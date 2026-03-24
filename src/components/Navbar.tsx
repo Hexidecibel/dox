@@ -1,32 +1,101 @@
-import { AppBar, Toolbar, Typography, Button, Container, Box } from '@mui/material'
-import { Link as RouterLink } from 'react-router-dom'
+import { AppBar, Toolbar, Typography, Button, Box, Chip, TextField, InputAdornment, useMediaQuery, useTheme, IconButton } from '@mui/material';
+import { Search as SearchIcon, Logout as LogoutIcon } from '@mui/icons-material';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+
+const roleColors: Record<string, 'primary' | 'secondary' | 'default'> = {
+  admin: 'primary',
+  user: 'secondary',
+  reader: 'default',
+};
 
 export function Navbar() {
+  const { user, logout, isAuthenticated } = useAuth();
+  const navigate = useNavigate();
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+
+  if (!isAuthenticated) return null;
+
   return (
-    <AppBar position="static" color="transparent" elevation={0}>
-      <Container maxWidth="lg">
-        <Toolbar disableGutters>
-          <Typography
-            variant="h6"
-            component={RouterLink}
-            to="/"
-            sx={{ textDecoration: 'none', color: 'inherit', flexGrow: 1 }}
-          >
-            doc-upload-site
-          </Typography>
-          <Box sx={{ display: 'flex', gap: 2 }}>
-            <Button component={RouterLink} to="/" color="inherit">
-              Home
-            </Button>
-            <Button component={RouterLink} to="/about" color="inherit">
-              About
-            </Button>
-            <Button component={RouterLink} to="/contact" color="inherit">
-              Contact
+    <AppBar
+      position="static"
+      elevation={0}
+      sx={{
+        bgcolor: 'background.paper',
+        color: 'text.primary',
+        borderBottom: '1px solid',
+        borderColor: 'divider',
+      }}
+    >
+      <Toolbar>
+        <Typography
+          variant="h6"
+          fontWeight={700}
+          color="primary.main"
+          sx={{ cursor: 'pointer', mr: 3, flexShrink: 0 }}
+          onClick={() => navigate('/dashboard')}
+        >
+          Document Portal
+        </Typography>
+
+        {!isMobile && (
+          <TextField
+            placeholder="Search documents..."
+            size="small"
+            sx={{ flex: 1, maxWidth: 400 }}
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchIcon fontSize="small" />
+                </InputAdornment>
+              ),
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const value = (e.target as HTMLInputElement).value;
+                if (value.trim()) {
+                  navigate(`/search?q=${encodeURIComponent(value.trim())}`);
+                }
+              }
+            }}
+          />
+        )}
+
+        {isMobile && (
+          <IconButton onClick={() => navigate('/search')} sx={{ ml: 'auto' }}>
+            <SearchIcon />
+          </IconButton>
+        )}
+
+        <Box sx={{ flex: 1 }} />
+
+        {user && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            {!isMobile && (
+              <>
+                <Typography variant="body2" fontWeight={500}>
+                  {user.name}
+                </Typography>
+                <Chip
+                  label={user.role}
+                  size="small"
+                  color={roleColors[user.role] || 'default'}
+                  sx={{ textTransform: 'capitalize', fontSize: '0.7rem' }}
+                />
+              </>
+            )}
+            <Button
+              size="small"
+              startIcon={<LogoutIcon />}
+              onClick={logout}
+              sx={{ color: 'text.secondary' }}
+            >
+              {isMobile ? '' : 'Sign Out'}
             </Button>
           </Box>
-        </Toolbar>
-      </Container>
+        )}
+      </Toolbar>
     </AppBar>
-  )
+  );
 }

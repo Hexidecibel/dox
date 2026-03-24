@@ -1,0 +1,2078 @@
+openapi: 3.1.0
+info:
+  title: Document Portal API
+  description: |
+    Multi-tenant document upload/download portal with version tracking, role-based access control,
+    audit logging, and report generation. Built on Cloudflare Pages Functions with D1 (SQLite) and R2 (object storage).
+
+    ## Authentication
+    All endpoints except login, forgot-password, reset-password, and GraphQL require authentication
+    via either a Bearer JWT token in the Authorization header or an API key in the X-API-Key header.
+    JWT tokens are issued by POST /api/auth/login and expire after 24 hours.
+    API keys are created via POST /api/api-keys and use the prefix `dox_sk_`.
+    Sessions can be revoked server-side via POST /api/auth/logout.
+
+    ## Roles
+    - **super_admin** — Full access across all tenants. Can manage tenants, users, and all documents.
+    - **org_admin** — Admin within their tenant. Can manage users (user/reader only) and documents in their org.
+    - **user** — Can create, upload, update, and delete documents within their tenant.
+    - **reader** — Read-only access to documents within their tenant.
+
+    ## Multi-tenancy
+    All data is scoped to tenants. Non-super_admin users are automatically restricted to their own tenant.
+  version: 0.1.0
+  contact:
+    name: Document Portal
+
+servers:
+  - url: http://localhost:8788
+    description: Local development
+  - url: https://doc-upload-site.pages.dev
+    description: Production (Cloudflare Pages)
+
+security:
+  - BearerAuth: []
+  - ApiKeyAuth: []
+
+tags:
+  - name: Auth
+    description: Authentication and password management
+  - name: Documents
+    description: Document CRUD, file upload/download, versioning, and search
+  - name: Tenants
+    description: Tenant (organization) management
+  - name: Users
+    description: User management and profiles
+  - name: Reports
+    description: Document report generation (CSV/JSON)
+  - name: Audit
+    description: Audit log queries
+  - name: API Keys
+    description: API key management for programmatic access
+  - name: GraphQL
+    description: GraphQL API (alternative to REST)
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT token obtained from POST /api/auth/login.
+        Token payload contains: sub (user ID), email, role, tenantId.
+        Tokens expire after 24 hours. Sessions are tracked server-side and can be revoked.
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        API key for programmatic access, created via POST /api/api-keys.
+        Keys use the prefix `dox_sk_` and authenticate as the user who created them.
+        Pass the full key in the X-API-Key header. Keys can be scoped to a tenant
+        and optionally have an expiration date.
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Hex UUID (no dashes)
+          example: "a1b2c3d4e5f6789012345678abcdef01"
+        email:
+          type: string
+          format: email
+          example: "user@example.com"
+        name:
+          type: string
+          example: "John Doe"
+        role:
+          type: string
+          enum: [super_admin, org_admin, user, reader]
+          example: "user"
+        tenant_id:
+          type: string
+          nullable: true
+          description: Tenant this user belongs to. Null for super_admins without a tenant.
+          example: "abcdef1234567890abcdef1234567890"
+        active:
+          type: integer
+          enum: [0, 1]
+          description: "1 = active, 0 = deactivated"
+          example: 1
+        last_login_at:
+          type: string
+          nullable: true
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+      required: [id, email, name, role, active]
+
+    Tenant:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "abcdef1234567890abcdef1234567890"
+        name:
+          type: string
+          example: "Acme Corp"
+        slug:
+          type: string
+          description: URL-safe identifier, auto-generated from name if not provided
+          example: "acme-corp"
+        description:
+          type: string
+          nullable: true
+          example: "Manufacturing division"
+        active:
+          type: integer
+          enum: [0, 1]
+          example: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, name, slug, active, created_at, updated_at]
+
+    Document:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "doc123abc456def789012345678abcde"
+        tenant_id:
+          type: string
+        title:
+          type: string
+          example: "Safety Data Sheet - Widget A"
+        description:
+          type: string
+          nullable: true
+        category:
+          type: string
+          nullable: true
+          example: "regulatory"
+        tags:
+          type: string
+          description: JSON-encoded array of tag strings
+          example: '["safety","compliance"]'
+        current_version:
+          type: integer
+          description: Latest version number (0 = no file uploaded yet)
+          example: 3
+        status:
+          type: string
+          enum: [active, archived, deleted]
+          example: "active"
+        created_by:
+          type: string
+          description: User ID of creator
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        creator_name:
+          type: string
+          nullable: true
+          description: Joined from users table
+        creator_email:
+          type: string
+          nullable: true
+          description: Joined from users table
+        tenant_name:
+          type: string
+          nullable: true
+          description: Joined from tenants table
+        external_ref:
+          type: string
+          nullable: true
+          description: Stable external reference ID for programmatic upserts
+          example: "REF-2024-001"
+        source_metadata:
+          type: string
+          nullable: true
+          description: JSON string with ingestion metadata (source, from, subject, received_at, etc.)
+      required: [id, tenant_id, title, current_version, status, created_by, created_at, updated_at]
+
+    DocumentVersion:
+      type: object
+      properties:
+        id:
+          type: string
+        document_id:
+          type: string
+        version_number:
+          type: integer
+          example: 2
+        file_name:
+          type: string
+          example: "sds-widget-a-v2.pdf"
+        file_size:
+          type: integer
+          description: File size in bytes
+          example: 524288
+        mime_type:
+          type: string
+          example: "application/pdf"
+        r2_key:
+          type: string
+          description: Storage key in R2
+          example: "acme-corp/doc123/2/sds-widget-a-v2.pdf"
+        checksum:
+          type: string
+          nullable: true
+          description: SHA-256 hex digest
+        change_notes:
+          type: string
+          nullable: true
+          example: "Updated section 4.2 with new regulations"
+        uploaded_by:
+          type: string
+          description: User ID of uploader
+        created_at:
+          type: string
+          format: date-time
+        uploader_name:
+          type: string
+          nullable: true
+          description: Joined from users table (present in list responses)
+      required: [id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by, created_at]
+
+    AuditEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        user_id:
+          type: string
+          nullable: true
+        tenant_id:
+          type: string
+          nullable: true
+        action:
+          type: string
+          description: "Action performed, e.g. login, logout, document_created, document_updated, document_deleted, document_version_uploaded, document_downloaded, user_created, user_updated, user_deactivated, user.password_reset, tenant_created, tenant_updated, tenant_deactivated, password_changed, report.generate"
+          example: "document_created"
+        resource_type:
+          type: string
+          nullable: true
+          example: "document"
+        resource_id:
+          type: string
+          nullable: true
+        details:
+          type: string
+          nullable: true
+          description: JSON string with change details
+        ip_address:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        user_name:
+          type: string
+          nullable: true
+          description: Joined from users table
+        user_email:
+          type: string
+          nullable: true
+          description: Joined from users table
+      required: [id, action, created_at]
+
+    AuthPayload:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT bearer token (24h expiry)
+        user:
+          type: object
+          properties:
+            id:
+              type: string
+            email:
+              type: string
+            name:
+              type: string
+            role:
+              type: string
+            tenant_id:
+              type: string
+              nullable: true
+            force_password_change:
+              type: integer
+              enum: [0, 1]
+              description: "1 if user must change password on next login"
+      required: [token, user]
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Unauthorized"
+      required: [error]
+
+    ApiKey:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Hex UUID
+        name:
+          type: string
+          description: Human-readable name for the API key
+          example: "CI Pipeline Key"
+        key_prefix:
+          type: string
+          description: First 12 characters of the key (for identification)
+          example: "dox_sk_abc12"
+        user_id:
+          type: string
+          description: User who created the key
+        tenant_id:
+          type: string
+          nullable: true
+          description: Tenant this key is scoped to (null = determined by user's tenant)
+        permissions:
+          type: string
+          description: JSON array of permission strings (default '["*"]')
+          example: '["*"]'
+        last_used_at:
+          type: string
+          nullable: true
+          format: date-time
+        expires_at:
+          type: string
+          nullable: true
+          format: date-time
+          description: Optional expiration date
+        revoked:
+          type: integer
+          enum: [0, 1]
+          description: "0 = active, 1 = revoked"
+        created_at:
+          type: string
+          format: date-time
+        user_name:
+          type: string
+          nullable: true
+          description: Joined from users table
+        user_email:
+          type: string
+          nullable: true
+          description: Joined from users table
+      required: [id, name, key_prefix, user_id, permissions, revoked, created_at]
+
+    PaginatedDocuments:
+      type: object
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: '#/components/schemas/Document'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    PaginatedAudit:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+  parameters:
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 50
+        maximum: 200
+      description: Maximum number of results (capped at 200)
+    OffsetParam:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        default: 0
+      description: Number of results to skip for pagination
+
+paths:
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in and obtain a JWT
+      description: |
+        Authenticates with email and password. Returns a JWT token valid for 24 hours.
+        Creates a server-side session record. Rate limited to 5 attempts per 15 minutes per IP+email.
+        **No auth required.**
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+              required: [email, password]
+            example:
+              email: "admin@example.com"
+              password: "SecurePass1"
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthPayload'
+        '400':
+          description: Missing email or password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Account inactive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limited (too many failed attempts)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register (create) a new user
+      description: |
+        Creates a new user account. **Requires super_admin or org_admin role.**
+        - super_admin can create any role in any tenant.
+        - org_admin can only create user/reader roles within their own tenant.
+        Sends an invitation email if RESEND_API_KEY is configured.
+        The new user is created with force_password_change = 1.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                name:
+                  type: string
+                role:
+                  type: string
+                  enum: [super_admin, org_admin, user, reader]
+                password:
+                  type: string
+                  description: "Must be 8-128 chars with uppercase, lowercase, and number"
+                tenantId:
+                  type: string
+                  description: Required for non-super_admin roles. org_admin defaults to own tenant.
+              required: [email, name, role, password]
+            example:
+              email: "newuser@example.com"
+              name: "Jane Doe"
+              role: "user"
+              password: "Welcome123"
+              tenantId: "abcdef1234567890abcdef1234567890"
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+                  emailSent:
+                    type: boolean
+                    description: Whether invitation email was sent
+        '400':
+          description: Validation error (missing fields, bad email, weak password)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: User with this email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/password:
+    put:
+      tags: [Auth]
+      summary: Change own password
+      description: |
+        Allows the authenticated user to change their own password.
+        Requires the current password for verification.
+        Clears the force_password_change flag.
+        **Requires any authenticated user.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                currentPassword:
+                  type: string
+                newPassword:
+                  type: string
+                  description: "Must be 8-128 chars with uppercase, lowercase, and number"
+              required: [currentPassword, newPassword]
+      responses:
+        '200':
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        '400':
+          description: Missing fields or weak password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Current password incorrect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out (revoke session)
+      description: |
+        Revokes the current session server-side. The JWT in the Authorization header
+        is looked up by its SHA-256 hash and marked as revoked.
+        **Requires any authenticated user.**
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+
+  /api/auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a password reset email
+      description: |
+        Sends a password reset email with a one-time token (1 hour expiry).
+        Always returns the same success message regardless of whether the email exists (prevents enumeration).
+        Rate limited to 3 attempts per 15 minutes per IP.
+        **No auth required.**
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+              required: [email]
+      responses:
+        '200':
+          description: Always returns success message
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "If an account exists with that email, a reset link has been sent"
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Reset password using a token
+      description: |
+        Completes a password reset using the token from the reset email.
+        Validates password complexity, updates the password, and revokes all existing sessions.
+        **No auth required.**
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                  description: Reset token from the email link
+                newPassword:
+                  type: string
+                  description: "Must be 8-128 chars with uppercase, lowercase, and number"
+              required: [token, newPassword]
+      responses:
+        '200':
+          description: Password reset successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Password has been reset successfully"
+        '400':
+          description: Invalid/expired token or weak password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/documents:
+    get:
+      tags: [Documents]
+      summary: List documents
+      description: |
+        Returns a paginated list of documents. Non-super_admin users are restricted to their own tenant.
+        **Requires any authenticated user.**
+      parameters:
+        - name: tenantId
+          in: query
+          schema:
+            type: string
+          description: Filter by tenant (super_admin only; others auto-scoped)
+        - name: category
+          in: query
+          schema:
+            type: string
+          description: Filter by category
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, archived, deleted]
+            default: active
+          description: Filter by status
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: Paginated document list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDocuments'
+
+    post:
+      tags: [Documents]
+      summary: Create a new document
+      description: |
+        Creates a document metadata record (no file yet — upload separately).
+        **Requires super_admin, org_admin, or user role.**
+        Non-super_admins are forced to their own tenant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+                category:
+                  type: string
+                tags:
+                  type: array
+                  items:
+                    type: string
+                tenantId:
+                  type: string
+                  description: Required. super_admin can specify any tenant.
+              required: [title]
+            example:
+              title: "Safety Data Sheet - Widget A"
+              description: "SDS for Widget A per OSHA 2024"
+              category: "regulatory"
+              tags: ["safety", "osha", "2024"]
+              tenantId: "abcdef1234567890abcdef1234567890"
+      responses:
+        '201':
+          description: Document created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    $ref: '#/components/schemas/Document'
+        '400':
+          description: Missing title or tenantId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Insufficient permissions or wrong tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Tenant not found or inactive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/documents/{id}:
+    get:
+      tags: [Documents]
+      summary: Get a single document
+      description: |
+        Returns document metadata with current version info.
+        Requires tenant access (user must belong to the document's tenant, or be super_admin).
+        **Requires any authenticated user.**
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Document with current version
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    $ref: '#/components/schemas/Document'
+                  currentVersion:
+                    $ref: '#/components/schemas/DocumentVersion'
+        '403':
+          description: Access denied to this tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    put:
+      tags: [Documents]
+      summary: Update document metadata
+      description: |
+        Updates title, description, category, tags, and/or status.
+        Logs a diff of what changed in the audit trail.
+        **Requires super_admin, org_admin, or user role** with tenant access.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+                category:
+                  type: string
+                tags:
+                  type: array
+                  items:
+                    type: string
+                status:
+                  type: string
+                  enum: [active, archived]
+            example:
+              title: "Updated Title"
+              status: "archived"
+      responses:
+        '200':
+          description: Updated document
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    $ref: '#/components/schemas/Document'
+        '400':
+          description: No fields to update or invalid status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      tags: [Documents]
+      summary: Delete a document (soft delete)
+      description: |
+        Sets document status to 'deleted'. Does not remove files from R2.
+        **Requires super_admin, org_admin, or user role** with tenant access.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Document deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/documents/{id}/upload:
+    post:
+      tags: [Documents]
+      summary: Upload a new document version
+      description: |
+        Uploads a file as a new version of the document. Accepts multipart form data.
+        The file is stored in R2 with key: `{tenantSlug}/{docId}/{version}/{fileName}`.
+        SHA-256 checksum is computed and stored.
+
+        **Allowed file types:** PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, PNG, JPG.
+        **Max file size:** 100 MB.
+
+        **Requires super_admin, org_admin, or user role** with tenant access.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The file to upload
+                changeNotes:
+                  type: string
+                  description: Optional notes describing what changed in this version
+              required: [file]
+      responses:
+        '201':
+          description: Version uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    $ref: '#/components/schemas/DocumentVersion'
+        '400':
+          description: Missing file, invalid type, or file too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Document not found or not active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/documents/{id}/download:
+    get:
+      tags: [Documents]
+      summary: Download a document file
+      description: |
+        Downloads the file for a specific version (or current version by default).
+        Returns the raw file with Content-Disposition header for browser download.
+        Logs a download audit entry.
+        **Requires any authenticated user** with tenant access.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: query
+          schema:
+            type: integer
+          description: Version number to download (defaults to current version)
+      responses:
+        '200':
+          description: File download
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: 'attachment; filename="report.pdf"'
+            Content-Type:
+              schema:
+                type: string
+                example: "application/pdf"
+            ETag:
+              schema:
+                type: string
+                description: SHA-256 checksum
+        '400':
+          description: Invalid version number
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Document, version, or file not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/documents/{id}/versions:
+    get:
+      tags: [Documents]
+      summary: List all versions of a document
+      description: |
+        Returns all versions for a document, ordered by version number descending.
+        Includes uploader name and email.
+        **Requires any authenticated user** with tenant access.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Version list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  versions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DocumentVersion'
+                  document_id:
+                    type: string
+                  current_version:
+                    type: integer
+        '403':
+          description: Access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/documents/search:
+    get:
+      tags: [Documents]
+      summary: Search documents
+      description: |
+        Searches documents by title, description, tags, and file names using SQL LIKE.
+        Joins document_versions to match against file_name as well.
+        Only returns active documents. Non-admins are restricted to their own tenant.
+        **Requires any authenticated user.**
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query (matches title, description, tags, and file names)
+        - name: tenantId
+          in: query
+          schema:
+            type: string
+          description: Filter by tenant (admin only)
+        - name: category
+          in: query
+          schema:
+            type: string
+          description: Filter by category
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDocuments'
+
+  /api/tenants:
+    get:
+      tags: [Tenants]
+      summary: List tenants
+      description: |
+        super_admin sees all tenants. Other users see only their own tenant.
+        **Requires any authenticated user.**
+      parameters:
+        - name: active
+          in: query
+          schema:
+            type: integer
+            enum: [0, 1]
+          description: Filter by active status
+      responses:
+        '200':
+          description: Tenant list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tenant'
+
+    post:
+      tags: [Tenants]
+      summary: Create a new tenant
+      description: |
+        Creates a new tenant (organization). Slug is auto-generated from name if not provided.
+        **Requires super_admin role.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                slug:
+                  type: string
+                  description: URL-safe identifier. Auto-generated from name if omitted.
+                description:
+                  type: string
+              required: [name]
+            example:
+              name: "Acme Corp"
+              description: "Manufacturing division"
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          description: Missing name or invalid slug
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Not super_admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Slug already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/tenants/{id}:
+    get:
+      tags: [Tenants]
+      summary: Get a tenant by ID
+      description: |
+        Returns a single tenant. super_admin can view any tenant.
+        Other users can only view their own tenant.
+        **Requires any authenticated user.**
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tenant details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '403':
+          description: Access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    put:
+      tags: [Tenants]
+      summary: Update a tenant
+      description: |
+        Updates tenant fields. super_admin can update all fields (name, slug, description, active).
+        org_admin can only update name and description for their own tenant.
+        **Requires super_admin or org_admin role.**
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                slug:
+                  type: string
+                  description: super_admin only
+                description:
+                  type: string
+                active:
+                  type: integer
+                  enum: [0, 1]
+                  description: super_admin only
+      responses:
+        '200':
+          description: Updated tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          description: No valid fields to update
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Slug already taken
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      tags: [Tenants]
+      summary: Deactivate a tenant
+      description: |
+        Soft-deactivates a tenant by setting active = 0.
+        **Requires super_admin role.**
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tenant deactivated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        '403':
+          description: Not super_admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/users:
+    get:
+      tags: [Users]
+      summary: List users
+      description: |
+        super_admin sees all users (optionally filtered by tenantId).
+        org_admin sees only their own tenant's users.
+        **Requires super_admin or org_admin role.**
+      parameters:
+        - name: tenantId
+          in: query
+          schema:
+            type: string
+          description: Filter by tenant (super_admin only)
+      responses:
+        '200':
+          description: User list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      tags: [Users]
+      summary: Create user (redirects to register)
+      description: |
+        Returns a 308 redirect to POST /api/auth/register.
+        Use /api/auth/register directly to create users.
+      responses:
+        '308':
+          description: Redirect to /api/auth/register
+          headers:
+            Location:
+              schema:
+                type: string
+                example: "/api/auth/register"
+
+  /api/users/{id}:
+    get:
+      tags: [Users]
+      summary: Get a user by ID
+      description: |
+        super_admin can view any user. org_admin can view users in their tenant.
+        user/reader can only view themselves.
+        **Requires any authenticated user.**
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '403':
+          description: Cannot view users outside scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    put:
+      tags: [Users]
+      summary: Update a user
+      description: |
+        Updates user fields. Allowed fields depend on the caller's role:
+        - **super_admin**: name, email, role, active, tenant_id (any user)
+        - **org_admin**: name, email, role (user/reader only), active (same tenant only, cannot modify other org_admins)
+        - **user/reader**: name only (self only)
+
+        Logs a diff of changes in the audit trail.
+        **Requires any authenticated user (self-edit for name).**
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                role:
+                  type: string
+                  enum: [super_admin, org_admin, user, reader]
+                active:
+                  type: integer
+                  enum: [0, 1]
+                tenant_id:
+                  type: string
+                  nullable: true
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: No valid fields to update
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      tags: [Users]
+      summary: Deactivate a user
+      description: |
+        Soft-deactivates a user by setting active = 0.
+        - super_admin can deactivate any user.
+        - org_admin can deactivate user/reader in their tenant (not other admins).
+        **Requires super_admin or org_admin role.**
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User deactivated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/users/me:
+    get:
+      tags: [Users]
+      summary: Get current user profile
+      description: |
+        Returns the authenticated user's profile including tenant name.
+        **Requires any authenticated user.**
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/User'
+                  - type: object
+                    properties:
+                      tenant_name:
+                        type: string
+                        nullable: true
+
+  /api/users/{id}/reset-password:
+    post:
+      tags: [Users]
+      summary: Admin-initiated password reset
+      description: |
+        Generates a temporary password, sets force_password_change = 1, and revokes all sessions.
+        Sends an email notification if RESEND_API_KEY is configured.
+        - super_admin can reset any user.
+        - org_admin can reset user/reader in their tenant (not other admins).
+        **Requires super_admin or org_admin role.**
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  temporaryPassword:
+                    type: string
+                    description: The generated temporary password (show to admin or send via email)
+                  emailSent:
+                    type: boolean
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/reports/generate:
+    post:
+      tags: [Reports]
+      summary: Generate a document report
+      description: |
+        Generates a report of documents matching the given filters.
+        Returns CSV (default) or JSON format. CSV includes Content-Disposition for download.
+        Non-super_admins are scoped to their own tenant.
+        **Requires any authenticated user.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenantId:
+                  type: string
+                  description: Filter by tenant (super_admin only)
+                category:
+                  type: string
+                  description: Filter by document category
+                dateFrom:
+                  type: string
+                  format: date
+                  description: Start date (inclusive)
+                  example: "2024-01-01"
+                dateTo:
+                  type: string
+                  format: date
+                  description: End date (inclusive)
+                  example: "2024-12-31"
+                format:
+                  type: string
+                  enum: [csv, json]
+                  default: csv
+            example:
+              category: "regulatory"
+              dateFrom: "2024-01-01"
+              dateTo: "2024-12-31"
+              format: "json"
+      responses:
+        '200':
+          description: Report data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        title:
+                          type: string
+                        category:
+                          type: string
+                        tags:
+                          type: string
+                        status:
+                          type: string
+                        currentVersion:
+                          type: integer
+                        fileName:
+                          type: string
+                        fileSizeKB:
+                          type: integer
+                        uploadedBy:
+                          type: string
+                        createdDate:
+                          type: string
+                        lastUpdated:
+                          type: string
+                  total:
+                    type: integer
+              description: JSON format response
+            text/csv:
+              schema:
+                type: string
+              description: CSV format response with Content-Disposition header
+
+  /api/audit:
+    get:
+      tags: [Audit]
+      summary: Query audit log
+      description: |
+        Returns paginated audit log entries with user info.
+        - super_admin can query all entries, optionally filtered by tenant.
+        - org_admin can only see their own tenant's entries.
+        - user/reader get 403.
+        **Requires super_admin or org_admin role.**
+      parameters:
+        - name: tenantId
+          in: query
+          schema:
+            type: string
+          description: Filter by tenant (super_admin only)
+        - name: action
+          in: query
+          schema:
+            type: string
+          description: Filter by action type
+        - name: userId
+          in: query
+          schema:
+            type: string
+          description: Filter by user ID
+        - name: resourceType
+          in: query
+          schema:
+            type: string
+          description: Filter by resource type (user, document, tenant, etc.)
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Start date (inclusive)
+        - name: dateTo
+          in: query
+          schema:
+            type: string
+            format: date
+          description: End date (inclusive)
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: Paginated audit entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAudit'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/documents/ingest:
+    post:
+      tags: [Documents]
+      summary: Ingest a document (upsert by external_ref)
+      description: |
+        Creates a new document or adds a new version to an existing document,
+        identified by `external_ref` within a tenant. Designed for agentic AI
+        and email processing pipelines.
+
+        - If a document with the given `external_ref` exists in the tenant, a new version is added.
+        - If no document exists, a new document is created with version 1.
+
+        Requires `user`, `org_admin`, or `super_admin` role.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The document file
+                external_ref:
+                  type: string
+                  description: Stable external reference ID (e.g. "REF-2024-001")
+                  example: "REF-2024-001"
+                tenant_id:
+                  type: string
+                  description: Tenant this document belongs to
+                title:
+                  type: string
+                  description: Document title (used on creation; if omitted, derived from filename)
+                description:
+                  type: string
+                  description: Document description
+                category:
+                  type: string
+                  description: Document category
+                tags:
+                  type: string
+                  description: JSON string array of tags
+                  example: '["safety","compliance"]'
+                changeNotes:
+                  type: string
+                  description: Version change notes
+                  example: "Updated via email from vendor@acme.com"
+                source_metadata:
+                  type: string
+                  description: JSON string with ingestion metadata
+                  example: '{"source":"email","from":"vendor@acme.com","subject":"Updated safety report","received_at":"2026-03-24T12:00:00Z"}'
+              required: [file, external_ref, tenant_id]
+      responses:
+        '200':
+          description: New version added to existing document
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  action:
+                    type: string
+                    enum: [version_added]
+                  document:
+                    $ref: '#/components/schemas/Document'
+                  version:
+                    $ref: '#/components/schemas/DocumentVersion'
+        '201':
+          description: New document created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  action:
+                    type: string
+                    enum: [created]
+                  document:
+                    $ref: '#/components/schemas/Document'
+                  version:
+                    $ref: '#/components/schemas/DocumentVersion'
+        '400':
+          description: Missing required fields, invalid file type, or file too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: No access to tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/documents/lookup:
+    get:
+      tags: [Documents]
+      summary: Look up a document by external reference
+      description: |
+        Returns the document (with current version info) identified by `external_ref`
+        within a tenant. Returns 404 if not found. Useful for checking if a document
+        exists before deciding whether to create or update.
+      parameters:
+        - name: external_ref
+          in: query
+          required: true
+          schema:
+            type: string
+          description: External reference ID to look up
+          example: "REF-2024-001"
+        - name: tenant_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Tenant ID to search within
+      responses:
+        '200':
+          description: Document found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    $ref: '#/components/schemas/Document'
+                  currentVersion:
+                    $ref: '#/components/schemas/DocumentVersion'
+        '400':
+          description: Missing required query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: No access to tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/api-keys:
+    get:
+      tags: [API Keys]
+      summary: List API keys
+      description: |
+        Returns all API keys visible to the caller.
+        - super_admin sees all keys across all tenants.
+        - org_admin sees only keys scoped to their tenant.
+        **Requires super_admin or org_admin role.**
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiKey'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      tags: [API Keys]
+      summary: Create a new API key
+      description: |
+        Creates a new API key for programmatic access. The full key is returned only once
+        in the response — it cannot be retrieved later. Keys authenticate as the user who
+        created them and inherit that user's role and permissions.
+        - org_admin keys are automatically scoped to their tenant.
+        - super_admin can optionally scope a key to a specific tenant.
+        **Requires super_admin or org_admin role.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Human-readable name for the key
+                  example: "CI Pipeline Key"
+                tenantId:
+                  type: string
+                  description: Tenant to scope this key to (super_admin only; org_admin auto-scoped)
+                permissions:
+                  type: array
+                  items:
+                    type: string
+                  description: 'Permission scopes (default: ["*"])'
+                  example: ["*"]
+                expiresAt:
+                  type: string
+                  format: date-time
+                  description: Optional expiration date
+              required: [name]
+      responses:
+        '201':
+          description: API key created (full key shown only once)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  apiKey:
+                    $ref: '#/components/schemas/ApiKey'
+                  key:
+                    type: string
+                    description: The full API key (shown only once, starts with dox_sk_)
+                    example: "dox_sk_abc123def456..."
+        '400':
+          description: Missing name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/api-keys/{id}:
+    delete:
+      tags: [API Keys]
+      summary: Revoke an API key
+      description: |
+        Revokes an API key so it can no longer be used for authentication.
+        - super_admin can revoke any key.
+        - org_admin can only revoke keys scoped to their tenant.
+        **Requires super_admin or org_admin role.**
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: API key ID to revoke
+      responses:
+        '200':
+          description: Key revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        '400':
+          description: Key is already revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Insufficient permissions or key belongs to another tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: API key not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/graphql:
+    post:
+      tags: [GraphQL]
+      summary: GraphQL endpoint
+      description: |
+        Full GraphQL API with queries and mutations mirroring the REST API.
+        Supports GraphiQL IDE when accessed via GET in a browser.
+        Authentication is optional (login mutation works without a token).
+        Authenticated requests use the same Bearer JWT as REST endpoints.
+        **No auth required** (the /api/graphql path is public; individual resolvers enforce auth).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                variables:
+                  type: object
+                operationName:
+                  type: string
+              required: [query]
+            example:
+              query: "query { me { id email name role } }"
+      responses:
+        '200':
+          description: GraphQL response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                  errors:
+                    type: array
+                    items:
+                      type: object
+
+    get:
+      tags: [GraphQL]
+      summary: GraphiQL IDE
+      description: |
+        Serves the GraphiQL interactive IDE for exploring the GraphQL schema.
+        Open in a browser to use the IDE.
+        **No auth required.**
+      security: []
+      responses:
+        '200':
+          description: GraphiQL HTML page
+          content:
+            text/html:
+              schema:
+                type: string

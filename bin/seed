@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+REMOTE=""
+if [ "${1:-}" = "--remote" ] || [ "${1:-}" = "-r" ]; then
+  REMOTE="--remote"
+  echo "Seeding production D1..."
+else
+  echo "Seeding local D1..."
+fi
+
+npx wrangler d1 execute doc-upload-db $REMOTE --file="migrations/0002_seed_admin.sql"
+echo "Seed complete."

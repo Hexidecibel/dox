@@ -1,4 +1,4 @@
-import { Container, Typography, Box, Paper } from '@mui/material'
+import { Container, Typography, Paper } from '@mui/material'
 
 export function About() {
   return (

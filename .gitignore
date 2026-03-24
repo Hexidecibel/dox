@@ -17,3 +17,7 @@ npm-debug.log*
 
 # OS
 .DS_Store
+
+# Wrangler
+.wrangler/
+.dev.varstsconfig.tsbuildinfo

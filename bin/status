@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "=== doc-upload-site status ==="
+echo ""
+
+echo "Pages deployments:"
+npx wrangler pages deployment list --project-name doc-upload-site 2>&1 | head -10
+
+echo ""
+echo "D1 database:"
+npx wrangler d1 info doc-upload-db 2>&1 | head -10
+
+echo ""
+echo "R2 bucket:"
+npx wrangler r2 bucket list 2>&1 | grep doc-upload
+
+echo ""
+echo "Public endpoint:"
+curl -s -o /dev/null -w "https://dox.cush.rocks -> HTTP %{http_code}\n" https://dox.cush.rocks 2>/dev/null || echo "https://dox.cush.rocks -> Not reachable (custom domain may not be set up yet)"

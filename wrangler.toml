@@ -1,0 +1,12 @@
+name = "doc-upload-site"
+compatibility_date = "2024-12-01"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "doc-upload-db"
+database_id = "a89907f9-5f15-4cdb-9a7a-bd273feaf159"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "doc-upload-files"

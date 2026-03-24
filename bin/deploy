@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "=== Deploying doc-upload-site to Cloudflare ==="
+
+# Build
+echo "Building frontend..."
+npm run build
+
+# Deploy to Cloudflare Pages
+echo "Deploying to Cloudflare Pages..."
+npx wrangler pages deploy dist --project-name doc-upload-site
+
+echo ""
+echo "=== Deployment complete ==="
+echo "URL: https://dox.cush.rocks"

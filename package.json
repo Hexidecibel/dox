@@ -5,22 +5,31 @@
   "dependencies": {
     "@emotion/react": "^11.13.0",
     "@emotion/styled": "^11.13.0",
+    "@hono/node-server": "^1.19.11",
     "@mui/icons-material": "^6.1.0",
     "@mui/material": "^6.1.0",
+    "graphql": "^16.13.2",
+    "graphql-yoga": "^5.18.1",
+    "hono": "^4.12.9",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0"
+    "react-router-dom": "^6.28.0",
+    "wrangler": "^4.77.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260317.1",
     "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
+    "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.3.3",
-    "typescript": "~5.6.2",
+    "typescript": "^5.6.3",
     "vite": "^5.4.10"
   },
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "dev": "npx wrangler pages dev dist --d1 DB --r2 FILES --port 8788",
+    "dev:frontend": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "migrate": "./bin/migrate",
+    "migrate:remote": "./bin/migrate doc-upload-db --remote"
   }
 }

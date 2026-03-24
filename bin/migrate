@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+REMOTE=""
+if [ "${1:-}" = "--remote" ] || [ "${1:-}" = "-r" ]; then
+  REMOTE="--remote"
+  echo "Running migrations REMOTELY against production D1..."
+  echo "Press Ctrl+C within 3 seconds to cancel..."
+  sleep 3
+else
+  echo "Running migrations locally..."
+fi
+
+for migration in migrations/*.sql; do
+  echo "Running: $(basename "$migration")"
+  npx wrangler d1 execute doc-upload-db $REMOTE --file="$migration"
+done
+
+echo "All migrations complete."
