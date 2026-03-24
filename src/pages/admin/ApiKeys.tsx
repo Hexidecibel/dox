@@ -38,6 +38,7 @@ import {
 import { api } from '../../lib/api';
 import type { ApiKey, Tenant } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
+import { CopyId } from '../../components/CopyId';
 
 export function ApiKeys() {
   const { user } = useAuth();
@@ -213,6 +214,7 @@ export function ApiKeys() {
                         <Typography variant="caption" color="text.secondary" fontFamily="monospace">
                           {key.key_prefix}...
                         </Typography>
+                        <Box><CopyId id={key.id} /></Box>
                       </Box>
                       {!key.revoked && (
                         <IconButton size="small" onClick={() => openRevoke(key)} color="error">
@@ -240,6 +242,7 @@ export function ApiKeys() {
           <Table>
             <TableHead>
               <TableRow>
+                <TableCell>ID</TableCell>
                 <TableCell>Name</TableCell>
                 <TableCell>Key</TableCell>
                 <TableCell>Tenant</TableCell>
@@ -252,7 +255,7 @@ export function ApiKeys() {
             <TableBody>
               {keys.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} sx={{ textAlign: 'center', py: 4 }}>
+                  <TableCell colSpan={8} sx={{ textAlign: 'center', py: 4 }}>
                     <Typography color="text.secondary">No API keys found</Typography>
                   </TableCell>
                 </TableRow>
@@ -261,6 +264,9 @@ export function ApiKeys() {
                   const status = getStatus(key);
                   return (
                     <TableRow key={key.id} hover>
+                      <TableCell>
+                        <CopyId id={key.id} />
+                      </TableCell>
                       <TableCell>
                         <Typography variant="body2" fontWeight={500}>
                           {key.name}

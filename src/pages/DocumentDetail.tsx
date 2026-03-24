@@ -36,6 +36,7 @@ import { VersionHistory } from '../components/VersionHistory';
 import { UploadDialog } from '../components/UploadDialog';
 import { RoleGuard } from '../components/RoleGuard';
 import { DocumentPreview } from '../components/DocumentPreview';
+import { CopyId } from '../components/CopyId';
 
 const statusColors: Record<string, 'success' | 'warning' | 'error'> = {
   active: 'success',
@@ -205,11 +206,15 @@ export function DocumentDetail() {
               sx={{ textTransform: 'capitalize' }}
             />
           </Box>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            {doc.creator_name && `Created by ${doc.creator_name} · `}
-            {new Date(doc.created_at).toLocaleDateString()} · Updated{' '}
-            {new Date(doc.updated_at).toLocaleDateString()}
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, flexWrap: 'wrap' }}>
+            <Typography variant="body2" color="text.secondary">
+              {doc.creator_name && `Created by ${doc.creator_name} · `}
+              {new Date(doc.created_at).toLocaleDateString()} · Updated{' '}
+              {new Date(doc.updated_at).toLocaleDateString()}
+            </Typography>
+            <CopyId id={doc.id} label="Doc:" />
+            {doc.tenant_id && <CopyId id={doc.tenant_id} label="Tenant:" />}
+          </Box>
         </Box>
       </Box>
 

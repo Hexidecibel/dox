@@ -40,6 +40,7 @@ import {
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { User, Tenant, Role } from '../../lib/types';
+import { CopyId } from '../../components/CopyId';
 
 const roleColors: Record<string, 'primary' | 'secondary' | 'default'> = {
   super_admin: 'primary',
@@ -244,6 +245,7 @@ export function Users() {
                       <Typography variant="caption" color="text.secondary">
                         {user.email}
                       </Typography>
+                      <Box><CopyId id={user.id} /></Box>
                     </Box>
                     <Box sx={{ display: 'flex', gap: 0.5 }}>
                       <IconButton size="small" onClick={() => openEdit(user)}>
@@ -279,6 +281,7 @@ export function Users() {
           <Table>
             <TableHead>
               <TableRow>
+                <TableCell>ID</TableCell>
                 <TableCell>Name</TableCell>
                 <TableCell>Email</TableCell>
                 <TableCell>Role</TableCell>
@@ -291,13 +294,16 @@ export function Users() {
             <TableBody>
               {users.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} sx={{ textAlign: 'center', py: 4 }}>
+                  <TableCell colSpan={8} sx={{ textAlign: 'center', py: 4 }}>
                     <Typography color="text.secondary">No users found</Typography>
                   </TableCell>
                 </TableRow>
               ) : (
                 users.map((user) => (
                   <TableRow key={user.id} hover>
+                    <TableCell>
+                      <CopyId id={user.id} />
+                    </TableCell>
                     <TableCell>
                       <Typography variant="body2" fontWeight={500}>
                         {user.name}

@@ -34,6 +34,7 @@ import {
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { Tenant } from '../../lib/types';
+import { CopyId } from '../../components/CopyId';
 
 export function Tenants() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -177,6 +178,7 @@ export function Tenants() {
                       <Typography variant="caption" color="text.secondary" fontFamily="monospace">
                         {tenant.slug}
                       </Typography>
+                      <Box><CopyId id={tenant.id} /></Box>
                     </Box>
                     <Box sx={{ display: 'flex', gap: 0.5, flexShrink: 0 }}>
                       <IconButton size="small" onClick={() => openEdit(tenant)}>
@@ -211,6 +213,7 @@ export function Tenants() {
           <Table>
             <TableHead>
               <TableRow>
+                <TableCell>ID</TableCell>
                 <TableCell>Name</TableCell>
                 <TableCell>Slug</TableCell>
                 <TableCell>Description</TableCell>
@@ -222,13 +225,16 @@ export function Tenants() {
             <TableBody>
               {tenants.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} sx={{ textAlign: 'center', py: 4 }}>
+                  <TableCell colSpan={7} sx={{ textAlign: 'center', py: 4 }}>
                     <Typography color="text.secondary">No tenants found</Typography>
                   </TableCell>
                 </TableRow>
               ) : (
                 tenants.map((tenant) => (
                   <TableRow key={tenant.id} hover>
+                    <TableCell>
+                      <CopyId id={tenant.id} />
+                    </TableCell>
                     <TableCell>
                       <Typography variant="body2" fontWeight={500}>
                         {tenant.name}
