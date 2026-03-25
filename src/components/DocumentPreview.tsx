@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import PdfViewer from './PdfViewer';
 import {
   Box,
   Paper,
@@ -83,23 +84,6 @@ function buildPreviewUrl(documentId: string, versionNumber?: number): string {
   if (versionNumber) params.set('version', String(versionNumber));
   if (token) params.set('token', token);
   return `/api/documents/${documentId}/download?${params.toString()}`;
-}
-
-function PdfPreview({ url }: { url: string }) {
-  return (
-    <Box sx={{ width: '100%', height: { xs: 400, sm: 600, md: 700 }, position: 'relative' }}>
-      <iframe
-        src={`${url}#toolbar=1`}
-        title="PDF Preview"
-        style={{
-          width: '100%',
-          height: '100%',
-          border: 'none',
-          borderRadius: 4,
-        }}
-      />
-    </Box>
-  );
 }
 
 function ImagePreview({ url, fileName }: { url: string; fileName: string }) {
@@ -586,7 +570,7 @@ export function DocumentPreview({ documentId, versionNumber, fileName, mimeType 
       </Box>
 
       {/* Preview Content */}
-      {previewType === 'pdf' && <PdfPreview url={previewUrl} />}
+      {previewType === 'pdf' && <PdfViewer url={previewUrl} fileName={fileName} />}
       {previewType === 'image' && <ImagePreview url={previewUrl} fileName={fileName} />}
       {previewType === 'text' && <TextPreview url={previewUrl} />}
       {previewType === 'json' && <JsonPreview url={previewUrl} />}
