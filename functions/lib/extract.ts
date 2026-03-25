@@ -1,7 +1,8 @@
+import { extractText as extractPdfText } from 'unpdf';
+
 /**
  * Extract searchable text content from uploaded files.
- * Supports: JSON, CSV, TXT, and plain text formats.
- * PDF extraction is complex (needs a library) — skip for v1, add later.
+ * Supports: JSON, CSV, TXT, PDF, and plain text formats.
  */
 export async function extractText(
   file: ArrayBuffer | Uint8Array,
@@ -36,9 +37,18 @@ export async function extractText(
       return null;
     }
 
-    // PDF — would need pdf-parse or similar, skip for v1
+    // PDF — extract text using unpdf
     if (mimeType === 'application/pdf') {
-      return null;
+      try {
+        const buffer = file instanceof ArrayBuffer ? file : file.buffer;
+        const { text } = await extractPdfText(buffer, { mergePages: true });
+        const trimmed = text.trim();
+        if (!trimmed) return null;
+        return trimmed.substring(0, 100_000);
+      } catch (err) {
+        console.warn('PDF text extraction failed:', err);
+        return null;
+      }
     }
 
     return null;
