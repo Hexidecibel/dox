@@ -84,7 +84,12 @@ export function Layout() {
   };
 
   const isActive = (path: string) => {
-    if (path.includes('?')) return location.pathname === path.split('?')[0];
+    if (path.includes('?')) {
+      const [pathname, query] = path.split('?');
+      return location.pathname === pathname && location.search.includes(query);
+    }
+    // For plain paths, also ensure we're not matching a query-param variant
+    if (location.pathname === path && location.search.includes('upload=true')) return false;
     return location.pathname === path || location.pathname.startsWith(path + '/');
   };
 
