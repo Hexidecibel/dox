@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { formatDate } from '../../utils/format';
 import {
   Box,
   Typography,
@@ -328,9 +329,7 @@ export function Users() {
                       />
                     </TableCell>
                     <TableCell>
-                      {user.last_login_at
-                        ? new Date(user.last_login_at).toLocaleDateString()
-                        : 'Never'}
+                      {formatDate(user.last_login_at)}
                     </TableCell>
                     <TableCell align="right">
                       <Tooltip title="Edit">

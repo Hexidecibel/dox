@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { formatDate } from '../utils/format';
 import {
   Box,
   Typography,
@@ -204,7 +205,7 @@ export function Profile() {
                 Member Since
               </Typography>
               <Typography variant="body1">
-                {new Date(profile.created_at).toLocaleDateString()}
+                {formatDate(profile.created_at)}
               </Typography>
             </Box>
           )}

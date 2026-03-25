@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { formatDateTime } from '../../utils/format';
 import {
   Box,
   Typography,
@@ -80,18 +81,6 @@ function getActionChip(action: string) {
   return <Chip label={action} size="small" color={cat.color} variant="outlined" />;
 }
 
-function formatTimestamp(ts: string): string {
-  const date = new Date(ts + (ts.endsWith('Z') ? '' : 'Z'));
-  return date.toLocaleString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
-
 function ExpandableRow({ entry }: { entry: AuditEntry }) {
   const [open, setOpen] = useState(false);
 
@@ -123,7 +112,7 @@ function ExpandableRow({ entry }: { entry: AuditEntry }) {
           )}
         </TableCell>
         <TableCell sx={{ whiteSpace: 'nowrap' }}>
-          {formatTimestamp(entry.created_at)}
+          {formatDateTime(entry.created_at)}
         </TableCell>
         <TableCell>
           {entry.user_name ? (

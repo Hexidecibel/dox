@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { formatDate } from '../../utils/format';
 import {
   Box,
   Typography,
@@ -200,7 +201,7 @@ export function Tenants() {
                   )}
                   <Box sx={{ display: 'flex', gap: 0.5 }}>
                     <Chip label={tenant.active ? 'Active' : 'Inactive'} size="small" color={tenant.active ? 'success' : 'default'} variant="outlined" />
-                    <Chip label={new Date(tenant.created_at).toLocaleDateString()} size="small" variant="outlined" />
+                    <Chip label={formatDate(tenant.created_at)} size="small" variant="outlined" />
                   </Box>
                 </CardContent>
               </Card>
@@ -267,7 +268,7 @@ export function Tenants() {
                         variant="outlined"
                       />
                     </TableCell>
-                    <TableCell>{new Date(tenant.created_at).toLocaleDateString()}</TableCell>
+                    <TableCell>{formatDate(tenant.created_at)}</TableCell>
                     <TableCell align="right">
                       <Tooltip title="Edit">
                         <IconButton size="small" onClick={() => openEdit(tenant)}>

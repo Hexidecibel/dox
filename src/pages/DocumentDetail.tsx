@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { formatDate } from '../utils/format';
 import {
   Box,
   Typography,
@@ -209,8 +210,8 @@ export function DocumentDetail() {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, flexWrap: 'wrap' }}>
             <Typography variant="body2" color="text.secondary">
               {doc.creator_name && `Created by ${doc.creator_name} · `}
-              {new Date(doc.created_at).toLocaleDateString()} · Updated{' '}
-              {new Date(doc.updated_at).toLocaleDateString()}
+              {formatDate(doc.created_at)} · Updated{' '}
+              {formatDate(doc.updated_at)}
             </Typography>
             <CopyId id={doc.id} label="Doc:" />
             {doc.tenant_id && <CopyId id={doc.tenant_id} label="Tenant:" />}
@@ -367,7 +368,7 @@ export function DocumentDetail() {
                   )}
                   {meta.received_at && (
                     <Chip
-                      label={`Received: ${new Date(meta.received_at).toLocaleDateString()}`}
+                      label={`Received: ${formatDate(meta.received_at)}`}
                       size="small"
                       variant="outlined"
                     />

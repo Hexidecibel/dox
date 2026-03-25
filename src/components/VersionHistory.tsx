@@ -1,3 +1,4 @@
+import { formatDateTime } from '../utils/format';
 import {
   List,
   ListItem,
@@ -111,7 +112,7 @@ export function VersionHistory({ documentId, versions, activeVersion, onPreviewV
               )}
               <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.25 }}>
                 {version.uploader_name && `${version.uploader_name} · `}
-                {new Date(version.created_at).toLocaleString()}
+                {formatDateTime(version.created_at)}
               </Typography>
             </CardContent>
           </Card>
@@ -200,7 +201,7 @@ export function VersionHistory({ documentId, versions, activeVersion, onPreviewV
                   )}
                   <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.25 }}>
                     {version.uploader_name && `${version.uploader_name} · `}
-                    {new Date(version.created_at).toLocaleString()}
+                    {formatDateTime(version.created_at)}
                   </Typography>
                 </Box>
               }

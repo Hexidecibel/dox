@@ -1,3 +1,4 @@
+import { formatDate } from '../utils/format';
 import {
   Card,
   CardContent,
@@ -122,7 +123,7 @@ export function DocumentCard({ document: doc }: DocumentCardProps) {
 
         <Typography variant="caption" color="text.secondary">
           {doc.creator_name && `By ${doc.creator_name} · `}
-          {new Date(doc.created_at).toLocaleDateString()}
+          {formatDate(doc.created_at)}
         </Typography>
       </CardContent>
 

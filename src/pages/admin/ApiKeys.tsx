@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { formatDate } from '../../utils/format';
 import {
   Box,
   Typography,
@@ -159,10 +160,6 @@ export function ApiKeys() {
     return { label: 'Active', color: 'success' };
   };
 
-  const formatDate = (date: string | null) => {
-    if (!date) return 'Never';
-    return new Date(date).toLocaleDateString();
-  };
 
   if (loading) {
     return (
