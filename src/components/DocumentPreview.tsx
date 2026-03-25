@@ -32,13 +32,18 @@ interface DocumentPreviewProps {
   mimeType: string;
 }
 
-type PreviewType = 'pdf' | 'image' | 'text' | 'csv' | 'office' | 'unknown';
+type PreviewType = 'pdf' | 'image' | 'text' | 'csv' | 'json' | 'office' | 'unknown';
 
-function getPreviewType(mimeType: string): PreviewType {
+function getPreviewType(mimeType: string, fileName?: string): PreviewType {
   if (mimeType === 'application/pdf') return 'pdf';
   if (['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'].includes(mimeType)) return 'image';
   if (mimeType === 'text/csv') return 'csv';
-  if (mimeType === 'text/plain') return 'text';
+  if (mimeType === 'application/json') return 'json';
+  if (mimeType === 'text/plain') {
+    // Fallback: detect .json extension even if served as text/plain
+    if (fileName && fileName.toLowerCase().endsWith('.json')) return 'json';
+    return 'text';
+  }
   if (
     mimeType === 'application/msword' ||
     mimeType === 'application/vnd.ms-excel' ||
@@ -54,6 +59,7 @@ function getPreviewTypeLabel(type: PreviewType): string {
     case 'image': return 'Image';
     case 'text': return 'Text';
     case 'csv': return 'CSV';
+    case 'json': return 'JSON';
     case 'office': return 'Office';
     default: return 'File';
   }
@@ -63,7 +69,7 @@ function getPreviewIcon(type: PreviewType) {
   switch (type) {
     case 'pdf': return <PdfIcon fontSize="small" />;
     case 'image': return <ImageIcon fontSize="small" />;
-    case 'text': case 'csv': return <TextIcon fontSize="small" />;
+    case 'text': case 'csv': case 'json': return <TextIcon fontSize="small" />;
     default: return <FileIcon fontSize="small" />;
   }
 }
@@ -297,6 +303,150 @@ function CsvPreview({ url }: { url: string }) {
   );
 }
 
+const MAX_JSON_LINES = 500;
+
+/** Syntax-highlight a JSON string with colored spans */
+function highlightJson(jsonStr: string): string {
+  return jsonStr.replace(
+    /("(?:\\.|[^"\\])*")\s*:/g,  // keys
+    '<span style="color:#1a237e;font-weight:500">$1</span>:'
+  ).replace(
+    /:\s*("(?:\\.|[^"\\])*")/g,  // string values
+    (_match, val) => `: <span style="color:#2e7d32">${val}</span>`
+  ).replace(
+    /:\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g,  // numbers
+    ': <span style="color:#e65100">$1</span>'
+  ).replace(
+    /:\s*(true|false|null)\b/g,  // booleans/null
+    ': <span style="color:#7b1fa2;font-weight:500">$1</span>'
+  ).replace(
+    /([[\]{}])/g,  // brackets/braces
+    '<span style="color:#757575">$1</span>'
+  );
+}
+
+function JsonPreview({ url }: { url: string }) {
+  const [content, setContent] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [truncated, setTruncated] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const [fullContent, setFullContent] = useState<string | null>(null);
+  const [parseError, setParseError] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    setError('');
+    setContent(null);
+    setFullContent(null);
+    setParseError(false);
+    setShowAll(false);
+    fetch(url)
+      .then((res) => {
+        if (!res.ok) throw new Error('Failed to fetch file');
+        return res.text();
+      })
+      .then((text) => {
+        // Try to parse and pretty-print
+        let formatted: string;
+        try {
+          const parsed = JSON.parse(text);
+          formatted = JSON.stringify(parsed, null, 2);
+        } catch {
+          // Invalid JSON — show raw text
+          formatted = text;
+          setParseError(true);
+        }
+        const lines = formatted.split('\n');
+        if (lines.length > MAX_JSON_LINES) {
+          setContent(lines.slice(0, MAX_JSON_LINES).join('\n'));
+          setFullContent(formatted);
+          setTruncated(true);
+        } else {
+          setContent(formatted);
+          setTruncated(false);
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load'))
+      .finally(() => setLoading(false));
+  }, [url]);
+
+  const displayContent = showAll && fullContent ? fullContent : content;
+
+  const highlighted = useMemo(() => {
+    if (!displayContent || parseError) return null;
+    return highlightJson(displayContent);
+  }, [displayContent, parseError]);
+
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+        <CircularProgress size={24} />
+      </Box>
+    );
+  }
+
+  if (error) {
+    return <Alert severity="warning" sx={{ m: 2 }}>{error}</Alert>;
+  }
+
+  return (
+    <Box sx={{ position: 'relative' }}>
+      {parseError && (
+        <Alert severity="info" sx={{ mx: 2, mt: 2 }}>
+          File could not be parsed as valid JSON. Showing raw content.
+        </Alert>
+      )}
+      <Paper
+        variant="outlined"
+        sx={{
+          m: 2,
+          p: 2,
+          maxHeight: showAll ? 'none' : 500,
+          overflow: 'auto',
+          bgcolor: '#fafafa',
+        }}
+      >
+        {highlighted ? (
+          <pre
+            style={{
+              margin: 0,
+              fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+              fontSize: '0.85rem',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              lineHeight: 1.5,
+            }}
+            dangerouslySetInnerHTML={{ __html: highlighted }}
+          />
+        ) : (
+          <pre
+            style={{
+              margin: 0,
+              fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+              fontSize: '0.85rem',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {displayContent}
+          </pre>
+        )}
+      </Paper>
+      {truncated && !showAll && (
+        <Box sx={{ px: 2, pb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Typography variant="caption" color="text.secondary">
+            Showing first {MAX_JSON_LINES} lines.
+          </Typography>
+          <Button size="small" onClick={() => setShowAll(true)}>
+            Show all
+          </Button>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
 /** Simple CSV line parser that handles quoted fields */
 function parseCsvLine(line: string): string[] {
   const result: string[] = [];
@@ -356,7 +506,7 @@ function NoPreview({ fileName }: { fileName: string; isOffice?: boolean }) {
 }
 
 export function DocumentPreview({ documentId, versionNumber, fileName, mimeType }: DocumentPreviewProps) {
-  const previewType = getPreviewType(mimeType);
+  const previewType = getPreviewType(mimeType, fileName);
   const previewUrl = useMemo(
     () => buildPreviewUrl(documentId, versionNumber),
     [documentId, versionNumber]
@@ -439,6 +589,7 @@ export function DocumentPreview({ documentId, versionNumber, fileName, mimeType 
       {previewType === 'pdf' && <PdfPreview url={previewUrl} />}
       {previewType === 'image' && <ImagePreview url={previewUrl} fileName={fileName} />}
       {previewType === 'text' && <TextPreview url={previewUrl} />}
+      {previewType === 'json' && <JsonPreview url={previewUrl} />}
       {previewType === 'csv' && <CsvPreview url={previewUrl} />}
       {(previewType === 'office' || previewType === 'unknown') && (
         <NoPreview fileName={fileName} isOffice={previewType === 'office'} />

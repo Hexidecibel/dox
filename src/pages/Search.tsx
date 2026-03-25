@@ -86,13 +86,13 @@ export function Search() {
         Search Documents
       </Typography>
       <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
-        Search across all documents by title, description, category, and tags.
+        Search across all documents by title, description, tags, file names, and file content.
       </Typography>
 
       <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, mb: 3 }}>
         <Box component="form" onSubmit={handleSearch}>
           <TextField
-            placeholder="Enter search terms..."
+            placeholder="Search titles, tags, file names, and content..."
             fullWidth
             value={query}
             onChange={(e) => setQuery(e.target.value)}

@@ -8,6 +8,7 @@ import {
 } from '../../../lib/permissions';
 import { buildR2Key, uploadFile, computeChecksum } from '../../../lib/r2';
 import { sanitizeString } from '../../../lib/validation';
+import { extractText } from '../../../lib/extract';
 import type { Env, User, Document } from '../../../lib/types';
 
 const ALLOWED_TYPES = [
@@ -18,6 +19,7 @@ const ALLOWED_TYPES = [
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'text/csv',
   'text/plain',
+  'application/json',
   'image/png',
   'image/jpeg',
 ];
@@ -33,6 +35,7 @@ const MIME_TO_EXTENSIONS: Record<string, string[]> = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
   'text/csv': ['.csv'],
   'text/plain': ['.txt', '.text', '.log', '.md'],
+  'application/json': ['.json'],
   'image/png': ['.png'],
   'image/jpeg': ['.jpg', '.jpeg'],
 };
@@ -79,7 +82,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const mimeType = file.type || 'application/octet-stream';
     if (!ALLOWED_TYPES.includes(mimeType)) {
       return new Response(
-        JSON.stringify({ error: 'File type not allowed. Accepted: PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, PNG, JPG' }),
+        JSON.stringify({ error: 'File type not allowed. Accepted: PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, JSON, PNG, JPG' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }
@@ -128,11 +131,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const r2Key = buildR2Key(doc.tenant_slug, docId, newVersion, fileName);
     await uploadFile(context.env.FILES, r2Key, fileData, mimeType);
 
+    // Extract text content for full-text search
+    const extractedText = await extractText(fileData, mimeType, fileName);
+
     // Insert version record
     const versionId = generateId();
     await context.env.DB.prepare(
-      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, change_notes, uploaded_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, change_notes, uploaded_by, extracted_text)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         versionId,
@@ -144,7 +150,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         r2Key,
         checksum,
         sanitizedNotes,
-        user.id
+        user.id,
+        extractedText
       )
       .run();
 

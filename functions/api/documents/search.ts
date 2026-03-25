@@ -2,7 +2,7 @@ import type { Env, User } from '../../lib/types';
 
 /**
  * GET /api/documents/search
- * Search documents by title, description, and tags.
+ * Search documents by title, description, tags, and file content.
  */
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -24,9 +24,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const params: (string | number)[] = [];
 
     if (q) {
-      conditions.push('(d.title LIKE ? OR d.description LIKE ? OR d.tags LIKE ? OR dv.file_name LIKE ?)');
+      conditions.push('(d.title LIKE ? OR d.description LIKE ? OR d.tags LIKE ? OR dv.file_name LIKE ? OR dv.extracted_text LIKE ?)');
       const searchTerm = `%${q}%`;
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
 
     if (tenantId) {
