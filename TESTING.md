@@ -1,7 +1,7 @@
 # Feature Testing Plan — doc-upload-site
 
 Live URL: https://dox.cush.rocks
-Super Admin: ludacris2k4@gmail.com
+Super Admin: admin@example.com
 Estimated Time: 30-45 minutes
 
 ---
@@ -11,7 +11,7 @@ Estimated Time: 30-45 minutes
 ### Login
 - [ ] Go to https://dox.cush.rocks
 - [ ] Should redirect to /login if not authenticated
-- [ ] Log in as ludacris2k4@gmail.com with the known password
+- [ ] Log in as admin@example.com with the known password
 - [ ] Should redirect to /dashboard
 - [ ] Dashboard shows welcome message and stats cards (document count, user count, tenant count)
 - [ ] Verify the user's name and role (super_admin) appear in the UI (sidebar or header)
@@ -28,7 +28,7 @@ Estimated Time: 30-45 minutes
 - [ ] Should redirect back to /login (token is revoked server-side)
 
 ### Login Again
-- [ ] Log back in as ludacris2k4@gmail.com — you will need this session for the remaining tests
+- [ ] Log back in as admin@example.com — you will need this session for the remaining tests
 
 ---
 
@@ -124,7 +124,7 @@ Estimated Time: 30-45 minutes
 - [ ] Log out
 
 ### Return to Super Admin
-- [ ] Log back in as ludacris2k4@gmail.com for remaining tests
+- [ ] Log back in as admin@example.com for remaining tests
 
 ---
 
@@ -266,7 +266,7 @@ Estimated Time: 30-45 minutes
 ## 10. API Keys
 
 ### Create an API Key
-- [ ] Log in as super_admin (ludacris2k4@gmail.com)
+- [ ] Log in as super_admin (admin@example.com)
 - [ ] Navigate to API Keys management (Settings or Admin section)
 - [ ] Click "Create API Key"
 - [ ] Enter a name: "Test Automation Key"
@@ -398,7 +398,7 @@ Estimated Time: 30-45 minutes
 ## 14. Admin Password Reset
 
 ### Reset a User's Password
-- [ ] Log in as super_admin (ludacris2k4@gmail.com)
+- [ ] Log in as super_admin (admin@example.com)
 - [ ] Navigate to user management
 - [ ] Find one of the test users (e.g., Acme User)
 - [ ] Click "Reset Password" (admin action)
@@ -418,7 +418,7 @@ Estimated Time: 30-45 minutes
 - [ ] Trying to use an old token for this user should return 401
 
 ### Return to Super Admin
-- [ ] Log back in as ludacris2k4@gmail.com
+- [ ] Log back in as admin@example.com
 
 ---
 
@@ -601,7 +601,7 @@ Estimated Time: 30-45 minutes
 ## 21. Super Admin Tenant Switching
 
 ### Tenant Selector
-- [ ] Log in as super_admin (ludacris2k4@gmail.com)
+- [ ] Log in as super_admin (admin@example.com)
 - [ ] Locate the tenant selector dropdown (should be in the header or sidebar)
 - [ ] Should list all tenants: Acme Manufacturing, Beta Industries, and any others
 

@@ -5,6 +5,7 @@ node_modules
 dist
 dist-ssr
 *.local
+tsconfig.tsbuildinfo
 
 # Editor
 .vscode/*
@@ -18,6 +19,12 @@ npm-debug.log*
 # OS
 .DS_Store
 
+# Environment / secrets
+.dev.vars
+.env
+.env.*
+!.env.example
+
 # Wrangler
 .wrangler/
-.dev.varstsconfig.tsbuildinfo
+wrangler.toml
