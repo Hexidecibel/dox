@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box,
   Typography,
@@ -54,6 +54,7 @@ export function Documents() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const { user, isSuperAdmin } = useAuth();
   const { tenants, selectedTenantId } = useTenant();
@@ -72,6 +73,21 @@ export function Documents() {
   const [createStatus, setCreateStatus] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-open upload dialog when ?upload=true is in the URL
+  useEffect(() => {
+    if (searchParams.get('upload') === 'true') {
+      setCreateOpen(true);
+    }
+  }, [searchParams]);
+
+  const closeCreateDialog = useCallback(() => {
+    setCreateOpen(false);
+    if (searchParams.has('upload')) {
+      searchParams.delete('upload');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   // Pre-select tenant when dialog opens and reset file state
   useEffect(() => {
@@ -166,7 +182,7 @@ export function Documents() {
         await api.documents.upload(newDoc.id, newDocFile, newDocChangeNotes.trim() || undefined);
       }
 
-      setCreateOpen(false);
+      closeCreateDialog();
       setNewTitle('');
       setNewDescription('');
       setNewCategory('');
@@ -314,10 +330,10 @@ export function Documents() {
       )}
 
       {/* Create Document Dialog */}
-      <Dialog open={createOpen} onClose={() => setCreateOpen(false)} maxWidth="sm" fullWidth fullScreen={isMobile}>
+      <Dialog open={createOpen} onClose={() => closeCreateDialog()} maxWidth="sm" fullWidth fullScreen={isMobile}>
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           Create New Document
-          <IconButton onClick={() => setCreateOpen(false)} size="small">
+          <IconButton onClick={() => closeCreateDialog()} size="small">
             <CloseIcon />
           </IconButton>
         </DialogTitle>
@@ -479,7 +495,7 @@ export function Documents() {
               {createStatus}
             </Typography>
           )}
-          <Button onClick={() => setCreateOpen(false)} disabled={creating}>
+          <Button onClick={() => closeCreateDialog()} disabled={creating}>
             Cancel
           </Button>
           <Button
