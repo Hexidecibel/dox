@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "=== Setting up Cloudflare resources for doc-upload-site ==="
+echo "=== Setting up Cloudflare resources for dox ==="
 
 # Create D1 database
 echo ""
@@ -28,7 +28,7 @@ npx wrangler r2 bucket create doc-upload-files 2>&1 || echo "Note: Bucket may al
 # Create Pages project
 echo ""
 echo "Creating Pages project..."
-npx wrangler pages project create doc-upload-site --production-branch main 2>&1 || echo "Note: Project may already exist."
+npx wrangler pages project create dox --production-branch main 2>&1 || echo "Note: Project may already exist."
 
 # Set secrets
 echo ""
@@ -38,12 +38,12 @@ echo ""
 echo "--- JWT_SECRET ---"
 echo "Generating a random JWT secret..."
 JWT_SECRET=$(openssl rand -hex 32)
-echo "$JWT_SECRET" | npx wrangler pages secret put JWT_SECRET --project-name doc-upload-site
+echo "$JWT_SECRET" | npx wrangler pages secret put JWT_SECRET --project-name dox
 
 echo ""
 echo "--- RESEND_API_KEY ---"
 echo "Enter your Resend API key:"
-npx wrangler pages secret put RESEND_API_KEY --project-name doc-upload-site
+npx wrangler pages secret put RESEND_API_KEY --project-name dox
 
 echo ""
 echo "=== Setup complete ==="
@@ -53,6 +53,6 @@ echo "  1. Update wrangler.toml with the D1 database_id above"
 echo "  2. Run migrations: ./bin/migrate --remote"
 echo "  3. Deploy: ./bin/deploy"
 echo "  4. Set up custom domain: dox.cush.rocks"
-echo "     - In Cloudflare Dashboard > Pages > doc-upload-site > Custom domains"
+echo "     - In Cloudflare Dashboard > Pages > dox > Custom domains"
 echo "     - Add dox.cush.rocks"
 echo "     - DNS will auto-configure since you're on Cloudflare"

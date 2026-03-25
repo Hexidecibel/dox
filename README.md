@@ -1,129 +1,205 @@
-# Document Portal
+```
+   ___  _____  __
+  / _ \/ _ \ \/ /
+ / // / ___/\  /
+/____/\___/ /_/
+```
 
-Multi-tenant document upload/download portal with version tracking, role-based access control, audit logging, and report generation. Built for regulatory document management where manufacturers and vendors independently manage their documents.
+### 📄 Document management that doesn't suck.
 
-## Features
+Multi-tenant document portal with version tracking, role-based access, audit logging, and an API that actually makes sense. Built on Cloudflare's edge stack — fast everywhere, cheap to run.
 
-- **Multi-tenant isolation** — each organization has its own documents and users
-- **4-tier RBAC** — super_admin, org_admin, user, reader roles
-- **Document versioning** — full version history with file storage on R2
-- **Inline preview** — PDF, images, CSV, and text files render in-browser
-- **Dual API** — REST + GraphQL endpoints
-- **API key access** — programmatic access for service integrations and automation
-- **Document ingestion** — upsert endpoint for agentic/email pipelines
-- **Audit logging** — every action tracked with diff details
-- **Search** — full-text search across titles, descriptions, tags, and filenames
-- **Report generation** — CSV and JSON exports
-- **Password management** — forgot/reset flow with email notifications
-- **Email notifications** — invitation and password reset emails via Resend
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## Tech Stack
+---
 
-| Component | Technology |
-|-----------|------------|
-| Runtime | Cloudflare Pages Functions (Workers) |
-| Database | Cloudflare D1 (SQLite at the edge) |
-| File Storage | Cloudflare R2 |
-| Frontend | React 18 + MUI 6 + React Router + Vite |
-| Auth | Custom JWT (HMAC-SHA256, PBKDF2 passwords) |
+## ✨ Features
+
+| | Feature | What it does |
+|---|---------|-------------|
+| 🏢 | **Multi-tenant** | Each org gets isolated docs, users, and audit trails |
+| 🔐 | **4-tier RBAC** | super_admin → org_admin → user → reader |
+| 📝 | **Version tracking** | Full history for every document, never lose a revision |
+| 👀 | **Inline preview** | PDFs, images, CSV, and text render right in the browser |
+| 🔍 | **Full-text search** | Search titles, descriptions, tags, filenames, and PDF content |
+| 🔌 | **REST + GraphQL** | Dual API surface — use whichever fits your workflow |
+| 🤖 | **Ingestion API** | Upsert endpoint for agentic AI pipelines and email automation |
+| 🔑 | **API keys** | Programmatic access with `dox_sk_` prefixed keys |
+| 📊 | **Reports** | CSV and JSON exports on demand |
+| 📋 | **Audit log** | Every action tracked with diffs — who did what, when |
+| 📧 | **Email notifications** | Invitations and password resets via Resend |
+| 🌍 | **Edge-native** | Runs on Cloudflare Workers — sub-50ms responses globally |
+
+---
+
+## 🏗️ Architecture
+
+```
+Browser ──→ Cloudflare Pages
+                │
+                ├── Static assets (React + Vite)
+                │
+                └── Pages Functions (Workers)
+                       │
+                       ├── D1 (SQLite at the edge)
+                       ├── R2 (file storage)
+                       └── Resend (email)
+```
+
+| Layer | Tech |
+|-------|------|
+| Frontend | React 18 + MUI 6 + Vite |
+| Backend | Cloudflare Pages Functions |
+| Database | Cloudflare D1 (SQLite) |
+| Storage | Cloudflare R2 |
+| Auth | JWT (HMAC-SHA256) + PBKDF2 passwords |
 | Email | Resend API |
-| GraphQL | graphql-yoga |
 
-## Prerequisites
+---
 
-- [Node.js](https://nodejs.org/) (v18+)
-- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/) (`npm install -g wrangler`)
-- A Cloudflare account with D1 and R2 enabled
+## 🚀 Quick Start
 
-## Setup
+You'll need [Node.js 18+](https://nodejs.org/) and a [Cloudflare account](https://dash.cloudflare.com/sign-up) with D1 and R2 enabled.
 
-1. **Clone and install dependencies:**
+### 1. Clone & install
 
-   ```bash
-   git clone <repo-url>
-   cd doc-upload-site
-   npm install
-   ```
+```bash
+git clone <your-repo-url>
+cd dox
+npm install
+```
 
-2. **Configure Wrangler:**
+### 2. Set up Cloudflare resources
 
-   ```bash
-   cp wrangler.toml.example wrangler.toml
-   ```
+```bash
+# Install wrangler if you haven't
+npm install -g wrangler
+wrangler login
 
-   Edit `wrangler.toml` and fill in your D1 database ID. To create the D1 database and R2 bucket:
+# Create your D1 database and R2 bucket
+wrangler d1 create dox-db
+wrangler r2 bucket create dox-files
+```
 
-   ```bash
-   wrangler d1 create doc-upload-db
-   wrangler r2 bucket create doc-upload-files
-   ```
+### 3. Configure
 
-3. **Configure environment variables:**
+```bash
+# Copy the example configs
+cp wrangler.toml.example wrangler.toml
+cp .env.example .dev.vars
+```
 
-   ```bash
-   cp .env.example .dev.vars
-   ```
+Edit `wrangler.toml` — paste your D1 database ID from step 2:
+```toml
+database_id = "your-d1-id-from-above"
+```
 
-   Edit `.dev.vars` and set:
-   - `JWT_SECRET` — generate with `openssl rand -hex 32`
-   - `RESEND_API_KEY` — (optional) get from [resend.com](https://resend.com) for email notifications
+Edit `.dev.vars` — set your JWT secret:
+```bash
+# Generate a secure secret
+openssl rand -hex 32
+```
 
-4. **Run migrations:**
+```
+JWT_SECRET=<paste-your-secret>
+RESEND_API_KEY=re_xxxx  # Optional — needed for email features
+```
 
-   ```bash
-   npm run migrate
-   ```
+### 4. Run migrations & seed
 
-5. **Seed the admin user:**
+```bash
+npm run migrate
+./bin/seed
+```
 
-   ```bash
-   ./bin/seed
-   ```
+This creates the database tables and a default super_admin account.
 
-   This creates a super_admin user. Log in and change the password immediately.
+### 5. Launch! 🎉
 
-6. **Start the dev server:**
+```bash
+npm run dev
+```
 
-   ```bash
-   npm run dev
-   ```
+Open [http://localhost:8788](http://localhost:8788) — log in with the seeded admin, change your password, and you're rolling.
 
-   The app will be available at `http://localhost:8788`.
+---
 
-## Scripts
+## 👥 Roles
 
-| Command | Description |
+| Role | Scope | What they can do |
+|------|-------|-----------------|
+| 🛡️ **super_admin** | All tenants | Everything — manage orgs, users, all docs |
+| 🏢 **org_admin** | Own tenant | Manage their org's users and documents |
+| ✏️ **user** | Own tenant | Create, upload, update, delete documents |
+| 👁️ **reader** | Own tenant | View and download only |
+
+---
+
+## 📖 API
+
+Full API documentation:
+
+- **[`openapi.yaml`](openapi.yaml)** — OpenAPI 3.1 spec (import into Postman, Insomnia, etc.)
+- **[`API.md`](API.md)** — Human-readable guide with curl examples
+
+Quick taste:
+
+```bash
+# Login
+curl -X POST http://localhost:8788/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "your-password"}'
+
+# List documents (with JWT)
+curl http://localhost:8788/api/documents \
+  -H "Authorization: Bearer <your-token>"
+
+# Or use an API key
+curl http://localhost:8788/api/documents \
+  -H "X-API-Key: dox_sk_your_key_here"
+```
+
+---
+
+## 🛠️ Scripts
+
+| Command | What it does |
 |---------|-------------|
-| `npm run dev` | Start full dev server (Wrangler + Vite) on port 8788 |
-| `npm run dev:frontend` | Start Vite HMR only (frontend dev) |
-| `npm run build` | Build for production (TypeScript + Vite) |
+| `npm run dev` | Full dev server (backend + frontend) on :8788 |
+| `npm run dev:frontend` | Vite HMR only (frontend dev) |
+| `npm run build` | Production build |
 | `npm run migrate` | Run D1 migrations locally |
-| `npm run migrate:remote` | Run D1 migrations on production |
-| `./bin/deploy` | Deploy to Cloudflare Pages |
-| `./bin/seed` | Seed admin user |
+| `npm run migrate:remote` | Run D1 migrations in production |
+| `./bin/deploy` | Build + deploy to Cloudflare Pages |
+| `./bin/seed` | Seed the admin user |
 
-## Role Model
+---
 
-| Role | Scope | Permissions |
-|------|-------|-------------|
-| super_admin | All tenants | Full access, manage tenants and all users |
-| org_admin | Own tenant | Manage users, documents, view audit logs |
-| user | Own tenant | Create, upload, update, delete documents |
-| reader | Own tenant | Read-only access, download files |
-
-## API Documentation
-
-- **`openapi.yaml`** — OpenAPI 3.1 spec for all REST endpoints
-- **`API.md`** — Human-readable API guide with examples
-
-## Deployment
+## 🚢 Deploying to Production
 
 ```bash
 ./bin/deploy
 ```
 
-This builds the project and deploys to Cloudflare Pages. Production secrets (`JWT_SECRET`, `RESEND_API_KEY`) are managed via `wrangler pages secret put`.
+Production secrets are set via Wrangler (the deploy script handles this):
+```bash
+wrangler pages secret put JWT_SECRET
+wrangler pages secret put RESEND_API_KEY  # Optional
+```
 
-## License
+---
 
-[MIT](LICENSE)
+## 🤝 Contributing
+
+1. Fork it
+2. Create your feature branch (`git checkout -b my-feature`)
+3. Make your changes
+4. Run `npm run build` to make sure nothing's broken
+5. Commit and push
+6. Open a PR
+
+---
+
+## 📄 License
+
+[MIT](LICENSE) — do whatever you want with it.

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 32" fill="none">
+  <rect width="28" height="28" x="2" y="2" rx="5" fill="#1976d2"/>
+  <path d="M9 7h9l5 5v12a1.5 1.5 0 01-1.5 1.5H9A1.5 1.5 0 017.5 24V8.5A1.5 1.5 0 019 7z" fill="white" opacity="0.9"/>
+  <path d="M18 7v5h5" fill="none" stroke="white" stroke-width="0.5" opacity="0.5"/>
+  <text x="12" y="21" font-family="system-ui,sans-serif" font-size="10" font-weight="700" fill="#1976d2">D</text>
+  <text x="38" y="23" font-family="system-ui,-apple-system,sans-serif" font-size="22" font-weight="700" fill="#1976d2">dox</text>
+</svg>

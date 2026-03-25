@@ -29,15 +29,9 @@ export function Navbar() {
       }}
     >
       <Toolbar>
-        <Typography
-          variant="h6"
-          fontWeight={700}
-          color="primary.main"
-          sx={{ cursor: 'pointer', mr: 3, flexShrink: 0 }}
-          onClick={() => navigate('/dashboard')}
-        >
-          Document Portal
-        </Typography>
+        <Box sx={{ cursor: 'pointer', mr: 3, flexShrink: 0 }} onClick={() => navigate('/dashboard')}>
+          <img src="/logo.svg" alt="Dox" height={28} />
+        </Box>
 
         {!isMobile && (
           <TextField

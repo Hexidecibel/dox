@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="6" fill="#1976d2"/>
+  <path d="M8 6h10l6 6v14a2 2 0 01-2 2H8a2 2 0 01-2-2V8a2 2 0 012-2z" fill="white" opacity="0.9"/>
+  <path d="M18 6v6h6" fill="none" stroke="white" stroke-width="0.5" opacity="0.5"/>
+  <text x="12" y="22" font-family="system-ui,sans-serif" font-size="12" font-weight="700" fill="#1976d2">D</text>
+</svg>

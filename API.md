@@ -1,8 +1,8 @@
-# Document Portal — API Reference
+# Dox — API Reference
 
 ## System Overview
 
-The Document Portal is a multi-tenant document management system for regulatory documents. It provides:
+Dox is a multi-tenant document management system for regulatory documents. It provides:
 
 - **Document management** with version tracking, file upload/download, categorization, and search
 - **Multi-tenant isolation** where each organization (tenant) has its own documents and users

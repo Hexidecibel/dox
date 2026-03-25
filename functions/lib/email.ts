@@ -13,7 +13,7 @@ export async function sendEmail(apiKey: string, options: SendEmailOptions): Prom
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: 'Document Portal <noreply@cush.rocks>',
+        from: 'Dox <noreply@cush.rocks>',
         to: [options.to],
         subject: options.subject,
         html: options.html,
@@ -35,7 +35,7 @@ export function buildInvitationEmail(params: {
 }): { subject: string; html: string } {
   const roleLabel = params.role.replace('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
-  const subject = `You've been invited to ${params.orgName} on Document Portal`;
+  const subject = `You've been invited to ${params.orgName} on Dox`;
 
   const html = `<!DOCTYPE html>
 <html>
@@ -47,14 +47,14 @@ export function buildInvitationEmail(params: {
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
     <tr>
       <td style="background:#1976d2;padding:24px 32px;">
-        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Document Portal</h1>
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Dox</h1>
       </td>
     </tr>
     <tr>
       <td style="padding:32px;">
         <h2 style="margin:0 0 16px;color:#333;font-size:18px;">Welcome to ${params.orgName}</h2>
         <p style="margin:0 0 16px;color:#555;line-height:1.6;">
-          ${params.inviterName} has invited you to join <strong>${params.orgName}</strong> on the Document Portal as a <strong>${roleLabel}</strong>.
+          ${params.inviterName} has invited you to join <strong>${params.orgName}</strong> on the Dox as a <strong>${roleLabel}</strong>.
         </p>
         <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8f9fa;border-radius:6px;margin:0 0 24px;">
           <tr>
@@ -81,7 +81,7 @@ export function buildInvitationEmail(params: {
     <tr>
       <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
         <p style="margin:0;color:#999;font-size:12px;text-align:center;">
-          This is an automated message from Document Portal. Please do not reply.
+          This is an automated message from Dox. Please do not reply.
         </p>
       </td>
     </tr>
@@ -96,7 +96,7 @@ export function buildPasswordResetEmail(params: {
   userName: string;
   resetUrl: string;
 }): { subject: string; html: string } {
-  const subject = 'Password Reset Request — Document Portal';
+  const subject = 'Password Reset Request — Dox';
 
   const html = `<!DOCTYPE html>
 <html>
@@ -108,7 +108,7 @@ export function buildPasswordResetEmail(params: {
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
     <tr>
       <td style="background:#1976d2;padding:24px 32px;">
-        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Document Portal</h1>
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Dox</h1>
       </td>
     </tr>
     <tr>
@@ -138,7 +138,7 @@ export function buildPasswordResetEmail(params: {
     <tr>
       <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
         <p style="margin:0;color:#999;font-size:12px;text-align:center;">
-          This is an automated message from Document Portal. Please do not reply.
+          This is an automated message from Dox. Please do not reply.
         </p>
       </td>
     </tr>
@@ -155,7 +155,7 @@ export function buildAdminResetEmail(params: {
   tempPassword: string;
   loginUrl: string;
 }): { subject: string; html: string } {
-  const subject = 'Your Password Has Been Reset — Document Portal';
+  const subject = 'Your Password Has Been Reset — Dox';
 
   const html = `<!DOCTYPE html>
 <html>
@@ -167,7 +167,7 @@ export function buildAdminResetEmail(params: {
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
     <tr>
       <td style="background:#1976d2;padding:24px 32px;">
-        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Document Portal</h1>
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Dox</h1>
       </td>
     </tr>
     <tr>
@@ -202,7 +202,7 @@ export function buildAdminResetEmail(params: {
     <tr>
       <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
         <p style="margin:0;color:#999;font-size:12px;text-align:center;">
-          This is an automated message from Document Portal. Please do not reply.
+          This is an automated message from Dox. Please do not reply.
         </p>
       </td>
     </tr>

@@ -1,4 +1,4 @@
-# Feature Testing Plan — doc-upload-site
+# Feature Testing Plan — Dox
 
 Live URL: https://dox.cush.rocks
 Super Admin: admin@example.com

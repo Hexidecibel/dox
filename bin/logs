@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 echo "=== Tailing Cloudflare Pages logs ==="
-npx wrangler pages deployment tail --project-name doc-upload-site
+npx wrangler pages deployment tail --project-name dox

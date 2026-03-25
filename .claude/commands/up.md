@@ -1,6 +1,6 @@
-# Start doc-upload-site
+# Start dox
 
-Start the development server/services for doc-upload-site.
+Start the development server/services for dox.
 
 ## Steps
 

@@ -1,6 +1,6 @@
-# Stop doc-upload-site
+# Stop dox
 
-Stop running services for doc-upload-site.
+Stop running services for dox.
 
 ## Steps
 

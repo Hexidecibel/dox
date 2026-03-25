@@ -130,7 +130,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // Send invitation email if Resend API key is configured
     let emailSent = false;
     if (context.env.RESEND_API_KEY) {
-      let orgName = 'Document Portal';
+      let orgName = 'Dox';
       if (resolvedTenantId) {
         const tenant = await context.env.DB.prepare(
           'SELECT name FROM tenants WHERE id = ?'

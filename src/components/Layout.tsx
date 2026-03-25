@@ -105,11 +105,11 @@ export function Layout() {
   const drawerContent = (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <Box sx={{ px: 2, py: 2.5 }}>
-        <Typography variant="h6" fontWeight={700} color="primary.main">
-          Document Portal
-        </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <img src="/logo.svg" alt="Dox" height={28} />
+        </Box>
         <Typography variant="caption" color="text.secondary">
-          Regulatory Document Management
+          Document Management
         </Typography>
       </Box>
       <Divider />
@@ -277,9 +277,7 @@ export function Layout() {
             <IconButton edge="start" onClick={() => setMobileOpen(!mobileOpen)} sx={{ mr: 1 }}>
               <MenuIcon />
             </IconButton>
-            <Typography variant="h6" fontWeight={700} color="primary.main" sx={{ flex: 1 }}>
-              Document Portal
-            </Typography>
+            <img src="/logo.svg" alt="Dox" height={24} style={{ flex: 0 }} />
             {user && (
               <Avatar
                 sx={{

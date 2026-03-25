@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Document Portal API
+  title: Dox API
   description: |
     Multi-tenant document upload/download portal with version tracking, role-based access control,
     audit logging, and report generation. Built on Cloudflare Pages Functions with D1 (SQLite) and R2 (object storage).
@@ -22,12 +22,12 @@ info:
     All data is scoped to tenants. Non-super_admin users are automatically restricted to their own tenant.
   version: 0.1.0
   contact:
-    name: Document Portal
+    name: Dox
 
 servers:
   - url: http://localhost:8788
     description: Local development
-  - url: https://doc-upload-site.pages.dev
+  - url: https://dox.pages.dev
     description: Production (Cloudflare Pages)
 
 security:
