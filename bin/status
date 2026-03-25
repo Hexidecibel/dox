@@ -6,7 +6,7 @@ echo "=== dox status ==="
 echo ""
 
 echo "Pages deployments:"
-npx wrangler pages deployment list --project-name dox 2>&1 | head -10
+npx wrangler pages deployment list --project-name doc-upload-site 2>&1 | head -10
 
 echo ""
 echo "D1 database:"

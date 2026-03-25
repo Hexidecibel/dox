@@ -10,7 +10,7 @@ npm run build
 
 # Deploy to Cloudflare Pages
 echo "Deploying to Cloudflare Pages..."
-npx wrangler pages deploy dist --project-name dox
+npx wrangler pages deploy dist --project-name doc-upload-site
 
 echo ""
 echo "=== Deployment complete ==="

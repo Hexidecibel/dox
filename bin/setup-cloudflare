@@ -28,7 +28,7 @@ npx wrangler r2 bucket create doc-upload-files 2>&1 || echo "Note: Bucket may al
 # Create Pages project
 echo ""
 echo "Creating Pages project..."
-npx wrangler pages project create dox --production-branch main 2>&1 || echo "Note: Project may already exist."
+npx wrangler pages project create doc-upload-site --production-branch main 2>&1 || echo "Note: Project may already exist."
 
 # Set secrets
 echo ""
@@ -38,12 +38,12 @@ echo ""
 echo "--- JWT_SECRET ---"
 echo "Generating a random JWT secret..."
 JWT_SECRET=$(openssl rand -hex 32)
-echo "$JWT_SECRET" | npx wrangler pages secret put JWT_SECRET --project-name dox
+echo "$JWT_SECRET" | npx wrangler pages secret put JWT_SECRET --project-name doc-upload-site
 
 echo ""
 echo "--- RESEND_API_KEY ---"
 echo "Enter your Resend API key:"
-npx wrangler pages secret put RESEND_API_KEY --project-name dox
+npx wrangler pages secret put RESEND_API_KEY --project-name doc-upload-site
 
 echo ""
 echo "=== Setup complete ==="
