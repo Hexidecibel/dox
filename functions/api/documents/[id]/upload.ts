@@ -132,7 +132,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     await uploadFile(context.env.FILES, r2Key, fileData, mimeType);
 
     // Extract text content for full-text search
-    const extractedText = await extractText(fileData, mimeType, fileName);
+    const extractedText = await extractText(fileData.slice(0), mimeType, fileName);
 
     // Insert version record
     const versionId = generateId();

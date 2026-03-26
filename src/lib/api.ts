@@ -67,6 +67,14 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
 
   if (!res.ok) {
+    // Auto-redirect to login on 401 (expired/invalid token), but not for login attempts
+    if (res.status === 401 && !path.includes('/auth/login')) {
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('auth_user');
+      window.location.href = '/login';
+      throw new Error('Session expired');
+    }
+
     let message: string;
     try {
       const body = await res.json();

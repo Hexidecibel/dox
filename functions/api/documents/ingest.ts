@@ -146,7 +146,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const checksum = await computeChecksum(fileData);
-    const extractedText = await extractText(fileData, mimeType, fileName);
+    const extractedText = await extractText(fileData.slice(0), mimeType, fileName);
     const sanitizedRef = sanitizeString(externalRef);
     const sanitizedNotes = changeNotes ? sanitizeString(changeNotes) : null;
     const sanitizedTitle = title ? sanitizeString(title) : fileName.replace(/\.[^/.]+$/, '');

@@ -275,7 +275,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // Compute checksum and extract text
     const checksum = await computeChecksum(fileData);
-    const extractedText = await extractText(fileData, mimeType, fileName);
+    const extractedText = await extractText(fileData.slice(0), mimeType, fileName);
     const sanitizedRef = sanitizeString(externalRef);
     const changeNotes = body.change_notes || null;
     const sanitizedNotes = changeNotes ? sanitizeString(changeNotes) : null;
