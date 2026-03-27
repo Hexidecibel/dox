@@ -3,6 +3,7 @@ export interface Env {
   FILES: R2Bucket;
   JWT_SECRET: string;
   RESEND_API_KEY?: string;
+  EMAIL_WEBHOOK_SECRET?: string;
 }
 
 export interface User {

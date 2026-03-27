@@ -10,6 +10,7 @@ import {
 import { buildR2Key, uploadFile, computeChecksum } from '../../lib/r2';
 import { sanitizeString } from '../../lib/validation';
 import { extractText } from '../../lib/extract';
+import { applyNamingTemplate } from '../../lib/naming';
 import type { Env, User, Document } from '../../lib/types';
 
 const ALLOWED_TYPES = [
@@ -63,6 +64,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const tags = formData.get('tags') as string | null;
     const changeNotes = formData.get('changeNotes') as string | null;
     const sourceMetadata = formData.get('source_metadata') as string | null;
+    const documentTypeId = formData.get('document_type_id') as string | null;
+    const lotNumber = formData.get('lot_number') as string | null;
+    const poNumber = formData.get('po_number') as string | null;
+    const codeDate = formData.get('code_date') as string | null;
+    const expirationDate = formData.get('expiration_date') as string | null;
+    const productIdsRaw = formData.get('product_ids') as string | null;
 
     // Validate required fields
     if (!file) {
@@ -120,6 +127,26 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       }
     }
 
+    // Validate product_ids if provided
+    let productLinks: Array<{ product_id: string; expires_at?: string; notes?: string }> = [];
+    if (productIdsRaw) {
+      try {
+        const parsed = JSON.parse(productIdsRaw);
+        if (!Array.isArray(parsed)) {
+          throw new BadRequestError('product_ids must be a JSON array');
+        }
+        for (const entry of parsed) {
+          if (!entry.product_id || typeof entry.product_id !== 'string') {
+            throw new BadRequestError('Each product_ids entry must have a product_id string');
+          }
+        }
+        productLinks = parsed;
+      } catch (e) {
+        if (e instanceof BadRequestError) throw e;
+        throw new BadRequestError('product_ids must be a valid JSON array');
+      }
+    }
+
     // Check tenant exists and is active
     const tenant = await context.env.DB.prepare(
       'SELECT id, slug, active FROM tenants WHERE id = ?'
@@ -150,6 +177,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const sanitizedRef = sanitizeString(externalRef);
     const sanitizedNotes = changeNotes ? sanitizeString(changeNotes) : null;
     const sanitizedTitle = title ? sanitizeString(title) : fileName.replace(/\.[^/.]+$/, '');
+    const sanitizedLotNumber = lotNumber ? sanitizeString(lotNumber) : null;
+    const sanitizedPoNumber = poNumber ? sanitizeString(poNumber) : null;
+    const sanitizedCodeDate = codeDate ? sanitizeString(codeDate) : null;
+    const sanitizedExpirationDate = expirationDate ? sanitizeString(expirationDate) : null;
+
+    // Check for naming template and apply to file name
+    let displayFileName = fileName;
+    const namingTemplate = await context.env.DB.prepare(
+      'SELECT template FROM naming_templates WHERE tenant_id = ? AND active = 1'
+    )
+      .bind(tenantId)
+      .first<{ template: string }>();
+
+    if (namingTemplate?.template) {
+      const fileExt = fileName.split('.').pop() || '';
+      displayFileName = applyNamingTemplate(namingTemplate.template, {
+        title: sanitizedTitle || fileName.replace(/\.[^/.]+$/, ''),
+        lot_number: sanitizedLotNumber || undefined,
+        po_number: sanitizedPoNumber || undefined,
+        code_date: sanitizedCodeDate || undefined,
+        expiration_date: sanitizedExpirationDate || undefined,
+        ext: fileExt,
+      });
+    }
 
     // Look up existing document by external_ref + tenant_id
     const existingDoc = await context.env.DB.prepare(
@@ -174,7 +225,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           versionId,
           existingDoc.id,
           newVersion,
-          fileName,
+          displayFileName,
           fileSize,
           mimeType,
           r2Key,
@@ -196,6 +247,26 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         updateFields.push('source_metadata = ?');
         updateBindings.push(sourceMetadata);
       }
+      if (documentTypeId) {
+        updateFields.push('document_type_id = ?');
+        updateBindings.push(documentTypeId);
+      }
+      if (sanitizedLotNumber) {
+        updateFields.push('lot_number = ?');
+        updateBindings.push(sanitizedLotNumber);
+      }
+      if (sanitizedPoNumber) {
+        updateFields.push('po_number = ?');
+        updateBindings.push(sanitizedPoNumber);
+      }
+      if (sanitizedCodeDate) {
+        updateFields.push('code_date = ?');
+        updateBindings.push(sanitizedCodeDate);
+      }
+      if (sanitizedExpirationDate) {
+        updateFields.push('expiration_date = ?');
+        updateBindings.push(sanitizedExpirationDate);
+      }
 
       updateBindings.push(existingDoc.id);
 
@@ -204,6 +275,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       )
         .bind(...updateBindings)
         .run();
+
+      // Link products if provided (update flow)
+      if (productLinks.length > 0) {
+        for (const link of productLinks) {
+          await context.env.DB.prepare(
+            `INSERT INTO document_products (id, document_id, product_id, expires_at, notes)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(document_id, product_id) DO UPDATE SET
+               expires_at = COALESCE(excluded.expires_at, document_products.expires_at),
+               notes = COALESCE(excluded.notes, document_products.notes),
+               updated_at = datetime('now')`
+          )
+            .bind(generateId(), existingDoc.id, link.product_id, link.expires_at || null, link.notes || null)
+            .run();
+        }
+      }
 
       await logAudit(
         context.env.DB,
@@ -240,12 +327,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             updated_at: new Date().toISOString(),
             external_ref: existingDoc.external_ref,
             source_metadata: sourceMetadata || existingDoc.source_metadata,
+            document_type_id: documentTypeId || existingDoc.document_type_id || null,
+            lot_number: sanitizedLotNumber || existingDoc.lot_number || null,
+            po_number: sanitizedPoNumber || existingDoc.po_number || null,
+            code_date: sanitizedCodeDate || existingDoc.code_date || null,
+            expiration_date: sanitizedExpirationDate || existingDoc.expiration_date || null,
           },
           version: {
             id: versionId,
             document_id: existingDoc.id,
             version_number: newVersion,
-            file_name: fileName,
+            file_name: displayFileName,
             file_size: fileSize,
             mime_type: mimeType,
             r2_key: r2Key,
@@ -265,8 +357,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
       // Insert document
       await context.env.DB.prepare(
-        `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, source_metadata)
-         VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?)`
+        `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, source_metadata, document_type_id, lot_number, po_number, code_date, expiration_date)
+         VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`
       )
         .bind(
           docId,
@@ -277,7 +369,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           tags || '[]',
           user.id,
           sanitizedRef,
-          sourceMetadata || null
+          sourceMetadata || null,
+          documentTypeId || null,
+          sanitizedLotNumber,
+          sanitizedPoNumber,
+          sanitizedCodeDate,
+          sanitizedExpirationDate
         )
         .run();
 
@@ -290,7 +387,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         .bind(
           versionId,
           docId,
-          fileName,
+          displayFileName,
           fileSize,
           mimeType,
           r2Key,
@@ -300,6 +397,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           extractedText
         )
         .run();
+
+      // Link products if provided (create flow)
+      if (productLinks.length > 0) {
+        for (const link of productLinks) {
+          await context.env.DB.prepare(
+            `INSERT INTO document_products (id, document_id, product_id, expires_at, notes)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(document_id, product_id) DO NOTHING`
+          )
+            .bind(generateId(), docId, link.product_id, link.expires_at || null, link.notes || null)
+            .run();
+        }
+      }
 
       await logAudit(
         context.env.DB,
@@ -338,12 +448,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             updated_at: now,
             external_ref: sanitizedRef,
             source_metadata: sourceMetadata || null,
+            document_type_id: documentTypeId || null,
+            lot_number: sanitizedLotNumber,
+            po_number: sanitizedPoNumber,
+            code_date: sanitizedCodeDate,
+            expiration_date: sanitizedExpirationDate,
           },
           version: {
             id: versionId,
             document_id: docId,
             version_number: 1,
-            file_name: fileName,
+            file_name: displayFileName,
             file_size: fileSize,
             mime_type: mimeType,
             r2_key: r2Key,

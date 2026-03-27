@@ -19,10 +19,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const docId = context.params.id as string;
 
     const doc = await context.env.DB.prepare(
-      `SELECT d.*, u.name as creator_name, u.email as creator_email, t.name as tenant_name, t.slug as tenant_slug
+      `SELECT d.*, u.name as creator_name, u.email as creator_email, t.name as tenant_name, t.slug as tenant_slug,
+              dt.name as document_type_name, dt.slug as document_type_slug
        FROM documents d
        LEFT JOIN users u ON d.created_by = u.id
        LEFT JOIN tenants t ON d.tenant_id = t.id
+       LEFT JOIN document_types dt ON d.document_type_id = dt.id
        WHERE d.id = ? AND d.status != 'deleted'`
     )
       .bind(docId)
@@ -47,8 +49,19 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         .first();
     }
 
+    // Get linked products with expiration info
+    const linkedProducts = await context.env.DB.prepare(
+      `SELECT dp.*, p.name as product_name, p.slug as product_slug
+       FROM document_products dp
+       INNER JOIN products p ON dp.product_id = p.id
+       WHERE dp.document_id = ?
+       ORDER BY p.name ASC`
+    )
+      .bind(docId)
+      .all();
+
     return new Response(
-      JSON.stringify({ document: doc, currentVersion }),
+      JSON.stringify({ document: doc, currentVersion, products: linkedProducts.results }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (err) {
@@ -93,6 +106,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       category?: string;
       tags?: string[];
       status?: 'active' | 'archived';
+      document_type_id?: string | null;
+      lot_number?: string | null;
+      po_number?: string | null;
+      code_date?: string | null;
+      expiration_date?: string | null;
     };
 
     const updates: string[] = [];
@@ -124,6 +142,26 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       updates.push('status = ?');
       params.push(body.status);
     }
+    if (body.document_type_id !== undefined) {
+      updates.push('document_type_id = ?');
+      params.push(body.document_type_id);
+    }
+    if (body.lot_number !== undefined) {
+      updates.push('lot_number = ?');
+      params.push(body.lot_number ? sanitizeString(body.lot_number) : null);
+    }
+    if (body.po_number !== undefined) {
+      updates.push('po_number = ?');
+      params.push(body.po_number ? sanitizeString(body.po_number) : null);
+    }
+    if (body.code_date !== undefined) {
+      updates.push('code_date = ?');
+      params.push(body.code_date ? sanitizeString(body.code_date) : null);
+    }
+    if (body.expiration_date !== undefined) {
+      updates.push('expiration_date = ?');
+      params.push(body.expiration_date ? sanitizeString(body.expiration_date) : null);
+    }
 
     if (updates.length === 0) {
       return new Response(
@@ -136,12 +174,18 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     params.push(docId);
 
     // Build new values for diff computation
+    const diffFields = ['title', 'description', 'category', 'tags', 'status', 'document_type_id', 'lot_number', 'po_number', 'code_date', 'expiration_date'];
     const newValues: Record<string, any> = {
       title: body.title !== undefined ? sanitizeString(body.title) : doc.title,
       description: body.description !== undefined ? sanitizeString(body.description) : doc.description,
       category: body.category !== undefined ? sanitizeString(body.category) : doc.category,
       tags: body.tags !== undefined ? body.tags : (doc.tags ? JSON.parse(doc.tags as string) : null),
       status: body.status !== undefined ? body.status : doc.status,
+      document_type_id: body.document_type_id !== undefined ? body.document_type_id : doc.document_type_id,
+      lot_number: body.lot_number !== undefined ? (body.lot_number ? sanitizeString(body.lot_number) : null) : doc.lot_number,
+      po_number: body.po_number !== undefined ? (body.po_number ? sanitizeString(body.po_number) : null) : doc.po_number,
+      code_date: body.code_date !== undefined ? (body.code_date ? sanitizeString(body.code_date) : null) : doc.code_date,
+      expiration_date: body.expiration_date !== undefined ? (body.expiration_date ? sanitizeString(body.expiration_date) : null) : doc.expiration_date,
     };
 
     // Parse tags from old doc for comparison
@@ -150,7 +194,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       tags: doc.tags ? JSON.parse(doc.tags as string) : null,
     };
 
-    const diff = computeDiff(oldDoc, newValues, ['title', 'description', 'category', 'tags', 'status']);
+    const diff = computeDiff(oldDoc, newValues, diffFields);
 
     await context.env.DB.prepare(
       `UPDATE documents SET ${updates.join(', ')} WHERE id = ?`

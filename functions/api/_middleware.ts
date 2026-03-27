@@ -18,7 +18,7 @@ const securityHeaders: Record<string, string> = {
 };
 
 /** Public routes that do not require authentication. */
-const PUBLIC_ROUTES = ['/api/auth/login', '/api/auth/forgot-password', '/api/auth/reset-password', '/api/graphql'];
+const PUBLIC_ROUTES = ['/api/auth/login', '/api/auth/forgot-password', '/api/auth/reset-password', '/api/graphql', '/api/webhooks/email-ingest'];
 
 function isPublicRoute(pathname: string): boolean {
   return PUBLIC_ROUTES.some((route) => pathname === route || pathname.startsWith(route + '/'));

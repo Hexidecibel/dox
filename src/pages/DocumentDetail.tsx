@@ -38,6 +38,8 @@ import { UploadDialog } from '../components/UploadDialog';
 import { RoleGuard } from '../components/RoleGuard';
 import { DocumentPreview } from '../components/DocumentPreview';
 import { CopyId } from '../components/CopyId';
+import { ProductLinker } from '../components/ProductLinker';
+import { useAuth } from '../contexts/AuthContext';
 
 const statusColors: Record<string, 'success' | 'warning' | 'error'> = {
   active: 'success',
@@ -50,6 +52,7 @@ export function DocumentDetail() {
   const navigate = useNavigate();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+  const { isReader } = useAuth();
   const [doc, setDoc] = useState<Document | null>(null);
   const [versions, setVersions] = useState<DocumentVersion[]>([]);
   const [loading, setLoading] = useState(true);
@@ -337,6 +340,37 @@ export function DocumentDetail() {
           </Box>
         )}
 
+        {doc.documentTypeName && (
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Document Type
+            </Typography>
+            <Chip label={doc.documentTypeName} color="info" variant="outlined" size="small" />
+          </Box>
+        )}
+
+        {(doc.lotNumber || doc.poNumber || doc.codeDate || doc.expirationDate) && (
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Metadata
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+              {doc.lotNumber && (
+                <Chip label={`Lot: ${doc.lotNumber}`} size="small" variant="outlined" />
+              )}
+              {doc.poNumber && (
+                <Chip label={`PO: ${doc.poNumber}`} size="small" variant="outlined" />
+              )}
+              {doc.codeDate && (
+                <Chip label={`Code Date: ${doc.codeDate}`} size="small" variant="outlined" />
+              )}
+              {doc.expirationDate && (
+                <Chip label={`Expires: ${doc.expirationDate}`} size="small" variant="outlined" />
+              )}
+            </Box>
+          </Box>
+        )}
+
         {doc.external_ref && (
           <Box sx={{ mb: 2 }}>
             <Typography variant="subtitle2" color="text.secondary" gutterBottom>
@@ -386,6 +420,13 @@ export function DocumentDetail() {
           }
         })()}
       </Paper>
+
+      {/* Linked Products */}
+      <ProductLinker
+        documentId={doc.id}
+        tenantId={doc.tenant_id}
+        readOnly={isReader}
+      />
 
       {/* Document Preview */}
       {previewVersion && (

@@ -28,6 +28,53 @@ export interface UserRow {
   force_password_change?: number;
 }
 
+export interface ProductRow {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TenantProductRow {
+  id: string;
+  tenant_id: string;
+  product_id: string;
+  created_at: string;
+}
+
+export interface DocumentProductRow {
+  id: string;
+  document_id: string;
+  product_id: string;
+  expires_at: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiDocumentProduct extends DocumentProductRow {
+  product_name?: string;
+  product_slug?: string;
+}
+
+export interface DocumentProductListResponse {
+  products: ApiDocumentProduct[];
+}
+
+export interface DocumentTypeRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  active: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DocumentRow {
   id: string;
   tenant_id: string;
@@ -40,6 +87,11 @@ export interface DocumentRow {
   created_by: string;
   created_at: string;
   updated_at: string;
+  document_type_id: string | null;
+  lot_number: string | null;
+  po_number: string | null;
+  code_date: string | null;
+  expiration_date: string | null;
 }
 
 export interface DocumentVersionRow {
@@ -69,6 +121,12 @@ export interface AuditEntryRow {
 }
 
 // === API Response Types (what endpoints actually return) ===
+
+export interface ApiProduct extends ProductRow {}
+
+export interface ApiDocumentType extends DocumentTypeRow {
+  tenant_name?: string;
+}
 
 export interface ApiUser {
   id: string;
@@ -111,6 +169,13 @@ export interface ApiDocument {
   updated_at: string;
   external_ref?: string | null;
   source_metadata?: string | null; // JSON string
+  document_type_id: string | null;
+  document_type_name?: string;
+  document_type_slug?: string;
+  lot_number: string | null;
+  po_number: string | null;
+  code_date: string | null;
+  expiration_date: string | null;
 }
 
 export interface ApiDocumentVersion {
@@ -228,6 +293,29 @@ export interface LookupResponse {
   currentVersion: ApiDocumentVersion | null;
 }
 
+export interface ProductListResponse {
+  products: ApiProduct[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ProductGetResponse {
+  product: ApiProduct;
+}
+
+export interface DocumentTypeListResponse {
+  documentTypes: ApiDocumentType[];
+}
+
+export interface DocumentTypeGetResponse {
+  documentType: ApiDocumentType;
+}
+
+export interface TenantProductListResponse {
+  products: ApiProduct[];
+}
+
 // === Frontend-friendly types (after parsing) ===
 
 export interface Document {
@@ -248,6 +336,13 @@ export interface Document {
   updated_at: string;
   external_ref?: string | null;
   source_metadata?: string | null; // JSON string
+  documentTypeId: string | null;
+  documentTypeName?: string;
+  documentTypeSlug?: string;
+  lotNumber: string | null;
+  poNumber: string | null;
+  codeDate: string | null;
+  expirationDate: string | null;
 }
 
 export interface DocumentVersion {
@@ -314,6 +409,115 @@ export interface ApiKey {
 export interface CreateApiKeyResponse {
   apiKey: ApiKey;
   key: string; // Full key, shown only once
+}
+
+// === Naming Template Types ===
+
+export interface NamingTemplateRow {
+  id: string;
+  tenant_id: string;
+  template: string;
+  active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiNamingTemplate extends NamingTemplateRow {}
+
+// === Email Domain Mapping Types ===
+
+export interface EmailDomainMappingRow {
+  id: string;
+  domain: string;
+  tenant_id: string;
+  default_user_id: string | null;
+  active: number;
+  created_at: string;
+}
+
+export interface ApiEmailDomainMapping extends EmailDomainMappingRow {
+  tenant_name?: string;
+  default_user_name?: string;
+}
+
+// === Expiration Types ===
+
+export interface ExpirationItem {
+  link_id: string;
+  document_id: string;
+  document_title: string;
+  document_type_name: string | null;
+  product_id: string;
+  product_name: string;
+  product_slug: string;
+  tenant_id: string;
+  tenant_name: string;
+  expires_at: string;
+  days_remaining: number;
+  status: 'expired' | 'critical' | 'warning' | 'ok';
+  notes: string | null;
+}
+
+export interface ExpirationSummary {
+  expired: number;
+  critical: number;
+  warning: number;
+  ok: number;
+  total: number;
+}
+
+export interface ExpirationListResponse {
+  expirations: ExpirationItem[];
+  summary: ExpirationSummary;
+}
+
+// === Document Bundle Types ===
+
+export interface DocumentBundleRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string | null;
+  product_id: string | null;
+  status: 'draft' | 'finalized';
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentBundleItemRow {
+  id: string;
+  bundle_id: string;
+  document_id: string;
+  version_number: number | null;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface ApiBundle extends DocumentBundleRow {
+  creator_name?: string;
+  product_name?: string;
+  item_count?: number;
+}
+
+export interface ApiBundleItem extends DocumentBundleItemRow {
+  document_title?: string;
+  document_type_name?: string;
+  file_name?: string;
+  file_size?: number;
+  mime_type?: string;
+}
+
+export interface BundleListResponse {
+  bundles: ApiBundle[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BundleGetResponse {
+  bundle: ApiBundle;
+  items: ApiBundleItem[];
 }
 
 // === Auth Token Storage Key (single constant) ===

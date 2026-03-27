@@ -31,7 +31,7 @@ import {
   InsertDriveFile as FileIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
-import type { Document } from '../lib/types';
+import type { Document, ApiDocumentType } from '../lib/types';
 import { DocumentCard } from '../components/DocumentCard';
 import { RoleGuard } from '../components/RoleGuard';
 import { useAuth } from '../contexts/AuthContext';
@@ -50,6 +50,8 @@ export function Documents() {
   const [categoryFilter, setCategoryFilter] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [docTypeFilter, setDocTypeFilter] = useState<string>('');
+  const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
 
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -73,6 +75,22 @@ export function Documents() {
   const [createStatus, setCreateStatus] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Load document types for filter
+  useEffect(() => {
+    const loadDocTypes = async () => {
+      try {
+        const result = await api.documentTypes.list({
+          tenant_id: selectedTenantId || undefined,
+          active: 1,
+        });
+        setDocumentTypes(result.documentTypes);
+      } catch {
+        // Silently fail -- document types filter is optional
+      }
+    };
+    loadDocTypes();
+  }, [selectedTenantId]);
 
   // Auto-open upload dialog when ?upload=true is in the URL
   useEffect(() => {
@@ -205,14 +223,18 @@ export function Documents() {
     }
   };
 
-  const filteredDocs = search
-    ? documents.filter(
-        (d) =>
-          d.title.toLowerCase().includes(search.toLowerCase()) ||
-          d.description?.toLowerCase().includes(search.toLowerCase()) ||
-          d.category?.toLowerCase().includes(search.toLowerCase())
-      )
-    : documents;
+  const filteredDocs = documents.filter((d) => {
+    if (search) {
+      const q = search.toLowerCase();
+      const matchesSearch =
+        d.title.toLowerCase().includes(q) ||
+        d.description?.toLowerCase().includes(q) ||
+        d.category?.toLowerCase().includes(q);
+      if (!matchesSearch) return false;
+    }
+    if (docTypeFilter && d.documentTypeId !== docTypeFilter) return false;
+    return true;
+  });
 
   const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
 
@@ -284,6 +306,24 @@ export function Documents() {
                 onDelete={() => { setCategoryFilter(''); setPage(1); }}
               />
             </>
+          )}
+          {documentTypes.length > 0 && (
+            <FormControl size="small" sx={{ ml: { xs: 0, sm: 2 }, minWidth: 160 }}>
+              <InputLabel id="doctype-filter-label">Document Type</InputLabel>
+              <Select
+                labelId="doctype-filter-label"
+                value={docTypeFilter}
+                onChange={(e) => { setDocTypeFilter(e.target.value); setPage(1); }}
+                label="Document Type"
+              >
+                <MenuItem value="">All Types</MenuItem>
+                {documentTypes.map((dt) => (
+                  <MenuItem key={dt.id} value={dt.id}>
+                    {dt.name}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
           )}
         </Box>
       </Box>

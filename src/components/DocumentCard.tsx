@@ -101,6 +101,9 @@ export function DocumentCard({ document: doc }: DocumentCardProps) {
           {doc.category && (
             <Chip label={doc.category} size="small" color="secondary" variant="outlined" />
           )}
+          {doc.documentTypeName && (
+            <Chip label={doc.documentTypeName} size="small" color="info" variant="outlined" />
+          )}
           <Chip
             label={doc.status}
             size="small"

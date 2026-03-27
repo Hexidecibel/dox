@@ -19,6 +19,22 @@ import type {
   LookupResponse,
   ApiKey,
   CreateApiKeyResponse,
+  ApiProduct,
+  ApiDocumentType,
+  ProductListResponse,
+  ProductGetResponse,
+  DocumentTypeListResponse,
+  DocumentTypeGetResponse,
+  TenantProductListResponse,
+  DocumentProductListResponse,
+  ApiDocumentProduct,
+  ApiNamingTemplate,
+  ApiEmailDomainMapping,
+  ExpirationListResponse,
+  ApiBundle,
+  ApiBundleItem,
+  BundleListResponse,
+  BundleGetResponse,
 } from './types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -43,6 +59,13 @@ function parseDocument(doc: any): Document {
   return {
     ...doc,
     tags,
+    documentTypeId: doc.document_type_id ?? null,
+    documentTypeName: doc.document_type_name,
+    documentTypeSlug: doc.document_type_slug,
+    lotNumber: doc.lot_number ?? null,
+    poNumber: doc.po_number ?? null,
+    codeDate: doc.code_date ?? null,
+    expirationDate: doc.expiration_date ?? null,
   };
 }
 
@@ -446,6 +469,251 @@ export const api = {
       fetchApi<{ success: boolean }>(`/api-keys/${id}`, { method: 'DELETE' }),
   },
 
+  products: {
+    /**
+     * GET /api/products
+     * Returns: { products: ApiProduct[], total, limit, offset }
+     */
+    list: (params?: { search?: string; active?: number; limit?: number; offset?: number }) => {
+      const query = new URLSearchParams();
+      if (params?.search) query.set('search', params.search);
+      if (params?.active !== undefined) query.set('active', String(params.active));
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      const qs = query.toString();
+      return fetchApi<ProductListResponse>(`/products${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * GET /api/products/:id
+     * Returns: { product: ApiProduct }
+     */
+    get: (id: string) => fetchApi<ProductGetResponse>(`/products/${id}`),
+
+    /**
+     * POST /api/products
+     * Returns: { product: ApiProduct }
+     */
+    create: (data: { name: string; description?: string }) =>
+      fetchApi<{ product: ApiProduct }>('/products', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * PUT /api/products/:id
+     * Returns: { product: ApiProduct }
+     */
+    update: (id: string, data: { name?: string; description?: string; active?: number }) =>
+      fetchApi<{ product: ApiProduct }>(`/products/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * DELETE /api/products/:id
+     * Returns: 204 No Content
+     */
+    delete: (id: string) =>
+      fetchApi<void>(`/products/${id}`, { method: 'DELETE' }),
+  },
+
+  tenantProducts: {
+    /**
+     * GET /api/tenants/:tenantId/products
+     * Returns: { products: ApiProduct[] }
+     */
+    list: (tenantId: string) =>
+      fetchApi<TenantProductListResponse>(`/tenants/${tenantId}/products`),
+
+    /**
+     * POST /api/tenants/:tenantId/products
+     * Add a product to a tenant
+     */
+    add: (tenantId: string, productId: string) =>
+      fetchApi<void>(`/tenants/${tenantId}/products`, {
+        method: 'POST',
+        body: JSON.stringify({ productId }),
+      }),
+
+    /**
+     * DELETE /api/tenants/:tenantId/products/:productId
+     * Remove a product from a tenant
+     */
+    remove: (tenantId: string, productId: string) =>
+      fetchApi<void>(`/tenants/${tenantId}/products/${productId}`, { method: 'DELETE' }),
+  },
+
+  documentTypes: {
+    /**
+     * GET /api/document-types
+     * Returns: { documentTypes: ApiDocumentType[] }
+     */
+    list: (params?: { tenant_id?: string; active?: number }) => {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.active !== undefined) query.set('active', String(params.active));
+      const qs = query.toString();
+      return fetchApi<DocumentTypeListResponse>(`/document-types${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * GET /api/document-types/:id
+     * Returns: { documentType: ApiDocumentType }
+     */
+    get: (id: string) => fetchApi<DocumentTypeGetResponse>(`/document-types/${id}`),
+
+    /**
+     * POST /api/document-types
+     * Returns: { documentType: ApiDocumentType }
+     */
+    create: (data: { name: string; description?: string; tenant_id?: string }) =>
+      fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * PUT /api/document-types/:id
+     * Returns: { documentType: ApiDocumentType }
+     */
+    update: (id: string, data: { name?: string; description?: string; active?: number }) =>
+      fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * DELETE /api/document-types/:id
+     * Returns: 204 No Content
+     */
+    delete: (id: string) =>
+      fetchApi<void>(`/document-types/${id}`, { method: 'DELETE' }),
+  },
+
+  documentProducts: {
+    /**
+     * GET /api/documents/:id/products
+     * Returns: { products: ApiDocumentProduct[] }
+     */
+    list: (documentId: string) =>
+      fetchApi<DocumentProductListResponse>(`/documents/${documentId}/products`),
+
+    /**
+     * POST /api/documents/:id/products
+     * Link a product to a document.
+     */
+    link: (documentId: string, data: { product_id: string; expires_at?: string; notes?: string }) =>
+      fetchApi<{ documentProduct: ApiDocumentProduct }>(`/documents/${documentId}/products`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * PUT /api/documents/:id/products/:productId
+     * Update a document-product link.
+     */
+    update: (documentId: string, productId: string, data: { expires_at?: string | null; notes?: string | null }) =>
+      fetchApi<{ documentProduct: ApiDocumentProduct }>(`/documents/${documentId}/products/${productId}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * DELETE /api/documents/:id/products/:productId
+     * Remove a document-product link.
+     */
+    unlink: (documentId: string, productId: string) =>
+      fetchApi<{ success: boolean }>(`/documents/${documentId}/products/${productId}`, { method: 'DELETE' }),
+  },
+
+  namingTemplates: {
+    /**
+     * GET /api/naming-templates
+     * Returns: { template: ApiNamingTemplate }
+     */
+    get: (tenantId?: string) => {
+      const query = new URLSearchParams();
+      if (tenantId) query.set('tenant_id', tenantId);
+      const qs = query.toString();
+      return fetchApi<{ template: ApiNamingTemplate }>(`/naming-templates${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * PUT /api/naming-templates
+     * Returns: { template: ApiNamingTemplate }
+     */
+    update: (data: { template: string; tenant_id?: string }) =>
+      fetchApi<{ template: ApiNamingTemplate }>('/naming-templates', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+  },
+
+  emailDomainMappings: {
+    /**
+     * GET /api/email-domain-mappings
+     * Returns: { mappings: ApiEmailDomainMapping[] }
+     */
+    list: (tenantId?: string) => {
+      const query = new URLSearchParams();
+      if (tenantId) query.set('tenant_id', tenantId);
+      const qs = query.toString();
+      return fetchApi<{ mappings: ApiEmailDomainMapping[] }>(`/email-domain-mappings${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * POST /api/email-domain-mappings
+     * Returns: { mapping: ApiEmailDomainMapping }
+     */
+    create: (data: { domain: string; default_user_id?: string; tenant_id?: string }) =>
+      fetchApi<{ mapping: ApiEmailDomainMapping }>('/email-domain-mappings', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * PUT /api/email-domain-mappings/:id
+     * Returns: { mapping: ApiEmailDomainMapping }
+     */
+    update: (id: string, data: { domain?: string; default_user_id?: string; active?: number }) =>
+      fetchApi<{ mapping: ApiEmailDomainMapping }>(`/email-domain-mappings/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * DELETE /api/email-domain-mappings/:id
+     * Returns: { success: true }
+     */
+    delete: (id: string) =>
+      fetchApi<{ success: boolean }>(`/email-domain-mappings/${id}`, { method: 'DELETE' }),
+  },
+
+  expirations: {
+    /**
+     * GET /api/expirations
+     * Returns: { expirations: ExpirationItem[], summary: ExpirationSummary }
+     */
+    list: (params?: { days_ahead?: number; tenant_id?: string; include_expired?: boolean }) => {
+      const query = new URLSearchParams();
+      if (params?.days_ahead !== undefined) query.set('days_ahead', String(params.days_ahead));
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.include_expired !== undefined) query.set('include_expired', String(params.include_expired));
+      const qs = query.toString();
+      return fetchApi<ExpirationListResponse>(`/expirations${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * POST /api/expirations/notify
+     * Triggers expiration notification emails. super_admin only.
+     */
+    notify: () =>
+      fetchApi<{ sent: number; tenants_notified: number; errors?: string[] }>('/expirations/notify', {
+        method: 'POST',
+      }),
+  },
+
   reports: {
     /**
      * POST /api/reports/generate
@@ -497,6 +765,82 @@ export const api = {
       }
 
       return res.json();
+    },
+  },
+
+  bundles: {
+    /**
+     * GET /api/bundles
+     * Returns: { bundles: ApiBundle[], total, limit, offset }
+     */
+    list: (params?: { limit?: number; offset?: number; tenant_id?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      const qs = query.toString();
+      return fetchApi<BundleListResponse>(`/bundles${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * GET /api/bundles/:id
+     * Returns: { bundle: ApiBundle, items: ApiBundleItem[] }
+     */
+    get: (id: string) => fetchApi<BundleGetResponse>(`/bundles/${id}`),
+
+    /**
+     * POST /api/bundles
+     * Returns: { bundle: ApiBundle }
+     */
+    create: (data: { name: string; description?: string; product_id?: string; tenant_id?: string }) =>
+      fetchApi<{ bundle: ApiBundle }>('/bundles', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * PUT /api/bundles/:id
+     * Returns: { bundle: ApiBundle }
+     */
+    update: (id: string, data: { name?: string; description?: string; product_id?: string | null; status?: string }) =>
+      fetchApi<{ bundle: ApiBundle }>(`/bundles/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * DELETE /api/bundles/:id
+     * Returns: { success: true }
+     */
+    delete: (id: string) =>
+      fetchApi<{ success: boolean }>(`/bundles/${id}`, { method: 'DELETE' }),
+
+    /**
+     * POST /api/bundles/:id/items
+     * Add a document to a bundle.
+     */
+    addItem: (bundleId: string, data: { document_id: string; version_number?: number; sort_order?: number }) =>
+      fetchApi<{ item: ApiBundleItem }>(`/bundles/${bundleId}/items`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * DELETE /api/bundles/:id/items/:itemId
+     * Remove an item from a bundle.
+     */
+    removeItem: (bundleId: string, itemId: string) =>
+      fetchApi<{ success: boolean }>(`/bundles/${bundleId}/items/${itemId}`, { method: 'DELETE' }),
+
+    /**
+     * Returns the download URL for a bundle ZIP.
+     */
+    downloadUrl: (bundleId: string): string => {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const params = new URLSearchParams();
+      if (token) params.set('token', token);
+      const qs = params.toString();
+      return `${API_BASE}/bundles/${bundleId}/download${qs ? `?${qs}` : ''}`;
     },
   },
 };

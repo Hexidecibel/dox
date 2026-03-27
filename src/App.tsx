@@ -15,6 +15,13 @@ import { Users } from './pages/admin/Users';
 import { Tenants } from './pages/admin/Tenants';
 import { AuditLog } from './pages/admin/AuditLog';
 import { ApiKeys } from './pages/admin/ApiKeys';
+import { Products } from './pages/admin/Products';
+import { DocumentTypes } from './pages/admin/DocumentTypes';
+import { NamingTemplate } from './pages/admin/NamingTemplate';
+import { EmailMappings } from './pages/admin/EmailMappings';
+import { Expirations } from './pages/Expirations';
+import { Bundles } from './pages/Bundles';
+import { BundleDetail } from './pages/BundleDetail';
 
 function App() {
   return (
@@ -34,16 +41,23 @@ function App() {
               <Route path="/documents/:id" element={<DocumentDetail />} />
               <Route path="/search" element={<Search />} />
               <Route path="/profile" element={<Profile />} />
+              <Route path="/expirations" element={<Expirations />} />
+              <Route path="/bundles" element={<Bundles />} />
+              <Route path="/bundles/:id" element={<BundleDetail />} />
 
               {/* Admin routes - users management and audit for super_admin and org_admin */}
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>
                 <Route path="/admin/users" element={<Users />} />
                 <Route path="/admin/api-keys" element={<ApiKeys />} />
                 <Route path="/admin/audit" element={<AuditLog />} />
+                <Route path="/admin/document-types" element={<DocumentTypes />} />
+                <Route path="/admin/naming-template" element={<NamingTemplate />} />
+                <Route path="/admin/email-mappings" element={<EmailMappings />} />
               </Route>
               {/* Super admin only routes */}
               <Route element={<ProtectedRoute roles={['super_admin']} />}>
                 <Route path="/admin/tenants" element={<Tenants />} />
+                <Route path="/admin/products" element={<Products />} />
               </Route>
             </Route>
           </Route>

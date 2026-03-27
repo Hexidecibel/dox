@@ -17,6 +17,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     let tenantId = url.searchParams.get('tenantId');
     const category = url.searchParams.get('category');
     const status = url.searchParams.get('status') || 'active';
+    const documentTypeId = url.searchParams.get('document_type_id');
+    const lotNumber = url.searchParams.get('lot_number');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
@@ -38,6 +40,16 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       params.push(category);
     }
 
+    if (documentTypeId) {
+      conditions.push('d.document_type_id = ?');
+      params.push(documentTypeId);
+    }
+
+    if (lotNumber) {
+      conditions.push('d.lot_number = ?');
+      params.push(lotNumber);
+    }
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     // Get total count
@@ -48,10 +60,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     // Get documents with creator info
     const query = `
-      SELECT d.*, u.name as creator_name, u.email as creator_email, t.name as tenant_name
+      SELECT d.*, u.name as creator_name, u.email as creator_email, t.name as tenant_name,
+             dt.name as document_type_name, dt.slug as document_type_slug
       FROM documents d
       LEFT JOIN users u ON d.created_by = u.id
       LEFT JOIN tenants t ON d.tenant_id = t.id
+      LEFT JOIN document_types dt ON d.document_type_id = dt.id
       ${whereClause}
       ORDER BY d.updated_at DESC
       LIMIT ? OFFSET ?
@@ -98,6 +112,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       category?: string;
       tags?: string[];
       tenantId?: string;
+      document_type_id?: string;
+      lot_number?: string;
+      po_number?: string;
+      code_date?: string;
+      expiration_date?: string;
     };
 
     if (!body.title) {
@@ -111,6 +130,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     body.title = sanitizeString(body.title);
     if (body.description) body.description = sanitizeString(body.description);
     if (body.category) body.category = sanitizeString(body.category);
+    if (body.lot_number) body.lot_number = sanitizeString(body.lot_number);
+    if (body.po_number) body.po_number = sanitizeString(body.po_number);
+    if (body.code_date) body.code_date = sanitizeString(body.code_date);
+    if (body.expiration_date) body.expiration_date = sanitizeString(body.expiration_date);
 
     // Determine tenant: non-super-admin users are forced to their own tenant
     let tenantId = body.tenantId || null;
@@ -146,8 +169,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const tags = JSON.stringify(body.tags || []);
 
     await context.env.DB.prepare(
-      `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, 0, 'active', ?)`
+      `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, document_type_id, lot_number, po_number, code_date, expiration_date)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         id,
@@ -156,7 +179,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         body.description || null,
         body.category || null,
         tags,
-        user.id
+        user.id,
+        body.document_type_id || null,
+        body.lot_number || null,
+        body.po_number || null,
+        body.code_date || null,
+        body.expiration_date || null
       )
       .run();
 
@@ -183,6 +211,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           current_version: 0,
           status: 'active',
           created_by: user.id,
+          document_type_id: body.document_type_id || null,
+          lot_number: body.lot_number || null,
+          po_number: body.po_number || null,
+          code_date: body.code_date || null,
+          expiration_date: body.expiration_date || null,
         },
       }),
       { status: 201, headers: { 'Content-Type': 'application/json' } }
