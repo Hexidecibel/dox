@@ -112,7 +112,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       getClientIp(context.request)
     );
 
-    return new Response(JSON.stringify(row), {
+    return new Response(JSON.stringify({ mapping: row }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });

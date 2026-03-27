@@ -50,16 +50,20 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(...params)
       .first<{ total: number }>();
 
-    // Get document types
+    // Get document types (with tenant name for super_admin view)
     const results = await context.env.DB.prepare(
-      `SELECT * FROM document_types ${whereClause} ORDER BY name ASC LIMIT ? OFFSET ?`
+      `SELECT dt.*, t.name as tenant_name
+       FROM document_types dt
+       LEFT JOIN tenants t ON dt.tenant_id = t.id
+       ${whereClause ? whereClause.replace(/tenant_id/g, 'dt.tenant_id').replace(/active/g, 'dt.active') : ''}
+       ORDER BY dt.name ASC LIMIT ? OFFSET ?`
     )
       .bind(...params, limit, offset)
       .all();
 
     return new Response(
       JSON.stringify({
-        document_types: results.results,
+        documentTypes: results.results,
         total: countResult?.total || 0,
         limit,
         offset,
@@ -169,7 +173,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       .bind(id)
       .first();
 
-    return new Response(JSON.stringify({ document_type: documentType }), {
+    return new Response(JSON.stringify({ documentType }), {
       status: 201,
       headers: { 'Content-Type': 'application/json' },
     });

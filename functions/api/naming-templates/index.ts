@@ -36,19 +36,21 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!template) {
       return new Response(
         JSON.stringify({
-          id: null,
-          tenant_id: tenantId,
-          template: '{title}.{ext}',
-          active: 1,
-          created_at: null,
-          updated_at: null,
-          is_default: true,
+          template: {
+            id: null,
+            tenant_id: tenantId,
+            template: '{title}.{ext}',
+            active: 1,
+            created_at: null,
+            updated_at: null,
+            is_default: true,
+          },
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
-    return new Response(JSON.stringify({ ...template, is_default: false }), {
+    return new Response(JSON.stringify({ template: { ...template, is_default: false } }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -128,7 +130,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       getClientIp(context.request)
     );
 
-    return new Response(JSON.stringify(row), {
+    return new Response(JSON.stringify({ template: row }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });

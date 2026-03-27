@@ -35,7 +35,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     requireTenantAccess(user, documentType.tenant_id as string);
 
     return new Response(
-      JSON.stringify({ document_type: documentType }),
+      JSON.stringify({ documentType }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (err) {
@@ -172,7 +172,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       .first();
 
     return new Response(
-      JSON.stringify({ document_type: updated }),
+      JSON.stringify({ documentType: updated }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (err) {
