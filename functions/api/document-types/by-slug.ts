@@ -12,6 +12,16 @@ function slugify(text: string): string {
   return text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
+function parseExtractionFields(docType: Record<string, unknown>): void {
+  if (docType.extraction_fields && typeof docType.extraction_fields === 'string') {
+    try {
+      docType.extraction_fields = JSON.parse(docType.extraction_fields as string);
+    } catch {
+      // leave as-is if invalid JSON
+    }
+  }
+}
+
 /**
  * GET /api/document-types/by-slug?slug=X&tenant_id=Y
  * Also accepts: ?name=X&tenant_id=Y (derives slug server-side)
@@ -56,6 +66,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!documentType) {
       throw new NotFoundError('Document type not found');
     }
+
+    parseExtractionFields(documentType as Record<string, unknown>);
 
     return new Response(
       JSON.stringify({ documentType }),

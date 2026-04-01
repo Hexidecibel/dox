@@ -8,6 +8,16 @@ function slugify(text: string): string {
   return text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
+function parseExtractionFields(docType: Record<string, unknown>): void {
+  if (docType.extraction_fields && typeof docType.extraction_fields === 'string') {
+    try {
+      docType.extraction_fields = JSON.parse(docType.extraction_fields as string);
+    } catch {
+      // leave as-is if invalid JSON
+    }
+  }
+}
+
 /**
  * GET /api/document-types
  * List document types. Non-super_admins see only their tenant's types.
@@ -61,9 +71,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(...params, limit, offset)
       .all();
 
+    const documentTypes = results.results.map((dt) => {
+      parseExtractionFields(dt as Record<string, unknown>);
+      return dt;
+    });
+
     return new Response(
       JSON.stringify({
-        documentTypes: results.results,
+        documentTypes,
         total: countResult?.total || 0,
         limit,
         offset,
@@ -224,6 +239,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     )
       .bind(id)
       .first();
+
+    if (documentType) {
+      parseExtractionFields(documentType as Record<string, unknown>);
+    }
 
     return new Response(JSON.stringify({ documentType }), {
       status: 201,

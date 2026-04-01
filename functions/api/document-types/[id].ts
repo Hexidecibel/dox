@@ -12,6 +12,16 @@ function slugify(text: string): string {
   return text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
+function parseExtractionFields(docType: Record<string, unknown>): void {
+  if (docType.extraction_fields && typeof docType.extraction_fields === 'string') {
+    try {
+      docType.extraction_fields = JSON.parse(docType.extraction_fields as string);
+    } catch {
+      // leave as-is if invalid JSON
+    }
+  }
+}
+
 /**
  * GET /api/document-types/:id
  * Get a single document type. Must belong to user's tenant (or super_admin).
@@ -33,6 +43,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     // Tenant access check
     requireTenantAccess(user, documentType.tenant_id as string);
+
+    parseExtractionFields(documentType as Record<string, unknown>);
 
     return new Response(
       JSON.stringify({ documentType }),
@@ -225,6 +237,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     )
       .bind(docTypeId)
       .first();
+
+    if (updated) {
+      parseExtractionFields(updated as Record<string, unknown>);
+    }
 
     return new Response(
       JSON.stringify({ documentType: updated }),
