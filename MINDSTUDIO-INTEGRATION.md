@@ -126,6 +126,36 @@ Content-Type: application/json
 - POST is **idempotent** — calling it twice with the same name returns the existing product
 - The `user` role can create products via this endpoint
 
+## Batch Product Resolution
+
+Resolve multiple product names in a single call. Creates any that don't exist.
+
+```
+POST /api/products/lookup-or-create-batch
+Content-Type: application/json
+
+{
+  "names": ["Vitamin A", "Vitamin D3", "Fish Oil"],
+  "tenant_id": "TENANT_ID"
+}
+```
+
+**Response (201 if any created, 200 if all existed):**
+```json
+{
+  "products": [
+    { "name": "Vitamin A", "product": { "id": "abc", "name": "Vitamin A", "slug": "vitamin-a", "active": 1 }, "created": false },
+    { "name": "Vitamin D3", "product": { "id": "def", "name": "Vitamin D3", "slug": "vitamin-d3", "active": 1 }, "created": true },
+    { "name": "Fish Oil", "product": { "id": "ghi", "name": "Fish Oil", "slug": "fish-oil", "active": 1 }, "created": true }
+  ]
+}
+```
+
+- Max 50 names per batch
+- Case-insensitive matching
+- Idempotent — safe to call repeatedly
+- Use POST (not GET) since it may create products
+
 ## Step 3: Ingest the Document
 
 Send the document with all extracted metadata via **multipart form data**.
@@ -221,7 +251,7 @@ Same external_ref + tenant_id → adds a version instead of creating a duplicate
 
 ## Alternative: URL-Based Ingest
 
-If MindStudio has the document at a URL (not a local file), use the JSON endpoint instead:
+If MindStudio has the document at a URL (not a local file), use the JSON endpoint instead. This endpoint now supports **all structured metadata fields** — full parity with the multipart `ingest` endpoint.
 
 ```
 POST /api/documents/ingest-url
@@ -231,14 +261,31 @@ Content-Type: application/json
   "file_url": "https://example.com/coa.pdf",
   "external_ref": "mindstudio-job-123",
   "tenant_id": "abc123",
-  "title": "Vitamin A COA",
-  "file_name": "vitamin-a-coa.pdf"
+  "title": "Vitamin A COA Lot 2026-001",
+  "file_name": "vitamin-a-coa.pdf",
+  "document_type_id": "doctype-id-from-step-1",
+  "lot_number": "LOT-2026-001",
+  "po_number": "PO-5678",
+  "code_date": "2026-01-15",
+  "expiration_date": "2027-01-15",
+  "product_ids": [
+    {
+      "product_id": "prod-id-from-step-2",
+      "expires_at": "2027-01-15",
+      "notes": "COA expiration"
+    }
+  ],
+  "source_metadata": {
+    "source": "mindstudio",
+    "parsed_at": "2026-03-31",
+    "confidence": 0.95
+  },
+  "category": "COA",
+  "tags": ["vitamins", "2026"]
 }
 ```
 
-Same upsert logic as the multipart endpoint. The server downloads the file from the URL.
-
-> **Note:** `ingest-url` does not currently support `document_type_id`, `lot_number`, `po_number`, `code_date`, `expiration_date`, or `product_ids`. Use the multipart `ingest` endpoint for full structured metadata.
+Same upsert logic as the multipart endpoint. The server downloads the file from the URL. Naming templates are applied automatically if configured for the tenant.
 
 ## Checking if a Document Exists
 
@@ -288,6 +335,7 @@ MindStudio does not need to worry about naming — just send the raw file and me
 |--------|--------|----------|
 | Get doc type ID | GET | `/api/document-types/by-slug?slug=X&tenant_id=Y` |
 | Get/create product ID | POST | `/api/products/lookup-or-create` |
+| Get/create product IDs (batch) | POST | `/api/products/lookup-or-create-batch` |
 | Ingest document (file) | POST | `/api/documents/ingest` (multipart) |
 | Ingest document (URL) | POST | `/api/documents/ingest-url` (JSON) |
 | Check if doc exists | GET | `/api/documents/lookup?external_ref=X&tenant_id=Y` |
