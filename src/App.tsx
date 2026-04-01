@@ -17,7 +17,6 @@ import { AuditLog } from './pages/admin/AuditLog';
 import { ApiKeys } from './pages/admin/ApiKeys';
 import { Products } from './pages/admin/Products';
 import { DocumentTypes } from './pages/admin/DocumentTypes';
-import { NamingTemplate } from './pages/admin/NamingTemplate';
 import { Expirations } from './pages/Expirations';
 import { Bundles } from './pages/Bundles';
 import { BundleDetail } from './pages/BundleDetail';
@@ -52,7 +51,6 @@ function App() {
                 <Route path="/admin/api-keys" element={<ApiKeys />} />
                 <Route path="/admin/audit" element={<AuditLog />} />
                 <Route path="/admin/document-types" element={<DocumentTypes />} />
-                <Route path="/admin/naming-template" element={<NamingTemplate />} />
                 <Route path="/admin/products" element={<Products />} />
               </Route>
               {/* Super admin only routes */}

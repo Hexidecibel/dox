@@ -79,6 +79,8 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       name?: string;
       description?: string;
       active?: number;
+      naming_format?: string | null;
+      extraction_fields?: Array<{ name: string; hint?: string; aliases?: string[] }> | null;
     };
 
     const updates: string[] = [];
@@ -136,6 +138,59 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }
       updates.push('active = ?');
       params.push(body.active);
+    }
+
+    if (body.naming_format !== undefined) {
+      if (body.naming_format !== null && typeof body.naming_format !== 'string') {
+        return new Response(
+          JSON.stringify({ error: 'naming_format must be a string or null' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (body.naming_format && body.naming_format.length > 500) {
+        return new Response(
+          JSON.stringify({ error: 'naming_format must be 500 characters or less' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      updates.push('naming_format = ?');
+      params.push(body.naming_format ? body.naming_format.trim() : null);
+    }
+
+    if (body.extraction_fields !== undefined) {
+      if (body.extraction_fields === null) {
+        updates.push('extraction_fields = ?');
+        params.push(null);
+      } else {
+        if (!Array.isArray(body.extraction_fields)) {
+          return new Response(
+            JSON.stringify({ error: 'extraction_fields must be an array or null' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        for (const ef of body.extraction_fields) {
+          if (typeof ef.name !== 'string' || !ef.name.trim()) {
+            return new Response(
+              JSON.stringify({ error: 'extraction_fields: each entry must have a non-empty name string' }),
+              { status: 400, headers: { 'Content-Type': 'application/json' } }
+            );
+          }
+          if (ef.hint !== undefined && typeof ef.hint !== 'string') {
+            return new Response(
+              JSON.stringify({ error: 'extraction_fields: hint must be a string if provided' }),
+              { status: 400, headers: { 'Content-Type': 'application/json' } }
+            );
+          }
+          if (ef.aliases !== undefined && (!Array.isArray(ef.aliases) || !ef.aliases.every((a: unknown) => typeof a === 'string'))) {
+            return new Response(
+              JSON.stringify({ error: 'extraction_fields: aliases must be an array of strings if provided' }),
+              { status: 400, headers: { 'Content-Type': 'application/json' } }
+            );
+          }
+        }
+        updates.push('extraction_fields = ?');
+        params.push(JSON.stringify(body.extraction_fields));
+      }
     }
 
     if (updates.length === 0) {

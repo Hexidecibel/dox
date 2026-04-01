@@ -37,7 +37,6 @@ import {
   FilterList as FilterIcon,
   Inventory as ProductsIcon,
   Category as DocTypesIcon,
-  TextFields as NamingIcon,
   Warning as WarningIcon,
   FolderCopy as BundlesIcon,
   History as HistoryIcon,
@@ -69,7 +68,6 @@ const adminItems: NavItem[] = [
   { label: 'Users', path: '/admin/users', icon: <UsersIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'API Keys', path: '/admin/api-keys', icon: <ApiKeyIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Document Types', path: '/admin/document-types', icon: <DocTypesIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Naming Template', path: '/admin/naming-template', icon: <NamingIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Products', path: '/admin/products', icon: <ProductsIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Tenants', path: '/admin/tenants', icon: <TenantsIcon />, roles: ['super_admin'] },
 ];

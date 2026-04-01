@@ -205,22 +205,33 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const sanitizedCodeDate = codeDate ? sanitizeString(codeDate) : null;
     const sanitizedExpirationDate = expirationDate ? sanitizeString(expirationDate) : null;
 
-    // Check for naming template and apply to file name
+    // Look up naming format from document type (if document_type_id provided)
     let displayFileName = fileName;
-    const namingTemplate = await context.env.DB.prepare(
-      'SELECT template FROM naming_templates WHERE tenant_id = ? AND active = 1'
-    )
-      .bind(tenantId)
-      .first<{ template: string }>();
+    let docTypeName: string | null = null;
+    let namingFormatTemplate: string | null = null;
 
-    if (namingTemplate?.template) {
+    if (documentTypeId) {
+      const docType = await context.env.DB.prepare(
+        'SELECT naming_format, name FROM document_types WHERE id = ? AND active = 1'
+      ).bind(documentTypeId).first<{ naming_format: string | null; name: string }>();
+
+      if (docType) {
+        docTypeName = docType.name;
+        if (docType.naming_format) {
+          namingFormatTemplate = docType.naming_format;
+        }
+      }
+    }
+
+    if (namingFormatTemplate) {
       const fileExt = fileName.split('.').pop() || '';
-      displayFileName = applyNamingTemplate(namingTemplate.template, {
+      displayFileName = applyNamingTemplate(namingFormatTemplate, {
         title: sanitizedTitle || fileName.replace(/\.[^/.]+$/, ''),
         lot_number: sanitizedLotNumber || undefined,
         po_number: sanitizedPoNumber || undefined,
         code_date: sanitizedCodeDate || undefined,
         expiration_date: sanitizedExpirationDate || undefined,
+        doc_type: docTypeName || undefined,
         ext: fileExt,
       });
     }

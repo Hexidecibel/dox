@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { formatDate } from '../../utils/format';
 import {
   Box,
@@ -29,6 +29,7 @@ import {
   useTheme,
   Card,
   CardContent,
+  Divider,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -38,9 +39,61 @@ import {
   Close as CloseIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
-import type { ApiDocumentType } from '../../lib/types';
+import type { ApiDocumentType, ExtractionField } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
+
+const PLACEHOLDERS = [
+  { label: '{title}', description: 'Document title' },
+  { label: '{lot_number}', description: 'Lot number' },
+  { label: '{po_number}', description: 'PO number' },
+  { label: '{code_date}', description: 'Code date' },
+  { label: '{expiration_date}', description: 'Expiration date' },
+  { label: '{doc_type}', description: 'Document type' },
+  { label: '{product}', description: 'Product name' },
+  { label: '{date}', description: 'Current date' },
+  { label: '{ext}', description: 'File extension' },
+];
+
+const SAMPLE_DATA: Record<string, string> = {
+  title: 'COA Dairy Gold Butter',
+  lot_number: 'LOT-2024-001',
+  po_number: 'PO-5678',
+  code_date: '2024-06-15',
+  expiration_date: '2025-06-15',
+  doc_type: 'COA',
+  product: 'Butter',
+  date: new Date().toISOString().split('T')[0],
+  ext: 'pdf',
+};
+
+const SUGGESTED_FIELDS = [
+  'Lot Number',
+  'PO Number',
+  'Expiration Date',
+  'Code Date',
+  'Product Name',
+  'Supplier Name',
+  'Customer Name',
+];
+
+function applyTemplate(template: string): string {
+  let result = template;
+  for (const [key, value] of Object.entries(SAMPLE_DATA)) {
+    result = result.split(`{${key}}`).join(value);
+  }
+  return result;
+}
+
+function parseExtractionFields(raw: string | null): ExtractionField[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 export function DocumentTypes() {
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
@@ -62,7 +115,13 @@ export function DocumentTypes() {
   const [formName, setFormName] = useState('');
   const [formDescription, setFormDescription] = useState('');
   const [formTenantId, setFormTenantId] = useState('');
+  const [formNamingFormat, setFormNamingFormat] = useState('');
+  const [formExtractFields, setFormExtractFields] = useState<ExtractionField[]>([]);
   const [saving, setSaving] = useState(false);
+
+  const [fieldInput, setFieldInput] = useState('');
+
+  const namingInputRef = useRef<HTMLInputElement>(null);
 
   const loadDocumentTypes = async () => {
     setLoading(true);
@@ -90,6 +149,10 @@ export function DocumentTypes() {
     setEditingType(null);
     setFormName('');
     setFormDescription('');
+    setFormNamingFormat('');
+    setFormExtractFields([]);
+    setFieldInput('');
+    setAliasInputs({});
     setFormTenantId(
       isSuperAdmin
         ? (tenantFilter || selectedTenantId || '')
@@ -102,6 +165,10 @@ export function DocumentTypes() {
     setEditingType(dt);
     setFormName(dt.name);
     setFormDescription(dt.description || '');
+    setFormNamingFormat(dt.naming_format || '');
+    setFormExtractFields(parseExtractionFields(dt.extraction_fields));
+    setFieldInput('');
+    setAliasInputs({});
     setFormTenantId(dt.tenant_id);
     setDialogOpen(true);
   };
@@ -110,10 +177,15 @@ export function DocumentTypes() {
     setSaving(true);
     setError('');
     try {
+      const extractFields = formExtractFields.length > 0 ? formExtractFields : undefined;
+      const namingFormat = formNamingFormat.trim() || undefined;
+
       if (editingType) {
         await api.documentTypes.update(editingType.id, {
           name: formName.trim(),
           description: formDescription.trim() || undefined,
+          naming_format: namingFormat ?? null,
+          extraction_fields: extractFields ?? null,
         });
       } else {
         const tenantId = isSuperAdmin ? formTenantId : user?.tenant_id;
@@ -126,6 +198,8 @@ export function DocumentTypes() {
           name: formName.trim(),
           description: formDescription.trim() || undefined,
           tenant_id: tenantId,
+          naming_format: namingFormat,
+          extraction_fields: extractFields,
         });
       }
       setDialogOpen(false);
@@ -146,10 +220,84 @@ export function DocumentTypes() {
     }
   };
 
+  const insertPlaceholder = (placeholder: string) => {
+    const input = namingInputRef.current;
+    if (input) {
+      const start = input.selectionStart ?? formNamingFormat.length;
+      const end = input.selectionEnd ?? formNamingFormat.length;
+      const newValue = formNamingFormat.slice(0, start) + placeholder + formNamingFormat.slice(end);
+      setFormNamingFormat(newValue);
+      setTimeout(() => {
+        input.focus();
+        const newPos = start + placeholder.length;
+        input.setSelectionRange(newPos, newPos);
+      }, 0);
+    } else {
+      setFormNamingFormat(formNamingFormat + placeholder);
+    }
+  };
+
+  const addField = (name: string) => {
+    if (!name.trim() || formExtractFields.some((f) => f.name === name.trim())) return;
+    setFormExtractFields([...formExtractFields, { name: name.trim() }]);
+    setFieldInput('');
+  };
+
+  const removeField = (name: string) => {
+    setFormExtractFields(formExtractFields.filter((f) => f.name !== name));
+  };
+
+  const updateFieldHint = (name: string, hint: string) => {
+    setFormExtractFields(
+      formExtractFields.map((f) =>
+        f.name === name ? { ...f, hint: hint || undefined } : f
+      )
+    );
+  };
+
+  const addFieldAlias = (name: string, alias: string) => {
+    if (!alias.trim()) return;
+    setFormExtractFields(
+      formExtractFields.map((f) => {
+        if (f.name !== name) return f;
+        const existing = f.aliases || [];
+        if (existing.includes(alias.trim())) return f;
+        return { ...f, aliases: [...existing, alias.trim()] };
+      })
+    );
+  };
+
+  const removeFieldAlias = (name: string, alias: string) => {
+    setFormExtractFields(
+      formExtractFields.map((f) => {
+        if (f.name !== name) return f;
+        const updated = (f.aliases || []).filter((a) => a !== alias);
+        return { ...f, aliases: updated.length > 0 ? updated : undefined };
+      })
+    );
+  };
+
+  const [aliasInputs, setAliasInputs] = useState<Record<string, string>>({});
+
+  const handleFieldKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (fieldInput.trim()) {
+        addField(fieldInput.trim());
+      }
+    }
+  };
+
+  const availableSuggestions = SUGGESTED_FIELDS.filter(
+    (s) => !formExtractFields.some((f) => f.name === s)
+  );
+
   const getTenantName = (tenantId: string) => {
     const tenant = tenants.find((t) => t.id === tenantId);
     return tenant?.name || tenantId;
   };
+
+  const namingPreview = formNamingFormat ? applyTemplate(formNamingFormat) : '';
 
   if (loading && documentTypes.length === 0) {
     return (
@@ -333,7 +481,7 @@ export function DocumentTypes() {
             <CloseIcon />
           </IconButton>
         </DialogTitle>
-        <DialogContent>
+        <DialogContent dividers sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
           {isSuperAdmin && !editingType && (
             <FormControl fullWidth sx={{ mt: 1, mb: 2 }}>
               <InputLabel>Tenant</InputLabel>
@@ -366,11 +514,175 @@ export function DocumentTypes() {
             label="Description"
             fullWidth
             multiline
-            rows={3}
+            rows={2}
             value={formDescription}
             onChange={(e) => setFormDescription(e.target.value)}
             disabled={saving}
+            sx={{ mb: 2 }}
           />
+
+          <Divider sx={{ my: 1 }} />
+
+          {/* Naming Format Section */}
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+              Naming Format (optional)
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+              Define how files of this type are named during ingest. Click placeholders to insert.
+            </Typography>
+            <TextField
+              fullWidth
+              value={formNamingFormat}
+              onChange={(e) => setFormNamingFormat(e.target.value)}
+              inputRef={namingInputRef}
+              placeholder="e.g. {doc_type}_{product}_{lot_number}.{ext}"
+              disabled={saving}
+              size="small"
+              InputProps={{
+                sx: { fontFamily: 'monospace' },
+              }}
+              sx={{ mb: 1.5 }}
+            />
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, mb: 1.5 }}>
+              {PLACEHOLDERS.map((p) => (
+                <Chip
+                  key={p.label}
+                  label={p.label}
+                  onClick={() => insertPlaceholder(p.label)}
+                  variant="outlined"
+                  color="primary"
+                  size="small"
+                  clickable
+                  title={p.description}
+                  disabled={saving}
+                  sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}
+                />
+              ))}
+            </Box>
+            {namingPreview && (
+              <Box sx={{ p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Preview:
+                </Typography>
+                <Typography variant="body2" fontFamily="monospace" sx={{ wordBreak: 'break-all' }}>
+                  {namingPreview}
+                </Typography>
+              </Box>
+            )}
+          </Box>
+
+          <Divider sx={{ my: 1 }} />
+
+          {/* Extraction Fields Section */}
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+              Extraction Fields
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+              Add fields to extract for this document type. Type a name and press Enter, or click a suggestion.
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 1, mb: 1.5 }}>
+              <TextField
+                fullWidth
+                size="small"
+                placeholder="e.g. Batch ID, Manufacturer, Weight..."
+                value={fieldInput}
+                onChange={(e) => setFieldInput(e.target.value)}
+                onKeyDown={handleFieldKeyDown}
+                disabled={saving}
+              />
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => fieldInput.trim() && addField(fieldInput.trim())}
+                disabled={saving || !fieldInput.trim()}
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                Add
+              </Button>
+            </Box>
+            {availableSuggestions.length > 0 && (
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, mb: 1.5 }}>
+                {availableSuggestions.map((s) => (
+                  <Chip
+                    key={s}
+                    label={s}
+                    size="small"
+                    variant="outlined"
+                    clickable
+                    onClick={() => addField(s)}
+                    disabled={saving}
+                    sx={{ fontSize: '0.75rem' }}
+                  />
+                ))}
+              </Box>
+            )}
+            {formExtractFields.length > 0 && (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                {formExtractFields.map((ef) => (
+                  <Box
+                    key={ef.name}
+                    sx={{
+                      py: 1,
+                      px: 1.5,
+                      borderRadius: 1,
+                      border: '1px solid',
+                      borderColor: 'divider',
+                    }}
+                  >
+                    <Chip
+                      label={ef.name}
+                      onDelete={() => removeField(ef.name)}
+                      size="small"
+                      disabled={saving}
+                      sx={{ mb: 0.75 }}
+                    />
+                    <TextField
+                      fullWidth
+                      size="small"
+                      placeholder="Optional hint for AI extraction..."
+                      value={ef.hint || ''}
+                      onChange={(e) => updateFieldHint(ef.name, e.target.value)}
+                      disabled={saving}
+                      sx={{ mb: 0.75, '& .MuiInputBase-input': { fontSize: '0.8rem', py: 0.5 } }}
+                    />
+                    <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 0.5 }}>
+                      {(ef.aliases || []).map((alias) => (
+                        <Chip
+                          key={alias}
+                          label={alias}
+                          size="small"
+                          variant="outlined"
+                          onDelete={() => removeFieldAlias(ef.name, alias)}
+                          disabled={saving}
+                          sx={{ fontSize: '0.7rem', height: 22 }}
+                        />
+                      ))}
+                      <TextField
+                        size="small"
+                        placeholder="Add alias..."
+                        value={aliasInputs[ef.name] || ''}
+                        onChange={(e) => setAliasInputs({ ...aliasInputs, [ef.name]: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const val = aliasInputs[ef.name];
+                            if (val?.trim()) {
+                              addFieldAlias(ef.name, val);
+                              setAliasInputs({ ...aliasInputs, [ef.name]: '' });
+                            }
+                          }
+                        }}
+                        disabled={saving}
+                        sx={{ flex: '0 1 140px', '& .MuiInputBase-input': { fontSize: '0.75rem', py: 0.25, px: 0.75 } }}
+                      />
+                    </Box>
+                  </Box>
+                ))}
+              </Box>
+            )}
+          </Box>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={() => setDialogOpen(false)} disabled={saving}>

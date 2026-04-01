@@ -98,6 +98,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       name?: string;
       description?: string;
       tenant_id?: string;
+      naming_format?: string;
+      extraction_fields?: Array<{ name: string; hint?: string; aliases?: string[] }>;
     };
 
     if (!body.name || !body.name.trim()) {
@@ -123,6 +125,56 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // Sanitize inputs
     body.name = sanitizeString(body.name);
     if (body.description) body.description = sanitizeString(body.description);
+
+    // Validate naming_format
+    let namingFormat: string | null = null;
+    if (body.naming_format !== undefined && body.naming_format !== null) {
+      if (typeof body.naming_format !== 'string') {
+        return new Response(
+          JSON.stringify({ error: 'naming_format must be a string' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (body.naming_format.length > 500) {
+        return new Response(
+          JSON.stringify({ error: 'naming_format must be 500 characters or less' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      namingFormat = body.naming_format.trim() || null;
+    }
+
+    // Validate extraction_fields
+    let extractionFieldsJson: string | null = null;
+    if (body.extraction_fields !== undefined && body.extraction_fields !== null) {
+      if (!Array.isArray(body.extraction_fields)) {
+        return new Response(
+          JSON.stringify({ error: 'extraction_fields must be an array' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      for (const ef of body.extraction_fields) {
+        if (typeof ef.name !== 'string' || !ef.name.trim()) {
+          return new Response(
+            JSON.stringify({ error: 'extraction_fields: each entry must have a non-empty name string' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (ef.hint !== undefined && typeof ef.hint !== 'string') {
+          return new Response(
+            JSON.stringify({ error: 'extraction_fields: hint must be a string if provided' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (ef.aliases !== undefined && (!Array.isArray(ef.aliases) || !ef.aliases.every((a: unknown) => typeof a === 'string'))) {
+          return new Response(
+            JSON.stringify({ error: 'extraction_fields: aliases must be an array of strings if provided' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+      extractionFieldsJson = JSON.stringify(body.extraction_fields);
+    }
 
     const slug = slugify(body.name);
 
@@ -150,10 +202,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const id = generateId();
 
     await context.env.DB.prepare(
-      `INSERT INTO document_types (id, tenant_id, name, slug, description, active)
-       VALUES (?, ?, ?, ?, ?, 1)`
+      `INSERT INTO document_types (id, tenant_id, name, slug, description, naming_format, extraction_fields, active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1)`
     )
-      .bind(id, tenantId, body.name, slug, body.description || null)
+      .bind(id, tenantId, body.name, slug, body.description || null, namingFormat, extractionFieldsJson)
       .run();
 
     await logAudit(

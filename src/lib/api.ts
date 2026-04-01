@@ -27,8 +27,8 @@ import type {
   DocumentTypeGetResponse,
   DocumentProductListResponse,
   ApiDocumentProduct,
-  ApiNamingTemplate,
   ExpirationListResponse,
+  ExtractionField,
   ApiBundle,
   ApiBundleItem,
   BundleListResponse,
@@ -554,7 +554,7 @@ export const api = {
      * POST /api/document-types
      * Returns: { documentType: ApiDocumentType }
      */
-    create: (data: { name: string; description?: string; tenant_id?: string }) =>
+    create: (data: { name: string; description?: string; tenant_id?: string; naming_format?: string; extraction_fields?: ExtractionField[] }) =>
       fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -564,7 +564,7 @@ export const api = {
      * PUT /api/document-types/:id
      * Returns: { documentType: ApiDocumentType }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; naming_format?: string | null; extraction_fields?: ExtractionField[] | null }) =>
       fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -612,29 +612,6 @@ export const api = {
      */
     unlink: (documentId: string, productId: string) =>
       fetchApi<{ success: boolean }>(`/documents/${documentId}/products/${productId}`, { method: 'DELETE' }),
-  },
-
-  namingTemplates: {
-    /**
-     * GET /api/naming-templates
-     * Returns: { template: ApiNamingTemplate }
-     */
-    get: (tenantId?: string) => {
-      const query = new URLSearchParams();
-      if (tenantId) query.set('tenant_id', tenantId);
-      const qs = query.toString();
-      return fetchApi<{ template: ApiNamingTemplate }>(`/naming-templates${qs ? `?${qs}` : ''}`);
-    },
-
-    /**
-     * PUT /api/naming-templates
-     * Returns: { template: ApiNamingTemplate }
-     */
-    update: (data: { template: string; tenant_id?: string }) =>
-      fetchApi<{ template: ApiNamingTemplate }>('/naming-templates', {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
   },
 
   expirations: {

@@ -58,12 +58,20 @@ export interface DocumentProductListResponse {
   products: ApiDocumentProduct[];
 }
 
+export interface ExtractionField {
+  name: string;           // "Lot Number" — display label, auto-slugified for API keys
+  hint?: string;          // "Usually found in the header or stamp area" — prompt hint for AI extraction
+  aliases?: string[];     // ["Batch Number", "Lot #"] — alternate names the field might appear as
+}
+
 export interface DocumentTypeRow {
   id: string;
   tenant_id: string;
   name: string;
   slug: string;
   description: string | null;
+  naming_format: string | null;
+  extraction_fields: string | null;
   active: number;
   created_at: string;
   updated_at: string;
@@ -400,19 +408,6 @@ export interface CreateApiKeyResponse {
   apiKey: ApiKey;
   key: string; // Full key, shown only once
 }
-
-// === Naming Template Types ===
-
-export interface NamingTemplateRow {
-  id: string;
-  tenant_id: string;
-  template: string;
-  active: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ApiNamingTemplate extends NamingTemplateRow {}
 
 // === Expiration Types ===
 

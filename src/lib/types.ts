@@ -30,7 +30,7 @@ export type {
   CreateApiKeyResponse,
   ApiDocumentProduct,
   DocumentProductListResponse,
-  ApiNamingTemplate,
+  ExtractionField,
   ExpirationListResponse,
   ExpirationItem,
   ExpirationSummary,
