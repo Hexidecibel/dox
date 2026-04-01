@@ -128,16 +128,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       title?: string;
       description?: string;
       category?: string;
-      tags?: string;
+      tags?: string | string[];
       change_notes?: string;
-      source_metadata?: string;
+      source_metadata?: string | Record<string, unknown>;
       file_name?: string;
       document_type_id?: string;
       lot_number?: string;
       po_number?: string;
       code_date?: string;
       expiration_date?: string;
-      product_ids?: string;
+      product_ids?: string | Array<{ product_id: string; expires_at?: string; notes?: string }>;
     };
     try {
       body = await context.request.json();
@@ -249,48 +249,62 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw new BadRequestError('File too large. Maximum size: 100MB');
     }
 
-    // Validate tags if provided
-    const tags = body.tags || null;
-    if (tags) {
-      try {
-        const parsed = JSON.parse(tags);
-        if (!Array.isArray(parsed)) {
-          throw new BadRequestError('tags must be a JSON array of strings');
+    // Normalize tags - accept string (JSON) or array
+    let tagsStr: string | null = null;
+    if (body.tags) {
+      if (Array.isArray(body.tags)) {
+        tagsStr = JSON.stringify(body.tags);
+      } else if (typeof body.tags === 'string') {
+        try {
+          const parsed = JSON.parse(body.tags);
+          if (!Array.isArray(parsed)) {
+            throw new BadRequestError('tags must be an array of strings');
+          }
+          tagsStr = body.tags;
+        } catch (e) {
+          if (e instanceof BadRequestError) throw e;
+          throw new BadRequestError('tags must be a valid JSON array');
         }
-      } catch (e) {
-        if (e instanceof BadRequestError) throw e;
-        throw new BadRequestError('tags must be a valid JSON array');
       }
     }
 
-    // Validate source_metadata if provided
-    const sourceMetadata = body.source_metadata || null;
-    if (sourceMetadata) {
-      try {
-        JSON.parse(sourceMetadata);
-      } catch {
-        throw new BadRequestError('source_metadata must be a valid JSON string');
+    // Normalize source_metadata - accept string (JSON) or object
+    let sourceMetadataStr: string | null = null;
+    if (body.source_metadata) {
+      if (typeof body.source_metadata === 'string') {
+        try {
+          JSON.parse(body.source_metadata);
+          sourceMetadataStr = body.source_metadata;
+        } catch {
+          throw new BadRequestError('source_metadata must be a valid JSON string');
+        }
+      } else if (typeof body.source_metadata === 'object') {
+        sourceMetadataStr = JSON.stringify(body.source_metadata);
       }
     }
 
-    // Validate product_ids if provided
+    // Normalize product_ids - accept string (JSON) or array
     let productLinks: Array<{ product_id: string; expires_at?: string; notes?: string }> = [];
     if (body.product_ids) {
-      try {
-        const parsed = JSON.parse(body.product_ids);
-        if (!Array.isArray(parsed)) {
-          throw new BadRequestError('product_ids must be a JSON array');
+      let parsed: unknown;
+      if (typeof body.product_ids === 'string') {
+        try {
+          parsed = JSON.parse(body.product_ids);
+        } catch {
+          throw new BadRequestError('product_ids must be a valid JSON array');
         }
-        for (const entry of parsed) {
-          if (!entry.product_id || typeof entry.product_id !== 'string') {
-            throw new BadRequestError('Each product_ids entry must have a product_id string');
-          }
-        }
-        productLinks = parsed;
-      } catch (e) {
-        if (e instanceof BadRequestError) throw e;
-        throw new BadRequestError('product_ids must be a valid JSON array');
+      } else {
+        parsed = body.product_ids;
       }
+      if (!Array.isArray(parsed)) {
+        throw new BadRequestError('product_ids must be an array');
+      }
+      for (const entry of parsed) {
+        if (!entry.product_id || typeof entry.product_id !== 'string') {
+          throw new BadRequestError('Each product_ids entry must have a product_id string');
+        }
+      }
+      productLinks = parsed;
     }
 
     // Check tenant exists and is active
@@ -334,11 +348,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const sanitizedTitle = body.title
       ? sanitizeString(body.title)
       : fileName.replace(/\.[^/.]+$/, '');
-    const sanitizedLotNumber = body.lot_number ? sanitizeString(body.lot_number) : null;
-    const sanitizedPoNumber = body.po_number ? sanitizeString(body.po_number) : null;
-    const sanitizedCodeDate = body.code_date ? sanitizeString(body.code_date) : null;
-    const sanitizedExpirationDate = body.expiration_date ? sanitizeString(body.expiration_date) : null;
-    const documentTypeId = body.document_type_id || null;
+    const sanitizedLotNumber = body.lot_number?.trim() ? sanitizeString(body.lot_number) : null;
+    const sanitizedPoNumber = body.po_number?.trim() ? sanitizeString(body.po_number) : null;
+    const sanitizedCodeDate = body.code_date?.trim() ? sanitizeString(body.code_date) : null;
+    const sanitizedExpirationDate = body.expiration_date?.trim() ? sanitizeString(body.expiration_date) : null;
+    const documentTypeId = body.document_type_id?.trim() || null;
 
     // Check for naming template and apply to file name
     let displayFileName = fileName;
@@ -401,9 +415,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       ];
       const updateBindings: (string | number | null)[] = [newVersion];
 
-      if (sourceMetadata) {
+      if (sourceMetadataStr) {
         updateFields.push('source_metadata = ?');
-        updateBindings.push(sourceMetadata);
+        updateBindings.push(sourceMetadataStr);
       }
       if (documentTypeId) {
         updateFields.push('document_type_id = ?');
@@ -465,7 +479,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           file_size: fileSize,
           source: 'url',
           file_url: fileUrl,
-          source_metadata: sourceMetadata ? JSON.parse(sourceMetadata) : null,
+          source_metadata: sourceMetadataStr ? JSON.parse(sourceMetadataStr) : null,
         }),
         getClientIp(context.request)
       );
@@ -486,7 +500,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             created_at: existingDoc.created_at,
             updated_at: new Date().toISOString(),
             external_ref: existingDoc.external_ref,
-            source_metadata: sourceMetadata || existingDoc.source_metadata,
+            source_metadata: sourceMetadataStr || existingDoc.source_metadata,
             document_type_id: documentTypeId || existingDoc.document_type_id || null,
             lot_number: sanitizedLotNumber || existingDoc.lot_number || null,
             po_number: sanitizedPoNumber || existingDoc.po_number || null,
@@ -526,10 +540,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           sanitizedTitle,
           body.description ? sanitizeString(body.description) : null,
           body.category ? sanitizeString(body.category) : null,
-          tags || '[]',
+          tagsStr || '[]',
           user.id,
           sanitizedRef,
-          sourceMetadata || null,
+          sourceMetadataStr || null,
           documentTypeId,
           sanitizedLotNumber,
           sanitizedPoNumber,
@@ -586,7 +600,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           file_size: fileSize,
           source: 'url',
           file_url: fileUrl,
-          source_metadata: sourceMetadata ? JSON.parse(sourceMetadata) : null,
+          source_metadata: sourceMetadataStr ? JSON.parse(sourceMetadataStr) : null,
         }),
         getClientIp(context.request)
       );
@@ -602,14 +616,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             title: sanitizedTitle,
             description: body.description ? sanitizeString(body.description) : null,
             category: body.category ? sanitizeString(body.category) : null,
-            tags: tags || '[]',
+            tags: tagsStr || '[]',
             current_version: 1,
             status: 'active',
             created_by: user.id,
             created_at: now,
             updated_at: now,
             external_ref: sanitizedRef,
-            source_metadata: sourceMetadata || null,
+            source_metadata: sourceMetadataStr || null,
             document_type_id: documentTypeId,
             lot_number: sanitizedLotNumber,
             po_number: sanitizedPoNumber,
