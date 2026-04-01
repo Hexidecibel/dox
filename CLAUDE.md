@@ -2,6 +2,9 @@
 
 Multi-tenant document upload/download portal with version tracking, role-based access control, audit logging, and report generation. Built for regulatory document management where manufacturers and vendors independently manage their documents.
 
+## Startup
+- Read `next-time.md` at the start of every conversation. Address any notes/thoughts before doing anything else.
+
 ## Architecture
 
 - **Runtime**: Cloudflare Pages Functions (Workers)
@@ -153,6 +156,7 @@ Use the slash commands for common tasks:
 | `plan.md` | Detailed implementation plans with status, design, file lists, and steps. |
 | `FEATURES.md` | Completed features — living changelog of what's been shipped. |
 | `backlog.md` | Deferred ideas, long-term research, and items not in the daily workflow. |
+| `next-time.md` | User's notes/thoughts for the next session. Read on startup, address first. |
 
 **Flow:** `todo.md` (idea) -> `plan.md` (planned -> in-progress -> done) -> `FEATURES.md` (shipped)
 **Deferred:** Items moved from `todo.md` to `backlog.md` when not prioritized.

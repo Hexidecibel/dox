@@ -38,6 +38,8 @@ import {
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { ApiProduct } from '../../lib/types';
+import { useAuth } from '../../contexts/AuthContext';
+import { useTenant } from '../../contexts/TenantContext';
 
 const ITEMS_PER_PAGE = 20;
 
@@ -52,12 +54,19 @@ export function Products() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
 
+  const { user, isSuperAdmin } = useAuth();
+  const { selectedTenantId } = useTenant();
+
   // Dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<ApiProduct | null>(null);
   const [formName, setFormName] = useState('');
   const [formDescription, setFormDescription] = useState('');
   const [saving, setSaving] = useState(false);
+
+  const tenantId = isSuperAdmin
+    ? (selectedTenantId || undefined)
+    : user?.tenant_id || undefined;
 
   const loadProducts = async () => {
     setLoading(true);
@@ -67,6 +76,7 @@ export function Products() {
         search: search || undefined,
         limit: ITEMS_PER_PAGE,
         offset: (page - 1) * ITEMS_PER_PAGE,
+        tenant_id: tenantId,
       });
       setProducts(result.products);
       setTotal(result.total);
@@ -79,7 +89,7 @@ export function Products() {
 
   useEffect(() => {
     loadProducts();
-  }, [page]);
+  }, [page, selectedTenantId]);
 
   // Debounced search
   useEffect(() => {
@@ -114,9 +124,16 @@ export function Products() {
           description: formDescription.trim() || undefined,
         });
       } else {
+        const createTenantId = tenantId || user?.tenant_id;
+        if (!createTenantId) {
+          setError('No tenant selected. Please select a tenant before creating a product.');
+          setSaving(false);
+          return;
+        }
         await api.products.create({
           name: formName.trim(),
           description: formDescription.trim() || undefined,
+          tenant_id: createTenantId,
         });
       }
       setDialogOpen(false);

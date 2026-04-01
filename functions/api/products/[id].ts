@@ -1,6 +1,7 @@
 import { logAudit, getClientIp } from '../../lib/db';
 import {
   requireRole,
+  requireTenantAccess,
   NotFoundError,
   errorToResponse,
 } from '../../lib/permissions';
@@ -9,10 +10,12 @@ import type { Env, User } from '../../lib/types';
 
 /**
  * GET /api/products/:id
- * Get a single product by ID. Any authenticated user.
+ * Get a single product by ID. Tenant members can see their own products.
+ * Super_admin can see any product.
  */
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
+    const user = context.data.user as User;
     const productId = context.params.id as string;
 
     const product = await context.env.DB.prepare(
@@ -22,6 +25,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .first();
 
     if (!product) {
+      throw new NotFoundError('Product not found');
+    }
+
+    // Check tenant access
+    if (user.role !== 'super_admin' && product.tenant_id !== user.tenant_id) {
       throw new NotFoundError('Product not found');
     }
 
@@ -43,7 +51,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
 /**
  * PUT /api/products/:id
- * Update a product. Only super_admin.
+ * Update a product. org_admin+ for their tenant, super_admin for any.
  * Fields: name, description, active.
  */
 export const onRequestPut: PagesFunction<Env> = async (context) => {
@@ -51,7 +59,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     const user = context.data.user as User;
     const productId = context.params.id as string;
 
-    requireRole(user, 'super_admin');
+    requireRole(user, 'super_admin', 'org_admin');
 
     const product = await context.env.DB.prepare(
       'SELECT * FROM products WHERE id = ?'
@@ -62,6 +70,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (!product) {
       throw new NotFoundError('Product not found');
     }
+
+    // Verify tenant access
+    requireTenantAccess(user, product.tenant_id as string);
 
     const body = (await context.request.json()) as {
       name?: string;
@@ -119,11 +130,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     await logAudit(
       context.env.DB,
       user.id,
-      null,
+      product.tenant_id as string,
       'product_updated',
       'product',
       productId,
-      JSON.stringify({ changes: body }),
+      JSON.stringify({ changes: body, tenant_id: product.tenant_id }),
       getClientIp(context.request)
     );
 
@@ -151,14 +162,14 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
 /**
  * DELETE /api/products/:id
- * Soft-delete a product (set active=0). Only super_admin.
+ * Soft-delete a product (set active=0). org_admin+ for their tenant, super_admin for any.
  */
 export const onRequestDelete: PagesFunction<Env> = async (context) => {
   try {
     const user = context.data.user as User;
     const productId = context.params.id as string;
 
-    requireRole(user, 'super_admin');
+    requireRole(user, 'super_admin', 'org_admin');
 
     const product = await context.env.DB.prepare(
       'SELECT * FROM products WHERE id = ?'
@@ -170,6 +181,9 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
       throw new NotFoundError('Product not found');
     }
 
+    // Verify tenant access
+    requireTenantAccess(user, product.tenant_id as string);
+
     await context.env.DB.prepare(
       "UPDATE products SET active = 0, updated_at = datetime('now') WHERE id = ?"
     )
@@ -179,11 +193,11 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
     await logAudit(
       context.env.DB,
       user.id,
-      null,
+      product.tenant_id as string,
       'product_deleted',
       'product',
       productId,
-      JSON.stringify({ name: product.name }),
+      JSON.stringify({ name: product.name, tenant_id: product.tenant_id }),
       getClientIp(context.request)
     );
 

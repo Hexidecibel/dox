@@ -30,19 +30,13 @@ export interface UserRow {
 
 export interface ProductRow {
   id: string;
+  tenant_id: string;
   name: string;
   slug: string;
   description: string | null;
   active: number;
   created_at: string;
   updated_at: string;
-}
-
-export interface TenantProductRow {
-  id: string;
-  tenant_id: string;
-  product_id: string;
-  created_at: string;
 }
 
 export interface DocumentProductRow {
@@ -312,10 +306,6 @@ export interface DocumentTypeGetResponse {
   documentType: ApiDocumentType;
 }
 
-export interface TenantProductListResponse {
-  products: ApiProduct[];
-}
-
 // === Frontend-friendly types (after parsing) ===
 
 export interface Document {
@@ -423,22 +413,6 @@ export interface NamingTemplateRow {
 }
 
 export interface ApiNamingTemplate extends NamingTemplateRow {}
-
-// === Email Domain Mapping Types ===
-
-export interface EmailDomainMappingRow {
-  id: string;
-  domain: string;
-  tenant_id: string;
-  default_user_id: string | null;
-  active: number;
-  created_at: string;
-}
-
-export interface ApiEmailDomainMapping extends EmailDomainMappingRow {
-  tenant_name?: string;
-  default_user_name?: string;
-}
 
 // === Expiration Types ===
 

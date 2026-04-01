@@ -62,7 +62,7 @@ function formatExpiration(expiresAt: string | null): string {
   return `Expires ${dateStr} (${diffDays}d)`;
 }
 
-export function ProductLinker({ documentId, tenantId: _tenantId, readOnly = false }: ProductLinkerProps) {
+export function ProductLinker({ documentId, tenantId, readOnly = false }: ProductLinkerProps) {
   const [linkedProducts, setLinkedProducts] = useState<ApiDocumentProduct[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -110,7 +110,7 @@ export function ProductLinker({ documentId, tenantId: _tenantId, readOnly = fals
     const timer = setTimeout(async () => {
       setSearching(true);
       try {
-        const result = await api.products.list({ search: searchQuery || undefined, active: 1, limit: 20 });
+        const result = await api.products.list({ search: searchQuery || undefined, active: 1, limit: 20, tenant_id: tenantId });
         // Filter out already-linked products
         const linkedIds = new Set(linkedProducts.map((lp) => lp.product_id));
         setSearchResults(result.products.filter((p) => !linkedIds.has(p.id)));
