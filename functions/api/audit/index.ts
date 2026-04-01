@@ -56,8 +56,15 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     if (action) {
-      conditions.push('a.action = ?');
-      params.push(action);
+      const actions = action.split(',').map(a => a.trim()).filter(Boolean);
+      if (actions.length === 1) {
+        conditions.push('a.action = ?');
+        params.push(actions[0]);
+      } else if (actions.length > 1) {
+        const placeholders = actions.map(() => '?').join(',');
+        conditions.push(`a.action IN (${placeholders})`);
+        params.push(...actions);
+      }
     }
 
     if (userId) {

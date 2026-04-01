@@ -25,11 +25,9 @@ import type {
   ProductGetResponse,
   DocumentTypeListResponse,
   DocumentTypeGetResponse,
-  TenantProductListResponse,
   DocumentProductListResponse,
   ApiDocumentProduct,
   ApiNamingTemplate,
-  ApiEmailDomainMapping,
   ExpirationListResponse,
   ApiBundle,
   ApiBundleItem,
@@ -458,6 +456,20 @@ export const api = {
     },
   },
 
+  ingestHistory: {
+    /**
+     * GET /api/audit (filtered to ingest actions)
+     * Returns: { entries: AuditEntry[], total, limit, offset }
+     */
+    list: (params?: Record<string, string>) => {
+      const query = new URLSearchParams({
+        action: 'document.ingested,document.ingest_failed',
+        ...params,
+      });
+      return fetchApi<AuditListResponse>(`/audit?${query.toString()}`);
+    },
+  },
+
   apiKeys: {
     list: () => fetchApi<ApiKey[]>('/api-keys'),
     create: (data: { name: string; tenantId?: string; permissions?: string[]; expiresAt?: string }) =>
@@ -474,12 +486,13 @@ export const api = {
      * GET /api/products
      * Returns: { products: ApiProduct[], total, limit, offset }
      */
-    list: (params?: { search?: string; active?: number; limit?: number; offset?: number }) => {
+    list: (params?: { search?: string; active?: number; limit?: number; offset?: number; tenant_id?: string }) => {
       const query = new URLSearchParams();
       if (params?.search) query.set('search', params.search);
       if (params?.active !== undefined) query.set('active', String(params.active));
       if (params?.limit) query.set('limit', String(params.limit));
       if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
       const qs = query.toString();
       return fetchApi<ProductListResponse>(`/products${qs ? `?${qs}` : ''}`);
     },
@@ -494,7 +507,7 @@ export const api = {
      * POST /api/products
      * Returns: { product: ApiProduct }
      */
-    create: (data: { name: string; description?: string }) =>
+    create: (data: { name: string; description?: string; tenant_id: string }) =>
       fetchApi<{ product: ApiProduct }>('/products', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -516,32 +529,6 @@ export const api = {
      */
     delete: (id: string) =>
       fetchApi<void>(`/products/${id}`, { method: 'DELETE' }),
-  },
-
-  tenantProducts: {
-    /**
-     * GET /api/tenants/:tenantId/products
-     * Returns: { products: ApiProduct[] }
-     */
-    list: (tenantId: string) =>
-      fetchApi<TenantProductListResponse>(`/tenants/${tenantId}/products`),
-
-    /**
-     * POST /api/tenants/:tenantId/products
-     * Add a product to a tenant
-     */
-    add: (tenantId: string, productId: string) =>
-      fetchApi<void>(`/tenants/${tenantId}/products`, {
-        method: 'POST',
-        body: JSON.stringify({ productId }),
-      }),
-
-    /**
-     * DELETE /api/tenants/:tenantId/products/:productId
-     * Remove a product from a tenant
-     */
-    remove: (tenantId: string, productId: string) =>
-      fetchApi<void>(`/tenants/${tenantId}/products/${productId}`, { method: 'DELETE' }),
   },
 
   documentTypes: {
@@ -648,46 +635,6 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
-  },
-
-  emailDomainMappings: {
-    /**
-     * GET /api/email-domain-mappings
-     * Returns: { mappings: ApiEmailDomainMapping[] }
-     */
-    list: (tenantId?: string) => {
-      const query = new URLSearchParams();
-      if (tenantId) query.set('tenant_id', tenantId);
-      const qs = query.toString();
-      return fetchApi<{ mappings: ApiEmailDomainMapping[] }>(`/email-domain-mappings${qs ? `?${qs}` : ''}`);
-    },
-
-    /**
-     * POST /api/email-domain-mappings
-     * Returns: { mapping: ApiEmailDomainMapping }
-     */
-    create: (data: { domain: string; default_user_id?: string; tenant_id?: string }) =>
-      fetchApi<{ mapping: ApiEmailDomainMapping }>('/email-domain-mappings', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-
-    /**
-     * PUT /api/email-domain-mappings/:id
-     * Returns: { mapping: ApiEmailDomainMapping }
-     */
-    update: (id: string, data: { domain?: string; default_user_id?: string; active?: number }) =>
-      fetchApi<{ mapping: ApiEmailDomainMapping }>(`/email-domain-mappings/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-
-    /**
-     * DELETE /api/email-domain-mappings/:id
-     * Returns: { success: true }
-     */
-    delete: (id: string) =>
-      fetchApi<{ success: boolean }>(`/email-domain-mappings/${id}`, { method: 'DELETE' }),
   },
 
   expirations: {

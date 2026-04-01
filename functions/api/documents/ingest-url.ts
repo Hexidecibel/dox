@@ -103,6 +103,11 @@ function filenameFromUrl(url: string): string | null {
  * Creates or adds a new version. Designed for agentic AI / email processing pipelines.
  */
 export const onRequestPost: PagesFunction<Env> = async (context) => {
+  let partialTenantId: string | null = null;
+  let partialFileName: string | null = null;
+  let partialExternalRef: string | null = null;
+  let partialFileUrl: string | null = null;
+
   try {
     // Require JSON content type
     const contentType = context.request.headers.get('Content-Type') || '';
@@ -141,6 +146,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const { file_url: fileUrl, external_ref: externalRef, tenant_id: tenantId } = body;
+
+    partialTenantId = tenantId || null;
+    partialExternalRef = externalRef || null;
+    partialFileUrl = fileUrl || null;
+    partialFileName = body.file_name || null;
 
     // Validate required fields
     if (!fileUrl) {
@@ -623,6 +633,31 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
   } catch (err) {
+    // Log failed ingest attempt
+    try {
+      const user = context.data?.user as User | undefined;
+      if (context.env?.DB && user?.id) {
+        await logAudit(
+          context.env.DB,
+          user.id,
+          partialTenantId,
+          'document.ingest_failed',
+          'document',
+          null,
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+            file_name: partialFileName,
+            external_ref: partialExternalRef,
+            source: 'url',
+            file_url: partialFileUrl,
+          }),
+          getClientIp(context.request)
+        );
+      }
+    } catch {
+      // Never let audit logging failure mask the original error
+    }
+
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;
 

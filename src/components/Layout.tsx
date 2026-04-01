@@ -38,9 +38,9 @@ import {
   Inventory as ProductsIcon,
   Category as DocTypesIcon,
   TextFields as NamingIcon,
-  Email as EmailIcon,
   Warning as WarningIcon,
   FolderCopy as BundlesIcon,
+  History as HistoryIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -62,6 +62,7 @@ const navItems: NavItem[] = [
   { label: 'Search', path: '/search', icon: <SearchIcon /> },
   { label: 'Bundles', path: '/bundles', icon: <BundlesIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Expirations', path: '/expirations', icon: <WarningIcon /> },
+  { label: 'Ingest History', path: '/ingest-history', icon: <HistoryIcon />, roles: ['super_admin', 'org_admin', 'user'] },
 ];
 
 const adminItems: NavItem[] = [
@@ -69,8 +70,7 @@ const adminItems: NavItem[] = [
   { label: 'API Keys', path: '/admin/api-keys', icon: <ApiKeyIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Document Types', path: '/admin/document-types', icon: <DocTypesIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Naming Template', path: '/admin/naming-template', icon: <NamingIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Email Mappings', path: '/admin/email-mappings', icon: <EmailIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Products', path: '/admin/products', icon: <ProductsIcon />, roles: ['super_admin'] },
+  { label: 'Products', path: '/admin/products', icon: <ProductsIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Tenants', path: '/admin/tenants', icon: <TenantsIcon />, roles: ['super_admin'] },
 ];
 

@@ -47,6 +47,10 @@ const MIME_TO_EXTENSIONS: Record<string, string[]> = {
  * Designed for agentic AI / email processing pipelines.
  */
 export const onRequestPost: PagesFunction<Env> = async (context) => {
+  let partialTenantId: string | null = null;
+  let partialFileName: string | null = null;
+  let partialExternalRef: string | null = null;
+
   try {
     const user = context.data.user as User;
 
@@ -70,6 +74,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const codeDate = formData.get('code_date') as string | null;
     const expirationDate = formData.get('expiration_date') as string | null;
     const productIdsRaw = formData.get('product_ids') as string | null;
+
+    partialTenantId = tenantId;
+    partialFileName = file?.name ?? null;
+    partialExternalRef = externalRef;
 
     // Validate required fields
     if (!file) {
@@ -163,6 +171,21 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // Check tenant access
     requireTenantAccess(user, tenantId);
+
+    // Validate product_ids belong to this tenant
+    if (productLinks.length > 0) {
+      const productIds = productLinks.map(l => l.product_id);
+      const placeholders = productIds.map(() => '?').join(',');
+      const validProducts = await context.env.DB.prepare(
+        `SELECT id FROM products WHERE id IN (${placeholders}) AND tenant_id = ?`
+      ).bind(...productIds, tenantId).all();
+
+      const validIds = new Set(validProducts.results.map((r: any) => r.id));
+      const invalidIds = productIds.filter(id => !validIds.has(id));
+      if (invalidIds.length > 0) {
+        throw new BadRequestError(`Invalid product_ids for this tenant: ${invalidIds.join(', ')}`);
+      }
+    }
 
     // Read file data and compute checksum
     const fileData = await file.arrayBuffer();
@@ -471,6 +494,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
   } catch (err) {
+    // Log failed ingest attempt
+    try {
+      const user = context.data?.user as User | undefined;
+      if (context.env?.DB && user?.id) {
+        await logAudit(
+          context.env.DB,
+          user.id,
+          partialTenantId,
+          'document.ingest_failed',
+          'document',
+          null,
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+            file_name: partialFileName,
+            external_ref: partialExternalRef,
+            source: 'form',
+          }),
+          getClientIp(context.request)
+        );
+      }
+    } catch {
+      // Never let audit logging failure mask the original error
+    }
+
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;
 
