@@ -144,7 +144,25 @@ export async function extractFields(
 
   for (const [key, value] of Object.entries(rawFields)) {
     if (!key.startsWith('_') && !reservedKeys.has(key)) {
-      fields[key] = value === null || value === undefined ? null : String(value);
+      if (value === null || value === undefined) {
+        fields[key] = null;
+      } else if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        fields[key] = String(value);
+      } else if (Array.isArray(value)) {
+        if (value.every(v => typeof v === 'string' || typeof v === 'number')) {
+          fields[key] = value.join(', ');
+        } else {
+          fields[key] = JSON.stringify(value);
+        }
+      } else if (typeof value === 'object') {
+        // Flatten nested object: { customer: { name: "ACME", city: "LA" } }
+        // becomes: { customer_name: "ACME", customer_city: "LA" }
+        for (const [subKey, subValue] of Object.entries(value as Record<string, unknown>)) {
+          if (subValue !== null && subValue !== undefined) {
+            fields[`${key}_${subKey}`] = typeof subValue === 'object' ? JSON.stringify(subValue) : String(subValue);
+          }
+        }
+      }
     }
   }
 

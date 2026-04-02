@@ -316,7 +316,37 @@ function parseExtraction(content) {
     }
   }
 
-  return { fields, tables, products, summary, confidence, documentType };
+  return { fields: flattenFields(fields), tables, products, summary, confidence, documentType };
+}
+
+// === Flatten nested objects/arrays in extracted fields ===
+
+function flattenFields(fields) {
+  const result = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === null || value === undefined) {
+      result[key] = null;
+    } else if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      result[key] = String(value);
+    } else if (Array.isArray(value)) {
+      // If array of simple values, join them
+      if (value.every(v => typeof v === 'string' || typeof v === 'number')) {
+        result[key] = value.join(', ');
+      } else {
+        // Complex array — stringify it
+        result[key] = JSON.stringify(value);
+      }
+    } else if (typeof value === 'object') {
+      // Flatten nested object: { customer: { name: "ACME", city: "LA" } }
+      // becomes: { customer_name: "ACME", customer_city: "LA" }
+      for (const [subKey, subValue] of Object.entries(value)) {
+        if (subValue !== null && subValue !== undefined) {
+          result[`${key}_${subKey}`] = typeof subValue === 'object' ? JSON.stringify(subValue) : String(subValue);
+        }
+      }
+    }
+  }
+  return result;
 }
 
 // === Confidence score (same logic as functions/lib/confidence.ts) ===

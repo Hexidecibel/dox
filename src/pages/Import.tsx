@@ -424,11 +424,18 @@ export function Import() {
           }
         }
 
+        const safeValue = (v: any): string => {
+          if (v === null || v === undefined) return '';
+          if (typeof v === 'string') return v;
+          if (typeof v === 'object') return JSON.stringify(v);
+          return String(v);
+        };
+
         const editedFields: Record<string, string> = {};
         const fieldAssignments: Record<string, string> = {};
 
         for (const [k, v] of Object.entries(fields)) {
-          editedFields[k] = v || '';
+          editedFields[k] = safeValue(v);
           fieldAssignments[k] = autoAssignTier(k);
         }
 
