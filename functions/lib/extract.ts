@@ -38,6 +38,9 @@ export async function extractText(
     }
 
     // PDF — extract text using unpdf
+    // Note: Scanned/image-based PDFs will return null here since OCR (tesseract)
+    // can't run in the Cloudflare Workers edge runtime. The local process-worker
+    // (bin/process-worker) has an OCR fallback for these cases.
     if (mimeType === 'application/pdf') {
       try {
         const buffer = file instanceof ArrayBuffer ? file : file.buffer;

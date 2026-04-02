@@ -14,6 +14,11 @@
  *   POLL_INTERVAL  — defaults to 3000 (ms)
  */
 
+const { execFileSync } = require('child_process');
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+
 const DOX_API_URL = (process.env.DOX_API_URL || 'https://dox.cush.rocks').replace(/\/+$/, '');
 const DOX_API_KEY = process.env.DOX_API_KEY || '';
 const QWEN_URL = (process.env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
@@ -73,6 +78,68 @@ async function postResults(id, body) {
   }
 }
 
+/**
+ * OCR fallback for scanned/image-based PDFs.
+ * Uses pdftoppm (poppler) to render pages as images, then tesseract for OCR.
+ * Returns extracted text or null if tools aren't available.
+ */
+function ocrPdf(pdfBuffer) {
+  // Check that required tools exist
+  try {
+    execFileSync('which', ['pdftoppm'], { stdio: 'pipe' });
+    execFileSync('which', ['tesseract'], { stdio: 'pipe' });
+  } catch {
+    console.warn('  OCR unavailable: pdftoppm or tesseract not installed');
+    return null;
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-ocr-'));
+  try {
+    const pdfPath = path.join(tmpDir, 'input.pdf');
+    fs.writeFileSync(pdfPath, Buffer.from(pdfBuffer));
+
+    // Render PDF pages to grayscale PGM images at 300 DPI
+    execFileSync('pdftoppm', ['-gray', '-r', '300', pdfPath, path.join(tmpDir, 'page')], {
+      timeout: 30_000,
+      stdio: 'pipe',
+    });
+
+    // Find generated page images and OCR each
+    const pageFiles = fs.readdirSync(tmpDir)
+      .filter(f => f.startsWith('page') && (f.endsWith('.pgm') || f.endsWith('.ppm')))
+      .sort();
+
+    if (pageFiles.length === 0) {
+      console.warn('  OCR: pdftoppm produced no images');
+      return null;
+    }
+
+    const texts = [];
+    for (const pageFile of pageFiles) {
+      try {
+        // --psm 1 = auto page segmentation with OSD (handles rotated pages)
+        const result = execFileSync('tesseract', [
+          path.join(tmpDir, pageFile), 'stdout', '--psm', '1'
+        ], { timeout: 60_000, stdio: ['pipe', 'pipe', 'pipe'] });
+        texts.push(result.toString('utf-8'));
+      } catch (err) {
+        console.warn(`  OCR: tesseract failed on ${pageFile}: ${err.message}`);
+      }
+    }
+
+    const combined = texts.join('\n\n').trim();
+    return combined.length > 0 ? combined : null;
+  } finally {
+    // Clean up temp files
+    try {
+      for (const f of fs.readdirSync(tmpDir)) {
+        fs.unlinkSync(path.join(tmpDir, f));
+      }
+      fs.rmdirSync(tmpDir);
+    } catch { /* best-effort cleanup */ }
+  }
+}
+
 async function processItem(item) {
   const startTime = Date.now();
   console.log(`Processing ${item.file_name} (${item.id})...`);
@@ -110,6 +177,16 @@ async function processItem(item) {
         text = result.text?.substring(0, 100000) || null;
       } catch (err) {
         console.warn(`PDF extraction failed for ${item.file_name}:`, err.message);
+      }
+
+      // OCR fallback for scanned/image-based PDFs
+      if (!text || text.trim().length === 0) {
+        console.log(`  No text from unpdf, trying OCR for ${item.file_name}...`);
+        text = ocrPdf(fileBuffer);
+        if (text) {
+          console.log(`  OCR extracted ${text.length} chars`);
+          text = text.substring(0, 100000);
+        }
       }
     } else if (
       item.mime_type === 'text/plain' ||
