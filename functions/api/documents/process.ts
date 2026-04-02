@@ -1,6 +1,7 @@
 import { extractText } from '../../lib/extract';
 import { extractFields } from '../../lib/llm';
 import { computeConfidenceScore } from '../../lib/confidence';
+import { computeChecksum } from '../../lib/r2';
 import {
   requireRole,
   requireTenantAccess,
@@ -173,6 +174,35 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const fileData = await file.arrayBuffer();
         const text = await extractText(fileData, mimeType, fileName);
 
+        // Compute checksum for duplicate detection
+        const checksum = await computeChecksum(fileData);
+
+        // Check for existing document with same checksum in this tenant
+        let duplicate: ProcessingResult['duplicate'] = undefined;
+        try {
+          const existingVersion = await context.env.DB.prepare(
+            `SELECT dv.document_id, dv.file_name, d.title
+             FROM document_versions dv
+             JOIN documents d ON d.id = dv.document_id
+             WHERE dv.checksum = ? AND d.tenant_id = ? AND d.status != 'deleted'
+             LIMIT 1`
+          ).bind(checksum, tenantId).first<{
+            document_id: string;
+            file_name: string;
+            title: string;
+          }>();
+
+          if (existingVersion) {
+            duplicate = {
+              document_id: existingVersion.document_id,
+              document_title: existingVersion.title,
+              file_name: existingVersion.file_name,
+            };
+          }
+        } catch {
+          // Non-critical — don't block processing if duplicate check fails
+        }
+
         if (!text) {
           results.push({
             file_name: file.name,
@@ -183,6 +213,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             product_names: [],
             confidence: 'low',
             confidence_score: 0,
+            checksum,
+            duplicate,
           });
           continue;
         }
@@ -201,6 +233,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           product_names: extraction.product_names,
           confidence: extraction.confidence,
           confidence_score: confidenceScore,
+          checksum,
+          duplicate,
         });
       } catch (err) {
         results.push({

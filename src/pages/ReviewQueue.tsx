@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -18,12 +18,16 @@ import {
   AccordionSummary,
   AccordionDetails,
   Snackbar,
+  Paper,
 } from '@mui/material';
 import {
   ExpandMore as ExpandMoreIcon,
   CheckCircle as CheckIcon,
   Cancel as CancelIcon,
+  InsertDriveFile as FileIcon,
 } from '@mui/icons-material';
+import PdfViewer from '../components/PdfViewer';
+import { AUTH_TOKEN_KEY } from '../lib/types';
 import { api } from '../lib/api';
 import type { ProcessingQueueItem, ApiDocumentType } from '../lib/types';
 import { useAuth } from '../contexts/AuthContext';
@@ -55,12 +59,43 @@ export default function ReviewQueue() {
   const [productNames, setProductNames] = useState<Record<string, string>>({});
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
+  const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+  const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
+  const blobUrlsRef = useRef<Record<string, string>>({});
 
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
     open: false,
     message: '',
     severity: 'success',
   });
+
+  // Cleanup blob URLs on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(blobUrlsRef.current).forEach(URL.revokeObjectURL);
+    };
+  }, []);
+
+  // Load file preview when a card is expanded
+  const loadPreview = useCallback(async (itemId: string) => {
+    if (previewUrls[itemId] || previewLoading[itemId]) return;
+    setPreviewLoading(prev => ({ ...prev, [itemId]: true }));
+    try {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const res = await fetch(`/api/queue/${itemId}/file`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error('Failed to fetch file');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      blobUrlsRef.current[itemId] = url;
+      setPreviewUrls(prev => ({ ...prev, [itemId]: url }));
+    } catch {
+      // Preview load failed silently - user still has fields to work with
+    } finally {
+      setPreviewLoading(prev => ({ ...prev, [itemId]: false }));
+    }
+  }, [previewUrls, previewLoading]);
 
   // Load document types for filter
   useEffect(() => {
@@ -261,7 +296,11 @@ export default function ReviewQueue() {
               <Card key={item.id} variant="outlined">
                 <CardContent
                   sx={{ cursor: 'pointer' }}
-                  onClick={() => setExpandedId(isExpanded ? null : item.id)}
+                  onClick={() => {
+                    const newId = isExpanded ? null : item.id;
+                    setExpandedId(newId);
+                    if (newId) loadPreview(newId);
+                  }}
                 >
                   {/* Header row */}
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
@@ -301,57 +340,123 @@ export default function ReviewQueue() {
 
                 {isExpanded && (
                   <Box sx={{ px: 2, pb: 2 }}>
-                    {/* Extracted text preview */}
-                    {item.extracted_text && (
-                      <Accordion variant="outlined" sx={{ mb: 2 }}>
-                        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                          <Typography variant="body2" color="text.secondary">
-                            Extracted text
-                          </Typography>
-                        </AccordionSummary>
-                        <AccordionDetails>
-                          <Typography
-                            variant="body2"
+                    <Box sx={{ display: 'flex', gap: 2, flexDirection: { xs: 'column', md: 'row' }, mb: 2 }}>
+                      {/* File preview */}
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        {previewLoading[item.id] ? (
+                          <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 300 }}>
+                            <CircularProgress />
+                          </Box>
+                        ) : previewUrls[item.id] ? (
+                          item.mime_type === 'application/pdf' ? (
+                            <Box sx={{ minHeight: 400, height: '100%' }}>
+                              <PdfViewer url={previewUrls[item.id]} fileName={item.file_name} />
+                            </Box>
+                          ) : item.mime_type.startsWith('image/') ? (
+                            <Box sx={{ display: 'flex', justifyContent: 'center', p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
+                              <img
+                                src={previewUrls[item.id]}
+                                alt={item.file_name}
+                                style={{ maxWidth: '100%', maxHeight: 500, objectFit: 'contain', borderRadius: 4 }}
+                              />
+                            </Box>
+                          ) : (
+                            <Paper
+                              variant="outlined"
+                              sx={{
+                                p: 3,
+                                height: '100%',
+                                minHeight: 200,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                bgcolor: 'grey.50',
+                              }}
+                            >
+                              <FileIcon sx={{ fontSize: 48, color: 'text.secondary', opacity: 0.5, mb: 1 }} />
+                              <Typography variant="body2" color="text.secondary">
+                                Preview not available for this file type
+                              </Typography>
+                            </Paper>
+                          )
+                        ) : (
+                          <Paper
+                            variant="outlined"
                             sx={{
-                              whiteSpace: 'pre-wrap',
-                              fontFamily: 'monospace',
-                              fontSize: '0.75rem',
-                              maxHeight: 200,
-                              overflow: 'auto',
-                              bgcolor: 'action.hover',
-                              p: 1.5,
-                              borderRadius: 1,
+                              p: 3,
+                              height: '100%',
+                              minHeight: 200,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              bgcolor: 'grey.50',
                             }}
                           >
-                            {item.extracted_text}
-                          </Typography>
-                        </AccordionDetails>
-                      </Accordion>
-                    )}
+                            <FileIcon sx={{ fontSize: 48, color: 'text.secondary', opacity: 0.5, mb: 1 }} />
+                            <Typography variant="body2" color="text.secondary">
+                              Preview unavailable
+                            </Typography>
+                          </Paper>
+                        )}
+                      </Box>
 
-                    {/* Editable fields */}
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mb: 2 }}>
-                      {Object.entries(fields).map(([fieldName, fieldValue]) => (
-                        <TextField
-                          key={fieldName}
-                          label={fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                          value={fieldValue}
-                          onChange={(e) => updateField(item.id, fieldName, e.target.value)}
-                          size="small"
-                          fullWidth
-                          disabled={item.status !== 'pending' || isActioning}
-                        />
-                      ))}
+                      {/* Fields column */}
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        {/* Extracted text preview */}
+                        {item.extracted_text && (
+                          <Accordion variant="outlined" sx={{ mb: 2 }}>
+                            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                              <Typography variant="body2" color="text.secondary">
+                                Extracted text
+                              </Typography>
+                            </AccordionSummary>
+                            <AccordionDetails>
+                              <Typography
+                                variant="body2"
+                                sx={{
+                                  whiteSpace: 'pre-wrap',
+                                  fontFamily: 'monospace',
+                                  fontSize: '0.75rem',
+                                  maxHeight: 200,
+                                  overflow: 'auto',
+                                  bgcolor: 'action.hover',
+                                  p: 1.5,
+                                  borderRadius: 1,
+                                }}
+                              >
+                                {item.extracted_text}
+                              </Typography>
+                            </AccordionDetails>
+                          </Accordion>
+                        )}
 
-                      <TextField
-                        label="Product Name"
-                        value={productNames[item.id] || ''}
-                        onChange={(e) => updateProductName(item.id, e.target.value)}
-                        size="small"
-                        fullWidth
-                        disabled={item.status !== 'pending' || isActioning}
-                        helperText="Will be looked up or created automatically"
-                      />
+                        {/* Editable fields */}
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                          {Object.entries(fields).map(([fieldName, fieldValue]) => (
+                            <TextField
+                              key={fieldName}
+                              label={fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                              value={fieldValue}
+                              onChange={(e) => updateField(item.id, fieldName, e.target.value)}
+                              size="small"
+                              fullWidth
+                              disabled={item.status !== 'pending' || isActioning}
+                            />
+                          ))}
+
+                          <TextField
+                            label="Product Name"
+                            value={productNames[item.id] || ''}
+                            onChange={(e) => updateProductName(item.id, e.target.value)}
+                            size="small"
+                            fullWidth
+                            disabled={item.status !== 'pending' || isActioning}
+                            helperText="Will be looked up or created automatically"
+                          />
+                        </Box>
+                      </Box>
                     </Box>
 
                     {/* Action buttons */}

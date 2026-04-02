@@ -501,6 +501,12 @@ export interface ProcessingResult {
   product_names: string[];
   confidence: 'high' | 'medium' | 'low';
   confidence_score: number;
+  checksum?: string;
+  duplicate?: {
+    document_id: string;
+    document_title: string;
+    file_name: string;
+  };
 }
 
 export interface ProcessingResponse {

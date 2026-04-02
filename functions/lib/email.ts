@@ -212,3 +212,86 @@ export function buildAdminResetEmail(params: {
 
   return { subject, html };
 }
+
+export function buildEmailIngestSummaryEmail(params: {
+  senderName: string;
+  tenantName: string;
+  results: Array<{ fileName: string; status: string; documentId?: string; queueId?: string; confidence?: number; error?: string }>;
+}): { subject: string; html: string } {
+  const { senderName, tenantName, results } = params;
+  const subject = `Dox: ${results.length} document${results.length === 1 ? '' : 's'} processed from your email`;
+
+  const statusIcon = (status: string) => {
+    if (status === 'ingested') return '&#x2705;';
+    if (status === 'queued') return '&#x23F3;';
+    return '&#x274C;';
+  };
+
+  const statusLabel = (status: string) => {
+    if (status === 'ingested') return 'Ingested';
+    if (status === 'queued') return 'Queued for Review';
+    return 'Error';
+  };
+
+  const rows = results.map(r => {
+    let detail = '';
+    if (r.status === 'ingested' && r.confidence !== undefined) {
+      detail = `Confidence: ${Math.round(r.confidence * 100)}%`;
+    } else if (r.status === 'queued') {
+      detail = 'Needs manual review before ingestion';
+    } else if (r.status === 'error' && r.error) {
+      detail = r.error;
+    }
+
+    return `<tr>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${r.fileName}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${statusIcon(r.status)} ${statusLabel(r.status)}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#666;font-size:13px;">${detail}</td>
+            </tr>`;
+  }).join('\n');
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr>
+      <td style="background:#1976d2;padding:24px 32px;">
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Dox</h1>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:32px;">
+        <h2 style="margin:0 0 16px;color:#333;font-size:18px;">Email Ingest Summary</h2>
+        <p style="margin:0 0 16px;color:#555;line-height:1.6;">
+          Hi ${senderName},
+        </p>
+        <p style="margin:0 0 24px;color:#555;line-height:1.6;">
+          We received your email and processed ${results.length} attachment${results.length === 1 ? '' : 's'}. Here's a summary:
+        </p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #eee;border-radius:6px;overflow:hidden;margin:0 0 24px;">
+          <tr style="background:#f8f9fa;">
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">File</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Status</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Details</th>
+          </tr>
+          ${rows}
+        </table>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
+        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+          Processed by Dox for ${tenantName}
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  return { subject, html };
+}

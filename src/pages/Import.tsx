@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Box,
@@ -36,8 +36,9 @@ import {
   ThumbUp as ThumbUpIcon,
   ThumbDown as ThumbDownIcon,
 } from '@mui/icons-material';
+import PdfViewer from '../components/PdfViewer';
 import { api } from '../lib/api';
-import type { ApiDocumentType, ProcessingResult } from '../lib/types';
+import type { ApiDocumentType, ProcessingResult, ProcessingResponse } from '../lib/types';
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -65,6 +66,56 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Inline preview for a local File object (blob URL). */
+function LocalFilePreview({ file }: { file: File }) {
+  const previewUrl = useMemo(() => URL.createObjectURL(file), [file]);
+
+  useEffect(() => {
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
+
+  if (file.type === 'application/pdf') {
+    return (
+      <Box sx={{ minHeight: 400, height: '100%' }}>
+        <PdfViewer url={previewUrl} fileName={file.name} />
+      </Box>
+    );
+  }
+
+  if (file.type.startsWith('image/')) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
+        <img
+          src={previewUrl}
+          alt={file.name}
+          style={{ maxWidth: '100%', maxHeight: 500, objectFit: 'contain', borderRadius: 4 }}
+        />
+      </Box>
+    );
+  }
+
+  return (
+    <Paper
+      variant="outlined"
+      sx={{
+        p: 3,
+        height: '100%',
+        minHeight: 200,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        bgcolor: 'grey.50',
+      }}
+    >
+      <FileIcon sx={{ fontSize: 48, color: 'text.secondary', opacity: 0.5, mb: 1 }} />
+      <Typography variant="body2" color="text.secondary">
+        Preview not available for this file type
+      </Typography>
+    </Paper>
+  );
+}
+
 export function Import() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -85,6 +136,7 @@ export function Import() {
 
   // Stage 2 state
   const [showSlowMessage, setShowSlowMessage] = useState(false);
+  const [processingStatus, setProcessingStatus] = useState<{ current: number; total: number; fileName: string } | null>(null);
 
   // Stage 3 state
   const [editableResults, setEditableResults] = useState<EditableResult[]>([]);
@@ -155,7 +207,7 @@ export function Import() {
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  // Stage 2: Process files
+  // Stage 2: Process files (one at a time for per-file progress)
   const handleProcess = async () => {
     if (!effectiveTenantId) {
       setError('Please select a tenant.');
@@ -164,13 +216,41 @@ export function Import() {
 
     setStage('processing');
     setError('');
+    setProcessingStatus({ current: 0, total: files.length, fileName: '' });
+
     try {
-      const response = await api.processing.process(files, documentTypeId, effectiveTenantId);
-      const autoIngestThreshold = response.document_type.auto_ingest_threshold ?? 0.8;
+      const allResults: ProcessingResult[] = [];
+      let docTypeInfo: ProcessingResponse['document_type'] | null = null;
+
+      for (let i = 0; i < files.length; i++) {
+        setProcessingStatus({ current: i + 1, total: files.length, fileName: files[i].name });
+        try {
+          const response = await api.processing.process([files[i]], documentTypeId, effectiveTenantId);
+          if (!docTypeInfo) docTypeInfo = response.document_type;
+          allResults.push(...response.results.map(r => ({ ...r, file_index: i })));
+        } catch (err) {
+          allResults.push({
+            file_name: files[i].name,
+            file_index: i,
+            status: 'error',
+            error_message: err instanceof Error ? err.message : 'Processing failed',
+            fields: {},
+            product_names: [],
+            confidence: 'low',
+            confidence_score: 0,
+          });
+        }
+      }
+
+      if (!docTypeInfo) {
+        throw new Error('Processing failed for all files');
+      }
+
+      const autoIngestThreshold = docTypeInfo.auto_ingest_threshold ?? 0.8;
 
       // Build editable results
-      const editable: EditableResult[] = response.results.map((result, i) => ({
-        file: files[i] || files[result.file_index],
+      const editable: EditableResult[] = allResults.map((result, i) => ({
+        file: files[result.file_index] || files[i],
         result,
         editedFields: Object.fromEntries(
           Object.entries(result.fields).map(([k, v]) => [k, v || ''])
@@ -184,12 +264,13 @@ export function Import() {
       }));
 
       setEditableResults(editable);
+      setProcessingStatus(null);
       setStage('review');
 
-      // Auto-ingest high confidence results
+      // Auto-ingest high confidence results (skip duplicates)
       for (let i = 0; i < editable.length; i++) {
         const item = editable[i];
-        if (item.result.status === 'success' && item.confidenceScore >= autoIngestThreshold) {
+        if (item.result.status === 'success' && item.confidenceScore >= autoIngestThreshold && !item.result.duplicate) {
           setEditableResults(prev => prev.map((r, idx) =>
             idx === i ? { ...r, autoIngesting: true } : r
           ));
@@ -199,6 +280,7 @@ export function Import() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Processing failed');
+      setProcessingStatus(null);
       setStage('upload');
     }
   };
@@ -312,6 +394,7 @@ export function Import() {
     setDocumentTypeId('');
     setEditableResults([]);
     setError('');
+    setProcessingStatus(null);
     setStage('upload');
   };
 
@@ -530,9 +613,20 @@ export function Import() {
         <Box sx={{ textAlign: 'center', py: 6 }}>
           <CircularProgress size={48} sx={{ mb: 2 }} />
           <Typography variant="h6" gutterBottom>
-            Processing {files.length} file{files.length > 1 ? 's' : ''}...
+            {processingStatus
+              ? `Processing file ${processingStatus.current} of ${processingStatus.total}`
+              : `Processing ${files.length} file${files.length > 1 ? 's' : ''}...`}
           </Typography>
-          <LinearProgress sx={{ maxWidth: 400, mx: 'auto', mb: 2 }} />
+          {processingStatus && processingStatus.fileName && (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              {processingStatus.fileName}
+            </Typography>
+          )}
+          <LinearProgress
+            variant={processingStatus ? 'determinate' : 'indeterminate'}
+            value={processingStatus ? (processingStatus.current / processingStatus.total) * 100 : undefined}
+            sx={{ maxWidth: 400, mx: 'auto', mb: 2 }}
+          />
           <Typography variant="body2" color="text.secondary">
             Extracting fields using AI
           </Typography>
@@ -617,94 +711,122 @@ export function Import() {
                   </Alert>
                 )}
 
-                {/* Success state: editable fields */}
+                {/* Duplicate warning */}
+                {item.result.duplicate && !item.imported && (
+                  <Alert
+                    severity="warning"
+                    sx={{ mb: 2 }}
+                    action={
+                      <Button
+                        color="inherit"
+                        size="small"
+                        startIcon={<OpenIcon />}
+                        onClick={() => navigate(`/documents/${item.result.duplicate!.document_id}`)}
+                      >
+                        View Existing
+                      </Button>
+                    }
+                  >
+                    This file appears to be a duplicate of &ldquo;{item.result.duplicate.document_title}&rdquo;.
+                    Importing will add a new version.
+                  </Alert>
+                )}
+
+                {/* Success state: split layout with preview + editable fields */}
                 {item.result.status === 'success' && !item.imported && (
-                  <>
-                    {/* Extracted text preview */}
-                    {item.result.extracted_text_preview && (
-                      <Accordion variant="outlined" sx={{ mb: 2 }}>
-                        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                          <Typography variant="body2" color="text.secondary">
-                            Extracted text preview
-                          </Typography>
-                        </AccordionSummary>
-                        <AccordionDetails>
-                          <Typography
-                            variant="body2"
-                            sx={{
-                              whiteSpace: 'pre-wrap',
-                              fontFamily: 'monospace',
-                              fontSize: '0.75rem',
-                              maxHeight: 200,
-                              overflow: 'auto',
-                              bgcolor: 'action.hover',
-                              p: 1.5,
-                              borderRadius: 1,
-                            }}
-                          >
-                            {item.result.extracted_text_preview}
-                          </Typography>
-                        </AccordionDetails>
-                      </Accordion>
-                    )}
+                  <Box sx={{ display: 'flex', gap: 2, flexDirection: { xs: 'column', md: 'row' } }}>
+                    {/* File preview */}
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <LocalFilePreview file={item.file} />
+                    </Box>
 
                     {/* Editable fields */}
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                      {Object.entries(item.editedFields).map(([fieldName, fieldValue]) => (
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      {/* Extracted text preview */}
+                      {item.result.extracted_text_preview && (
+                        <Accordion variant="outlined" sx={{ mb: 2 }}>
+                          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                            <Typography variant="body2" color="text.secondary">
+                              Extracted text preview
+                            </Typography>
+                          </AccordionSummary>
+                          <AccordionDetails>
+                            <Typography
+                              variant="body2"
+                              sx={{
+                                whiteSpace: 'pre-wrap',
+                                fontFamily: 'monospace',
+                                fontSize: '0.75rem',
+                                maxHeight: 200,
+                                overflow: 'auto',
+                                bgcolor: 'action.hover',
+                                p: 1.5,
+                                borderRadius: 1,
+                              }}
+                            >
+                              {item.result.extracted_text_preview}
+                            </Typography>
+                          </AccordionDetails>
+                        </Accordion>
+                      )}
+
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                        {Object.entries(item.editedFields).map(([fieldName, fieldValue]) => (
+                          <TextField
+                            key={fieldName}
+                            label={fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                            value={fieldValue}
+                            onChange={(e) => updateField(index, fieldName, e.target.value)}
+                            size="small"
+                            fullWidth
+                            disabled={item.importing}
+                          />
+                        ))}
+
+                        {/* Product name */}
                         <TextField
-                          key={fieldName}
-                          label={fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                          value={fieldValue}
-                          onChange={(e) => updateField(index, fieldName, e.target.value)}
+                          label="Product Name"
+                          value={item.productName}
+                          onChange={(e) => updateProductName(index, e.target.value)}
                           size="small"
                           fullWidth
                           disabled={item.importing}
+                          helperText="Will be looked up or created automatically"
                         />
-                      ))}
 
-                      {/* Product name */}
-                      <TextField
-                        label="Product Name"
-                        value={item.productName}
-                        onChange={(e) => updateProductName(index, e.target.value)}
-                        size="small"
-                        fullWidth
-                        disabled={item.importing}
-                        helperText="Will be looked up or created automatically"
-                      />
-
-                      {/* Rate Extraction */}
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <Typography variant="body2" color="text.secondary">
-                          Rate Extraction:
-                        </Typography>
-                        <IconButton
-                          size="small"
-                          color={item.ratingSubmitted === 'up' ? 'success' : 'default'}
-                          onClick={() => handleRate(index, 1.0)}
-                          disabled={!!item.ratingSubmitted}
-                        >
-                          <ThumbUpIcon fontSize="small" />
-                        </IconButton>
-                        <IconButton
-                          size="small"
-                          color={item.ratingSubmitted === 'down' ? 'error' : 'default'}
-                          onClick={() => handleRate(index, 0.0)}
-                          disabled={!!item.ratingSubmitted}
-                        >
-                          <ThumbDownIcon fontSize="small" />
-                        </IconButton>
-                        {item.ratingSubmitted && (
-                          <Typography variant="caption" color="text.secondary">
-                            Rating saved
+                        {/* Rate Extraction */}
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                          <Typography variant="body2" color="text.secondary">
+                            Rate Extraction:
                           </Typography>
-                        )}
-                        {item.correctionsSaved && (
-                          <Chip label="Corrections saved" size="small" color="info" variant="outlined" sx={{ ml: 1 }} />
-                        )}
+                          <IconButton
+                            size="small"
+                            color={item.ratingSubmitted === 'up' ? 'success' : 'default'}
+                            onClick={() => handleRate(index, 1.0)}
+                            disabled={!!item.ratingSubmitted}
+                          >
+                            <ThumbUpIcon fontSize="small" />
+                          </IconButton>
+                          <IconButton
+                            size="small"
+                            color={item.ratingSubmitted === 'down' ? 'error' : 'default'}
+                            onClick={() => handleRate(index, 0.0)}
+                            disabled={!!item.ratingSubmitted}
+                          >
+                            <ThumbDownIcon fontSize="small" />
+                          </IconButton>
+                          {item.ratingSubmitted && (
+                            <Typography variant="caption" color="text.secondary">
+                              Rating saved
+                            </Typography>
+                          )}
+                          {item.correctionsSaved && (
+                            <Chip label="Corrections saved" size="small" color="info" variant="outlined" sx={{ ml: 1 }} />
+                          )}
+                        </Box>
                       </Box>
                     </Box>
-                  </>
+                  </Box>
                 )}
 
                 {/* Imported success link */}
