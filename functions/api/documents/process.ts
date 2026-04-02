@@ -62,22 +62,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     let docType: {
       id: string;
       name: string;
-      naming_format: string | null;
       extraction_fields: string | null;
-      auto_ingest_threshold: number | null;
+      auto_ingest: number;
     } | null = null;
 
     let extractionFields: ExtractionField[] = [];
 
     if (documentTypeId) {
       docType = await context.env.DB.prepare(
-        'SELECT id, name, naming_format, extraction_fields, auto_ingest_threshold FROM document_types WHERE id = ? AND active = 1'
+        'SELECT id, name, extraction_fields, auto_ingest FROM document_types WHERE id = ? AND active = 1'
       ).bind(documentTypeId).first<{
         id: string;
         name: string;
-        naming_format: string | null;
         extraction_fields: string | null;
-        auto_ingest_threshold: number | null;
+        auto_ingest: number;
       }>();
 
       if (!docType) {
@@ -217,9 +215,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         document_type: {
           id: docType.id,
           name: docType.name,
-          naming_format: docType.naming_format || null,
           extraction_fields: extractionFields,
-          auto_ingest_threshold: docType.auto_ingest_threshold ?? null,
+          auto_ingest: !!(docType.auto_ingest),
         },
       } : {}),
     }), {

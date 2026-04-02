@@ -393,7 +393,7 @@ export function Import() {
 
   // Build editable results from completed queue items
   const buildEditableResults = (items: QueuedItem[]) => {
-    const autoIngestThreshold = docTypeInfo?.auto_ingest_threshold ?? 0.8;
+    const autoIngestEnabled = docTypeInfo?.auto_ingest ?? false;
 
     const editable: EditableResult[] = items
       .filter(item => item.id && item.result && item.processingStatus === 'ready')
@@ -470,7 +470,7 @@ export function Import() {
     // Auto-ingest high confidence results
     for (let i = 0; i < editable.length; i++) {
       const item = editable[i];
-      if (item.confidenceScore >= autoIngestThreshold && !item.queueItem.checksum) {
+      if (autoIngestEnabled && item.confidenceScore >= 0.7 && !item.queueItem.checksum) {
         // Check for duplicate via checksum in the queue item
       }
     }

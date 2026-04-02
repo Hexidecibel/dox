@@ -27,8 +27,6 @@ import type {
   DocumentTypeGetResponse,
   DocumentProductListResponse,
   ApiDocumentProduct,
-  ExpirationListResponse,
-  ExtractionField,
   ApiBundle,
   ApiBundleItem,
   BundleListResponse,
@@ -628,7 +626,7 @@ export const api = {
      * POST /api/document-types
      * Returns: { documentType: ApiDocumentType }
      */
-    create: (data: { name: string; description?: string; tenant_id?: string; naming_format?: string; extraction_fields?: ExtractionField[]; auto_ingest_threshold?: number }) =>
+    create: (data: { name: string; description?: string; tenant_id?: string; auto_ingest?: number; extract_tables?: number }) =>
       fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -638,7 +636,7 @@ export const api = {
      * PUT /api/document-types/:id
      * Returns: { documentType: ApiDocumentType }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number; naming_format?: string | null; extraction_fields?: ExtractionField[] | null; auto_ingest_threshold?: number | null }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; auto_ingest?: number; extract_tables?: number }) =>
       fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -686,30 +684,6 @@ export const api = {
      */
     unlink: (documentId: string, productId: string) =>
       fetchApi<{ success: boolean }>(`/documents/${documentId}/products/${productId}`, { method: 'DELETE' }),
-  },
-
-  expirations: {
-    /**
-     * GET /api/expirations
-     * Returns: { expirations: ExpirationItem[], summary: ExpirationSummary }
-     */
-    list: (params?: { days_ahead?: number; tenant_id?: string; include_expired?: boolean }) => {
-      const query = new URLSearchParams();
-      if (params?.days_ahead !== undefined) query.set('days_ahead', String(params.days_ahead));
-      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
-      if (params?.include_expired !== undefined) query.set('include_expired', String(params.include_expired));
-      const qs = query.toString();
-      return fetchApi<ExpirationListResponse>(`/expirations${qs ? `?${qs}` : ''}`);
-    },
-
-    /**
-     * POST /api/expirations/notify
-     * Triggers expiration notification emails. super_admin only.
-     */
-    notify: () =>
-      fetchApi<{ sent: number; tenants_notified: number; errors?: string[] }>('/expirations/notify', {
-        method: 'POST',
-      }),
   },
 
   reports: {

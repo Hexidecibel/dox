@@ -17,7 +17,6 @@ import { AuditLog } from './pages/admin/AuditLog';
 import { ApiKeys } from './pages/admin/ApiKeys';
 import { Products } from './pages/admin/Products';
 import { DocumentTypes } from './pages/admin/DocumentTypes';
-import { Expirations } from './pages/Expirations';
 import { Bundles } from './pages/Bundles';
 import { BundleDetail } from './pages/BundleDetail';
 import { IngestHistory } from './pages/IngestHistory';
@@ -42,7 +41,6 @@ function App() {
               <Route path="/documents/:id" element={<DocumentDetail />} />
               <Route path="/search" element={<Search />} />
               <Route path="/profile" element={<Profile />} />
-              <Route path="/expirations" element={<Expirations />} />
               <Route path="/bundles" element={<Bundles />} />
               <Route path="/bundles/:id" element={<BundleDetail />} />
               <Route path="/ingest-history" element={<IngestHistory />} />

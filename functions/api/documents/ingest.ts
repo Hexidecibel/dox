@@ -10,7 +10,6 @@ import {
 import { buildR2Key, uploadFile, computeChecksum } from '../../lib/r2';
 import { sanitizeString } from '../../lib/validation';
 import { extractText } from '../../lib/extract';
-import { applyNamingTemplate } from '../../lib/naming';
 import type { Env, User, Document } from '../../lib/types';
 
 const ALLOWED_TYPES = [
@@ -224,37 +223,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const primaryMetadataStr = Object.keys(primaryMetadata).length > 0 ? JSON.stringify(primaryMetadata) : null;
     const extendedMetadataStr = Object.keys(extendedMetadata).length > 0 ? JSON.stringify(extendedMetadata) : null;
 
-    // Look up naming format from document type (if document_type_id provided)
-    let displayFileName = fileName;
-    let docTypeName: string | null = null;
-    let namingFormatTemplate: string | null = null;
-
-    if (documentTypeId) {
-      const docType = await context.env.DB.prepare(
-        'SELECT naming_format, name FROM document_types WHERE id = ? AND active = 1'
-      ).bind(documentTypeId).first<{ naming_format: string | null; name: string }>();
-
-      if (docType) {
-        docTypeName = docType.name;
-        if (docType.naming_format) {
-          namingFormatTemplate = docType.naming_format;
-        }
-      }
-    }
-
-    if (namingFormatTemplate) {
-      const fileExt = fileName.split('.').pop() || '';
-      const namingMeta: Record<string, string | undefined> = {
-        title: sanitizedTitle || fileName.replace(/\.[^/.]+$/, ''),
-        doc_type: docTypeName || undefined,
-        ext: fileExt,
-      };
-      // Merge primary_metadata values so naming templates can use any field
-      for (const [k, v] of Object.entries(primaryMetadata)) {
-        if (v) namingMeta[k] = v;
-      }
-      displayFileName = applyNamingTemplate(namingFormatTemplate, namingMeta);
-    }
+    // Use original filename as-is (metadata is searchable separately)
+    const displayFileName = fileName;
 
     // Look up existing document by external_ref + tenant_id
     const existingDoc = await context.env.DB.prepare(

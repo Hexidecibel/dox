@@ -30,7 +30,6 @@ Full-text search already captures everything. Extraction fields are for:
 - Structured metadata (primary_metadata JSON) for filtering/dashboards
 - Product resolution (matching to catalog)
 - Supplier resolution (lookup-or-create)
-- Naming format placeholders (any metadata key works as `{key}`)
 - Clean, normalized values
 
 ### Email webhook (Phase 4)

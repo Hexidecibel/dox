@@ -70,9 +70,9 @@ export interface DocumentTypeRow {
   name: string;
   slug: string;
   description: string | null;
-  naming_format: string | null;
-  extraction_fields: string | null;
-  auto_ingest_threshold: number | null;
+  auto_ingest_threshold: number | null; // deprecated, unused
+  auto_ingest: number;       // 0 or 1
+  extract_tables: number;    // 0 or 1
   active: number;
   created_at: string;
   updated_at: string;
@@ -443,35 +443,6 @@ export interface CreateApiKeyResponse {
 
 // === Expiration Types ===
 
-export interface ExpirationItem {
-  link_id: string;
-  document_id: string;
-  document_title: string;
-  document_type_name: string | null;
-  product_id: string;
-  product_name: string;
-  product_slug: string;
-  tenant_id: string;
-  tenant_name: string;
-  expires_at: string;
-  days_remaining: number;
-  status: 'expired' | 'critical' | 'warning' | 'ok';
-  notes: string | null;
-}
-
-export interface ExpirationSummary {
-  expired: number;
-  critical: number;
-  warning: number;
-  ok: number;
-  total: number;
-}
-
-export interface ExpirationListResponse {
-  expirations: ExpirationItem[];
-  summary: ExpirationSummary;
-}
-
 // === Document Bundle Types ===
 
 export interface DocumentBundleRow {
@@ -556,9 +527,7 @@ export interface ProcessingResponse {
   document_type: {
     id: string;
     name: string;
-    naming_format: string | null;
-    extraction_fields: ExtractionField[];
-    auto_ingest_threshold: number | null;
+    auto_ingest: boolean;
   };
 }
 
@@ -625,9 +594,7 @@ export interface QueuedResponse {
   document_type?: {
     id: string;
     name: string;
-    naming_format: string | null;
-    extraction_fields: ExtractionField[];
-    auto_ingest_threshold: number | null;
+    auto_ingest: boolean;
   };
 }
 

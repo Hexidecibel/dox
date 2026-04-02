@@ -3,7 +3,6 @@ import { uploadFile, computeChecksum, buildR2Key } from '../../lib/r2';
 import { extractText } from '../../lib/extract';
 import { extractFields } from '../../lib/llm';
 import { computeConfidenceScore } from '../../lib/confidence';
-import { applyNamingTemplate } from '../../lib/naming';
 import { sendEmail, buildEmailIngestSummaryEmail } from '../../lib/email';
 import type { Env } from '../../lib/types';
 
@@ -121,25 +120,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // 5. Load document type config (naming, threshold)
     const documentTypeId = mapping.default_document_type_id || null;
     let docTypeName: string | null = null;
-    let namingFormat: string | null = null;
-    let autoIngestThreshold = 0.8;
+    let autoIngestEnabled = false;
 
     if (documentTypeId) {
       const docType = await context.env.DB.prepare(
-        'SELECT id, name, naming_format, auto_ingest_threshold FROM document_types WHERE id = ? AND active = 1'
+        'SELECT id, name, auto_ingest FROM document_types WHERE id = ? AND active = 1'
       )
         .bind(documentTypeId)
         .first<{
           id: string;
           name: string;
-          naming_format: string | null;
-          auto_ingest_threshold: number | null;
+          auto_ingest: number;
         }>();
 
       if (docType) {
         docTypeName = docType.name;
-        namingFormat = docType.naming_format;
-        autoIngestThreshold = docType.auto_ingest_threshold ?? 0.8;
+        autoIngestEnabled = !!(docType.auto_ingest);
       }
     }
 
@@ -265,7 +261,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
         // Decide: auto-ingest or queue for review
         // Training gate: if not enough training examples, ALWAYS queue for review
-        if (trainingReady && confidenceScore >= autoIngestThreshold) {
+        if (autoIngestEnabled && trainingReady && confidenceScore >= 0.7) {
           // === AUTO-INGEST: high confidence ===
           const checksum = await computeChecksum(fileData);
           const docId = generateId();
@@ -310,20 +306,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
           }
 
-          // Apply naming format if available
-          let displayFileName = fileName;
-          if (namingFormat) {
-            const fileExt = fileName.split('.').pop() || '';
-            const namingMeta: Record<string, string | undefined> = {
-              title,
-              doc_type: docTypeName || undefined,
-              ext: fileExt,
-            };
-            for (const [k, v] of Object.entries(primaryMetadata)) {
-              if (v) namingMeta[k] = v;
-            }
-            displayFileName = applyNamingTemplate(namingFormat, namingMeta);
-          }
+          // Use original filename as-is (metadata is searchable separately)
+          const displayFileName = fileName;
 
           // Upload to R2
           const r2Key = buildR2Key(
