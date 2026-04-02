@@ -120,6 +120,9 @@ async function processItem(item) {
       return;
     }
 
+    // Trim text for LLM (full text still stored for search)
+    const llmText = text.substring(0, 10000);
+
     // Call Qwen
     const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
       method: 'POST',
@@ -127,12 +130,12 @@ async function processItem(item) {
       body: JSON.stringify({
         model: 'Qwen3-5-35B-A3B',
         temperature: 0,
-        max_tokens: 4096,
+        max_tokens: 2048,
         messages: [
           { role: 'system', content: buildPrompt() },
           {
             role: 'user',
-            content: `<document>\n${text}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+            content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
           },
         ],
       }),
