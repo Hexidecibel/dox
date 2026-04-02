@@ -43,6 +43,7 @@ export type {
   ExtractedTable,
   ExtractionExampleRow,
   ProcessingQueueItem,
+  QueuedResponse,
   ParsedQuery,
   NaturalSearchResponse,
   ApiSupplier,

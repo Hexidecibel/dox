@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [ -z "${DOX_API_KEY:-}" ]; then
+  echo "Error: DOX_API_KEY environment variable required"
+  echo "Create an API key in dox admin, then: DOX_API_KEY=dox_sk_... bin/process-worker-start"
+  exit 1
+fi
+
+export DOX_API_URL="${DOX_API_URL:-https://dox.cush.rocks}"
+export QWEN_URL="${QWEN_URL:-http://127.0.0.1:9600}"
+
+mkdir -p logs
+
+nohup node bin/process-worker > logs/process-worker.log 2>&1 &
+echo "Process worker started (PID: $!)"
+echo "Logs: logs/process-worker.log"
+echo "Stop: kill $!"

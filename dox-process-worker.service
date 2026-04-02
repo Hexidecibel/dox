@@ -1,0 +1,18 @@
+[Unit]
+Description=Dox Document Process Worker
+After=network.target
+
+[Service]
+Type=simple
+User=hexi
+WorkingDirectory=/home/hexi/local/src/doc-upload-site
+ExecStart=/usr/bin/node /home/hexi/local/src/doc-upload-site/bin/process-worker
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=DOX_API_URL=https://dox.cush.rocks
+Environment=DOX_API_KEY=PLACEHOLDER_NEEDS_REAL_KEY
+Environment=QWEN_URL=http://127.0.0.1:9600
+
+[Install]
+WantedBy=multi-user.target

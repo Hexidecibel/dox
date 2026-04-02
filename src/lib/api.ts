@@ -33,8 +33,8 @@ import type {
   ApiBundleItem,
   BundleListResponse,
   BundleGetResponse,
-  ProcessingResponse,
   ProcessingQueueItem,
+  QueuedResponse,
   NaturalSearchResponse,
   ApiSupplier,
   SupplierListResponse,
@@ -845,14 +845,14 @@ export const api = {
   processing: {
     /**
      * POST /api/documents/process
-     * Send files + document type for AI extraction. Returns extracted fields per file.
+     * Send files for async processing. Returns queue item IDs immediately.
      */
-    process: (files: File[], documentTypeId: string, tenantId: string): Promise<ProcessingResponse> => {
+    process: (files: File[], documentTypeId: string, tenantId: string): Promise<QueuedResponse> => {
       const form = new FormData();
       files.forEach(f => form.append('files', f));
       form.append('document_type_id', documentTypeId);
       form.append('tenant_id', tenantId);
-      return fetchApi<ProcessingResponse>('/documents/process', {
+      return fetchApi<QueuedResponse>('/documents/process', {
         method: 'POST',
         body: form,
       });
@@ -869,6 +869,8 @@ export const api = {
       fetchApi<{ document: any }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     reject: (id: string) =>
       fetchApi<void>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'rejected' }) }),
+    postResults: (id: string, data: Record<string, unknown>) =>
+      fetchApi<{ success: boolean }>(`/queue/${id}/results`, { method: 'PUT', body: JSON.stringify(data) }),
   },
 
   extractionExamples: {

@@ -592,10 +592,42 @@ export interface ProcessingQueueItem {
   product_names: string | null;
   supplier: string | null;
   status: 'pending' | 'approved' | 'rejected';
+  processing_status: 'queued' | 'processing' | 'ready' | 'error';
+  error_message: string | null;
+  checksum: string | null;
+  tables: string | null;
+  summary: string | null;
   reviewed_by: string | null;
   reviewed_at: string | null;
   created_by: string | null;
   created_at: string;
+  // Joined fields from list/get queries
+  document_type_name?: string;
+  document_type_slug?: string;
+  tenant_name?: string;
+  tenant_slug?: string;
+  created_by_name?: string;
+  reviewed_by_name?: string;
+}
+
+export interface QueuedResponse {
+  queued: true;
+  items: Array<{
+    id: string;
+    file_name: string;
+    duplicate?: {
+      document_id: string;
+      document_title: string;
+      file_name: string;
+    } | null;
+  }>;
+  document_type: {
+    id: string;
+    name: string;
+    naming_format: string | null;
+    extraction_fields: ExtractionField[];
+    auto_ingest_threshold: number | null;
+  };
 }
 
 // === Natural Language Search ===

@@ -1,0 +1,277 @@
+#!/usr/bin/env node
+
+/**
+ * Dox Document Process Worker
+ *
+ * Polls the dox API for queued documents, extracts text, calls Qwen for field
+ * extraction, and posts results back. Runs locally as a daemon — no CF Worker
+ * time limits.
+ *
+ * Config (environment variables):
+ *   DOX_API_URL   — defaults to https://dox.cush.rocks
+ *   DOX_API_KEY   — required, API key for auth (X-API-Key header)
+ *   QWEN_URL      — defaults to http://127.0.0.1:9600
+ *   POLL_INTERVAL  — defaults to 3000 (ms)
+ */
+
+const DOX_API_URL = (process.env.DOX_API_URL || 'https://dox.cush.rocks').replace(/\/+$/, '');
+const DOX_API_KEY = process.env.DOX_API_KEY || '';
+const QWEN_URL = (process.env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
+const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000', 10);
+
+if (!DOX_API_KEY) {
+  console.error('Error: DOX_API_KEY environment variable is required');
+  console.error('Create an API key in dox admin, then set DOX_API_KEY=dox_sk_...');
+  process.exit(1);
+}
+
+const headers = {
+  'X-API-Key': DOX_API_KEY,
+  'Content-Type': 'application/json',
+};
+
+let processing = false;
+
+async function poll() {
+  if (processing) return; // skip if still working on previous batch
+  processing = true;
+
+  try {
+    const res = await fetch(
+      `${DOX_API_URL}/api/queue?processing_status=queued&limit=5`,
+      { headers }
+    );
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.error(`Poll failed: ${res.status} ${text.substring(0, 200)}`);
+      return;
+    }
+
+    const data = await res.json();
+    const items = data.items || [];
+
+    for (const item of items) {
+      await processItem(item);
+    }
+  } catch (err) {
+    console.error('Poll error:', err.message);
+  } finally {
+    processing = false;
+  }
+}
+
+async function postResults(id, body) {
+  const res = await fetch(`${DOX_API_URL}/api/queue/${id}/results`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    console.error(`Failed to post results for ${id}: ${res.status} ${text.substring(0, 200)}`);
+  }
+}
+
+async function processItem(item) {
+  const startTime = Date.now();
+  console.log(`Processing ${item.file_name} (${item.id})...`);
+
+  try {
+    // Mark as processing
+    await postResults(item.id, { processing_status: 'processing' });
+
+    // Download file
+    const fileRes = await fetch(`${DOX_API_URL}/api/queue/${item.id}/file`, {
+      headers: { 'X-API-Key': DOX_API_KEY },
+    });
+
+    if (!fileRes.ok) {
+      throw new Error(`File download failed: ${fileRes.status}`);
+    }
+
+    const fileBuffer = await fileRes.arrayBuffer();
+
+    // Extract text based on mime type
+    let text = null;
+
+    if (item.mime_type === 'application/pdf') {
+      try {
+        const { extractText } = await import('unpdf');
+        const result = await extractText(new Uint8Array(fileBuffer), { mergePages: true });
+        text = result.text?.substring(0, 100000) || null;
+      } catch (err) {
+        console.warn(`PDF extraction failed for ${item.file_name}:`, err.message);
+      }
+    } else if (
+      item.mime_type === 'text/plain' ||
+      item.mime_type === 'text/csv' ||
+      item.mime_type === 'application/json'
+    ) {
+      text = new TextDecoder().decode(new Uint8Array(fileBuffer)).substring(0, 100000);
+    }
+
+    if (!text || text.trim().length === 0) {
+      await postResults(item.id, {
+        processing_status: 'error',
+        error_message: 'Could not extract text from file',
+      });
+      console.log(`  Skipped ${item.file_name}: no text extracted`);
+      return;
+    }
+
+    // Call Qwen
+    const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'Qwen3-5-35B-A3B',
+        temperature: 0,
+        max_tokens: 4096,
+        messages: [
+          { role: 'system', content: buildPrompt() },
+          {
+            role: 'user',
+            content: `<document>\n${text}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+          },
+        ],
+      }),
+    });
+
+    if (!qwenRes.ok) {
+      const errText = await qwenRes.text().catch(() => '');
+      throw new Error(`Qwen request failed: ${qwenRes.status} ${errText.substring(0, 200)}`);
+    }
+
+    const qwenData = await qwenRes.json();
+    const content = qwenData.choices?.[0]?.message?.content || '';
+
+    // Parse response
+    const parsed = parseExtraction(content);
+
+    // Detect supplier
+    const supplierKeys = ['supplier_name', 'supplier', 'manufacturer', 'vendor', 'company', 'from'];
+    const supplier = supplierKeys.map(k => parsed.fields?.[k]).find(v => v != null && String(v).trim() !== '') || null;
+
+    // Compute confidence score
+    const confidenceScore = computeConfidenceScore(parsed.confidence, parsed.fields || {});
+
+    // Post results
+    await postResults(item.id, {
+      processing_status: 'ready',
+      extracted_text: text.substring(0, 100000),
+      ai_fields: JSON.stringify(parsed.fields || {}),
+      ai_confidence: parsed.confidence || 'low',
+      confidence_score: confidenceScore,
+      product_names: JSON.stringify(parsed.products || []),
+      tables: JSON.stringify(parsed.tables || []),
+      summary: parsed.summary || '',
+      supplier: supplier,
+    });
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`  Done: ${item.file_name} (${Math.round(confidenceScore * 100)}% confidence, ${elapsed}s)`);
+  } catch (err) {
+    console.error(`  Error processing ${item.file_name}:`, err.message);
+    await postResults(item.id, {
+      processing_status: 'error',
+      error_message: err.message,
+    }).catch(() => {});
+  }
+}
+
+// === Prompt (same logic as functions/lib/llm.ts) ===
+
+function buildPrompt() {
+  return [
+    'You are a document data extraction assistant. Analyze the provided document and extract ALL structured data you can find.',
+    '',
+    'Return a JSON object with these sections:',
+    '',
+    '1. "fields": an object of ALL key-value pairs found in the document. Use snake_case keys derived from the field labels (e.g., "Lot Number" -> "lot_number", "Ship Date" -> "ship_date", "Customer Name" -> "customer_name"). Set value to null if a label exists but the value is unclear.',
+    '',
+    '2. "tables": an array of any tabular data found (e.g., test results, line items). Each table is: { "name": "string describing the table", "headers": ["col1", "col2"], "rows": [["val1", "val2"], ...] }',
+    '',
+    '3. "products": an array of product/item names mentioned in the document (empty array if none found).',
+    '',
+    '4. "summary": a one-sentence description of what this document is (e.g., "Certificate of Analysis for Butter from Supplier X, Lot LOT-2024-042").',
+    '',
+    '5. "_confidence": "high" if the document was clearly structured and most data was extracted, "medium" if some parts were ambiguous, "low" if the document was hard to parse.',
+  ].join('\n');
+}
+
+// === Response parser (same logic as functions/lib/llm.ts) ===
+
+function parseExtraction(content) {
+  content = (content || '').trim();
+
+  // Strip markdown code fences
+  const fenceMatch = content.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/);
+  if (fenceMatch) {
+    content = fenceMatch[1].trim();
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return { fields: {}, tables: [], products: [], summary: '', confidence: 'low' };
+  }
+
+  const products = Array.isArray(parsed.products) ? parsed.products : [];
+  const confidence = ['high', 'medium', 'low'].includes(parsed._confidence) ? parsed._confidence : 'low';
+  const tables = Array.isArray(parsed.tables) ? parsed.tables : [];
+  const summary = typeof parsed.summary === 'string' ? parsed.summary : '';
+
+  // Build fields
+  const fields = {};
+  const rawFields =
+    typeof parsed.fields === 'object' && parsed.fields !== null && !Array.isArray(parsed.fields)
+      ? parsed.fields
+      : parsed;
+  const reservedKeys = new Set(['fields', 'tables', 'products', 'summary', '_confidence']);
+
+  for (const [key, value] of Object.entries(rawFields)) {
+    if (!key.startsWith('_') && !reservedKeys.has(key)) {
+      fields[key] = value === null || value === undefined ? null : String(value);
+    }
+  }
+
+  return { fields, tables, products, summary, confidence };
+}
+
+// === Confidence score (same logic as functions/lib/confidence.ts) ===
+
+function computeConfidenceScore(aiConfidence, extractedFields) {
+  let score = aiConfidence === 'high' ? 0.9 : aiConfidence === 'medium' ? 0.6 : 0.3;
+
+  const totalFields = Object.values(extractedFields).filter(v => v != null).length;
+  score += Math.min(totalFields * 0.01, 0.08);
+
+  for (const [key, value] of Object.entries(extractedFields)) {
+    if (value && key.includes('date')) {
+      if (!/\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(value) && !/\d{1,2}[-/]\d{1,2}[-/]\d{2,4}/.test(value)) {
+        score -= 0.1;
+      }
+    }
+  }
+
+  const lotValue = extractedFields['lot_number'] || extractedFields['batch_number'];
+  if (lotValue && lotValue.length < 3) {
+    score -= 0.05;
+  }
+
+  return Math.max(0, Math.min(1, score));
+}
+
+// === Main loop ===
+
+console.log(`Dox process worker started`);
+console.log(`  API: ${DOX_API_URL}`);
+console.log(`  Qwen: ${QWEN_URL}`);
+console.log(`  Poll interval: ${POLL_INTERVAL / 1000}s`);
+console.log('');
+
+// Immediate first poll, then interval
+poll();
+setInterval(poll, POLL_INTERVAL);

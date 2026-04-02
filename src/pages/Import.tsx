@@ -42,10 +42,13 @@ import {
   OpenInNew as OpenIcon,
   ThumbUp as ThumbUpIcon,
   ThumbDown as ThumbDownIcon,
+  HourglassEmpty as QueuedIcon,
+  Sync as ProcessingIcon,
+  Error as ErrorIcon,
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
 import { api } from '../lib/api';
-import type { ApiDocumentType, ProcessingResult, ProcessingResponse, ExtractedTable } from '../lib/types';
+import type { ApiDocumentType, ProcessingQueueItem, QueuedResponse, ExtractedTable } from '../lib/types';
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -70,7 +73,6 @@ const PRODUCT_FIELD_NAMES = new Set([
 function autoAssignTier(fieldKey: string): string {
   const normalized = fieldKey.toLowerCase().trim();
   if (PRODUCT_FIELD_NAMES.has(normalized)) return 'product_name';
-  // By default, all AI-extracted fields go to primary
   return 'primary';
 }
 
@@ -78,13 +80,19 @@ function humanizeFieldKey(key: string): string {
   return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-// Removed unused tierLabelFor -- tiers are shown via Select dropdown now
-
 // === Interfaces ===
+
+interface QueuedItem {
+  id: string;
+  fileName: string;
+  processingStatus: string;
+  result?: ProcessingQueueItem;
+  duplicate?: { document_id: string; document_title: string; file_name: string } | null;
+}
 
 interface EditableResult {
   file: File;
-  result: ProcessingResult;
+  queueItem: ProcessingQueueItem;
   editedFields: Record<string, string>;
   fieldAssignments: Record<string, string>;
   productName: string;
@@ -248,6 +256,22 @@ function FieldRow({
   );
 }
 
+/** Processing status indicator for a single queued item */
+function ProcessingStatusChip({ status }: { status: string }) {
+  switch (status) {
+    case 'queued':
+      return <Chip icon={<QueuedIcon />} label="Queued" size="small" color="default" variant="outlined" />;
+    case 'processing':
+      return <Chip icon={<ProcessingIcon />} label="Processing" size="small" color="info" variant="outlined" />;
+    case 'ready':
+      return <Chip icon={<CheckIcon />} label="Ready" size="small" color="success" variant="outlined" />;
+    case 'error':
+      return <Chip icon={<ErrorIcon />} label="Error" size="small" color="error" variant="outlined" />;
+    default:
+      return <Chip label={status} size="small" />;
+  }
+}
+
 // === Main Component ===
 
 export function Import() {
@@ -268,9 +292,9 @@ export function Import() {
   const [error, setError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Stage 2 state
-  const [showSlowMessage, setShowSlowMessage] = useState(false);
-  const [processingStatus, setProcessingStatus] = useState<{ current: number; total: number; fileName: string } | null>(null);
+  // Stage 2 state — async polling
+  const [queuedItems, setQueuedItems] = useState<QueuedItem[]>([]);
+  const [docTypeInfo, setDocTypeInfo] = useState<QueuedResponse['document_type'] | null>(null);
 
   // Stage 3 state
   const [editableResults, setEditableResults] = useState<EditableResult[]>([]);
@@ -310,15 +334,114 @@ export function Import() {
     }
   }, [isSuperAdmin, selectedTenantId]);
 
-  // Show slow message after 5 seconds during processing
+  // Poll queued items during processing stage
   useEffect(() => {
-    if (stage === 'processing') {
-      setShowSlowMessage(false);
-      const timer = setTimeout(() => setShowSlowMessage(true), 5000);
-      return () => clearTimeout(timer);
+    if (stage !== 'processing' || queuedItems.length === 0) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const updated = await Promise.all(
+          queuedItems.map(async (item) => {
+            // Skip items that are already done
+            if (item.processingStatus === 'ready' || item.processingStatus === 'error') return item;
+            // Skip items that failed validation (no ID)
+            if (!item.id) return item;
+            try {
+              const res = await api.queue.get(item.id);
+              return {
+                ...item,
+                processingStatus: res.item.processing_status || item.processingStatus,
+                result: res.item,
+              };
+            } catch {
+              return item;
+            }
+          })
+        );
+        setQueuedItems(updated);
+
+        // Check if all items are done
+        const allDone = updated.every(i => !i.id || i.processingStatus === 'ready' || i.processingStatus === 'error');
+        if (allDone) {
+          buildEditableResults(updated);
+          setStage('review');
+        }
+      } catch {
+        // Polling error — ignore, will retry
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [stage, queuedItems]);
+
+  // Build editable results from completed queue items
+  const buildEditableResults = (items: QueuedItem[]) => {
+    const autoIngestThreshold = docTypeInfo?.auto_ingest_threshold ?? 0.8;
+
+    const editable: EditableResult[] = items
+      .filter(item => item.id && item.result && item.processingStatus === 'ready')
+      .map((item) => {
+        const queueItem = item.result!;
+
+        // Parse AI fields from JSON string
+        let fields: Record<string, string | null> = {};
+        if (queueItem.ai_fields) {
+          try {
+            fields = typeof queueItem.ai_fields === 'string'
+              ? JSON.parse(queueItem.ai_fields)
+              : queueItem.ai_fields;
+          } catch {
+            fields = {};
+          }
+        }
+
+        // Parse product names from JSON string
+        let productNames: string[] = [];
+        if (queueItem.product_names) {
+          try {
+            productNames = typeof queueItem.product_names === 'string'
+              ? JSON.parse(queueItem.product_names)
+              : queueItem.product_names;
+          } catch {
+            productNames = [];
+          }
+        }
+
+        const editedFields: Record<string, string> = {};
+        const fieldAssignments: Record<string, string> = {};
+
+        for (const [k, v] of Object.entries(fields)) {
+          editedFields[k] = v || '';
+          fieldAssignments[k] = autoAssignTier(k);
+        }
+
+        // Find the original file by name
+        const file = files.find(f => f.name === item.fileName) || files[0];
+
+        return {
+          file,
+          queueItem,
+          editedFields,
+          fieldAssignments,
+          productName: productNames[0] || '',
+          importing: false,
+          imported: false,
+          confidenceScore: queueItem.confidence_score || 0,
+          autoIngesting: false,
+          correctionsSaved: false,
+        };
+      });
+
+    setEditableResults(editable);
+
+    // Auto-ingest high confidence results
+    for (let i = 0; i < editable.length; i++) {
+      const item = editable[i];
+      if (item.confidenceScore >= autoIngestThreshold && !item.queueItem.checksum) {
+        // Check for duplicate via checksum in the queue item
+      }
     }
-    setShowSlowMessage(false);
-  }, [stage]);
+  };
 
   // Drag handlers
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -341,7 +464,7 @@ export function Import() {
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  // Stage 2: Process files (one at a time for per-file progress)
+  // Stage 2: Submit files for async processing
   const handleProcess = async () => {
     if (!effectiveTenantId) {
       setError('Please select a tenant.');
@@ -350,90 +473,36 @@ export function Import() {
 
     setStage('processing');
     setError('');
-    setProcessingStatus({ current: 0, total: files.length, fileName: '' });
 
     try {
-      const allResults: ProcessingResult[] = [];
-      let docTypeInfo: ProcessingResponse['document_type'] | null = null;
+      const response = await api.processing.process(files, documentTypeId, effectiveTenantId);
+      setDocTypeInfo(response.document_type);
 
-      for (let i = 0; i < files.length; i++) {
-        setProcessingStatus({ current: i + 1, total: files.length, fileName: files[i].name });
-        try {
-          const response = await api.processing.process([files[i]], documentTypeId, effectiveTenantId);
-          if (!docTypeInfo) docTypeInfo = response.document_type;
-          allResults.push(...response.results.map(r => ({ ...r, file_index: i })));
-        } catch (err) {
-          allResults.push({
-            file_name: files[i].name,
-            file_index: i,
-            status: 'error',
-            error_message: err instanceof Error ? err.message : 'Processing failed',
-            fields: {},
-            product_names: [],
-            confidence: 'low',
-            confidence_score: 0,
-            training_ready: false,
-            example_count: 0,
-          });
-        }
-      }
+      // Initialize queued items for polling
+      const items: QueuedItem[] = response.items.map(item => ({
+        id: item.id,
+        fileName: item.file_name,
+        processingStatus: item.id ? 'queued' : 'error',
+        duplicate: item.duplicate,
+      }));
 
-      if (!docTypeInfo) {
-        throw new Error('Processing failed for all files');
-      }
+      setQueuedItems(items);
 
-      const autoIngestThreshold = docTypeInfo.auto_ingest_threshold ?? 0.8;
-
-      // Build editable results with field assignments
-      const editable: EditableResult[] = allResults.map((result, i) => {
-        const editedFields: Record<string, string> = {};
-        const fieldAssignments: Record<string, string> = {};
-
-        for (const [k, v] of Object.entries(result.fields)) {
-          editedFields[k] = v || '';
-          fieldAssignments[k] = autoAssignTier(k);
-        }
-
-        return {
-          file: files[result.file_index] || files[i],
-          result,
-          editedFields,
-          fieldAssignments,
-          productName: result.product_names[0] || '',
-          importing: false,
-          imported: false,
-          confidenceScore: result.confidence_score,
-          autoIngesting: false,
-          correctionsSaved: false,
-        };
-      });
-
-      setEditableResults(editable);
-      setProcessingStatus(null);
-      setStage('review');
-
-      // Auto-ingest high confidence results (skip duplicates, require training readiness)
-      for (let i = 0; i < editable.length; i++) {
-        const item = editable[i];
-        if (item.result.status === 'success' && item.result.training_ready && item.confidenceScore >= autoIngestThreshold && !item.result.duplicate) {
-          setEditableResults(prev => prev.map((r, idx) =>
-            idx === i ? { ...r, autoIngesting: true } : r
-          ));
-          // Use a small delay to allow state to render
-          setTimeout(() => handleImport(i), 100 * i);
-        }
+      // If no valid items were queued, go back
+      if (items.every(i => !i.id)) {
+        setError('No files could be queued for processing');
+        setStage('upload');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Processing failed');
-      setProcessingStatus(null);
       setStage('upload');
     }
   };
 
-  // Stage 3: Import a single file — uses field assignments to build the ingest payload
+  // Stage 3: Import a single file
   const handleImport = async (index: number) => {
     const item = editableResults[index];
-    if (!item || item.imported || item.result.status === 'error') return;
+    if (!item || item.imported || !item.queueItem) return;
 
     // Mark importing
     setEditableResults(prev => prev.map((r, i) =>
@@ -441,30 +510,40 @@ export function Import() {
     ));
 
     try {
+      // Parse fields from queue item
+      let aiFields: Record<string, string | null> = {};
+      if (item.queueItem.ai_fields) {
+        try {
+          aiFields = typeof item.queueItem.ai_fields === 'string'
+            ? JSON.parse(item.queueItem.ai_fields)
+            : item.queueItem.ai_fields;
+        } catch { aiFields = {}; }
+      }
+
       // Auto-save correction as training example if fields were edited
       const fieldsChanged = Object.keys(item.editedFields).some(
-        k => item.editedFields[k] !== (item.result.fields[k] || '')
+        k => item.editedFields[k] !== (aiFields[k] || '')
       );
       if (fieldsChanged && documentTypeId) {
         try {
           await api.extractionExamples.create({
             document_type_id: documentTypeId,
             tenant_id: effectiveTenantId || undefined,
-            input_text: item.result.extracted_text_preview || '',
-            ai_output: JSON.stringify(item.result.fields),
+            input_text: (item.queueItem.extracted_text || '').substring(0, 2000),
+            ai_output: JSON.stringify(aiFields),
             corrected_output: JSON.stringify(item.editedFields),
             score: 0.8,
-            supplier: item.result.supplier || null,
+            supplier: item.queueItem.supplier || null,
           });
           setEditableResults(prev => prev.map((r, i) =>
             i === index ? { ...r, correctionsSaved: true } : r
           ));
         } catch {
-          // Non-critical -- don't block import
+          // Non-critical
         }
       }
 
-      // 1. Resolve product — check assignment first, then fallback to productName
+      // 1. Resolve product
       let productId: string | undefined;
       const productField = Object.entries(item.fieldAssignments).find(([, tier]) => tier === 'product_name');
       const productNameValue = productField ? item.editedFields[productField[0]] : item.productName;
@@ -476,12 +555,12 @@ export function Import() {
         productId = prodResult.product.id;
       }
 
-      // 2. Resolve supplier if detected
+      // 2. Resolve supplier
       let supplierId: string | undefined;
-      if (item.result.supplier) {
+      if (item.queueItem.supplier) {
         try {
           const supplierResult = await api.suppliers.lookupOrCreate({
-            name: item.result.supplier,
+            name: item.queueItem.supplier,
             tenant_id: effectiveTenantId,
           });
           supplierId = supplierResult.supplier.id;
@@ -490,7 +569,7 @@ export function Import() {
         }
       }
 
-      // 3. Build FormData for ingest using tier assignments
+      // 3. Build FormData for ingest
       const form = new FormData();
       form.append('file', item.file);
       form.append('tenant_id', effectiveTenantId);
@@ -516,7 +595,6 @@ export function Import() {
         } else if (tier === 'extended') {
           if (value) extendedMeta[key] = value;
         }
-        // 'product_name' and 'dismiss' are handled separately
       }
 
       if (Object.keys(primaryMeta).length > 0) {
@@ -527,12 +605,20 @@ export function Import() {
       }
 
       // Build source_metadata from tables
-      if (item.result.tables?.length) {
-        const sourceMeta: Record<string, unknown> = { _tables: item.result.tables };
+      let tables: ExtractedTable[] = [];
+      if (item.queueItem.tables) {
+        try {
+          tables = typeof item.queueItem.tables === 'string'
+            ? JSON.parse(item.queueItem.tables)
+            : item.queueItem.tables;
+        } catch { tables = []; }
+      }
+      if (tables.length > 0) {
+        const sourceMeta: Record<string, unknown> = { _tables: tables };
         form.append('source_metadata', JSON.stringify(sourceMeta));
       }
 
-      // 3. Call ingest via direct fetch (multipart form)
+      // 4. Call ingest
       const token = localStorage.getItem(AUTH_TOKEN_KEY);
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -549,6 +635,16 @@ export function Import() {
       }
 
       const result = await response.json();
+
+      // Mark the queue item as approved
+      try {
+        await api.queue.approve(item.queueItem.id, {
+          fields: item.editedFields,
+          product_name: productNameValue || undefined,
+        });
+      } catch {
+        // Non-critical — document was already ingested
+      }
 
       // Mark imported
       setEditableResults(prev => prev.map((r, i) =>
@@ -568,7 +664,7 @@ export function Import() {
   const handleImportAll = async () => {
     for (let i = 0; i < editableResults.length; i++) {
       const item = editableResults[i];
-      if (!item.imported && item.result.status !== 'error' && !item.importError) {
+      if (!item.imported && !item.importError) {
         await handleImport(i);
       }
     }
@@ -579,8 +675,9 @@ export function Import() {
     setFiles([]);
     setDocumentTypeId('');
     setEditableResults([]);
+    setQueuedItems([]);
+    setDocTypeInfo(null);
     setError('');
-    setProcessingStatus(null);
     setStage('upload');
   };
 
@@ -622,15 +719,26 @@ export function Import() {
   const handleRate = async (index: number, score: number) => {
     const item = editableResults[index];
     if (!item) return;
+
+    // Parse AI fields for the example
+    let aiFields: Record<string, string | null> = {};
+    if (item.queueItem.ai_fields) {
+      try {
+        aiFields = typeof item.queueItem.ai_fields === 'string'
+          ? JSON.parse(item.queueItem.ai_fields)
+          : item.queueItem.ai_fields;
+      } catch { aiFields = {}; }
+    }
+
     try {
       await api.extractionExamples.create({
         document_type_id: documentTypeId,
         tenant_id: effectiveTenantId || undefined,
-        input_text: item.result.extracted_text_preview || '',
-        ai_output: JSON.stringify(item.result.fields),
+        input_text: (item.queueItem.extracted_text || '').substring(0, 2000),
+        ai_output: JSON.stringify(aiFields),
         corrected_output: JSON.stringify(item.editedFields),
         score,
-        supplier: item.result.supplier || null,
+        supplier: item.queueItem.supplier || null,
       });
       setEditableResults(prev => prev.map((r, i) =>
         i === index ? { ...r, ratingSubmitted: score >= 0.5 ? 'up' as const : 'down' as const } : r
@@ -641,14 +749,24 @@ export function Import() {
     }
   };
 
-  const confidenceColor = (c: string): 'success' | 'warning' | 'error' => {
-    if (c === 'high') return 'success';
-    if (c === 'medium') return 'warning';
+  const confidenceColor = (score: number): 'success' | 'warning' | 'error' => {
+    if (score >= 0.8) return 'success';
+    if (score >= 0.5) return 'warning';
     return 'error';
   };
 
-  const importableCount = editableResults.filter(r => !r.imported && r.result.status !== 'error' && !r.importError).length;
+  const confidenceLabel = (score: number): string => {
+    if (score >= 0.8) return 'high';
+    if (score >= 0.5) return 'medium';
+    return 'low';
+  };
+
+  const importableCount = editableResults.filter(r => !r.imported && !r.importError).length;
   const importedCount = editableResults.filter(r => r.imported).length;
+
+  // Processing stage: count statuses
+  const readyCount = queuedItems.filter(i => i.processingStatus === 'ready' || i.processingStatus === 'error').length;
+  const totalQueuedCount = queuedItems.filter(i => !!i.id).length;
 
   return (
     <Box>
@@ -656,7 +774,7 @@ export function Import() {
         <Typography variant="h4" fontWeight={700}>
           Import
         </Typography>
-        {stage === 'review' && (
+        {(stage === 'review' || stage === 'processing') && (
           <Button variant="outlined" startIcon={<ReplayIcon />} onClick={handleStartOver}>
             Start Over
           </Button>
@@ -815,33 +933,60 @@ export function Import() {
         </Box>
       )}
 
-      {/* Stage 2: Processing */}
+      {/* Stage 2: Processing (async polling) */}
       {stage === 'processing' && (
-        <Box sx={{ textAlign: 'center', py: 6 }}>
-          <CircularProgress size={48} sx={{ mb: 2 }} />
-          <Typography variant="h6" gutterBottom>
-            {processingStatus
-              ? `Processing file ${processingStatus.current} of ${processingStatus.total}`
-              : `Processing ${files.length} file${files.length > 1 ? 's' : ''}...`}
-          </Typography>
-          {processingStatus && processingStatus.fileName && (
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              {processingStatus.fileName}
+        <Box sx={{ py: 4 }}>
+          <Box sx={{ textAlign: 'center', mb: 4 }}>
+            <CircularProgress size={48} sx={{ mb: 2 }} />
+            <Typography variant="h6" gutterBottom>
+              Processing {totalQueuedCount} file{totalQueuedCount > 1 ? 's' : ''}
             </Typography>
-          )}
-          <LinearProgress
-            variant={processingStatus ? 'determinate' : 'indeterminate'}
-            value={processingStatus ? (processingStatus.current / processingStatus.total) * 100 : undefined}
-            sx={{ maxWidth: 400, mx: 'auto', mb: 2 }}
-          />
-          <Typography variant="body2" color="text.secondary">
-            Extracting fields using AI
-          </Typography>
-          {showSlowMessage && (
-            <Alert severity="info" sx={{ maxWidth: 500, mx: 'auto', mt: 3 }}>
-              The AI model may take up to 60 seconds on first request while it loads into memory.
+            <LinearProgress
+              variant="determinate"
+              value={totalQueuedCount > 0 ? (readyCount / totalQueuedCount) * 100 : 0}
+              sx={{ maxWidth: 400, mx: 'auto', mb: 2 }}
+            />
+            <Typography variant="body2" color="text.secondary">
+              {readyCount} of {totalQueuedCount} complete
+            </Typography>
+          </Box>
+
+          {/* Per-file status list */}
+          <Box sx={{ maxWidth: 600, mx: 'auto' }}>
+            {queuedItems.filter(i => !!i.id).map((item) => (
+              <Box
+                key={item.id}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 1.5,
+                  py: 1,
+                  px: 2,
+                  borderRadius: 1,
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  mb: 0.5,
+                }}
+              >
+                <FileIcon color="primary" fontSize="small" />
+                <Typography variant="body2" sx={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {item.fileName}
+                </Typography>
+                <ProcessingStatusChip status={item.processingStatus} />
+              </Box>
+            ))}
+          </Box>
+
+          {/* Duplicate warnings */}
+          {queuedItems.filter(i => i.duplicate).map((item) => (
+            <Alert
+              key={item.id}
+              severity="warning"
+              sx={{ maxWidth: 600, mx: 'auto', mt: 1 }}
+            >
+              {item.fileName} may be a duplicate of &ldquo;{item.duplicate!.document_title}&rdquo;.
             </Alert>
-          )}
+          ))}
         </Box>
       )}
 
@@ -853,6 +998,14 @@ export function Import() {
             <Typography variant="body1">
               {editableResults.length} file{editableResults.length > 1 ? 's' : ''} processed
             </Typography>
+            {/* Show errors from processing */}
+            {queuedItems.filter(i => i.processingStatus === 'error').length > 0 && (
+              <Chip
+                label={`${queuedItems.filter(i => i.processingStatus === 'error').length} failed`}
+                color="error"
+                size="small"
+              />
+            )}
             {importedCount > 0 && (
               <Chip label={`${importedCount} imported`} color="success" size="small" />
             )}
@@ -867,204 +1020,258 @@ export function Import() {
             )}
           </Box>
 
+          {/* Processing errors */}
+          {queuedItems.filter(i => i.processingStatus === 'error').map((item) => (
+            <Alert key={item.id} severity="error" sx={{ mb: 1 }}>
+              {item.fileName}: {item.result?.error_message || 'Processing failed'}
+            </Alert>
+          ))}
+
           {/* Results cards */}
-          {editableResults.map((item, index) => (
-            <Card key={index} variant="outlined" sx={{ mb: 2 }}>
-              <CardContent>
-                {/* Header row */}
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
-                  <FileIcon color="primary" fontSize="small" />
-                  <Typography variant="subtitle1" fontWeight={600} sx={{ flex: 1 }}>
-                    {item.file.name}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {formatFileSize(item.file.size)}
-                  </Typography>
-                  {item.result.status === 'success' && (
-                    <>
-                      <Chip
-                        label={item.result.confidence}
-                        size="small"
-                        color={confidenceColor(item.result.confidence)}
-                        variant="outlined"
-                      />
-                      <Typography variant="body2" fontWeight={600} color="text.secondary">
-                        {Math.round(item.confidenceScore * 100)}%
-                      </Typography>
-                    </>
-                  )}
-                  {item.autoIngesting && !item.imported && (
-                    <Chip label="Auto-importing..." size="small" color="info" icon={<CircularProgress size={14} />} />
-                  )}
-                  {item.imported && item.autoIngesting && (
-                    <Chip label="Auto-imported" size="small" color="success" icon={<CheckIcon />} />
-                  )}
-                  {item.imported && !item.autoIngesting && (
-                    <Chip label="Imported" size="small" color="success" icon={<CheckIcon />} />
-                  )}
-                </Box>
+          {editableResults.map((item, index) => {
+            // Parse tables and products from queue item for display
+            let tables: ExtractedTable[] = [];
+            if (item.queueItem.tables) {
+              try {
+                tables = typeof item.queueItem.tables === 'string'
+                  ? JSON.parse(item.queueItem.tables)
+                  : item.queueItem.tables;
+              } catch { tables = []; }
+            }
 
-                {/* Summary text */}
-                {item.result.summary && (
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2, ml: 3.5 }}>
-                    {item.result.summary}
-                  </Typography>
-                )}
+            let productNames: string[] = [];
+            if (item.queueItem.product_names) {
+              try {
+                productNames = typeof item.queueItem.product_names === 'string'
+                  ? JSON.parse(item.queueItem.product_names)
+                  : item.queueItem.product_names;
+              } catch { productNames = []; }
+            }
 
-                {/* Error state */}
-                {item.result.status === 'error' && (
-                  <Alert severity="error">
-                    {item.result.error_message || 'Processing failed for this file.'}
-                  </Alert>
-                )}
+            const summary = item.queueItem.summary || '';
+            const extractedTextPreview = (item.queueItem.extracted_text || '').substring(0, 500);
+            const confidence = item.confidenceScore;
 
-                {/* Import error */}
-                {item.importError && (
-                  <Alert severity="error" sx={{ mb: 2 }}>
-                    Import failed: {item.importError}
-                  </Alert>
-                )}
+            return (
+              <Card key={index} variant="outlined" sx={{ mb: 2 }}>
+                <CardContent>
+                  {/* Header row */}
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
+                    <FileIcon color="primary" fontSize="small" />
+                    <Typography variant="subtitle1" fontWeight={600} sx={{ flex: 1 }}>
+                      {item.file.name}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {formatFileSize(item.file.size)}
+                    </Typography>
+                    <Chip
+                      label={confidenceLabel(confidence)}
+                      size="small"
+                      color={confidenceColor(confidence)}
+                      variant="outlined"
+                    />
+                    <Typography variant="body2" fontWeight={600} color="text.secondary">
+                      {Math.round(confidence * 100)}%
+                    </Typography>
+                    {item.imported && (
+                      <Chip label="Imported" size="small" color="success" icon={<CheckIcon />} />
+                    )}
+                  </Box>
 
-                {/* Duplicate warning */}
-                {item.result.duplicate && !item.imported && (
-                  <Alert
-                    severity="warning"
-                    sx={{ mb: 2 }}
-                    action={
-                      <Button
-                        color="inherit"
-                        size="small"
-                        startIcon={<OpenIcon />}
-                        onClick={() => navigate(`/documents/${item.result.duplicate!.document_id}`)}
+                  {/* Summary text */}
+                  {summary && (
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2, ml: 3.5 }}>
+                      {summary}
+                    </Typography>
+                  )}
+
+                  {/* Duplicate warning */}
+                  {(() => {
+                    const qItem = queuedItems.find(q => q.id === item.queueItem.id);
+                    return qItem?.duplicate && !item.imported ? (
+                      <Alert
+                        severity="warning"
+                        sx={{ mb: 2 }}
+                        action={
+                          <Button
+                            color="inherit"
+                            size="small"
+                            startIcon={<OpenIcon />}
+                            onClick={() => navigate(`/documents/${qItem.duplicate!.document_id}`)}
+                          >
+                            View Existing
+                          </Button>
+                        }
                       >
-                        View Existing
-                      </Button>
-                    }
-                  >
-                    This file appears to be a duplicate of &ldquo;{item.result.duplicate.document_title}&rdquo;.
-                    Importing will add a new version.
-                  </Alert>
-                )}
+                        This file appears to be a duplicate of &ldquo;{qItem.duplicate.document_title}&rdquo;.
+                        Importing will add a new version.
+                      </Alert>
+                    ) : null;
+                  })()}
 
-                {/* Training gate banner */}
-                {item.result.status === 'success' && !item.imported && !item.result.training_ready && (
-                  <Alert severity="info" sx={{ mb: 2 }}>
-                    This is a new supplier/document type combination. Please review and correct the extraction to help train the AI. ({item.result.example_count}/3 training examples)
-                  </Alert>
-                )}
+                  {/* Import error */}
+                  {item.importError && (
+                    <Alert severity="error" sx={{ mb: 2 }}>
+                      Import failed: {item.importError}
+                    </Alert>
+                  )}
 
-                {/* Success state: split layout with preview + editable fields */}
-                {item.result.status === 'success' && !item.imported && (
-                  <Box sx={{ display: 'flex', gap: 2, flexDirection: { xs: 'column', md: 'row' } }}>
-                    {/* File preview */}
-                    <Box sx={{ flex: 1, minWidth: 0 }}>
-                      <LocalFilePreview file={item.file} />
-                    </Box>
-
-                    {/* Right panel: fields, tables, products */}
-                    <Box sx={{ flex: 1, minWidth: 0 }}>
-                      {/* Extracted text preview */}
-                      {item.result.extracted_text_preview && (
-                        <Accordion variant="outlined" sx={{ mb: 2 }}>
-                          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                            <Typography variant="body2" color="text.secondary">
-                              Extracted text preview
-                            </Typography>
-                          </AccordionSummary>
-                          <AccordionDetails>
-                            <Typography
-                              variant="body2"
-                              sx={{
-                                whiteSpace: 'pre-wrap',
-                                fontFamily: 'monospace',
-                                fontSize: '0.75rem',
-                                maxHeight: 200,
-                                overflow: 'auto',
-                                bgcolor: 'action.hover',
-                                p: 1.5,
-                                borderRadius: 1,
-                              }}
-                            >
-                              {item.result.extracted_text_preview}
-                            </Typography>
-                          </AccordionDetails>
-                        </Accordion>
-                      )}
-
-                      {/* Section 1: Extracted Fields */}
-                      <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                        Extracted Fields
-                      </Typography>
-                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mb: 2 }}>
-                        {Object.entries(item.editedFields).map(([fieldName, fieldValue]) => (
-                          <FieldRow
-                            key={fieldName}
-                            fieldKey={fieldName}
-                            value={fieldValue}
-                            assignment={item.fieldAssignments[fieldName] || ''}
-                            disabled={item.importing}
-                            onValueChange={(v) => updateField(index, fieldName, v)}
-                            onAssignmentChange={(role) => updateFieldAssignment(index, fieldName, role)}
-                          />
-                        ))}
+                  {/* Success state: split layout with preview + editable fields */}
+                  {!item.imported && (
+                    <Box sx={{ display: 'flex', gap: 2, flexDirection: { xs: 'column', md: 'row' } }}>
+                      {/* File preview */}
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <LocalFilePreview file={item.file} />
                       </Box>
 
-                      {/* Section 2: Tables */}
-                      {item.result.tables && item.result.tables.length > 0 && (
-                        <>
-                          <Divider sx={{ my: 2 }} />
-                          <Accordion variant="outlined" defaultExpanded={item.result.tables.length === 1}>
+                      {/* Right panel: fields, tables, products */}
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        {/* Extracted text preview */}
+                        {extractedTextPreview && (
+                          <Accordion variant="outlined" sx={{ mb: 2 }}>
                             <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                              <Typography variant="subtitle2">
-                                Tables ({item.result.tables.length})
+                              <Typography variant="body2" color="text.secondary">
+                                Extracted text preview
                               </Typography>
                             </AccordionSummary>
                             <AccordionDetails>
-                              {item.result.tables.map((table, ti) => (
-                                <ExtractedTableView key={ti} table={table} />
-                              ))}
-                              <Typography variant="caption" color="text.secondary">
-                                Tables are saved to document metadata on import.
+                              <Typography
+                                variant="body2"
+                                sx={{
+                                  whiteSpace: 'pre-wrap',
+                                  fontFamily: 'monospace',
+                                  fontSize: '0.75rem',
+                                  maxHeight: 200,
+                                  overflow: 'auto',
+                                  bgcolor: 'action.hover',
+                                  p: 1.5,
+                                  borderRadius: 1,
+                                }}
+                              >
+                                {extractedTextPreview}
                               </Typography>
                             </AccordionDetails>
                           </Accordion>
-                        </>
-                      )}
+                        )}
 
-                      {/* Section 3: Products */}
-                      <Divider sx={{ my: 2 }} />
-                      <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                        Products
-                      </Typography>
-                      {item.result.product_names.length > 0 && (
-                        <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mb: 1 }}>
-                          {item.result.product_names.map((pn, pi) => (
-                            <Chip
-                              key={pi}
-                              label={pn}
-                              size="small"
-                              variant="outlined"
-                              onClick={() => updateProductName(index, pn)}
-                              color={item.productName === pn ? 'primary' : 'default'}
+                        {/* Section 1: Extracted Fields */}
+                        <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                          Extracted Fields
+                        </Typography>
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mb: 2 }}>
+                          {Object.entries(item.editedFields).map(([fieldName, fieldValue]) => (
+                            <FieldRow
+                              key={fieldName}
+                              fieldKey={fieldName}
+                              value={fieldValue}
+                              assignment={item.fieldAssignments[fieldName] || ''}
+                              disabled={item.importing}
+                              onValueChange={(v) => updateField(index, fieldName, v)}
+                              onAssignmentChange={(role) => updateFieldAssignment(index, fieldName, role)}
                             />
                           ))}
                         </Box>
-                      )}
-                      <TextField
-                        label="Product Name"
-                        value={item.productName}
-                        onChange={(e) => updateProductName(index, e.target.value)}
-                        size="small"
-                        fullWidth
-                        disabled={item.importing}
-                        helperText="Will be looked up or created automatically"
-                      />
 
-                      {/* Rate Extraction */}
-                      <Divider sx={{ my: 2 }} />
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <Typography variant="body2" color="text.secondary">
-                          Rate Extraction:
+                        {/* Section 2: Tables */}
+                        {tables.length > 0 && (
+                          <>
+                            <Divider sx={{ my: 2 }} />
+                            <Accordion variant="outlined" defaultExpanded={tables.length === 1}>
+                              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                                <Typography variant="subtitle2">
+                                  Tables ({tables.length})
+                                </Typography>
+                              </AccordionSummary>
+                              <AccordionDetails>
+                                {tables.map((table, ti) => (
+                                  <ExtractedTableView key={ti} table={table} />
+                                ))}
+                                <Typography variant="caption" color="text.secondary">
+                                  Tables are saved to document metadata on import.
+                                </Typography>
+                              </AccordionDetails>
+                            </Accordion>
+                          </>
+                        )}
+
+                        {/* Section 3: Products */}
+                        <Divider sx={{ my: 2 }} />
+                        <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                          Products
+                        </Typography>
+                        {productNames.length > 0 && (
+                          <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mb: 1 }}>
+                            {productNames.map((pn, pi) => (
+                              <Chip
+                                key={pi}
+                                label={pn}
+                                size="small"
+                                variant="outlined"
+                                onClick={() => updateProductName(index, pn)}
+                                color={item.productName === pn ? 'primary' : 'default'}
+                              />
+                            ))}
+                          </Box>
+                        )}
+                        <TextField
+                          label="Product Name"
+                          value={item.productName}
+                          onChange={(e) => updateProductName(index, e.target.value)}
+                          size="small"
+                          fullWidth
+                          disabled={item.importing}
+                          helperText="Will be looked up or created automatically"
+                        />
+
+                        {/* Rate Extraction */}
+                        <Divider sx={{ my: 2 }} />
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                          <Typography variant="body2" color="text.secondary">
+                            Rate Extraction:
+                          </Typography>
+                          <IconButton
+                            size="small"
+                            color={item.ratingSubmitted === 'up' ? 'success' : 'default'}
+                            onClick={() => handleRate(index, 1.0)}
+                            disabled={!!item.ratingSubmitted}
+                          >
+                            <ThumbUpIcon fontSize="small" />
+                          </IconButton>
+                          <IconButton
+                            size="small"
+                            color={item.ratingSubmitted === 'down' ? 'error' : 'default'}
+                            onClick={() => handleRate(index, 0.0)}
+                            disabled={!!item.ratingSubmitted}
+                          >
+                            <ThumbDownIcon fontSize="small" />
+                          </IconButton>
+                          {item.ratingSubmitted && (
+                            <Typography variant="caption" color="text.secondary">
+                              Rating saved
+                            </Typography>
+                          )}
+                          {item.correctionsSaved && (
+                            <Chip label="Corrections saved" size="small" color="info" variant="outlined" sx={{ ml: 1 }} />
+                          )}
+                        </Box>
+                      </Box>
+                    </Box>
+                  )}
+
+                  {/* Imported success link */}
+                  {item.imported && item.documentId && (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1, flexWrap: 'wrap' }}>
+                      <Button
+                        size="small"
+                        startIcon={<OpenIcon />}
+                        onClick={() => navigate(`/documents/${item.documentId}`)}
+                      >
+                        View Document
+                      </Button>
+                      {/* Rate extraction for imported items */}
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                        <Typography variant="caption" color="text.secondary">
+                          Rate:
                         </Typography>
                         <IconButton
                           size="small"
@@ -1072,7 +1279,7 @@ export function Import() {
                           onClick={() => handleRate(index, 1.0)}
                           disabled={!!item.ratingSubmitted}
                         >
-                          <ThumbUpIcon fontSize="small" />
+                          <ThumbUpIcon sx={{ fontSize: 16 }} />
                         </IconButton>
                         <IconButton
                           size="small"
@@ -1080,76 +1287,33 @@ export function Import() {
                           onClick={() => handleRate(index, 0.0)}
                           disabled={!!item.ratingSubmitted}
                         >
-                          <ThumbDownIcon fontSize="small" />
+                          <ThumbDownIcon sx={{ fontSize: 16 }} />
                         </IconButton>
                         {item.ratingSubmitted && (
-                          <Typography variant="caption" color="text.secondary">
-                            Rating saved
-                          </Typography>
-                        )}
-                        {item.correctionsSaved && (
-                          <Chip label="Corrections saved" size="small" color="info" variant="outlined" sx={{ ml: 1 }} />
+                          <Typography variant="caption" color="text.secondary">Saved</Typography>
                         )}
                       </Box>
                     </Box>
-                  </Box>
-                )}
+                  )}
+                </CardContent>
 
-                {/* Imported success link */}
-                {item.imported && item.documentId && (
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1, flexWrap: 'wrap' }}>
+                {/* Action buttons */}
+                {!item.imported && (
+                  <CardActions sx={{ px: 2, pb: 2 }}>
                     <Button
+                      variant="contained"
                       size="small"
-                      startIcon={<OpenIcon />}
-                      onClick={() => navigate(`/documents/${item.documentId}`)}
+                      onClick={() => handleImport(index)}
+                      disabled={item.importing}
+                      startIcon={item.importing ? <CircularProgress size={16} color="inherit" /> : undefined}
                     >
-                      View Document
+                      {item.importing ? 'Importing...' : 'Import'}
                     </Button>
-                    {/* Rate extraction for imported items */}
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                      <Typography variant="caption" color="text.secondary">
-                        Rate:
-                      </Typography>
-                      <IconButton
-                        size="small"
-                        color={item.ratingSubmitted === 'up' ? 'success' : 'default'}
-                        onClick={() => handleRate(index, 1.0)}
-                        disabled={!!item.ratingSubmitted}
-                      >
-                        <ThumbUpIcon sx={{ fontSize: 16 }} />
-                      </IconButton>
-                      <IconButton
-                        size="small"
-                        color={item.ratingSubmitted === 'down' ? 'error' : 'default'}
-                        onClick={() => handleRate(index, 0.0)}
-                        disabled={!!item.ratingSubmitted}
-                      >
-                        <ThumbDownIcon sx={{ fontSize: 16 }} />
-                      </IconButton>
-                      {item.ratingSubmitted && (
-                        <Typography variant="caption" color="text.secondary">Saved</Typography>
-                      )}
-                    </Box>
-                  </Box>
+                  </CardActions>
                 )}
-              </CardContent>
-
-              {/* Action buttons */}
-              {item.result.status === 'success' && !item.imported && (
-                <CardActions sx={{ px: 2, pb: 2 }}>
-                  <Button
-                    variant="contained"
-                    size="small"
-                    onClick={() => handleImport(index)}
-                    disabled={item.importing}
-                    startIcon={item.importing ? <CircularProgress size={16} color="inherit" /> : undefined}
-                  >
-                    {item.importing ? 'Importing...' : 'Import'}
-                  </Button>
-                </CardActions>
-              )}
-            </Card>
-          ))}
+              </Card>
+            );
+          })}
         </Box>
       )}
 

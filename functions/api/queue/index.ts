@@ -18,6 +18,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const url = new URL(context.request.url);
 
     const status = url.searchParams.get('status') || 'pending';
+    const processingStatus = url.searchParams.get('processing_status');
     const documentTypeId = url.searchParams.get('document_type_id');
     let tenantId = url.searchParams.get('tenant_id');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
@@ -39,6 +40,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (tenantId) {
       conditions.push('pq.tenant_id = ?');
       params.push(tenantId);
+    }
+
+    if (processingStatus) {
+      conditions.push('pq.processing_status = ?');
+      params.push(processingStatus);
     }
 
     if (documentTypeId) {
