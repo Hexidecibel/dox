@@ -30,6 +30,7 @@ import {
   Card,
   CardContent,
   Divider,
+  Slider,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -85,8 +86,9 @@ function applyTemplate(template: string): string {
   return result;
 }
 
-function parseExtractionFields(raw: string | null): ExtractionField[] {
+function parseExtractionFields(raw: string | ExtractionField[] | null): ExtractionField[] {
   if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
   try {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -117,6 +119,7 @@ export function DocumentTypes() {
   const [formTenantId, setFormTenantId] = useState('');
   const [formNamingFormat, setFormNamingFormat] = useState('');
   const [formExtractFields, setFormExtractFields] = useState<ExtractionField[]>([]);
+  const [formAutoIngestThreshold, setFormAutoIngestThreshold] = useState(0.8);
   const [saving, setSaving] = useState(false);
 
   const [fieldInput, setFieldInput] = useState('');
@@ -151,6 +154,7 @@ export function DocumentTypes() {
     setFormDescription('');
     setFormNamingFormat('');
     setFormExtractFields([]);
+    setFormAutoIngestThreshold(0.8);
     setFieldInput('');
     setAliasInputs({});
     setFormTenantId(
@@ -167,6 +171,7 @@ export function DocumentTypes() {
     setFormDescription(dt.description || '');
     setFormNamingFormat(dt.naming_format || '');
     setFormExtractFields(parseExtractionFields(dt.extraction_fields));
+    setFormAutoIngestThreshold((dt as any).auto_ingest_threshold ?? 0.8);
     setFieldInput('');
     setAliasInputs({});
     setFormTenantId(dt.tenant_id);
@@ -186,6 +191,7 @@ export function DocumentTypes() {
           description: formDescription.trim() || undefined,
           naming_format: namingFormat ?? null,
           extraction_fields: extractFields ?? null,
+          auto_ingest_threshold: formAutoIngestThreshold,
         });
       } else {
         const tenantId = isSuperAdmin ? formTenantId : user?.tenant_id;
@@ -200,6 +206,7 @@ export function DocumentTypes() {
           tenant_id: tenantId,
           naming_format: namingFormat,
           extraction_fields: extractFields,
+          auto_ingest_threshold: formAutoIngestThreshold,
         });
       }
       setDialogOpen(false);
@@ -682,6 +689,34 @@ export function DocumentTypes() {
                 ))}
               </Box>
             )}
+          </Box>
+
+          <Divider sx={{ my: 1 }} />
+
+          {/* Auto-Ingest Threshold */}
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+              Auto-Ingest Threshold: {Math.round(formAutoIngestThreshold * 100)}%
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+              Documents above this confidence score will be automatically imported
+            </Typography>
+            <Slider
+              value={formAutoIngestThreshold}
+              onChange={(_, val) => setFormAutoIngestThreshold(val as number)}
+              min={0.5}
+              max={1.0}
+              step={0.05}
+              marks={[
+                { value: 0.5, label: '50%' },
+                { value: 0.75, label: '75%' },
+                { value: 1.0, label: '100%' },
+              ]}
+              valueLabelDisplay="auto"
+              valueLabelFormat={(v) => `${Math.round(v * 100)}%`}
+              disabled={saving}
+              sx={{ mx: 1 }}
+            />
           </Box>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>

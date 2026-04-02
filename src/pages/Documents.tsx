@@ -29,9 +29,10 @@ import {
   Close as CloseIcon,
   CloudUpload as UploadIcon,
   InsertDriveFile as FileIcon,
+  AutoAwesome as AiIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
-import type { Document, ApiDocumentType } from '../lib/types';
+import type { Document, ApiDocumentType, ParsedQuery } from '../lib/types';
 import { DocumentCard } from '../components/DocumentCard';
 import { RoleGuard } from '../components/RoleGuard';
 import { useAuth } from '../contexts/AuthContext';
@@ -52,6 +53,10 @@ export function Documents() {
   const [error, setError] = useState('');
   const [docTypeFilter, setDocTypeFilter] = useState<string>('');
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
+  const [aiSearchActive, setAiSearchActive] = useState(false);
+  const [aiSearchLoading, setAiSearchLoading] = useState(false);
+  const [aiParsedQuery, setAiParsedQuery] = useState<ParsedQuery | null>(null);
+  const [aiSearchError, setAiSearchError] = useState('');
 
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -168,8 +173,53 @@ export function Documents() {
   };
 
   useEffect(() => {
-    loadDocuments();
+    if (!aiSearchActive) {
+      loadDocuments();
+    }
   }, [page, statusFilter, categoryFilter, selectedTenantId]);
+
+  const handleAiSearch = async () => {
+    if (!search.trim()) return;
+    setAiSearchLoading(true);
+    setAiSearchError('');
+    setAiParsedQuery(null);
+    try {
+      const result = await api.naturalSearch(search.trim(), selectedTenantId || undefined);
+      setAiParsedQuery(result.parsed_query);
+      setDocuments((result.results || []).map((d: any) => ({
+        ...d,
+        tags: typeof d.tags === 'string' ? (() => { try { return JSON.parse(d.tags); } catch { return []; } })() : (d.tags || []),
+        documentTypeId: d.document_type_id ?? null,
+        documentTypeName: d.document_type_name,
+        documentTypeSlug: d.document_type_slug,
+        lotNumber: d.lot_number ?? null,
+        poNumber: d.po_number ?? null,
+        codeDate: d.code_date ?? null,
+        expirationDate: d.expiration_date ?? null,
+      })));
+      setTotal(result.total || 0);
+    } catch (err) {
+      setAiSearchError(err instanceof Error ? err.message : 'AI search failed');
+      // Fall back to regular search
+      loadDocuments();
+    } finally {
+      setAiSearchLoading(false);
+    }
+  };
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && aiSearchActive) {
+      e.preventDefault();
+      handleAiSearch();
+    }
+  };
+
+  const clearAiSearch = () => {
+    setAiParsedQuery(null);
+    setAiSearchError('');
+    setSearch('');
+    loadDocuments();
+  };
 
   const handleCreateDocument = async () => {
     if (!newTitle.trim()) return;
@@ -257,21 +307,100 @@ export function Documents() {
 
       {/* Search and Filters */}
       <Box sx={{ mb: 3 }}>
-        <TextField
-          placeholder="Search documents..."
-          fullWidth
-          size="small"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          InputProps={{
-            startAdornment: (
-              <InputAdornment position="start">
-                <SearchIcon />
-              </InputAdornment>
-            ),
-          }}
-          sx={{ mb: 2 }}
-        />
+        <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
+          <TextField
+            placeholder={aiSearchActive ? 'Search with AI (e.g. "COAs for Butter from March")...' : 'Search documents...'}
+            fullWidth
+            size="small"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  {aiSearchActive ? <AiIcon color="primary" /> : <SearchIcon />}
+                </InputAdornment>
+              ),
+              endAdornment: aiSearchActive && search ? (
+                <InputAdornment position="end">
+                  <Button
+                    size="small"
+                    onClick={handleAiSearch}
+                    disabled={aiSearchLoading}
+                    variant="contained"
+                    sx={{ minWidth: 'auto', px: 1.5 }}
+                  >
+                    {aiSearchLoading ? <CircularProgress size={16} color="inherit" /> : 'Search'}
+                  </Button>
+                </InputAdornment>
+              ) : undefined,
+            }}
+          />
+          <Button
+            variant={aiSearchActive ? 'contained' : 'outlined'}
+            size="small"
+            onClick={() => {
+              setAiSearchActive(!aiSearchActive);
+              if (aiSearchActive) {
+                clearAiSearch();
+              }
+            }}
+            startIcon={<AiIcon />}
+            sx={{ whiteSpace: 'nowrap' }}
+          >
+            AI
+          </Button>
+        </Box>
+
+        {/* AI search error */}
+        {aiSearchError && (
+          <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setAiSearchError('')}>
+            {aiSearchError}
+          </Alert>
+        )}
+
+        {/* AI parsed query display */}
+        {aiParsedQuery && (
+          <Box sx={{ mb: 2, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              AI understood:{' '}
+              <Typography component="span" variant="body2" fontWeight={600}>
+                {[
+                  aiParsedQuery.document_type_slug,
+                  aiParsedQuery.product_name && `for ${aiParsedQuery.product_name}`,
+                  aiParsedQuery.lot_number && `lot ${aiParsedQuery.lot_number}`,
+                  aiParsedQuery.po_number && `PO ${aiParsedQuery.po_number}`,
+                  aiParsedQuery.date_from && `from ${aiParsedQuery.date_from}`,
+                  aiParsedQuery.date_to && `to ${aiParsedQuery.date_to}`,
+                  ...aiParsedQuery.keywords,
+                ].filter(Boolean).join(', ') || 'general search'}
+              </Typography>
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+              {aiParsedQuery.document_type_slug && (
+                <Chip label={`Type: ${aiParsedQuery.document_type_slug}`} size="small" onDelete={clearAiSearch} />
+              )}
+              {aiParsedQuery.product_name && (
+                <Chip label={`Product: ${aiParsedQuery.product_name}`} size="small" onDelete={clearAiSearch} />
+              )}
+              {aiParsedQuery.lot_number && (
+                <Chip label={`Lot: ${aiParsedQuery.lot_number}`} size="small" onDelete={clearAiSearch} />
+              )}
+              {aiParsedQuery.po_number && (
+                <Chip label={`PO: ${aiParsedQuery.po_number}`} size="small" onDelete={clearAiSearch} />
+              )}
+              {aiParsedQuery.date_from && (
+                <Chip label={`From: ${aiParsedQuery.date_from}`} size="small" onDelete={clearAiSearch} />
+              )}
+              {aiParsedQuery.date_to && (
+                <Chip label={`To: ${aiParsedQuery.date_to}`} size="small" onDelete={clearAiSearch} />
+              )}
+              {aiParsedQuery.keywords.map((kw, i) => (
+                <Chip key={i} label={kw} size="small" onDelete={clearAiSearch} />
+              ))}
+            </Box>
+          </Box>
+        )}
         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
           <Typography variant="body2" color="text.secondary" sx={{ mr: 0.5 }}>
             Status:

@@ -40,5 +40,9 @@ export type {
   BundleGetResponse,
   ProcessingResult,
   ProcessingResponse,
+  ExtractionExampleRow,
+  ProcessingQueueItem,
+  ParsedQuery,
+  NaturalSearchResponse,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';

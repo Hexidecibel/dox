@@ -1,4 +1,4 @@
-import type { Env, User } from '../../lib/types';
+import type { Env, User } from '../../../lib/types';
 
 /**
  * GET /api/documents/search

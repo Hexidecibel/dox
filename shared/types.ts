@@ -72,6 +72,7 @@ export interface DocumentTypeRow {
   description: string | null;
   naming_format: string | null;
   extraction_fields: string | null;
+  auto_ingest_threshold: number | null;
   active: number;
   created_at: string;
   updated_at: string;
@@ -499,6 +500,7 @@ export interface ProcessingResult {
   fields: Record<string, string | null>;
   product_names: string[];
   confidence: 'high' | 'medium' | 'low';
+  confidence_score: number;
 }
 
 export interface ProcessingResponse {
@@ -508,7 +510,60 @@ export interface ProcessingResponse {
     name: string;
     naming_format: string | null;
     extraction_fields: ExtractionField[];
+    auto_ingest_threshold: number | null;
   };
+}
+
+// === Extraction Examples & Processing Queue ===
+
+export interface ExtractionExampleRow {
+  id: string;
+  document_type_id: string;
+  tenant_id: string;
+  input_text: string;
+  ai_output: string;
+  corrected_output: string;
+  score: number | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface ProcessingQueueItem {
+  id: string;
+  tenant_id: string;
+  document_type_id: string;
+  file_r2_key: string;
+  file_name: string;
+  file_size: number;
+  mime_type: string;
+  extracted_text: string | null;
+  ai_fields: string | null;
+  ai_confidence: string | null;
+  confidence_score: number | null;
+  product_names: string | null;
+  status: 'pending' | 'approved' | 'rejected';
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+// === Natural Language Search ===
+
+export interface ParsedQuery {
+  keywords: string[];
+  document_type_slug: string | null;
+  product_name: string | null;
+  date_from: string | null;
+  date_to: string | null;
+  lot_number: string | null;
+  po_number: string | null;
+}
+
+export interface NaturalSearchResponse {
+  parsed_query: ParsedQuery;
+  results: ApiDocument[];
+  total: number;
 }
 
 // === Auth Token Storage Key (single constant) ===

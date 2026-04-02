@@ -33,6 +33,8 @@ import {
   CheckCircle as CheckIcon,
   Replay as ReplayIcon,
   OpenInNew as OpenIcon,
+  ThumbUp as ThumbUpIcon,
+  ThumbDown as ThumbDownIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
 import type { ApiDocumentType, ProcessingResult } from '../lib/types';
@@ -51,6 +53,10 @@ interface EditableResult {
   imported: boolean;
   importError?: string;
   documentId?: string;
+  confidenceScore: number;
+  autoIngesting: boolean;
+  correctionsSaved: boolean;
+  ratingSubmitted?: 'up' | 'down';
 }
 
 function formatFileSize(bytes: number): string {
@@ -160,6 +166,8 @@ export function Import() {
     setError('');
     try {
       const response = await api.processing.process(files, documentTypeId, effectiveTenantId);
+      const autoIngestThreshold = response.document_type.auto_ingest_threshold ?? 0.8;
+
       // Build editable results
       const editable: EditableResult[] = response.results.map((result, i) => ({
         file: files[i] || files[result.file_index],
@@ -170,10 +178,25 @@ export function Import() {
         productName: result.product_names[0] || '',
         importing: false,
         imported: false,
+        confidenceScore: result.confidence_score,
+        autoIngesting: false,
+        correctionsSaved: false,
       }));
 
       setEditableResults(editable);
       setStage('review');
+
+      // Auto-ingest high confidence results
+      for (let i = 0; i < editable.length; i++) {
+        const item = editable[i];
+        if (item.result.status === 'success' && item.confidenceScore >= autoIngestThreshold) {
+          setEditableResults(prev => prev.map((r, idx) =>
+            idx === i ? { ...r, autoIngesting: true } : r
+          ));
+          // Use a small delay to allow state to render
+          setTimeout(() => handleImport(i), 100 * i);
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Processing failed');
       setStage('upload');
@@ -191,6 +214,28 @@ export function Import() {
     ));
 
     try {
+      // Auto-save correction as training example if fields were edited
+      const fieldsChanged = Object.keys(item.editedFields).some(
+        k => item.editedFields[k] !== (item.result.fields[k] || '')
+      );
+      if (fieldsChanged && documentTypeId) {
+        try {
+          await api.extractionExamples.create({
+            document_type_id: documentTypeId,
+            tenant_id: effectiveTenantId || undefined,
+            input_text: item.result.extracted_text_preview || '',
+            ai_output: JSON.stringify(item.result.fields),
+            corrected_output: JSON.stringify(item.editedFields),
+            score: 0.8,
+          });
+          setEditableResults(prev => prev.map((r, i) =>
+            i === index ? { ...r, correctionsSaved: true } : r
+          ));
+        } catch {
+          // Non-critical -- don't block import
+        }
+      }
+
       // 1. Resolve product if name provided
       let productId: string | undefined;
       if (item.productName.trim()) {
@@ -239,7 +284,7 @@ export function Import() {
 
       // Mark imported
       setEditableResults(prev => prev.map((r, i) =>
-        i === index ? { ...r, importing: false, imported: true, documentId: result.document.id } : r
+        i === index ? { ...r, importing: false, imported: true, autoIngesting: false, documentId: result.document.id } : r
       ));
 
       setSnackbar({ open: true, message: `Imported ${item.file.name}`, severity: 'success' });
@@ -282,6 +327,28 @@ export function Import() {
     setEditableResults(prev => prev.map((r, i) =>
       i === index ? { ...r, productName: value } : r
     ));
+  };
+
+  // Rate extraction quality
+  const handleRate = async (index: number, score: number) => {
+    const item = editableResults[index];
+    if (!item) return;
+    try {
+      await api.extractionExamples.create({
+        document_type_id: documentTypeId,
+        tenant_id: effectiveTenantId || undefined,
+        input_text: item.result.extracted_text_preview || '',
+        ai_output: JSON.stringify(item.result.fields),
+        corrected_output: JSON.stringify(item.editedFields),
+        score,
+      });
+      setEditableResults(prev => prev.map((r, i) =>
+        i === index ? { ...r, ratingSubmitted: score >= 0.5 ? 'up' as const : 'down' as const } : r
+      ));
+      setSnackbar({ open: true, message: 'Rating saved', severity: 'success' });
+    } catch {
+      setSnackbar({ open: true, message: 'Failed to save rating', severity: 'error' });
+    }
   };
 
   const confidenceColor = (c: string): 'success' | 'warning' | 'error' => {
@@ -513,14 +580,25 @@ export function Import() {
                     {formatFileSize(item.file.size)}
                   </Typography>
                   {item.result.status === 'success' && (
-                    <Chip
-                      label={item.result.confidence}
-                      size="small"
-                      color={confidenceColor(item.result.confidence)}
-                      variant="outlined"
-                    />
+                    <>
+                      <Chip
+                        label={item.result.confidence}
+                        size="small"
+                        color={confidenceColor(item.result.confidence)}
+                        variant="outlined"
+                      />
+                      <Typography variant="body2" fontWeight={600} color="text.secondary">
+                        {Math.round(item.confidenceScore * 100)}%
+                      </Typography>
+                    </>
                   )}
-                  {item.imported && (
+                  {item.autoIngesting && !item.imported && (
+                    <Chip label="Auto-importing..." size="small" color="info" icon={<CircularProgress size={14} />} />
+                  )}
+                  {item.imported && item.autoIngesting && (
+                    <Chip label="Auto-imported" size="small" color="success" icon={<CheckIcon />} />
+                  )}
+                  {item.imported && !item.autoIngesting && (
                     <Chip label="Imported" size="small" color="success" icon={<CheckIcon />} />
                   )}
                 </Box>
@@ -594,20 +672,77 @@ export function Import() {
                         disabled={item.importing}
                         helperText="Will be looked up or created automatically"
                       />
+
+                      {/* Rate Extraction */}
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Typography variant="body2" color="text.secondary">
+                          Rate Extraction:
+                        </Typography>
+                        <IconButton
+                          size="small"
+                          color={item.ratingSubmitted === 'up' ? 'success' : 'default'}
+                          onClick={() => handleRate(index, 1.0)}
+                          disabled={!!item.ratingSubmitted}
+                        >
+                          <ThumbUpIcon fontSize="small" />
+                        </IconButton>
+                        <IconButton
+                          size="small"
+                          color={item.ratingSubmitted === 'down' ? 'error' : 'default'}
+                          onClick={() => handleRate(index, 0.0)}
+                          disabled={!!item.ratingSubmitted}
+                        >
+                          <ThumbDownIcon fontSize="small" />
+                        </IconButton>
+                        {item.ratingSubmitted && (
+                          <Typography variant="caption" color="text.secondary">
+                            Rating saved
+                          </Typography>
+                        )}
+                        {item.correctionsSaved && (
+                          <Chip label="Corrections saved" size="small" color="info" variant="outlined" sx={{ ml: 1 }} />
+                        )}
+                      </Box>
                     </Box>
                   </>
                 )}
 
                 {/* Imported success link */}
                 {item.imported && item.documentId && (
-                  <Button
-                    size="small"
-                    startIcon={<OpenIcon />}
-                    onClick={() => navigate(`/documents/${item.documentId}`)}
-                    sx={{ mt: 1 }}
-                  >
-                    View Document
-                  </Button>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1, flexWrap: 'wrap' }}>
+                    <Button
+                      size="small"
+                      startIcon={<OpenIcon />}
+                      onClick={() => navigate(`/documents/${item.documentId}`)}
+                    >
+                      View Document
+                    </Button>
+                    {/* Rate extraction for imported items */}
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                      <Typography variant="caption" color="text.secondary">
+                        Rate:
+                      </Typography>
+                      <IconButton
+                        size="small"
+                        color={item.ratingSubmitted === 'up' ? 'success' : 'default'}
+                        onClick={() => handleRate(index, 1.0)}
+                        disabled={!!item.ratingSubmitted}
+                      >
+                        <ThumbUpIcon sx={{ fontSize: 16 }} />
+                      </IconButton>
+                      <IconButton
+                        size="small"
+                        color={item.ratingSubmitted === 'down' ? 'error' : 'default'}
+                        onClick={() => handleRate(index, 0.0)}
+                        disabled={!!item.ratingSubmitted}
+                      >
+                        <ThumbDownIcon sx={{ fontSize: 16 }} />
+                      </IconButton>
+                      {item.ratingSubmitted && (
+                        <Typography variant="caption" color="text.secondary">Saved</Typography>
+                      )}
+                    </Box>
+                  </Box>
                 )}
               </CardContent>
 

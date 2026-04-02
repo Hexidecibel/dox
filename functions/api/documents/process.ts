@@ -1,5 +1,6 @@
 import { extractText } from '../../lib/extract';
 import { extractFields } from '../../lib/llm';
+import { computeConfidenceScore } from '../../lib/confidence';
 import {
   requireRole,
   requireTenantAccess,
@@ -63,12 +64,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // Look up document type and get extraction_fields
     const docType = await context.env.DB.prepare(
-      'SELECT id, name, naming_format, extraction_fields FROM document_types WHERE id = ? AND active = 1'
+      'SELECT id, name, naming_format, extraction_fields, auto_ingest_threshold FROM document_types WHERE id = ? AND active = 1'
     ).bind(documentTypeId).first<{
       id: string;
       name: string;
       naming_format: string | null;
       extraction_fields: string | null;
+      auto_ingest_threshold: number | null;
     }>();
 
     if (!docType) {
@@ -87,6 +89,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         // Invalid JSON in extraction_fields — treat as empty
       }
     }
+
+    // Fetch few-shot examples for this document type
+    const examplesResult = await context.env.DB.prepare(
+      `SELECT input_text, corrected_output FROM extraction_examples
+       WHERE document_type_id = ? AND tenant_id = ? AND score >= 0.7
+       ORDER BY score DESC, created_at DESC LIMIT 3`
+    ).bind(documentTypeId, tenantId).all();
+
+    const fewShotExamples = examplesResult.results?.map(e => ({
+      input_text: e.input_text as string,
+      corrected_output: e.corrected_output as string,
+    }));
 
     // Get all files from form data
     const files: File[] = [];
@@ -117,6 +131,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             fields: {},
             product_names: [],
             confidence: 'low',
+            confidence_score: 0,
           });
           continue;
         }
@@ -134,6 +149,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             fields: {},
             product_names: [],
             confidence: 'low',
+            confidence_score: 0,
           });
           continue;
         }
@@ -148,6 +164,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             fields: {},
             product_names: [],
             confidence: 'low',
+            confidence_score: 0,
           });
           continue;
         }
@@ -165,12 +182,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             fields: {},
             product_names: [],
             confidence: 'low',
+            confidence_score: 0,
           });
           continue;
         }
 
-        // Call LLM for field extraction
-        const extraction = await extractFields(text, extractionFields, context.env);
+        // Call LLM for field extraction (with few-shot examples)
+        const extraction = await extractFields(text, extractionFields, context.env, fewShotExamples);
+
+        const confidenceScore = computeConfidenceScore(extraction.confidence, extraction.fields, extractionFields);
 
         results.push({
           file_name: file.name,
@@ -180,6 +200,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           fields: extraction.fields,
           product_names: extraction.product_names,
           confidence: extraction.confidence,
+          confidence_score: confidenceScore,
         });
       } catch (err) {
         results.push({
@@ -201,6 +222,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         name: docType.name as string,
         naming_format: docType.naming_format || null,
         extraction_fields: extractionFields,
+        auto_ingest_threshold: docType.auto_ingest_threshold ?? null,
       },
     }), {
       status: 200,

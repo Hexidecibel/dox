@@ -34,6 +34,8 @@ import type {
   BundleListResponse,
   BundleGetResponse,
   ProcessingResponse,
+  ProcessingQueueItem,
+  NaturalSearchResponse,
 } from './types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -566,7 +568,7 @@ export const api = {
      * POST /api/document-types
      * Returns: { documentType: ApiDocumentType }
      */
-    create: (data: { name: string; description?: string; tenant_id?: string; naming_format?: string; extraction_fields?: ExtractionField[] }) =>
+    create: (data: { name: string; description?: string; tenant_id?: string; naming_format?: string; extraction_fields?: ExtractionField[]; auto_ingest_threshold?: number }) =>
       fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -576,7 +578,7 @@ export const api = {
      * PUT /api/document-types/:id
      * Returns: { documentType: ApiDocumentType }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number; naming_format?: string | null; extraction_fields?: ExtractionField[] | null }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; naming_format?: string | null; extraction_fields?: ExtractionField[] | null; auto_ingest_threshold?: number | null }) =>
       fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -796,4 +798,29 @@ export const api = {
       });
     },
   },
+
+  queue: {
+    list: (params?: { status?: string; document_type_id?: string; tenant_id?: string; limit?: number; offset?: number }) =>
+      fetchApi<{ items: ProcessingQueueItem[]; total: number; limit: number; offset: number }>(
+        `/queue?${new URLSearchParams(Object.entries(params || {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])).toString()}`
+      ),
+    get: (id: string) => fetchApi<{ item: ProcessingQueueItem }>(`/queue/${id}`),
+    approve: (id: string, data: { fields?: Record<string, string>; product_name?: string }) =>
+      fetchApi<{ document: any }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
+    reject: (id: string) =>
+      fetchApi<void>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'rejected' }) }),
+  },
+
+  extractionExamples: {
+    list: (documentTypeId: string, tenantId?: string) =>
+      fetchApi<{ examples: any[]; total: number }>(`/extraction-examples?document_type_id=${documentTypeId}${tenantId ? `&tenant_id=${tenantId}` : ''}`),
+    create: (data: { document_type_id: string; tenant_id?: string; input_text: string; ai_output: string; corrected_output: string; score?: number }) =>
+      fetchApi<{ example: any }>('/extraction-examples', { method: 'POST', body: JSON.stringify(data) }),
+  },
+
+  naturalSearch: (query: string, tenantId?: string) =>
+    fetchApi<NaturalSearchResponse>('/documents/search/natural', {
+      method: 'POST',
+      body: JSON.stringify({ query, tenant_id: tenantId }),
+    }),
 };

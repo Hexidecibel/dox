@@ -41,6 +41,7 @@ import {
   FolderCopy as BundlesIcon,
   History as HistoryIcon,
   FileUpload as ImportIcon,
+  RateReview as RateReviewIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -63,6 +64,7 @@ const navItems: NavItem[] = [
   { label: 'Bundles', path: '/bundles', icon: <BundlesIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Expirations', path: '/expirations', icon: <WarningIcon /> },
   { label: 'Import', path: '/import', icon: <ImportIcon />, roles: ['super_admin', 'org_admin', 'user'] },
+  { label: 'Review Queue', path: '/review', icon: <RateReviewIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Ingest History', path: '/ingest-history', icon: <HistoryIcon />, roles: ['super_admin', 'org_admin', 'user'] },
 ];
 
