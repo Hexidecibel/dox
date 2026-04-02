@@ -57,14 +57,6 @@ type Stage = 'upload' | 'processing' | 'review';
 
 // === Field assignment helpers ===
 
-/** Tiers: by default all fields go to primary. User can demote to extended or dismiss. */
-const ASSIGNABLE_TIERS = [
-  { value: 'primary', label: 'Primary' },
-  { value: 'extended', label: 'Extended' },
-  { value: 'product_name', label: 'Product Name' },
-  { value: 'dismiss', label: 'Dismiss' },
-] as const;
-
 /** Maps common AI-extracted field keys for product detection */
 const PRODUCT_FIELD_NAMES = new Set([
   'product_name', 'product', 'product_description',
@@ -95,6 +87,7 @@ interface EditableResult {
   queueItem: ProcessingQueueItem;
   editedFields: Record<string, string>;
   fieldAssignments: Record<string, string>;
+  dismissedFields: Set<string>;
   productName: string;
   importing: boolean;
   imported: boolean;
@@ -209,7 +202,14 @@ function ExtractedTableView({ table }: { table: ExtractedTable }) {
   );
 }
 
-/** Single field row with value editor and tier assignment */
+/** Assignable tiers for non-dismissed fields (no dismiss option in dropdown) */
+const FIELD_TIERS = [
+  { value: 'primary', label: 'Primary' },
+  { value: 'extended', label: 'Extended' },
+  { value: 'product_name', label: 'Product Name' },
+] as const;
+
+/** Single field row with value editor, tier assignment, and dismiss button */
 function FieldRow({
   fieldKey,
   value,
@@ -217,6 +217,7 @@ function FieldRow({
   disabled,
   onValueChange,
   onAssignmentChange,
+  onDismiss,
 }: {
   fieldKey: string;
   value: string;
@@ -224,6 +225,7 @@ function FieldRow({
   disabled: boolean;
   onValueChange: (v: string) => void;
   onAssignmentChange: (tier: string) => void;
+  onDismiss: () => void;
 }) {
   return (
     <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
@@ -233,8 +235,8 @@ function FieldRow({
         onChange={(e) => onValueChange(e.target.value)}
         size="small"
         fullWidth
-        disabled={disabled || assignment === 'dismiss'}
-        sx={{ flex: 1, opacity: assignment === 'dismiss' ? 0.5 : 1 }}
+        disabled={disabled}
+        sx={{ flex: 1 }}
       />
       <Box sx={{ minWidth: 140 }}>
         <FormControl size="small" fullWidth>
@@ -244,7 +246,7 @@ function FieldRow({
             disabled={disabled}
             sx={{ fontSize: '0.8125rem', height: 32 }}
           >
-            {ASSIGNABLE_TIERS.map(r => (
+            {FIELD_TIERS.map(r => (
               <MenuItem key={r.value} value={r.value}>
                 {r.label}
               </MenuItem>
@@ -252,6 +254,15 @@ function FieldRow({
           </Select>
         </FormControl>
       </Box>
+      <IconButton
+        size="small"
+        onClick={onDismiss}
+        disabled={disabled}
+        title="Dismiss field"
+        sx={{ color: 'text.secondary', '&:hover': { color: 'error.main' } }}
+      >
+        <CloseIcon fontSize="small" />
+      </IconButton>
     </Box>
   );
 }
@@ -423,6 +434,7 @@ export function Import() {
           queueItem,
           editedFields,
           fieldAssignments,
+          dismissedFields: new Set<string>(),
           productName: productNames[0] || '',
           importing: false,
           imported: false,
@@ -586,14 +598,19 @@ export function Import() {
       }
 
       // Build primary_metadata from "primary" assigned fields
+      // Dismissed fields go to extended_metadata
       const primaryMeta: Record<string, string> = {};
       const extendedMeta: Record<string, string> = {};
       for (const [key, value] of Object.entries(item.editedFields)) {
-        const tier = item.fieldAssignments[key];
-        if (tier === 'primary') {
-          if (value) primaryMeta[key] = value;
-        } else if (tier === 'extended') {
+        if (item.dismissedFields.has(key)) {
           if (value) extendedMeta[key] = value;
+        } else {
+          const tier = item.fieldAssignments[key];
+          if (tier === 'primary') {
+            if (value) primaryMeta[key] = value;
+          } else if (tier === 'extended') {
+            if (value) extendedMeta[key] = value;
+          }
         }
       }
 
@@ -713,6 +730,27 @@ export function Import() {
     setEditableResults(prev => prev.map((r, i) =>
       i === index ? { ...r, productName: value } : r
     ));
+  };
+
+  // Dismiss/restore fields
+  const [showDismissed, setShowDismissed] = useState<Record<number, boolean>>({});
+
+  const handleDismiss = (resultIndex: number, fieldKey: string) => {
+    setEditableResults(prev => prev.map((item, i) => {
+      if (i !== resultIndex) return item;
+      const dismissed = new Set(item.dismissedFields);
+      dismissed.add(fieldKey);
+      return { ...item, dismissedFields: dismissed };
+    }));
+  };
+
+  const handleRestore = (resultIndex: number, fieldKey: string) => {
+    setEditableResults(prev => prev.map((item, i) => {
+      if (i !== resultIndex) return item;
+      const dismissed = new Set(item.dismissedFields);
+      dismissed.delete(fieldKey);
+      return { ...item, dismissedFields: dismissed };
+    }));
   };
 
   // Rate extraction quality
@@ -1159,7 +1197,9 @@ export function Import() {
                           Extracted Fields
                         </Typography>
                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mb: 2 }}>
-                          {Object.entries(item.editedFields).map(([fieldName, fieldValue]) => (
+                          {Object.entries(item.editedFields)
+                            .filter(([fieldName]) => !item.dismissedFields.has(fieldName))
+                            .map(([fieldName, fieldValue]) => (
                             <FieldRow
                               key={fieldName}
                               fieldKey={fieldName}
@@ -1168,9 +1208,37 @@ export function Import() {
                               disabled={item.importing}
                               onValueChange={(v) => updateField(index, fieldName, v)}
                               onAssignmentChange={(role) => updateFieldAssignment(index, fieldName, role)}
+                              onDismiss={() => handleDismiss(index, fieldName)}
                             />
                           ))}
                         </Box>
+
+                        {/* Dismissed fields */}
+                        {item.dismissedFields.size > 0 && (
+                          <Box sx={{ mb: 2 }}>
+                            <Button
+                              size="small"
+                              onClick={() => setShowDismissed(prev => ({ ...prev, [index]: !prev[index] }))}
+                              sx={{ textTransform: 'none', color: 'text.secondary', mb: 0.5 }}
+                            >
+                              {showDismissed[index] ? 'Hide' : 'Show'} {item.dismissedFields.size} dismissed field{item.dismissedFields.size !== 1 ? 's' : ''}
+                            </Button>
+                            {showDismissed[index] && (
+                              <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                                {Array.from(item.dismissedFields).map(fieldKey => (
+                                  <Chip
+                                    key={fieldKey}
+                                    label={`${humanizeFieldKey(fieldKey)}: ${item.editedFields[fieldKey] || '(empty)'}`}
+                                    size="small"
+                                    variant="outlined"
+                                    onDelete={() => handleRestore(index, fieldKey)}
+                                    sx={{ opacity: 0.7 }}
+                                  />
+                                ))}
+                              </Box>
+                            )}
+                          </Box>
+                        )}
 
                         {/* Section 2: Tables */}
                         {tables.length > 0 && (
