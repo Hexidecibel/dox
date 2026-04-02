@@ -1,0 +1,67 @@
+#!/usr/bin/env node
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const ROOT = path.resolve(__dirname, '..');
+const SECRET_FILE = path.join(ROOT, '.qwen-proxy-secret');
+const PORT = parseInt(process.env.QWEN_PROXY_PORT || '9601', 10);
+const TARGET = 'http://127.0.0.1:9600';
+
+function getSecret() {
+  if (process.env.QWEN_PROXY_SECRET) return process.env.QWEN_PROXY_SECRET;
+  try {
+    return fs.readFileSync(SECRET_FILE, 'utf8').trim();
+  } catch {
+    const secret = require('node:crypto').randomBytes(32).toString('hex');
+    fs.writeFileSync(SECRET_FILE, secret + '\n', { mode: 0o600 });
+    return secret;
+  }
+}
+
+const SECRET = getSecret();
+
+const server = http.createServer((req, res) => {
+  const auth = req.headers['authorization'] || '';
+  if (auth !== `Bearer ${SECRET}`) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    return;
+  }
+
+  // Build forwarded headers, stripping Authorization
+  const fwdHeaders = { ...req.headers };
+  delete fwdHeaders['authorization'];
+  delete fwdHeaders['host'];
+
+  const url = new URL(req.url, TARGET);
+  const proxyReq = http.request(
+    {
+      hostname: '127.0.0.1',
+      port: 9600,
+      path: url.pathname + url.search,
+      method: req.method,
+      headers: fwdHeaders,
+    },
+    (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res, { end: true });
+    }
+  );
+
+  proxyReq.on('error', (err) => {
+    console.error('Proxy error:', err.message);
+    if (!res.headersSent) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Bad Gateway', detail: err.message }));
+    }
+  });
+
+  req.pipe(proxyReq, { end: true });
+});
+
+server.listen(PORT, () => {
+  console.log(`Qwen auth proxy listening on port ${PORT}`);
+  console.log(`Proxying to ${TARGET}`);
+  console.log(`Secret: ${SECRET}`);
+});

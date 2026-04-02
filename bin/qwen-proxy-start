@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# Start proxy in background
+node bin/qwen-proxy &
+PROXY_PID=$!
+sleep 1
+
+# Start tunnel
+/home/hexi/local/src/cush-tools/bin/tunnel 9601 qwen --bg
+
+echo ""
+echo "Qwen proxy running on port 9601 (PID: $PROXY_PID)"
+echo "Tunnel: https://qwen.tunnel.cush.rocks"
+echo "Set QWEN_URL=https://qwen.tunnel.cush.rocks in Cloudflare Pages secrets"

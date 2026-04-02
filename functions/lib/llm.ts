@@ -39,7 +39,7 @@ function buildPrompt(fields: ExtractionField[]): string {
 export async function extractFields(
   text: string,
   extractionFields: ExtractionField[],
-  env: { QWEN_URL?: string }
+  env: { QWEN_URL?: string; QWEN_SECRET?: string }
 ): Promise<ExtractionResult> {
   if (!text || text.trim().length === 0) {
     const fields: Record<string, string | null> = {};
@@ -59,7 +59,10 @@ export async function extractFields(
   try {
     response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(env.QWEN_SECRET ? { Authorization: `Bearer ${env.QWEN_SECRET}` } : {}),
+      },
       signal: controller.signal,
       body: JSON.stringify({
         model: 'Qwen3-5-35B-A3B',

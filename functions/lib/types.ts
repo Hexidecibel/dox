@@ -5,6 +5,7 @@ export interface Env {
   RESEND_API_KEY?: string;
   EMAIL_WEBHOOK_SECRET?: string;
   QWEN_URL?: string;
+  QWEN_SECRET?: string;
 }
 
 export interface User {
