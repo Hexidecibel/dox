@@ -131,30 +131,38 @@ async function processItem(item) {
     // Trim text for LLM (full text still stored for search)
     const llmText = text.substring(0, 10000);
 
-    // Call Qwen
-    const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'Qwen3-5-35B-A3B',
-        temperature: 0,
-        max_tokens: 2048,
-        messages: [
-          { role: 'system', content: buildPrompt() },
-          {
-            role: 'user',
-            content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
-          },
-        ],
-      }),
-    });
-
-    if (!qwenRes.ok) {
-      const errText = await qwenRes.text().catch(() => '');
-      throw new Error(`Qwen request failed: ${qwenRes.status} ${errText.substring(0, 200)}`);
+    // Call Qwen (with retry for cold starts)
+    let qwenData;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'Qwen3-5-35B-A3B',
+            temperature: 0,
+            max_tokens: 2048,
+            messages: [
+              { role: 'system', content: buildPrompt() },
+              {
+                role: 'user',
+                content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+              },
+            ],
+          }),
+        });
+        if (!qwenRes.ok) {
+          const errText = await qwenRes.text().catch(() => '');
+          throw new Error(`Qwen HTTP ${qwenRes.status}: ${errText.substring(0, 200)}`);
+        }
+        qwenData = await qwenRes.json();
+        break;
+      } catch (err) {
+        if (attempt === 2) throw new Error(`Qwen call failed: ${err.message}`);
+        console.warn(`  Qwen retry ${attempt}/2 for ${item.file_name}: ${err.message}`);
+        await new Promise(r => setTimeout(r, 5000));
+      }
     }
-
-    const qwenData = await qwenRes.json();
     const content = qwenData.choices?.[0]?.message?.content || '';
 
     // Parse response
