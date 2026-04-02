@@ -38,7 +38,7 @@ async function poll() {
 
   try {
     const res = await fetch(
-      `${DOX_API_URL}/api/queue?processing_status=queued&limit=5`,
+      `${DOX_API_URL}/api/queue?processing_status=queued&limit=1`,
       { headers }
     );
 
@@ -81,16 +81,24 @@ async function processItem(item) {
     // Mark as processing
     await postResults(item.id, { processing_status: 'processing' });
 
-    // Download file
-    const fileRes = await fetch(`${DOX_API_URL}/api/queue/${item.id}/file`, {
-      headers: { 'X-API-Key': DOX_API_KEY },
-    });
-
-    if (!fileRes.ok) {
-      throw new Error(`File download failed: ${fileRes.status}`);
+    // Download file (with retry)
+    let fileBuffer;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const fileRes = await fetch(`${DOX_API_URL}/api/queue/${item.id}/file`, {
+          headers: { 'X-API-Key': DOX_API_KEY },
+        });
+        if (!fileRes.ok) {
+          throw new Error(`File download failed: ${fileRes.status}`);
+        }
+        fileBuffer = await fileRes.arrayBuffer();
+        break;
+      } catch (err) {
+        if (attempt === 3) throw err;
+        console.warn(`  Retry ${attempt}/3 for ${item.file_name}: ${err.message}`);
+        await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
     }
-
-    const fileBuffer = await fileRes.arrayBuffer();
 
     // Extract text based on mime type
     let text = null;
