@@ -97,6 +97,12 @@ interface EditableResult {
   autoIngesting: boolean;
   correctionsSaved: boolean;
   ratingSubmitted?: 'up' | 'down';
+  /** The document_type_id (either user-selected or AI-matched) */
+  resolvedDocTypeId: string;
+  /** The AI's raw guess label */
+  documentTypeGuess: string | null;
+  /** Whether the AI matched an existing doc type */
+  docTypeMatched: boolean;
 }
 
 // === Utility ===
@@ -429,6 +435,11 @@ export function Import() {
         // Find the original file by name
         const file = files.find(f => f.name === item.fileName) || files[0];
 
+        // Resolve document type: prefer user-selected, then AI-matched from queue item
+        const resolvedDocTypeId = documentTypeId || queueItem.document_type_id || '';
+        const documentTypeGuess = (queueItem as any).document_type_guess || null;
+        const docTypeMatched = !documentTypeId && !!queueItem.document_type_id;
+
         return {
           file,
           queueItem,
@@ -441,6 +452,9 @@ export function Import() {
           confidenceScore: queueItem.confidence_score || 0,
           autoIngesting: false,
           correctionsSaved: false,
+          resolvedDocTypeId,
+          documentTypeGuess,
+          docTypeMatched,
         };
       });
 
@@ -487,7 +501,7 @@ export function Import() {
     setError('');
 
     try {
-      const response = await api.processing.process(files, documentTypeId, effectiveTenantId);
+      const response = await api.processing.process(files, effectiveTenantId, documentTypeId || undefined);
       setDocTypeInfo(response.document_type);
 
       // Initialize queued items for polling
@@ -532,14 +546,17 @@ export function Import() {
         } catch { aiFields = {}; }
       }
 
+      // Determine effective doc type for this item
+      const itemDocTypeId = documentTypeId || item.resolvedDocTypeId || '';
+
       // Auto-save correction as training example if fields were edited
       const fieldsChanged = Object.keys(item.editedFields).some(
         k => item.editedFields[k] !== (aiFields[k] || '')
       );
-      if (fieldsChanged && documentTypeId) {
+      if (fieldsChanged && itemDocTypeId) {
         try {
           await api.extractionExamples.create({
-            document_type_id: documentTypeId,
+            document_type_id: itemDocTypeId,
             tenant_id: effectiveTenantId || undefined,
             input_text: (item.queueItem.extracted_text || '').substring(0, 2000),
             ai_output: JSON.stringify(aiFields),
@@ -587,7 +604,9 @@ export function Import() {
       form.append('tenant_id', effectiveTenantId);
       form.append('external_ref', `import-${Date.now()}-${index}-${item.file.name}`);
       form.append('title', item.file.name.replace(/\.[^/.]+$/, ''));
-      form.append('document_type_id', documentTypeId);
+      if (itemDocTypeId) {
+        form.append('document_type_id', itemDocTypeId);
+      }
 
       if (supplierId) {
         form.append('supplier_id', supplierId);
@@ -768,9 +787,15 @@ export function Import() {
       } catch { aiFields = {}; }
     }
 
+    const ratingDocTypeId = documentTypeId || item.resolvedDocTypeId || '';
+    if (!ratingDocTypeId) {
+      setSnackbar({ open: true, message: 'Cannot save rating without a document type', severity: 'error' });
+      return;
+    }
+
     try {
       await api.extractionExamples.create({
-        document_type_id: documentTypeId,
+        document_type_id: ratingDocTypeId,
         tenant_id: effectiveTenantId || undefined,
         input_text: (item.queueItem.extracted_text || '').substring(0, 2000),
         ai_output: JSON.stringify(aiFields),
@@ -849,34 +874,6 @@ export function Import() {
               </Select>
             </FormControl>
           )}
-
-          {/* Document type selector */}
-          <FormControl fullWidth sx={{ mb: 3 }}>
-            <InputLabel>Document Type</InputLabel>
-            <Select
-              value={documentTypeId}
-              onChange={(e) => setDocumentTypeId(e.target.value)}
-              label="Document Type"
-              required
-              disabled={documentTypes.length === 0}
-            >
-              {documentTypes.map((dt) => (
-                <MenuItem key={dt.id} value={dt.id}>
-                  {dt.name}
-                  {dt.description && (
-                    <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                      -- {dt.description}
-                    </Typography>
-                  )}
-                </MenuItem>
-              ))}
-            </Select>
-            {effectiveTenantId && documentTypes.length === 0 && (
-              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-                No document types found for this tenant. Create one in Document Types admin first.
-              </Typography>
-            )}
-          </FormControl>
 
           {/* Drop zone */}
           <Paper
@@ -957,12 +954,42 @@ export function Import() {
             </Box>
           )}
 
+          {/* Optional document type selector */}
+          {documentTypes.length > 0 && (
+            <FormControl fullWidth sx={{ mb: 3 }}>
+              <InputLabel>Pre-select document type (optional)</InputLabel>
+              <Select
+                value={documentTypeId}
+                onChange={(e) => setDocumentTypeId(e.target.value)}
+                label="Pre-select document type (optional)"
+                displayEmpty
+              >
+                <MenuItem value="">
+                  <em>Let AI detect</em>
+                </MenuItem>
+                {documentTypes.map((dt) => (
+                  <MenuItem key={dt.id} value={dt.id}>
+                    {dt.name}
+                    {dt.description && (
+                      <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                        -- {dt.description}
+                      </Typography>
+                    )}
+                  </MenuItem>
+                ))}
+              </Select>
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                Leave empty to let AI detect the document type automatically.
+              </Typography>
+            </FormControl>
+          )}
+
           {/* Process button */}
           <Button
             variant="contained"
             size="large"
             onClick={handleProcess}
-            disabled={files.length === 0 || !documentTypeId || (isSuperAdmin && !tenantId)}
+            disabled={files.length === 0 || (isSuperAdmin && !tenantId)}
             startIcon={<UploadIcon />}
             fullWidth={isMobile}
           >
@@ -1111,6 +1138,20 @@ export function Import() {
                     <Typography variant="body2" fontWeight={600} color="text.secondary">
                       {Math.round(confidence * 100)}%
                     </Typography>
+                    {/* Document type chip */}
+                    {(() => {
+                      const dtName = documentTypeId
+                        ? documentTypes.find(dt => dt.id === documentTypeId)?.name
+                        : item.resolvedDocTypeId
+                          ? documentTypes.find(dt => dt.id === item.resolvedDocTypeId)?.name
+                          : null;
+                      if (dtName) {
+                        return <Chip label={dtName} size="small" color="success" variant="outlined" />;
+                      } else if (item.documentTypeGuess) {
+                        return <Chip label={`${item.documentTypeGuess} (new)`} size="small" color="warning" variant="outlined" />;
+                      }
+                      return null;
+                    })()}
                     {item.imported && (
                       <Chip label="Imported" size="small" color="success" icon={<CheckIcon />} />
                     )}
@@ -1236,6 +1277,42 @@ export function Import() {
                                   />
                                 ))}
                               </Box>
+                            )}
+                          </Box>
+                        )}
+
+                        {/* Document Type selector (when not pre-selected) */}
+                        {!documentTypeId && (
+                          <Box sx={{ mb: 2 }}>
+                            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                              Document Type
+                            </Typography>
+                            <FormControl size="small" fullWidth>
+                              <Select
+                                value={item.resolvedDocTypeId}
+                                onChange={(e) => {
+                                  const newId = e.target.value;
+                                  setEditableResults(prev => prev.map((r, i) =>
+                                    i === index ? { ...r, resolvedDocTypeId: newId, docTypeMatched: !!newId } : r
+                                  ));
+                                }}
+                                displayEmpty
+                                disabled={item.importing}
+                              >
+                                <MenuItem value="">
+                                  <em>{item.documentTypeGuess ? `AI guess: ${item.documentTypeGuess}` : 'None'}</em>
+                                </MenuItem>
+                                {documentTypes.map((dt) => (
+                                  <MenuItem key={dt.id} value={dt.id}>
+                                    {dt.name}
+                                  </MenuItem>
+                                ))}
+                              </Select>
+                            </FormControl>
+                            {item.documentTypeGuess && !item.resolvedDocTypeId && (
+                              <Typography variant="caption" color="warning.main" sx={{ mt: 0.5, display: 'block' }}>
+                                AI detected &ldquo;{item.documentTypeGuess}&rdquo; but no matching type found. Select one above or it will be imported without a type.
+                              </Typography>
                             )}
                           </Box>
                         )}

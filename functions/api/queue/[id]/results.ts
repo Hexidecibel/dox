@@ -29,6 +29,8 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       summary?: string;
       supplier?: string | null;
       error_message?: string;
+      document_type_id?: string | null;
+      document_type_guess?: string | null;
     };
 
     if (!body.processing_status || !['processing', 'ready', 'error'].includes(body.processing_status)) {
@@ -93,6 +95,16 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.error_message !== undefined) {
       updates.push('error_message = ?');
       params.push(body.error_message);
+    }
+
+    if (body.document_type_id !== undefined) {
+      updates.push('document_type_id = ?');
+      params.push(body.document_type_id);
+    }
+
+    if (body.document_type_guess !== undefined) {
+      updates.push('document_type_guess = ?');
+      params.push(body.document_type_guess);
     }
 
     params.push(queueId);

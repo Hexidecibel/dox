@@ -580,7 +580,7 @@ export interface ExtractionExampleRow {
 export interface ProcessingQueueItem {
   id: string;
   tenant_id: string;
-  document_type_id: string;
+  document_type_id: string | null;
   file_r2_key: string;
   file_name: string;
   file_size: number;
@@ -591,6 +591,7 @@ export interface ProcessingQueueItem {
   confidence_score: number | null;
   product_names: string | null;
   supplier: string | null;
+  document_type_guess: string | null;
   status: 'pending' | 'approved' | 'rejected';
   processing_status: 'queued' | 'processing' | 'ready' | 'error';
   error_message: string | null;
@@ -621,7 +622,7 @@ export interface QueuedResponse {
       file_name: string;
     } | null;
   }>;
-  document_type: {
+  document_type?: {
     id: string;
     name: string;
     naming_format: string | null;

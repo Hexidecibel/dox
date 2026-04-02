@@ -11,7 +11,7 @@ Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
 Environment=DOX_API_URL=https://dox.cush.rocks
-Environment=DOX_API_KEY=PLACEHOLDER_NEEDS_REAL_KEY
+Environment=DOX_API_KEY=dox_sk_20b863e96b995d544d912039c87dd3ad91578f6055ca0be851d2bb8c7c0ed7a03373dda07df79765677e6aefb4ef9a6babfc9a616d49e7a15b811fc5b92d4750
 Environment=QWEN_URL=http://127.0.0.1:9600
 
 [Install]

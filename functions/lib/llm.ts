@@ -6,6 +6,7 @@ export interface ExtractionResult {
   products: string[];
   summary: string;
   confidence: 'high' | 'medium' | 'low';
+  documentType: string | null;
   raw_response?: string;
 }
 
@@ -38,6 +39,8 @@ function buildPrompt(examples?: { input_text: string; corrected_output: string }
     '4. "summary": one-sentence description of the document.',
     '',
     '5. "_confidence": "high", "medium", or "low"',
+    '',
+    '6. "document_type": a short label for what kind of document this is (e.g., "Certificate of Analysis", "Bill of Lading", "Safety Data Sheet", "Spec Sheet", "Invoice", "Purchase Order"). Use standard industry terminology.',
   ].join('\n');
 
   if (examples && examples.length > 0) {
@@ -56,7 +59,7 @@ export async function extractFields(
   examples?: { input_text: string; corrected_output: string }[]
 ): Promise<ExtractionResult> {
   if (!text || text.trim().length === 0) {
-    return { fields: {}, tables: [], products: [], summary: '', confidence: 'low' };
+    return { fields: {}, tables: [], products: [], summary: '', confidence: 'low', documentType: null };
   }
 
   const baseUrl = (env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
@@ -114,7 +117,7 @@ export async function extractFields(
   try {
     parsed = JSON.parse(content);
   } catch {
-    return { fields: {}, tables: [], products: [], summary: '', confidence: 'low', raw_response: content };
+    return { fields: {}, tables: [], products: [], summary: '', confidence: 'low', documentType: null, raw_response: content };
   }
 
   const products = Array.isArray(parsed.products)
@@ -130,13 +133,14 @@ export async function extractFields(
     : [];
 
   const summary = typeof parsed.summary === 'string' ? parsed.summary : '';
+  const documentType = typeof parsed.document_type === 'string' ? parsed.document_type : null;
 
   // Build fields from the "fields" object, or from top-level non-reserved keys
   const fields: Record<string, string | null> = {};
   const rawFields = (typeof parsed.fields === 'object' && parsed.fields !== null && !Array.isArray(parsed.fields))
     ? parsed.fields as Record<string, unknown>
     : parsed;
-  const reservedKeys = new Set(['fields', 'tables', 'products', 'summary', '_confidence']);
+  const reservedKeys = new Set(['fields', 'tables', 'products', 'summary', '_confidence', 'document_type']);
 
   for (const [key, value] of Object.entries(rawFields)) {
     if (!key.startsWith('_') && !reservedKeys.has(key)) {
@@ -144,7 +148,7 @@ export async function extractFields(
     }
   }
 
-  return { fields, tables, products, summary, confidence };
+  return { fields, tables, products, summary, confidence, documentType };
 }
 
 export async function parseNaturalQuery(

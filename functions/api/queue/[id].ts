@@ -88,7 +88,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       .first<{
         id: string;
         tenant_id: string;
-        document_type_id: string;
+        document_type_id: string | null;
         file_r2_key: string;
         file_name: string;
         file_size: number;
@@ -137,7 +137,7 @@ async function handleApprove(
   item: {
     id: string;
     tenant_id: string;
-    document_type_id: string;
+    document_type_id: string | null;
     file_r2_key: string;
     file_name: string;
     file_size: number;

@@ -156,8 +156,20 @@ async function processItem(item) {
     // Compute confidence score
     const confidenceScore = computeConfidenceScore(parsed.confidence, parsed.fields || {});
 
+    // Resolve document type if AI guessed one and queue item has no doc type set
+    let resolvedDocTypeId = item.document_type_id || null;
+    const docTypeGuess = parsed.documentType || null;
+
+    if (docTypeGuess && !resolvedDocTypeId) {
+      try {
+        resolvedDocTypeId = await fuzzyMatchDocType(docTypeGuess, item.tenant_id);
+      } catch (err) {
+        console.warn(`  Doc type matching failed:`, err.message);
+      }
+    }
+
     // Post results
-    await postResults(item.id, {
+    const resultBody = {
       processing_status: 'ready',
       extracted_text: text.substring(0, 100000),
       ai_fields: JSON.stringify(parsed.fields || {}),
@@ -167,7 +179,14 @@ async function processItem(item) {
       tables: JSON.stringify(parsed.tables || []),
       summary: parsed.summary || '',
       supplier: supplier,
-    });
+      document_type_guess: docTypeGuess,
+    };
+
+    if (resolvedDocTypeId && !item.document_type_id) {
+      resultBody.document_type_id = resolvedDocTypeId;
+    }
+
+    await postResults(item.id, resultBody);
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`  Done: ${item.file_name} (${Math.round(confidenceScore * 100)}% confidence, ${elapsed}s)`);
@@ -178,6 +197,49 @@ async function processItem(item) {
       error_message: err.message,
     }).catch(() => {});
   }
+}
+
+// === Document type fuzzy matching ===
+
+async function fuzzyMatchDocType(guess, tenantId) {
+  const res = await fetch(
+    `${DOX_API_URL}/api/document-types?tenant_id=${encodeURIComponent(tenantId)}&active=1`,
+    { headers }
+  );
+  if (!res.ok) return null;
+
+  const data = await res.json();
+  const docTypes = data.documentTypes || [];
+  if (docTypes.length === 0) return null;
+
+  const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const guessNorm = normalize(guess);
+
+  // Exact name/slug match
+  for (const dt of docTypes) {
+    if (normalize(dt.name) === guessNorm || dt.slug === guessNorm.replace(/\s+/g, '-')) {
+      return dt.id;
+    }
+  }
+
+  // Substring match (either direction)
+  for (const dt of docTypes) {
+    const dtNorm = normalize(dt.name);
+    if (guessNorm.includes(dtNorm) || dtNorm.includes(guessNorm)) {
+      return dt.id;
+    }
+  }
+
+  // Acronym match: "COA" matches "Certificate of Analysis"
+  for (const dt of docTypes) {
+    const dtNorm = normalize(dt.name);
+    const acronym = dtNorm.split(' ').map(w => w[0]).join('');
+    if (acronym === guessNorm || guessNorm === acronym) {
+      return dt.id;
+    }
+  }
+
+  return null;
 }
 
 // === Prompt (same logic as functions/lib/llm.ts) ===
@@ -211,6 +273,8 @@ function buildPrompt() {
     '4. "summary": one-sentence description of the document.',
     '',
     '5. "_confidence": "high", "medium", or "low"',
+    '',
+    '6. "document_type": a short label for what kind of document this is (e.g., "Certificate of Analysis", "Bill of Lading", "Safety Data Sheet", "Spec Sheet", "Invoice", "Purchase Order"). Use standard industry terminology.',
   ].join('\n');
 }
 
@@ -236,6 +300,7 @@ function parseExtraction(content) {
   const confidence = ['high', 'medium', 'low'].includes(parsed._confidence) ? parsed._confidence : 'low';
   const tables = Array.isArray(parsed.tables) ? parsed.tables : [];
   const summary = typeof parsed.summary === 'string' ? parsed.summary : '';
+  const documentType = typeof parsed.document_type === 'string' ? parsed.document_type : null;
 
   // Build fields
   const fields = {};
@@ -243,7 +308,7 @@ function parseExtraction(content) {
     typeof parsed.fields === 'object' && parsed.fields !== null && !Array.isArray(parsed.fields)
       ? parsed.fields
       : parsed;
-  const reservedKeys = new Set(['fields', 'tables', 'products', 'summary', '_confidence']);
+  const reservedKeys = new Set(['fields', 'tables', 'products', 'summary', '_confidence', 'document_type']);
 
   for (const [key, value] of Object.entries(rawFields)) {
     if (!key.startsWith('_') && !reservedKeys.has(key)) {
@@ -251,7 +316,7 @@ function parseExtraction(content) {
     }
   }
 
-  return { fields, tables, products, summary, confidence };
+  return { fields, tables, products, summary, confidence, documentType };
 }
 
 // === Confidence score (same logic as functions/lib/confidence.ts) ===

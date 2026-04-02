@@ -847,10 +847,10 @@ export const api = {
      * POST /api/documents/process
      * Send files for async processing. Returns queue item IDs immediately.
      */
-    process: (files: File[], documentTypeId: string, tenantId: string): Promise<QueuedResponse> => {
+    process: (files: File[], tenantId: string, documentTypeId?: string): Promise<QueuedResponse> => {
       const form = new FormData();
       files.forEach(f => form.append('files', f));
-      form.append('document_type_id', documentTypeId);
+      if (documentTypeId) form.append('document_type_id', documentTypeId);
       form.append('tenant_id', tenantId);
       return fetchApi<QueuedResponse>('/documents/process', {
         method: 'POST',

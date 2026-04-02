@@ -49,43 +49,51 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     requireRole(user, 'super_admin', 'org_admin', 'user');
 
     const formData = await context.request.formData();
-    const documentTypeId = formData.get('document_type_id') as string;
+    const documentTypeId = formData.get('document_type_id') as string | null;
     const tenantId = (formData.get('tenant_id') as string) || user.tenant_id;
 
-    if (!documentTypeId) {
-      throw new BadRequestError('document_type_id is required');
-    }
     if (!tenantId) {
       throw new BadRequestError('tenant_id is required');
     }
 
     requireTenantAccess(user, tenantId);
 
-    // Look up document type
-    const docType = await context.env.DB.prepare(
-      'SELECT id, name, naming_format, extraction_fields, auto_ingest_threshold FROM document_types WHERE id = ? AND active = 1'
-    ).bind(documentTypeId).first<{
+    // Look up document type if provided
+    let docType: {
       id: string;
       name: string;
       naming_format: string | null;
       extraction_fields: string | null;
       auto_ingest_threshold: number | null;
-    }>();
+    } | null = null;
 
-    if (!docType) {
-      throw new NotFoundError('Document type not found');
-    }
-
-    // Parse extraction_fields
     let extractionFields: ExtractionField[] = [];
-    if (docType.extraction_fields) {
-      try {
-        const parsed = typeof docType.extraction_fields === 'string'
-          ? JSON.parse(docType.extraction_fields)
-          : docType.extraction_fields;
-        if (Array.isArray(parsed)) extractionFields = parsed;
-      } catch {
-        // Invalid JSON — treat as empty
+
+    if (documentTypeId) {
+      docType = await context.env.DB.prepare(
+        'SELECT id, name, naming_format, extraction_fields, auto_ingest_threshold FROM document_types WHERE id = ? AND active = 1'
+      ).bind(documentTypeId).first<{
+        id: string;
+        name: string;
+        naming_format: string | null;
+        extraction_fields: string | null;
+        auto_ingest_threshold: number | null;
+      }>();
+
+      if (!docType) {
+        throw new NotFoundError('Document type not found');
+      }
+
+      // Parse extraction_fields
+      if (docType.extraction_fields) {
+        try {
+          const parsed = typeof docType.extraction_fields === 'string'
+            ? JSON.parse(docType.extraction_fields)
+            : docType.extraction_fields;
+          if (Array.isArray(parsed)) extractionFields = parsed;
+        } catch {
+          // Invalid JSON — treat as empty
+        }
       }
     }
 
@@ -192,7 +200,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, status, processing_status, checksum, created_by)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?)`
       )
-        .bind(queueId, tenantId, documentTypeId, r2Key, fileName, file.size, mimeType, checksum, user.id)
+        .bind(queueId, tenantId, documentTypeId || null, r2Key, fileName, file.size, mimeType, checksum, user.id)
         .run();
 
       queuedItems.push({
@@ -205,13 +213,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return new Response(JSON.stringify({
       queued: true,
       items: queuedItems,
-      document_type: {
-        id: docType.id,
-        name: docType.name,
-        naming_format: docType.naming_format || null,
-        extraction_fields: extractionFields,
-        auto_ingest_threshold: docType.auto_ingest_threshold ?? null,
-      },
+      ...(docType ? {
+        document_type: {
+          id: docType.id,
+          name: docType.name,
+          naming_format: docType.naming_format || null,
+          extraction_fields: extractionFields,
+          auto_ingest_threshold: docType.auto_ingest_threshold ?? null,
+        },
+      } : {}),
     }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
