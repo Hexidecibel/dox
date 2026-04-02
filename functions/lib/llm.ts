@@ -49,7 +49,7 @@ export async function extractFields(
   const systemPrompt = buildPrompt(examples);
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 90_000);
+  const timeout = setTimeout(() => controller.abort(), 180_000);
 
   let response: Response;
   try {
@@ -76,7 +76,7 @@ export async function extractFields(
   } catch (err: unknown) {
     clearTimeout(timeout);
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error('LLM request timed out after 90 seconds');
+      throw new Error('LLM request timed out after 180 seconds');
     }
     throw new Error(`LLM server not reachable at ${baseUrl}. Is Qwen running?`);
   } finally {
