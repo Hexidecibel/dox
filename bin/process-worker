@@ -128,29 +128,33 @@ async function processItem(item) {
       return;
     }
 
-    // Trim text for LLM (full text still stored for search)
-    const llmText = text.substring(0, 10000);
+    // Trim text for LLM — 4K chars is plenty for COAs/invoices
+    const llmText = text.substring(0, 4000);
 
-    // Call Qwen (with retry for cold starts)
+    // Call Qwen (with retry + 5 min timeout for cold starts)
     let qwenData;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 300_000); // 5 min
         const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             model: 'Qwen3-5-35B-A3B',
             temperature: 0,
-            max_tokens: 2048,
+            max_tokens: 1024,
             messages: [
               { role: 'system', content: buildPrompt() },
               {
                 role: 'user',
-                content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+                content: `<document>\n${llmText}\n</document>\n\nExtract the key structured data. Return JSON only. /no_think`,
               },
             ],
           }),
         });
+        clearTimeout(timeout);
         if (!qwenRes.ok) {
           const errText = await qwenRes.text().catch(() => '');
           throw new Error(`Qwen HTTP ${qwenRes.status}: ${errText.substring(0, 200)}`);
@@ -160,7 +164,9 @@ async function processItem(item) {
       } catch (err) {
         if (attempt === 2) throw new Error(`Qwen call failed: ${err.message}`);
         console.warn(`  Qwen retry ${attempt}/2 for ${item.file_name}: ${err.message}`);
-        await new Promise(r => setTimeout(r, 5000));
+        // Wait 60s on retry — give model time to load
+        console.warn('  Waiting 60s for model to load...');
+        await new Promise(r => setTimeout(r, 60_000));
       }
     }
     const content = qwenData.choices?.[0]?.message?.content || '';
