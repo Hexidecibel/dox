@@ -964,12 +964,13 @@ export function Import() {
           {/* Optional document type selector */}
           {documentTypes.length > 0 && (
             <FormControl fullWidth sx={{ mb: 3 }}>
-              <InputLabel>Pre-select document type (optional)</InputLabel>
+              <InputLabel shrink>Pre-select document type (optional)</InputLabel>
               <Select
                 value={documentTypeId}
                 onChange={(e) => setDocumentTypeId(e.target.value)}
                 label="Pre-select document type (optional)"
                 displayEmpty
+                notched
               >
                 <MenuItem value="">
                   <em>Let AI detect</em>
