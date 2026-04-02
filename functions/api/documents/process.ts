@@ -91,17 +91,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       }
     }
 
-    // Fetch few-shot examples for this document type
-    const examplesResult = await context.env.DB.prepare(
-      `SELECT input_text, corrected_output FROM extraction_examples
-       WHERE document_type_id = ? AND tenant_id = ? AND score >= 0.7
-       ORDER BY score DESC, created_at DESC LIMIT 3`
-    ).bind(documentTypeId, tenantId).all();
-
-    const fewShotExamples = examplesResult.results?.map(e => ({
-      input_text: e.input_text as string,
-      corrected_output: e.corrected_output as string,
-    }));
+    // Few-shot examples will be fetched per-file after supplier detection
+    // (moved below into the per-file processing loop)
 
     // Get all files from form data
     const files: File[] = [];
@@ -133,6 +124,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             product_names: [],
             confidence: 'low',
             confidence_score: 0,
+            training_ready: false,
+            example_count: 0,
           });
           continue;
         }
@@ -151,6 +144,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             product_names: [],
             confidence: 'low',
             confidence_score: 0,
+            training_ready: false,
+            example_count: 0,
           });
           continue;
         }
@@ -166,6 +161,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             product_names: [],
             confidence: 'low',
             confidence_score: 0,
+            training_ready: false,
+            example_count: 0,
           });
           continue;
         }
@@ -213,14 +210,77 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             product_names: [],
             confidence: 'low',
             confidence_score: 0,
+            training_ready: false,
+            example_count: 0,
             checksum,
             duplicate,
           });
           continue;
         }
 
-        // Call LLM for field extraction (with few-shot examples)
-        const extraction = await extractFields(text, context.env, fewShotExamples);
+        // Initial LLM extraction (no few-shot yet — we need supplier first)
+        const initialExtraction = await extractFields(text, context.env);
+
+        // Detect supplier from extracted fields
+        const supplierKeys = ['supplier_name', 'supplier', 'manufacturer', 'vendor', 'company', 'from'];
+        const supplier = supplierKeys.map(k => initialExtraction.fields[k]).find(v => v != null && String(v).trim() !== '') as string | undefined || null;
+
+        // Fetch supplier-aware few-shot examples
+        const MIN_TRAINING_EXAMPLES = 3;
+        let fewShotExamples: { input_text: string; corrected_output: string }[] = [];
+
+        if (supplier) {
+          const supplierExResult = await context.env.DB.prepare(
+            `SELECT input_text, corrected_output FROM extraction_examples
+             WHERE document_type_id = ? AND tenant_id = ? AND supplier = ? AND score >= 0.7
+             ORDER BY score DESC, created_at DESC LIMIT 3`
+          ).bind(documentTypeId, tenantId, supplier).all();
+          fewShotExamples = (supplierExResult.results || []).map(e => ({
+            input_text: e.input_text as string,
+            corrected_output: e.corrected_output as string,
+          }));
+        }
+
+        // Fill remaining slots from other suppliers
+        if (fewShotExamples.length < 3) {
+          const remaining = 3 - fewShotExamples.length;
+          const otherExResult = await context.env.DB.prepare(
+            `SELECT input_text, corrected_output FROM extraction_examples
+             WHERE document_type_id = ? AND tenant_id = ? AND (supplier IS NULL OR supplier != ?) AND score >= 0.7
+             ORDER BY score DESC, created_at DESC LIMIT ?`
+          ).bind(documentTypeId, tenantId, supplier || '', remaining).all();
+          fewShotExamples = [...fewShotExamples, ...(otherExResult.results || []).map(e => ({
+            input_text: e.input_text as string,
+            corrected_output: e.corrected_output as string,
+          }))];
+        }
+
+        // Re-extract with few-shot examples if we have any
+        let extraction = initialExtraction;
+        if (fewShotExamples.length > 0) {
+          extraction = await extractFields(text, context.env, fewShotExamples);
+        }
+
+        // Count training examples for this supplier+doctype
+        let exampleCount = 0;
+        if (supplier) {
+          const supplierExamples = await context.env.DB.prepare(
+            `SELECT COUNT(*) as count FROM extraction_examples
+             WHERE document_type_id = ? AND tenant_id = ? AND supplier = ? AND score >= 0.7`
+          ).bind(documentTypeId, tenantId, supplier).first();
+          exampleCount = (supplierExamples?.count as number) || 0;
+        }
+
+        if (exampleCount < MIN_TRAINING_EXAMPLES) {
+          // Fallback: count all examples for this doc type
+          const allExamples = await context.env.DB.prepare(
+            `SELECT COUNT(*) as count FROM extraction_examples
+             WHERE document_type_id = ? AND tenant_id = ? AND score >= 0.7`
+          ).bind(documentTypeId, tenantId).first();
+          exampleCount = (allExamples?.count as number) || 0;
+        }
+
+        const trainingReady = exampleCount >= MIN_TRAINING_EXAMPLES;
 
         const confidenceScore = computeConfidenceScore(extraction.confidence, extraction.fields);
 
@@ -235,6 +295,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           product_names: extraction.products,
           confidence: extraction.confidence,
           confidence_score: confidenceScore,
+          supplier: supplier || undefined,
+          training_ready: trainingReady,
+          example_count: exampleCount,
           checksum,
           duplicate,
         });
@@ -247,6 +310,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           fields: {},
           product_names: [],
           confidence: 'low',
+          confidence_score: 0,
+          training_ready: false,
+          example_count: 0,
         });
       }
     }

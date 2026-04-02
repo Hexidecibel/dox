@@ -407,6 +407,8 @@ export function Import() {
             product_names: [],
             confidence: 'low',
             confidence_score: 0,
+            training_ready: false,
+            example_count: 0,
           });
         }
       }
@@ -445,10 +447,10 @@ export function Import() {
       setProcessingStatus(null);
       setStage('review');
 
-      // Auto-ingest high confidence results (skip duplicates)
+      // Auto-ingest high confidence results (skip duplicates, require training readiness)
       for (let i = 0; i < editable.length; i++) {
         const item = editable[i];
-        if (item.result.status === 'success' && item.confidenceScore >= autoIngestThreshold && !item.result.duplicate) {
+        if (item.result.status === 'success' && item.result.training_ready && item.confidenceScore >= autoIngestThreshold && !item.result.duplicate) {
           setEditableResults(prev => prev.map((r, idx) =>
             idx === i ? { ...r, autoIngesting: true } : r
           ));
@@ -487,6 +489,7 @@ export function Import() {
             ai_output: JSON.stringify(item.result.fields),
             corrected_output: JSON.stringify(item.editedFields),
             score: 0.8,
+            supplier: item.result.supplier || null,
           });
           setEditableResults(prev => prev.map((r, i) =>
             i === index ? { ...r, correctionsSaved: true } : r
@@ -645,6 +648,7 @@ export function Import() {
         ai_output: JSON.stringify(item.result.fields),
         corrected_output: JSON.stringify(item.editedFields),
         score,
+        supplier: item.result.supplier || null,
       });
       setEditableResults(prev => prev.map((r, i) =>
         i === index ? { ...r, ratingSubmitted: score >= 0.5 ? 'up' as const : 'down' as const } : r
@@ -957,6 +961,13 @@ export function Import() {
                   >
                     This file appears to be a duplicate of &ldquo;{item.result.duplicate.document_title}&rdquo;.
                     Importing will add a new version.
+                  </Alert>
+                )}
+
+                {/* Training gate banner */}
+                {item.result.status === 'success' && !item.imported && !item.result.training_ready && (
+                  <Alert severity="info" sx={{ mb: 2 }}>
+                    This is a new supplier/document type combination. Please review and correct the extraction to help train the AI. ({item.result.example_count}/3 training examples)
                   </Alert>
                 )}
 

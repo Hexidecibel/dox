@@ -509,6 +509,9 @@ export interface ProcessingResult {
   product_names: string[];
   confidence: 'high' | 'medium' | 'low';
   confidence_score: number;
+  supplier?: string;
+  training_ready: boolean;
+  example_count: number;
   checksum?: string;
   duplicate?: {
     document_id: string;
@@ -538,6 +541,7 @@ export interface ExtractionExampleRow {
   ai_output: string;
   corrected_output: string;
   score: number | null;
+  supplier: string | null;
   created_by: string | null;
   created_at: string;
 }
@@ -555,6 +559,7 @@ export interface ProcessingQueueItem {
   ai_confidence: string | null;
   confidence_score: number | null;
   product_names: string | null;
+  supplier: string | null;
   status: 'pending' | 'approved' | 'rejected';
   reviewed_by: string | null;
   reviewed_at: string | null;

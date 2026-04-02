@@ -143,23 +143,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       }
     }
 
-    // 6. Fetch few-shot examples for this document type
-    let fewShotExamples: { input_text: string; corrected_output: string }[] = [];
-    if (documentTypeId) {
-      const exResult = await context.env.DB.prepare(
-        `SELECT input_text, corrected_output FROM extraction_examples
-         WHERE document_type_id = ? AND tenant_id = ? AND score >= 0.7
-         ORDER BY score DESC, created_at DESC LIMIT 3`
-      )
-        .bind(documentTypeId, mapping.tenant_id)
-        .all();
-
-      fewShotExamples =
-        exResult.results?.map((e) => ({
-          input_text: e.input_text as string,
-          corrected_output: e.corrected_output as string,
-        })) || [];
-    }
+    // 6. Few-shot examples fetched per-file after supplier detection (moved below)
 
     // 7. Collect attachments from form data
     const subject = (formData.get('subject') as string) || 'Email Ingest';
@@ -199,29 +183,89 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         // Extract text
         const text = await extractText(fileData.slice(0), mimeType, fileName);
 
-        // Extract fields via LLM (if extraction fields configured)
+        // Extract fields via LLM
         let fields: Record<string, string | null> = {};
         let productNames: string[] = [];
         let confidence: 'high' | 'medium' | 'low' = 'low';
         let confidenceScore = 0.3;
+        let supplier: string | null = null;
+        let trainingReady = false;
+
+        const MIN_TRAINING_EXAMPLES = 3;
 
         if (text) {
-          const extraction = await extractFields(
-            text,
-            context.env,
-            fewShotExamples
-          );
+          // Initial extraction (no few-shot — need supplier first)
+          const initialExtraction = await extractFields(text, context.env);
+
+          // Detect supplier from extracted fields
+          const supplierKeys = ['supplier_name', 'supplier', 'manufacturer', 'vendor', 'company', 'from'];
+          supplier = supplierKeys.map(k => initialExtraction.fields[k]).find(v => v != null && String(v).trim() !== '') as string | undefined || null;
+
+          // Fetch supplier-aware few-shot examples
+          let fewShotExamples: { input_text: string; corrected_output: string }[] = [];
+          if (documentTypeId) {
+            if (supplier) {
+              const supplierExResult = await context.env.DB.prepare(
+                `SELECT input_text, corrected_output FROM extraction_examples
+                 WHERE document_type_id = ? AND tenant_id = ? AND supplier = ? AND score >= 0.7
+                 ORDER BY score DESC, created_at DESC LIMIT 3`
+              ).bind(documentTypeId, mapping.tenant_id, supplier).all();
+              fewShotExamples = (supplierExResult.results || []).map(e => ({
+                input_text: e.input_text as string,
+                corrected_output: e.corrected_output as string,
+              }));
+            }
+
+            if (fewShotExamples.length < 3) {
+              const remaining = 3 - fewShotExamples.length;
+              const otherExResult = await context.env.DB.prepare(
+                `SELECT input_text, corrected_output FROM extraction_examples
+                 WHERE document_type_id = ? AND tenant_id = ? AND (supplier IS NULL OR supplier != ?) AND score >= 0.7
+                 ORDER BY score DESC, created_at DESC LIMIT ?`
+              ).bind(documentTypeId, mapping.tenant_id, supplier || '', remaining).all();
+              fewShotExamples = [...fewShotExamples, ...(otherExResult.results || []).map(e => ({
+                input_text: e.input_text as string,
+                corrected_output: e.corrected_output as string,
+              }))];
+            }
+          }
+
+          // Re-extract with few-shot examples if available
+          const extraction = fewShotExamples.length > 0
+            ? await extractFields(text, context.env, fewShotExamples)
+            : initialExtraction;
+
           fields = extraction.fields;
           productNames = extraction.products;
           confidence = extraction.confidence;
-          confidenceScore = computeConfidenceScore(
-            extraction.confidence,
-            extraction.fields,
-          );
+          confidenceScore = computeConfidenceScore(extraction.confidence, extraction.fields);
+
+          // Count training examples for training gate
+          if (documentTypeId) {
+            let exampleCount = 0;
+            if (supplier) {
+              const supplierExamples = await context.env.DB.prepare(
+                `SELECT COUNT(*) as count FROM extraction_examples
+                 WHERE document_type_id = ? AND tenant_id = ? AND supplier = ? AND score >= 0.7`
+              ).bind(documentTypeId, mapping.tenant_id, supplier).first();
+              exampleCount = (supplierExamples?.count as number) || 0;
+            }
+
+            if (exampleCount < MIN_TRAINING_EXAMPLES) {
+              const allExamples = await context.env.DB.prepare(
+                `SELECT COUNT(*) as count FROM extraction_examples
+                 WHERE document_type_id = ? AND tenant_id = ? AND score >= 0.7`
+              ).bind(documentTypeId, mapping.tenant_id).first();
+              exampleCount = (allExamples?.count as number) || 0;
+            }
+
+            trainingReady = exampleCount >= MIN_TRAINING_EXAMPLES;
+          }
         }
 
         // Decide: auto-ingest or queue for review
-        if (confidenceScore >= autoIngestThreshold) {
+        // Training gate: if not enough training examples, ALWAYS queue for review
+        if (trainingReady && confidenceScore >= autoIngestThreshold) {
           // === AUTO-INGEST: high confidence ===
           const checksum = await computeChecksum(fileData);
           const docId = generateId();
@@ -350,8 +394,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           await uploadFile(context.env.FILES, r2Key, fileData, mimeType);
 
           await context.env.DB.prepare(
-            `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, extracted_text, ai_fields, ai_confidence, confidence_score, product_names, status, created_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+            `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, extracted_text, ai_fields, ai_confidence, confidence_score, product_names, supplier, status, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
           )
             .bind(
               queueId,
@@ -366,6 +410,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
               confidence,
               confidenceScore,
               JSON.stringify(productNames),
+              supplier,
               mapping.default_user_id
             )
             .run();

@@ -814,7 +814,7 @@ export const api = {
   extractionExamples: {
     list: (documentTypeId: string, tenantId?: string) =>
       fetchApi<{ examples: any[]; total: number }>(`/extraction-examples?document_type_id=${documentTypeId}${tenantId ? `&tenant_id=${tenantId}` : ''}`),
-    create: (data: { document_type_id: string; tenant_id?: string; input_text: string; ai_output: string; corrected_output: string; score?: number }) =>
+    create: (data: { document_type_id: string; tenant_id?: string; input_text: string; ai_output: string; corrected_output: string; score?: number; supplier?: string | null }) =>
       fetchApi<{ example: any }>('/extraction-examples', { method: 'POST', body: JSON.stringify(data) }),
   },
 

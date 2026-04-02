@@ -98,6 +98,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         ai_confidence: string | null;
         confidence_score: number | null;
         product_names: string | null;
+        supplier: string | null;
         status: string;
         created_by: string | null;
         tenant_slug: string;
@@ -146,6 +147,7 @@ async function handleApprove(
     ai_confidence: string | null;
     confidence_score: number | null;
     product_names: string | null;
+    supplier: string | null;
     status: string;
     created_by: string | null;
     tenant_slug: string;
@@ -247,18 +249,25 @@ async function handleApprove(
       .run();
   }
 
-  // Save extraction example if user corrected fields
+  // Save extraction example if user corrected fields (with supplier for training gate)
   if (fields && item.ai_fields && item.extracted_text) {
     const aiFields = JSON.parse(item.ai_fields);
     const fieldsChanged = JSON.stringify(fields) !== JSON.stringify(aiFields);
+
+    // Detect supplier from fields or queue item
+    const supplier = item.supplier || (() => {
+      const supplierKeys = ['supplier_name', 'supplier', 'manufacturer', 'vendor', 'company', 'from'];
+      const approvedSupplier = supplierKeys.map(k => (fields as Record<string, string>)[k]).find(v => v != null && v.trim() !== '');
+      return approvedSupplier || null;
+    })();
 
     if (fieldsChanged) {
       const exampleId = generateId();
       const inputText = item.extracted_text.substring(0, 2000);
 
       await context.env.DB.prepare(
-        `INSERT INTO extraction_examples (id, document_type_id, tenant_id, input_text, ai_output, corrected_output, score, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, 1.0, ?)`
+        `INSERT INTO extraction_examples (id, document_type_id, tenant_id, input_text, ai_output, corrected_output, score, supplier, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, 1.0, ?, ?)`
       )
         .bind(
           exampleId,
@@ -267,6 +276,7 @@ async function handleApprove(
           inputText,
           item.ai_fields,
           JSON.stringify(fields),
+          supplier,
           user.id
         )
         .run();

@@ -98,6 +98,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       ai_output?: string;
       corrected_output?: string;
       score?: number;
+      supplier?: string | null;
     };
 
     if (!body.document_type_id) {
@@ -127,10 +128,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const id = generateId();
     const score = body.score !== undefined ? body.score : null;
+    const supplier = body.supplier !== undefined ? body.supplier : null;
 
     await context.env.DB.prepare(
-      `INSERT INTO extraction_examples (id, document_type_id, tenant_id, input_text, ai_output, corrected_output, score, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO extraction_examples (id, document_type_id, tenant_id, input_text, ai_output, corrected_output, score, supplier, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         id,
@@ -140,6 +142,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         body.ai_output,
         body.corrected_output,
         score,
+        supplier,
         user.id
       )
       .run();
