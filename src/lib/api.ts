@@ -36,6 +36,9 @@ import type {
   ProcessingResponse,
   ProcessingQueueItem,
   NaturalSearchResponse,
+  ApiSupplier,
+  SupplierListResponse,
+  SupplierLookupOrCreateResponse,
 } from './types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -57,16 +60,35 @@ function parseDocument(doc: any): Document {
     tags = doc.tags;
   }
 
+  // Parse primary_metadata and extended_metadata from JSON strings
+  let primaryMetadata: Record<string, string | null> | null = null;
+  if (doc.primary_metadata) {
+    try {
+      primaryMetadata = typeof doc.primary_metadata === 'string'
+        ? JSON.parse(doc.primary_metadata)
+        : doc.primary_metadata;
+    } catch { primaryMetadata = null; }
+  }
+
+  let extendedMetadata: Record<string, string | null> | null = null;
+  if (doc.extended_metadata) {
+    try {
+      extendedMetadata = typeof doc.extended_metadata === 'string'
+        ? JSON.parse(doc.extended_metadata)
+        : doc.extended_metadata;
+    } catch { extendedMetadata = null; }
+  }
+
   return {
     ...doc,
     tags,
     documentTypeId: doc.document_type_id ?? null,
     documentTypeName: doc.document_type_name,
     documentTypeSlug: doc.document_type_slug,
-    lotNumber: doc.lot_number ?? null,
-    poNumber: doc.po_number ?? null,
-    codeDate: doc.code_date ?? null,
-    expirationDate: doc.expiration_date ?? null,
+    supplierId: doc.supplier_id ?? null,
+    supplierName: doc.supplier_name,
+    primaryMetadata,
+    extendedMetadata,
   };
 }
 
@@ -242,7 +264,7 @@ export const api = {
      * Returns: { document: ApiDocument }
      * The updated document has tags as JSON string.
      */
-    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; lot_number: string | null; po_number: string | null; code_date: string | null; expiration_date: string | null; document_type_id: string | null }>): Promise<Document> => {
+    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null }>): Promise<Document> => {
       const response = await fetchApi<DocumentUpdateResponse>(`/documents/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -540,6 +562,44 @@ export const api = {
      */
     lookupOrCreate: (data: { name: string; tenant_id: string }) =>
       fetchApi<{ product: ApiProduct; created: boolean }>('/products/lookup-or-create', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  },
+
+  suppliers: {
+    /**
+     * GET /api/suppliers
+     * Returns: { suppliers: ApiSupplier[], total }
+     */
+    list: (params?: { search?: string; active?: number; limit?: number; offset?: number; tenant_id?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.search) query.set('search', params.search);
+      if (params?.active !== undefined) query.set('active', String(params.active));
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      const qs = query.toString();
+      return fetchApi<SupplierListResponse>(`/suppliers${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * POST /api/suppliers
+     * Returns: { supplier: ApiSupplier }
+     */
+    create: (data: { name: string; tenant_id: string; aliases?: string }) =>
+      fetchApi<{ supplier: ApiSupplier }>('/suppliers', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * POST /api/suppliers/lookup-or-create
+     * Fuzzy match or create supplier by name.
+     * Returns: { supplier: ApiSupplier, created: boolean }
+     */
+    lookupOrCreate: (data: { name: string; tenant_id: string }) =>
+      fetchApi<SupplierLookupOrCreateResponse>('/suppliers/lookup-or-create', {
         method: 'POST',
         body: JSON.stringify(data),
       }),

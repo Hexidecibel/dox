@@ -1,37 +1,27 @@
 /**
  * Apply a naming template to document metadata.
  *
- * Supported placeholders: {title}, {lot_number}, {po_number}, {code_date},
- * {expiration_date}, {doc_type}, {product}, {date}, {ext}
+ * Accepts a generic metadata record. Any key in the record can be used as a
+ * placeholder via {key_name}. Special keys:
+ *   - {date} — today's date (auto-generated)
+ *   - {ext} — file extension
+ *   - {title}, {doc_type}, {product} — common keys
+ *
+ * All other placeholders are pulled from the metadata by key name, so
+ * {lot_number}, {po_number}, {supplier}, etc. all work if present.
  *
  * Unknown placeholders are removed. Output is sanitized for filesystem safety.
  */
 export function applyNamingTemplate(
   template: string,
-  metadata: {
-    title?: string;
-    lot_number?: string;
-    po_number?: string;
-    code_date?: string;
-    expiration_date?: string;
-    doc_type?: string;
-    product?: string;
-    ext?: string;
-  }
+  metadata: Record<string, string | undefined>
 ): string {
   let result = template;
 
-  // Replace known placeholders
+  // Always provide a {date} placeholder
   const fields: Record<string, string | undefined> = {
-    title: metadata.title,
-    lot_number: metadata.lot_number,
-    po_number: metadata.po_number,
-    code_date: metadata.code_date,
-    expiration_date: metadata.expiration_date,
-    doc_type: metadata.doc_type,
-    product: metadata.product,
-    date: new Date().toISOString().split('T')[0], // today's date as fallback
-    ext: metadata.ext,
+    date: new Date().toISOString().split('T')[0],
+    ...metadata,
   };
 
   for (const [key, value] of Object.entries(fields)) {

@@ -160,8 +160,8 @@ export async function parseNaturalQuery(
     '- "product_name": matching product name or null',
     '- "date_from": start date (YYYY-MM-DD) or null — resolve relative dates like "last month", "from March"',
     '- "date_to": end date (YYYY-MM-DD) or null',
-    '- "lot_number": lot number if mentioned, or null',
-    '- "po_number": PO number if mentioned, or null',
+    '- "supplier_name": supplier/manufacturer name if mentioned, or null',
+    '- "metadata_search": any specific field value to search for in metadata (lot numbers, PO numbers, etc.), or null',
   ].join('\n');
 
   const controller = new AbortController();
@@ -218,8 +218,8 @@ export async function parseNaturalQuery(
       product_name: parsed.product_name || null,
       date_from: parsed.date_from || null,
       date_to: parsed.date_to || null,
-      lot_number: parsed.lot_number || null,
-      po_number: parsed.po_number || null,
+      supplier_name: parsed.supplier_name || null,
+      metadata_search: parsed.metadata_search || null,
     };
   } catch {
     // Fallback: treat entire query as keywords
@@ -229,8 +229,8 @@ export async function parseNaturalQuery(
       product_name: null,
       date_from: null,
       date_to: null,
-      lot_number: null,
-      po_number: null,
+      supplier_name: null,
+      metadata_search: null,
     };
   }
 }

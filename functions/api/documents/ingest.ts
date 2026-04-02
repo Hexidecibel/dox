@@ -69,6 +69,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const changeNotes = formData.get('changeNotes') as string | null;
     const sourceMetadata = formData.get('source_metadata') as string | null;
     const documentTypeId = formData.get('document_type_id') as string | null;
+    const supplierId = formData.get('supplier_id') as string | null;
+    const primaryMetadataRaw = formData.get('primary_metadata') as string | null;
+    const extendedMetadataRaw = formData.get('extended_metadata') as string | null;
+    // Backward compat: accept old field names and fold them into primary_metadata
     const lotNumber = formData.get('lot_number') as string | null;
     const poNumber = formData.get('po_number') as string | null;
     const codeDate = formData.get('code_date') as string | null;
@@ -200,10 +204,25 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const sanitizedRef = sanitizeString(externalRef);
     const sanitizedNotes = changeNotes ? sanitizeString(changeNotes) : null;
     const sanitizedTitle = title ? sanitizeString(title) : fileName.replace(/\.[^/.]+$/, '');
-    const sanitizedLotNumber = lotNumber ? sanitizeString(lotNumber) : null;
-    const sanitizedPoNumber = poNumber ? sanitizeString(poNumber) : null;
-    const sanitizedCodeDate = codeDate ? sanitizeString(codeDate) : null;
-    const sanitizedExpirationDate = expirationDate ? sanitizeString(expirationDate) : null;
+
+    // Build primary_metadata: explicit JSON > backward-compat old fields
+    let primaryMetadata: Record<string, string | null> = {};
+    if (primaryMetadataRaw) {
+      try { primaryMetadata = JSON.parse(primaryMetadataRaw); } catch { /* ignore */ }
+    }
+    // Backward compat: fold old field names into primary_metadata
+    if (lotNumber) primaryMetadata.lot_number = sanitizeString(lotNumber);
+    if (poNumber) primaryMetadata.po_number = sanitizeString(poNumber);
+    if (codeDate) primaryMetadata.code_date = sanitizeString(codeDate);
+    if (expirationDate) primaryMetadata.expiration_date = sanitizeString(expirationDate);
+
+    let extendedMetadata: Record<string, string | null> = {};
+    if (extendedMetadataRaw) {
+      try { extendedMetadata = JSON.parse(extendedMetadataRaw); } catch { /* ignore */ }
+    }
+
+    const primaryMetadataStr = Object.keys(primaryMetadata).length > 0 ? JSON.stringify(primaryMetadata) : null;
+    const extendedMetadataStr = Object.keys(extendedMetadata).length > 0 ? JSON.stringify(extendedMetadata) : null;
 
     // Look up naming format from document type (if document_type_id provided)
     let displayFileName = fileName;
@@ -225,15 +244,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (namingFormatTemplate) {
       const fileExt = fileName.split('.').pop() || '';
-      displayFileName = applyNamingTemplate(namingFormatTemplate, {
+      const namingMeta: Record<string, string | undefined> = {
         title: sanitizedTitle || fileName.replace(/\.[^/.]+$/, ''),
-        lot_number: sanitizedLotNumber || undefined,
-        po_number: sanitizedPoNumber || undefined,
-        code_date: sanitizedCodeDate || undefined,
-        expiration_date: sanitizedExpirationDate || undefined,
         doc_type: docTypeName || undefined,
         ext: fileExt,
-      });
+      };
+      // Merge primary_metadata values so naming templates can use any field
+      for (const [k, v] of Object.entries(primaryMetadata)) {
+        if (v) namingMeta[k] = v;
+      }
+      displayFileName = applyNamingTemplate(namingFormatTemplate, namingMeta);
     }
 
     // Look up existing document by external_ref + tenant_id
@@ -285,21 +305,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         updateFields.push('document_type_id = ?');
         updateBindings.push(documentTypeId);
       }
-      if (sanitizedLotNumber) {
-        updateFields.push('lot_number = ?');
-        updateBindings.push(sanitizedLotNumber);
+      if (supplierId) {
+        updateFields.push('supplier_id = ?');
+        updateBindings.push(supplierId);
       }
-      if (sanitizedPoNumber) {
-        updateFields.push('po_number = ?');
-        updateBindings.push(sanitizedPoNumber);
+      if (primaryMetadataStr) {
+        updateFields.push('primary_metadata = ?');
+        updateBindings.push(primaryMetadataStr);
       }
-      if (sanitizedCodeDate) {
-        updateFields.push('code_date = ?');
-        updateBindings.push(sanitizedCodeDate);
-      }
-      if (sanitizedExpirationDate) {
-        updateFields.push('expiration_date = ?');
-        updateBindings.push(sanitizedExpirationDate);
+      if (extendedMetadataStr) {
+        updateFields.push('extended_metadata = ?');
+        updateBindings.push(extendedMetadataStr);
       }
 
       updateBindings.push(existingDoc.id);
@@ -362,10 +378,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             external_ref: existingDoc.external_ref,
             source_metadata: sourceMetadata || existingDoc.source_metadata,
             document_type_id: documentTypeId || existingDoc.document_type_id || null,
-            lot_number: sanitizedLotNumber || existingDoc.lot_number || null,
-            po_number: sanitizedPoNumber || existingDoc.po_number || null,
-            code_date: sanitizedCodeDate || existingDoc.code_date || null,
-            expiration_date: sanitizedExpirationDate || existingDoc.expiration_date || null,
+            supplier_id: supplierId || existingDoc.supplier_id || null,
+            primary_metadata: primaryMetadataStr || existingDoc.primary_metadata || null,
+            extended_metadata: extendedMetadataStr || existingDoc.extended_metadata || null,
           },
           version: {
             id: versionId,
@@ -391,8 +406,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
       // Insert document
       await context.env.DB.prepare(
-        `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, source_metadata, document_type_id, lot_number, po_number, code_date, expiration_date)
-         VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, source_metadata, document_type_id, supplier_id, primary_metadata, extended_metadata)
+         VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, ?, ?, ?, ?)`
       )
         .bind(
           docId,
@@ -405,10 +420,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           sanitizedRef,
           sourceMetadata || null,
           documentTypeId || null,
-          sanitizedLotNumber,
-          sanitizedPoNumber,
-          sanitizedCodeDate,
-          sanitizedExpirationDate
+          supplierId || null,
+          primaryMetadataStr,
+          extendedMetadataStr
         )
         .run();
 
@@ -483,10 +497,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             external_ref: sanitizedRef,
             source_metadata: sourceMetadata || null,
             document_type_id: documentTypeId || null,
-            lot_number: sanitizedLotNumber,
-            po_number: sanitizedPoNumber,
-            code_date: sanitizedCodeDate,
-            expiration_date: sanitizedExpirationDate,
+            supplier_id: supplierId || null,
+            primary_metadata: primaryMetadataStr,
+            extended_metadata: extendedMetadataStr,
           },
           version: {
             id: versionId,

@@ -18,7 +18,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const category = url.searchParams.get('category');
     const status = url.searchParams.get('status') || 'active';
     const documentTypeId = url.searchParams.get('document_type_id');
-    const lotNumber = url.searchParams.get('lot_number');
+    const supplierId = url.searchParams.get('supplier_id');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
@@ -45,9 +45,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       params.push(documentTypeId);
     }
 
-    if (lotNumber) {
-      conditions.push('d.lot_number = ?');
-      params.push(lotNumber);
+    if (supplierId) {
+      conditions.push('d.supplier_id = ?');
+      params.push(supplierId);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -61,11 +61,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // Get documents with creator info
     const query = `
       SELECT d.*, u.name as creator_name, u.email as creator_email, t.name as tenant_name,
-             dt.name as document_type_name, dt.slug as document_type_slug
+             dt.name as document_type_name, dt.slug as document_type_slug,
+             s.name as supplier_name
       FROM documents d
       LEFT JOIN users u ON d.created_by = u.id
       LEFT JOIN tenants t ON d.tenant_id = t.id
       LEFT JOIN document_types dt ON d.document_type_id = dt.id
+      LEFT JOIN suppliers s ON d.supplier_id = s.id
       ${whereClause}
       ORDER BY d.updated_at DESC
       LIMIT ? OFFSET ?
@@ -113,10 +115,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       tags?: string[];
       tenantId?: string;
       document_type_id?: string;
-      lot_number?: string;
-      po_number?: string;
-      code_date?: string;
-      expiration_date?: string;
+      supplier_id?: string;
+      primary_metadata?: Record<string, string | null>;
+      extended_metadata?: Record<string, string | null>;
     };
 
     if (!body.title) {
@@ -130,10 +131,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     body.title = sanitizeString(body.title);
     if (body.description) body.description = sanitizeString(body.description);
     if (body.category) body.category = sanitizeString(body.category);
-    if (body.lot_number) body.lot_number = sanitizeString(body.lot_number);
-    if (body.po_number) body.po_number = sanitizeString(body.po_number);
-    if (body.code_date) body.code_date = sanitizeString(body.code_date);
-    if (body.expiration_date) body.expiration_date = sanitizeString(body.expiration_date);
 
     // Determine tenant: non-super-admin users are forced to their own tenant
     let tenantId = body.tenantId || null;
@@ -168,9 +165,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const id = generateId();
     const tags = JSON.stringify(body.tags || []);
 
+    const primaryMetadataStr = body.primary_metadata ? JSON.stringify(body.primary_metadata) : null;
+    const extendedMetadataStr = body.extended_metadata ? JSON.stringify(body.extended_metadata) : null;
+
     await context.env.DB.prepare(
-      `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, document_type_id, lot_number, po_number, code_date, expiration_date)
-       VALUES (?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, document_type_id, supplier_id, primary_metadata, extended_metadata)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?)`
     )
       .bind(
         id,
@@ -181,10 +181,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         tags,
         user.id,
         body.document_type_id || null,
-        body.lot_number || null,
-        body.po_number || null,
-        body.code_date || null,
-        body.expiration_date || null
+        body.supplier_id || null,
+        primaryMetadataStr,
+        extendedMetadataStr
       )
       .run();
 
@@ -212,10 +211,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           status: 'active',
           created_by: user.id,
           document_type_id: body.document_type_id || null,
-          lot_number: body.lot_number || null,
-          po_number: body.po_number || null,
-          code_date: body.code_date || null,
-          expiration_date: body.expiration_date || null,
+          supplier_id: body.supplier_id || null,
+          primary_metadata: primaryMetadataStr,
+          extended_metadata: extendedMetadataStr,
         },
       }),
       { status: 201, headers: { 'Content-Type': 'application/json' } }

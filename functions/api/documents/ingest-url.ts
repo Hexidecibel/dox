@@ -133,6 +133,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       source_metadata?: string | Record<string, unknown>;
       file_name?: string;
       document_type_id?: string;
+      supplier_id?: string;
+      primary_metadata?: string | Record<string, string | null>;
+      extended_metadata?: string | Record<string, string | null>;
+      // Backward compat: old field names folded into primary_metadata
       lot_number?: string;
       po_number?: string;
       code_date?: string;
@@ -348,11 +352,35 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const sanitizedTitle = body.title
       ? sanitizeString(body.title)
       : fileName.replace(/\.[^/.]+$/, '');
-    const sanitizedLotNumber = body.lot_number?.trim() ? sanitizeString(body.lot_number) : null;
-    const sanitizedPoNumber = body.po_number?.trim() ? sanitizeString(body.po_number) : null;
-    const sanitizedCodeDate = body.code_date?.trim() ? sanitizeString(body.code_date) : null;
-    const sanitizedExpirationDate = body.expiration_date?.trim() ? sanitizeString(body.expiration_date) : null;
     const documentTypeId = body.document_type_id?.trim() || null;
+    const supplierId = body.supplier_id?.trim() || null;
+
+    // Build primary_metadata: explicit JSON > backward-compat old fields
+    let primaryMetadata: Record<string, string | null> = {};
+    if (body.primary_metadata) {
+      if (typeof body.primary_metadata === 'string') {
+        try { primaryMetadata = JSON.parse(body.primary_metadata); } catch { /* ignore */ }
+      } else {
+        primaryMetadata = body.primary_metadata;
+      }
+    }
+    // Backward compat: fold old field names into primary_metadata
+    if (body.lot_number?.trim()) primaryMetadata.lot_number = sanitizeString(body.lot_number);
+    if (body.po_number?.trim()) primaryMetadata.po_number = sanitizeString(body.po_number);
+    if (body.code_date?.trim()) primaryMetadata.code_date = sanitizeString(body.code_date);
+    if (body.expiration_date?.trim()) primaryMetadata.expiration_date = sanitizeString(body.expiration_date);
+
+    let extendedMetadata: Record<string, string | null> = {};
+    if (body.extended_metadata) {
+      if (typeof body.extended_metadata === 'string') {
+        try { extendedMetadata = JSON.parse(body.extended_metadata); } catch { /* ignore */ }
+      } else {
+        extendedMetadata = body.extended_metadata;
+      }
+    }
+
+    const primaryMetadataStr = Object.keys(primaryMetadata).length > 0 ? JSON.stringify(primaryMetadata) : null;
+    const extendedMetadataStr = Object.keys(extendedMetadata).length > 0 ? JSON.stringify(extendedMetadata) : null;
 
     // Look up naming format from document type (if document_type_id provided)
     let displayFileName = fileName;
@@ -374,15 +402,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (namingFormatTemplate) {
       const fileExt = fileName.split('.').pop() || '';
-      displayFileName = applyNamingTemplate(namingFormatTemplate, {
+      const namingMeta: Record<string, string | undefined> = {
         title: sanitizedTitle || fileName.replace(/\.[^/.]+$/, ''),
-        lot_number: sanitizedLotNumber || undefined,
-        po_number: sanitizedPoNumber || undefined,
-        code_date: sanitizedCodeDate || undefined,
-        expiration_date: sanitizedExpirationDate || undefined,
         doc_type: docTypeName || undefined,
         ext: fileExt,
-      });
+      };
+      for (const [k, v] of Object.entries(primaryMetadata)) {
+        if (v) namingMeta[k] = v;
+      }
+      displayFileName = applyNamingTemplate(namingFormatTemplate, namingMeta);
     }
 
     // Look up existing document by external_ref + tenant_id
@@ -434,21 +462,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         updateFields.push('document_type_id = ?');
         updateBindings.push(documentTypeId);
       }
-      if (sanitizedLotNumber) {
-        updateFields.push('lot_number = ?');
-        updateBindings.push(sanitizedLotNumber);
+      if (supplierId) {
+        updateFields.push('supplier_id = ?');
+        updateBindings.push(supplierId);
       }
-      if (sanitizedPoNumber) {
-        updateFields.push('po_number = ?');
-        updateBindings.push(sanitizedPoNumber);
+      if (primaryMetadataStr) {
+        updateFields.push('primary_metadata = ?');
+        updateBindings.push(primaryMetadataStr);
       }
-      if (sanitizedCodeDate) {
-        updateFields.push('code_date = ?');
-        updateBindings.push(sanitizedCodeDate);
-      }
-      if (sanitizedExpirationDate) {
-        updateFields.push('expiration_date = ?');
-        updateBindings.push(sanitizedExpirationDate);
+      if (extendedMetadataStr) {
+        updateFields.push('extended_metadata = ?');
+        updateBindings.push(extendedMetadataStr);
       }
 
       updateBindings.push(existingDoc.id);
@@ -513,10 +537,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             external_ref: existingDoc.external_ref,
             source_metadata: sourceMetadataStr || existingDoc.source_metadata,
             document_type_id: documentTypeId || existingDoc.document_type_id || null,
-            lot_number: sanitizedLotNumber || existingDoc.lot_number || null,
-            po_number: sanitizedPoNumber || existingDoc.po_number || null,
-            code_date: sanitizedCodeDate || existingDoc.code_date || null,
-            expiration_date: sanitizedExpirationDate || existingDoc.expiration_date || null,
+            supplier_id: supplierId || existingDoc.supplier_id || null,
+            primary_metadata: primaryMetadataStr || existingDoc.primary_metadata || null,
+            extended_metadata: extendedMetadataStr || existingDoc.extended_metadata || null,
           },
           version: {
             id: versionId,
@@ -542,8 +565,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
       // Insert document
       await context.env.DB.prepare(
-        `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, source_metadata, document_type_id, lot_number, po_number, code_date, expiration_date)
-         VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, source_metadata, document_type_id, supplier_id, primary_metadata, extended_metadata)
+         VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, ?, ?, ?, ?)`
       )
         .bind(
           docId,
@@ -556,10 +579,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           sanitizedRef,
           sourceMetadataStr || null,
           documentTypeId,
-          sanitizedLotNumber,
-          sanitizedPoNumber,
-          sanitizedCodeDate,
-          sanitizedExpirationDate
+          supplierId,
+          primaryMetadataStr,
+          extendedMetadataStr
         )
         .run();
 
@@ -636,10 +658,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             external_ref: sanitizedRef,
             source_metadata: sourceMetadataStr || null,
             document_type_id: documentTypeId,
-            lot_number: sanitizedLotNumber,
-            po_number: sanitizedPoNumber,
-            code_date: sanitizedCodeDate,
-            expiration_date: sanitizedExpirationDate,
+            supplier_id: supplierId,
+            primary_metadata: primaryMetadataStr,
+            extended_metadata: extendedMetadataStr,
           },
           version: {
             id: versionId,

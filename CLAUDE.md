@@ -28,6 +28,7 @@ functions/api/          # REST API endpoints (Cloudflare Pages Functions)
   reports/              # CSV/JSON report generation
   audit/                # Audit log queries
   products/             # Global product catalog CRUD, tenant-product associations
+  suppliers/            # Supplier CRUD, lookup-or-create
   document-types/       # Per-tenant document type CRUD
   document-products/    # Document-product linking with expiration
   bundles/              # Document bundles (compliance packages), download as ZIP
@@ -71,14 +72,15 @@ bin/                    # Operational scripts (deploy, migrate, seed)
 - **File Name Search**: `GET /api/documents/search` now also matches against `file_name` in document_versions (joined).
 - **Products**: Global product catalog shared across tenants. Tenant-product associations track which suppliers provide which products.
 - **Document Types**: Per-tenant document type definitions (COA, Spec Sheet, SDS, etc.) replacing freeform categories.
-- **Structured Metadata**: First-class fields on documents: `lot_number`, `po_number`, `code_date`, `expiration_date`, `document_type_id`.
+- **Structured Metadata**: Flexible JSON metadata on documents via `primary_metadata` and `extended_metadata` columns. Old hardcoded fields (lot_number, po_number, code_date, expiration_date) remain in DB but are unused.
+- **Suppliers**: First-class supplier entity per tenant. Documents link to suppliers via `supplier_id`. Lookup-or-create endpoint for fuzzy matching.
 - **Document-Product Linking**: Many-to-many links between documents and products with per-link expiration dates and notes. Ingest API accepts `product_ids`.
-- **Naming Templates**: Per-tenant file naming templates with placeholders (`{lot_number}`, `{product}`, `{doc_type}`, etc.) applied during ingest.
+- **Naming Templates**: Per-tenant file naming templates with generic placeholders (any metadata key like `{lot_number}`, `{supplier}`, `{doc_type}`, etc.) applied during ingest.
 - **Email Ingest**: `POST /api/webhooks/email-ingest` for Mailgun/SendGrid inbound parse. Maps sender domain to tenant, extracts attachments.
 - **Expiration Dashboard**: Dashboard showing documents approaching expiration with summary cards, configurable look-ahead, and email alerts to org_admins.
 - **Document Bundles**: Named compliance packages grouping documents with version pinning. Download as ZIP. Draft/finalized workflow.
 
-## Migrations (0001-0016)
+## Migrations (0001-0022)
 
 | # | File | Purpose |
 |---|------|---------|
@@ -98,6 +100,12 @@ bin/                    # Operational scripts (deploy, migrate, seed)
 | 0014 | naming_templates | Per-tenant naming_templates table |
 | 0015 | email_domain_mappings | Email domain to tenant mapping for inbound email ingest |
 | 0016 | document_bundles | Bundles, bundle_documents tables for compliance packages |
+| 0017 | tenant_specific_products | Make products tenant-specific |
+| 0018 | document_type_naming_and_extraction | Naming format and extraction fields on document_types |
+| 0019 | smart_upload_and_queue | Processing queue, extraction examples for AI pipeline |
+| 0020 | email_domain_default_doctype | default_document_type_id on email_domain_mappings |
+| 0021 | extraction_example_supplier | Add supplier column to extraction_examples |
+| 0022 | suppliers_and_dynamic_metadata | Suppliers table, supplier_id + primary_metadata + extended_metadata on documents |
 
 ## Role Model (4 roles)
 

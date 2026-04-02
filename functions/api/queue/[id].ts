@@ -178,10 +178,49 @@ async function handleApprove(
   // Determine title
   const title = approvedFields.title || item.file_name.replace(/\.[^/.]+$/, '');
 
+  // Build primary_metadata from approved fields
+  const primaryMetadata: Record<string, string | null> = {};
+  for (const [k, v] of Object.entries(approvedFields)) {
+    // Skip fields that go into other columns
+    if (['title', 'description', 'category'].includes(k)) continue;
+    if (v) primaryMetadata[k] = v;
+  }
+  const primaryMetadataStr = Object.keys(primaryMetadata).length > 0 ? JSON.stringify(primaryMetadata) : null;
+
+  // Resolve supplier from queue item
+  let supplierId: string | null = null;
+  const supplierName = item.supplier || approvedFields.supplier || approvedFields.supplier_name || null;
+  if (supplierName) {
+    try {
+      const slug = supplierName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      let existing = await context.env.DB.prepare(
+        'SELECT id FROM suppliers WHERE tenant_id = ? AND slug = ?'
+      ).bind(item.tenant_id, slug).first<{ id: string }>();
+
+      if (!existing) {
+        existing = await context.env.DB.prepare(
+          'SELECT id FROM suppliers WHERE tenant_id = ? AND LOWER(name) = LOWER(?)'
+        ).bind(item.tenant_id, supplierName).first<{ id: string }>();
+      }
+
+      if (existing) {
+        supplierId = existing.id;
+      } else {
+        const newId = generateId();
+        await context.env.DB.prepare(
+          'INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)'
+        ).bind(newId, item.tenant_id, supplierName, slug).run();
+        supplierId = newId;
+      }
+    } catch {
+      // Non-critical
+    }
+  }
+
   // Insert document
   await context.env.DB.prepare(
-    `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, lot_number, po_number, code_date, expiration_date)
-     VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata)
+     VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?)`
   )
     .bind(
       docId,
@@ -192,10 +231,8 @@ async function handleApprove(
       user.id,
       externalRef,
       item.document_type_id,
-      approvedFields.lot_number || null,
-      approvedFields.po_number || null,
-      approvedFields.code_date || null,
-      approvedFields.expiration_date || null
+      supplierId,
+      primaryMetadataStr
     )
     .run();
 

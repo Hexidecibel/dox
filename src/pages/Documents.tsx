@@ -186,17 +186,27 @@ export function Documents() {
     try {
       const result = await api.naturalSearch(search.trim(), selectedTenantId || undefined);
       setAiParsedQuery(result.parsed_query);
-      setDocuments((result.results || []).map((d: any) => ({
-        ...d,
-        tags: typeof d.tags === 'string' ? (() => { try { return JSON.parse(d.tags); } catch { return []; } })() : (d.tags || []),
-        documentTypeId: d.document_type_id ?? null,
-        documentTypeName: d.document_type_name,
-        documentTypeSlug: d.document_type_slug,
-        lotNumber: d.lot_number ?? null,
-        poNumber: d.po_number ?? null,
-        codeDate: d.code_date ?? null,
-        expirationDate: d.expiration_date ?? null,
-      })));
+      setDocuments((result.results || []).map((d: any) => {
+        let primaryMetadata = null;
+        if (d.primary_metadata) {
+          try { primaryMetadata = typeof d.primary_metadata === 'string' ? JSON.parse(d.primary_metadata) : d.primary_metadata; } catch { /* ignore */ }
+        }
+        let extendedMetadata = null;
+        if (d.extended_metadata) {
+          try { extendedMetadata = typeof d.extended_metadata === 'string' ? JSON.parse(d.extended_metadata) : d.extended_metadata; } catch { /* ignore */ }
+        }
+        return {
+          ...d,
+          tags: typeof d.tags === 'string' ? (() => { try { return JSON.parse(d.tags); } catch { return []; } })() : (d.tags || []),
+          documentTypeId: d.document_type_id ?? null,
+          documentTypeName: d.document_type_name,
+          documentTypeSlug: d.document_type_slug,
+          supplierId: d.supplier_id ?? null,
+          supplierName: d.supplier_name,
+          primaryMetadata,
+          extendedMetadata,
+        };
+      }));
       setTotal(result.total || 0);
     } catch (err) {
       setAiSearchError(err instanceof Error ? err.message : 'AI search failed');
@@ -368,8 +378,8 @@ export function Documents() {
                 {[
                   aiParsedQuery.document_type_slug,
                   aiParsedQuery.product_name && `for ${aiParsedQuery.product_name}`,
-                  aiParsedQuery.lot_number && `lot ${aiParsedQuery.lot_number}`,
-                  aiParsedQuery.po_number && `PO ${aiParsedQuery.po_number}`,
+                  aiParsedQuery.supplier_name && `from ${aiParsedQuery.supplier_name}`,
+                  aiParsedQuery.metadata_search && `"${aiParsedQuery.metadata_search}"`,
                   aiParsedQuery.date_from && `from ${aiParsedQuery.date_from}`,
                   aiParsedQuery.date_to && `to ${aiParsedQuery.date_to}`,
                   ...aiParsedQuery.keywords,
@@ -383,11 +393,11 @@ export function Documents() {
               {aiParsedQuery.product_name && (
                 <Chip label={`Product: ${aiParsedQuery.product_name}`} size="small" onDelete={clearAiSearch} />
               )}
-              {aiParsedQuery.lot_number && (
-                <Chip label={`Lot: ${aiParsedQuery.lot_number}`} size="small" onDelete={clearAiSearch} />
+              {aiParsedQuery.supplier_name && (
+                <Chip label={`Supplier: ${aiParsedQuery.supplier_name}`} size="small" onDelete={clearAiSearch} />
               )}
-              {aiParsedQuery.po_number && (
-                <Chip label={`PO: ${aiParsedQuery.po_number}`} size="small" onDelete={clearAiSearch} />
+              {aiParsedQuery.metadata_search && (
+                <Chip label={`Search: ${aiParsedQuery.metadata_search}`} size="small" onDelete={clearAiSearch} />
               )}
               {aiParsedQuery.date_from && (
                 <Chip label={`From: ${aiParsedQuery.date_from}`} size="small" onDelete={clearAiSearch} />

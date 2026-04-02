@@ -91,10 +91,41 @@ export interface DocumentRow {
   created_at: string;
   updated_at: string;
   document_type_id: string | null;
-  lot_number: string | null;
-  po_number: string | null;
-  code_date: string | null;
-  expiration_date: string | null;
+  supplier_id: string | null;
+  primary_metadata: string | null; // JSON string
+  extended_metadata: string | null; // JSON string
+  // Deprecated: old hardcoded fields, still in DB but unused
+  lot_number?: string | null;
+  po_number?: string | null;
+  code_date?: string | null;
+  expiration_date?: string | null;
+}
+
+export interface SupplierRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  slug: string;
+  aliases: string | null;
+  active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiSupplier extends SupplierRow {}
+
+export interface SupplierListResponse {
+  suppliers: ApiSupplier[];
+  total: number;
+}
+
+export interface SupplierGetResponse {
+  supplier: ApiSupplier;
+}
+
+export interface SupplierLookupOrCreateResponse {
+  supplier: ApiSupplier;
+  created: boolean;
 }
 
 export interface DocumentVersionRow {
@@ -175,10 +206,10 @@ export interface ApiDocument {
   document_type_id: string | null;
   document_type_name?: string;
   document_type_slug?: string;
-  lot_number: string | null;
-  po_number: string | null;
-  code_date: string | null;
-  expiration_date: string | null;
+  supplier_id: string | null;
+  supplier_name?: string;
+  primary_metadata: string | null; // JSON string
+  extended_metadata: string | null; // JSON string
 }
 
 export interface ApiDocumentVersion {
@@ -338,10 +369,10 @@ export interface Document {
   documentTypeId: string | null;
   documentTypeName?: string;
   documentTypeSlug?: string;
-  lotNumber: string | null;
-  poNumber: string | null;
-  codeDate: string | null;
-  expirationDate: string | null;
+  supplierId: string | null;
+  supplierName?: string;
+  primaryMetadata: Record<string, string | null> | null;
+  extendedMetadata: Record<string, string | null> | null;
 }
 
 export interface DocumentVersion {
@@ -575,8 +606,8 @@ export interface ParsedQuery {
   product_name: string | null;
   date_from: string | null;
   date_to: string | null;
-  lot_number: string | null;
-  po_number: string | null;
+  supplier_name: string | null;
+  metadata_search: string | null;
 }
 
 export interface NaturalSearchResponse {

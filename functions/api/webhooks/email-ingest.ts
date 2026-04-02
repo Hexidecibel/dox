@@ -273,19 +273,56 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           const externalRef = `email-${Date.now()}-${i}-${senderDomain}`;
           const title = fileName.replace(/\.[^/.]+$/, '');
 
+          // Build primary_metadata from extracted fields
+          const primaryMetadata: Record<string, string | null> = {};
+          for (const [k, v] of Object.entries(fields)) {
+            if (v != null) primaryMetadata[k] = v;
+          }
+          const primaryMetadataStr = Object.keys(primaryMetadata).length > 0 ? JSON.stringify(primaryMetadata) : null;
+
+          // Resolve supplier
+          let supplierId: string | null = null;
+          if (supplier) {
+            try {
+              // Simple lookup-or-create inline
+              const slug = supplier.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+              let existingSupplier = await context.env.DB.prepare(
+                'SELECT id FROM suppliers WHERE tenant_id = ? AND slug = ?'
+              ).bind(mapping.tenant_id, slug).first<{ id: string }>();
+
+              if (!existingSupplier) {
+                existingSupplier = await context.env.DB.prepare(
+                  'SELECT id FROM suppliers WHERE tenant_id = ? AND LOWER(name) = LOWER(?)'
+                ).bind(mapping.tenant_id, supplier).first<{ id: string }>();
+              }
+
+              if (existingSupplier) {
+                supplierId = existingSupplier.id;
+              } else {
+                const newSupplierId = generateId();
+                await context.env.DB.prepare(
+                  'INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)'
+                ).bind(newSupplierId, mapping.tenant_id, supplier, slug).run();
+                supplierId = newSupplierId;
+              }
+            } catch {
+              // Non-critical
+            }
+          }
+
           // Apply naming format if available
           let displayFileName = fileName;
           if (namingFormat) {
             const fileExt = fileName.split('.').pop() || '';
-            displayFileName = applyNamingTemplate(namingFormat, {
+            const namingMeta: Record<string, string | undefined> = {
               title,
-              lot_number: fields['lot_number'] || undefined,
-              po_number: fields['po_number'] || undefined,
-              code_date: fields['code_date'] || undefined,
-              expiration_date: fields['expiration_date'] || undefined,
               doc_type: docTypeName || undefined,
               ext: fileExt,
-            });
+            };
+            for (const [k, v] of Object.entries(primaryMetadata)) {
+              if (v) namingMeta[k] = v;
+            }
+            displayFileName = applyNamingTemplate(namingFormat, namingMeta);
           }
 
           // Upload to R2
@@ -299,8 +336,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
           // Insert document
           await context.env.DB.prepare(
-            `INSERT INTO documents (id, tenant_id, title, current_version, status, created_by, external_ref, source_metadata, document_type_id, lot_number, po_number, code_date, expiration_date)
-             VALUES (?, ?, ?, 1, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`
+            `INSERT INTO documents (id, tenant_id, title, current_version, status, created_by, external_ref, source_metadata, document_type_id, supplier_id, primary_metadata)
+             VALUES (?, ?, ?, 1, 'active', ?, ?, ?, ?, ?, ?)`
           )
             .bind(
               docId,
@@ -314,10 +351,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 subject,
               }),
               documentTypeId,
-              fields['lot_number'] || null,
-              fields['po_number'] || null,
-              fields['code_date'] || null,
-              fields['expiration_date'] || null
+              supplierId,
+              primaryMetadataStr
             )
             .run();
 

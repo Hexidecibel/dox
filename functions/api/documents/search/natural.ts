@@ -111,16 +111,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       params.push(parsedQuery.date_to + 'T23:59:59');
     }
 
-    // Lot number
-    if (parsedQuery.lot_number) {
-      conditions.push('d.lot_number = ?');
-      params.push(parsedQuery.lot_number);
+    // Supplier filter
+    let needSupplierJoin = false;
+    if (parsedQuery.supplier_name) {
+      conditions.push('LOWER(sup.name) = LOWER(?)');
+      params.push(parsedQuery.supplier_name);
+      needSupplierJoin = true;
     }
 
-    // PO number
-    if (parsedQuery.po_number) {
-      conditions.push('d.po_number = ?');
-      params.push(parsedQuery.po_number);
+    // Metadata search (searches primary_metadata JSON text)
+    if (parsedQuery.metadata_search) {
+      conditions.push('(d.primary_metadata LIKE ? OR d.extended_metadata LIKE ?)');
+      const term = `%${parsedQuery.metadata_search}%`;
+      params.push(term, term);
     }
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
@@ -130,12 +133,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       LEFT JOIN users u ON d.created_by = u.id
       LEFT JOIN tenants t ON d.tenant_id = t.id
       LEFT JOIN document_versions dv ON dv.document_id = d.id
-      LEFT JOIN document_types dt ON d.document_type_id = dt.id`;
+      LEFT JOIN document_types dt ON d.document_type_id = dt.id
+      LEFT JOIN suppliers s ON d.supplier_id = s.id`;
 
     if (needProductJoin) {
       joins += `
       LEFT JOIN document_products dp ON dp.document_id = d.id
       LEFT JOIN products p ON dp.product_id = p.id`;
+    }
+
+    if (needSupplierJoin) {
+      joins += `
+      LEFT JOIN suppliers sup ON d.supplier_id = sup.id`;
     }
 
     // Count total
@@ -148,7 +157,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // Fetch results
     const results = await context.env.DB.prepare(
       `SELECT DISTINCT d.*, u.name as creator_name, u.email as creator_email, t.name as tenant_name,
-              dt.name as document_type_name, dt.slug as document_type_slug
+              dt.name as document_type_name, dt.slug as document_type_slug,
+              s.name as supplier_name
        FROM documents d
        ${joins}
        ${whereClause}

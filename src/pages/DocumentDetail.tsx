@@ -85,19 +85,12 @@ export function DocumentDetail() {
   const [editDescription, setEditDescription] = useState('');
   const [editCategory, setEditCategory] = useState('');
   const [editTags, setEditTags] = useState('');
-  const [editLotNumber, setEditLotNumber] = useState('');
-  const [editPoNumber, setEditPoNumber] = useState('');
-  const [editCodeDate, setEditCodeDate] = useState('');
-  const [editExpirationDate, setEditExpirationDate] = useState('');
   const [editDocumentTypeId, setEditDocumentTypeId] = useState('');
   const [saving, setSaving] = useState(false);
 
   // Metadata inline editing
   const [metaEditing, setMetaEditing] = useState(false);
-  const [metaLotNumber, setMetaLotNumber] = useState('');
-  const [metaPoNumber, setMetaPoNumber] = useState('');
-  const [metaCodeDate, setMetaCodeDate] = useState('');
-  const [metaExpirationDate, setMetaExpirationDate] = useState('');
+  const [metaFields, setMetaFields] = useState<Record<string, string>>({});
   const [metaSaving, setMetaSaving] = useState(false);
 
   // Source metadata collapse
@@ -137,10 +130,13 @@ export function DocumentDetail() {
   // Sync inline metadata fields when doc loads
   useEffect(() => {
     if (doc) {
-      setMetaLotNumber(doc.lotNumber || '');
-      setMetaPoNumber(doc.poNumber || '');
-      setMetaCodeDate(doc.codeDate || '');
-      setMetaExpirationDate(doc.expirationDate || '');
+      const fields: Record<string, string> = {};
+      if (doc.primaryMetadata) {
+        for (const [k, v] of Object.entries(doc.primaryMetadata)) {
+          fields[k] = v || '';
+        }
+      }
+      setMetaFields(fields);
     }
   }, [doc]);
 
@@ -171,10 +167,6 @@ export function DocumentDetail() {
     setEditDescription(doc.description || '');
     setEditCategory(doc.category || '');
     setEditTags(doc.tags.join(', '));
-    setEditLotNumber(doc.lotNumber || '');
-    setEditPoNumber(doc.poNumber || '');
-    setEditCodeDate(doc.codeDate || '');
-    setEditExpirationDate(doc.expirationDate || '');
     setEditDocumentTypeId(doc.documentTypeId || '');
     setEditOpen(true);
     setAnchorEl(null);
@@ -192,10 +184,6 @@ export function DocumentDetail() {
           .split(',')
           .map((t) => t.trim())
           .filter(Boolean),
-        lot_number: editLotNumber.trim() || null,
-        po_number: editPoNumber.trim() || null,
-        code_date: editCodeDate.trim() || null,
-        expiration_date: editExpirationDate.trim() || null,
         document_type_id: editDocumentTypeId || null,
       });
       setEditOpen(false);
@@ -211,11 +199,13 @@ export function DocumentDetail() {
     if (!doc || !id) return;
     setMetaSaving(true);
     try {
+      // Build primary_metadata from edited fields, stripping empty values
+      const newMeta: Record<string, string | null> = {};
+      for (const [k, v] of Object.entries(metaFields)) {
+        newMeta[k] = v.trim() || null;
+      }
       await api.documents.update(id, {
-        lot_number: metaLotNumber.trim() || null,
-        po_number: metaPoNumber.trim() || null,
-        code_date: metaCodeDate.trim() || null,
-        expiration_date: metaExpirationDate.trim() || null,
+        primary_metadata: Object.values(newMeta).some(v => v) ? newMeta : null,
       });
       setMetaEditing(false);
       loadDocument();
@@ -436,12 +426,22 @@ export function DocumentDetail() {
           </Box>
         )}
 
-        {/* Editable Metadata Section */}
-        {(doc.lotNumber || doc.poNumber || doc.codeDate || doc.expirationDate || !isReader) && (
+        {/* Supplier */}
+        {doc.supplierName && (
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Supplier
+            </Typography>
+            <Chip label={doc.supplierName} color="default" variant="outlined" size="small" />
+          </Box>
+        )}
+
+        {/* Editable Primary Metadata Section */}
+        {(doc.primaryMetadata && Object.keys(doc.primaryMetadata).length > 0 || !isReader) && (
           <Box sx={{ mb: 2 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
               <Typography variant="subtitle2" color="text.secondary">
-                Extracted Metadata
+                Metadata
               </Typography>
               {!isReader && !metaEditing && (
                 <IconButton size="small" onClick={() => setMetaEditing(true)}>
@@ -452,38 +452,17 @@ export function DocumentDetail() {
             {metaEditing ? (
               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
                 <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap' }}>
-                  <TextField
-                    label="Lot Number"
-                    size="small"
-                    value={metaLotNumber}
-                    onChange={(e) => setMetaLotNumber(e.target.value)}
-                    disabled={metaSaving}
-                    sx={{ flex: '1 1 180px' }}
-                  />
-                  <TextField
-                    label="PO Number"
-                    size="small"
-                    value={metaPoNumber}
-                    onChange={(e) => setMetaPoNumber(e.target.value)}
-                    disabled={metaSaving}
-                    sx={{ flex: '1 1 180px' }}
-                  />
-                  <TextField
-                    label="Code Date"
-                    size="small"
-                    value={metaCodeDate}
-                    onChange={(e) => setMetaCodeDate(e.target.value)}
-                    disabled={metaSaving}
-                    sx={{ flex: '1 1 180px' }}
-                  />
-                  <TextField
-                    label="Expiration Date"
-                    size="small"
-                    value={metaExpirationDate}
-                    onChange={(e) => setMetaExpirationDate(e.target.value)}
-                    disabled={metaSaving}
-                    sx={{ flex: '1 1 180px' }}
-                  />
+                  {Object.entries(metaFields).map(([key, value]) => (
+                    <TextField
+                      key={key}
+                      label={key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                      size="small"
+                      value={value}
+                      onChange={(e) => setMetaFields(prev => ({ ...prev, [key]: e.target.value }))}
+                      disabled={metaSaving}
+                      sx={{ flex: '1 1 180px' }}
+                    />
+                  ))}
                 </Box>
                 <Box sx={{ display: 'flex', gap: 1 }}>
                   <Button
@@ -499,10 +478,13 @@ export function DocumentDetail() {
                     size="small"
                     onClick={() => {
                       setMetaEditing(false);
-                      setMetaLotNumber(doc.lotNumber || '');
-                      setMetaPoNumber(doc.poNumber || '');
-                      setMetaCodeDate(doc.codeDate || '');
-                      setMetaExpirationDate(doc.expirationDate || '');
+                      const fields: Record<string, string> = {};
+                      if (doc.primaryMetadata) {
+                        for (const [k, v] of Object.entries(doc.primaryMetadata)) {
+                          fields[k] = v || '';
+                        }
+                      }
+                      setMetaFields(fields);
                     }}
                     disabled={metaSaving}
                   >
@@ -512,28 +494,51 @@ export function DocumentDetail() {
               </Box>
             ) : (
               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                {doc.lotNumber ? (
-                  <Chip label={`Lot: ${doc.lotNumber}`} size="small" variant="outlined" />
-                ) : !isReader ? (
-                  <Chip label="Lot: --" size="small" variant="outlined" sx={{ opacity: 0.5 }} />
-                ) : null}
-                {doc.poNumber ? (
-                  <Chip label={`PO: ${doc.poNumber}`} size="small" variant="outlined" />
-                ) : !isReader ? (
-                  <Chip label="PO: --" size="small" variant="outlined" sx={{ opacity: 0.5 }} />
-                ) : null}
-                {doc.codeDate ? (
-                  <Chip label={`Code Date: ${doc.codeDate}`} size="small" variant="outlined" />
-                ) : !isReader ? (
-                  <Chip label="Code Date: --" size="small" variant="outlined" sx={{ opacity: 0.5 }} />
-                ) : null}
-                {doc.expirationDate ? (
-                  <Chip label={`Expires: ${doc.expirationDate}`} size="small" variant="outlined" />
-                ) : !isReader ? (
-                  <Chip label="Expires: --" size="small" variant="outlined" sx={{ opacity: 0.5 }} />
-                ) : null}
+                {doc.primaryMetadata && Object.entries(doc.primaryMetadata).map(([key, value]) => (
+                  value ? (
+                    <Chip
+                      key={key}
+                      label={`${key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}: ${value}`}
+                      size="small"
+                      variant="outlined"
+                    />
+                  ) : null
+                ))}
+                {(!doc.primaryMetadata || Object.values(doc.primaryMetadata).every(v => !v)) && !isReader && (
+                  <Typography variant="body2" color="text.secondary">No metadata</Typography>
+                )}
               </Box>
             )}
+          </Box>
+        )}
+
+        {/* Extended Metadata (collapsed) */}
+        {doc.extendedMetadata && Object.keys(doc.extendedMetadata).length > 0 && (
+          <Box sx={{ mb: 2 }}>
+            <Button
+              size="small"
+              onClick={() => setSourceMetaOpen(!sourceMetaOpen)}
+              endIcon={sourceMetaOpen ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+              sx={{ mb: 0.5, textTransform: 'none', color: 'text.secondary', px: 0, minWidth: 0 }}
+            >
+              <Typography variant="subtitle2" color="text.secondary">
+                Extended Metadata
+              </Typography>
+            </Button>
+            <Collapse in={sourceMetaOpen}>
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                {Object.entries(doc.extendedMetadata).map(([key, value]) => (
+                  value ? (
+                    <Chip
+                      key={key}
+                      label={`${key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}: ${value}`}
+                      size="small"
+                      variant="outlined"
+                    />
+                  ) : null
+                ))}
+              </Box>
+            </Collapse>
           </Box>
         )}
 
@@ -730,37 +735,7 @@ export function DocumentDetail() {
               </Select>
             </FormControl>
           )}
-          <TextField
-            label="Lot Number"
-            fullWidth
-            value={editLotNumber}
-            onChange={(e) => setEditLotNumber(e.target.value)}
-            disabled={saving}
-            sx={{ mb: 2 }}
-          />
-          <TextField
-            label="PO Number"
-            fullWidth
-            value={editPoNumber}
-            onChange={(e) => setEditPoNumber(e.target.value)}
-            disabled={saving}
-            sx={{ mb: 2 }}
-          />
-          <TextField
-            label="Code Date"
-            fullWidth
-            value={editCodeDate}
-            onChange={(e) => setEditCodeDate(e.target.value)}
-            disabled={saving}
-            sx={{ mb: 2 }}
-          />
-          <TextField
-            label="Expiration Date"
-            fullWidth
-            value={editExpirationDate}
-            onChange={(e) => setEditExpirationDate(e.target.value)}
-            disabled={saving}
-          />
+          {/* Metadata fields are edited inline on the document detail page, not in this dialog */}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={() => setEditOpen(false)} disabled={saving}>

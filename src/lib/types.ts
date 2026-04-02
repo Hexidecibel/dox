@@ -45,5 +45,9 @@ export type {
   ProcessingQueueItem,
   ParsedQuery,
   NaturalSearchResponse,
+  ApiSupplier,
+  SupplierListResponse,
+  SupplierGetResponse,
+  SupplierLookupOrCreateResponse,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';

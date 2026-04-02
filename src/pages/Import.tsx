@@ -54,49 +54,31 @@ type Stage = 'upload' | 'processing' | 'review';
 
 // === Field assignment helpers ===
 
-/** DB field roles a user can assign to an extracted field */
-const ASSIGNABLE_ROLES = [
-  { value: '', label: 'None' },
-  { value: 'lot_number', label: 'Lot Number' },
-  { value: 'po_number', label: 'PO Number' },
-  { value: 'code_date', label: 'Code Date' },
-  { value: 'expiration_date', label: 'Expiration Date' },
+/** Tiers: by default all fields go to primary. User can demote to extended or dismiss. */
+const ASSIGNABLE_TIERS = [
+  { value: 'primary', label: 'Primary' },
+  { value: 'extended', label: 'Extended' },
   { value: 'product_name', label: 'Product Name' },
-  { value: 'metadata', label: 'Save to Metadata' },
+  { value: 'dismiss', label: 'Dismiss' },
 ] as const;
 
-/** Maps common AI-extracted field keys to their DB column role */
-const STANDARD_FIELD_MAPPINGS: Record<string, string> = {
-  lot_number: 'lot_number',
-  lot: 'lot_number',
-  batch_number: 'lot_number',
-  batch_id: 'lot_number',
-  po_number: 'po_number',
-  purchase_order: 'po_number',
-  purchase_order_number: 'po_number',
-  expiration_date: 'expiration_date',
-  exp_date: 'expiration_date',
-  expires: 'expiration_date',
-  code_date: 'code_date',
-  production_date: 'code_date',
-  product_name: 'product_name',
-  product: 'product_name',
-  product_description: 'product_name',
-};
+/** Maps common AI-extracted field keys for product detection */
+const PRODUCT_FIELD_NAMES = new Set([
+  'product_name', 'product', 'product_description',
+]);
 
-function autoAssignRole(fieldKey: string): string {
+function autoAssignTier(fieldKey: string): string {
   const normalized = fieldKey.toLowerCase().trim();
-  return STANDARD_FIELD_MAPPINGS[normalized] || '';
+  if (PRODUCT_FIELD_NAMES.has(normalized)) return 'product_name';
+  // By default, all AI-extracted fields go to primary
+  return 'primary';
 }
 
 function humanizeFieldKey(key: string): string {
   return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-function roleLabelFor(roleValue: string): string {
-  const found = ASSIGNABLE_ROLES.find(r => r.value === roleValue);
-  return found?.label || roleValue;
-}
+// Removed unused tierLabelFor -- tiers are shown via Select dropdown now
 
 // === Interfaces ===
 
@@ -219,7 +201,7 @@ function ExtractedTableView({ table }: { table: ExtractedTable }) {
   );
 }
 
-/** Single field row with value editor and role assignment */
+/** Single field row with value editor and tier assignment */
 function FieldRow({
   fieldKey,
   value,
@@ -233,10 +215,8 @@ function FieldRow({
   assignment: string;
   disabled: boolean;
   onValueChange: (v: string) => void;
-  onAssignmentChange: (role: string) => void;
+  onAssignmentChange: (tier: string) => void;
 }) {
-  const isAutoAssigned = !!autoAssignRole(fieldKey);
-
   return (
     <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
       <TextField
@@ -245,39 +225,24 @@ function FieldRow({
         onChange={(e) => onValueChange(e.target.value)}
         size="small"
         fullWidth
-        disabled={disabled}
-        sx={{ flex: 1 }}
+        disabled={disabled || assignment === 'dismiss'}
+        sx={{ flex: 1, opacity: assignment === 'dismiss' ? 0.5 : 1 }}
       />
-      <Box sx={{ minWidth: 160 }}>
-        {assignment ? (
-          <Chip
-            label={`\u2192 ${roleLabelFor(assignment)}`}
-            size="small"
-            color={isAutoAssigned ? 'success' : 'primary'}
-            variant={isAutoAssigned ? 'filled' : 'outlined'}
-            onDelete={() => onAssignmentChange('')}
-            sx={{ height: 28 }}
-          />
-        ) : (
-          <FormControl size="small" fullWidth>
-            <Select
-              value=""
-              displayEmpty
-              onChange={(e) => onAssignmentChange(e.target.value)}
-              disabled={disabled}
-              sx={{ fontSize: '0.8125rem', height: 32 }}
-            >
-              <MenuItem value="" disabled>
-                <Typography variant="body2" color="text.secondary">Assign...</Typography>
+      <Box sx={{ minWidth: 140 }}>
+        <FormControl size="small" fullWidth>
+          <Select
+            value={assignment}
+            onChange={(e) => onAssignmentChange(e.target.value)}
+            disabled={disabled}
+            sx={{ fontSize: '0.8125rem', height: 32 }}
+          >
+            {ASSIGNABLE_TIERS.map(r => (
+              <MenuItem key={r.value} value={r.value}>
+                {r.label}
               </MenuItem>
-              {ASSIGNABLE_ROLES.filter(r => r.value).map(r => (
-                <MenuItem key={r.value} value={r.value}>
-                  {r.label}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-        )}
+            ))}
+          </Select>
+        </FormControl>
       </Box>
     </Box>
   );
@@ -426,7 +391,7 @@ export function Import() {
 
         for (const [k, v] of Object.entries(result.fields)) {
           editedFields[k] = v || '';
-          fieldAssignments[k] = autoAssignRole(k);
+          fieldAssignments[k] = autoAssignTier(k);
         }
 
         return {
@@ -501,7 +466,7 @@ export function Import() {
 
       // 1. Resolve product — check assignment first, then fallback to productName
       let productId: string | undefined;
-      const productField = Object.entries(item.fieldAssignments).find(([, role]) => role === 'product_name');
+      const productField = Object.entries(item.fieldAssignments).find(([, tier]) => tier === 'product_name');
       const productNameValue = productField ? item.editedFields[productField[0]] : item.productName;
       if (productNameValue?.trim()) {
         const prodResult = await api.products.lookupOrCreate({
@@ -511,7 +476,21 @@ export function Import() {
         productId = prodResult.product.id;
       }
 
-      // 2. Build FormData for ingest using field assignments
+      // 2. Resolve supplier if detected
+      let supplierId: string | undefined;
+      if (item.result.supplier) {
+        try {
+          const supplierResult = await api.suppliers.lookupOrCreate({
+            name: item.result.supplier,
+            tenant_id: effectiveTenantId,
+          });
+          supplierId = supplierResult.supplier.id;
+        } catch {
+          // Non-critical
+        }
+      }
+
+      // 3. Build FormData for ingest using tier assignments
       const form = new FormData();
       form.append('file', item.file);
       form.append('tenant_id', effectiveTenantId);
@@ -519,35 +498,38 @@ export function Import() {
       form.append('title', item.file.name.replace(/\.[^/.]+$/, ''));
       form.append('document_type_id', documentTypeId);
 
-      // Map assigned fields to their DB columns
-      const dbFieldMap: Record<string, string> = {};
-      for (const [key, role] of Object.entries(item.fieldAssignments)) {
-        if (role && role !== 'metadata' && role !== 'product_name') {
-          dbFieldMap[role] = item.editedFields[key];
-        }
+      if (supplierId) {
+        form.append('supplier_id', supplierId);
       }
-      if (dbFieldMap.lot_number) form.append('lot_number', dbFieldMap.lot_number);
-      if (dbFieldMap.po_number) form.append('po_number', dbFieldMap.po_number);
-      if (dbFieldMap.expiration_date) form.append('expiration_date', dbFieldMap.expiration_date);
-      if (dbFieldMap.code_date) form.append('code_date', dbFieldMap.code_date);
 
       if (productId) {
         form.append('product_ids', JSON.stringify([{ product_id: productId }]));
       }
 
-      // Build source_metadata from unassigned / metadata-assigned fields
-      const metadata: Record<string, unknown> = {};
+      // Build primary_metadata from "primary" assigned fields
+      const primaryMeta: Record<string, string> = {};
+      const extendedMeta: Record<string, string> = {};
       for (const [key, value] of Object.entries(item.editedFields)) {
-        const role = item.fieldAssignments[key];
-        if (!role || role === 'metadata') {
-          metadata[key] = value;
+        const tier = item.fieldAssignments[key];
+        if (tier === 'primary') {
+          if (value) primaryMeta[key] = value;
+        } else if (tier === 'extended') {
+          if (value) extendedMeta[key] = value;
         }
+        // 'product_name' and 'dismiss' are handled separately
       }
+
+      if (Object.keys(primaryMeta).length > 0) {
+        form.append('primary_metadata', JSON.stringify(primaryMeta));
+      }
+      if (Object.keys(extendedMeta).length > 0) {
+        form.append('extended_metadata', JSON.stringify(extendedMeta));
+      }
+
+      // Build source_metadata from tables
       if (item.result.tables?.length) {
-        metadata._tables = item.result.tables;
-      }
-      if (Object.keys(metadata).length > 0) {
-        form.append('source_metadata', JSON.stringify(metadata));
+        const sourceMeta: Record<string, unknown> = { _tables: item.result.tables };
+        form.append('source_metadata', JSON.stringify(sourceMeta));
       }
 
       // 3. Call ingest via direct fetch (multipart form)
@@ -609,22 +591,22 @@ export function Import() {
     ));
   };
 
-  // Update field assignment
-  const updateFieldAssignment = (index: number, fieldName: string, role: string) => {
+  // Update field tier assignment
+  const updateFieldAssignment = (index: number, fieldName: string, tier: string) => {
     setEditableResults(prev => prev.map((r, i) => {
       if (i !== index) return r;
       const newAssignments = { ...r.fieldAssignments };
 
-      // If assigning a unique role (not metadata), clear it from any other field first
-      if (role && role !== 'metadata') {
+      // product_name is unique -- clear it from any other field first
+      if (tier === 'product_name') {
         for (const k of Object.keys(newAssignments)) {
-          if (newAssignments[k] === role) {
-            newAssignments[k] = '';
+          if (newAssignments[k] === 'product_name') {
+            newAssignments[k] = 'primary';
           }
         }
       }
 
-      newAssignments[fieldName] = role;
+      newAssignments[fieldName] = tier;
       return { ...r, fieldAssignments: newAssignments };
     }));
   };
