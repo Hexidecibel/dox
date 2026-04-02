@@ -33,6 +33,7 @@ import type {
   ApiBundleItem,
   BundleListResponse,
   BundleGetResponse,
+  ProcessingResponse,
 } from './types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -529,6 +530,17 @@ export const api = {
      */
     delete: (id: string) =>
       fetchApi<void>(`/products/${id}`, { method: 'DELETE' }),
+
+    /**
+     * POST /api/products/lookup-or-create
+     * Finds an existing product by name or creates a new one.
+     * Returns: { product: ApiProduct, created: boolean }
+     */
+    lookupOrCreate: (data: { name: string; tenant_id: string }) =>
+      fetchApi<{ product: ApiProduct; created: boolean }>('/products/lookup-or-create', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
 
   documentTypes: {
@@ -765,6 +777,23 @@ export const api = {
       if (token) params.set('token', token);
       const qs = params.toString();
       return `${API_BASE}/bundles/${bundleId}/download${qs ? `?${qs}` : ''}`;
+    },
+  },
+
+  processing: {
+    /**
+     * POST /api/documents/process
+     * Send files + document type for AI extraction. Returns extracted fields per file.
+     */
+    process: (files: File[], documentTypeId: string, tenantId: string): Promise<ProcessingResponse> => {
+      const form = new FormData();
+      files.forEach(f => form.append('files', f));
+      form.append('document_type_id', documentTypeId);
+      form.append('tenant_id', tenantId);
+      return fetchApi<ProcessingResponse>('/documents/process', {
+        method: 'POST',
+        body: form,
+      });
     },
   },
 };

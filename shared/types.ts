@@ -489,6 +489,28 @@ export interface BundleGetResponse {
   items: ApiBundleItem[];
 }
 
+// === Document Processing ===
+export interface ProcessingResult {
+  file_name: string;
+  file_index: number;
+  status: 'success' | 'error';
+  error_message?: string;
+  extracted_text_preview?: string;
+  fields: Record<string, string | null>;
+  product_names: string[];
+  confidence: 'high' | 'medium' | 'low';
+}
+
+export interface ProcessingResponse {
+  results: ProcessingResult[];
+  document_type: {
+    id: string;
+    name: string;
+    naming_format: string | null;
+    extraction_fields: ExtractionField[];
+  };
+}
+
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'auth_user';

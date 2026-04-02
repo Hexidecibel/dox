@@ -1,0 +1,219 @@
+import { extractText } from '../../lib/extract';
+import { extractFields } from '../../lib/llm';
+import {
+  requireRole,
+  requireTenantAccess,
+  BadRequestError,
+  NotFoundError,
+  errorToResponse,
+} from '../../lib/permissions';
+import type { User, Env } from '../../lib/types';
+import type { ExtractionField, ProcessingResult } from '../../../shared/types';
+
+const ALLOWED_TYPES = [
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/csv',
+  'text/plain',
+  'application/json',
+  'image/png',
+  'image/jpeg',
+];
+
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+
+const MIME_TO_EXTENSIONS: Record<string, string[]> = {
+  'application/pdf': ['.pdf'],
+  'application/msword': ['.doc'],
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+  'application/vnd.ms-excel': ['.xls'],
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+  'text/csv': ['.csv'],
+  'text/plain': ['.txt', '.text', '.log', '.md'],
+  'application/json': ['.json'],
+  'image/png': ['.png'],
+  'image/jpeg': ['.jpg', '.jpeg'],
+};
+
+/**
+ * POST /api/documents/process
+ * Accept files, extract text, call LLM for field extraction, return results.
+ * Does NOT ingest/store anything — purely for preview/processing.
+ */
+export const onRequestPost: PagesFunction<Env> = async (context) => {
+  try {
+    const user = context.data.user as User;
+    requireRole(user, 'super_admin', 'org_admin', 'user');
+
+    const formData = await context.request.formData();
+    const documentTypeId = formData.get('document_type_id') as string;
+    const tenantId = (formData.get('tenant_id') as string) || user.tenant_id;
+
+    if (!documentTypeId) {
+      throw new BadRequestError('document_type_id is required');
+    }
+    if (!tenantId) {
+      throw new BadRequestError('tenant_id is required');
+    }
+
+    requireTenantAccess(user, tenantId);
+
+    // Look up document type and get extraction_fields
+    const docType = await context.env.DB.prepare(
+      'SELECT id, name, naming_format, extraction_fields FROM document_types WHERE id = ? AND active = 1'
+    ).bind(documentTypeId).first<{
+      id: string;
+      name: string;
+      naming_format: string | null;
+      extraction_fields: string | null;
+    }>();
+
+    if (!docType) {
+      throw new NotFoundError('Document type not found');
+    }
+
+    // Parse extraction_fields
+    let extractionFields: ExtractionField[] = [];
+    if (docType.extraction_fields) {
+      try {
+        const parsed = typeof docType.extraction_fields === 'string'
+          ? JSON.parse(docType.extraction_fields)
+          : docType.extraction_fields;
+        if (Array.isArray(parsed)) extractionFields = parsed;
+      } catch {
+        // Invalid JSON in extraction_fields — treat as empty
+      }
+    }
+
+    // Get all files from form data
+    const files: File[] = [];
+    for (const [key, value] of formData.entries()) {
+      if (key === 'files' && value instanceof File) {
+        files.push(value);
+      }
+    }
+
+    if (files.length === 0) {
+      throw new BadRequestError('No files provided');
+    }
+
+    // Process each file
+    const results: ProcessingResult[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        // Validate file type
+        const mimeType = file.type || 'application/octet-stream';
+        if (!ALLOWED_TYPES.includes(mimeType)) {
+          results.push({
+            file_name: file.name,
+            file_index: i,
+            status: 'error',
+            error_message: 'File type not allowed. Accepted: PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, JSON, PNG, JPG',
+            fields: {},
+            product_names: [],
+            confidence: 'low',
+          });
+          continue;
+        }
+
+        // Validate file extension matches mime type
+        const fileName = file.name;
+        const ext = fileName.includes('.') ? '.' + fileName.split('.').pop()!.toLowerCase() : '';
+        const expectedExtensions = MIME_TO_EXTENSIONS[mimeType];
+        if (expectedExtensions && ext && !expectedExtensions.includes(ext)) {
+          results.push({
+            file_name: file.name,
+            file_index: i,
+            status: 'error',
+            error_message: `File extension "${ext}" does not match the file type "${mimeType}"`,
+            fields: {},
+            product_names: [],
+            confidence: 'low',
+          });
+          continue;
+        }
+
+        // Validate file size
+        if (file.size > MAX_FILE_SIZE) {
+          results.push({
+            file_name: file.name,
+            file_index: i,
+            status: 'error',
+            error_message: 'File too large (100MB max)',
+            fields: {},
+            product_names: [],
+            confidence: 'low',
+          });
+          continue;
+        }
+
+        // Extract text
+        const fileData = await file.arrayBuffer();
+        const text = await extractText(fileData, mimeType, fileName);
+
+        if (!text) {
+          results.push({
+            file_name: file.name,
+            file_index: i,
+            status: 'error',
+            error_message: 'Could not extract text from file',
+            fields: {},
+            product_names: [],
+            confidence: 'low',
+          });
+          continue;
+        }
+
+        // Call LLM for field extraction
+        const extraction = await extractFields(text, extractionFields, context.env);
+
+        results.push({
+          file_name: file.name,
+          file_index: i,
+          status: 'success',
+          extracted_text_preview: text.substring(0, 500),
+          fields: extraction.fields,
+          product_names: extraction.product_names,
+          confidence: extraction.confidence,
+        });
+      } catch (err) {
+        results.push({
+          file_name: file.name,
+          file_index: i,
+          status: 'error',
+          error_message: err instanceof Error ? err.message : 'Processing failed',
+          fields: {},
+          product_names: [],
+          confidence: 'low',
+        });
+      }
+    }
+
+    return new Response(JSON.stringify({
+      results,
+      document_type: {
+        id: docType.id as string,
+        name: docType.name as string,
+        naming_format: docType.naming_format || null,
+        extraction_fields: extractionFields,
+      },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (err) {
+    const httpErr = errorToResponse(err);
+    if (httpErr) return httpErr;
+
+    console.error('Process error:', err);
+    return new Response(
+      JSON.stringify({ error: 'Internal server error' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+};

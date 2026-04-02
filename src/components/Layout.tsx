@@ -40,6 +40,7 @@ import {
   Warning as WarningIcon,
   FolderCopy as BundlesIcon,
   History as HistoryIcon,
+  FileUpload as ImportIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -61,6 +62,7 @@ const navItems: NavItem[] = [
   { label: 'Search', path: '/search', icon: <SearchIcon /> },
   { label: 'Bundles', path: '/bundles', icon: <BundlesIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Expirations', path: '/expirations', icon: <WarningIcon /> },
+  { label: 'Import', path: '/import', icon: <ImportIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Ingest History', path: '/ingest-history', icon: <HistoryIcon />, roles: ['super_admin', 'org_admin', 'user'] },
 ];
 

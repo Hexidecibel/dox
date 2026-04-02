@@ -38,5 +38,7 @@ export type {
   ApiBundleItem,
   BundleListResponse,
   BundleGetResponse,
+  ProcessingResult,
+  ProcessingResponse,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';

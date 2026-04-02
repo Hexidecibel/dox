@@ -4,6 +4,7 @@ export interface Env {
   JWT_SECRET: string;
   RESEND_API_KEY?: string;
   EMAIL_WEBHOOK_SECRET?: string;
+  QWEN_URL?: string;
 }
 
 export interface User {

@@ -21,6 +21,7 @@ import { Expirations } from './pages/Expirations';
 import { Bundles } from './pages/Bundles';
 import { BundleDetail } from './pages/BundleDetail';
 import { IngestHistory } from './pages/IngestHistory';
+import { Import } from './pages/Import';
 
 function App() {
   return (
@@ -44,6 +45,7 @@ function App() {
               <Route path="/bundles" element={<Bundles />} />
               <Route path="/bundles/:id" element={<BundleDetail />} />
               <Route path="/ingest-history" element={<IngestHistory />} />
+              <Route path="/import" element={<Import />} />
 
               {/* Admin routes - users management and audit for super_admin and org_admin */}
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>
