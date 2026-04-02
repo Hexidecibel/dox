@@ -220,9 +220,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         // Call LLM for field extraction (with few-shot examples)
-        const extraction = await extractFields(text, extractionFields, context.env, fewShotExamples);
+        const extraction = await extractFields(text, context.env, fewShotExamples);
 
-        const confidenceScore = computeConfidenceScore(extraction.confidence, extraction.fields, extractionFields);
+        const confidenceScore = computeConfidenceScore(extraction.confidence, extraction.fields);
 
         results.push({
           file_name: file.name,
@@ -230,7 +230,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           status: 'success',
           extracted_text_preview: text.substring(0, 500),
           fields: extraction.fields,
-          product_names: extraction.product_names,
+          tables: extraction.tables,
+          summary: extraction.summary,
+          product_names: extraction.products,
           confidence: extraction.confidence,
           confidence_score: confidenceScore,
           checksum,

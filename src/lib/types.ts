@@ -40,6 +40,7 @@ export type {
   BundleGetResponse,
   ProcessingResult,
   ProcessingResponse,
+  ExtractedTable,
   ExtractionExampleRow,
   ProcessingQueueItem,
   ParsedQuery,

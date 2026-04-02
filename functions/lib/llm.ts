@@ -1,38 +1,29 @@
-import type { ExtractionField, ParsedQuery } from '../../shared/types';
+import type { ParsedQuery } from '../../shared/types';
 
 export interface ExtractionResult {
-  fields: Record<string, string | null>;
-  product_names: string[];
+  fields: Record<string, string | null>;    // ALL key-value pairs found
+  tables: Array<{ name: string; headers: string[]; rows: string[][] }>;
+  products: string[];
+  summary: string;
   confidence: 'high' | 'medium' | 'low';
   raw_response?: string;
 }
 
-function slugify(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-}
-
-function buildPrompt(fields: ExtractionField[], examples?: { input_text: string; corrected_output: string }[]): string {
-  const fieldLines = fields.map((f) => {
-    const key = slugify(f.name);
-    let line = `- "${key}": ${f.name}`;
-    if (f.hint) line += ` (hint: ${f.hint})`;
-    if (f.aliases && f.aliases.length > 0) {
-      line += ` (may also appear as: ${f.aliases.join(', ')})`;
-    }
-    return line;
-  });
-
+function buildPrompt(examples?: { input_text: string; corrected_output: string }[]): string {
   let prompt = [
-    'You are a document data extraction assistant. Extract the requested fields from the provided document text. Return ONLY a valid JSON object with no additional text or explanation.',
+    'You are a document data extraction assistant. Analyze the provided document and extract ALL structured data you can find.',
     '',
-    'For each field below, extract its value from the document. If a field is not found, set it to null.',
+    'Return a JSON object with these sections:',
     '',
-    'Fields to extract:',
-    ...fieldLines,
+    '1. "fields": an object of ALL key-value pairs found in the document. Use snake_case keys derived from the field labels (e.g., "Lot Number" → "lot_number", "Ship Date" → "ship_date", "Customer Name" → "customer_name"). Set value to null if a label exists but the value is unclear.',
     '',
-    'Also include these in your JSON response:',
-    '- "_product_names": an array of product/item names mentioned in the document (empty array if none found)',
-    '- "_confidence": "high" if most fields were clearly found, "medium" if some were ambiguous, "low" if the document was hard to parse',
+    '2. "tables": an array of any tabular data found (e.g., test results, line items). Each table is: { "name": "string describing the table", "headers": ["col1", "col2"], "rows": [["val1", "val2"], ...] }',
+    '',
+    '3. "products": an array of product/item names mentioned in the document (empty array if none found).',
+    '',
+    '4. "summary": a one-sentence description of what this document is (e.g., "Certificate of Analysis for Butter from Supplier X, Lot LOT-2024-042").',
+    '',
+    '5. "_confidence": "high" if the document was clearly structured and most data was extracted, "medium" if some parts were ambiguous, "low" if the document was hard to parse.',
   ].join('\n');
 
   if (examples && examples.length > 0) {
@@ -47,20 +38,15 @@ function buildPrompt(fields: ExtractionField[], examples?: { input_text: string;
 
 export async function extractFields(
   text: string,
-  extractionFields: ExtractionField[],
   env: { QWEN_URL?: string; QWEN_SECRET?: string },
   examples?: { input_text: string; corrected_output: string }[]
 ): Promise<ExtractionResult> {
   if (!text || text.trim().length === 0) {
-    const fields: Record<string, string | null> = {};
-    for (const f of extractionFields) {
-      fields[slugify(f.name)] = null;
-    }
-    return { fields, product_names: [], confidence: 'low' };
+    return { fields: {}, tables: [], products: [], summary: '', confidence: 'low' };
   }
 
   const baseUrl = (env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
-  const systemPrompt = buildPrompt(extractionFields, examples);
+  const systemPrompt = buildPrompt(examples);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90_000);
@@ -82,7 +68,7 @@ export async function extractFields(
           { role: 'system', content: systemPrompt },
           {
             role: 'user',
-            content: `<document>\n${text}\n</document>\n\nExtract the fields and respond with JSON only. /no_think`,
+            content: `<document>\n${text}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
           },
         ],
       }),
@@ -114,26 +100,37 @@ export async function extractFields(
   try {
     parsed = JSON.parse(content);
   } catch {
-    return { fields: {}, product_names: [], confidence: 'low', raw_response: content };
+    return { fields: {}, tables: [], products: [], summary: '', confidence: 'low', raw_response: content };
   }
 
-  const product_names = Array.isArray(parsed._product_names)
-    ? (parsed._product_names as string[])
+  const products = Array.isArray(parsed.products)
+    ? (parsed.products as string[])
     : [];
 
   const confidence = (['high', 'medium', 'low'].includes(parsed._confidence as string)
     ? parsed._confidence
     : 'low') as ExtractionResult['confidence'];
 
-  // Build fields, excluding underscore-prefixed keys
+  const tables = Array.isArray(parsed.tables)
+    ? (parsed.tables as ExtractionResult['tables'])
+    : [];
+
+  const summary = typeof parsed.summary === 'string' ? parsed.summary : '';
+
+  // Build fields from the "fields" object, or from top-level non-reserved keys
   const fields: Record<string, string | null> = {};
-  for (const [key, value] of Object.entries(parsed)) {
-    if (!key.startsWith('_')) {
+  const rawFields = (typeof parsed.fields === 'object' && parsed.fields !== null && !Array.isArray(parsed.fields))
+    ? parsed.fields as Record<string, unknown>
+    : parsed;
+  const reservedKeys = new Set(['fields', 'tables', 'products', 'summary', '_confidence']);
+
+  for (const [key, value] of Object.entries(rawFields)) {
+    if (!key.startsWith('_') && !reservedKeys.has(key)) {
       fields[key] = value === null || value === undefined ? null : String(value);
     }
   }
 
-  return { fields, product_names, confidence };
+  return { fields, tables, products, summary, confidence };
 }
 
 export async function parseNaturalQuery(

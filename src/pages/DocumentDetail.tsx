@@ -21,6 +21,16 @@ import {
   MenuItem,
   ListItemIcon,
   ListItemText,
+  Collapse,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Select,
+  InputLabel,
+  FormControl,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -30,9 +40,12 @@ import {
   Delete as DeleteIcon,
   Archive as ArchiveIcon,
   MoreVert as MoreIcon,
+  ExpandMore as ExpandMoreIcon,
+  ExpandLess as ExpandLessIcon,
+  Save as SaveIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
-import type { Document, DocumentVersion } from '../lib/types';
+import type { Document, DocumentVersion, ApiDocumentType } from '../lib/types';
 import { VersionHistory } from '../components/VersionHistory';
 import { UploadDialog } from '../components/UploadDialog';
 import { RoleGuard } from '../components/RoleGuard';
@@ -72,7 +85,26 @@ export function DocumentDetail() {
   const [editDescription, setEditDescription] = useState('');
   const [editCategory, setEditCategory] = useState('');
   const [editTags, setEditTags] = useState('');
+  const [editLotNumber, setEditLotNumber] = useState('');
+  const [editPoNumber, setEditPoNumber] = useState('');
+  const [editCodeDate, setEditCodeDate] = useState('');
+  const [editExpirationDate, setEditExpirationDate] = useState('');
+  const [editDocumentTypeId, setEditDocumentTypeId] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // Metadata inline editing
+  const [metaEditing, setMetaEditing] = useState(false);
+  const [metaLotNumber, setMetaLotNumber] = useState('');
+  const [metaPoNumber, setMetaPoNumber] = useState('');
+  const [metaCodeDate, setMetaCodeDate] = useState('');
+  const [metaExpirationDate, setMetaExpirationDate] = useState('');
+  const [metaSaving, setMetaSaving] = useState(false);
+
+  // Source metadata collapse
+  const [sourceMetaOpen, setSourceMetaOpen] = useState(false);
+
+  // Document types for dropdown
+  const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
 
   const loadDocument = async () => {
     if (!id) return;
@@ -102,6 +134,32 @@ export function DocumentDetail() {
     loadDocument();
   }, [id]);
 
+  // Sync inline metadata fields when doc loads
+  useEffect(() => {
+    if (doc) {
+      setMetaLotNumber(doc.lotNumber || '');
+      setMetaPoNumber(doc.poNumber || '');
+      setMetaCodeDate(doc.codeDate || '');
+      setMetaExpirationDate(doc.expirationDate || '');
+    }
+  }, [doc]);
+
+  // Load document types for the dropdown
+  useEffect(() => {
+    const loadDocTypes = async () => {
+      try {
+        const result = await api.documentTypes.list({
+          tenant_id: doc?.tenant_id || undefined,
+          active: 1,
+        });
+        setDocumentTypes(result.documentTypes || []);
+      } catch {
+        // Non-critical, silently ignore
+      }
+    };
+    if (doc?.tenant_id) loadDocTypes();
+  }, [doc?.tenant_id]);
+
   const handleUploadSuccess = () => {
     setUploadOpen(false);
     loadDocument();
@@ -113,6 +171,11 @@ export function DocumentDetail() {
     setEditDescription(doc.description || '');
     setEditCategory(doc.category || '');
     setEditTags(doc.tags.join(', '));
+    setEditLotNumber(doc.lotNumber || '');
+    setEditPoNumber(doc.poNumber || '');
+    setEditCodeDate(doc.codeDate || '');
+    setEditExpirationDate(doc.expirationDate || '');
+    setEditDocumentTypeId(doc.documentTypeId || '');
     setEditOpen(true);
     setAnchorEl(null);
   };
@@ -129,6 +192,11 @@ export function DocumentDetail() {
           .split(',')
           .map((t) => t.trim())
           .filter(Boolean),
+        lot_number: editLotNumber.trim() || null,
+        po_number: editPoNumber.trim() || null,
+        code_date: editCodeDate.trim() || null,
+        expiration_date: editExpirationDate.trim() || null,
+        document_type_id: editDocumentTypeId || null,
       });
       setEditOpen(false);
       loadDocument();
@@ -136,6 +204,25 @@ export function DocumentDetail() {
       setError(err instanceof Error ? err.message : 'Failed to update document');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSaveMetadata = async () => {
+    if (!doc || !id) return;
+    setMetaSaving(true);
+    try {
+      await api.documents.update(id, {
+        lot_number: metaLotNumber.trim() || null,
+        po_number: metaPoNumber.trim() || null,
+        code_date: metaCodeDate.trim() || null,
+        expiration_date: metaExpirationDate.trim() || null,
+      });
+      setMetaEditing(false);
+      loadDocument();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update metadata');
+    } finally {
+      setMetaSaving(false);
     }
   };
 
@@ -349,25 +436,104 @@ export function DocumentDetail() {
           </Box>
         )}
 
-        {(doc.lotNumber || doc.poNumber || doc.codeDate || doc.expirationDate) && (
+        {/* Editable Metadata Section */}
+        {(doc.lotNumber || doc.poNumber || doc.codeDate || doc.expirationDate || !isReader) && (
           <Box sx={{ mb: 2 }}>
-            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-              Metadata
-            </Typography>
-            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-              {doc.lotNumber && (
-                <Chip label={`Lot: ${doc.lotNumber}`} size="small" variant="outlined" />
-              )}
-              {doc.poNumber && (
-                <Chip label={`PO: ${doc.poNumber}`} size="small" variant="outlined" />
-              )}
-              {doc.codeDate && (
-                <Chip label={`Code Date: ${doc.codeDate}`} size="small" variant="outlined" />
-              )}
-              {doc.expirationDate && (
-                <Chip label={`Expires: ${doc.expirationDate}`} size="small" variant="outlined" />
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+              <Typography variant="subtitle2" color="text.secondary">
+                Extracted Metadata
+              </Typography>
+              {!isReader && !metaEditing && (
+                <IconButton size="small" onClick={() => setMetaEditing(true)}>
+                  <EditIcon fontSize="small" />
+                </IconButton>
               )}
             </Box>
+            {metaEditing ? (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap' }}>
+                  <TextField
+                    label="Lot Number"
+                    size="small"
+                    value={metaLotNumber}
+                    onChange={(e) => setMetaLotNumber(e.target.value)}
+                    disabled={metaSaving}
+                    sx={{ flex: '1 1 180px' }}
+                  />
+                  <TextField
+                    label="PO Number"
+                    size="small"
+                    value={metaPoNumber}
+                    onChange={(e) => setMetaPoNumber(e.target.value)}
+                    disabled={metaSaving}
+                    sx={{ flex: '1 1 180px' }}
+                  />
+                  <TextField
+                    label="Code Date"
+                    size="small"
+                    value={metaCodeDate}
+                    onChange={(e) => setMetaCodeDate(e.target.value)}
+                    disabled={metaSaving}
+                    sx={{ flex: '1 1 180px' }}
+                  />
+                  <TextField
+                    label="Expiration Date"
+                    size="small"
+                    value={metaExpirationDate}
+                    onChange={(e) => setMetaExpirationDate(e.target.value)}
+                    disabled={metaSaving}
+                    sx={{ flex: '1 1 180px' }}
+                  />
+                </Box>
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <Button
+                    size="small"
+                    variant="contained"
+                    startIcon={<SaveIcon />}
+                    onClick={handleSaveMetadata}
+                    disabled={metaSaving}
+                  >
+                    {metaSaving ? 'Saving...' : 'Save'}
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setMetaEditing(false);
+                      setMetaLotNumber(doc.lotNumber || '');
+                      setMetaPoNumber(doc.poNumber || '');
+                      setMetaCodeDate(doc.codeDate || '');
+                      setMetaExpirationDate(doc.expirationDate || '');
+                    }}
+                    disabled={metaSaving}
+                  >
+                    Cancel
+                  </Button>
+                </Box>
+              </Box>
+            ) : (
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                {doc.lotNumber ? (
+                  <Chip label={`Lot: ${doc.lotNumber}`} size="small" variant="outlined" />
+                ) : !isReader ? (
+                  <Chip label="Lot: --" size="small" variant="outlined" sx={{ opacity: 0.5 }} />
+                ) : null}
+                {doc.poNumber ? (
+                  <Chip label={`PO: ${doc.poNumber}`} size="small" variant="outlined" />
+                ) : !isReader ? (
+                  <Chip label="PO: --" size="small" variant="outlined" sx={{ opacity: 0.5 }} />
+                ) : null}
+                {doc.codeDate ? (
+                  <Chip label={`Code Date: ${doc.codeDate}`} size="small" variant="outlined" />
+                ) : !isReader ? (
+                  <Chip label="Code Date: --" size="small" variant="outlined" sx={{ opacity: 0.5 }} />
+                ) : null}
+                {doc.expirationDate ? (
+                  <Chip label={`Expires: ${doc.expirationDate}`} size="small" variant="outlined" />
+                ) : !isReader ? (
+                  <Chip label="Expires: --" size="small" variant="outlined" sx={{ opacity: 0.5 }} />
+                ) : null}
+              </Box>
+            )}
           </Box>
         )}
 
@@ -388,31 +554,73 @@ export function DocumentDetail() {
         {doc.source_metadata && (() => {
           try {
             const meta = JSON.parse(doc.source_metadata);
+            const tables = meta._tables;
+            const regularKeys = Object.keys(meta).filter((k) => k !== '_tables');
+
             return (
               <Box>
-                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                  Ingestion Source
-                </Typography>
-                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                  {meta.source && (
-                    <Chip label={`Source: ${meta.source}`} size="small" variant="outlined" />
+                <Button
+                  size="small"
+                  onClick={() => setSourceMetaOpen(!sourceMetaOpen)}
+                  endIcon={sourceMetaOpen ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                  sx={{ mb: 0.5, textTransform: 'none', color: 'text.secondary', px: 0, minWidth: 0 }}
+                >
+                  <Typography variant="subtitle2" color="text.secondary">
+                    Source Metadata
+                  </Typography>
+                </Button>
+                <Collapse in={sourceMetaOpen}>
+                  {regularKeys.length > 0 && (
+                    <Box sx={{ mb: 1 }}>
+                      {regularKeys.map((key) => {
+                        const value = meta[key];
+                        const displayValue =
+                          typeof value === 'object' ? JSON.stringify(value) :
+                          key.includes('date') || key.includes('_at') ? formatDate(String(value)) :
+                          String(value);
+                        return (
+                          <Box key={key} sx={{ display: 'flex', gap: 1, py: 0.25 }}>
+                            <Typography variant="body2" color="text.secondary" sx={{ minWidth: 120, fontWeight: 500 }}>
+                              {key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}:
+                            </Typography>
+                            <Typography variant="body2">{displayValue}</Typography>
+                          </Box>
+                        );
+                      })}
+                    </Box>
                   )}
-                  {meta.from && (
-                    <Chip label={`From: ${meta.from}`} size="small" variant="outlined" />
-                  )}
-                  {meta.received_at && (
-                    <Chip
-                      label={`Received: ${formatDate(meta.received_at)}`}
-                      size="small"
-                      variant="outlined"
-                    />
-                  )}
-                  {meta.subject && (
-                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, width: '100%' }}>
-                      Subject: {meta.subject}
-                    </Typography>
-                  )}
-                </Box>
+                  {tables && Array.isArray(tables) && tables.map((table: { title?: string; headers?: string[]; rows?: string[][] }, idx: number) => (
+                    <Box key={idx} sx={{ mb: 2 }}>
+                      {table.title && (
+                        <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                          {table.title}
+                        </Typography>
+                      )}
+                      <TableContainer>
+                        <Table size="small" sx={{ '& td, & th': { py: 0.5, px: 1 } }}>
+                          {table.headers && (
+                            <TableHead>
+                              <TableRow>
+                                {table.headers.map((h: string, i: number) => (
+                                  <TableCell key={i} sx={{ fontWeight: 600 }}>{h}</TableCell>
+                                ))}
+                              </TableRow>
+                            </TableHead>
+                          )}
+                          <TableBody>
+                            {(table.rows || []).map((row: string[], ri: number) => (
+                              <TableRow key={ri}>
+                                {row.map((cell: string, ci: number) => (
+                                  <TableCell key={ci}>{cell}</TableCell>
+                                ))}
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </TableContainer>
+                    </Box>
+                  ))}
+                </Collapse>
               </Box>
             );
           } catch {
@@ -500,6 +708,58 @@ export function DocumentDetail() {
             onChange={(e) => setEditTags(e.target.value)}
             disabled={saving}
             helperText="Comma-separated"
+            sx={{ mb: 2 }}
+          />
+          {documentTypes.length > 0 && (
+            <FormControl fullWidth sx={{ mb: 2 }}>
+              <InputLabel>Document Type</InputLabel>
+              <Select
+                value={editDocumentTypeId}
+                onChange={(e) => setEditDocumentTypeId(e.target.value as string)}
+                label="Document Type"
+                disabled={saving}
+              >
+                <MenuItem value="">
+                  <em>None</em>
+                </MenuItem>
+                {documentTypes.map((dt) => (
+                  <MenuItem key={dt.id} value={dt.id}>
+                    {dt.name}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          )}
+          <TextField
+            label="Lot Number"
+            fullWidth
+            value={editLotNumber}
+            onChange={(e) => setEditLotNumber(e.target.value)}
+            disabled={saving}
+            sx={{ mb: 2 }}
+          />
+          <TextField
+            label="PO Number"
+            fullWidth
+            value={editPoNumber}
+            onChange={(e) => setEditPoNumber(e.target.value)}
+            disabled={saving}
+            sx={{ mb: 2 }}
+          />
+          <TextField
+            label="Code Date"
+            fullWidth
+            value={editCodeDate}
+            onChange={(e) => setEditCodeDate(e.target.value)}
+            disabled={saving}
+            sx={{ mb: 2 }}
+          />
+          <TextField
+            label="Expiration Date"
+            fullWidth
+            value={editExpirationDate}
+            onChange={(e) => setEditExpirationDate(e.target.value)}
+            disabled={saving}
           />
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>

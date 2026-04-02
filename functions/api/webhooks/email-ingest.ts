@@ -6,7 +6,6 @@ import { computeConfidenceScore } from '../../lib/confidence';
 import { applyNamingTemplate } from '../../lib/naming';
 import { sendEmail, buildEmailIngestSummaryEmail } from '../../lib/email';
 import type { Env } from '../../lib/types';
-import type { ExtractionField } from '../../../shared/types';
 
 const ALLOWED_TYPES = [
   'application/pdf',
@@ -119,8 +118,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return jsonResponse({ error: 'Default user not found or inactive' }, 200);
     }
 
-    // 5. Load document type config (extraction fields, naming, threshold)
-    let extractionFields: ExtractionField[] = [];
+    // 5. Load document type config (naming, threshold)
     const documentTypeId = mapping.default_document_type_id || null;
     let docTypeName: string | null = null;
     let namingFormat: string | null = null;
@@ -128,14 +126,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (documentTypeId) {
       const docType = await context.env.DB.prepare(
-        'SELECT id, name, naming_format, extraction_fields, auto_ingest_threshold FROM document_types WHERE id = ? AND active = 1'
+        'SELECT id, name, naming_format, auto_ingest_threshold FROM document_types WHERE id = ? AND active = 1'
       )
         .bind(documentTypeId)
         .first<{
           id: string;
           name: string;
           naming_format: string | null;
-          extraction_fields: string | null;
           auto_ingest_threshold: number | null;
         }>();
 
@@ -143,18 +140,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         docTypeName = docType.name;
         namingFormat = docType.naming_format;
         autoIngestThreshold = docType.auto_ingest_threshold ?? 0.8;
-
-        if (docType.extraction_fields) {
-          try {
-            const parsed =
-              typeof docType.extraction_fields === 'string'
-                ? JSON.parse(docType.extraction_fields)
-                : docType.extraction_fields;
-            if (Array.isArray(parsed)) extractionFields = parsed;
-          } catch {
-            // Invalid JSON — treat as no extraction fields
-          }
-        }
       }
     }
 
@@ -220,20 +205,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         let confidence: 'high' | 'medium' | 'low' = 'low';
         let confidenceScore = 0.3;
 
-        if (extractionFields.length > 0 && text) {
+        if (text) {
           const extraction = await extractFields(
             text,
-            extractionFields,
             context.env,
             fewShotExamples
           );
           fields = extraction.fields;
-          productNames = extraction.product_names;
+          productNames = extraction.products;
           confidence = extraction.confidence;
           confidenceScore = computeConfidenceScore(
             extraction.confidence,
             extraction.fields,
-            extractionFields
           );
         }
 

@@ -24,6 +24,13 @@ import {
   Snackbar,
   useMediaQuery,
   useTheme,
+  Divider,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
 } from '@mui/material';
 import {
   CloudUpload as UploadIcon,
@@ -38,17 +45,66 @@ import {
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
 import { api } from '../lib/api';
-import type { ApiDocumentType, ProcessingResult, ProcessingResponse } from '../lib/types';
+import type { ApiDocumentType, ProcessingResult, ProcessingResponse, ExtractedTable } from '../lib/types';
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 
 type Stage = 'upload' | 'processing' | 'review';
 
+// === Field assignment helpers ===
+
+/** DB field roles a user can assign to an extracted field */
+const ASSIGNABLE_ROLES = [
+  { value: '', label: 'None' },
+  { value: 'lot_number', label: 'Lot Number' },
+  { value: 'po_number', label: 'PO Number' },
+  { value: 'code_date', label: 'Code Date' },
+  { value: 'expiration_date', label: 'Expiration Date' },
+  { value: 'product_name', label: 'Product Name' },
+  { value: 'metadata', label: 'Save to Metadata' },
+] as const;
+
+/** Maps common AI-extracted field keys to their DB column role */
+const STANDARD_FIELD_MAPPINGS: Record<string, string> = {
+  lot_number: 'lot_number',
+  lot: 'lot_number',
+  batch_number: 'lot_number',
+  batch_id: 'lot_number',
+  po_number: 'po_number',
+  purchase_order: 'po_number',
+  purchase_order_number: 'po_number',
+  expiration_date: 'expiration_date',
+  exp_date: 'expiration_date',
+  expires: 'expiration_date',
+  code_date: 'code_date',
+  production_date: 'code_date',
+  product_name: 'product_name',
+  product: 'product_name',
+  product_description: 'product_name',
+};
+
+function autoAssignRole(fieldKey: string): string {
+  const normalized = fieldKey.toLowerCase().trim();
+  return STANDARD_FIELD_MAPPINGS[normalized] || '';
+}
+
+function humanizeFieldKey(key: string): string {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function roleLabelFor(roleValue: string): string {
+  const found = ASSIGNABLE_ROLES.find(r => r.value === roleValue);
+  return found?.label || roleValue;
+}
+
+// === Interfaces ===
+
 interface EditableResult {
   file: File;
   result: ProcessingResult;
   editedFields: Record<string, string>;
+  fieldAssignments: Record<string, string>;
   productName: string;
   importing: boolean;
   imported: boolean;
@@ -59,6 +115,8 @@ interface EditableResult {
   correctionsSaved: boolean;
   ratingSubmitted?: 'up' | 'down';
 }
+
+// === Utility ===
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -115,6 +173,117 @@ function LocalFilePreview({ file }: { file: File }) {
     </Paper>
   );
 }
+
+/** Collapsible extracted table display */
+function ExtractedTableView({ table }: { table: ExtractedTable }) {
+  const [expanded, setExpanded] = useState(false);
+  const COLLAPSED_ROW_LIMIT = 5;
+  const needsCollapse = table.rows.length > COLLAPSED_ROW_LIMIT;
+  const visibleRows = expanded ? table.rows : table.rows.slice(0, COLLAPSED_ROW_LIMIT);
+
+  return (
+    <Box sx={{ mb: 2 }}>
+      <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+        {table.name || 'Table'}
+      </Typography>
+      <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 400, overflow: 'auto' }}>
+        <Table size="small" stickyHeader>
+          <TableHead>
+            <TableRow>
+              {table.headers.map((h, i) => (
+                <TableCell key={i} sx={{ fontWeight: 600, bgcolor: 'grey.100', whiteSpace: 'nowrap' }}>
+                  {h}
+                </TableCell>
+              ))}
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {visibleRows.map((row, ri) => (
+              <TableRow key={ri} hover>
+                {row.map((cell, ci) => (
+                  <TableCell key={ci} sx={{ whiteSpace: 'nowrap' }}>
+                    {cell}
+                  </TableCell>
+                ))}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableContainer>
+      {needsCollapse && (
+        <Button size="small" onClick={() => setExpanded(!expanded)} sx={{ mt: 0.5 }}>
+          {expanded ? 'Show less' : `Show all ${table.rows.length} rows`}
+        </Button>
+      )}
+    </Box>
+  );
+}
+
+/** Single field row with value editor and role assignment */
+function FieldRow({
+  fieldKey,
+  value,
+  assignment,
+  disabled,
+  onValueChange,
+  onAssignmentChange,
+}: {
+  fieldKey: string;
+  value: string;
+  assignment: string;
+  disabled: boolean;
+  onValueChange: (v: string) => void;
+  onAssignmentChange: (role: string) => void;
+}) {
+  const isAutoAssigned = !!autoAssignRole(fieldKey);
+
+  return (
+    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+      <TextField
+        label={humanizeFieldKey(fieldKey)}
+        value={value}
+        onChange={(e) => onValueChange(e.target.value)}
+        size="small"
+        fullWidth
+        disabled={disabled}
+        sx={{ flex: 1 }}
+      />
+      <Box sx={{ minWidth: 160 }}>
+        {assignment ? (
+          <Chip
+            label={`\u2192 ${roleLabelFor(assignment)}`}
+            size="small"
+            color={isAutoAssigned ? 'success' : 'primary'}
+            variant={isAutoAssigned ? 'filled' : 'outlined'}
+            onDelete={() => onAssignmentChange('')}
+            sx={{ height: 28 }}
+          />
+        ) : (
+          <FormControl size="small" fullWidth>
+            <Select
+              value=""
+              displayEmpty
+              onChange={(e) => onAssignmentChange(e.target.value)}
+              disabled={disabled}
+              sx={{ fontSize: '0.8125rem', height: 32 }}
+            >
+              <MenuItem value="" disabled>
+                <Typography variant="body2" color="text.secondary">Assign...</Typography>
+              </MenuItem>
+              {ASSIGNABLE_ROLES.filter(r => r.value).map(r => (
+                <MenuItem key={r.value} value={r.value}>
+                  {r.label}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
+// === Main Component ===
 
 export function Import() {
   const theme = useTheme();
@@ -248,20 +417,29 @@ export function Import() {
 
       const autoIngestThreshold = docTypeInfo.auto_ingest_threshold ?? 0.8;
 
-      // Build editable results
-      const editable: EditableResult[] = allResults.map((result, i) => ({
-        file: files[result.file_index] || files[i],
-        result,
-        editedFields: Object.fromEntries(
-          Object.entries(result.fields).map(([k, v]) => [k, v || ''])
-        ),
-        productName: result.product_names[0] || '',
-        importing: false,
-        imported: false,
-        confidenceScore: result.confidence_score,
-        autoIngesting: false,
-        correctionsSaved: false,
-      }));
+      // Build editable results with field assignments
+      const editable: EditableResult[] = allResults.map((result, i) => {
+        const editedFields: Record<string, string> = {};
+        const fieldAssignments: Record<string, string> = {};
+
+        for (const [k, v] of Object.entries(result.fields)) {
+          editedFields[k] = v || '';
+          fieldAssignments[k] = autoAssignRole(k);
+        }
+
+        return {
+          file: files[result.file_index] || files[i],
+          result,
+          editedFields,
+          fieldAssignments,
+          productName: result.product_names[0] || '',
+          importing: false,
+          imported: false,
+          confidenceScore: result.confidence_score,
+          autoIngesting: false,
+          correctionsSaved: false,
+        };
+      });
 
       setEditableResults(editable);
       setProcessingStatus(null);
@@ -285,7 +463,7 @@ export function Import() {
     }
   };
 
-  // Stage 3: Import a single file
+  // Stage 3: Import a single file — uses field assignments to build the ingest payload
   const handleImport = async (index: number) => {
     const item = editableResults[index];
     if (!item || item.imported || item.result.status === 'error') return;
@@ -318,17 +496,19 @@ export function Import() {
         }
       }
 
-      // 1. Resolve product if name provided
+      // 1. Resolve product — check assignment first, then fallback to productName
       let productId: string | undefined;
-      if (item.productName.trim()) {
+      const productField = Object.entries(item.fieldAssignments).find(([, role]) => role === 'product_name');
+      const productNameValue = productField ? item.editedFields[productField[0]] : item.productName;
+      if (productNameValue?.trim()) {
         const prodResult = await api.products.lookupOrCreate({
-          name: item.productName.trim(),
+          name: productNameValue.trim(),
           tenant_id: effectiveTenantId,
         });
         productId = prodResult.product.id;
       }
 
-      // 2. Build FormData for ingest
+      // 2. Build FormData for ingest using field assignments
       const form = new FormData();
       form.append('file', item.file);
       form.append('tenant_id', effectiveTenantId);
@@ -336,14 +516,35 @@ export function Import() {
       form.append('title', item.file.name.replace(/\.[^/.]+$/, ''));
       form.append('document_type_id', documentTypeId);
 
-      // Map well-known fields
-      if (item.editedFields.lot_number) form.append('lot_number', item.editedFields.lot_number);
-      if (item.editedFields.po_number) form.append('po_number', item.editedFields.po_number);
-      if (item.editedFields.expiration_date) form.append('expiration_date', item.editedFields.expiration_date);
-      if (item.editedFields.code_date) form.append('code_date', item.editedFields.code_date);
+      // Map assigned fields to their DB columns
+      const dbFieldMap: Record<string, string> = {};
+      for (const [key, role] of Object.entries(item.fieldAssignments)) {
+        if (role && role !== 'metadata' && role !== 'product_name') {
+          dbFieldMap[role] = item.editedFields[key];
+        }
+      }
+      if (dbFieldMap.lot_number) form.append('lot_number', dbFieldMap.lot_number);
+      if (dbFieldMap.po_number) form.append('po_number', dbFieldMap.po_number);
+      if (dbFieldMap.expiration_date) form.append('expiration_date', dbFieldMap.expiration_date);
+      if (dbFieldMap.code_date) form.append('code_date', dbFieldMap.code_date);
 
       if (productId) {
         form.append('product_ids', JSON.stringify([{ product_id: productId }]));
+      }
+
+      // Build source_metadata from unassigned / metadata-assigned fields
+      const metadata: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(item.editedFields)) {
+        const role = item.fieldAssignments[key];
+        if (!role || role === 'metadata') {
+          metadata[key] = value;
+        }
+      }
+      if (item.result.tables?.length) {
+        metadata._tables = item.result.tables;
+      }
+      if (Object.keys(metadata).length > 0) {
+        form.append('source_metadata', JSON.stringify(metadata));
       }
 
       // 3. Call ingest via direct fetch (multipart form)
@@ -403,6 +604,26 @@ export function Import() {
     setEditableResults(prev => prev.map((r, i) =>
       i === index ? { ...r, editedFields: { ...r.editedFields, [fieldName]: value } } : r
     ));
+  };
+
+  // Update field assignment
+  const updateFieldAssignment = (index: number, fieldName: string, role: string) => {
+    setEditableResults(prev => prev.map((r, i) => {
+      if (i !== index) return r;
+      const newAssignments = { ...r.fieldAssignments };
+
+      // If assigning a unique role (not metadata), clear it from any other field first
+      if (role && role !== 'metadata') {
+        for (const k of Object.keys(newAssignments)) {
+          if (newAssignments[k] === role) {
+            newAssignments[k] = '';
+          }
+        }
+      }
+
+      newAssignments[fieldName] = role;
+      return { ...r, fieldAssignments: newAssignments };
+    }));
   };
 
   // Update product name
@@ -665,7 +886,7 @@ export function Import() {
             <Card key={index} variant="outlined" sx={{ mb: 2 }}>
               <CardContent>
                 {/* Header row */}
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2, flexWrap: 'wrap' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
                   <FileIcon color="primary" fontSize="small" />
                   <Typography variant="subtitle1" fontWeight={600} sx={{ flex: 1 }}>
                     {item.file.name}
@@ -696,6 +917,13 @@ export function Import() {
                     <Chip label="Imported" size="small" color="success" icon={<CheckIcon />} />
                   )}
                 </Box>
+
+                {/* Summary text */}
+                {item.result.summary && (
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2, ml: 3.5 }}>
+                    {item.result.summary}
+                  </Typography>
+                )}
 
                 {/* Error state */}
                 {item.result.status === 'error' && (
@@ -740,7 +968,7 @@ export function Import() {
                       <LocalFilePreview file={item.file} />
                     </Box>
 
-                    {/* Editable fields */}
+                    {/* Right panel: fields, tables, products */}
                     <Box sx={{ flex: 1, minWidth: 0 }}>
                       {/* Extracted text preview */}
                       {item.result.extracted_text_preview && (
@@ -770,60 +998,105 @@ export function Import() {
                         </Accordion>
                       )}
 
-                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                      {/* Section 1: Extracted Fields */}
+                      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                        Extracted Fields
+                      </Typography>
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mb: 2 }}>
                         {Object.entries(item.editedFields).map(([fieldName, fieldValue]) => (
-                          <TextField
+                          <FieldRow
                             key={fieldName}
-                            label={fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                            fieldKey={fieldName}
                             value={fieldValue}
-                            onChange={(e) => updateField(index, fieldName, e.target.value)}
-                            size="small"
-                            fullWidth
+                            assignment={item.fieldAssignments[fieldName] || ''}
                             disabled={item.importing}
+                            onValueChange={(v) => updateField(index, fieldName, v)}
+                            onAssignmentChange={(role) => updateFieldAssignment(index, fieldName, role)}
                           />
                         ))}
+                      </Box>
 
-                        {/* Product name */}
-                        <TextField
-                          label="Product Name"
-                          value={item.productName}
-                          onChange={(e) => updateProductName(index, e.target.value)}
-                          size="small"
-                          fullWidth
-                          disabled={item.importing}
-                          helperText="Will be looked up or created automatically"
-                        />
+                      {/* Section 2: Tables */}
+                      {item.result.tables && item.result.tables.length > 0 && (
+                        <>
+                          <Divider sx={{ my: 2 }} />
+                          <Accordion variant="outlined" defaultExpanded={item.result.tables.length === 1}>
+                            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                              <Typography variant="subtitle2">
+                                Tables ({item.result.tables.length})
+                              </Typography>
+                            </AccordionSummary>
+                            <AccordionDetails>
+                              {item.result.tables.map((table, ti) => (
+                                <ExtractedTableView key={ti} table={table} />
+                              ))}
+                              <Typography variant="caption" color="text.secondary">
+                                Tables are saved to document metadata on import.
+                              </Typography>
+                            </AccordionDetails>
+                          </Accordion>
+                        </>
+                      )}
 
-                        {/* Rate Extraction */}
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                          <Typography variant="body2" color="text.secondary">
-                            Rate Extraction:
-                          </Typography>
-                          <IconButton
-                            size="small"
-                            color={item.ratingSubmitted === 'up' ? 'success' : 'default'}
-                            onClick={() => handleRate(index, 1.0)}
-                            disabled={!!item.ratingSubmitted}
-                          >
-                            <ThumbUpIcon fontSize="small" />
-                          </IconButton>
-                          <IconButton
-                            size="small"
-                            color={item.ratingSubmitted === 'down' ? 'error' : 'default'}
-                            onClick={() => handleRate(index, 0.0)}
-                            disabled={!!item.ratingSubmitted}
-                          >
-                            <ThumbDownIcon fontSize="small" />
-                          </IconButton>
-                          {item.ratingSubmitted && (
-                            <Typography variant="caption" color="text.secondary">
-                              Rating saved
-                            </Typography>
-                          )}
-                          {item.correctionsSaved && (
-                            <Chip label="Corrections saved" size="small" color="info" variant="outlined" sx={{ ml: 1 }} />
-                          )}
+                      {/* Section 3: Products */}
+                      <Divider sx={{ my: 2 }} />
+                      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                        Products
+                      </Typography>
+                      {item.result.product_names.length > 0 && (
+                        <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mb: 1 }}>
+                          {item.result.product_names.map((pn, pi) => (
+                            <Chip
+                              key={pi}
+                              label={pn}
+                              size="small"
+                              variant="outlined"
+                              onClick={() => updateProductName(index, pn)}
+                              color={item.productName === pn ? 'primary' : 'default'}
+                            />
+                          ))}
                         </Box>
+                      )}
+                      <TextField
+                        label="Product Name"
+                        value={item.productName}
+                        onChange={(e) => updateProductName(index, e.target.value)}
+                        size="small"
+                        fullWidth
+                        disabled={item.importing}
+                        helperText="Will be looked up or created automatically"
+                      />
+
+                      {/* Rate Extraction */}
+                      <Divider sx={{ my: 2 }} />
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Typography variant="body2" color="text.secondary">
+                          Rate Extraction:
+                        </Typography>
+                        <IconButton
+                          size="small"
+                          color={item.ratingSubmitted === 'up' ? 'success' : 'default'}
+                          onClick={() => handleRate(index, 1.0)}
+                          disabled={!!item.ratingSubmitted}
+                        >
+                          <ThumbUpIcon fontSize="small" />
+                        </IconButton>
+                        <IconButton
+                          size="small"
+                          color={item.ratingSubmitted === 'down' ? 'error' : 'default'}
+                          onClick={() => handleRate(index, 0.0)}
+                          disabled={!!item.ratingSubmitted}
+                        >
+                          <ThumbDownIcon fontSize="small" />
+                        </IconButton>
+                        {item.ratingSubmitted && (
+                          <Typography variant="caption" color="text.secondary">
+                            Rating saved
+                          </Typography>
+                        )}
+                        {item.correctionsSaved && (
+                          <Chip label="Corrections saved" size="small" color="info" variant="outlined" sx={{ ml: 1 }} />
+                        )}
                       </Box>
                     </Box>
                   </Box>

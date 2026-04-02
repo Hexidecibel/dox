@@ -1,20 +1,19 @@
-import type { ExtractionField } from '../../shared/types';
+const STANDARD_FIELDS = ['lot_number', 'po_number', 'code_date', 'expiration_date'];
 
 export function computeConfidenceScore(
   aiConfidence: 'high' | 'medium' | 'low',
   extractedFields: Record<string, string | null>,
-  expectedFields: ExtractionField[]
 ): number {
   // Base score from AI self-assessment
   let score = aiConfidence === 'high' ? 0.9 : aiConfidence === 'medium' ? 0.6 : 0.3;
 
-  // Penalize missing expected fields
-  const expectedCount = expectedFields.length;
-  const extractedCount = Object.values(extractedFields).filter(v => v !== null && v !== '').length;
-  if (expectedCount > 0) {
-    const missingPenalty = Math.max(0, expectedCount - extractedCount) * 0.05;
-    score -= missingPenalty;
-  }
+  // Bonus for finding standard fields
+  const foundStandard = STANDARD_FIELDS.filter(f => extractedFields[f] != null).length;
+  score += foundStandard * 0.02;
+
+  // Small bonus for finding more data overall (capped)
+  const totalFields = Object.values(extractedFields).filter(v => v != null).length;
+  score += Math.min(totalFields * 0.005, 0.05);
 
   // Validate date field plausibility
   const dateFieldNames = ['expiration_date', 'code_date', 'date', 'production_date'];

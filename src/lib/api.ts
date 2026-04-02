@@ -242,7 +242,7 @@ export const api = {
      * Returns: { document: ApiDocument }
      * The updated document has tags as JSON string.
      */
-    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string }>): Promise<Document> => {
+    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; lot_number: string | null; po_number: string | null; code_date: string | null; expiration_date: string | null; document_type_id: string | null }>): Promise<Document> => {
       const response = await fetchApi<DocumentUpdateResponse>(`/documents/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),

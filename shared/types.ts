@@ -491,6 +491,12 @@ export interface BundleGetResponse {
 }
 
 // === Document Processing ===
+export interface ExtractedTable {
+  name: string;
+  headers: string[];
+  rows: string[][];
+}
+
 export interface ProcessingResult {
   file_name: string;
   file_index: number;
@@ -498,6 +504,8 @@ export interface ProcessingResult {
   error_message?: string;
   extracted_text_preview?: string;
   fields: Record<string, string | null>;
+  tables?: ExtractedTable[];
+  summary?: string;
   product_names: string[];
   confidence: 'high' | 'medium' | 'low';
   confidence_score: number;
