@@ -51,6 +51,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const formData = await context.request.formData();
     const documentTypeId = formData.get('document_type_id') as string | null;
     const tenantId = (formData.get('tenant_id') as string) || user.tenant_id;
+    const source = (formData.get('source') as string) || 'import';
+    const sourceDetail = formData.get('source_detail') as string | null;
 
     if (!tenantId) {
       throw new BadRequestError('tenant_id is required');
@@ -195,10 +197,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
       // Create queue entry
       await context.env.DB.prepare(
-        `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, status, processing_status, checksum, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?)`
+        `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, status, processing_status, checksum, created_by, source, source_detail)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?)`
       )
-        .bind(queueId, tenantId, documentTypeId || null, r2Key, fileName, file.size, mimeType, checksum, user.id)
+        .bind(queueId, tenantId, documentTypeId || null, r2Key, fileName, file.size, mimeType, checksum, user.id, source, sourceDetail)
         .run();
 
       queuedItems.push({

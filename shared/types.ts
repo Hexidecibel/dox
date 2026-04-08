@@ -597,6 +597,8 @@ export interface ProcessingQueueItem {
   created_at: string;
   template_id: string | null;
   auto_ingested: number;
+  source: string | null;
+  source_detail: string | null;
   // Joined fields from list/get queries
   document_type_name?: string;
   document_type_slug?: string;

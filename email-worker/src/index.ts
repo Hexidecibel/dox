@@ -123,6 +123,13 @@ export default {
         const blob = new Blob([att.content], { type: mimeType });
         form.append('files', blob, fileName);
         form.append('tenant_id', tenant.id);
+        form.append('source', 'email');
+        form.append('source_detail', JSON.stringify({
+          sender: senderEmail,
+          sender_name: senderName,
+          subject: subject,
+          received_at: new Date().toISOString(),
+        }));
 
         const res = await fetch(`${env.DOX_API_BASE}/api/documents/process`, {
           method: 'POST',

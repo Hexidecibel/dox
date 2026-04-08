@@ -122,7 +122,22 @@ function QueueRow({ item }: { item: ProcessingQueueItem }) {
           </Tooltip>
         </TableCell>
         <TableCell>
-          <Chip label="Import" size="small" variant="outlined" />
+          <Chip
+            label={item.source === 'email' ? 'Email' : item.source === 'api' ? 'API' : 'Import'}
+            size="small"
+            color={item.source === 'email' ? 'info' : 'default'}
+            variant="outlined"
+          />
+          {item.source_detail && (() => {
+            try {
+              const detail = typeof item.source_detail === 'string' ? JSON.parse(item.source_detail) : item.source_detail;
+              return detail.sender ? (
+                <Typography variant="caption" color="text.secondary" display="block">
+                  {detail.sender}
+                </Typography>
+              ) : null;
+            } catch { return null; }
+          })()}
         </TableCell>
         <TableCell>
           {processingChip(item.processing_status)}
