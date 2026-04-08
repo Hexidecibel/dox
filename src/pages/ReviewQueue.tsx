@@ -81,6 +81,7 @@ export default function ReviewQueue() {
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
   const [dismissedFields, setDismissedFields] = useState<Record<string, Set<string>>>({});
   const [excludedTables, setExcludedTables] = useState<Record<string, Set<number>>>({});
+  const [excludedColumns, setExcludedColumns] = useState<Record<string, Record<number, Set<number>>>>({});
   const [editedTables, setEditedTables] = useState<Record<string, ExtractedTable[]>>({});
   const blobUrlsRef = useRef<Record<string, string>>({});
 
@@ -365,6 +366,20 @@ export default function ReviewQueue() {
     try {
       return typeof item.tables === 'string' ? JSON.parse(item.tables) : item.tables;
     } catch { return []; }
+  };
+
+  const toggleColumn = (itemId: string, tableIdx: number, colIdx: number) => {
+    setExcludedColumns(prev => {
+      const itemCols = { ...(prev[itemId] || {}) };
+      const tableCols = new Set(itemCols[tableIdx] || []);
+      if (tableCols.has(colIdx)) {
+        tableCols.delete(colIdx);
+      } else {
+        tableCols.add(colIdx);
+      }
+      itemCols[tableIdx] = tableCols;
+      return { ...prev, [itemId]: itemCols };
+    });
   };
 
   const toggleTable = (itemId: string, tableIndex: number) => {
@@ -780,25 +795,43 @@ export default function ReviewQueue() {
                                       <Table size="small">
                                         <TableHead>
                                           <TableRow>
-                                            {table.headers.map((h, i) => (
-                                              <TableCell key={i} sx={{ fontWeight: 600 }}>
-                                                {h.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
-                                              </TableCell>
-                                            ))}
+                                            {table.headers.map((h, colIdx) => {
+                                              const excluded = excludedColumns[item.id]?.[tableIndex]?.has(colIdx);
+                                              return (
+                                                <TableCell key={colIdx} sx={{
+                                                  fontWeight: 600,
+                                                  opacity: excluded ? 0.4 : 1,
+                                                  textDecoration: excluded ? 'line-through' : 'none',
+                                                }}>
+                                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                                    <Checkbox
+                                                      size="small"
+                                                      checked={!excluded}
+                                                      onChange={() => toggleColumn(item.id, tableIndex, colIdx)}
+                                                      disabled={item.status !== 'pending'}
+                                                      sx={{ p: 0 }}
+                                                    />
+                                                    {h.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                                  </Box>
+                                                </TableCell>
+                                              );
+                                            })}
                                           </TableRow>
                                         </TableHead>
                                         <TableBody>
                                           {table.rows.map((row, rowIdx) => (
                                             <TableRow key={rowIdx}>
                                               {row.map((_cell, cellIdx) => (
-                                                <TableCell key={cellIdx}>
+                                                <TableCell key={cellIdx} sx={{
+                                                  opacity: excludedColumns[item.id]?.[tableIndex]?.has(cellIdx) ? 0.3 : 1,
+                                                }}>
                                                   <TextField
                                                     value={getTableCell(item.id, tableIndex, rowIdx, cellIdx)}
                                                     onChange={(e) => updateTableCell(item.id, tableIndex, rowIdx, cellIdx, e.target.value)}
                                                     size="small"
                                                     variant="standard"
                                                     fullWidth
-                                                    disabled={item.status !== 'pending' || excludedTables[item.id]?.has(tableIndex)}
+                                                    disabled={item.status !== 'pending' || excludedTables[item.id]?.has(tableIndex) || excludedColumns[item.id]?.[tableIndex]?.has(cellIdx)}
                                                     InputProps={{ disableUnderline: item.status !== 'pending' }}
                                                   />
                                                 </TableCell>
