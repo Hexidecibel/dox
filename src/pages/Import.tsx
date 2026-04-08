@@ -349,6 +349,10 @@ export function Import() {
   // Suppliers list (for template dialog autocomplete)
   const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([]);
 
+  // Product autocomplete
+  const [productOptions, setProductOptions] = useState<string[]>([]);
+  const [productSearchTimeout, setProductSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
+
   // Resolve effective tenant ID
   const effectiveTenantId = isSuperAdmin ? tenantId : (user?.tenant_id || '');
 
@@ -362,6 +366,25 @@ export function Import() {
     };
     if (effectiveTenantId) loadSuppliers();
   }, [effectiveTenantId]);
+
+  // Debounced product search for autocomplete
+  const searchProducts = useCallback((query: string) => {
+    if (productSearchTimeout) clearTimeout(productSearchTimeout);
+    if (!query || query.length < 2) {
+      setProductOptions([]);
+      return;
+    }
+    const timeout = setTimeout(async () => {
+      try {
+        const result = await api.products.list({ search: query, tenant_id: effectiveTenantId, active: 1, limit: 10 });
+        const names = (result.products || []).map((p: any) => p.name);
+        setProductOptions(names);
+      } catch {
+        setProductOptions([]);
+      }
+    }, 300);
+    setProductSearchTimeout(timeout);
+  }, [effectiveTenantId, productSearchTimeout]);
 
   // Load document types
   useEffect(() => {
@@ -1517,14 +1540,27 @@ export function Import() {
                             ))}
                           </Box>
                         )}
-                        <TextField
-                          label="Product Name"
+                        <Autocomplete
+                          freeSolo
+                          options={productOptions}
                           value={item.productName}
-                          onChange={(e) => updateProductName(index, e.target.value)}
-                          size="small"
-                          fullWidth
+                          onInputChange={(_, value) => {
+                            updateProductName(index, value);
+                            searchProducts(value);
+                          }}
+                          onChange={(_, value) => {
+                            updateProductName(index, value || '');
+                          }}
                           disabled={item.importing}
-                          helperText="Will be looked up or created automatically"
+                          renderInput={(params) => (
+                            <TextField
+                              {...params}
+                              label="Product Name"
+                              size="small"
+                              fullWidth
+                              helperText="Type to search existing products, or enter a new name"
+                            />
+                          )}
                         />
 
                         {/* Rate Extraction */}

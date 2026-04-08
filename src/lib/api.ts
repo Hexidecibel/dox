@@ -216,7 +216,7 @@ export const api = {
       if (params?.status) query.set('status', params.status);
       if (params?.page) query.set('offset', String((params.page - 1) * (params.limit || 50)));
       if (params?.limit) query.set('limit', String(params.limit));
-      if (params?.tenantId) query.set('tenantId', params.tenantId);
+      if (params?.tenantId) query.set('tenant_id', params.tenantId);
       const qs = query.toString();
       const data = await fetchApi<DocumentListResponse>(`/documents${qs ? `?${qs}` : ''}`);
       return {

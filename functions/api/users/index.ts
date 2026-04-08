@@ -7,7 +7,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     requireRole(currentUser, 'super_admin', 'org_admin');
 
     const url = new URL(context.request.url);
-    const tenantIdFilter = url.searchParams.get('tenantId');
+    const tenantIdFilter = url.searchParams.get('tenant_id');
 
     let query: string;
     const bindings: string[] = [];

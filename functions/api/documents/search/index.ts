@@ -10,7 +10,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const url = new URL(context.request.url);
 
     const q = url.searchParams.get('q') || '';
-    let tenantId = url.searchParams.get('tenantId');
+    let tenantId = url.searchParams.get('tenant_id');
     const category = url.searchParams.get('category');
     const documentTypeId = url.searchParams.get('document_type_id');
     const supplierId = url.searchParams.get('supplier_id');

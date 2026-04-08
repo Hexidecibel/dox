@@ -46,6 +46,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (active !== null && active !== undefined && active !== '') {
       conditions.push('active = ?');
       params.push(parseInt(active, 10));
+    } else {
+      // Default to showing only active suppliers
+      conditions.push('active = 1');
     }
 
     if (search) {

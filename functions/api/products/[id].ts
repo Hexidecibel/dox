@@ -77,7 +77,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     const body = (await context.request.json()) as {
       name?: string;
       description?: string;
-      active?: number;
+      active?: number | boolean;
     };
 
     const updates: string[] = [];
@@ -101,6 +101,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     }
 
     if (body.active !== undefined) {
+      // Coerce boolean to integer
+      if (typeof body.active === 'boolean') {
+        body.active = body.active ? 1 : 0;
+      }
       if (body.active !== 0 && body.active !== 1) {
         return new Response(
           JSON.stringify({ error: 'active must be 0 or 1' }),

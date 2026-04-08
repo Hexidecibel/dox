@@ -32,7 +32,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     const url = new URL(context.request.url);
-    const tenantId = url.searchParams.get('tenantId');
+    const tenantId = url.searchParams.get('tenant_id');
     const action = url.searchParams.get('action');
     const userId = url.searchParams.get('userId');
     const resourceType = url.searchParams.get('resourceType');

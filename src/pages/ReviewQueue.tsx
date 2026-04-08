@@ -21,6 +21,7 @@ import {
   Paper,
   FormControlLabel,
   Switch,
+  Autocomplete,
 } from '@mui/material';
 import {
   ExpandMore as ExpandMoreIcon,
@@ -66,6 +67,27 @@ export default function ReviewQueue() {
   const blobUrlsRef = useRef<Record<string, string>>({});
 
   const [showAutoIngestedOnly, setShowAutoIngestedOnly] = useState(false);
+
+  // Product autocomplete
+  const [productOptions, setProductOptions] = useState<string[]>([]);
+  const productSearchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const searchProducts = useCallback((query: string) => {
+    if (productSearchRef.current) clearTimeout(productSearchRef.current);
+    if (!query || query.length < 2) {
+      setProductOptions([]);
+      return;
+    }
+    productSearchRef.current = setTimeout(async () => {
+      try {
+        const tenantId = isSuperAdmin ? (tenantFilter || selectedTenantId || '') : (selectedTenantId || '');
+        const result = await api.products.list({ search: query, tenant_id: tenantId, active: 1, limit: 10 });
+        setProductOptions((result.products || []).map((p: any) => p.name));
+      } catch {
+        setProductOptions([]);
+      }
+    }, 300);
+  }, [isSuperAdmin, tenantFilter, selectedTenantId]);
 
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
     open: false,
@@ -472,14 +494,27 @@ export default function ReviewQueue() {
                             />
                           ))}
 
-                          <TextField
-                            label="Product Name"
+                          <Autocomplete
+                            freeSolo
+                            options={productOptions}
                             value={productNames[item.id] || ''}
-                            onChange={(e) => updateProductName(item.id, e.target.value)}
-                            size="small"
-                            fullWidth
+                            onInputChange={(_, value) => {
+                              updateProductName(item.id, value);
+                              searchProducts(value);
+                            }}
+                            onChange={(_, value) => {
+                              updateProductName(item.id, value || '');
+                            }}
                             disabled={item.status !== 'pending' || isActioning}
-                            helperText="Will be looked up or created automatically"
+                            renderInput={(params) => (
+                              <TextField
+                                {...params}
+                                label="Product Name"
+                                size="small"
+                                fullWidth
+                                helperText="Type to search existing products, or enter a new name"
+                              />
+                            )}
                           />
                         </Box>
                       </Box>

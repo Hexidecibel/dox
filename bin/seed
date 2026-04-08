@@ -10,5 +10,33 @@ else
   echo "Seeding local D1..."
 fi
 
-npx wrangler d1 execute doc-upload-db $REMOTE --file="migrations/0002_seed_admin.sql"
+# Generate a proper PBKDF2 password hash for admin123 using Node.js crypto
+# Format matches functions/lib/auth.ts: hex(salt):hex(derivedKey)
+PASSWORD_HASH=$(node -e "
+const crypto = require('crypto');
+const salt = crypto.randomBytes(16);
+const derived = crypto.pbkdf2Sync('admin123', salt, 100000, 32, 'sha256');
+console.log(salt.toString('hex') + ':' + derived.toString('hex'));
+")
+
+# Create a temp SQL file with the proper hash
+TMPFILE=$(mktemp)
+trap "rm -f $TMPFILE" EXIT
+
+cat > "$TMPFILE" <<SQL
+-- Create default tenant
+INSERT OR IGNORE INTO tenants (id, name, slug, description)
+VALUES ('default', 'System', 'system', 'Default system tenant');
+
+-- Create default admin user (password: admin123 - CHANGE IN PRODUCTION)
+INSERT OR IGNORE INTO users (id, email, password_hash, name, role, tenant_id)
+VALUES ('admin', 'admin@docportal.local', '${PASSWORD_HASH}', 'System Admin', 'super_admin', NULL);
+
+-- Default site settings
+INSERT OR IGNORE INTO site_settings (key, value, group_name) VALUES ('site_name', 'Dox', 'general');
+INSERT OR IGNORE INTO site_settings (key, value, group_name) VALUES ('max_file_size_mb', '100', 'uploads');
+INSERT OR IGNORE INTO site_settings (key, value, group_name) VALUES ('allowed_file_types', '["pdf","doc","docx","xls","xlsx","csv","txt","png","jpg","jpeg"]', 'uploads');
+SQL
+
+npx wrangler d1 execute doc-upload-db $REMOTE --file="$TMPFILE"
 echo "Seed complete."

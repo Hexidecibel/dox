@@ -41,6 +41,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (activeFilter !== null) {
       conditions.push('active = ?');
       params.push(Number(activeFilter));
+    } else {
+      // Default to showing only active products
+      conditions.push('active = 1');
     }
 
     if (search) {

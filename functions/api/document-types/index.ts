@@ -49,6 +49,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (activeFilter !== null) {
       conditions.push('active = ?');
       params.push(Number(activeFilter));
+    } else {
+      // Default to showing only active document types
+      conditions.push('active = 1');
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
