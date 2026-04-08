@@ -79,6 +79,7 @@ export default function ReviewQueue() {
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
+  const [dismissedFields, setDismissedFields] = useState<Record<string, Set<string>>>({});
   const blobUrlsRef = useRef<Record<string, string>>({});
 
   const [showAutoIngestedOnly, setShowAutoIngestedOnly] = useState(false);
@@ -257,8 +258,17 @@ export default function ReviewQueue() {
         } catch { /* ignore */ }
       }
 
+      // Remove dismissed fields before sending
+      const primaryFields = { ...fields };
+      const dismissed = dismissedFields[id];
+      if (dismissed) {
+        for (const key of dismissed) {
+          delete primaryFields[key];
+        }
+      }
+
       await api.queue.approve(id, {
-        fields,
+        fields: primaryFields,
         product_name: productName || undefined,
       });
       setSnackbar({ open: true, message: 'Item approved and imported', severity: 'success' });
@@ -317,6 +327,22 @@ export default function ReviewQueue() {
 
   const updateProductName = (itemId: string, value: string) => {
     setProductNames(prev => ({ ...prev, [itemId]: value }));
+  };
+
+  const dismissField = (itemId: string, fieldKey: string) => {
+    setDismissedFields(prev => {
+      const current = new Set(prev[itemId] || []);
+      current.add(fieldKey);
+      return { ...prev, [itemId]: current };
+    });
+  };
+
+  const restoreField = (itemId: string, fieldKey: string) => {
+    setDismissedFields(prev => {
+      const current = new Set(prev[itemId] || []);
+      current.delete(fieldKey);
+      return { ...prev, [itemId]: current };
+    });
   };
 
   const confidenceColor = (score: number | null): 'success' | 'warning' | 'error' => {
@@ -590,17 +616,52 @@ export default function ReviewQueue() {
 
                         {/* Editable fields */}
                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                          {Object.entries(fields).map(([fieldName, fieldValue]) => (
-                            <TextField
-                              key={fieldName}
-                              label={fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                              value={fieldValue}
-                              onChange={(e) => updateField(item.id, fieldName, e.target.value)}
-                              size="small"
-                              fullWidth
-                              disabled={item.status !== 'pending' || isActioning || isProcessing}
-                            />
+                          {Object.entries(fields)
+                            .filter(([key]) => !dismissedFields[item.id]?.has(key))
+                            .map(([fieldName, fieldValue]) => (
+                            <Box key={fieldName} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                              <TextField
+                                label={fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                value={fieldValue}
+                                onChange={(e) => updateField(item.id, fieldName, e.target.value)}
+                                size="small"
+                                fullWidth
+                                disabled={item.status !== 'pending' || isActioning || isProcessing}
+                              />
+                              <IconButton
+                                size="small"
+                                onClick={() => dismissField(item.id, fieldName)}
+                                disabled={item.status !== 'pending' || isActioning || isProcessing}
+                                title="Move to extended metadata"
+                              >
+                                <CloseIcon fontSize="small" />
+                              </IconButton>
+                            </Box>
                           ))}
+
+                          {dismissedFields[item.id]?.size > 0 && (
+                            <Box sx={{ mt: 1 }}>
+                              <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: 'block' }}>
+                                Dismissed (not stored as primary metadata)
+                              </Typography>
+                              <Box sx={{ pl: 1, borderLeft: '2px solid', borderColor: 'divider' }}>
+                                {Array.from(dismissedFields[item.id] || []).map(key => (
+                                  <Box key={key} sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 0.5 }}>
+                                    <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
+                                      {key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}: {editedFields[item.id]?.[key] || ''}
+                                    </Typography>
+                                    <Button
+                                      size="small"
+                                      onClick={() => restoreField(item.id, key)}
+                                      disabled={item.status !== 'pending' || isActioning || isProcessing}
+                                    >
+                                      Restore
+                                    </Button>
+                                  </Box>
+                                ))}
+                              </Box>
+                            </Box>
+                          )}
 
                           <Autocomplete
                             freeSolo

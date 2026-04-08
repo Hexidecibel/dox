@@ -10,7 +10,6 @@ import {
   Select,
   MenuItem,
   CircularProgress,
-  LinearProgress,
   Alert,
   Chip,
   IconButton,
@@ -51,31 +50,18 @@ import {
   OpenInNew as OpenIcon,
   ThumbUp as ThumbUpIcon,
   ThumbDown as ThumbDownIcon,
-  HourglassEmpty as QueuedIcon,
-  Sync as ProcessingIcon,
   Error as ErrorIcon,
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
 import { api } from '../lib/api';
-import type { ApiDocumentType, ProcessingQueueItem, QueuedResponse, ExtractedTable, ExtractionTemplate, TemplateFieldMapping } from '../lib/types';
+import type { ApiDocumentType, ProcessingQueueItem, ExtractedTable, ExtractionTemplate, TemplateFieldMapping } from '../lib/types';
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 
-type Stage = 'upload' | 'processing' | 'review';
+type Stage = 'upload' | 'queued' | 'review';
 
 // === Field assignment helpers ===
-
-/** Maps common AI-extracted field keys for product detection */
-const PRODUCT_FIELD_NAMES = new Set([
-  'product_name', 'product', 'product_description',
-]);
-
-function autoAssignTier(fieldKey: string): string {
-  const normalized = fieldKey.toLowerCase().trim();
-  if (PRODUCT_FIELD_NAMES.has(normalized)) return 'product_name';
-  return 'primary';
-}
 
 function humanizeFieldKey(key: string): string {
   return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -282,21 +268,6 @@ function FieldRow({
   );
 }
 
-/** Processing status indicator for a single queued item */
-function ProcessingStatusChip({ status }: { status: string }) {
-  switch (status) {
-    case 'queued':
-      return <Chip icon={<QueuedIcon />} label="Queued" size="small" color="default" variant="outlined" />;
-    case 'processing':
-      return <Chip icon={<ProcessingIcon />} label="Processing" size="small" color="info" variant="outlined" />;
-    case 'ready':
-      return <Chip icon={<CheckIcon />} label="Ready" size="small" color="success" variant="outlined" />;
-    case 'error':
-      return <Chip icon={<ErrorIcon />} label="Error" size="small" color="error" variant="outlined" />;
-    default:
-      return <Chip label={status} size="small" />;
-  }
-}
 
 // === Main Component ===
 
@@ -320,7 +291,6 @@ export function Import() {
 
   // Stage 2 state — async polling
   const [queuedItems, setQueuedItems] = useState<QueuedItem[]>([]);
-  const [docTypeInfo, setDocTypeInfo] = useState<QueuedResponse['document_type'] | null>(null);
 
   // Stage 3 state
   const [editableResults, setEditableResults] = useState<EditableResult[]>([]);
@@ -411,46 +381,6 @@ export function Import() {
     }
   }, [isSuperAdmin, selectedTenantId]);
 
-  // Poll queued items during processing stage
-  useEffect(() => {
-    if (stage !== 'processing' || queuedItems.length === 0) return;
-
-    const interval = setInterval(async () => {
-      try {
-        const updated = await Promise.all(
-          queuedItems.map(async (item) => {
-            // Skip items that are already done
-            if (item.processingStatus === 'ready' || item.processingStatus === 'error') return item;
-            // Skip items that failed validation (no ID)
-            if (!item.id) return item;
-            try {
-              const res = await api.queue.get(item.id);
-              return {
-                ...item,
-                processingStatus: res.item.processing_status || item.processingStatus,
-                result: res.item,
-              };
-            } catch {
-              return item;
-            }
-          })
-        );
-        setQueuedItems(updated);
-
-        // Check if all items are done
-        const allDone = updated.every(i => !i.id || i.processingStatus === 'ready' || i.processingStatus === 'error');
-        if (allDone) {
-          buildEditableResults(updated);
-          setStage('review');
-        }
-      } catch {
-        // Polling error — ignore, will retry
-      }
-    }, 2000);
-
-    return () => clearInterval(interval);
-  }, [stage, queuedItems]);
-
   // Fetch extraction templates for items that have a template_id
   useEffect(() => {
     if (editableResults.length === 0) return;
@@ -523,91 +453,6 @@ export function Import() {
     }));
   }, [templates]);
 
-  // Build editable results from completed queue items
-  const buildEditableResults = (items: QueuedItem[]) => {
-    const autoIngestEnabled = docTypeInfo?.auto_ingest ?? false;
-
-    const editable: EditableResult[] = items
-      .filter(item => item.id && item.result && item.processingStatus === 'ready')
-      .map((item) => {
-        const queueItem = item.result!;
-
-        // Parse AI fields from JSON string
-        let fields: Record<string, string | null> = {};
-        if (queueItem.ai_fields) {
-          try {
-            fields = typeof queueItem.ai_fields === 'string'
-              ? JSON.parse(queueItem.ai_fields)
-              : queueItem.ai_fields;
-          } catch {
-            fields = {};
-          }
-        }
-
-        // Parse product names from JSON string
-        let productNames: string[] = [];
-        if (queueItem.product_names) {
-          try {
-            productNames = typeof queueItem.product_names === 'string'
-              ? JSON.parse(queueItem.product_names)
-              : queueItem.product_names;
-          } catch {
-            productNames = [];
-          }
-        }
-
-        const safeValue = (v: any): string => {
-          if (v === null || v === undefined) return '';
-          if (typeof v === 'string') return v;
-          if (typeof v === 'object') return JSON.stringify(v);
-          return String(v);
-        };
-
-        const editedFields: Record<string, string> = {};
-        const fieldAssignments: Record<string, string> = {};
-
-        for (const [k, v] of Object.entries(fields)) {
-          editedFields[k] = safeValue(v);
-          fieldAssignments[k] = autoAssignTier(k);
-        }
-
-        // Find the original file by name
-        const file = files.find(f => f.name === item.fileName) || files[0];
-
-        // Resolve document type: prefer user-selected, then AI-matched from queue item
-        const resolvedDocTypeId = documentTypeId || queueItem.document_type_id || '';
-        const documentTypeGuess = (queueItem as any).document_type_guess || null;
-        const docTypeMatched = !documentTypeId && !!queueItem.document_type_id;
-
-        return {
-          file,
-          queueItem,
-          editedFields,
-          fieldAssignments,
-          dismissedFields: new Set<string>(),
-          productName: productNames[0] || '',
-          importing: false,
-          imported: false,
-          confidenceScore: queueItem.confidence_score || 0,
-          autoIngesting: false,
-          correctionsSaved: false,
-          resolvedDocTypeId,
-          documentTypeGuess,
-          docTypeMatched,
-        };
-      });
-
-    setEditableResults(editable);
-
-    // Auto-ingest high confidence results
-    for (let i = 0; i < editable.length; i++) {
-      const item = editable[i];
-      if (autoIngestEnabled && item.confidenceScore >= 0.7 && !item.queueItem.checksum) {
-        // Check for duplicate via checksum in the queue item
-      }
-    }
-  };
-
   // Drag handlers
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -636,14 +481,11 @@ export function Import() {
       return;
     }
 
-    setStage('processing');
     setError('');
 
     try {
       const response = await api.processing.process(files, effectiveTenantId, documentTypeId || undefined);
-      setDocTypeInfo(response.document_type);
-
-      // Initialize queued items for polling
+      // Initialize queued items
       const items: QueuedItem[] = response.items.map(item => ({
         id: item.id,
         fileName: item.file_name,
@@ -657,6 +499,8 @@ export function Import() {
       if (items.every(i => !i.id)) {
         setError('No files could be queued for processing');
         setStage('upload');
+      } else {
+        setStage('queued');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Processing failed');
@@ -882,7 +726,6 @@ export function Import() {
     setDocumentTypeId('');
     setEditableResults([]);
     setQueuedItems([]);
-    setDocTypeInfo(null);
     setError('');
     setStage('upload');
   };
@@ -997,17 +840,13 @@ export function Import() {
   const importableCount = editableResults.filter(r => !r.imported && !r.importError).length;
   const importedCount = editableResults.filter(r => r.imported).length;
 
-  // Processing stage: count statuses
-  const readyCount = queuedItems.filter(i => i.processingStatus === 'ready' || i.processingStatus === 'error').length;
-  const totalQueuedCount = queuedItems.filter(i => !!i.id).length;
-
   return (
     <Box>
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 3, flexWrap: 'wrap', gap: 1 }}>
         <Typography variant="h4" fontWeight={700}>
           Import
         </Typography>
-        {(stage === 'review' || stage === 'processing') && (
+        {(stage === 'review' || stage === 'queued') && (
           <Button variant="outlined" startIcon={<ReplayIcon />} onClick={handleStartOver}>
             Start Over
           </Button>
@@ -1169,61 +1008,53 @@ export function Import() {
         </Box>
       )}
 
-      {/* Stage 2: Processing (async polling) */}
-      {stage === 'processing' && (
-        <Box sx={{ py: 4 }}>
-          <Box sx={{ textAlign: 'center', mb: 4 }}>
-            <CircularProgress size={48} sx={{ mb: 2 }} />
-            <Typography variant="h6" gutterBottom>
-              Processing {totalQueuedCount} file{totalQueuedCount > 1 ? 's' : ''}
-            </Typography>
-            <LinearProgress
-              variant="determinate"
-              value={totalQueuedCount > 0 ? (readyCount / totalQueuedCount) * 100 : 0}
-              sx={{ maxWidth: 400, mx: 'auto', mb: 2 }}
-            />
-            <Typography variant="body2" color="text.secondary">
-              {readyCount} of {totalQueuedCount} complete
-            </Typography>
-          </Box>
+      {/* Stage 2: Queued confirmation */}
+      {stage === 'queued' && (
+        <Paper sx={{ p: 4, textAlign: 'center' }}>
+          <CheckIcon sx={{ fontSize: 64, color: 'success.main', mb: 2 }} />
+          <Typography variant="h5" gutterBottom>
+            {queuedItems.filter(i => !!i.id).length} document{queuedItems.filter(i => !!i.id).length !== 1 ? 's' : ''} queued for processing
+          </Typography>
+          <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
+            AI extraction is running in the background. Documents will appear in the Review Queue when ready.
+          </Typography>
 
-          {/* Per-file status list */}
-          <Box sx={{ maxWidth: 600, mx: 'auto' }}>
-            {queuedItems.filter(i => !!i.id).map((item) => (
-              <Box
-                key={item.id}
-                sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 1.5,
-                  py: 1,
-                  px: 2,
-                  borderRadius: 1,
-                  border: '1px solid',
-                  borderColor: 'divider',
-                  mb: 0.5,
-                }}
-              >
-                <FileIcon color="primary" fontSize="small" />
-                <Typography variant="body2" sx={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {item.fileName}
-                </Typography>
-                <ProcessingStatusChip status={item.processingStatus} />
+          {/* Show what was queued */}
+          <Box sx={{ mb: 3, textAlign: 'left', maxWidth: 500, mx: 'auto' }}>
+            {queuedItems.map((item, i) => (
+              <Box key={i} sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 0.5 }}>
+                {item.id ? (
+                  <CheckIcon color="success" fontSize="small" />
+                ) : (
+                  <ErrorIcon color="error" fontSize="small" />
+                )}
+                <Typography variant="body2">{item.fileName}</Typography>
+                {item.duplicate && (
+                  <Chip label="Duplicate detected" size="small" color="warning" />
+                )}
               </Box>
             ))}
           </Box>
 
-          {/* Duplicate warnings */}
-          {queuedItems.filter(i => i.duplicate).map((item) => (
-            <Alert
-              key={item.id}
-              severity="warning"
-              sx={{ maxWidth: 600, mx: 'auto', mt: 1 }}
+          <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
+            <Button
+              variant="contained"
+              onClick={() => navigate('/review')}
             >
-              {item.fileName} may be a duplicate of &ldquo;{item.duplicate!.document_title}&rdquo;.
-            </Alert>
-          ))}
-        </Box>
+              Go to Review Queue
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={() => {
+                setStage('upload');
+                setFiles([]);
+                setQueuedItems([]);
+              }}
+            >
+              Import More
+            </Button>
+          </Box>
+        </Paper>
       )}
 
       {/* Stage 3: Review & Import */}
