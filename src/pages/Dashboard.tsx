@@ -166,13 +166,13 @@ export function Dashboard() {
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  {selectedTenant.slug}@dox.cush.rocks
+                  {selectedTenant.slug}@supdox.com
                 </Typography>
                 <Tooltip title="Copy email address">
                   <IconButton
                     size="small"
                     onClick={() => {
-                      navigator.clipboard.writeText(`${selectedTenant.slug}@dox.cush.rocks`);
+                      navigator.clipboard.writeText(`${selectedTenant.slug}@supdox.com`);
                       setCopySnackbar(true);
                     }}
                   >

@@ -1,0 +1,11 @@
+name = "dox-email-worker"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[vars]
+DOX_API_BASE = "https://dox.cush.rocks"
+EMAIL_DOMAIN = "supdox.com"
+
+# Secrets (set via wrangler secret put):
+# EMAIL_INGEST_API_KEY - dox API key for posting to /api/documents/process
+# RESEND_API_KEY - for sending summary emails back to sender
