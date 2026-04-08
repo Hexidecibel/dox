@@ -8,14 +8,20 @@ import {
   Button,
   CircularProgress,
   Alert,
+  Snackbar,
+  IconButton,
+  Tooltip,
 } from '@mui/material';
 import {
   Description as DocsIcon,
   CloudUpload as UploadIcon,
   TrendingUp as TrendingIcon,
+  Email as EmailIcon,
+  ContentCopy as CopyIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useTenant } from '../contexts/TenantContext';
 import { api } from '../lib/api';
 import type { Document } from '../lib/types';
 import { DocumentCard } from '../components/DocumentCard';
@@ -23,11 +29,13 @@ import { RoleGuard } from '../components/RoleGuard';
 
 export function Dashboard() {
   const { user } = useAuth();
+  const { selectedTenant } = useTenant();
   const navigate = useNavigate();
   const [recentDocs, setRecentDocs] = useState<Document[]>([]);
   const [totalDocs, setTotalDocs] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [copySnackbar, setCopySnackbar] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -129,6 +137,57 @@ export function Dashboard() {
         </RoleGuard>
       </Grid>
 
+      {/* Email Documents */}
+      {selectedTenant && (
+        <Card sx={{ mb: 4 }}>
+          <CardContent sx={{ display: 'flex', alignItems: 'flex-start', gap: 2 }}>
+            <Box sx={{ width: 48, height: 48, borderRadius: 1.5, bgcolor: 'info.main', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <EmailIcon sx={{ fontSize: 24, color: 'white' }} />
+            </Box>
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Typography variant="h6" fontWeight={600} gutterBottom>
+                Email Documents
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                Forward documents to this address for automatic processing:
+              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                <Typography
+                  variant="body1"
+                  fontWeight={600}
+                  sx={{
+                    fontFamily: 'monospace',
+                    bgcolor: 'action.hover',
+                    px: 1.5,
+                    py: 0.75,
+                    borderRadius: 1,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {selectedTenant.slug}@dox.cush.rocks
+                </Typography>
+                <Tooltip title="Copy email address">
+                  <IconButton
+                    size="small"
+                    onClick={() => {
+                      navigator.clipboard.writeText(`${selectedTenant.slug}@dox.cush.rocks`);
+                      setCopySnackbar(true);
+                    }}
+                  >
+                    <CopyIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Box>
+              <Typography variant="body2" color="text.secondary">
+                Attachments will be automatically extracted, classified, and added to your document queue.
+              </Typography>
+            </Box>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Recent Documents */}
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
         <Typography variant="h6" fontWeight={600}>
@@ -157,6 +216,14 @@ export function Dashboard() {
           ))}
         </Grid>
       )}
+
+      <Snackbar
+        open={copySnackbar}
+        autoHideDuration={2000}
+        onClose={() => setCopySnackbar(false)}
+        message="Email address copied to clipboard"
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      />
     </Box>
   );
 }
