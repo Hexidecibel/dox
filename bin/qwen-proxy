@@ -6,6 +6,10 @@ const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 const SECRET_FILE = path.join(ROOT, '.qwen-proxy-secret');
 const PORT = parseInt(process.env.QWEN_PROXY_PORT || '9601', 10);
+const GPU_HOST = process.env.QWEN_GPU_HOST || '192.168.1.67';
+const GPU_PORT = 9600;
+const LOCAL_PORT = 9600;
+const CONNECT_TIMEOUT = 2000;
 const TARGET = 'http://127.0.0.1:9600';
 
 function getSecret() {
@@ -35,33 +39,66 @@ const server = http.createServer((req, res) => {
   delete fwdHeaders['host'];
 
   const url = new URL(req.url, TARGET);
-  const proxyReq = http.request(
-    {
-      hostname: '127.0.0.1',
-      port: 9600,
-      path: url.pathname + url.search,
-      method: req.method,
-      headers: fwdHeaders,
-    },
-    (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, proxyRes.headers);
-      proxyRes.pipe(res, { end: true });
-    }
-  );
+  const reqPath = url.pathname + url.search;
 
-  proxyReq.on('error', (err) => {
-    console.error('Proxy error:', err.message);
-    if (!res.headersSent) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Bad Gateway', detail: err.message }));
+  // Collect request body (we may need to send it twice)
+  const bodyChunks = [];
+  req.on('data', (chunk) => bodyChunks.push(chunk));
+  req.on('end', () => {
+    const body = Buffer.concat(bodyChunks);
+
+    function sendTo(hostname, port, label, onError) {
+      const proxyReq = http.request(
+        {
+          hostname,
+          port,
+          path: reqPath,
+          method: req.method,
+          headers: fwdHeaders,
+          timeout: hostname === GPU_HOST ? CONNECT_TIMEOUT : 0,
+        },
+        (proxyRes) => {
+          console.log(`[${label}] ${req.method} ${reqPath} -> ${proxyRes.statusCode}`);
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          proxyRes.pipe(res, { end: true });
+        }
+      );
+
+      // Connection timeout — only fires before response headers arrive
+      proxyReq.on('timeout', () => {
+        proxyReq.destroy(new Error('connect timeout'));
+      });
+
+      proxyReq.on('error', (err) => {
+        console.error(`[${label}] ${err.message}`);
+        if (onError) {
+          onError();
+        } else if (!res.headersSent) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Bad Gateway', detail: err.message }));
+        }
+      });
+
+      // Clear the connect timeout once we get a response
+      if (hostname === GPU_HOST) {
+        proxyReq.on('socket', (socket) => {
+          socket.on('connect', () => proxyReq.setTimeout(0));
+        });
+      }
+
+      proxyReq.end(body);
     }
+
+    // Try GPU first, fall back to local CPU
+    sendTo(GPU_HOST, GPU_PORT, 'gpu', () => {
+      sendTo('127.0.0.1', LOCAL_PORT, 'cpu');
+    });
   });
-
-  req.pipe(proxyReq, { end: true });
 });
 
 server.listen(PORT, () => {
   console.log(`Qwen auth proxy listening on port ${PORT}`);
-  console.log(`Proxying to ${TARGET}`);
+  console.log(`GPU backend: ${GPU_HOST}:${GPU_PORT} (${CONNECT_TIMEOUT}ms timeout)`);
+  console.log(`CPU backend: 127.0.0.1:${LOCAL_PORT} (fallback)`);
   console.log(`Secret: ${SECRET}`);
 });

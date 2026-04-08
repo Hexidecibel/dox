@@ -36,6 +36,7 @@ import {
   TableRow,
   Divider,
   IconButton,
+  Tooltip,
 } from '@mui/material';
 import {
   ExpandMore as ExpandMoreIcon,
@@ -43,6 +44,7 @@ import {
   Cancel as CancelIcon,
   InsertDriveFile as FileIcon,
   Close as CloseIcon,
+  RotateRight as RotateIcon,
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
 import { AUTH_TOKEN_KEY } from '../lib/types';
@@ -129,6 +131,7 @@ export default function ReviewQueue() {
 
   // Suppliers list (for template dialog autocomplete)
   const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([]);
+  const [imageRotation, setImageRotation] = useState<Record<string, number>>({});
 
   // Resolve effective tenant ID
   const effectiveTenantId = isSuperAdmin ? (tenantFilter || selectedTenantId || '') : (selectedTenantId || '');
@@ -607,12 +610,28 @@ export default function ReviewQueue() {
                               <PdfViewer url={previewUrls[item.id]} fileName={item.file_name} />
                             </Box>
                           ) : item.mime_type.startsWith('image/') ? (
-                            <Box sx={{ display: 'flex', justifyContent: 'center', p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
-                              <img
-                                src={previewUrls[item.id]}
-                                alt={item.file_name}
-                                style={{ maxWidth: '100%', maxHeight: 500, objectFit: 'contain', borderRadius: 4 }}
-                              />
+                            <Box sx={{ bgcolor: 'grey.50', borderRadius: 1, overflow: 'hidden' }}>
+                              <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 1, pt: 0.5 }}>
+                                <Tooltip title="Rotate 90°">
+                                  <IconButton size="small" onClick={() => setImageRotation((prev) => ({ ...prev, [item.id]: ((prev[item.id] || 0) + 90) % 360 }))}>
+                                    <RotateIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              </Box>
+                              <Box sx={{ display: 'flex', justifyContent: 'center', p: 2, pt: 0 }}>
+                                <img
+                                  src={previewUrls[item.id]}
+                                  alt={item.file_name}
+                                  style={{
+                                    maxWidth: '100%',
+                                    maxHeight: 500,
+                                    objectFit: 'contain',
+                                    borderRadius: 4,
+                                    transform: `rotate(${imageRotation[item.id] || 0}deg)`,
+                                    transition: 'transform 0.3s ease',
+                                  }}
+                                />
+                              </Box>
                             </Box>
                           ) : (
                             <Paper

@@ -8,7 +8,7 @@ import {
 } from '@mui/material';
 import {
   NavigateBefore, NavigateNext, ZoomIn, ZoomOut,
-  Download as DownloadIcon
+  Download as DownloadIcon, RotateRight as RotateIcon,
 } from '@mui/icons-material';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -25,6 +25,7 @@ export default function PdfViewer({ url, fileName }: PdfViewerProps) {
   const [fitMode, setFitMode] = useState<'width' | 'page' | 'custom'>('width');
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const [pageInputValue, setPageInputValue] = useState<string>('1');
+  const [rotation, setRotation] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -88,6 +89,10 @@ export default function PdfViewer({ url, fileName }: PdfViewerProps) {
       setFitMode('custom');
     }
   }, [scale]);
+
+  const rotate = useCallback(() => {
+    setRotation((r) => (r + 90) % 360);
+  }, []);
 
   const handleFitMode = useCallback((_: React.MouseEvent<HTMLElement>, val: 'width' | 'page' | null) => {
     if (val) {
@@ -195,6 +200,14 @@ export default function PdfViewer({ url, fileName }: PdfViewerProps) {
             <Tooltip title="Fit to page"><span>Page</span></Tooltip>
           </ToggleButton>
         </ToggleButtonGroup>
+
+        <Box sx={{ borderLeft: '1px solid', borderColor: 'divider', height: 24, mx: 0.5 }} />
+
+        <Tooltip title="Rotate 90°">
+          <IconButton size="small" onClick={rotate}>
+            <RotateIcon />
+          </IconButton>
+        </Tooltip>
       </Paper>
 
       <Box
@@ -235,6 +248,7 @@ export default function PdfViewer({ url, fileName }: PdfViewerProps) {
           >
             <Page
               pageNumber={pageNumber}
+              rotate={rotation}
               {...(fitMode !== 'custom'
                 ? { width: fitMode === 'page' ? containerWidth * 0.9 : containerWidth }
                 : { scale })}
