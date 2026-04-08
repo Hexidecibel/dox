@@ -233,12 +233,41 @@ async function processItem(item) {
       item.mime_type === 'application/json'
     ) {
       text = new TextDecoder().decode(new Uint8Array(fileBuffer)).substring(0, 100000);
+    } else if (item.mime_type === 'image/png' || item.mime_type === 'image/jpeg' || item.mime_type === 'image/jpg') {
+      // OCR standalone images via tesseract
+      try {
+        const ext = item.mime_type === 'image/png' ? 'png' : 'jpg';
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-ocr-'));
+        const imgPath = path.join(tmpDir, `image.${ext}`);
+        fs.writeFileSync(imgPath, Buffer.from(fileBuffer));
+
+        try {
+          const result = execFileSync('tesseract', [
+            imgPath, 'stdout', '--psm', '1'
+          ], { timeout: 60_000, stdio: ['pipe', 'pipe', 'pipe'] });
+          text = result.toString('utf-8').trim();
+          if (text) {
+            console.log(`  OCR extracted ${text.length} chars from image`);
+            text = text.substring(0, 100000);
+          }
+        } catch (err) {
+          console.warn(`  OCR failed for ${item.file_name}: ${err.message}`);
+        }
+
+        // Cleanup
+        try {
+          fs.unlinkSync(imgPath);
+          fs.rmdirSync(tmpDir);
+        } catch { /* best-effort */ }
+      } catch (err) {
+        console.warn(`  Image OCR setup failed: ${err.message}`);
+      }
     }
 
     if (!text || text.trim().length === 0) {
       await postResults(item.id, {
         processing_status: 'error',
-        error_message: 'Could not extract text from file',
+        error_message: `Could not extract text from ${item.mime_type} file. ${item.mime_type.startsWith('image/') ? 'OCR failed or produced no text.' : 'Unsupported file format for text extraction.'}`,
       });
       console.log(`  Skipped ${item.file_name}: no text extracted`);
       return;
