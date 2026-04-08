@@ -4,9 +4,9 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-## Phase 1: Smart COA Intake — COMPLETE (2026-04-07)
+## Phase 1: Smart COA Intake — COMPLETE (2026-04-08)
 
-All Phase 1 features are live on supdox.com:
+All Phase 1 features are live on supdox.com.
 
 ### What's working
 - Upload → queue → Qwen AI extraction → human review → ingest
@@ -15,39 +15,74 @@ All Phase 1 features are live on supdox.com:
 - Email ingestion at {slug}@supdox.com via CF Email Worker
 - AI natural language search (fuzzy products/suppliers, expiration queries, metadata filters, relevance ranking)
 - Product name autocomplete in review/import
-- OCR fallback via tesseract for scanned PDFs
-- Extraction examples saved on every correction (feedback loop for improving quality)
+- OCR fallback via tesseract for scanned PDFs and standalone images
+- Auto-rotation detection for sideways/upside-down scans (tesseract OSD + ImageMagick)
+- Manual rotate button in PDF viewer and image previews
+- Few-shot extraction examples — corrections improve future extractions per supplier
+- Full table review: editable cells, add/delete rows and columns, include/exclude tables and columns
+- Re-extract from text (paste text for AI re-parsing, or re-queue for reprocessing)
+- Notes field per queue item
+- Field dismiss (X button moves to extended metadata, restore option)
+- Source tracking on queue items (import/email/api with sender details)
+- Result notification emails for email-sourced docs (auto-ingested → summary, needs review → link)
+- Import page is fire-and-forget (queue and go, check Review Queue later)
+- Ingest History page shows full pipeline journey (source, processing status, confidence, template match)
+- Supplier management pages (list + detail with products, templates, documents tabs)
+- Products linked to suppliers via supplier_id
+- Template management on supplier detail page (edit field mappings, auto-ingest settings)
 
 ### Bug fixes applied
-- Soft-deleted items now hidden by default in list endpoints
+- Soft-deleted items hidden by default in list endpoints
 - Boolean active values coerced to integer on update
 - Seed script generates proper PBKDF2 password hash
 - Query param standardized to tenant_id (snake_case) everywhere
+- Process worker: 6K text trim (was 12K), staleness recovery for stuck items
+- Aliases parsing handles both string and array formats
 
-### Known remaining items (non-blocking)
-- FTS5 migration (Phase 2 of search upgrade) — for when document count grows
-- Email ingest log not written to DB (worker lacks D1 bindings, logs to console only)
+### UI cleanup
+- Upload removed from nav (Import is the only intake path)
+- Bundles hidden from nav (backend stays for future Phase 5)
+- Products removed from nav (managed via Supplier detail page)
+- Suppliers in admin nav above Document Types
+
+### Known remaining items
+- FTS5 migration (Phase 2 of search) — for when document count grows
+- Email ingest log not written to DB (worker lacks D1 bindings, logs to console)
 - Process worker not managed by systemd (runs as background process)
-- Prompt tuning improves automatically as users review/correct more documents
+- Table edits and column excludes not persisted to backend on approve (visual only during review)
+- Notes field not persisted to backend on approve
 
 ### Qwen proxy
-- Auth proxy runs on port 9601, tunneled to qwen.cush.rocks (or qwen.tunnel.cush.rocks)
-- Secret stored in `.qwen-proxy-secret` (gitignored)
+- Runs on port 9600 locally (or 9601 via auth proxy)
+- Secret in `.qwen-proxy-secret` (gitignored)
 - Cloudflare Pages secrets: QWEN_URL + QWEN_SECRET
-- Consider making the proxy auto-start or adding to a systemd service
+- Worker needs restart to pick up code changes to bin/process-worker
 
 ---
 
-## Next up: Phase 2 — Order Intake & Parsing
-
-Per the COA-AUTOMATION-ROADMAP.md:
-- Parse the daily ERP email that lists customers needing COAs
-- Build an order queue: "Customer X, Order Y needs COAs"
-- Customer registry with COA requirements
-- This is the trigger for the downstream ERP/WMS integration (Phase 3)
-
 ## Domain setup
-- App: https://supdox.com (CF Pages)
+- App: https://supdox.com (CF Pages, custom domain)
 - Email: {slug}@supdox.com (CF Email Routing → dox-email-worker)
 - Legacy: dox.cush.rocks still works (CNAME to Pages)
 - DNS: supdox.com on Cloudflare, cush.rocks on name.com
+- Resend verified for noreply@supdox.com
+
+---
+
+## Next up: Testing round
+
+Full end-to-end testing of Phase 1 before moving to Phase 2:
+1. Upload COAs via Import → verify processing, review, template save
+2. Email COAs to cush-co@supdox.com → verify receipt, processing, result email
+3. Test template auto-ingest with second doc from same supplier
+4. Test natural language search after docs are ingested
+5. Test supplier management (create, edit templates, view docs)
+6. Verify few-shot examples improve extraction on re-process
+
+## Then: Phase 2 — Order Intake & Parsing
+
+Per COA-AUTOMATION-ROADMAP.md:
+- Parse daily ERP email listing customers needing COAs
+- Build order queue
+- Customer registry
+- This triggers downstream ERP/WMS integration (Phase 3)
