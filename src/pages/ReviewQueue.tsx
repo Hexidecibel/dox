@@ -429,6 +429,46 @@ export default function ReviewQueue() {
     });
   };
 
+  const deleteTableRow = (itemId: string, tableIdx: number, rowIdx: number) => {
+    setEditedTables(prev => {
+      const tables = prev[itemId] ? prev[itemId].map(t => ({ ...t, rows: t.rows.map(r => [...r]) })) : parseTables(itemId);
+      if (tables[tableIdx] && tables[tableIdx].rows.length > 1) {
+        tables[tableIdx] = {
+          ...tables[tableIdx],
+          rows: tables[tableIdx].rows.filter((_, i) => i !== rowIdx),
+        };
+      }
+      return { ...prev, [itemId]: tables };
+    });
+  };
+
+  const deleteTableColumn = (itemId: string, tableIdx: number, colIdx: number) => {
+    setEditedTables(prev => {
+      const tables = prev[itemId] ? prev[itemId].map(t => ({ ...t, rows: t.rows.map(r => [...r]) })) : parseTables(itemId);
+      if (tables[tableIdx] && tables[tableIdx].headers.length > 1) {
+        tables[tableIdx] = {
+          ...tables[tableIdx],
+          headers: tables[tableIdx].headers.filter((_, i) => i !== colIdx),
+          rows: tables[tableIdx].rows.map(row => row.filter((_, i) => i !== colIdx)),
+        };
+      }
+      return { ...prev, [itemId]: tables };
+    });
+    // Also clean up excludedColumns for this table (shift indices)
+    setExcludedColumns(prev => {
+      const itemCols = prev[itemId];
+      if (!itemCols?.[tableIdx]) return prev;
+      const oldSet = itemCols[tableIdx];
+      const newSet = new Set<number>();
+      for (const idx of oldSet) {
+        if (idx < colIdx) newSet.add(idx);
+        else if (idx > colIdx) newSet.add(idx - 1);
+        // idx === colIdx is removed
+      }
+      return { ...prev, [itemId]: { ...itemCols, [tableIdx]: newSet } };
+    });
+  };
+
   const handleReExtract = async (itemId: string) => {
     setReExtractLoading(prev => ({ ...prev, [itemId]: true }));
     try {
@@ -880,10 +920,19 @@ export default function ReviewQueue() {
                                                       sx={{ p: 0 }}
                                                     />
                                                     {h.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                                    <IconButton
+                                                      size="small"
+                                                      onClick={(e) => { e.stopPropagation(); deleteTableColumn(item.id, tableIndex, colIdx); }}
+                                                      disabled={item.status !== 'pending'}
+                                                      sx={{ p: 0, ml: 0.5 }}
+                                                    >
+                                                      <CloseIcon sx={{ fontSize: 14 }} />
+                                                    </IconButton>
                                                   </Box>
                                                 </TableCell>
                                               );
                                             })}
+                                            <TableCell padding="checkbox" />
                                           </TableRow>
                                         </TableHead>
                                         <TableBody>
@@ -904,6 +953,15 @@ export default function ReviewQueue() {
                                                   />
                                                 </TableCell>
                                               ))}
+                                              <TableCell padding="checkbox">
+                                                <IconButton
+                                                  size="small"
+                                                  onClick={() => deleteTableRow(item.id, tableIndex, rowIdx)}
+                                                  disabled={item.status !== 'pending' || excludedTables[item.id]?.has(tableIndex)}
+                                                >
+                                                  <CloseIcon fontSize="small" />
+                                                </IconButton>
+                                              </TableCell>
                                             </TableRow>
                                           ))}
                                         </TableBody>
