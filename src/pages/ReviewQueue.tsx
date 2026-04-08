@@ -333,6 +333,7 @@ export default function ReviewQueue() {
             const isExpanded = expandedId === item.id;
             const fields = editedFields[item.id] || {};
             const isActioning = actionLoading[item.id] || false;
+            const isProcessing = item.processing_status !== 'ready';
 
             return (
               <Card key={item.id} variant="outlined">
@@ -372,6 +373,15 @@ export default function ReviewQueue() {
                     )}
                     {item.auto_ingested === 1 && (
                       <Chip label="Auto-ingested" color="success" size="small" sx={{ ml: 0.5 }} />
+                    )}
+                    {isProcessing && (
+                      <Chip
+                        icon={item.processing_status === 'processing' ? <CircularProgress size={14} /> : undefined}
+                        label={item.processing_status === 'queued' ? 'Queued' : 'Processing...'}
+                        color="default"
+                        size="small"
+                        sx={{ ml: 0.5 }}
+                      />
                     )}
                     <Typography variant="caption" color="text.secondary">
                       {formatDate(item.created_at)}
@@ -490,7 +500,7 @@ export default function ReviewQueue() {
                               onChange={(e) => updateField(item.id, fieldName, e.target.value)}
                               size="small"
                               fullWidth
-                              disabled={item.status !== 'pending' || isActioning}
+                              disabled={item.status !== 'pending' || isActioning || isProcessing}
                             />
                           ))}
 
@@ -505,7 +515,7 @@ export default function ReviewQueue() {
                             onChange={(_, value) => {
                               updateProductName(item.id, value || '');
                             }}
-                            disabled={item.status !== 'pending' || isActioning}
+                            disabled={item.status !== 'pending' || isActioning || isProcessing}
                             renderInput={(params) => (
                               <TextField
                                 {...params}
@@ -528,7 +538,7 @@ export default function ReviewQueue() {
                           color="success"
                           size="small"
                           onClick={(e) => { e.stopPropagation(); handleApprove(item.id); }}
-                          disabled={isActioning}
+                          disabled={isActioning || isProcessing}
                           startIcon={isActioning ? <CircularProgress size={16} color="inherit" /> : <CheckIcon />}
                         >
                           Approve
@@ -538,7 +548,7 @@ export default function ReviewQueue() {
                           color="error"
                           size="small"
                           onClick={(e) => { e.stopPropagation(); handleReject(item.id); }}
-                          disabled={isActioning}
+                          disabled={isActioning || isProcessing}
                           startIcon={<CancelIcon />}
                         >
                           Reject
