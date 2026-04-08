@@ -17,7 +17,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     const url = new URL(context.request.url);
 
-    const status = url.searchParams.get('status') || 'pending';
+    const status = url.searchParams.get('status') || 'pending'; // pass 'all' to skip status filter
     const processingStatus = url.searchParams.get('processing_status');
     const documentTypeId = url.searchParams.get('document_type_id');
     let tenantId = url.searchParams.get('tenant_id');
@@ -32,7 +32,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
 
-    if (status) {
+    if (status && status !== 'all') {
       conditions.push('pq.status = ?');
       params.push(status);
     }

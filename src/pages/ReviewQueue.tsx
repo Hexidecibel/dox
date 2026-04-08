@@ -230,15 +230,41 @@ export default function ReviewQueue() {
     setActionLoading(prev => ({ ...prev, [id]: true }));
     try {
       const item = items.find(i => i.id === id);
+
+      // Use edited fields, falling back to AI fields
+      let fields = editedFields[id];
+      if (!fields || Object.keys(fields).length === 0) {
+        if (item?.ai_fields) {
+          try {
+            const parsed = typeof item.ai_fields === 'string' ? JSON.parse(item.ai_fields) : item.ai_fields;
+            fields = Object.fromEntries(
+              Object.entries(parsed).map(([k, v]) => [k, String(v ?? '')])
+            );
+          } catch { fields = {}; }
+        } else {
+          fields = {};
+        }
+      }
+
+      // Use product name, falling back to AI detection
+      let productName = productNames[id];
+      if (!productName && item?.product_names) {
+        try {
+          const products = typeof item.product_names === 'string' ? JSON.parse(item.product_names) : item.product_names;
+          if (Array.isArray(products) && products.length > 0) {
+            productName = products[0];
+          }
+        } catch { /* ignore */ }
+      }
+
       await api.queue.approve(id, {
-        fields: editedFields[id],
-        product_name: productNames[id] || undefined,
+        fields,
+        product_name: productName || undefined,
       });
       setSnackbar({ open: true, message: 'Item approved and imported', severity: 'success' });
 
       // Prompt to save template if no template existed
       if (item && !item.template_id && item.supplier && item.document_type_id) {
-        const fields = editedFields[id] || {};
         const mappings: TemplateFieldMapping[] = Object.keys(fields).map((key, i) => ({
           field_key: key,
           tier: 'primary' as const,

@@ -861,7 +861,7 @@ export const api = {
   },
 
   queue: {
-    list: (params?: { status?: string; document_type_id?: string; tenant_id?: string; limit?: number; offset?: number }) =>
+    list: (params?: { status?: string; processing_status?: string; document_type_id?: string; tenant_id?: string; limit?: number; offset?: number }) =>
       fetchApi<{ items: ProcessingQueueItem[]; total: number; limit: number; offset: number }>(
         `/queue?${new URLSearchParams(Object.entries(params || {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])).toString()}`
       ),
