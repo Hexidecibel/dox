@@ -147,9 +147,14 @@ function ocrPdf(pdfBuffer) {
     const texts = [];
     for (const pageFile of pageFiles) {
       try {
+        const pagePath = path.join(tmpDir, pageFile);
+
+        // Auto-rotate page if needed
+        detectAndRotateImage(pagePath);
+
         // --psm 1 = auto page segmentation with OSD (handles rotated pages)
         const result = execFileSync('tesseract', [
-          path.join(tmpDir, pageFile), 'stdout', '--psm', '1'
+          pagePath, 'stdout', '--psm', '1'
         ], { timeout: 60_000, stdio: ['pipe', 'pipe', 'pipe'] });
         texts.push(result.toString('utf-8'));
       } catch (err) {
@@ -167,6 +172,53 @@ function ocrPdf(pdfBuffer) {
       }
       fs.rmdirSync(tmpDir);
     } catch { /* best-effort cleanup */ }
+  }
+}
+
+/**
+ * Detect orientation of an image using tesseract OSD and rotate if needed.
+ * Uses ImageMagick (convert or magick) for rotation.
+ * Returns the rotation angle applied (0 if none).
+ */
+function detectAndRotateImage(imagePath) {
+  try {
+    // --psm 0 = orientation and script detection only
+    const osdOutput = execFileSync('tesseract', [
+      imagePath, 'stdout', '--psm', '0'
+    ], { timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] }).toString('utf-8');
+
+    // Parse rotation angle from OSD output
+    // Output looks like: "Rotate: 90" or "Orientation in degrees: 90"
+    const rotateMatch = osdOutput.match(/Rotate:\s*(\d+)/i) ||
+                        osdOutput.match(/Orientation in degrees:\s*(\d+)/i);
+    const rotation = rotateMatch ? parseInt(rotateMatch[1], 10) : 0;
+
+    if (rotation > 0 && rotation !== 360) {
+      console.log(`  Detected rotation: ${rotation}° — auto-correcting`);
+      // Use ImageMagick to rotate
+      try {
+        execFileSync('convert', [imagePath, '-rotate', String(rotation), imagePath], {
+          timeout: 30_000,
+          stdio: 'pipe',
+        });
+        return rotation;
+      } catch (err) {
+        // Try 'magick' command (ImageMagick v7)
+        try {
+          execFileSync('magick', [imagePath, '-rotate', String(rotation), imagePath], {
+            timeout: 30_000,
+            stdio: 'pipe',
+          });
+          return rotation;
+        } catch {
+          console.warn(`  ImageMagick not available, skipping rotation`);
+        }
+      }
+    }
+    return 0;
+  } catch (err) {
+    // OSD detection failed (common with non-text images)
+    return 0;
   }
 }
 
@@ -240,6 +292,9 @@ async function processItem(item) {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-ocr-'));
         const imgPath = path.join(tmpDir, `image.${ext}`);
         fs.writeFileSync(imgPath, Buffer.from(fileBuffer));
+
+        // Auto-rotate image if needed before OCR
+        detectAndRotateImage(imgPath);
 
         try {
           const result = execFileSync('tesseract', [
