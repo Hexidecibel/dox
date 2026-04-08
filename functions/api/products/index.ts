@@ -20,6 +20,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const url = new URL(context.request.url);
     const search = url.searchParams.get('search');
     const activeFilter = url.searchParams.get('active');
+    const supplierIdFilter = url.searchParams.get('supplier_id');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
@@ -44,6 +45,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     } else {
       // Default to showing only active products
       conditions.push('active = 1');
+    }
+
+    if (supplierIdFilter) {
+      conditions.push('supplier_id = ?');
+      params.push(supplierIdFilter);
     }
 
     if (search) {
@@ -104,6 +110,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       name?: string;
       description?: string;
       tenant_id?: string;
+      supplier_id?: string;
     };
 
     // Determine tenant_id
@@ -159,10 +166,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const id = generateId();
 
     await context.env.DB.prepare(
-      `INSERT INTO products (id, tenant_id, name, slug, description, active)
-       VALUES (?, ?, ?, ?, ?, 1)`
+      `INSERT INTO products (id, tenant_id, name, slug, description, active, supplier_id)
+       VALUES (?, ?, ?, ?, ?, 1, ?)`
     )
-      .bind(id, tenantId, body.name, slug, body.description || null)
+      .bind(id, tenantId, body.name, slug, body.description || null, body.supplier_id || null)
       .run();
 
     await logAudit(

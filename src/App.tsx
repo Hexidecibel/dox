@@ -16,6 +16,8 @@ import { Tenants } from './pages/admin/Tenants';
 import { AuditLog } from './pages/admin/AuditLog';
 import { ApiKeys } from './pages/admin/ApiKeys';
 import { Products } from './pages/admin/Products';
+import { Suppliers } from './pages/admin/Suppliers';
+import { SupplierDetail } from './pages/admin/SupplierDetail';
 import { DocumentTypes } from './pages/admin/DocumentTypes';
 import { Bundles } from './pages/Bundles';
 import { BundleDetail } from './pages/BundleDetail';
@@ -54,6 +56,8 @@ function App() {
                 <Route path="/admin/audit" element={<AuditLog />} />
                 <Route path="/admin/document-types" element={<DocumentTypes />} />
                 <Route path="/admin/products" element={<Products />} />
+                <Route path="/admin/suppliers" element={<Suppliers />} />
+                <Route path="/admin/suppliers/:id" element={<SupplierDetail />} />
               </Route>
               {/* Super admin only routes */}
               <Route element={<ProtectedRoute roles={['super_admin']} />}>

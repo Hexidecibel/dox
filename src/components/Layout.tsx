@@ -35,6 +35,7 @@ import {
   Person as PersonIcon,
   FilterList as FilterIcon,
   Inventory as ProductsIcon,
+  LocalShipping as SuppliersIcon,
   Category as DocTypesIcon,
   History as HistoryIcon,
   FileUpload as ImportIcon,
@@ -67,6 +68,7 @@ const adminItems: NavItem[] = [
   { label: 'API Keys', path: '/admin/api-keys', icon: <ApiKeyIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Document Types', path: '/admin/document-types', icon: <DocTypesIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Products', path: '/admin/products', icon: <ProductsIcon />, roles: ['super_admin', 'org_admin'] },
+  { label: 'Suppliers', path: '/admin/suppliers', icon: <SuppliersIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Tenants', path: '/admin/tenants', icon: <TenantsIcon />, roles: ['super_admin'] },
 ];
 

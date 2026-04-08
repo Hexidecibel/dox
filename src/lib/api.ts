@@ -210,13 +210,14 @@ export const api = {
      * Returns: { documents: ApiDocument[], total, limit, offset }
      * documents have tags as JSON string -- we parse them.
      */
-    list: async (params?: { category?: string; status?: string; page?: number; limit?: number; tenantId?: string }): Promise<{ documents: Document[]; total: number }> => {
+    list: async (params?: { category?: string; status?: string; page?: number; limit?: number; tenantId?: string; supplier_id?: string }): Promise<{ documents: Document[]; total: number }> => {
       const query = new URLSearchParams();
       if (params?.category) query.set('category', params.category);
       if (params?.status) query.set('status', params.status);
       if (params?.page) query.set('offset', String((params.page - 1) * (params.limit || 50)));
       if (params?.limit) query.set('limit', String(params.limit));
       if (params?.tenantId) query.set('tenant_id', params.tenantId);
+      if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
       const qs = query.toString();
       const data = await fetchApi<DocumentListResponse>(`/documents${qs ? `?${qs}` : ''}`);
       return {
@@ -511,13 +512,14 @@ export const api = {
      * GET /api/products
      * Returns: { products: ApiProduct[], total, limit, offset }
      */
-    list: (params?: { search?: string; active?: number; limit?: number; offset?: number; tenant_id?: string }) => {
+    list: (params?: { search?: string; active?: number; limit?: number; offset?: number; tenant_id?: string; supplier_id?: string }) => {
       const query = new URLSearchParams();
       if (params?.search) query.set('search', params.search);
       if (params?.active !== undefined) query.set('active', String(params.active));
       if (params?.limit) query.set('limit', String(params.limit));
       if (params?.offset !== undefined) query.set('offset', String(params.offset));
       if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
       const qs = query.toString();
       return fetchApi<ProductListResponse>(`/products${qs ? `?${qs}` : ''}`);
     },
@@ -532,7 +534,7 @@ export const api = {
      * POST /api/products
      * Returns: { product: ApiProduct }
      */
-    create: (data: { name: string; description?: string; tenant_id: string }) =>
+    create: (data: { name: string; description?: string; tenant_id: string; supplier_id?: string }) =>
       fetchApi<{ product: ApiProduct }>('/products', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -542,7 +544,7 @@ export const api = {
      * PUT /api/products/:id
      * Returns: { product: ApiProduct }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null }) =>
       fetchApi<{ product: ApiProduct }>(`/products/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -592,6 +594,29 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
+
+    /**
+     * GET /api/suppliers/:id
+     * Returns: { supplier: ApiSupplier } (with parsed aliases array and counts)
+     */
+    get: (id: string) => fetchApi<{ supplier: ApiSupplier }>(`/suppliers/${id}`),
+
+    /**
+     * PUT /api/suppliers/:id
+     * Returns: { supplier: ApiSupplier }
+     */
+    update: (id: string, data: { name?: string; aliases?: string[]; active?: boolean }) =>
+      fetchApi<{ supplier: ApiSupplier }>(`/suppliers/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * DELETE /api/suppliers/:id
+     * Soft-delete (sets active=0). Returns: { success: true }
+     */
+    delete: (id: string) =>
+      fetchApi<{ success: boolean }>(`/suppliers/${id}`, { method: 'DELETE' }),
 
     /**
      * POST /api/suppliers/lookup-or-create
