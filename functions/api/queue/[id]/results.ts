@@ -4,6 +4,7 @@ import {
   BadRequestError,
   errorToResponse,
 } from '../../../lib/permissions';
+import { sendEmail } from '../../../lib/email';
 import type { Env, User } from '../../../lib/types';
 
 /**
@@ -39,10 +40,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
     // Verify queue item exists
     const item = await context.env.DB.prepare(
-      'SELECT id, tenant_id, document_type_id, processing_status FROM processing_queue WHERE id = ?'
+      'SELECT id, tenant_id, document_type_id, processing_status, source, source_detail, file_name FROM processing_queue WHERE id = ?'
     )
       .bind(queueId)
-      .first<{ id: string; tenant_id: string; document_type_id: string | null; processing_status: string }>();
+      .first<{ id: string; tenant_id: string; document_type_id: string | null; processing_status: string; source: string | null; source_detail: string | null; file_name: string }>();
 
     if (!item) {
       throw new NotFoundError('Queue item not found');
@@ -116,6 +117,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       .run();
 
     // --- Template matching & auto-ingest ---
+    let wasAutoIngested = false;
     if (body.processing_status === 'ready') {
       try {
         // 1. Resolve supplier from the posted supplier name
@@ -236,6 +238,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
                 await context.env.DB.prepare(
                   'UPDATE processing_queue SET auto_ingested = 1 WHERE id = ?'
                 ).bind(queueId).run();
+                wasAutoIngested = true;
               }
             }
           }
@@ -243,6 +246,57 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       } catch (autoIngestErr) {
         // Non-fatal — log but don't fail the results update
         console.error('Auto-ingest check failed:', autoIngestErr);
+      }
+
+      // --- Send result email for email-sourced documents ---
+      if (item.source === 'email' && item.source_detail) {
+        try {
+          const sourceDetail = JSON.parse(item.source_detail as string);
+          const senderEmail = sourceDetail.sender;
+
+          if (senderEmail && context.env.RESEND_API_KEY) {
+            const aiFields = body.ai_fields ? JSON.parse(body.ai_fields) : {};
+            const confidence = body.confidence_score || 0;
+            const fileName = item.file_name;
+
+            let subject: string;
+            let htmlBody: string;
+
+            if (wasAutoIngested) {
+              const fieldRows = Object.entries(aiFields)
+                .filter(([, v]) => v != null && String(v).trim() !== '')
+                .map(([k, v]) => `<tr><td style="padding:4px 12px 4px 0;color:#666;font-weight:600">${(k as string).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</td><td style="padding:4px 0">${v}</td></tr>`)
+                .join('');
+
+              subject = `[SupDox] Document Processed: ${fileName}`;
+              htmlBody = `
+                <div style="font-family:sans-serif;max-width:600px">
+                  <h2 style="color:#2e7d32">Document Auto-Processed</h2>
+                  <p><strong>${fileName}</strong> was automatically processed and ingested (${Math.round(confidence * 100)}% confidence).</p>
+                  <table style="border-collapse:collapse;margin:16px 0">${fieldRows}</table>
+                  <p style="color:#666;font-size:14px">This document was processed automatically based on a saved template. You can view it in the <a href="https://supdox.com/documents">document library</a>.</p>
+                </div>`;
+            } else {
+              subject = `[SupDox] Review Needed: ${fileName}`;
+              htmlBody = `
+                <div style="font-family:sans-serif;max-width:600px">
+                  <h2 style="color:#ed6c02">Document Needs Review</h2>
+                  <p><strong>${fileName}</strong> was processed but needs human review before it can be ingested (${Math.round(confidence * 100)}% confidence).</p>
+                  <p><a href="https://supdox.com/review" style="display:inline-block;padding:10px 20px;background:#1976d2;color:white;text-decoration:none;border-radius:4px">Go to Review Queue</a></p>
+                  <p style="color:#666;font-size:14px">Once reviewed and approved, you'll receive a confirmation with the extracted details.</p>
+                </div>`;
+            }
+
+            await sendEmail(context.env.RESEND_API_KEY, {
+              to: senderEmail,
+              subject,
+              html: htmlBody,
+            });
+          }
+        } catch (emailErr) {
+          console.error('Result email failed:', emailErr);
+          // Non-fatal
+        }
       }
     }
 
