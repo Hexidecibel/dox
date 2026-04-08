@@ -88,6 +88,9 @@ export default function ReviewQueue() {
   const blobUrlsRef = useRef<Record<string, string>>({});
 
   const [showAutoIngestedOnly, setShowAutoIngestedOnly] = useState(false);
+  const [reExtractText, setReExtractText] = useState<Record<string, string>>({});
+  const [reExtractLoading, setReExtractLoading] = useState<Record<string, boolean>>({});
+  const [notes, setNotes] = useState<Record<string, string>>({});
 
   // Product autocomplete
   const [productOptions, setProductOptions] = useState<string[]>([]);
@@ -110,7 +113,7 @@ export default function ReviewQueue() {
     }, 300);
   }, [isSuperAdmin, tenantFilter, selectedTenantId]);
 
-  const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
+  const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'info' }>({
     open: false,
     message: '',
     severity: 'success',
@@ -395,6 +398,52 @@ export default function ReviewQueue() {
       }
       return { ...prev, [itemId]: current };
     });
+  };
+
+  const addTableRow = (itemId: string, tableIdx: number) => {
+    setEditedTables(prev => {
+      const tables = prev[itemId] ? prev[itemId].map(t => ({ ...t, rows: t.rows.map(r => [...r]) })) : parseTables(itemId);
+      if (tables[tableIdx]) {
+        const colCount = tables[tableIdx].headers.length;
+        const newRow = new Array(colCount).fill('');
+        tables[tableIdx] = {
+          ...tables[tableIdx],
+          rows: [...tables[tableIdx].rows, newRow],
+        };
+      }
+      return { ...prev, [itemId]: tables };
+    });
+  };
+
+  const addTableColumn = (itemId: string, tableIdx: number) => {
+    setEditedTables(prev => {
+      const tables = prev[itemId] ? prev[itemId].map(t => ({ ...t, rows: t.rows.map(r => [...r]) })) : parseTables(itemId);
+      if (tables[tableIdx]) {
+        tables[tableIdx] = {
+          ...tables[tableIdx],
+          headers: [...tables[tableIdx].headers, 'New Column'],
+          rows: tables[tableIdx].rows.map(row => [...row, '']),
+        };
+      }
+      return { ...prev, [itemId]: tables };
+    });
+  };
+
+  const handleReExtract = async (itemId: string) => {
+    setReExtractLoading(prev => ({ ...prev, [itemId]: true }));
+    try {
+      const body: Record<string, any> = { processing_status: 'queued' };
+      if (reExtractText[itemId]?.trim()) {
+        body.extracted_text = reExtractText[itemId].trim();
+      }
+      await api.queue.postResults(itemId, body);
+      setSnackbar({ open: true, message: 'Item re-queued for processing', severity: 'info' });
+      loadQueue();
+    } catch {
+      setSnackbar({ open: true, message: 'Re-extract failed', severity: 'error' });
+    } finally {
+      setReExtractLoading(prev => ({ ...prev, [itemId]: false }));
+    }
   };
 
   const getTableCell = (itemId: string, tableIdx: number, rowIdx: number, cellIdx: number): string => {
@@ -860,6 +909,24 @@ export default function ReviewQueue() {
                                         </TableBody>
                                       </Table>
                                     </TableContainer>
+                                    <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
+                                      <Button
+                                        size="small"
+                                        variant="outlined"
+                                        onClick={() => addTableRow(item.id, tableIndex)}
+                                        disabled={item.status !== 'pending' || excludedTables[item.id]?.has(tableIndex)}
+                                      >
+                                        + Add Row
+                                      </Button>
+                                      <Button
+                                        size="small"
+                                        variant="outlined"
+                                        onClick={() => addTableColumn(item.id, tableIndex)}
+                                        disabled={item.status !== 'pending' || excludedTables[item.id]?.has(tableIndex)}
+                                      >
+                                        + Add Column
+                                      </Button>
+                                    </Box>
                                   </AccordionDetails>
                                 </Accordion>
                               ))}
@@ -868,6 +935,53 @@ export default function ReviewQueue() {
                         })()}
                       </Box>
                     </Box>
+
+                    {/* Re-extract from text */}
+                    {item.status === 'pending' && (
+                      <Accordion variant="outlined" sx={{ mt: 2 }}>
+                        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                          <Typography variant="body2">Re-extract from text</Typography>
+                        </AccordionSummary>
+                        <AccordionDetails>
+                          <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
+                            Paste or type the document text below and the AI will re-parse fields and tables from it.
+                          </Typography>
+                          <TextField
+                            multiline
+                            rows={6}
+                            fullWidth
+                            placeholder="Paste document text here..."
+                            value={reExtractText[item.id] || ''}
+                            onChange={(e) => setReExtractText(prev => ({ ...prev, [item.id]: e.target.value }))}
+                            size="small"
+                            sx={{ mb: 1 }}
+                          />
+                          <Button
+                            variant="contained"
+                            size="small"
+                            disabled={!reExtractText[item.id]?.trim() || reExtractLoading[item.id]}
+                            onClick={() => handleReExtract(item.id)}
+                            startIcon={reExtractLoading[item.id] ? <CircularProgress size={16} /> : undefined}
+                          >
+                            {reExtractLoading[item.id] ? 'Extracting...' : 'Re-extract'}
+                          </Button>
+                        </AccordionDetails>
+                      </Accordion>
+                    )}
+
+                    {/* Notes */}
+                    <TextField
+                      label="Notes"
+                      multiline
+                      rows={2}
+                      fullWidth
+                      size="small"
+                      value={notes[item.id] || ''}
+                      onChange={(e) => setNotes(prev => ({ ...prev, [item.id]: e.target.value }))}
+                      disabled={item.status !== 'pending'}
+                      placeholder="Add notes about this document..."
+                      sx={{ mt: 2 }}
+                    />
 
                     {/* Action buttons */}
                     {item.status === 'pending' && (
