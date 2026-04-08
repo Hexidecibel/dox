@@ -27,7 +27,6 @@ import {
   Menu as MenuIcon,
   Dashboard as DashboardIcon,
   Description as DocsIcon,
-  CloudUpload as UploadIcon,
   Search as SearchIcon,
   People as UsersIcon,
   Business as TenantsIcon,
@@ -37,7 +36,6 @@ import {
   FilterList as FilterIcon,
   Inventory as ProductsIcon,
   Category as DocTypesIcon,
-  FolderCopy as BundlesIcon,
   History as HistoryIcon,
   FileUpload as ImportIcon,
   RateReview as RateReviewIcon,
@@ -58,9 +56,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { label: 'Dashboard', path: '/dashboard', icon: <DashboardIcon /> },
   { label: 'Documents', path: '/documents', icon: <DocsIcon /> },
-  { label: 'Upload', path: '/documents?upload=true', icon: <UploadIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Search', path: '/search', icon: <SearchIcon /> },
-  { label: 'Bundles', path: '/bundles', icon: <BundlesIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Import', path: '/import', icon: <ImportIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Review Queue', path: '/review', icon: <RateReviewIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Ingest History', path: '/ingest-history', icon: <HistoryIcon />, roles: ['super_admin', 'org_admin', 'user'] },
@@ -100,8 +96,6 @@ export function Layout() {
       const [pathname, query] = path.split('?');
       return location.pathname === pathname && location.search.includes(query);
     }
-    // For plain paths, also ensure we're not matching a query-param variant
-    if (location.pathname === path && location.search.includes('upload=true')) return false;
     return location.pathname === path || location.pathname.startsWith(path + '/');
   };
 
