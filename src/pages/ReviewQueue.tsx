@@ -47,7 +47,7 @@ import {
 import PdfViewer from '../components/PdfViewer';
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { api } from '../lib/api';
-import type { ProcessingQueueItem, ApiDocumentType, TemplateFieldMapping } from '../lib/types';
+import type { ProcessingQueueItem, ApiDocumentType, TemplateFieldMapping, ExtractedTable } from '../lib/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 
@@ -80,6 +80,8 @@ export default function ReviewQueue() {
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
   const [dismissedFields, setDismissedFields] = useState<Record<string, Set<string>>>({});
+  const [excludedTables, setExcludedTables] = useState<Record<string, Set<number>>>({});
+  const [editedTables, setEditedTables] = useState<Record<string, ExtractedTable[]>>({});
   const blobUrlsRef = useRef<Record<string, string>>({});
 
   const [showAutoIngestedOnly, setShowAutoIngestedOnly] = useState(false);
@@ -216,6 +218,18 @@ export default function ReviewQueue() {
       }
       setEditedFields(fields);
       setProductNames(names);
+      // Initialize edited tables
+      const tables: Record<string, ExtractedTable[]> = {};
+      for (const item of (result.items || [])) {
+        if (item.tables) {
+          try {
+            tables[item.id] = typeof item.tables === 'string' ? JSON.parse(item.tables) : item.tables;
+          } catch {
+            tables[item.id] = [];
+          }
+        }
+      }
+      setEditedTables(tables);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load queue');
     } finally {
@@ -342,6 +356,49 @@ export default function ReviewQueue() {
       const current = new Set(prev[itemId] || []);
       current.delete(fieldKey);
       return { ...prev, [itemId]: current };
+    });
+  };
+
+  const parseTables = (itemId: string): ExtractedTable[] => {
+    const item = items.find(i => i.id === itemId);
+    if (!item?.tables) return [];
+    try {
+      return typeof item.tables === 'string' ? JSON.parse(item.tables) : item.tables;
+    } catch { return []; }
+  };
+
+  const toggleTable = (itemId: string, tableIndex: number) => {
+    setExcludedTables(prev => {
+      const current = new Set(prev[itemId] || []);
+      if (current.has(tableIndex)) {
+        current.delete(tableIndex);
+      } else {
+        current.add(tableIndex);
+      }
+      return { ...prev, [itemId]: current };
+    });
+  };
+
+  const getTableCell = (itemId: string, tableIdx: number, rowIdx: number, cellIdx: number): string => {
+    const edited = editedTables[itemId];
+    if (edited && edited[tableIdx]?.rows[rowIdx]?.[cellIdx] !== undefined) {
+      return edited[tableIdx].rows[rowIdx][cellIdx];
+    }
+    const item = items.find(i => i.id === itemId);
+    if (!item?.tables) return '';
+    try {
+      const tables = typeof item.tables === 'string' ? JSON.parse(item.tables) : item.tables;
+      return tables[tableIdx]?.rows[rowIdx]?.[cellIdx] || '';
+    } catch { return ''; }
+  };
+
+  const updateTableCell = (itemId: string, tableIdx: number, rowIdx: number, cellIdx: number, value: string) => {
+    setEditedTables(prev => {
+      const itemTables = prev[itemId] ? prev[itemId].map(t => ({ ...t, rows: t.rows.map(r => [...r]) })) : parseTables(itemId);
+      if (itemTables[tableIdx]) {
+        itemTables[tableIdx].rows[rowIdx][cellIdx] = value;
+      }
+      return { ...prev, [itemId]: itemTables };
     });
   };
 
@@ -686,6 +743,77 @@ export default function ReviewQueue() {
                             )}
                           />
                         </Box>
+
+                        {/* Tables Section */}
+                        {(() => {
+                          const tables = editedTables[item.id] || parseTables(item.id);
+                          return tables.length > 0 ? (
+                            <Box sx={{ mt: 2 }}>
+                              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                                Extracted Tables ({tables.length})
+                              </Typography>
+                              {tables.map((table, tableIndex) => (
+                                <Accordion key={tableIndex} variant="outlined" sx={{ mb: 1 }}>
+                                  <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                                      <Typography variant="body2" fontWeight={600}>
+                                        {table.name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                      </Typography>
+                                      <Chip label={`${table.rows.length} rows`} size="small" />
+                                      <Box sx={{ flex: 1 }} />
+                                      <Switch
+                                        size="small"
+                                        checked={!excludedTables[item.id]?.has(tableIndex)}
+                                        onChange={(e) => {
+                                          e.stopPropagation();
+                                          toggleTable(item.id, tableIndex);
+                                        }}
+                                        onClick={(e) => e.stopPropagation()}
+                                      />
+                                      <Typography variant="caption" color="text.secondary">
+                                        {excludedTables[item.id]?.has(tableIndex) ? 'Excluded' : 'Included'}
+                                      </Typography>
+                                    </Box>
+                                  </AccordionSummary>
+                                  <AccordionDetails>
+                                    <TableContainer>
+                                      <Table size="small">
+                                        <TableHead>
+                                          <TableRow>
+                                            {table.headers.map((h, i) => (
+                                              <TableCell key={i} sx={{ fontWeight: 600 }}>
+                                                {h.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                              </TableCell>
+                                            ))}
+                                          </TableRow>
+                                        </TableHead>
+                                        <TableBody>
+                                          {table.rows.map((row, rowIdx) => (
+                                            <TableRow key={rowIdx}>
+                                              {row.map((_cell, cellIdx) => (
+                                                <TableCell key={cellIdx}>
+                                                  <TextField
+                                                    value={getTableCell(item.id, tableIndex, rowIdx, cellIdx)}
+                                                    onChange={(e) => updateTableCell(item.id, tableIndex, rowIdx, cellIdx, e.target.value)}
+                                                    size="small"
+                                                    variant="standard"
+                                                    fullWidth
+                                                    disabled={item.status !== 'pending' || excludedTables[item.id]?.has(tableIndex)}
+                                                    InputProps={{ disableUnderline: item.status !== 'pending' }}
+                                                  />
+                                                </TableCell>
+                                              ))}
+                                            </TableRow>
+                                          ))}
+                                        </TableBody>
+                                      </Table>
+                                    </TableContainer>
+                                  </AccordionDetails>
+                                </Accordion>
+                              ))}
+                            </Box>
+                          ) : null;
+                        })()}
                       </Box>
                     </Box>
 
