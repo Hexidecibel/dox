@@ -40,12 +40,13 @@ FIELD EXTRACTION RULES:
 3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signatures, titles, disclaimers, individual test values (those go in tables).
 
 TABLE EXTRACTION RULES:
-1. COA test results → table named "test_results" with columns: ["test", "specification", "result", "units", "pass_fail"]
-   - "specification" = acceptable range or limit (e.g., "<10", "3.0-5.0", ">80%")
-   - Preserve units (CFU/mL, %, mg/kg, etc.)
-   - pass_fail = "Pass", "Fail", "Conforms", or null if not stated
-2. Line items (invoices, BOLs) → table named "line_items"
-3. Multiple distinct tables → separate entries for each
+1. Extract ALL tabular data found in the document. Preserve every column present — do not drop columns.
+2. Name tables descriptively: "test_results", "line_items", "physical_properties", "microbiological_analysis", "sensory_analysis", etc.
+3. Use the column headers exactly as they appear in the document. If no headers exist, infer them from context.
+4. For COA test results, common columns include: test, test_method, unit_of_measure, specification, result, units, pass_fail — but extract whatever columns are present.
+5. Preserve units (CFU/mL, %, mg/kg, etc.) and pass/fail values as written.
+6. Multiple distinct tables in the document → separate entries for each (e.g., physical tests and microbiological tests should be separate tables).
+7. Keep row order as it appears in the document.
 
 OCR / SCANNED DOCUMENT HANDLING:
 - If text appears garbled, do your best but set _confidence to "low"
@@ -89,12 +90,12 @@ Output:
   },
   "tables": [{
     "name": "test_results",
-    "headers": ["test", "specification", "result", "units", "pass_fail"],
+    "headers": ["test", "test_method", "specification", "result", "units", "pass_fail"],
     "rows": [
-      ["Fat Content", ">80%", "81.2", "%", "Pass"],
-      ["Moisture", "<16%", "15.4", "%", "Pass"],
-      ["Coliform", "<10", "<1", "CFU/g", "Pass"],
-      ["Standard Plate Count", "<20,000", "4,500", "CFU/g", "Pass"]
+      ["Fat Content", "SMEDP 15.122", ">80%", "81.2", "%", "Pass"],
+      ["Moisture", "SMEDP 15.122", "<16%", "15.4", "%", "Pass"],
+      ["Coliform", "AOAC 989.10", "<10", "<1", "CFU/g", "Pass"],
+      ["Standard Plate Count", "AOAC 989.10", "<20,000", "4,500", "CFU/g", "Pass"]
     ]
   }],
   "products": ["Grade AA Butter 68#"],
