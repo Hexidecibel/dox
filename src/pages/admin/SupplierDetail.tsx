@@ -95,13 +95,14 @@ export function SupplierDetail() {
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [documentsTotal, setDocumentsTotal] = useState(0);
 
-  const parseAliases = (aliases: string | null): string[] => {
+  const parseAliases = (aliases: string | string[] | null): string[] => {
     if (!aliases) return [];
+    if (Array.isArray(aliases)) return aliases;
     try {
       const parsed = JSON.parse(aliases);
       return Array.isArray(parsed) ? parsed : [];
     } catch {
-      return aliases.split(',').map(a => a.trim()).filter(Boolean);
+      return String(aliases).split(',').map(a => a.trim()).filter(Boolean);
     }
   };
 
