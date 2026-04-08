@@ -222,6 +222,39 @@ function detectAndRotateImage(imagePath) {
   }
 }
 
+async function fetchExtractionExamples(tenantId, documentTypeId, supplier) {
+  const params = new URLSearchParams();
+  if (documentTypeId) params.set('document_type_id', documentTypeId);
+  if (tenantId) params.set('tenant_id', tenantId);
+
+  try {
+    const res = await fetch(
+      `${DOX_API_URL}/api/extraction-examples?${params.toString()}&limit=5`,
+      { headers }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    let examples = data.examples || [];
+
+    // Prefer examples from same supplier
+    if (supplier) {
+      const supplierExamples = examples.filter(e =>
+        e.supplier && e.supplier.toLowerCase().includes(supplier.toLowerCase())
+      );
+      if (supplierExamples.length > 0) {
+        examples = supplierExamples;
+      }
+    }
+
+    // Return top 3 by score (highest corrections first)
+    return examples
+      .sort((a, b) => (b.score || 0) - (a.score || 0))
+      .slice(0, 3);
+  } catch {
+    return [];
+  }
+}
+
 async function processItem(item) {
   const startTime = Date.now();
   console.log(`Processing ${item.file_name} (${item.id})...`);
@@ -331,6 +364,24 @@ async function processItem(item) {
     // Trim text for LLM — 6K covers key fields on first 1-2 pages
     const llmText = text.substring(0, 6000);
 
+    // Try to guess supplier from filename for better example matching
+    let guessedSupplier = null;
+    const supplierMatch = item.file_name.match(/^[\(\d\)\s]*([A-Za-z][A-Za-z\s&.]+?)[\s-]+(COA|BOL|SDS|cert|lot|spec)/i);
+    if (supplierMatch) {
+      guessedSupplier = supplierMatch[1].trim();
+    }
+
+    // Fetch few-shot examples for this tenant/doctype
+    let examples = [];
+    try {
+      examples = await fetchExtractionExamples(item.tenant_id, item.document_type_id, guessedSupplier);
+      if (examples.length > 0) {
+        console.log(`  Using ${examples.length} few-shot example(s) for prompt`);
+      }
+    } catch {
+      // Non-critical — continue without examples
+    }
+
     // Call Qwen (with retry + 5 min timeout for cold starts)
     let qwenData;
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -350,7 +401,7 @@ async function processItem(item) {
             temperature: 0,
             max_tokens: 4096,
             messages: [
-              { role: 'system', content: buildPrompt() },
+              { role: 'system', content: buildPrompt(examples) },
               {
                 role: 'user',
                 content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
@@ -636,8 +687,25 @@ Output:
   "document_type": "Certificate of Analysis"
 }`;
 
-function buildPrompt() {
-  return BASE_PROMPT + '\n\n' + DAIRY_FOOD_INDUSTRY_PROMPT;
+function buildPrompt(examples = []) {
+  let prompt = BASE_PROMPT + '\n\n' + DAIRY_FOOD_INDUSTRY_PROMPT;
+
+  if (examples.length > 0) {
+    prompt += '\n\nPREVIOUS CORRECTIONS FOR THIS SUPPLIER/DOCUMENT TYPE:';
+    prompt += '\nLearn from these past corrections. The "corrected" output is what the human verified as correct.\n';
+
+    for (const ex of examples) {
+      const inputSnippet = (ex.input_text || '').substring(0, 500);
+      const corrected = ex.corrected_output || ex.ai_output || '{}';
+
+      prompt += `\nExample input (truncated):\n${inputSnippet}\n`;
+      prompt += `Corrected extraction:\n${corrected}\n`;
+    }
+
+    prompt += '\nUse these examples to guide your extraction. Match the field names and formatting from the corrections.';
+  }
+
+  return prompt;
 }
 
 // === Response parser (same logic as functions/lib/llm.ts) ===
