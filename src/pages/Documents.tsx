@@ -145,13 +145,20 @@ export function Documents() {
   };
 
   const filteredDocs = documents.filter((d) => {
-    if (search) {
+    if (search && !aiParsedQuery) {
       const q = search.toLowerCase();
-      const matchesSearch =
-        d.title.toLowerCase().includes(q) ||
-        d.description?.toLowerCase().includes(q) ||
-        d.category?.toLowerCase().includes(q);
-      if (!matchesSearch) return false;
+      const searchableText = [
+        d.title,
+        d.description,
+        d.category,
+        d.supplierName,
+        d.documentTypeName,
+        ...(d.tags || []),
+        d.primaryMetadata ? JSON.stringify(d.primaryMetadata) : '',
+        d.extendedMetadata ? JSON.stringify(d.extendedMetadata) : '',
+      ].filter(Boolean).join(' ').toLowerCase();
+
+      if (!searchableText.includes(q)) return false;
     }
     if (docTypeFilter && d.documentTypeId !== docTypeFilter) return false;
     return true;
