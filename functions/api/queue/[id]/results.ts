@@ -180,12 +180,56 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
             const aiFields = body.ai_fields ? JSON.parse(body.ai_fields) : {};
             const confidenceScore = body.confidence_score || 0;
 
+            // Fuzzy field name matching for OCR typos (e.g., log_number vs lot_number)
+            const levenshtein = (a: string, b: string): number => {
+              const m = a.length, n = b.length;
+              if (m === 0) return n;
+              if (n === 0) return m;
+              const d: number[][] = Array.from({ length: m + 1 }, (_, i) =>
+                Array.from({ length: n + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
+              );
+              for (let i = 1; i <= m; i++) {
+                for (let j = 1; j <= n; j++) {
+                  d[i][j] = a[i - 1] === b[j - 1]
+                    ? d[i - 1][j - 1]
+                    : 1 + Math.min(d[i - 1][j], d[i][j - 1], d[i - 1][j - 1]);
+                }
+              }
+              return d[m][n];
+            };
+
+            const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+            const fuzzyFindValue = (fieldKey: string, aliases: string[]): unknown => {
+              // 1. Exact match on field_key
+              if (aiFields[fieldKey] != null) return aiFields[fieldKey];
+              // 2. Exact match on aliases
+              for (const alias of aliases) {
+                if (aiFields[alias] != null) return aiFields[alias];
+              }
+              // 3. Fuzzy match: find AI field keys within edit distance threshold
+              const targets = [fieldKey, ...aliases];
+              const aiKeys = Object.keys(aiFields);
+              for (const target of targets) {
+                const normTarget = normalize(target);
+                for (const aiKey of aiKeys) {
+                  const normAiKey = normalize(aiKey);
+                  const dist = levenshtein(normTarget, normAiKey);
+                  // Allow distance 1 for short keys (<=6 normalized chars), distance 2 for longer
+                  const threshold = normTarget.length <= 6 ? 1 : 2;
+                  if (dist > 0 && dist <= threshold) {
+                    return aiFields[aiKey];
+                  }
+                }
+              }
+              return null;
+            };
+
             // Check all required fields are present
             const requiredFieldsMet = fieldMappings
               .filter(f => f.required)
               .every(f => {
-                const value = aiFields[f.field_key] ||
-                  (f.aliases || []).map((a: string) => aiFields[a]).find((v: unknown) => v != null);
+                const value = fuzzyFindValue(f.field_key, f.aliases || []);
                 return value != null && String(value).trim() !== '';
               });
 
@@ -201,8 +245,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
               // Build fields from template mappings
               const mappedFields: Record<string, string> = {};
               for (const mapping of fieldMappings) {
-                const value = aiFields[mapping.field_key] ||
-                  (mapping.aliases || []).map((a: string) => aiFields[a]).find((v: unknown) => v != null);
+                const value = fuzzyFindValue(mapping.field_key, mapping.aliases || []);
                 if (value != null) {
                   mappedFields[mapping.field_key] = String(value);
                 }

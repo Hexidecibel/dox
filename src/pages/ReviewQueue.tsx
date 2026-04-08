@@ -37,6 +37,8 @@ import {
   Divider,
   IconButton,
   Tooltip,
+  Tab,
+  Tabs,
 } from '@mui/material';
 import {
   ExpandMore as ExpandMoreIcon,
@@ -45,6 +47,8 @@ import {
   InsertDriveFile as FileIcon,
   Close as CloseIcon,
   RotateRight as RotateIcon,
+  Add as AddIcon,
+  Edit as EditIcon,
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
 import { AUTH_TOKEN_KEY } from '../lib/types';
@@ -82,10 +86,31 @@ export default function ReviewQueue() {
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
   const [dismissedFields, setDismissedFields] = useState<Record<string, Set<string>>>({});
+  const [fieldRenames, setFieldRenames] = useState<Record<string, Record<string, string>>>({});
+  // {queueItemId: {currentKey: originalAiKey}}  — tracks what was renamed from what
+  const [editingLabel, setEditingLabel] = useState<{itemId: string; fieldKey: string} | null>(null);
+  const [editingLabelValue, setEditingLabelValue] = useState('');
+  const [editingHeader, setEditingHeader] = useState<{itemId: string; tableIdx: number; colIdx: number} | null>(null);
+  const [editingHeaderValue, setEditingHeaderValue] = useState('');
   const [excludedTables, setExcludedTables] = useState<Record<string, Set<number>>>({});
   const [excludedColumns, setExcludedColumns] = useState<Record<string, Record<number, Set<number>>>>({});
   const [editedTables, setEditedTables] = useState<Record<string, ExtractedTable[]>>({});
   const blobUrlsRef = useRef<Record<string, string>>({});
+
+  // Multi-product support
+  const SHARED_FIELD_KEYS = new Set([
+    'supplier_name', 'customer_name', 'po_number', 'order_number',
+    'ship_date', 'grade', 'plant_number',
+  ]);
+
+  interface ProductState {
+    product_name: string;
+    fields: Record<string, string>;
+    tableIndices: number[];  // indices into editedTables[itemId]
+  }
+
+  const [multiProducts, setMultiProducts] = useState<Record<string, ProductState[]>>({});
+  const [activeProductTab, setActiveProductTab] = useState<Record<string, number>>({});
 
   const [showAutoIngestedOnly, setShowAutoIngestedOnly] = useState(false);
   const [reExtractText, setReExtractText] = useState<Record<string, string>>({});
@@ -237,6 +262,53 @@ export default function ReviewQueue() {
         }
       }
       setEditedTables(tables);
+
+      // Detect multi-product items
+      const mp: Record<string, ProductState[]> = {};
+      for (const item of (result.items || [])) {
+        const prodNames = (() => {
+          try {
+            const p = item.product_names ? JSON.parse(item.product_names) : [];
+            return Array.isArray(p) ? p : [];
+          } catch { return []; }
+        })();
+
+        const itemTables = tables[item.id] || [];
+
+        // Multi-product: more than 1 product name AND more than 1 table
+        if (prodNames.length > 1 && itemTables.length > 1) {
+          const itemFields = fields[item.id] || {};
+
+          // Split fields into shared vs per-product
+          const sharedFields: Record<string, string> = {};
+          const perProductFields: Record<string, string> = {};
+          for (const [k, v] of Object.entries(itemFields)) {
+            if (SHARED_FIELD_KEYS.has(k)) {
+              sharedFields[k] = v;
+            } else {
+              perProductFields[k] = v;
+            }
+          }
+
+          // Override editedFields for this item to only contain shared fields
+          fields[item.id] = sharedFields;
+
+          // Create product states — distribute tables evenly
+          mp[item.id] = prodNames.map((name: string, i: number) => ({
+            product_name: name,
+            fields: i === 0 ? { ...perProductFields } : {
+              product_name: name,
+              lot_number: '',
+              code_date: '',
+              expiration_date: '',
+            },
+            tableIndices: itemTables.length >= prodNames.length
+              ? [i]  // 1:1 table-to-product mapping
+              : (i === 0 ? itemTables.map((_: any, idx: number) => idx) : []),  // all to first if not enough tables
+          }));
+        }
+      }
+      setMultiProducts(mp);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load queue');
     } finally {
@@ -288,19 +360,36 @@ export default function ReviewQueue() {
         }
       }
 
-      await api.queue.approve(id, {
-        fields: primaryFields,
-        product_name: productName || undefined,
-      });
-      setSnackbar({ open: true, message: 'Item approved and imported', severity: 'success' });
+      if (isMultiProduct(id)) {
+        // Multi-product approval
+        const products = multiProducts[id] || [];
+        const tables = editedTables[id] || parseTables(id);
+        await api.queue.approve(id, {
+          shared_fields: primaryFields,
+          products: products.map(p => ({
+            product_name: p.product_name,
+            fields: p.fields,
+            tables: p.tableIndices.map(i => tables[i]).filter(Boolean),
+          })),
+        });
+        setSnackbar({ open: true, message: `${products.length} documents created from multi-product approval`, severity: 'success' });
+      } else {
+        await api.queue.approve(id, {
+          fields: primaryFields,
+          product_name: productName || undefined,
+        });
+        setSnackbar({ open: true, message: 'Item approved and imported', severity: 'success' });
+      }
 
       // Prompt to save template if no template existed
       if (item && !item.template_id && item.supplier && item.document_type_id) {
+        const itemRenames = fieldRenames[item.id] || {};
         const mappings: TemplateFieldMapping[] = Object.keys(fields).map((key, i) => ({
           field_key: key,
           tier: 'primary' as const,
           display_order: i,
           required: ['lot_number', 'supplier_name', 'product_name'].includes(key),
+          ...(itemRenames[key] ? { aliases: [itemRenames[key]] } : {}),
         }));
 
         const docType = documentTypes.find((dt: any) => dt.id === item.document_type_id);
@@ -363,6 +452,190 @@ export default function ReviewQueue() {
       const current = new Set(prev[itemId] || []);
       current.delete(fieldKey);
       return { ...prev, [itemId]: current };
+    });
+  };
+
+  // Convert display label to snake_case key
+  function labelToKey(label: string): string {
+    return label.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  }
+
+  const renameField = (itemId: string, oldKey: string, newLabel: string) => {
+    const newKey = labelToKey(newLabel);
+    if (!newKey || newKey === oldKey) return;
+
+    const currentFields = editedFields[itemId] || {};
+    if (newKey in currentFields && newKey !== oldKey) {
+      setSnackbar({ open: true, message: 'A field with this name already exists', severity: 'error' });
+      return;
+    }
+
+    // Update editedFields: remove old key, add new key with same value
+    setEditedFields(prev => {
+      const itemFields = { ...prev[itemId] };
+      const value = itemFields[oldKey];
+      delete itemFields[oldKey];
+      itemFields[newKey] = value;
+      return { ...prev, [itemId]: itemFields };
+    });
+
+    // Track the rename for template alias generation
+    setFieldRenames(prev => {
+      const itemRenames = { ...(prev[itemId] || {}) };
+      // If this key was already renamed from something, preserve the original
+      const originalKey = itemRenames[oldKey] || oldKey;
+      delete itemRenames[oldKey];
+      if (originalKey !== newKey) {
+        itemRenames[newKey] = originalKey;
+      }
+      return { ...prev, [itemId]: itemRenames };
+    });
+
+    // Update dismissedFields if applicable
+    setDismissedFields(prev => {
+      const set = prev[itemId];
+      if (set?.has(oldKey)) {
+        const newSet = new Set(set);
+        newSet.delete(oldKey);
+        newSet.add(newKey);
+        return { ...prev, [itemId]: newSet };
+      }
+      return prev;
+    });
+  };
+
+  const addField = (itemId: string) => {
+    const existing = editedFields[itemId] || {};
+    let counter = 1;
+    let key = `new_field_${counter}`;
+    while (key in existing) {
+      counter++;
+      key = `new_field_${counter}`;
+    }
+    setEditedFields(prev => ({
+      ...prev,
+      [itemId]: { ...(prev[itemId] || {}), [key]: '' },
+    }));
+    // Immediately start editing the label
+    setEditingLabel({ itemId, fieldKey: key });
+    setEditingLabelValue(key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+  };
+
+  // Multi-product helpers
+  const isMultiProduct = (itemId: string) => (multiProducts[itemId]?.length || 0) > 1;
+
+  const updateMultiProductField = (itemId: string, productIdx: number, fieldName: string, value: string) => {
+    setMultiProducts(prev => {
+      const products = [...(prev[itemId] || [])];
+      if (products[productIdx]) {
+        products[productIdx] = {
+          ...products[productIdx],
+          fields: { ...products[productIdx].fields, [fieldName]: value },
+        };
+      }
+      return { ...prev, [itemId]: products };
+    });
+  };
+
+  const updateMultiProductName = (itemId: string, productIdx: number, value: string) => {
+    setMultiProducts(prev => {
+      const products = [...(prev[itemId] || [])];
+      if (products[productIdx]) {
+        products[productIdx] = { ...products[productIdx], product_name: value };
+      }
+      return { ...prev, [itemId]: products };
+    });
+  };
+
+  const addProduct = (itemId: string) => {
+    setMultiProducts(prev => {
+      const products = [...(prev[itemId] || [])];
+      products.push({
+        product_name: '',
+        fields: { product_name: '', lot_number: '', code_date: '', expiration_date: '' },
+        tableIndices: [],
+      });
+      return { ...prev, [itemId]: products };
+    });
+  };
+
+  const removeProduct = (itemId: string, productIdx: number) => {
+    setMultiProducts(prev => {
+      const products = (prev[itemId] || []).filter((_, i) => i !== productIdx);
+      return { ...prev, [itemId]: products };
+    });
+    // Reset tab if needed
+    setActiveProductTab(prev => {
+      const current = prev[itemId] || 0;
+      if (current >= (multiProducts[itemId]?.length || 1) - 1) {
+        return { ...prev, [itemId]: Math.max(0, current - 1) };
+      }
+      return prev;
+    });
+  };
+
+  const assignTableToProduct = (itemId: string, tableIdx: number, productIdx: number) => {
+    setMultiProducts(prev => {
+      const products = (prev[itemId] || []).map((p, i) => ({
+        ...p,
+        tableIndices: i === productIdx
+          ? [...new Set([...p.tableIndices, tableIdx])]
+          : p.tableIndices.filter(t => t !== tableIdx),
+      }));
+      return { ...prev, [itemId]: products };
+    });
+  };
+
+  const addProductField = (itemId: string, productIdx: number) => {
+    setMultiProducts(prev => {
+      const products = [...(prev[itemId] || [])];
+      if (products[productIdx]) {
+        const existing = products[productIdx].fields;
+        let counter = 1;
+        let key = `new_field_${counter}`;
+        while (key in existing) { counter++; key = `new_field_${counter}`; }
+        products[productIdx] = {
+          ...products[productIdx],
+          fields: { ...existing, [key]: '' },
+        };
+      }
+      return { ...prev, [itemId]: products };
+    });
+  };
+
+  const renameProductField = (itemId: string, productIdx: number, oldKey: string, newLabel: string) => {
+    const newKey = labelToKey(newLabel);
+    if (!newKey || newKey === oldKey) return;
+
+    setMultiProducts(prev => {
+      const products = [...(prev[itemId] || [])];
+      if (products[productIdx]) {
+        const fields = { ...products[productIdx].fields };
+        if (newKey in fields && newKey !== oldKey) {
+          setSnackbar({ open: true, message: 'A field with this name already exists', severity: 'error' });
+          return prev;
+        }
+        const value = fields[oldKey];
+        delete fields[oldKey];
+        fields[newKey] = value;
+        products[productIdx] = { ...products[productIdx], fields };
+      }
+      return { ...prev, [itemId]: products };
+    });
+  };
+
+  const updateTableHeader = (itemId: string, tableIdx: number, colIdx: number, newHeader: string) => {
+    setEditedTables(prev => {
+      const tables = prev[itemId]
+        ? prev[itemId].map(t => ({ ...t, headers: [...t.headers], rows: t.rows.map(r => [...r]) }))
+        : parseTables(itemId);
+      if (tables[tableIdx]) {
+        tables[tableIdx] = {
+          ...tables[tableIdx],
+          headers: tables[tableIdx].headers.map((h, i) => i === colIdx ? newHeader : h),
+        };
+      }
+      return { ...prev, [itemId]: tables };
     });
   };
 
@@ -794,20 +1067,297 @@ export default function ReviewQueue() {
                           </Accordion>
                         )}
 
+                        {isMultiProduct(item.id) && (
+                          <Box sx={{ mb: 2 }}>
+                            <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+                              Multi-product document — {multiProducts[item.id]?.length || 0} products detected
+                            </Typography>
+                          </Box>
+                        )}
+
+                        {isMultiProduct(item.id) ? (
+                          <>
+                            {/* Shared fields for multi-product */}
+                            <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Shared Fields</Typography>
+                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mb: 2 }}>
+                              {Object.entries(editedFields[item.id] || {})
+                                .filter(([key]) => !dismissedFields[item.id]?.has(key))
+                                .map(([fieldName, fieldValue]) => (
+                                <Box key={fieldName} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                                  <TextField
+                                    label={fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                    value={fieldValue}
+                                    onChange={(e) => updateField(item.id, fieldName, e.target.value)}
+                                    size="small"
+                                    fullWidth
+                                    disabled={item.status !== 'pending' || isActioning || isProcessing}
+                                  />
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => dismissField(item.id, fieldName)}
+                                    disabled={item.status !== 'pending' || isActioning || isProcessing}
+                                    title="Move to extended metadata"
+                                  >
+                                    <CloseIcon fontSize="small" />
+                                  </IconButton>
+                                </Box>
+                              ))}
+                              {item.status === 'pending' && !isActioning && !isProcessing && (
+                                <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => addField(item.id)} sx={{ alignSelf: 'flex-start' }}>
+                                  Add Shared Field
+                                </Button>
+                              )}
+                            </Box>
+
+                            {/* Product tabs */}
+                            <Divider sx={{ mb: 1 }} />
+                            <Box sx={{ borderBottom: 1, borderColor: 'divider', display: 'flex', alignItems: 'center' }}>
+                              <Tabs
+                                value={activeProductTab[item.id] || 0}
+                                onChange={(_, v) => setActiveProductTab(prev => ({ ...prev, [item.id]: v }))}
+                                variant="scrollable"
+                                scrollButtons="auto"
+                                sx={{ flex: 1 }}
+                              >
+                                {(multiProducts[item.id] || []).map((p, i) => (
+                                  <Tab key={i} label={p.product_name || `Product ${i + 1}`} />
+                                ))}
+                              </Tabs>
+                              {item.status === 'pending' && (
+                                <Button size="small" onClick={() => addProduct(item.id)} sx={{ ml: 1 }}>
+                                  + Product
+                                </Button>
+                              )}
+                            </Box>
+
+                            {/* Active product content */}
+                            {(() => {
+                              const prodIdx = activeProductTab[item.id] || 0;
+                              const prod = multiProducts[item.id]?.[prodIdx];
+                              if (!prod) return null;
+                              const allTables = editedTables[item.id] || parseTables(item.id);
+                              return (
+                                <Box sx={{ pt: 2 }}>
+                                  {/* Product name */}
+                                  <Autocomplete
+                                    freeSolo
+                                    options={productOptions}
+                                    value={prod.product_name}
+                                    onInputChange={(_, value) => {
+                                      updateMultiProductName(item.id, prodIdx, value);
+                                      searchProducts(value);
+                                    }}
+                                    onChange={(_, value) => updateMultiProductName(item.id, prodIdx, value || '')}
+                                    disabled={item.status !== 'pending' || isActioning || isProcessing}
+                                    renderInput={(params) => (
+                                      <TextField {...params} label="Product Name" size="small" fullWidth sx={{ mb: 1.5 }} />
+                                    )}
+                                  />
+
+                                  {/* Product-specific fields */}
+                                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mb: 2 }}>
+                                    {Object.entries(prod.fields).map(([fieldName, fieldValue]) => (
+                                      <Box key={fieldName} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                                        <Box sx={{ flex: 1 }}>
+                                          {editingLabel?.itemId === item.id && editingLabel?.fieldKey === `product_${prodIdx}_${fieldName}` ? (
+                                            <TextField
+                                              value={editingLabelValue}
+                                              onChange={(e) => setEditingLabelValue(e.target.value)}
+                                              onBlur={() => {
+                                                renameProductField(item.id, prodIdx, fieldName, editingLabelValue);
+                                                setEditingLabel(null);
+                                              }}
+                                              onKeyDown={(e) => {
+                                                if (e.key === 'Enter') { renameProductField(item.id, prodIdx, fieldName, editingLabelValue); setEditingLabel(null); }
+                                                else if (e.key === 'Escape') setEditingLabel(null);
+                                              }}
+                                              size="small" fullWidth autoFocus label="Field name" sx={{ mb: 0.5 }}
+                                            />
+                                          ) : (
+                                            <TextField
+                                              label={
+                                                <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, cursor: item.status === 'pending' ? 'pointer' : 'default' }}
+                                                  onClick={(e) => {
+                                                    if (item.status !== 'pending') return;
+                                                    e.preventDefault(); e.stopPropagation();
+                                                    setEditingLabel({ itemId: item.id, fieldKey: `product_${prodIdx}_${fieldName}` });
+                                                    setEditingLabelValue(fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+                                                  }}
+                                                >
+                                                  {fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                                  {item.status === 'pending' && <EditIcon sx={{ fontSize: 12, opacity: 0.5 }} />}
+                                                </Box>
+                                              }
+                                              value={fieldValue}
+                                              onChange={(e) => updateMultiProductField(item.id, prodIdx, fieldName, e.target.value)}
+                                              size="small" fullWidth
+                                              disabled={item.status !== 'pending' || isActioning || isProcessing}
+                                            />
+                                          )}
+                                        </Box>
+                                      </Box>
+                                    ))}
+                                    {item.status === 'pending' && (
+                                      <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => addProductField(item.id, prodIdx)} sx={{ alignSelf: 'flex-start' }}>
+                                        Add Field
+                                      </Button>
+                                    )}
+                                  </Box>
+
+                                  {/* Tables assigned to this product */}
+                                  <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                                    Tables ({prod.tableIndices.length})
+                                  </Typography>
+                                  {allTables.length > 0 && (
+                                    <Box sx={{ mb: 1 }}>
+                                      {allTables.map((table, tableIndex) => {
+                                        const assignedToThis = prod.tableIndices.includes(tableIndex);
+                                        if (!assignedToThis) return null;
+                                        return (
+                                          <Accordion key={tableIndex} variant="outlined" sx={{ mb: 1 }}>
+                                            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                                                <Typography variant="body2" fontWeight={600}>
+                                                  {table.name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                                </Typography>
+                                                <Chip label={`${table.rows.length} rows`} size="small" />
+                                                <Box sx={{ flex: 1 }} />
+                                                {item.status === 'pending' && (
+                                                  <FormControl size="small" sx={{ minWidth: 120 }} onClick={(e) => e.stopPropagation()}>
+                                                    <Select
+                                                      value={prodIdx}
+                                                      onChange={(e) => {
+                                                        assignTableToProduct(item.id, tableIndex, e.target.value as number);
+                                                      }}
+                                                      size="small"
+                                                      variant="standard"
+                                                    >
+                                                      {(multiProducts[item.id] || []).map((mp, mi) => (
+                                                        <MenuItem key={mi} value={mi}>
+                                                          {mp.product_name || `Product ${mi + 1}`}
+                                                        </MenuItem>
+                                                      ))}
+                                                    </Select>
+                                                  </FormControl>
+                                                )}
+                                              </Box>
+                                            </AccordionSummary>
+                                            <AccordionDetails>
+                                              <TableContainer>
+                                                <Table size="small">
+                                                  <TableHead>
+                                                    <TableRow>
+                                                      {table.headers.map((h, colIdx) => (
+                                                        <TableCell key={colIdx} sx={{ fontWeight: 600 }}>
+                                                          {h.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                                        </TableCell>
+                                                      ))}
+                                                    </TableRow>
+                                                  </TableHead>
+                                                  <TableBody>
+                                                    {table.rows.map((row, rowIdx) => (
+                                                      <TableRow key={rowIdx}>
+                                                        {row.map((cell, cellIdx) => (
+                                                          <TableCell key={cellIdx}>
+                                                            <TextField
+                                                              value={cell}
+                                                              onChange={(e) => updateTableCell(item.id, tableIndex, rowIdx, cellIdx, e.target.value)}
+                                                              size="small" variant="standard" fullWidth
+                                                              disabled={item.status !== 'pending'}
+                                                              InputProps={{ disableUnderline: item.status !== 'pending' }}
+                                                            />
+                                                          </TableCell>
+                                                        ))}
+                                                      </TableRow>
+                                                    ))}
+                                                  </TableBody>
+                                                </Table>
+                                              </TableContainer>
+                                            </AccordionDetails>
+                                          </Accordion>
+                                        );
+                                      })}
+                                      {/* Show unassigned tables */}
+                                      {allTables.some((_, ti) => !(multiProducts[item.id] || []).some(p => p.tableIndices.includes(ti))) && (
+                                        <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                                          Unassigned tables: {allTables.map((_, ti) => ti).filter(ti => !(multiProducts[item.id] || []).some(p => p.tableIndices.includes(ti))).map(ti => `Table ${ti + 1}`).join(', ')}
+                                          {' — '}assign via the dropdown on each table
+                                        </Typography>
+                                      )}
+                                    </Box>
+                                  )}
+
+                                  {/* Remove product */}
+                                  {item.status === 'pending' && (multiProducts[item.id]?.length || 0) > 1 && (
+                                    <Button
+                                      size="small"
+                                      color="error"
+                                      onClick={() => removeProduct(item.id, prodIdx)}
+                                      sx={{ mt: 1 }}
+                                    >
+                                      Remove This Product
+                                    </Button>
+                                  )}
+                                </Box>
+                              );
+                            })()}
+                          </>
+                        ) : (
+                          <>
                         {/* Editable fields */}
                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
                           {Object.entries(fields)
                             .filter(([key]) => !dismissedFields[item.id]?.has(key))
                             .map(([fieldName, fieldValue]) => (
                             <Box key={fieldName} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                              <TextField
-                                label={fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                                value={fieldValue}
-                                onChange={(e) => updateField(item.id, fieldName, e.target.value)}
-                                size="small"
-                                fullWidth
-                                disabled={item.status !== 'pending' || isActioning || isProcessing}
-                              />
+                              <Box sx={{ flex: 1 }}>
+                                {editingLabel?.itemId === item.id && editingLabel?.fieldKey === fieldName ? (
+                                  <TextField
+                                    value={editingLabelValue}
+                                    onChange={(e) => setEditingLabelValue(e.target.value)}
+                                    onBlur={() => {
+                                      renameField(item.id, fieldName, editingLabelValue);
+                                      setEditingLabel(null);
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        renameField(item.id, fieldName, editingLabelValue);
+                                        setEditingLabel(null);
+                                      } else if (e.key === 'Escape') {
+                                        setEditingLabel(null);
+                                      }
+                                    }}
+                                    size="small"
+                                    fullWidth
+                                    autoFocus
+                                    variant="outlined"
+                                    label="Field name"
+                                    sx={{ mb: 0.5 }}
+                                  />
+                                ) : (
+                                  <TextField
+                                    label={
+                                      <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, cursor: item.status === 'pending' ? 'pointer' : 'default' }}
+                                        onClick={(e) => {
+                                          if (item.status !== 'pending' || isActioning || isProcessing) return;
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          setEditingLabel({ itemId: item.id, fieldKey: fieldName });
+                                          setEditingLabelValue(fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+                                        }}
+                                      >
+                                        {fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                        {item.status === 'pending' && <EditIcon sx={{ fontSize: 12, opacity: 0.5 }} />}
+                                      </Box>
+                                    }
+                                    value={fieldValue}
+                                    onChange={(e) => updateField(item.id, fieldName, e.target.value)}
+                                    size="small"
+                                    fullWidth
+                                    disabled={item.status !== 'pending' || isActioning || isProcessing}
+                                  />
+                                )}
+                              </Box>
                               <IconButton
                                 size="small"
                                 onClick={() => dismissField(item.id, fieldName)}
@@ -818,6 +1368,18 @@ export default function ReviewQueue() {
                               </IconButton>
                             </Box>
                           ))}
+
+                          {item.status === 'pending' && !isActioning && !isProcessing && (
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              startIcon={<AddIcon />}
+                              onClick={() => addField(item.id)}
+                              sx={{ alignSelf: 'flex-start', mt: 0.5 }}
+                            >
+                              Add Field
+                            </Button>
+                          )}
 
                           {dismissedFields[item.id]?.size > 0 && (
                             <Box sx={{ mt: 1 }}>
@@ -905,6 +1467,7 @@ export default function ReviewQueue() {
                                           <TableRow>
                                             {table.headers.map((h, colIdx) => {
                                               const excluded = excludedColumns[item.id]?.[tableIndex]?.has(colIdx);
+                                              const isEditingThisHeader = editingHeader?.itemId === item.id && editingHeader?.tableIdx === tableIndex && editingHeader?.colIdx === colIdx;
                                               return (
                                                 <TableCell key={colIdx} sx={{
                                                   fontWeight: 600,
@@ -919,7 +1482,53 @@ export default function ReviewQueue() {
                                                       disabled={item.status !== 'pending'}
                                                       sx={{ p: 0 }}
                                                     />
-                                                    {h.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                                    {isEditingThisHeader ? (
+                                                      <TextField
+                                                        value={editingHeaderValue}
+                                                        onChange={(e) => setEditingHeaderValue(e.target.value)}
+                                                        onBlur={() => {
+                                                          if (editingHeaderValue.trim()) {
+                                                            updateTableHeader(item.id, tableIndex, colIdx, editingHeaderValue.trim());
+                                                          }
+                                                          setEditingHeader(null);
+                                                        }}
+                                                        onKeyDown={(e) => {
+                                                          if (e.key === 'Enter') {
+                                                            if (editingHeaderValue.trim()) {
+                                                              updateTableHeader(item.id, tableIndex, colIdx, editingHeaderValue.trim());
+                                                            }
+                                                            setEditingHeader(null);
+                                                          } else if (e.key === 'Escape') {
+                                                            setEditingHeader(null);
+                                                          }
+                                                        }}
+                                                        size="small"
+                                                        variant="standard"
+                                                        autoFocus
+                                                        sx={{ minWidth: 80 }}
+                                                      />
+                                                    ) : (
+                                                      <Box
+                                                        component="span"
+                                                        sx={{
+                                                          cursor: item.status === 'pending' ? 'pointer' : 'default',
+                                                          display: 'inline-flex',
+                                                          alignItems: 'center',
+                                                          gap: 0.5,
+                                                          '&:hover .edit-icon': item.status === 'pending' ? { opacity: 0.7 } : {},
+                                                        }}
+                                                        onClick={() => {
+                                                          if (item.status !== 'pending') return;
+                                                          setEditingHeader({ itemId: item.id, tableIdx: tableIndex, colIdx });
+                                                          setEditingHeaderValue(h);
+                                                        }}
+                                                      >
+                                                        {h.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                                        {item.status === 'pending' && (
+                                                          <EditIcon className="edit-icon" sx={{ fontSize: 12, opacity: 0.3 }} />
+                                                        )}
+                                                      </Box>
+                                                    )}
                                                     <IconButton
                                                       size="small"
                                                       onClick={(e) => { e.stopPropagation(); deleteTableColumn(item.id, tableIndex, colIdx); }}
@@ -991,6 +1600,8 @@ export default function ReviewQueue() {
                             </Box>
                           ) : null;
                         })()}
+                          </>
+                        )}
                       </Box>
                     </Box>
 

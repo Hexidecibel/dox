@@ -869,13 +869,19 @@ export const api = {
     approve: (id: string, data: {
       fields?: Record<string, string>;
       product_name?: string;
+      shared_fields?: Record<string, string>;
+      products?: Array<{
+        product_name: string;
+        fields: Record<string, string>;
+        tables?: Array<{ name: string; headers: string[]; rows: string[][] }>;
+      }>;
       save_template?: {
         field_mappings: TemplateFieldMapping[];
         auto_ingest_enabled?: boolean;
         confidence_threshold?: number;
       };
     }) =>
-      fetchApi<{ document: any }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
+      fetchApi<{ document?: any; documents?: any[] }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     reject: (id: string) =>
       fetchApi<void>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'rejected' }) }),
     postResults: (id: string, data: Record<string, unknown>) =>

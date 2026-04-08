@@ -21,8 +21,8 @@ DOCUMENT TYPES:
 
 FIELD EXTRACTION RULES:
 1. Use these EXACT canonical field names (snake_case):
-   - supplier_name — company/organization name that produced/shipped the product (NOT a street address — if only an address is visible with no company name, set to null)
-   - customer_name — company receiving the product
+   - supplier_name — company/organization that PRODUCED, TESTED, or SHIPPED the product. This is typically the company on the letterhead, the lab that ran the tests, or the "From" entity. NOT the customer/recipient. If only an address is visible with no company name, look for the company name in: letterhead, "Approved by" signatures, facility name, or document footer. Set to null only if truly unidentifiable.
+   - customer_name — company RECEIVING the product. Often labeled "Ship To", "Customer", "Sold To", or "Attention". If a company name appears prominently but is clearly the recipient (e.g., appears after "Ship To:"), it is the customer, NOT the supplier.
    - product_name — full product name (e.g., "Unsalted Sweet Cream Butter 68#")
    - product_code — supplier's internal product/item code or SKU
    - lot_number — lot, batch, or run number
@@ -38,6 +38,10 @@ FIELD EXTRACTION RULES:
 2. For dates: normalize to YYYY-MM-DD. Two-digit years mean 2000s (e.g., '26 = 2026, 03/08/26 = 2026-03-08). Julian dates (e.g., "6094") mean day 094 of 2026 — convert when identifiable. If ambiguous, keep as-is.
 
 3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signatures, titles, disclaimers, individual test values (those go in tables).
+
+4. FILENAME CONTEXT: The filename is provided in <filename> tags. It often contains metadata like item numbers, product codes, lot numbers, and dates. Use this as supplementary context when the document text is incomplete or ambiguous, but prefer values from the document body when both are available.
+
+5. SUPPLIER vs CUSTOMER: A common error is confusing supplier and customer. The supplier PRODUCES the product; the customer RECEIVES it. If "MEDOSWEET FARMS" appears after "Ship To:", it is the customer_name, not the supplier_name. The company at the TOP of the document (letterhead, header) is usually the supplier.
 
 TABLE EXTRACTION RULES:
 1. Extract ALL tabular data found in the document. Preserve every column present — do not drop columns.
@@ -176,7 +180,7 @@ function isLikelyAddress(value: any): boolean {
 export async function extractFields(
   text: string,
   env: { QWEN_URL?: string; QWEN_SECRET?: string },
-  options?: { examples?: Array<{ text: string; result: string }>; industryPrompt?: string }
+  options?: { examples?: Array<{ text: string; result: string }>; industryPrompt?: string; fileName?: string }
 ): Promise<ExtractionResult> {
   if (!text || text.trim().length === 0) {
     return { fields: {}, tables: [], products: [], summary: '', confidence: 'low', documentType: null };
@@ -205,7 +209,7 @@ export async function extractFields(
           { role: 'system', content: systemPrompt },
           {
             role: 'user',
-            content: `<document>\n${text}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+            content: `${options?.fileName ? `<filename>${options.fileName}</filename>\n` : ''}<document>\n${text}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
           },
         ],
       }),

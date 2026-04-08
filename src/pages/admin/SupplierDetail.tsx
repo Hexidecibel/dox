@@ -86,6 +86,7 @@ export function SupplierDetail() {
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<ExtractionTemplate | null>(null);
   const [templateFieldMappings, setTemplateFieldMappings] = useState<TemplateFieldMapping[]>([]);
+  const [templateSampleData, setTemplateSampleData] = useState<Record<string, string>>({});
   const [templateAutoIngest, setTemplateAutoIngest] = useState(false);
   const [templateConfidence, setTemplateConfidence] = useState(0.85);
   const [savingTemplate, setSavingTemplate] = useState(false);
@@ -235,11 +236,40 @@ export function SupplierDetail() {
     }
   };
 
-  const openEditTemplate = (template: ExtractionTemplate) => {
+  const openEditTemplate = async (template: ExtractionTemplate) => {
+    if (!supplier) return;
     setEditingTemplate(template);
     setTemplateFieldMappings([...template.field_mappings]);
     setTemplateAutoIngest(!!template.auto_ingest_enabled);
     setTemplateConfidence(template.confidence_threshold);
+    setTemplateSampleData({});
+
+    // Fetch sample data from most recent approved queue item for this template
+    try {
+      const result = await api.queue.list({
+        tenant_id: supplier.tenant_id,
+        status: 'approved',
+        document_type_id: template.document_type_id,
+        limit: 5,
+      });
+      const items = result.items || [];
+      // Find one that matches this supplier
+      const match = items.find((item: any) =>
+        item.supplier?.toLowerCase() === supplier.name.toLowerCase() ||
+        item.template_id === template.id
+      ) || items[0];
+
+      if (match?.ai_fields) {
+        try {
+          const parsed = typeof match.ai_fields === 'string' ? JSON.parse(match.ai_fields) : match.ai_fields;
+          const sample: Record<string, string> = {};
+          for (const [k, v] of Object.entries(parsed)) {
+            if (v != null) sample[k] = String(v);
+          }
+          setTemplateSampleData(sample);
+        } catch { /* ignore parse errors */ }
+      }
+    } catch { /* non-critical */ }
   };
 
   const handleSaveTemplate = async () => {
@@ -589,7 +619,7 @@ export function SupplierDetail() {
         <Dialog
           open={!!editingTemplate}
           onClose={() => setEditingTemplate(null)}
-          maxWidth="sm"
+          maxWidth="md"
           fullWidth
         >
           {editingTemplate && (
@@ -606,15 +636,21 @@ export function SupplierDetail() {
                 </Typography>
 
                 {/* Field Mappings */}
-                <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
                   Fields to extract
                 </Typography>
+                {Object.keys(templateSampleData).length > 0 && (
+                  <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
+                    Sample values from most recent processed document
+                  </Typography>
+                )}
 
                 <TableContainer component={Paper} variant="outlined" sx={{ mb: 2 }}>
                   <Table size="small">
                     <TableHead>
                       <TableRow>
                         <TableCell>Field</TableCell>
+                        <TableCell>Sample Value</TableCell>
                         <TableCell>Tier</TableCell>
                         <TableCell align="center">Required</TableCell>
                         <TableCell align="center">Remove</TableCell>
@@ -626,6 +662,25 @@ export function SupplierDetail() {
                           <TableCell>
                             <Typography variant="body2">
                               {mapping.field_key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                            </Typography>
+                            {mapping.aliases && mapping.aliases.length > 0 && (
+                              <Typography variant="caption" color="text.secondary">
+                                aliases: {mapping.aliases.join(', ')}
+                              </Typography>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="body2" color={templateSampleData[mapping.field_key] ? 'text.primary' : 'text.disabled'} sx={{
+                              maxWidth: 180,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              fontFamily: 'monospace',
+                              fontSize: '0.8rem',
+                            }}>
+                              {templateSampleData[mapping.field_key] ||
+                                (mapping.aliases || []).map(a => templateSampleData[a]).find(v => v) ||
+                                '—'}
                             </Typography>
                           </TableCell>
                           <TableCell>
@@ -668,7 +723,7 @@ export function SupplierDetail() {
                       ))}
                       {templateFieldMappings.length === 0 && (
                         <TableRow>
-                          <TableCell colSpan={4} sx={{ textAlign: 'center', py: 2 }}>
+                          <TableCell colSpan={5} sx={{ textAlign: 'center', py: 2 }}>
                             <Typography variant="body2" color="text.secondary">No fields</Typography>
                           </TableCell>
                         </TableRow>

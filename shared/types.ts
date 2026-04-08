@@ -523,6 +523,12 @@ export interface ExtractedTable {
   rows: string[][];
 }
 
+export interface ProductEntry {
+  product_name: string;
+  fields: Record<string, string>;
+  tables?: ExtractedTable[];
+}
+
 export interface ProcessingResult {
   file_name: string;
   file_index: number;

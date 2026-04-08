@@ -40,6 +40,7 @@ export type {
   ProcessingResult,
   ProcessingResponse,
   ExtractedTable,
+  ProductEntry,
   ExtractionExampleRow,
   ProcessingQueueItem,
   QueuedResponse,

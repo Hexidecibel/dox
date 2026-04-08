@@ -7,7 +7,7 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import { deleteFile } from '../../lib/r2';
-import { approveQueueItem } from '../../lib/queue-approve';
+import { approveQueueItem, approveMultiProductQueueItem } from '../../lib/queue-approve';
 import type { QueueItem } from '../../lib/queue-approve';
 import type { Env, User } from '../../lib/types';
 import type { TemplateFieldMapping } from '../../../shared/types';
@@ -72,8 +72,16 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
     const body = (await context.request.json()) as {
       status?: 'approved' | 'rejected';
+      // Legacy single-product
       fields?: Record<string, string>;
       product_name?: string;
+      // Multi-product
+      shared_fields?: Record<string, string>;
+      products?: Array<{
+        product_name: string;
+        fields: Record<string, string>;
+        tables?: Array<{ name: string; headers: string[]; rows: string[][] }>;
+      }>;
       save_template?: {
         field_mappings: TemplateFieldMapping[];
         auto_ingest_enabled?: boolean;
@@ -106,6 +114,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     }
 
     if (body.status === 'approved') {
+      if (body.products && body.products.length > 0) {
+        return await handleMultiProductApprove(context, user, item, body.shared_fields, body.products, body.save_template);
+      }
       return await handleApprove(context, user, item, body.fields, body.product_name, body.save_template);
     } else {
       return await handleReject(context, user, item);
@@ -182,6 +193,80 @@ async function handleApprove(
         current_version: 1,
         status: 'active',
       },
+    }),
+    { headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
+async function handleMultiProductApprove(
+  context: EventContext<Env, string, Record<string, unknown>>,
+  user: User,
+  item: QueueItem,
+  sharedFields?: Record<string, string>,
+  products?: Array<{
+    product_name: string;
+    fields: Record<string, string>;
+    tables?: Array<{ name: string; headers: string[]; rows: string[][] }>;
+  }>,
+  saveTemplate?: {
+    field_mappings: TemplateFieldMapping[];
+    auto_ingest_enabled?: boolean;
+    confidence_threshold?: number;
+  }
+): Promise<Response> {
+  const result = await approveMultiProductQueueItem(
+    context.env.DB,
+    context.env.FILES,
+    item,
+    {
+      sharedFields,
+      products: (products || []).map(p => ({
+        productName: p.product_name,
+        fields: p.fields,
+        tables: p.tables,
+      })),
+      userId: user.id,
+      clientIp: getClientIp(context.request),
+    }
+  );
+
+  // Upsert extraction template if requested
+  if (saveTemplate && result.supplierId && item.document_type_id) {
+    const templateId = generateId();
+    await context.env.DB.prepare(
+      `INSERT INTO extraction_templates (id, tenant_id, supplier_id, document_type_id, field_mappings, auto_ingest_enabled, confidence_threshold, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tenant_id, supplier_id, document_type_id)
+       DO UPDATE SET field_mappings = excluded.field_mappings,
+                     auto_ingest_enabled = excluded.auto_ingest_enabled,
+                     confidence_threshold = excluded.confidence_threshold,
+                     updated_at = datetime('now')`
+    )
+      .bind(
+        templateId,
+        item.tenant_id,
+        result.supplierId,
+        item.document_type_id,
+        JSON.stringify(saveTemplate.field_mappings),
+        saveTemplate.auto_ingest_enabled ? 1 : 0,
+        saveTemplate.confidence_threshold ?? 0.85,
+        user.id
+      )
+      .run();
+  }
+
+  return new Response(
+    JSON.stringify({
+      item: { id: item.id, status: 'approved', reviewed_by: user.id },
+      documents: result.documents.map(d => ({
+        id: d.documentId,
+        tenant_id: item.tenant_id,
+        title: d.title,
+        product_name: d.productName,
+        external_ref: d.externalRef,
+        current_version: 1,
+        status: 'active',
+      })),
     }),
     { headers: { 'Content-Type': 'application/json' } }
   );
