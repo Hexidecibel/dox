@@ -12,7 +12,8 @@ RestartSec=5
 Environment=NODE_ENV=production
 Environment=DOX_API_URL=https://dox.cush.rocks
 Environment=DOX_API_KEY=dox_sk_20b863e96b995d544d912039c87dd3ad91578f6055ca0be851d2bb8c7c0ed7a03373dda07df79765677e6aefb4ef9a6babfc9a616d49e7a15b811fc5b92d4750
-Environment=QWEN_URL=http://127.0.0.1:9600
+Environment=QWEN_URL=https://qwen.cush.rocks
+Environment=QWEN_SECRET=f8d806a55d8e50230153dc68d7782a7747b28cc81bef9fc59d458ff46faf0840
 
 [Install]
 WantedBy=multi-user.target

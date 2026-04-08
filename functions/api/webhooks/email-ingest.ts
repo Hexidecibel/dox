@@ -228,7 +228,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
           // Re-extract with few-shot examples if available
           const extraction = fewShotExamples.length > 0
-            ? await extractFields(text, context.env, fewShotExamples)
+            ? await extractFields(text, context.env, {
+                examples: fewShotExamples.map(e => ({ text: e.input_text, result: e.corrected_output })),
+              })
             : initialExtraction;
 
           fields = extraction.fields;

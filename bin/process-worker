@@ -11,6 +11,7 @@
  *   DOX_API_URL   — defaults to https://dox.cush.rocks
  *   DOX_API_KEY   — required, API key for auth (X-API-Key header)
  *   QWEN_URL      — defaults to http://127.0.0.1:9600
+ *   QWEN_SECRET   — optional, Bearer token for Qwen auth proxy
  *   POLL_INTERVAL  — defaults to 3000 (ms)
  */
 
@@ -18,10 +19,19 @@ const { execFileSync } = require('child_process');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const { Agent } = require('undici');
+
+// Increase headers timeout for slow LLM inference (default is 300s, we need 15min)
+const llmDispatcher = new Agent({
+  headersTimeout: 900_000,   // 15 minutes
+  bodyTimeout: 900_000,      // 15 minutes
+  connectTimeout: 30_000,    // 30 seconds
+});
 
 const DOX_API_URL = (process.env.DOX_API_URL || 'https://dox.cush.rocks').replace(/\/+$/, '');
 const DOX_API_KEY = process.env.DOX_API_KEY || '';
 const QWEN_URL = (process.env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
+const QWEN_SECRET = process.env.QWEN_SECRET || '';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000', 10);
 
 if (!DOX_API_KEY) {
@@ -42,6 +52,26 @@ async function poll() {
   processing = true;
 
   try {
+    // Reset stale "processing" items (stuck for >10 min)
+    try {
+      const staleRes = await fetch(
+        `${DOX_API_URL}/api/queue?processing_status=processing&limit=10`,
+        { headers }
+      );
+      if (staleRes.ok) {
+        const staleData = await staleRes.json();
+        for (const item of (staleData.items || [])) {
+          const updatedAt = new Date(item.created_at).getTime();
+          if (Date.now() - updatedAt > 10 * 60 * 1000) {
+            console.log(`Resetting stale item: ${item.file_name} (${item.id})`);
+            await postResults(item.id, { processing_status: 'queued', error_message: null });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Staleness check failed:', err.message);
+    }
+
     const res = await fetch(
       `${DOX_API_URL}/api/queue?processing_status=queued&limit=1`,
       { headers }
@@ -170,6 +200,9 @@ async function processItem(item) {
     // Extract text based on mime type
     let text = null;
 
+    // Keep a copy of fileBuffer for OCR fallback (unpdf may detach the ArrayBuffer)
+    const fileBufferCopy = fileBuffer.slice(0);
+
     if (item.mime_type === 'application/pdf') {
       try {
         const { extractText } = await import('unpdf');
@@ -179,10 +212,16 @@ async function processItem(item) {
         console.warn(`PDF extraction failed for ${item.file_name}:`, err.message);
       }
 
+      // Check if unpdf output is garbled (columns merged without whitespace)
+      if (text && text.trim().length > 0 && isTextGarbled(text)) {
+        console.log(`  Text looks garbled (avg word len too high), trying OCR for ${item.file_name}...`);
+        text = null; // fall through to OCR path below
+      }
+
       // OCR fallback for scanned/image-based PDFs
       if (!text || text.trim().length === 0) {
         console.log(`  No text from unpdf, trying OCR for ${item.file_name}...`);
-        text = ocrPdf(fileBuffer);
+        text = ocrPdf(fileBufferCopy);
         if (text) {
           console.log(`  OCR extracted ${text.length} chars`);
           text = text.substring(0, 100000);
@@ -205,28 +244,32 @@ async function processItem(item) {
       return;
     }
 
-    // Trim text for LLM — 4K chars is plenty for COAs/invoices
-    const llmText = text.substring(0, 4000);
+    // Trim text for LLM — 6K covers key fields on first 1-2 pages
+    const llmText = text.substring(0, 6000);
 
     // Call Qwen (with retry + 5 min timeout for cold starts)
     let qwenData;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 300_000); // 5 min
+        const timeout = setTimeout(() => controller.abort(), 1_800_000); // 30 min
         const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(QWEN_SECRET ? { Authorization: `Bearer ${QWEN_SECRET}` } : {}),
+          },
           signal: controller.signal,
+          dispatcher: llmDispatcher,
           body: JSON.stringify({
             model: 'Qwen3-5-35B-A3B',
             temperature: 0,
-            max_tokens: 1024,
+            max_tokens: 4096,
             messages: [
               { role: 'system', content: buildPrompt() },
               {
                 role: 'user',
-                content: `<document>\n${llmText}\n</document>\n\nExtract the key structured data. Return JSON only. /no_think`,
+                content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
               },
             ],
           }),
@@ -247,16 +290,21 @@ async function processItem(item) {
       }
     }
     const content = qwenData.choices?.[0]?.message?.content || '';
+    console.log(`  Qwen response (${content.length} chars): ${content.substring(0, 200)}...`);
 
     // Parse response
     const parsed = parseExtraction(content);
 
-    // Detect supplier
-    const supplierKeys = ['supplier_name', 'supplier', 'manufacturer', 'vendor', 'company', 'from'];
-    const supplier = supplierKeys.map(k => parsed.fields?.[k]).find(v => v != null && String(v).trim() !== '') || null;
+    // Canonicalize field names and detect supplier
+    const canonicalized = canonicalizeFields(parsed.fields || {});
+    if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
+      canonicalized.supplier_name = null;
+    }
+    parsed.fields = canonicalized;
+    const supplier = canonicalized.supplier_name || null;
 
     // Compute confidence score
-    const confidenceScore = computeConfidenceScore(parsed.confidence, parsed.fields || {});
+    const confidenceScore = computeConfidenceScore(parsed.confidence, parsed.fields || {}, parsed.tables || []);
 
     // Resolve document type if AI guessed one and queue item has no doc type set
     let resolvedDocTypeId = item.document_type_id || null;
@@ -299,6 +347,71 @@ async function processItem(item) {
       error_message: err.message,
     }).catch(() => {});
   }
+}
+
+// === Field canonicalization ===
+
+const FIELD_ALIASES = {
+  supplier_name: ['supplier', 'vendor', 'manufacturer', 'company', 'from', 'shipped_by'],
+  customer_name: ['customer', 'sold_to', 'ship_to', 'buyer', 'consignee'],
+  lot_number: ['lot_no', 'lot_num', 'lot', 'batch_number', 'batch_no', 'batch', 'run_number', 'lot_code'],
+  po_number: ['po', 'purchase_order', 'purchase_order_number', 'po_no'],
+  product_name: ['product', 'item', 'material', 'description', 'item_description'],
+  product_code: ['item_code', 'sku', 'material_code', 'item_number', 'item_no'],
+  expiration_date: ['exp_date', 'best_by', 'use_by', 'best_before', 'sell_by', 'bb_date'],
+  code_date: ['production_date', 'pack_date', 'mfg_date', 'manufacture_date', 'date_of_manufacture'],
+  ship_date: ['shipping_date', 'date_shipped'],
+  net_weight: ['weight', 'net_wt'],
+  order_number: ['order_no', 'sales_order', 'reference_number', 'ref_number'],
+  grade: ['quality_grade', 'usda_grade'],
+  plant_number: ['plant_no', 'facility_number', 'facility_id', 'plant_id'],
+};
+
+function canonicalizeFields(fields) {
+  const reverseMap = {};
+  for (const [canonical, aliases] of Object.entries(FIELD_ALIASES)) {
+    for (const alias of aliases) {
+      reverseMap[alias] = canonical;
+    }
+  }
+  const result = {};
+  for (const [key, value] of Object.entries(fields)) {
+    const canonical = reverseMap[key] || key;
+    if (!(canonical in result) || result[canonical] == null) {
+      result[canonical] = value;
+    }
+  }
+  return result;
+}
+
+// === Address detection ===
+
+function isLikelyAddress(value) {
+  if (!value || typeof value !== 'string') return false;
+  const v = value.trim();
+  const streetPattern = /^\d+\s+(N\.?|S\.?|E\.?|W\.?|North|South|East|West|Main)\b/i;
+  const unitStreetPattern = /^[A-Z0-9#]+\s+\d+\s+\w/i;
+  const stateZipPattern = /\b[A-Z]{2}\s+\d{5}(-\d{4})?\b/;
+  const streetSuffixes = /\b(Street|St\.?|Avenue|Ave\.?|Boulevard|Blvd\.?|Road|Rd\.?|Drive|Dr\.?|Lane|Ln\.?|Way|Court|Ct\.?|Place|Pl\.?)\b/i;
+  if ((streetPattern.test(v) || unitStreetPattern.test(v)) && (stateZipPattern.test(v) || streetSuffixes.test(v))) {
+    return true;
+  }
+  if (stateZipPattern.test(v) && streetSuffixes.test(v)) {
+    return true;
+  }
+  return false;
+}
+
+// === Garbled text detection ===
+
+function isTextGarbled(text) {
+  if (!text || text.length < 100) return false;
+  const words = text.split(/\s+/).filter(w => w.length > 0);
+  if (words.length === 0) return false;
+  const avgWordLen = words.reduce((s, w) => s + w.length, 0) / words.length;
+  const whitespaceRatio = (text.match(/\s/g) || []).length / text.length;
+  // Long average words + low whitespace = column-merged garbage from bad PDF extraction
+  return avgWordLen > 15 || whitespaceRatio < 0.08;
 }
 
 // === Document type fuzzy matching ===
@@ -344,46 +457,111 @@ async function fuzzyMatchDocType(guess, tenantId) {
   return null;
 }
 
-// === Prompt (same logic as functions/lib/llm.ts) ===
+// === Prompt (same content as functions/lib/llm.ts) ===
+
+const BASE_PROMPT = `You are a document data extraction assistant specializing in supply chain and compliance documents including Certificates of Analysis (COAs), Bills of Lading, Spec Sheets, Safety Data Sheets, and invoices.
+
+DOCUMENT TYPES:
+- Certificate of Analysis (COA): Lab/QA results proving a product batch meets specifications. Structure: header info (supplier, customer, dates, lot) + test results table + approval.
+- Bill of Lading (BOL): Shipping document with carrier, origin, destination, weights.
+- Spec Sheet: Product specification with allowable ranges for tests.
+- Invoice / PO: Purchase order or invoice with line items, quantities, prices.
+- Safety Data Sheet (SDS): Chemical safety information.
+
+FIELD EXTRACTION RULES:
+1. Use these EXACT canonical field names (snake_case):
+   - supplier_name — company/organization name that produced/shipped the product (NOT a street address — if only an address is visible with no company name, set to null)
+   - customer_name — company receiving the product
+   - product_name — full product name (e.g., "Unsalted Sweet Cream Butter 68#")
+   - product_code — supplier's internal product/item code or SKU
+   - lot_number — lot, batch, or run number
+   - po_number — purchase order number
+   - code_date — production/pack/code date
+   - expiration_date — expiration, best-by, use-by, or sell-by date
+   - ship_date — date shipped
+   - grade — quality grade (e.g., "Grade A", "Grade AA", "US Extra")
+   - plant_number — facility ID or plant number
+   - net_weight — net weight with units
+   - order_number — sales order or reference number
+
+2. For dates: normalize to YYYY-MM-DD. Two-digit years mean 2000s (e.g., '26 = 2026, 03/08/26 = 2026-03-08). Julian dates (e.g., "6094") mean day 094 of 2026 — convert when identifiable. If ambiguous, keep as-is.
+
+3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signatures, titles, disclaimers, individual test values (those go in tables).
+
+TABLE EXTRACTION RULES:
+1. COA test results → table named "test_results" with columns: ["test", "specification", "result", "units", "pass_fail"]
+   - "specification" = acceptable range or limit (e.g., "<10", "3.0-5.0", ">80%")
+   - Preserve units (CFU/mL, %, mg/kg, etc.)
+   - pass_fail = "Pass", "Fail", "Conforms", or null if not stated
+2. Line items (invoices, BOLs) → table named "line_items"
+3. Multiple distinct tables → separate entries for each
+
+OCR / SCANNED DOCUMENT HANDLING:
+- If text appears garbled, do your best but set _confidence to "low"
+- Common OCR errors: l↔1, O↔0, rn↔m. Infer correct values from context.
+- Partially readable values: include what you can and append "(?)".
+
+Return JSON with:
+{
+  "fields": { ... },
+  "tables": [{ "name": "string", "headers": [...], "rows": [[...]] }],
+  "products": ["product name 1", ...],
+  "summary": "one-sentence description",
+  "_confidence": "high" | "medium" | "low",
+  "document_type": "Certificate of Analysis" | "Bill of Lading" | etc.
+}`;
+
+const DAIRY_FOOD_INDUSTRY_PROMPT = `
+INDUSTRY CONTEXT — Dairy & Food:
+- Common COA tests: Standard Plate Count (SPC), coliform, E. coli, yeast & mold, somatic cell count, butterfat %, moisture %, pH, acidity, temperature
+- Grade designations: Grade A, Grade AA, US Extra, USDA grades
+- Plant/facility numbers: USDA plant numbers (e.g., "Plant 42-1234")
+- Code dates may use Julian format (YDDD where Y=last digit of year, DDD=day)
+- Net weights: common units are lbs, gallons, kg
+
+EXAMPLE — Dairy COA extraction:
+Input: "Darigold Inc. COA for Grade AA Butter 68#, Lot L26-0842, PO PO-44821, Packed 03/15/26, Best By 09/15/26, Plant 42-1234. Tests: Fat >80% result 81.2% Pass, Moisture <16% result 15.4% Pass, Coliform <10 CFU/g result <1 Pass, SPC <20000 CFU/g result 4500 Pass"
+
+Output:
+{
+  "fields": {
+    "supplier_name": "Darigold Inc.",
+    "product_name": "Grade AA Butter 68#",
+    "lot_number": "L26-0842",
+    "po_number": "PO-44821",
+    "code_date": "2026-03-15",
+    "expiration_date": "2026-09-15",
+    "grade": "Grade AA",
+    "plant_number": "42-1234",
+    "net_weight": "68 lbs"
+  },
+  "tables": [{
+    "name": "test_results",
+    "headers": ["test", "specification", "result", "units", "pass_fail"],
+    "rows": [
+      ["Fat Content", ">80%", "81.2", "%", "Pass"],
+      ["Moisture", "<16%", "15.4", "%", "Pass"],
+      ["Coliform", "<10", "<1", "CFU/g", "Pass"],
+      ["Standard Plate Count", "<20,000", "4,500", "CFU/g", "Pass"]
+    ]
+  }],
+  "products": ["Grade AA Butter 68#"],
+  "summary": "COA for Darigold Grade AA Butter lot L26-0842, all tests pass.",
+  "_confidence": "high",
+  "document_type": "Certificate of Analysis"
+}`;
 
 function buildPrompt() {
-  return [
-    'You are a document data extraction assistant. Analyze the document and extract structured data.',
-    '',
-    'IMPORTANT RULES:',
-    '1. Put test results, lab analyses, specifications, and any tabular data into "tables" — NOT as individual key-value fields.',
-    '2. DO NOT include as fields:',
-    '   - Page numbers, print dates, header/footer text',
-    '   - Addresses, phone numbers, fax numbers, websites',
-    '   - Boilerplate text, disclaimers, signatures',
-    '   - Individual test values that belong in a results table',
-    '3. DO include as fields:',
-    '   - Document identifiers (lot numbers, PO numbers, order numbers, invoice numbers)',
-    '   - Dates that matter (expiration, production, ship date, code date)',
-    '   - Names (supplier, customer, product, manufacturer)',
-    '   - Quantities, weights, descriptions',
-    '   - Reference numbers, certifications',
-    '',
-    'Return a JSON object with:',
-    '',
-    '1. "fields": key-value pairs of meaningful document data. Use snake_case keys (e.g., "Lot Number" → "lot_number"). Set null for unclear values. ONLY include fields that a human would consider important business data.',
-    '',
-    '2. "tables": tabular data (test results, specs, line items). Each: { "name": "string", "headers": ["col1", "col2"], "rows": [["val1", "val2"]] }',
-    '',
-    '3. "products": array of product/item names found.',
-    '',
-    '4. "summary": one-sentence description of the document.',
-    '',
-    '5. "_confidence": "high", "medium", or "low"',
-    '',
-    '6. "document_type": a short label for what kind of document this is (e.g., "Certificate of Analysis", "Bill of Lading", "Safety Data Sheet", "Spec Sheet", "Invoice", "Purchase Order"). Use standard industry terminology.',
-  ].join('\n');
+  return BASE_PROMPT + '\n\n' + DAIRY_FOOD_INDUSTRY_PROMPT;
 }
 
 // === Response parser (same logic as functions/lib/llm.ts) ===
 
 function parseExtraction(content) {
   content = (content || '').trim();
+
+  // Strip Qwen3 <think>...</think> blocks (thinking model artifacts)
+  content = content.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
 
   // Strip markdown code fences
   const fenceMatch = content.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/);
@@ -453,23 +631,60 @@ function flattenFields(fields) {
 
 // === Confidence score (same logic as functions/lib/confidence.ts) ===
 
-function computeConfidenceScore(aiConfidence, extractedFields) {
-  let score = aiConfidence === 'high' ? 0.9 : aiConfidence === 'medium' ? 0.6 : 0.3;
+function computeConfidenceScore(aiConfidence, extractedFields, tables = []) {
+  // Lower base weights — LLM self-assessment is unreliable
+  let score = aiConfidence === 'high' ? 0.85 : aiConfidence === 'medium' ? 0.55 : 0.25;
 
-  const totalFields = Object.values(extractedFields).filter(v => v != null).length;
-  score += Math.min(totalFields * 0.01, 0.08);
+  const fields = extractedFields || {};
+  const nonNullFields = Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== '');
 
-  for (const [key, value] of Object.entries(extractedFields)) {
+  // Bonus for finding data (up to +0.08)
+  score += Math.min(nonNullFields.length * 0.01, 0.08);
+
+  // Reward key document fields being present (+0.02 each, up to +0.06)
+  const keyFields = ['supplier_name', 'product_name', 'lot_number'];
+  for (const key of keyFields) {
+    if (fields[key] != null && String(fields[key]).trim() !== '') {
+      score += 0.02;
+    }
+  }
+
+  // Reward having at least one date field (+0.02)
+  const hasDate = Object.entries(fields).some(
+    ([k, v]) => k.includes('date') && v != null && String(v).trim() !== ''
+  );
+  if (hasDate) score += 0.02;
+
+  // Reward having test results table with actual rows (+0.03)
+  const hasTestResults = tables.some(
+    t => t.rows && t.rows.length > 0 && t.headers && t.headers.length > 0
+  );
+  if (hasTestResults) score += 0.03;
+
+  // Penalize date fields that don't look like dates (-0.08 each)
+  for (const [key, value] of Object.entries(fields)) {
     if (value && key.includes('date')) {
-      if (!/\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(value) && !/\d{1,2}[-/]\d{1,2}[-/]\d{2,4}/.test(value)) {
-        score -= 0.1;
+      const v = String(value);
+      const looksLikeDate =
+        /\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(v) ||
+        /\d{1,2}[-/]\d{1,2}[-/]\d{2,4}/.test(v);
+      if (!looksLikeDate) {
+        score -= 0.08;
       }
     }
   }
 
-  const lotValue = extractedFields['lot_number'] || extractedFields['batch_number'];
-  if (lotValue && lotValue.length < 3) {
+  // Penalize very short lot numbers (-0.05)
+  const lotValue = fields['lot_number'];
+  if (lotValue && String(lotValue).trim().length < 3) {
     score -= 0.05;
+  }
+
+  // Penalize uncertainty markers (-0.05 each)
+  for (const [, value] of nonNullFields) {
+    if (String(value).includes('(?)')) {
+      score -= 0.05;
+    }
   }
 
   return Math.max(0, Math.min(1, score));

@@ -19,6 +19,8 @@ import {
   AccordionDetails,
   Snackbar,
   Paper,
+  FormControlLabel,
+  Switch,
 } from '@mui/material';
 import {
   ExpandMore as ExpandMoreIcon,
@@ -62,6 +64,8 @@ export default function ReviewQueue() {
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
   const blobUrlsRef = useRef<Record<string, string>>({});
+
+  const [showAutoIngestedOnly, setShowAutoIngestedOnly] = useState(false);
 
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
     open: false,
@@ -202,6 +206,10 @@ export default function ReviewQueue() {
     return 'error';
   };
 
+  const filteredItems = showAutoIngestedOnly
+    ? items.filter(i => i.auto_ingested === 1)
+    : items;
+
   return (
     <Box>
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 3, flexWrap: 'wrap', gap: 1 }}>
@@ -270,13 +278,25 @@ export default function ReviewQueue() {
             </Select>
           </FormControl>
         )}
+
+        <FormControlLabel
+          control={
+            <Switch
+              size="small"
+              checked={showAutoIngestedOnly}
+              onChange={(e) => setShowAutoIngestedOnly(e.target.checked)}
+            />
+          }
+          label="Auto-ingested only"
+          sx={{ ml: 0.5 }}
+        />
       </Box>
 
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
           <CircularProgress />
         </Box>
-      ) : items.length === 0 ? (
+      ) : filteredItems.length === 0 ? (
         <Box sx={{ textAlign: 'center', py: 8 }}>
           <Typography variant="h6" color="text.secondary" gutterBottom>
             No items in queue
@@ -287,7 +307,7 @@ export default function ReviewQueue() {
         </Box>
       ) : (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {items.map((item) => {
+          {filteredItems.map((item) => {
             const isExpanded = expandedId === item.id;
             const fields = editedFields[item.id] || {};
             const isActioning = actionLoading[item.id] || false;
@@ -325,6 +345,12 @@ export default function ReviewQueue() {
                       variant="outlined"
                       sx={{ textTransform: 'capitalize' }}
                     />
+                    {item.template_id && (
+                      <Chip label="Template matched" color="info" size="small" sx={{ ml: 0.5 }} />
+                    )}
+                    {item.auto_ingested === 1 && (
+                      <Chip label="Auto-ingested" color="success" size="small" sx={{ ml: 0.5 }} />
+                    )}
                     <Typography variant="caption" color="text.secondary">
                       {formatDate(item.created_at)}
                     </Typography>

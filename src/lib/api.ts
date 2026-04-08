@@ -37,6 +37,8 @@ import type {
   ApiSupplier,
   SupplierListResponse,
   SupplierLookupOrCreateResponse,
+  ExtractionTemplate,
+  TemplateFieldMapping,
 } from './types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -839,7 +841,15 @@ export const api = {
         `/queue?${new URLSearchParams(Object.entries(params || {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])).toString()}`
       ),
     get: (id: string) => fetchApi<{ item: ProcessingQueueItem }>(`/queue/${id}`),
-    approve: (id: string, data: { fields?: Record<string, string>; product_name?: string }) =>
+    approve: (id: string, data: {
+      fields?: Record<string, string>;
+      product_name?: string;
+      save_template?: {
+        field_mappings: TemplateFieldMapping[];
+        auto_ingest_enabled?: boolean;
+        confidence_threshold?: number;
+      };
+    }) =>
       fetchApi<{ document: any }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     reject: (id: string) =>
       fetchApi<void>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'rejected' }) }),
@@ -852,6 +862,48 @@ export const api = {
       fetchApi<{ examples: any[]; total: number }>(`/extraction-examples?document_type_id=${documentTypeId}${tenantId ? `&tenant_id=${tenantId}` : ''}`),
     create: (data: { document_type_id: string; tenant_id?: string; input_text: string; ai_output: string; corrected_output: string; score?: number; supplier?: string | null }) =>
       fetchApi<{ example: any }>('/extraction-examples', { method: 'POST', body: JSON.stringify(data) }),
+  },
+
+  extractionTemplates: {
+    list: (params?: { tenant_id?: string; supplier_id?: string; document_type_id?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.tenant_id) qs.set('tenant_id', params.tenant_id);
+      if (params?.supplier_id) qs.set('supplier_id', params.supplier_id);
+      if (params?.document_type_id) qs.set('document_type_id', params.document_type_id);
+      const query = qs.toString();
+      return fetchApi<{ templates: ExtractionTemplate[]; total: number }>(
+        `/extraction-templates${query ? `?${query}` : ''}`
+      );
+    },
+    get: (id: string) => fetchApi<{ template: ExtractionTemplate }>(`/extraction-templates/${id}`),
+    lookup: (params: { supplier_id: string; document_type_id: string; tenant_id?: string }) => {
+      const qs = new URLSearchParams({
+        supplier_id: params.supplier_id,
+        document_type_id: params.document_type_id,
+      });
+      if (params.tenant_id) qs.set('tenant_id', params.tenant_id);
+      return fetchApi<{ template: ExtractionTemplate }>(`/extraction-templates/lookup?${qs.toString()}`);
+    },
+    create: (data: {
+      tenant_id?: string;
+      supplier_id: string;
+      document_type_id: string;
+      field_mappings: TemplateFieldMapping[];
+      auto_ingest_enabled?: boolean;
+      confidence_threshold?: number;
+    }) => fetchApi<{ template: ExtractionTemplate }>('/extraction-templates', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+    update: (id: string, data: {
+      field_mappings?: TemplateFieldMapping[];
+      auto_ingest_enabled?: boolean;
+      confidence_threshold?: number;
+    }) => fetchApi<{ template: ExtractionTemplate }>(`/extraction-templates/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+    delete: (id: string) => fetchApi<void>(`/extraction-templates/${id}`, { method: 'DELETE' }),
   },
 
   naturalSearch: (query: string, tenantId?: string) =>

@@ -9,7 +9,8 @@ if [ -z "${DOX_API_KEY:-}" ]; then
 fi
 
 export DOX_API_URL="${DOX_API_URL:-https://dox.cush.rocks}"
-export QWEN_URL="${QWEN_URL:-http://127.0.0.1:9600}"
+export QWEN_URL="${QWEN_URL:-https://qwen.cush.rocks}"
+export QWEN_SECRET="${QWEN_SECRET:-f8d806a55d8e50230153dc68d7782a7747b28cc81bef9fc59d458ff46faf0840}"
 
 mkdir -p logs
 

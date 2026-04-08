@@ -31,6 +31,15 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Autocomplete,
+  Switch,
+  FormControlLabel,
+  Checkbox,
+  Slider,
 } from '@mui/material';
 import {
   CloudUpload as UploadIcon,
@@ -48,7 +57,7 @@ import {
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
 import { api } from '../lib/api';
-import type { ApiDocumentType, ProcessingQueueItem, QueuedResponse, ExtractedTable } from '../lib/types';
+import type { ApiDocumentType, ProcessingQueueItem, QueuedResponse, ExtractedTable, ExtractionTemplate, TemplateFieldMapping } from '../lib/types';
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -317,14 +326,42 @@ export function Import() {
   const [editableResults, setEditableResults] = useState<EditableResult[]>([]);
 
   // Snackbar
-  const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
+  const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'info' }>({
     open: false,
     message: '',
     severity: 'success',
   });
 
+  // Extraction templates
+  const [templates, setTemplates] = useState<Record<string, ExtractionTemplate>>({});
+  const [templateDialog, setTemplateDialog] = useState<{
+    open: boolean;
+    index: number;
+    supplierName: string;
+    supplierId: string | null;
+    docTypeName: string;
+    docTypeId: string | null;
+    fieldMappings: TemplateFieldMapping[];
+    autoIngestEnabled: boolean;
+    confidenceThreshold: number;
+  } | null>(null);
+
+  // Suppliers list (for template dialog autocomplete)
+  const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([]);
+
   // Resolve effective tenant ID
   const effectiveTenantId = isSuperAdmin ? tenantId : (user?.tenant_id || '');
+
+  // Load suppliers for template dialog
+  useEffect(() => {
+    const loadSuppliers = async () => {
+      try {
+        const data = await api.suppliers.list({ tenant_id: effectiveTenantId });
+        setSuppliers((data.suppliers || []).map(s => ({ id: s.id, name: s.name })));
+      } catch { /* non-critical */ }
+    };
+    if (effectiveTenantId) loadSuppliers();
+  }, [effectiveTenantId]);
 
   // Load document types
   useEffect(() => {
@@ -390,6 +427,78 @@ export function Import() {
 
     return () => clearInterval(interval);
   }, [stage, queuedItems]);
+
+  // Fetch extraction templates for items that have a template_id
+  useEffect(() => {
+    if (editableResults.length === 0) return;
+
+    const fetchTemplates = async () => {
+      const newTemplates: Record<string, ExtractionTemplate> = {};
+      for (const result of editableResults) {
+        const templateId = result.queueItem.template_id;
+        if (templateId && !templates[templateId]) {
+          try {
+            const { template } = await api.extractionTemplates.get(templateId);
+            newTemplates[templateId] = template;
+          } catch {
+            // Template not found, skip
+          }
+        }
+      }
+      if (Object.keys(newTemplates).length > 0) {
+        setTemplates(prev => ({ ...prev, ...newTemplates }));
+      }
+    };
+
+    fetchTemplates();
+  }, [editableResults.length]); // Only run when results are first built
+
+  // Apply templates to field assignments when templates load
+  useEffect(() => {
+    if (Object.keys(templates).length === 0) return;
+
+    setEditableResults(prev => prev.map(result => {
+      const templateId = result.queueItem.template_id;
+      if (!templateId || !templates[templateId]) return result;
+
+      const template = templates[templateId];
+      const mappings = template.field_mappings;
+
+      // Build field assignments from template
+      const newAssignments: Record<string, string> = {};
+      const newDismissed = new Set<string>();
+
+      // Build alias map
+      const aliasMap = new Map<string, TemplateFieldMapping>();
+      for (const m of mappings) {
+        for (const alias of (m.aliases || [])) {
+          aliasMap.set(alias, m);
+        }
+      }
+
+      for (const key of Object.keys(result.editedFields)) {
+        const mapping = mappings.find(m => m.field_key === key) || aliasMap.get(key);
+        if (mapping) {
+          newAssignments[key] = mapping.tier;
+        } else {
+          // Field not in template — dismiss it
+          newDismissed.add(key);
+          newAssignments[key] = 'extended';
+        }
+      }
+
+      // Find product name from template
+      const productMapping = mappings.find(m => m.tier === 'product_name');
+      const productName = productMapping ? (result.editedFields[productMapping.field_key] || result.productName) : result.productName;
+
+      return {
+        ...result,
+        fieldAssignments: Object.keys(newAssignments).length > 0 ? newAssignments : result.fieldAssignments,
+        dismissedFields: newDismissed.size > 0 ? newDismissed : result.dismissedFields,
+        productName,
+      };
+    }));
+  }, [templates]);
 
   // Build editable results from completed queue items
   const buildEditableResults = (items: QueuedItem[]) => {
@@ -695,6 +804,37 @@ export function Import() {
       ));
 
       setSnackbar({ open: true, message: `Imported ${item.file.name}`, severity: 'success' });
+
+      // Prompt to save template if no template existed
+      if (!item.queueItem.template_id && (item.queueItem.supplier || supplierId) && itemDocTypeId) {
+        // Build field mappings from current assignments
+        const mappings: TemplateFieldMapping[] = [];
+        let order = 0;
+        for (const [key, tier] of Object.entries(item.fieldAssignments)) {
+          if (item.dismissedFields.has(key)) continue;
+          mappings.push({
+            field_key: key,
+            tier: tier as 'primary' | 'extended' | 'product_name',
+            display_order: order++,
+            required: ['lot_number', 'supplier_name', 'product_name'].includes(key),
+          });
+        }
+
+        // Find doc type name
+        const docType = documentTypes.find(dt => dt.id === itemDocTypeId);
+
+        setTemplateDialog({
+          open: true,
+          index,
+          supplierName: item.queueItem.supplier || '',
+          supplierId: supplierId || null,
+          docTypeName: docType?.name || (item.queueItem as any).document_type_guess || '',
+          docTypeId: itemDocTypeId || null,
+          fieldMappings: mappings,
+          autoIngestEnabled: false,
+          confidenceThreshold: 0.85,
+        });
+      }
     } catch (err) {
       setEditableResults(prev => prev.map((r, i) =>
         i === index ? { ...r, importing: false, importError: err instanceof Error ? err.message : 'Import failed' } : r
@@ -1160,6 +1300,17 @@ export function Import() {
                       }
                       return null;
                     })()}
+                    {item.queueItem.template_id && templates[item.queueItem.template_id] && (
+                      <Chip
+                        label={`Template: ${templates[item.queueItem.template_id].supplier_name} + ${templates[item.queueItem.template_id].document_type_name}`}
+                        color="info"
+                        size="small"
+                        sx={{ ml: 1 }}
+                      />
+                    )}
+                    {item.queueItem.auto_ingested === 1 && (
+                      <Chip label="Auto-ingested" color="success" size="small" sx={{ ml: 1 }} />
+                    )}
                     {item.imported && (
                       <Chip label="Imported" size="small" color="success" icon={<CheckIcon />} />
                     )}
@@ -1477,6 +1628,263 @@ export function Import() {
         onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
         message={snackbar.message}
       />
+
+      {/* Save Template Dialog */}
+      <Dialog
+        open={!!templateDialog}
+        onClose={() => setTemplateDialog(null)}
+        maxWidth="sm"
+        fullWidth
+      >
+        {templateDialog && (
+          <>
+            <DialogTitle>Save Extraction Template</DialogTitle>
+            <DialogContent>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                Templates remember which fields matter for a supplier + document type combination.
+                Future documents that match will have fields pre-mapped automatically, and can
+                optionally be ingested without manual review.
+              </Typography>
+
+              {/* Supplier */}
+              <Autocomplete
+                freeSolo
+                options={suppliers.map(s => s.name)}
+                value={templateDialog.supplierName}
+                onChange={(_, value) => {
+                  const match = suppliers.find(s => s.name === value);
+                  setTemplateDialog(prev => prev ? {
+                    ...prev,
+                    supplierName: (value as string) || '',
+                    supplierId: match?.id || null,
+                  } : null);
+                }}
+                onInputChange={(_, value) => {
+                  setTemplateDialog(prev => prev ? {
+                    ...prev,
+                    supplierName: value,
+                    supplierId: suppliers.find(s => s.name === value)?.id || null,
+                  } : null);
+                }}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Supplier"
+                    helperText={templateDialog.supplierId ? 'Existing supplier' : 'Will be created'}
+                    fullWidth
+                    margin="normal"
+                  />
+                )}
+              />
+
+              {/* Document Type */}
+              <Autocomplete
+                freeSolo
+                options={documentTypes.map(dt => dt.name)}
+                value={templateDialog.docTypeName}
+                onChange={(_, value) => {
+                  const match = documentTypes.find(dt => dt.name === value);
+                  setTemplateDialog(prev => prev ? {
+                    ...prev,
+                    docTypeName: (value as string) || '',
+                    docTypeId: match?.id || null,
+                  } : null);
+                }}
+                onInputChange={(_, value) => {
+                  setTemplateDialog(prev => prev ? {
+                    ...prev,
+                    docTypeName: value,
+                    docTypeId: documentTypes.find(dt => dt.name === value)?.id || null,
+                  } : null);
+                }}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Document Type"
+                    helperText={templateDialog.docTypeId ? 'Existing type' : 'Will be created'}
+                    fullWidth
+                    margin="normal"
+                  />
+                )}
+              />
+
+              {/* Field Mappings */}
+              <Typography variant="subtitle2" sx={{ mt: 3, mb: 1 }}>
+                Fields to extract
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                These fields will be automatically mapped when documents from this supplier are processed.
+                Required fields must be present for auto-ingest to work.
+              </Typography>
+
+              <TableContainer component={Paper} variant="outlined" sx={{ mb: 2 }}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Field</TableCell>
+                      <TableCell>Tier</TableCell>
+                      <TableCell align="center">Required</TableCell>
+                      <TableCell align="center">Remove</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {templateDialog.fieldMappings.map((mapping, i) => (
+                      <TableRow key={mapping.field_key}>
+                        <TableCell>
+                          <Typography variant="body2">
+                            {mapping.field_key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>
+                          <Select
+                            size="small"
+                            value={mapping.tier}
+                            onChange={(e) => {
+                              setTemplateDialog(prev => {
+                                if (!prev) return null;
+                                const updated = [...prev.fieldMappings];
+                                updated[i] = { ...updated[i], tier: e.target.value as 'primary' | 'extended' | 'product_name' };
+                                return { ...prev, fieldMappings: updated };
+                              });
+                            }}
+                          >
+                            <MenuItem value="primary">Primary</MenuItem>
+                            <MenuItem value="extended">Extended</MenuItem>
+                            <MenuItem value="product_name">Product Name</MenuItem>
+                          </Select>
+                        </TableCell>
+                        <TableCell align="center">
+                          <Checkbox
+                            size="small"
+                            checked={mapping.required}
+                            onChange={(e) => {
+                              setTemplateDialog(prev => {
+                                if (!prev) return null;
+                                const updated = [...prev.fieldMappings];
+                                updated[i] = { ...updated[i], required: e.target.checked };
+                                return { ...prev, fieldMappings: updated };
+                              });
+                            }}
+                          />
+                        </TableCell>
+                        <TableCell align="center">
+                          <IconButton
+                            size="small"
+                            onClick={() => {
+                              setTemplateDialog(prev => {
+                                if (!prev) return null;
+                                return { ...prev, fieldMappings: prev.fieldMappings.filter((_, j) => j !== i) };
+                              });
+                            }}
+                          >
+                            <CloseIcon fontSize="small" />
+                          </IconButton>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+
+              {/* Auto-ingest settings */}
+              <Divider sx={{ my: 2 }} />
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                Auto-ingest
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                When enabled, documents that match this template with high enough confidence
+                will be ingested automatically — no manual review needed.
+              </Typography>
+
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={templateDialog.autoIngestEnabled}
+                    onChange={(e) => setTemplateDialog(prev => prev ? { ...prev, autoIngestEnabled: e.target.checked } : null)}
+                  />
+                }
+                label="Enable auto-ingest"
+              />
+
+              {templateDialog.autoIngestEnabled && (
+                <Box sx={{ mt: 1, px: 1 }}>
+                  <Typography variant="body2" gutterBottom>
+                    Confidence threshold: {Math.round(templateDialog.confidenceThreshold * 100)}%
+                  </Typography>
+                  <Slider
+                    value={templateDialog.confidenceThreshold}
+                    onChange={(_, value) => setTemplateDialog(prev => prev ? { ...prev, confidenceThreshold: value as number } : null)}
+                    min={0.5}
+                    max={1.0}
+                    step={0.05}
+                    marks={[
+                      { value: 0.5, label: '50%' },
+                      { value: 0.7, label: '70%' },
+                      { value: 0.85, label: '85%' },
+                      { value: 1.0, label: '100%' },
+                    ]}
+                  />
+                </Box>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setTemplateDialog(null)}>
+                Skip
+              </Button>
+              <Button
+                variant="contained"
+                disabled={!templateDialog.supplierName.trim() || !templateDialog.docTypeName.trim() || templateDialog.fieldMappings.length === 0}
+                onClick={async () => {
+                  if (!templateDialog) return;
+
+                  try {
+                    // Resolve or create supplier
+                    let supplierId = templateDialog.supplierId;
+                    if (!supplierId && templateDialog.supplierName.trim()) {
+                      const { supplier } = await api.suppliers.lookupOrCreate({
+                        name: templateDialog.supplierName.trim(),
+                        tenant_id: effectiveTenantId,
+                      });
+                      supplierId = supplier.id;
+                    }
+
+                    // Resolve or create doc type
+                    let docTypeId = templateDialog.docTypeId;
+                    if (!docTypeId && templateDialog.docTypeName.trim()) {
+                      const { documentType } = await api.documentTypes.create({
+                        name: templateDialog.docTypeName.trim(),
+                        tenant_id: effectiveTenantId || undefined,
+                      });
+                      docTypeId = documentType.id;
+                    }
+
+                    if (!supplierId || !docTypeId) {
+                      throw new Error('Could not resolve supplier or document type');
+                    }
+
+                    // Create the template
+                    await api.extractionTemplates.create({
+                      tenant_id: effectiveTenantId || undefined,
+                      supplier_id: supplierId,
+                      document_type_id: docTypeId,
+                      field_mappings: templateDialog.fieldMappings,
+                      auto_ingest_enabled: templateDialog.autoIngestEnabled,
+                      confidence_threshold: templateDialog.confidenceThreshold,
+                    });
+
+                    setSnackbar({ open: true, message: 'Template saved! Future documents from this supplier will be auto-mapped.', severity: 'success' });
+                    setTemplateDialog(null);
+                  } catch (err) {
+                    setSnackbar({ open: true, message: err instanceof Error ? err.message : 'Failed to save template', severity: 'error' });
+                  }
+                }}
+              >
+                Save Template
+              </Button>
+            </DialogActions>
+          </>
+        )}
+      </Dialog>
     </Box>
   );
 }

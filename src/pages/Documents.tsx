@@ -205,6 +205,8 @@ export function Documents() {
           supplierName: d.supplier_name,
           primaryMetadata,
           extendedMetadata,
+          match_context: d.match_context,
+          relevance_score: d.relevance_score,
         };
       }));
       setTotal(result.total || 0);
@@ -373,31 +375,22 @@ export function Documents() {
         {aiParsedQuery && (
           <Box sx={{ mb: 2, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              AI understood:{' '}
               <Typography component="span" variant="body2" fontWeight={600}>
-                {[
-                  aiParsedQuery.document_type_slug,
-                  aiParsedQuery.product_name && `for ${aiParsedQuery.product_name}`,
-                  aiParsedQuery.supplier_name && `from ${aiParsedQuery.supplier_name}`,
-                  aiParsedQuery.metadata_search && `"${aiParsedQuery.metadata_search}"`,
-                  aiParsedQuery.date_from && `from ${aiParsedQuery.date_from}`,
-                  aiParsedQuery.date_to && `to ${aiParsedQuery.date_to}`,
-                  ...aiParsedQuery.keywords,
-                ].filter(Boolean).join(', ') || 'general search'}
+                {aiParsedQuery.intent_summary || 'General search'}
               </Typography>
             </Typography>
             <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
               {aiParsedQuery.document_type_slug && (
                 <Chip label={`Type: ${aiParsedQuery.document_type_slug}`} size="small" onDelete={clearAiSearch} />
               )}
-              {aiParsedQuery.product_name && (
-                <Chip label={`Product: ${aiParsedQuery.product_name}`} size="small" onDelete={clearAiSearch} />
+              {aiParsedQuery.product_names.length > 0 && (
+                <Chip label={`Products: ${aiParsedQuery.product_names.join(', ')}`} size="small" onDelete={clearAiSearch} />
               )}
               {aiParsedQuery.supplier_name && (
                 <Chip label={`Supplier: ${aiParsedQuery.supplier_name}`} size="small" onDelete={clearAiSearch} />
               )}
-              {aiParsedQuery.metadata_search && (
-                <Chip label={`Search: ${aiParsedQuery.metadata_search}`} size="small" onDelete={clearAiSearch} />
+              {aiParsedQuery.metadata_filters.length > 0 && (
+                <Chip label={`Metadata: ${aiParsedQuery.metadata_filters.map(f => `${f.field}=${f.value}`).join(', ')}`} size="small" onDelete={clearAiSearch} />
               )}
               {aiParsedQuery.date_from && (
                 <Chip label={`From: ${aiParsedQuery.date_from}`} size="small" onDelete={clearAiSearch} />
@@ -408,6 +401,21 @@ export function Documents() {
               {aiParsedQuery.keywords.map((kw, i) => (
                 <Chip key={i} label={kw} size="small" onDelete={clearAiSearch} />
               ))}
+              {aiParsedQuery.expiration_filter && (
+                <Chip
+                  label={`Expiring ${aiParsedQuery.expiration_filter.operator} ${aiParsedQuery.expiration_filter.date1}`}
+                  size="small"
+                  color="warning"
+                  onDelete={clearAiSearch}
+                />
+              )}
+              {aiParsedQuery.content_search && (
+                <Chip
+                  label={`Content: "${aiParsedQuery.content_search}"`}
+                  size="small"
+                  onDelete={clearAiSearch}
+                />
+              )}
             </Box>
           </Box>
         )}

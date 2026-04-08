@@ -128,6 +128,20 @@ export function DocumentCard({ document: doc }: DocumentCardProps) {
           {doc.creator_name && `By ${doc.creator_name} · `}
           {formatDate(doc.created_at)}
         </Typography>
+
+        {/* Match context snippets from natural search */}
+        {(doc as any).match_context && (doc as any).match_context.length > 0 && (
+          <Box sx={{ mt: 0.5 }}>
+            {(doc as any).match_context.map((ctx: { field: string; snippet: string }, i: number) => (
+              <Typography key={i} variant="caption" color="text.secondary" sx={{ display: 'block', fontStyle: 'italic' }}>
+                <Typography component="span" variant="caption" color="text.disabled">
+                  {ctx.field}:
+                </Typography>{' '}
+                {ctx.snippet}
+              </Typography>
+            ))}
+          </Box>
+        )}
       </CardContent>
 
       <CardActions sx={{ pt: 0, px: 2, pb: 1.5 }}>

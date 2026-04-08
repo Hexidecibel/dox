@@ -64,6 +64,30 @@ export interface ExtractionField {
   aliases?: string[];     // ["Batch Number", "Lot #"] — alternate names the field might appear as
 }
 
+export interface TemplateFieldMapping {
+  field_key: string;
+  tier: 'primary' | 'extended' | 'product_name';
+  display_order: number;
+  required: boolean;
+  aliases?: string[];
+}
+
+export interface ExtractionTemplateRow {
+  id: string;
+  tenant_id: string;
+  supplier_id: string;
+  document_type_id: string;
+  field_mappings: string; // JSON<TemplateFieldMapping[]>
+  auto_ingest_enabled: number;
+  confidence_threshold: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  // Joined fields
+  supplier_name?: string;
+  document_type_name?: string;
+}
+
 export interface DocumentTypeRow {
   id: string;
   tenant_id: string;
@@ -571,6 +595,8 @@ export interface ProcessingQueueItem {
   reviewed_at: string | null;
   created_by: string | null;
   created_at: string;
+  template_id: string | null;
+  auto_ingested: number;
   // Joined fields from list/get queries
   document_type_name?: string;
   document_type_slug?: string;
@@ -600,19 +626,40 @@ export interface QueuedResponse {
 
 // === Natural Language Search ===
 
+export interface MetadataFilter {
+  field: string;
+  operator: 'equals' | 'contains' | 'gt' | 'lt';
+  value: string;
+}
+
 export interface ParsedQuery {
   keywords: string[];
   document_type_slug: string | null;
-  product_name: string | null;
+  product_names: string[];
+  supplier_name: string | null;
   date_from: string | null;
   date_to: string | null;
-  supplier_name: string | null;
-  metadata_search: string | null;
+  metadata_filters: MetadataFilter[];
+  expiration_filter: {
+    operator: 'before' | 'after' | 'between';
+    date1: string;
+    date2?: string;
+  } | null;
+  content_search: string | null;
+  intent_summary: string;
+}
+
+export interface SearchMatchContext {
+  field: string;
+  snippet: string;
 }
 
 export interface NaturalSearchResponse {
   parsed_query: ParsedQuery;
-  results: ApiDocument[];
+  results: (Document & {
+    relevance_score?: number;
+    match_context?: SearchMatchContext[];
+  })[];
   total: number;
 }
 
