@@ -14,4 +14,4 @@ npx wrangler pages deploy dist --project-name doc-upload-site
 
 echo ""
 echo "=== Deployment complete ==="
-echo "URL: https://dox.cush.rocks"
+echo "URL: https://supdox.com"

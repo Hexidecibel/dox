@@ -232,7 +232,7 @@ async function sendReply(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: 'Dox <noreply@cush.rocks>',
+        from: 'SupDox <noreply@supdox.com>',
         to: [to],
         subject: `[Dox] ${subject}`,
         text,

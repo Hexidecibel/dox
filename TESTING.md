@@ -1,6 +1,6 @@
 # Feature Testing Plan — Dox
 
-Live URL: https://dox.cush.rocks
+Live URL: https://supdox.com
 Super Admin: admin@example.com
 Estimated Time: 30-45 minutes
 
@@ -9,7 +9,7 @@ Estimated Time: 30-45 minutes
 ## 1. Authentication
 
 ### Login
-- [ ] Go to https://dox.cush.rocks
+- [ ] Go to https://supdox.com
 - [ ] Should redirect to /login if not authenticated
 - [ ] Log in as admin@example.com with the known password
 - [ ] Should redirect to /dashboard
@@ -19,12 +19,12 @@ Estimated Time: 30-45 minutes
 ### Session Persistence
 - [ ] Refresh the page (F5) while on /dashboard
 - [ ] Should remain logged in (not kicked to /login)
-- [ ] Open a new tab and go to https://dox.cush.rocks/dashboard — should load without login prompt
+- [ ] Open a new tab and go to https://supdox.com/dashboard — should load without login prompt
 
 ### Logout
 - [ ] Click Sign Out
 - [ ] Should redirect to /login
-- [ ] Try navigating directly to https://dox.cush.rocks/dashboard
+- [ ] Try navigating directly to https://supdox.com/dashboard
 - [ ] Should redirect back to /login (token is revoked server-side)
 
 ### Login Again
@@ -68,7 +68,7 @@ Estimated Time: 30-45 minutes
   - Tenant: Acme Manufacturing
   - Password: a strong password (e.g., "AcmeAdmin1")
 - [ ] Verify creation succeeds
-- [ ] Check if an invitation email arrives at the specified address (sent from noreply@cush.rocks via Resend)
+- [ ] Check if an invitation email arrives at the specified address (sent from noreply@supdox.com via Resend)
 - [ ] Email should contain login credentials and a sign-in link
 
 ### Create a Regular User
@@ -278,7 +278,7 @@ Estimated Time: 30-45 minutes
 ### Use the API Key with curl
 - [ ] Use the copied key to make an API request:
   ```bash
-  curl https://dox.cush.rocks/api/users/me \
+  curl https://supdox.com/api/users/me \
     -H "X-API-Key: dox_sk_YOUR_KEY_HERE"
   ```
 - [ ] Should return the super_admin user profile (the key authenticates as the user who created it)
@@ -286,7 +286,7 @@ Estimated Time: 30-45 minutes
 ### Use the API Key for Document Access
 - [ ] List documents using the API key:
   ```bash
-  curl https://dox.cush.rocks/api/documents \
+  curl https://supdox.com/api/documents \
     -H "X-API-Key: dox_sk_YOUR_KEY_HERE"
   ```
 - [ ] Should return documents (scoped to the key's tenant if one was set)
@@ -300,7 +300,7 @@ Estimated Time: 30-45 minutes
 ### Verify Revoked Key Is Rejected
 - [ ] Try using the revoked key:
   ```bash
-  curl https://dox.cush.rocks/api/users/me \
+  curl https://supdox.com/api/users/me \
     -H "X-API-Key: dox_sk_YOUR_REVOKED_KEY"
   ```
 - [ ] Should return 401 "Invalid API key"
@@ -316,7 +316,7 @@ Estimated Time: 30-45 minutes
 ### Ingest a New Document
 - [ ] Use curl to ingest a document:
   ```bash
-  curl -X POST https://dox.cush.rocks/api/documents/ingest \
+  curl -X POST https://supdox.com/api/documents/ingest \
     -H "X-API-Key: dox_sk_YOUR_KEY" \
     -F "file=@/path/to/test-document.pdf" \
     -F "external_ref=TEST-REF-001" \
@@ -334,7 +334,7 @@ Estimated Time: 30-45 minutes
 ### Ingest Again with Same external_ref (Version Upsert)
 - [ ] Run the same curl command again with a different file (or same file):
   ```bash
-  curl -X POST https://dox.cush.rocks/api/documents/ingest \
+  curl -X POST https://supdox.com/api/documents/ingest \
     -H "X-API-Key: dox_sk_YOUR_KEY" \
     -F "file=@/path/to/updated-document.pdf" \
     -F "external_ref=TEST-REF-001" \
@@ -352,7 +352,7 @@ Estimated Time: 30-45 minutes
 ### Look Up by external_ref
 - [ ] Use curl to look up the ingested document:
   ```bash
-  curl "https://dox.cush.rocks/api/documents/lookup?external_ref=TEST-REF-001&tenant_id=ACME_TENANT_ID" \
+  curl "https://supdox.com/api/documents/lookup?external_ref=TEST-REF-001&tenant_id=ACME_TENANT_ID" \
     -H "X-API-Key: dox_sk_YOUR_KEY"
   ```
 - [ ] Should return the document with current version info
@@ -361,7 +361,7 @@ Estimated Time: 30-45 minutes
 ### Lookup for Non-Existent Reference
 - [ ] Look up a reference that does not exist:
   ```bash
-  curl "https://dox.cush.rocks/api/documents/lookup?external_ref=DOES-NOT-EXIST&tenant_id=ACME_TENANT_ID" \
+  curl "https://supdox.com/api/documents/lookup?external_ref=DOES-NOT-EXIST&tenant_id=ACME_TENANT_ID" \
     -H "X-API-Key: dox_sk_YOUR_KEY"
   ```
 - [ ] Should return 404 "Document not found"
@@ -375,7 +375,7 @@ Estimated Time: 30-45 minutes
 - [ ] On the login page, click "Forgot Password"
 - [ ] Enter the email of one of the test users
 - [ ] Submit — should always show a generic success message ("If an account exists...")
-- [ ] Check email for the reset link (sent from noreply@cush.rocks)
+- [ ] Check email for the reset link (sent from noreply@supdox.com)
 
 ### Complete the Reset
 - [ ] Click the reset link from the email
@@ -490,7 +490,7 @@ Estimated Time: 30-45 minutes
 ## 18. GraphQL
 
 ### GraphiQL Playground
-- [ ] Navigate to https://dox.cush.rocks/api/graphql in the browser
+- [ ] Navigate to https://supdox.com/api/graphql in the browser
 - [ ] GraphiQL IDE should load (interactive query editor)
 - [ ] Set the Authorization header to `Bearer <your-token>` (you may need to get the token from browser DevTools > Application > localStorage or Network tab)
 
@@ -638,4 +638,4 @@ After testing, you may want to:
 - **Rate limits**: Login = 5 attempts / 15 min per IP+email; Forgot password = 3 attempts / 15 min per IP
 - **Token expiry**: JWT tokens expire after 24 hours
 - **Allowed file types**: PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, PNG, JPG (max 100 MB)
-- **Emails**: Sent via Resend from noreply@cush.rocks — check spam/junk folders if not in inbox
+- **Emails**: Sent via Resend from noreply@supdox.com — check spam/junk folders if not in inbox

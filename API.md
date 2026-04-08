@@ -1006,13 +1006,13 @@ The document portal supports an email-to-agent-to-portal pipeline for automated 
 
 ```bash
 # Step 1: Create an API key for the agent (one-time setup)
-API_KEY=$(curl -s -X POST https://dox.cush.rocks/api/api-keys \
+API_KEY=$(curl -s -X POST https://supdox.com/api/api-keys \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{"name":"Email Agent"}' | jq -r '.key')
 
 # Step 2: Agent ingests a document from an email
-curl -X POST https://dox.cush.rocks/api/documents/ingest \
+curl -X POST https://supdox.com/api/documents/ingest \
   -H "X-API-Key: $API_KEY" \
   -F "file=@/tmp/attachment.pdf" \
   -F "external_ref=msg-id-12345@mail.example.com" \
@@ -1024,7 +1024,7 @@ curl -X POST https://dox.cush.rocks/api/documents/ingest \
   -F 'source_metadata={"source":"email","from":"vendor@acme.com","subject":"Updated Safety Report","received_at":"2026-03-24T12:00:00Z"}'
 
 # Step 3: Agent checks if a document already exists before deciding what to do
-curl -s "https://dox.cush.rocks/api/documents/lookup?external_ref=msg-id-12345@mail.example.com&tenant_id=TENANT_ID" \
+curl -s "https://supdox.com/api/documents/lookup?external_ref=msg-id-12345@mail.example.com&tenant_id=TENANT_ID" \
   -H "X-API-Key: $API_KEY"
 ```
 
@@ -1244,7 +1244,7 @@ Emails are sent via the [Resend](https://resend.com) API when `RESEND_API_KEY` i
 2. **Password reset email** — sent when `POST /api/auth/forgot-password` is called. Contains a one-time reset link (1 hour expiry).
 3. **Admin reset email** — sent when an admin resets a user's password via `POST /api/users/:id/reset-password`. Contains the temporary password.
 
-All emails are sent from `noreply@cush.rocks`.
+All emails are sent from `noreply@supdox.com`.
 
 ---
 

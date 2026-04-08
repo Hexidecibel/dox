@@ -18,4 +18,4 @@ npx wrangler r2 bucket list 2>&1 | grep doc-upload
 
 echo ""
 echo "Public endpoint:"
-curl -s -o /dev/null -w "https://dox.cush.rocks -> HTTP %{http_code}\n" https://dox.cush.rocks 2>/dev/null || echo "https://dox.cush.rocks -> Not reachable (custom domain may not be set up yet)"
+curl -s -o /dev/null -w "https://supdox.com -> HTTP %{http_code}\n" https://supdox.com 2>/dev/null || echo "https://supdox.com -> Not reachable (custom domain may not be set up yet)"

@@ -8,7 +8,7 @@
  * time limits.
  *
  * Config (environment variables):
- *   DOX_API_URL   — defaults to https://dox.cush.rocks
+ *   DOX_API_URL   — defaults to https://supdox.com
  *   DOX_API_KEY   — required, API key for auth (X-API-Key header)
  *   QWEN_URL      — defaults to http://127.0.0.1:9600
  *   QWEN_SECRET   — optional, Bearer token for Qwen auth proxy
@@ -28,7 +28,7 @@ const llmDispatcher = new Agent({
   connectTimeout: 30_000,    // 30 seconds
 });
 
-const DOX_API_URL = (process.env.DOX_API_URL || 'https://dox.cush.rocks').replace(/\/+$/, '');
+const DOX_API_URL = (process.env.DOX_API_URL || 'https://supdox.com').replace(/\/+$/, '');
 const DOX_API_KEY = process.env.DOX_API_KEY || '';
 const QWEN_URL = (process.env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
 const QWEN_SECRET = process.env.QWEN_SECRET || '';
