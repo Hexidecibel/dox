@@ -88,6 +88,96 @@ export default {
     const subject = parsed.subject || '(no subject)';
     const senderName = parsed.from?.name || senderEmail;
 
+    // 3b. Check if any connector matches this email
+    try {
+      const matchParams = new URLSearchParams({
+        subject: subject,
+        sender: senderEmail,
+        tenant_slug: slug,
+      });
+      const matchRes = await fetch(
+        `${env.DOX_API_BASE}/api/connectors/match-email?${matchParams}`,
+        { headers: { 'X-API-Key': env.EMAIL_INGEST_API_KEY } }
+      );
+
+      if (matchRes.ok) {
+        const matchData = await matchRes.json() as { matched: boolean; connector_id?: string };
+
+        if (matchData.matched && matchData.connector_id) {
+          console.log(`Connector match found: ${matchData.connector_id} for email from ${senderEmail}`);
+
+          // Route to connector email ingest instead of document processing
+          const attachmentPayloads = (parsed.attachments || [])
+            .filter(att => {
+              if (att.disposition === 'inline') return false;
+              const content = att.content;
+              const size = typeof content === 'string' ? content.length : content.byteLength;
+              return size >= 1024;
+            })
+            .map(att => {
+              const content = att.content;
+              const bytes = content instanceof ArrayBuffer
+                ? new Uint8Array(content)
+                : typeof content === 'string'
+                  ? new TextEncoder().encode(content)
+                  : new Uint8Array(content);
+              return {
+                filename: att.filename || 'attachment',
+                content_base64: btoa(String.fromCharCode(...bytes)),
+                content_type: att.mimeType || 'application/octet-stream',
+                size: bytes.byteLength,
+              };
+            });
+
+          const ingestRes = await fetch(
+            `${env.DOX_API_BASE}/api/webhooks/connector-email-ingest`,
+            {
+              method: 'POST',
+              headers: {
+                'X-API-Key': env.EMAIL_INGEST_API_KEY,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                connector_id: matchData.connector_id,
+                tenant_id: tenant.id,
+                subject: subject,
+                sender: senderEmail,
+                body: parsed.text || '',
+                html: parsed.html || '',
+                attachments: attachmentPayloads,
+              }),
+            }
+          );
+
+          if (ingestRes.ok) {
+            const result = await ingestRes.json() as {
+              run_id: string; status: string;
+              orders_created: number; customers_created: number;
+            };
+            console.log(`Connector ingest complete: run=${result.run_id} status=${result.status} orders=${result.orders_created}`);
+
+            await sendReply(env, senderEmail, `Report Processed — ${tenant.name}`,
+              `Hi ${senderName},\n\n` +
+              `Your email "${subject}" was processed as a connector report.\n\n` +
+              `Results: ${result.orders_created} order(s) created, ${result.customers_created} customer(s) created.\n\n` +
+              `— SupDox`);
+          } else {
+            const errText = await ingestRes.text().catch(() => 'Unknown error');
+            console.error(`Connector ingest failed: ${ingestRes.status} ${errText}`);
+            await sendReply(env, senderEmail, `Processing Error — ${tenant.name}`,
+              `Hi ${senderName},\n\n` +
+              `Your email "${subject}" was received but processing failed. Our team has been notified.\n\n` +
+              `— SupDox`);
+          }
+
+          return; // Don't continue to document processing
+        }
+      }
+    } catch (err) {
+      // If connector matching fails, fall through to normal document processing
+      console.error('Connector match check failed, falling through to document processing:', err);
+    }
+
     // 4. Filter attachments
     const validAttachments = (parsed.attachments || []).filter(att => {
       // Skip inline images (email signatures, etc.)

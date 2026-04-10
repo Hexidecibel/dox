@@ -6,6 +6,7 @@ export interface Env {
   EMAIL_WEBHOOK_SECRET?: string;
   QWEN_URL?: string;
   QWEN_SECRET?: string;
+  CONNECTOR_ENCRYPTION_KEY?: string;
 }
 
 export interface User {

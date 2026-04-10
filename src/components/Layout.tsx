@@ -39,6 +39,9 @@ import {
   History as HistoryIcon,
   FileUpload as ImportIcon,
   RateReview as RateReviewIcon,
+  ShoppingCart as OrdersIcon,
+  Hub as ConnectorsIcon,
+  ContactMail as CustomersIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -60,6 +63,7 @@ const navItems: NavItem[] = [
   { label: 'Import', path: '/import', icon: <ImportIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Review Queue', path: '/review', icon: <RateReviewIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Ingest History', path: '/ingest-history', icon: <HistoryIcon />, roles: ['super_admin', 'org_admin', 'user'] },
+  { label: 'Orders', path: '/orders', icon: <OrdersIcon />, roles: ['super_admin', 'org_admin', 'user'] },
 ];
 
 const adminItems: NavItem[] = [
@@ -67,6 +71,8 @@ const adminItems: NavItem[] = [
   { label: 'API Keys', path: '/admin/api-keys', icon: <ApiKeyIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Suppliers', path: '/admin/suppliers', icon: <SuppliersIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Document Types', path: '/admin/document-types', icon: <DocTypesIcon />, roles: ['super_admin', 'org_admin'] },
+  { label: 'Connectors', path: '/admin/connectors', icon: <ConnectorsIcon />, roles: ['super_admin', 'org_admin'] },
+  { label: 'Customers', path: '/admin/customers', icon: <CustomersIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Tenants', path: '/admin/tenants', icon: <TenantsIcon />, roles: ['super_admin'] },
 ];
 

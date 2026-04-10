@@ -671,6 +671,189 @@ export interface NaturalSearchResponse {
   total: number;
 }
 
+// === Order Natural Language Search ===
+
+export interface OrderNaturalSearchResponse {
+  results: Array<{
+    id: string;
+    tenant_id: string;
+    order_number: string;
+    po_number: string | null;
+    customer_id: string | null;
+    customer_name: string | null;
+    customer_number: string | null;
+    customer_name_resolved: string | null;
+    status: string;
+    item_count: number;
+    matched_count: number;
+    product_names: string | null;
+    lot_numbers: string | null;
+    created_at: string;
+    updated_at: string;
+    relevance_score: number;
+  }>;
+  query_interpretation: {
+    original_query: string;
+    parsed: Record<string, unknown>;
+    explanation: string;
+  };
+  total: number;
+}
+
+// === Connector, Order & Customer Enums ===
+export type ConnectorType = 'email' | 'api_poll' | 'webhook' | 'file_watch';
+export type SystemType = 'erp' | 'wms' | 'other';
+export type ConnectorRunStatus = 'running' | 'success' | 'partial' | 'error';
+export type OrderStatus = 'pending' | 'enriched' | 'matched' | 'fulfilled' | 'delivered' | 'error';
+export type COADeliveryMethod = 'email' | 'portal' | 'none';
+
+// === Connector Row & API Types ===
+export interface ConnectorRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  connector_type: ConnectorType;
+  system_type: SystemType;
+  config: string; // JSON
+  field_mappings: string; // JSON
+  credentials_encrypted: string | null;
+  credentials_iv: string | null;
+  schedule: string | null;
+  active: number;
+  last_run_at: string | null;
+  last_error: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiConnector extends Omit<ConnectorRow, 'credentials_encrypted' | 'credentials_iv'> {
+  has_credentials: boolean;
+  tenant_name?: string;
+  created_by_name?: string;
+}
+
+export interface ConnectorListResponse {
+  connectors: ApiConnector[];
+  total: number;
+}
+
+export interface ConnectorGetResponse {
+  connector: ApiConnector;
+}
+
+// === Connector Run Row & API Types ===
+export interface ConnectorRunRow {
+  id: string;
+  connector_id: string;
+  tenant_id: string;
+  status: ConnectorRunStatus;
+  started_at: string;
+  completed_at: string | null;
+  records_found: number;
+  records_created: number;
+  records_updated: number;
+  records_errored: number;
+  error_message: string | null;
+  details: string | null; // JSON
+  created_at: string;
+}
+
+export interface ApiConnectorRun extends ConnectorRunRow {
+  connector_name?: string;
+}
+
+export interface ConnectorRunListResponse {
+  runs: ApiConnectorRun[];
+  total: number;
+}
+
+// === Customer Row & API Types ===
+export interface CustomerRow {
+  id: string;
+  tenant_id: string;
+  customer_number: string;
+  name: string;
+  email: string | null;
+  coa_delivery_method: COADeliveryMethod;
+  coa_requirements: string | null; // JSON
+  active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiCustomer extends CustomerRow {
+  tenant_name?: string;
+  order_count?: number;
+}
+
+export interface CustomerListResponse {
+  customers: ApiCustomer[];
+  total: number;
+}
+
+export interface CustomerGetResponse {
+  customer: ApiCustomer;
+}
+
+// === Order Row & API Types ===
+export interface OrderRow {
+  id: string;
+  tenant_id: string;
+  connector_id: string | null;
+  connector_run_id: string | null;
+  order_number: string;
+  po_number: string | null;
+  customer_id: string | null;
+  customer_number: string | null;
+  customer_name: string | null;
+  status: OrderStatus;
+  source_data: string | null; // JSON
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiOrder extends OrderRow {
+  customer_name_resolved?: string;
+  item_count?: number;
+  matched_count?: number;
+  connector_name?: string;
+  tenant_name?: string;
+}
+
+export interface OrderListResponse {
+  orders: ApiOrder[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface OrderGetResponse {
+  order: ApiOrder;
+  items: ApiOrderItem[];
+}
+
+// === Order Item Row & API Types ===
+export interface OrderItemRow {
+  id: string;
+  order_id: string;
+  product_id: string | null;
+  product_name: string | null;
+  product_code: string | null;
+  quantity: number | null;
+  lot_number: string | null;
+  lot_matched: number;
+  coa_document_id: string | null;
+  match_confidence: number | null;
+  created_at: string;
+}
+
+export interface ApiOrderItem extends OrderItemRow {
+  product_name_resolved?: string;
+  coa_document_title?: string;
+}
+
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'auth_user';

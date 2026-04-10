@@ -48,3 +48,40 @@
 - Download bundle as ZIP
 - Draft/finalized workflow
 - Reusable DocumentPicker component
+
+## 2026-04-09: Phase 2 — Connector System, Orders & Customers
+
+### Connector Framework
+- Universal data connector system supporting email parse, API poll, webhook, and file watch types
+- Credential encryption for secure storage of API keys and passwords
+- Field mappings to transform external data into internal schemas
+- Connector runs tracking with status, logs, and error reporting
+
+### Customer Registry
+- Customer management with COA delivery preferences (email, portal, both)
+- Lookup by customer number for fast matching
+- Per-tenant customer records with contact details
+
+### Order Pipeline
+- Orders with line items, full status workflow (pending → enriched → matched → fulfilled → delivered)
+- Item-level COA matching tracks which documents satisfy each line item
+- Order search and status filtering
+
+### Order Intake via Email
+- ERP email parsing (text/CSV/AI) creates orders and customers automatically
+- Connector-driven intake pipeline from email to structured order data
+
+### Order Search
+- Enhanced text search across all order fields (order number, PO, customer name/number, product names, lot numbers)
+- Natural language AI search via Qwen — understands queries like "Kraft orders from last week", "unfulfilled orders with vanilla", "orders with lot L2026-0412"
+- POST /api/orders/search/natural endpoint for AI-powered order queries
+
+### Unified Search Page
+- Documents/Orders tabs on the Search page
+- Both tabs support regular and AI search modes
+- Consistent search experience across all data types
+
+### Admin UI
+- Connectors: list, detail view, creation wizard with step-by-step configuration
+- Customers: list with search, detail view with order history
+- Orders page with status filtering, search, and item progress tracking

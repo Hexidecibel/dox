@@ -1,0 +1,284 @@
+import { logAudit, getClientIp } from '../../lib/db';
+import {
+  requireRole,
+  requireTenantAccess,
+  NotFoundError,
+  BadRequestError,
+  errorToResponse,
+} from '../../lib/permissions';
+import { sanitizeString } from '../../lib/validation';
+import { encryptCredentials } from '../../lib/connectors/crypto';
+import type { Env, User } from '../../lib/types';
+
+const VALID_CONNECTOR_TYPES = ['email', 'api_poll', 'webhook', 'file_watch'];
+const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
+
+function transformConnector(row: Record<string, unknown>): Record<string, unknown> {
+  const { credentials_encrypted, credentials_iv, ...rest } = row;
+  return {
+    ...rest,
+    has_credentials: !!(credentials_encrypted && credentials_iv),
+  };
+}
+
+/**
+ * GET /api/connectors/:id
+ * Get a single connector by ID.
+ */
+export const onRequestGet: PagesFunction<Env> = async (context) => {
+  try {
+    const user = context.data.user as User;
+    const connectorId = context.params.id as string;
+
+    const connector = await context.env.DB.prepare(
+      `SELECT c.*, u.name as created_by_name
+       FROM connectors c
+       LEFT JOIN users u ON c.created_by = u.id
+       WHERE c.id = ?`
+    )
+      .bind(connectorId)
+      .first();
+
+    if (!connector) {
+      throw new NotFoundError('Connector not found');
+    }
+
+    if (user.role !== 'super_admin' && connector.tenant_id !== user.tenant_id) {
+      throw new NotFoundError('Connector not found');
+    }
+
+    return new Response(
+      JSON.stringify({ connector: transformConnector(connector) }),
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+  } catch (err) {
+    const httpErr = errorToResponse(err);
+    if (httpErr) return httpErr;
+
+    console.error('Get connector error:', err);
+    return new Response(
+      JSON.stringify({ error: 'Internal server error' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+};
+
+/**
+ * PUT /api/connectors/:id
+ * Update a connector.
+ */
+export const onRequestPut: PagesFunction<Env> = async (context) => {
+  try {
+    const user = context.data.user as User;
+    const connectorId = context.params.id as string;
+
+    requireRole(user, 'super_admin', 'org_admin');
+
+    const connector = await context.env.DB.prepare(
+      'SELECT * FROM connectors WHERE id = ?'
+    )
+      .bind(connectorId)
+      .first();
+
+    if (!connector) {
+      throw new NotFoundError('Connector not found');
+    }
+
+    requireTenantAccess(user, connector.tenant_id as string);
+
+    const body = (await context.request.json()) as {
+      name?: string;
+      connector_type?: string;
+      system_type?: string;
+      config?: Record<string, unknown>;
+      field_mappings?: Record<string, unknown>;
+      credentials?: Record<string, unknown>;
+      schedule?: string | null;
+      active?: number | boolean;
+    };
+
+    const updates: string[] = [];
+    const params: (string | number | null)[] = [];
+
+    if (body.name !== undefined) {
+      const name = sanitizeString(body.name);
+      if (!name) {
+        throw new BadRequestError('name cannot be empty');
+      }
+      updates.push('name = ?');
+      params.push(name);
+    }
+
+    if (body.connector_type !== undefined) {
+      if (!VALID_CONNECTOR_TYPES.includes(body.connector_type)) {
+        throw new BadRequestError(
+          `connector_type must be one of: ${VALID_CONNECTOR_TYPES.join(', ')}`
+        );
+      }
+      updates.push('connector_type = ?');
+      params.push(body.connector_type);
+    }
+
+    if (body.system_type !== undefined) {
+      if (!VALID_SYSTEM_TYPES.includes(body.system_type)) {
+        throw new BadRequestError(
+          `system_type must be one of: ${VALID_SYSTEM_TYPES.join(', ')}`
+        );
+      }
+      updates.push('system_type = ?');
+      params.push(body.system_type);
+    }
+
+    if (body.config !== undefined) {
+      updates.push('config = ?');
+      params.push(JSON.stringify(body.config));
+    }
+
+    if (body.field_mappings !== undefined) {
+      updates.push('field_mappings = ?');
+      params.push(JSON.stringify(body.field_mappings));
+    }
+
+    if (body.credentials !== undefined) {
+      if (body.credentials && context.env.CONNECTOR_ENCRYPTION_KEY) {
+        const { encrypted, iv } = await encryptCredentials(
+          body.credentials,
+          context.env.CONNECTOR_ENCRYPTION_KEY,
+          connector.tenant_id as string,
+          connectorId
+        );
+        updates.push('credentials_encrypted = ?');
+        params.push(encrypted);
+        updates.push('credentials_iv = ?');
+        params.push(iv);
+      } else {
+        updates.push('credentials_encrypted = ?');
+        params.push(null);
+        updates.push('credentials_iv = ?');
+        params.push(null);
+      }
+    }
+
+    if (body.schedule !== undefined) {
+      updates.push('schedule = ?');
+      params.push(body.schedule ? sanitizeString(body.schedule) : null);
+    }
+
+    if (body.active !== undefined) {
+      let activeVal: number;
+      if (typeof body.active === 'boolean') {
+        activeVal = body.active ? 1 : 0;
+      } else {
+        activeVal = body.active;
+      }
+      if (activeVal !== 0 && activeVal !== 1) {
+        throw new BadRequestError('active must be 0 or 1');
+      }
+      updates.push('active = ?');
+      params.push(activeVal);
+    }
+
+    if (updates.length === 0) {
+      throw new BadRequestError('No fields to update');
+    }
+
+    updates.push("updated_at = datetime('now')");
+    params.push(connectorId);
+
+    await context.env.DB.prepare(
+      `UPDATE connectors SET ${updates.join(', ')} WHERE id = ?`
+    )
+      .bind(...params)
+      .run();
+
+    await logAudit(
+      context.env.DB,
+      user.id,
+      connector.tenant_id as string,
+      'connector.updated',
+      'connector',
+      connectorId,
+      JSON.stringify({ changes: Object.keys(body) }),
+      getClientIp(context.request)
+    );
+
+    const updated = await context.env.DB.prepare(
+      `SELECT c.*, u.name as created_by_name
+       FROM connectors c
+       LEFT JOIN users u ON c.created_by = u.id
+       WHERE c.id = ?`
+    )
+      .bind(connectorId)
+      .first();
+
+    return new Response(
+      JSON.stringify({ connector: updated ? transformConnector(updated) : null }),
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+  } catch (err) {
+    const httpErr = errorToResponse(err);
+    if (httpErr) return httpErr;
+
+    console.error('Update connector error:', err);
+    return new Response(
+      JSON.stringify({ error: 'Internal server error' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+};
+
+/**
+ * DELETE /api/connectors/:id
+ * Soft-delete a connector (set active=0).
+ */
+export const onRequestDelete: PagesFunction<Env> = async (context) => {
+  try {
+    const user = context.data.user as User;
+    const connectorId = context.params.id as string;
+
+    requireRole(user, 'super_admin', 'org_admin');
+
+    const connector = await context.env.DB.prepare(
+      'SELECT * FROM connectors WHERE id = ?'
+    )
+      .bind(connectorId)
+      .first();
+
+    if (!connector) {
+      throw new NotFoundError('Connector not found');
+    }
+
+    requireTenantAccess(user, connector.tenant_id as string);
+
+    await context.env.DB.prepare(
+      "UPDATE connectors SET active = 0, updated_at = datetime('now') WHERE id = ?"
+    )
+      .bind(connectorId)
+      .run();
+
+    await logAudit(
+      context.env.DB,
+      user.id,
+      connector.tenant_id as string,
+      'connector.deleted',
+      'connector',
+      connectorId,
+      JSON.stringify({ name: connector.name }),
+      getClientIp(context.request)
+    );
+
+    return new Response(
+      JSON.stringify({ success: true }),
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+  } catch (err) {
+    const httpErr = errorToResponse(err);
+    if (httpErr) return httpErr;
+
+    console.error('Delete connector error:', err);
+    return new Response(
+      JSON.stringify({ error: 'Internal server error' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+};

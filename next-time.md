@@ -69,20 +69,19 @@ All Phase 1 features are live on supdox.com.
 
 ---
 
-## Next up: Testing round
+## Phase 2: Connector System, Orders, Customers — CODE COMPLETE (2026-04-09)
 
-Full end-to-end testing of Phase 1 before moving to Phase 2:
-1. Upload COAs via Import → verify processing, review, template save
-2. Email COAs to cush-co@supdox.com → verify receipt, processing, result email
-3. Test template auto-ingest with second doc from same supplier
-4. Test natural language search after docs are ingested
-5. Test supplier management (create, edit templates, view docs)
-6. Verify few-shot examples improve extraction on re-process
+Phase 2 is code-complete and ready for testing.
 
-## Then: Phase 2 — Order Intake & Parsing
+### Before deploying
+- Migration 0030 applied locally — run `npm run migrate:remote` for production
+- Test plan at `test-plan-phase2.md` — follow it to verify everything works
+- After testing passes, deploy with `./bin/deploy`
 
-Per COA-AUTOMATION-ROADMAP.md:
-- Parse daily ERP email listing customers needing COAs
-- Build order queue
-- Customer registry
-- This triggers downstream ERP/WMS integration (Phase 3)
+### Also completed (order search)
+- Enhanced order list search covers all fields (order number, PO, customer name/number, product names, lot numbers) via LIKE queries
+- Natural language order search implemented (POST /api/orders/search/natural) — AI-powered via Qwen
+- Search page has Documents/Orders tabs, both with regular and AI search modes
+
+### Follow-up items to consider (Phase 3)
+- Order-to-COA auto-matching — automatically match order items to existing COA documents by product + lot

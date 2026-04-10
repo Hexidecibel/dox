@@ -942,4 +942,87 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ query, tenant_id: tenantId }),
     }),
+
+  connectors: {
+    list(params?: { tenant_id?: string; connector_type?: string; system_type?: string; search?: string; active?: string; limit?: number; offset?: number }) {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.connector_type) query.set('connector_type', params.connector_type);
+      if (params?.system_type) query.set('system_type', params.system_type);
+      if (params?.search) query.set('search', params.search);
+      if (params?.active) query.set('active', params.active);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset) query.set('offset', String(params.offset));
+      return fetchApi(`/connectors?${query}`);
+    },
+    get(id: string) { return fetchApi(`/connectors/${id}`); },
+    create(data: { name: string; connector_type: string; system_type?: string; config?: Record<string, unknown>; field_mappings?: Record<string, string>; credentials?: Record<string, unknown>; schedule?: string; tenant_id?: string }) {
+      return fetchApi('/connectors', { method: 'POST', body: JSON.stringify(data) });
+    },
+    update(id: string, data: Record<string, unknown>) {
+      return fetchApi(`/connectors/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+    },
+    delete(id: string) { return fetchApi(`/connectors/${id}`, { method: 'DELETE' }); },
+    test(id: string) { return fetchApi(`/connectors/${id}/test`, { method: 'POST' }); },
+    run(id: string) { return fetchApi(`/connectors/${id}/run`, { method: 'POST' }); },
+    runs(id: string, params?: { limit?: number; offset?: number }) {
+      const query = new URLSearchParams();
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset) query.set('offset', String(params.offset));
+      return fetchApi(`/connectors/${id}/runs?${query}`);
+    },
+  },
+
+  orders: {
+    list(params?: { tenant_id?: string; status?: string; customer_id?: string; connector_id?: string; search?: string; limit?: number; offset?: number }) {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.status) query.set('status', params.status);
+      if (params?.customer_id) query.set('customer_id', params.customer_id);
+      if (params?.connector_id) query.set('connector_id', params.connector_id);
+      if (params?.search) query.set('search', params.search);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset) query.set('offset', String(params.offset));
+      return fetchApi(`/orders?${query}`);
+    },
+    get(id: string) { return fetchApi(`/orders/${id}`); },
+    create(data: { order_number: string; po_number?: string; customer_id?: string; customer_number?: string; customer_name?: string; tenant_id?: string; items?: Array<{ product_name?: string; product_code?: string; quantity?: number; lot_number?: string }> }) {
+      return fetchApi('/orders', { method: 'POST', body: JSON.stringify(data) });
+    },
+    update(id: string, data: Record<string, unknown>) {
+      return fetchApi(`/orders/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+    },
+    delete(id: string) { return fetchApi(`/orders/${id}`, { method: 'DELETE' }); },
+    naturalSearch(query: string, tenantId?: string) {
+      return fetchApi('/orders/search/natural', {
+        method: 'POST',
+        body: JSON.stringify({ query, tenant_id: tenantId }),
+      });
+    },
+  },
+
+  customers: {
+    list(params?: { tenant_id?: string; search?: string; active?: string; limit?: number; offset?: number }) {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.search) query.set('search', params.search);
+      if (params?.active) query.set('active', params.active);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset) query.set('offset', String(params.offset));
+      return fetchApi(`/customers?${query}`);
+    },
+    get(id: string) { return fetchApi(`/customers/${id}`); },
+    create(data: { customer_number: string; name: string; email?: string; coa_delivery_method?: string; coa_requirements?: Record<string, unknown>; tenant_id?: string }) {
+      return fetchApi('/customers', { method: 'POST', body: JSON.stringify(data) });
+    },
+    update(id: string, data: Record<string, unknown>) {
+      return fetchApi(`/customers/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+    },
+    delete(id: string) { return fetchApi(`/customers/${id}`, { method: 'DELETE' }); },
+    lookup(params: { customer_number: string; tenant_id?: string }) {
+      const query = new URLSearchParams({ customer_number: params.customer_number });
+      if (params.tenant_id) query.set('tenant_id', params.tenant_id);
+      return fetchApi(`/customers/lookup?${query}`);
+    },
+  },
 };

@@ -24,6 +24,13 @@ import { BundleDetail } from './pages/BundleDetail';
 import { IngestHistory } from './pages/IngestHistory';
 import { Import } from './pages/Import';
 import ReviewQueue from './pages/ReviewQueue';
+import { Connectors } from './pages/admin/Connectors';
+import { ConnectorDetail } from './pages/admin/ConnectorDetail';
+import { ConnectorWizard } from './pages/admin/ConnectorWizard';
+import { Customers } from './pages/admin/Customers';
+import { CustomerDetail } from './pages/admin/CustomerDetail';
+import { Orders } from './pages/Orders';
+import { OrderDetail } from './pages/OrderDetail';
 
 function App() {
   return (
@@ -48,6 +55,8 @@ function App() {
               <Route path="/ingest-history" element={<IngestHistory />} />
               <Route path="/import" element={<Import />} />
               <Route path="/review" element={<ReviewQueue />} />
+              <Route path="/orders" element={<Orders />} />
+              <Route path="/orders/:id" element={<OrderDetail />} />
 
               {/* Admin routes - users management and audit for super_admin and org_admin */}
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>
@@ -58,6 +67,12 @@ function App() {
                 <Route path="/admin/products" element={<Products />} />
                 <Route path="/admin/suppliers" element={<Suppliers />} />
                 <Route path="/admin/suppliers/:id" element={<SupplierDetail />} />
+                <Route path="/admin/connectors" element={<Connectors />} />
+                <Route path="/admin/connectors/new" element={<ConnectorWizard />} />
+                <Route path="/admin/connectors/:id/edit" element={<ConnectorWizard />} />
+                <Route path="/admin/connectors/:id" element={<ConnectorDetail />} />
+                <Route path="/admin/customers" element={<Customers />} />
+                <Route path="/admin/customers/:id" element={<CustomerDetail />} />
               </Route>
               {/* Super admin only routes */}
               <Route element={<ProtectedRoute roles={['super_admin']} />}>
