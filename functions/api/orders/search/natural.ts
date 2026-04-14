@@ -90,7 +90,7 @@ async function parseOrderQuery(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: 'Qwen3-5-35B-A3B',
+        model: 'Qwen3-8B',
         temperature: 0,
         max_tokens: 500,
         messages: [

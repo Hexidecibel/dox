@@ -202,7 +202,7 @@ export async function extractFields(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: 'Qwen3-5-35B-A3B',
+        model: 'Qwen3-8B',
         temperature: 0,
         max_tokens: 2048,
         messages: [
@@ -388,7 +388,7 @@ export async function parseNaturalQuery(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: 'Qwen3-5-35B-A3B',
+        model: 'Qwen3-8B',
         temperature: 0,
         max_tokens: 1024,
         messages: [

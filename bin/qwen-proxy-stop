@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PID_FILE=".qwen-proxy.pid"
+
+if systemctl is-active --quiet qwen-proxy.service 2>/dev/null; then
+  echo "Error: qwen-proxy.service is active under systemd."
+  echo "Stop it with: sudo systemctl stop qwen-proxy.service"
+  exit 1
+fi
+
+PID=""
+if [ -f "$PID_FILE" ]; then
+  PID="$(cat "$PID_FILE")"
+fi
+
+if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+  # Fall back to pgrep
+  PID="$(pgrep -f "node.*bin/qwen-proxy" || true)"
+fi
+
+if [ -z "$PID" ]; then
+  echo "qwen-proxy is not running"
+  rm -f "$PID_FILE"
+  exit 0
+fi
+
+echo "Stopping qwen-proxy (PID $PID)..."
+kill -TERM "$PID" 2>/dev/null || true
+
+# Wait up to 3 seconds for graceful exit
+for _ in 1 2 3; do
+  if ! kill -0 "$PID" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+
+if kill -0 "$PID" 2>/dev/null; then
+  echo "Process still alive after SIGTERM; sending SIGKILL"
+  kill -KILL "$PID" 2>/dev/null || true
+fi
+
+rm -f "$PID_FILE"
+echo "qwen-proxy stopped"

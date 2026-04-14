@@ -10,6 +10,7 @@ const GPU_HOST = process.env.QWEN_GPU_HOST || '192.168.1.67';
 const GPU_PORT = 9600;
 const LOCAL_PORT = 9600;
 const CONNECT_TIMEOUT = 2000;
+const REQUEST_TIMEOUT = 310000; // 310s — long enough for big XLSX extraction chunks (~90-130s)
 const TARGET = 'http://127.0.0.1:9600';
 
 function getSecret() {
@@ -48,6 +49,7 @@ const server = http.createServer((req, res) => {
     const body = Buffer.concat(bodyChunks);
 
     function sendTo(hostname, port, label, onError) {
+      let connected = false;
       const proxyReq = http.request(
         {
           hostname,
@@ -55,7 +57,9 @@ const server = http.createServer((req, res) => {
           path: reqPath,
           method: req.method,
           headers: fwdHeaders,
-          timeout: hostname === GPU_HOST ? CONNECT_TIMEOUT : 0,
+          // For GPU: start with a short connect timeout, swap to REQUEST_TIMEOUT once connected.
+          // For CPU fallback: use REQUEST_TIMEOUT immediately.
+          timeout: hostname === GPU_HOST ? CONNECT_TIMEOUT : REQUEST_TIMEOUT,
         },
         (proxyRes) => {
           console.log(`[${label}] ${req.method} ${reqPath} -> ${proxyRes.statusCode}`);
@@ -64,14 +68,24 @@ const server = http.createServer((req, res) => {
         }
       );
 
-      // Connection timeout — only fires before response headers arrive
       proxyReq.on('timeout', () => {
-        proxyReq.destroy(new Error('connect timeout'));
+        if (!connected) {
+          // Connect-phase timeout — try the fallback (or 502 if no fallback)
+          proxyReq.destroy(new Error('connect timeout'));
+        } else {
+          // Request-phase timeout — return 504 cleanly instead of hanging
+          console.error(`[${label}] request timeout after ${REQUEST_TIMEOUT}ms`);
+          proxyReq.destroy(new Error('request timeout'));
+          if (!res.headersSent) {
+            res.writeHead(504, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Gateway Timeout', detail: `upstream ${label} exceeded ${REQUEST_TIMEOUT}ms` }));
+          }
+        }
       });
 
       proxyReq.on('error', (err) => {
         console.error(`[${label}] ${err.message}`);
-        if (onError) {
+        if (!connected && onError) {
           onError();
         } else if (!res.headersSent) {
           res.writeHead(502, { 'Content-Type': 'application/json' });
@@ -79,12 +93,13 @@ const server = http.createServer((req, res) => {
         }
       });
 
-      // Clear the connect timeout once we get a response
-      if (hostname === GPU_HOST) {
-        proxyReq.on('socket', (socket) => {
-          socket.on('connect', () => proxyReq.setTimeout(0));
+      // Once the socket connects, switch to the long request timeout.
+      proxyReq.on('socket', (socket) => {
+        socket.on('connect', () => {
+          connected = true;
+          proxyReq.setTimeout(REQUEST_TIMEOUT);
         });
-      }
+      });
 
       proxyReq.end(body);
     }
@@ -96,9 +111,15 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// Inbound timeouts — must be long enough for big XLSX extraction chunks (~90-130s).
+server.setTimeout(REQUEST_TIMEOUT);
+server.requestTimeout = REQUEST_TIMEOUT;
+server.headersTimeout = REQUEST_TIMEOUT;
+server.keepAliveTimeout = REQUEST_TIMEOUT + 10000; // slightly longer than requestTimeout per Node docs
+
 server.listen(PORT, () => {
   console.log(`Qwen auth proxy listening on port ${PORT}`);
-  console.log(`GPU backend: ${GPU_HOST}:${GPU_PORT} (${CONNECT_TIMEOUT}ms timeout)`);
+  console.log(`GPU backend: ${GPU_HOST}:${GPU_PORT} (${CONNECT_TIMEOUT}ms connect, ${REQUEST_TIMEOUT}ms request)`);
   console.log(`CPU backend: 127.0.0.1:${LOCAL_PORT} (fallback)`);
   console.log(`Secret: ${SECRET}`);
 });

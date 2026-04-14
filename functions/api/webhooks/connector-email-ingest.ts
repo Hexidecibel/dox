@@ -40,12 +40,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // 1. Fetch the connector
     const connector = await context.env.DB.prepare(
-      `SELECT id, tenant_id, type, config, field_mappings, credentials_encrypted, credentials_iv, active
+      `SELECT id, tenant_id, connector_type, config, field_mappings, credentials_encrypted, credentials_iv, active
        FROM connectors WHERE id = ?`
     ).bind(payload.connector_id).first<{
       id: string;
       tenant_id: string;
-      type: string;
+      connector_type: string;
       config: string;
       field_mappings: string;
       credentials_encrypted: string | null;
@@ -61,7 +61,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return jsonResponse({ error: 'Connector is not active' }, 400);
     }
 
-    if (connector.type !== 'email') {
+    if (connector.connector_type !== 'email') {
       return jsonResponse({ error: 'Connector is not an email type' }, 400);
     }
 
@@ -112,7 +112,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       r2: context.env.FILES,
       tenantId: connector.tenant_id,
       connectorId: connector.id,
-      connectorType: connector.type as 'email',
+      connectorType: connector.connector_type as 'email',
       config,
       fieldMappings,
       credentials,

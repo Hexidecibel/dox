@@ -1,5 +1,5 @@
 import { generateId, logAudit } from '../db';
-import type { ConnectorContext, ConnectorOutput, ConnectorInput } from './types';
+import type { ConnectorContext, ConnectorOutput, ConnectorInput, ParsedContact, ParsedCustomer } from './types';
 import { getConnectorExecutor } from './index';
 import type { ConnectorType } from '../../../shared/types';
 
@@ -24,6 +24,33 @@ export interface OrchestratorResult {
   ordersCreated: number;
   customersCreated: number;
   errors: string[];
+}
+
+/**
+ * Build the canonical contact list for a parsed customer.
+ * - Prefer the explicit `contacts[]` (from AI extraction of registry rows).
+ * - Fall back to the single `email` field when no contacts are present.
+ * - Dedup case-insensitively by email within the list.
+ */
+function resolveContacts(customer: ParsedCustomer): ParsedContact[] {
+  const result: ParsedContact[] = [];
+  const seen = new Set<string>();
+  const push = (c: ParsedContact) => {
+    const email = c.email?.trim();
+    if (!email) return;
+    const key = email.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    result.push({ ...c, email });
+  };
+
+  if (Array.isArray(customer.contacts)) {
+    for (const c of customer.contacts) push(c);
+  }
+  if (result.length === 0 && customer.email) {
+    push({ email: customer.email });
+  }
+  return result;
 }
 
 export async function executeConnectorRun(params: OrchestratorParams): Promise<OrchestratorResult> {
@@ -74,19 +101,60 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
         `SELECT id FROM customers WHERE tenant_id = ? AND customer_number = ?`
       ).bind(tenantId, customer.customer_number).first<{ id: string }>();
 
+      // Resolve the contact list. If the AI/parser only supplied a single
+      // top-level `email`, synthesize a one-entry contact list so the join
+      // table still gets populated.
+      const contacts = resolveContacts(customer);
+      // Always use the first contact's email as the primary backfill when
+      // no explicit email was supplied on the customer.
+      const primaryEmail = customer.email || contacts[0]?.email || null;
+
+      let customerId: string;
       if (existing) {
-        // Update name/email if provided
+        customerId = existing.id;
         await db.prepare(
           `UPDATE customers SET name = ?, email = COALESCE(?, email), updated_at = datetime('now')
            WHERE id = ?`
-        ).bind(customer.name, customer.email || null, existing.id).run();
+        ).bind(customer.name, primaryEmail, customerId).run();
       } else {
-        const id = generateId();
+        customerId = generateId();
         await db.prepare(
           `INSERT INTO customers (id, tenant_id, customer_number, name, email)
            VALUES (?, ?, ?, ?, ?)`
-        ).bind(id, tenantId, customer.customer_number, customer.name, customer.email || null).run();
+        ).bind(customerId, tenantId, customer.customer_number, customer.name, primaryEmail).run();
         customersCreated++;
+      }
+
+      // Insert each contact. First in the list is primary (unless the
+      // parser explicitly flagged one). Per-customer email uniqueness is
+      // enforced at the DB layer via a UNIQUE (customer_id, lower(email))
+      // index — duplicates are silently skipped via OR IGNORE so re-runs
+      // don't crash.
+      const explicitPrimarySeen = contacts.some(c => c.is_primary === true);
+      for (let i = 0; i < contacts.length; i++) {
+        const contact = contacts[i];
+        const isPrimary = explicitPrimarySeen
+          ? (contact.is_primary === true ? 1 : 0)
+          : (i === 0 ? 1 : 0);
+        try {
+          await db.prepare(
+            `INSERT OR IGNORE INTO customer_contacts
+             (id, customer_id, tenant_id, name, email, role, is_primary)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            generateId(),
+            customerId,
+            tenantId,
+            contact.name || null,
+            contact.email,
+            contact.role || null,
+            isPrimary,
+          ).run();
+        } catch (err) {
+          output.errors.push({
+            message: `Contact insert failed for ${customer.customer_number} (${contact.email}): ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
       }
     } catch (err) {
       output.errors.push({
@@ -164,9 +232,12 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
     }
   }
 
-  // Determine final status
+  // Determine final status. `info[]` is purely informational (processing
+  // summaries, skipped-sheet notices, etc.) and must NOT count toward the
+  // error tally or the partial/success decision.
   const totalRecords = output.orders.length + output.customers.length;
   const errorCount = output.errors.length;
+  const infoMessages = output.info || [];
   const status = errorCount === 0 ? 'success' : (ordersCreated > 0 || customersCreated > 0) ? 'partial' : 'error';
 
   // Update run record
@@ -180,10 +251,12 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
     status,
     totalRecords,
     ordersCreated + customersCreated,
-    totalRecords - ordersCreated - customersCreated - errorCount,
+    // Clamp to zero: on a failed run totalRecords can be 0 while errorCount
+    // is positive, which would otherwise produce a negative updated count.
+    Math.max(0, totalRecords - ordersCreated - customersCreated - errorCount),
     errorCount,
     errorCount > 0 ? output.errors.map(e => e.message).join('; ') : null,
-    JSON.stringify({ errors: output.errors }),
+    JSON.stringify({ errors: output.errors, info: infoMessages }),
     runId
   ).run();
 

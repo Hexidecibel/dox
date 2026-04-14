@@ -174,7 +174,7 @@ Scaling the AI extraction pipeline across multiple machines.
 
 ### Current
 - Single server running llama-swap on port 9600
-- Qwen3-5-35B-A3B model (mixture-of-experts)
+- Qwen3-8B model (mixture-of-experts)
 - Auth proxy on port 9601, tunneled for remote access
 
 ### Planned

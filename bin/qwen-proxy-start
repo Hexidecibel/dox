@@ -2,15 +2,35 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Start proxy in background
-node bin/qwen-proxy &
+PID_FILE=".qwen-proxy.pid"
+LOG_FILE="logs/qwen-proxy.log"
+
+# Refuse if systemd is managing it — use `sudo systemctl restart qwen-proxy.service` instead.
+if systemctl is-active --quiet qwen-proxy.service 2>/dev/null; then
+  echo "Error: qwen-proxy.service is active under systemd."
+  echo "Manage it with: sudo systemctl {start,stop,restart} qwen-proxy.service"
+  exit 1
+fi
+
+# Refuse if already running via this script
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  echo "Error: qwen-proxy already running (PID $(cat "$PID_FILE"))"
+  exit 1
+fi
+
+# Refuse if any node qwen-proxy is running outside our PID file
+EXISTING=$(pgrep -f "node.*bin/qwen-proxy" || true)
+if [ -n "$EXISTING" ]; then
+  echo "Error: a qwen-proxy node process is already running (PID $EXISTING)"
+  exit 1
+fi
+
+mkdir -p logs
+
+nohup node bin/qwen-proxy > "$LOG_FILE" 2>&1 &
 PROXY_PID=$!
-sleep 1
+echo "$PROXY_PID" > "$PID_FILE"
 
-# Start tunnel
-/home/hexi/local/src/cush-tools/bin/tunnel 9601 qwen --bg
-
-echo ""
-echo "Qwen proxy running on port 9601 (PID: $PROXY_PID)"
-echo "Tunnel: https://qwen.tunnel.cush.rocks"
-echo "Set QWEN_URL=https://qwen.tunnel.cush.rocks in Cloudflare Pages secrets"
+echo "Qwen proxy started (PID: $PROXY_PID)"
+echo "Logs: $LOG_FILE"
+echo "Stop: bin/qwen-proxy-stop"

@@ -18,10 +18,20 @@ export interface ParsedOrderItem {
   lot_number?: string;
 }
 
+export interface ParsedContact {
+  name?: string;
+  email: string;
+  role?: string;
+  is_primary?: boolean;
+}
+
 export interface ParsedCustomer {
   customer_number: string;
   name: string;
+  /** Primary contact email. Back-compat: may be derived from contacts[0]. */
   email?: string;
+  /** Full contact list — registry rows often have 2-5 entries per customer. */
+  contacts?: ParsedContact[];
 }
 
 export interface ConnectorError {
@@ -34,6 +44,12 @@ export interface ConnectorOutput {
   orders: ParsedOrder[];
   customers: ParsedCustomer[];
   errors: ConnectorError[];
+  /**
+   * Informational messages that are NOT errors (e.g. "processed N pages in
+   * M chunks, extracted K orders / J customers"). Separate channel so the
+   * orchestrator's status calc doesn't mislabel successful runs as `partial`.
+   */
+  info?: string[];
 }
 
 // === Connector Context & Input ===
