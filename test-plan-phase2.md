@@ -1,9 +1,11 @@
 # Phase 2 Test Plan: UI/Frontend Manual Testing
 
+> **Dev environment:** Running locally on the user's machine, exposed at `https://dox-dev.tunnel.cush.rocks` via cush-tools tunnel (auto-expires ~1 hour from start, extend with `bin/status extend dox-dev`). Login: `admin@docportal.local` / `admin123`.
+
 > **API layer is automated.** 306 tests cover all REST endpoints (customers, orders, connectors, ingest, edge cases). Run with `npm test`. This plan focuses on **manual UI/frontend testing** only.
 
 **Prerequisites:**
-- Dev server running at `localhost:8788` (`npm run dev`)
+- Dev server running locally (`npm run dev`), exposed via tunnel at `https://dox-dev.tunnel.cush.rocks`
 - Seeded admin user exists (run `./bin/seed` if needed)
 - Tenant exists (the seed creates one)
 - Some test data helps -- either seed via the API tests (`npm test`) or create manually during testing
@@ -16,7 +18,7 @@ For any ad-hoc API calls during testing:
 
 ```bash
 # Login and capture token
-TOKEN=$(curl -s http://localhost:8788/api/auth/login \
+TOKEN=$(curl -s https://dox-dev.tunnel.cush.rocks/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@example.com","password":"admin123"}' \
   | jq -r '.token')
@@ -24,7 +26,7 @@ TOKEN=$(curl -s http://localhost:8788/api/auth/login \
 echo $TOKEN
 
 # Also grab the tenant_id from the login response
-TENANT_ID=$(curl -s http://localhost:8788/api/auth/login \
+TENANT_ID=$(curl -s https://dox-dev.tunnel.cush.rocks/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@example.com","password":"admin123"}' \
   | jq -r '.user.tenant_id')
@@ -175,7 +177,7 @@ SO-2026-0103,M000789,"Mars Wrigley Confections",PO-90003,2026-04-14,Vanilla Oleo
 CSVEOF
 )
 
-curl -s http://localhost:8788/api/webhooks/connector-email-ingest \
+curl -s https://dox-dev.tunnel.cush.rocks/api/webhooks/connector-email-ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -197,7 +199,7 @@ curl -s http://localhost:8788/api/webhooks/connector-email-ingest \
 
 ## 3. UI Walkthrough
 
-Open `http://localhost:8788` in browser, login as admin (email/password from seed), verify dashboard loads.
+Open `https://dox-dev.tunnel.cush.rocks` in browser, login as admin (email/password from seed), verify dashboard loads.
 
 ### 3.1 Orders Page (`/orders`)
 

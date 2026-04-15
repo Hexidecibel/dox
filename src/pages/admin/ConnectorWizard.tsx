@@ -1,5 +1,21 @@
-import { useState, useEffect } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+/**
+ * Connector Wizard — file-first flow (Wave 2).
+ *
+ * Step order (MVP):
+ *   0. Name & Type         — pick connector type + name + system type on one card
+ *   1. Upload Sample       — drop a CSV/TSV/TXT file (5MB max) to seed discovery
+ *   2. Review Schema       — confirm how each detected column maps to dox fields
+ *   3. Live Preview        — call preview-extraction and see what the parser would emit
+ *  [3.5]. Connection Config — subject filters / base URL / webhook secret (email/api_poll/webhook only)
+ *   4. Review & Save       — final summary + activate toggle
+ *
+ * The Connection Config step is conditionally inserted when the connector
+ * type needs it. For file_watch (and future formats that use the upload
+ * flow), we skip straight from Live Preview to Review & Save.
+ */
+
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import {
   Box,
   Typography,
@@ -34,8 +50,17 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
 import { StepConnectionConfig } from '../../components/connectors/StepConnectionConfig';
-import { StepFieldMapping } from '../../components/connectors/StepFieldMapping';
+import { StepUploadSample } from '../../components/connectors/StepUploadSample';
+import { StepSchemaReview } from '../../components/connectors/StepSchemaReview';
+import { StepLivePreview } from '../../components/connectors/StepLivePreview';
 import { StepTestAndActivate } from '../../components/connectors/StepTestAndActivate';
+import {
+  defaultFieldMappings,
+  normalizeFieldMappings,
+  validateFieldMappings,
+  type ConnectorFieldMappings,
+} from '../../components/connectors/doxFields';
+import type { DiscoverSchemaResponse } from '../../types/connectorSchema';
 
 type ConnectorType = 'email' | 'api_poll' | 'webhook' | 'file_watch';
 type SystemType = 'erp' | 'wms' | 'other';
@@ -45,13 +70,23 @@ interface WizardState {
   name: string;
   systemType: SystemType;
   config: Record<string, unknown>;
-  fieldMappings: Record<string, string>;
+  fieldMappings: ConnectorFieldMappings;
   credentials: Record<string, unknown> | null;
   schedule: string | null;
   active: boolean;
+  sample: DiscoverSchemaResponse | null;
 }
 
-const STEPS = ['Choose Type', 'Basic Info', 'Connection Settings', 'Field Mapping', 'Test & Activate'];
+/**
+ * Location state shape accepted by the wizard route. Lets callers
+ * (ConnectorDetail "Remap with new sample", etc.) seed the wizard at a
+ * specific step without trashing the editing flow.
+ */
+interface WizardLocationState {
+  startAtStep?: number;
+  /** When true, treat this as an edit of an existing connector but start at a non-default step. */
+  remapMode?: boolean;
+}
 
 const CONNECTOR_TYPE_OPTIONS: {
   type: ConnectorType;
@@ -59,93 +94,66 @@ const CONNECTOR_TYPE_OPTIONS: {
   description: string;
   icon: React.ReactNode;
   recommended?: boolean;
+  disabled?: boolean;
+  badge?: string;
 }[] = [
+  {
+    type: 'file_watch',
+    label: 'File Upload / Watch',
+    description: 'Upload files directly or watch an R2 bucket for new files',
+    icon: <FileIcon sx={{ fontSize: 40 }} />,
+    recommended: true,
+  },
   {
     type: 'email',
     label: 'Email Parser',
-    description: 'Parse orders from automated ERP emails',
+    description: 'Receive documents via email (attachments + body parsing)',
     icon: <EmailIcon sx={{ fontSize: 40 }} />,
-    recommended: true,
   },
   {
     type: 'api_poll',
     label: 'API Connection',
     description: 'Connect directly to your ERP/WMS REST API',
     icon: <SyncIcon sx={{ fontSize: 40 }} />,
+    badge: 'Coming soon',
   },
   {
     type: 'webhook',
     label: 'Webhook Receiver',
     description: 'Receive data pushed from your systems',
     icon: <WebhookIcon sx={{ fontSize: 40 }} />,
-  },
-  {
-    type: 'file_watch',
-    label: 'File Watcher',
-    description: 'Monitor for CSV or Excel file drops',
-    icon: <FileIcon sx={{ fontSize: 40 }} />,
+    badge: 'Coming soon',
   },
 ];
 
-const DEFAULT_CONFIGS: Record<ConnectorType, Record<string, unknown>> = {
-  email: {
-    subject_patterns: [],
-    sender_filter: '',
-    parsing_prompt: '',
-  },
-  api_poll: {
-    base_url: '',
-    endpoint: '',
-    method: 'GET',
-    headers: {},
-  },
-  webhook: {
-    secret: '',
-    path_prefix: '',
-  },
-  file_watch: {
-    path: '',
-    pattern: '*.csv',
-    format: 'csv',
-  },
-};
+function connectorNeedsConnectionConfig(type: ConnectorType | null): boolean {
+  return type === 'email' || type === 'api_poll' || type === 'webhook';
+}
 
-const DEFAULT_FIELD_MAPPINGS: Record<ConnectorType, Record<string, string>> = {
-  email: {
-    customer_name: '',
-    order_number: '',
-    items: '',
-  },
-  api_poll: {
-    customer_name: '',
-    order_number: '',
-    items: '',
-  },
-  webhook: {
-    customer_name: '',
-    order_number: '',
-    items: '',
-  },
-  file_watch: {
-    customer_name: '',
-    order_number: '',
-    items: '',
-  },
-};
+function buildStepLabels(state: WizardState): string[] {
+  const base = ['Name & Type', 'Upload Sample', 'Review Schema', 'Live Preview'];
+  if (connectorNeedsConnectionConfig(state.connectorType)) {
+    base.push('Connection');
+  }
+  base.push('Review & Save');
+  return base;
+}
 
 const initialState: WizardState = {
   connectorType: null,
   name: '',
   systemType: 'erp',
   config: {},
-  fieldMappings: {},
+  fieldMappings: defaultFieldMappings(),
   credentials: null,
   schedule: null,
   active: false,
+  sample: null,
 };
 
 export function ConnectorWizard() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { id: connectorId } = useParams<{ id: string }>();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
@@ -154,12 +162,24 @@ export function ConnectorWizard() {
   const { selectedTenantId } = useTenant();
 
   const isEditMode = !!connectorId;
+  const locationState = (location.state || {}) as WizardLocationState;
 
   const [activeStep, setActiveStep] = useState(0);
   const [state, setState] = useState<WizardState>(initialState);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  const stepLabels = useMemo(() => buildStepLabels(state), [state]);
+  const totalSteps = stepLabels.length;
+  const lastStepIndex = totalSteps - 1;
+
+  // Which tenant will receive this connector? Super admins can pick; everyone
+  // else is locked to their own. Needed by StepUploadSample so discover-schema
+  // knows where to scope the sample.
+  const currentTenantId = isSuperAdmin
+    ? (selectedTenantId || user?.tenant_id || null)
+    : (user?.tenant_id || null);
 
   // Load existing connector in edit mode
   useEffect(() => {
@@ -168,65 +188,103 @@ export function ConnectorWizard() {
     setError('');
     (async () => {
       try {
-        const result = await api.connectors.get(connectorId) as any;
+        const result = await api.connectors.get(connectorId) as { connector: Record<string, unknown> };
         const c = result.connector;
-        const config = typeof c.config === 'string' ? JSON.parse(c.config) : (c.config || {});
-        const mappings = c.field_mappings
-          ? typeof c.field_mappings === 'string'
-            ? JSON.parse(c.field_mappings)
-            : c.field_mappings
-          : {};
+        const config = typeof c.config === 'string' ? JSON.parse(c.config as string) : (c.config || {});
+        const mappings = normalizeFieldMappings(c.field_mappings);
+        // If this connector has a stored sample and the caller wants to jump
+        // straight into the live-preview or review step ("Re-test" / "Remap"),
+        // fetch the stored sample from R2 and re-run discovery so the wizard
+        // has a populated detected_fields list — not an empty stub.
+        const storedSampleKey = (c.sample_r2_key as string | null) || null;
+        let rehydratedSample: DiscoverSchemaResponse | null = null;
+        if (storedSampleKey && (locationState.startAtStep === 2 || locationState.startAtStep === 3)) {
+          try {
+            rehydratedSample = await api.connectors.rehydrateSample(connectorId);
+          } catch (hydrateErr) {
+            // Non-fatal — fall back to the empty-shell behavior so the
+            // wizard can still land the user on the requested step.
+            console.warn('Sample rehydrate failed, falling back to stub:', hydrateErr);
+            rehydratedSample = {
+              sample_id: storedSampleKey,
+              source_type: 'csv',
+              file_name: 'stored sample',
+              size: 0,
+              expires_at: 0,
+              detected_fields: [],
+              sample_rows: [],
+              layout_hint: 'Stored sample (rehydrate failed)',
+              warnings: [hydrateErr instanceof Error ? hydrateErr.message : String(hydrateErr)],
+              suggested_mappings: mappings,
+            };
+          }
+        }
+
         setState({
-          connectorType: c.connector_type,
-          name: c.name,
-          systemType: c.system_type || 'erp',
-          config,
+          connectorType: c.connector_type as ConnectorType,
+          name: c.name as string,
+          systemType: (c.system_type as SystemType) || 'erp',
+          config: config as Record<string, unknown>,
           fieldMappings: mappings,
           credentials: null,
-          schedule: c.schedule || null,
-          active: c.active,
+          schedule: (c.schedule as string | null) || null,
+          active: !!c.active,
+          sample: rehydratedSample,
         });
-        // Skip type step in edit mode
-        setActiveStep(1);
+        // Skip the Name & Type step in edit mode; allow caller to override via location state.
+        setActiveStep(locationState.startAtStep ?? 1);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load connector');
       } finally {
         setLoading(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectorId]);
 
   const updateState = (patch: Partial<WizardState>) => {
     setState((prev) => ({ ...prev, ...patch }));
   };
 
+  /**
+   * Resolve the "role" of the current active step — the base-step set can
+   * include an optional Connection Config slot so integer indices shift
+   * depending on connector type. Centralizing the lookup keeps validation /
+   * rendering in sync.
+   */
+  function stepRoleAt(index: number): 'type' | 'upload' | 'review' | 'preview' | 'connection' | 'save' {
+    const label = stepLabels[index];
+    switch (label) {
+      case 'Name & Type': return 'type';
+      case 'Upload Sample': return 'upload';
+      case 'Review Schema': return 'review';
+      case 'Live Preview': return 'preview';
+      case 'Connection': return 'connection';
+      case 'Review & Save': return 'save';
+      default: return 'save';
+    }
+  }
+
   const validateStep = (): string | null => {
-    switch (activeStep) {
-      case 0:
+    const role = stepRoleAt(activeStep);
+    switch (role) {
+      case 'type':
         if (!state.connectorType) return 'Please select a connector type';
-        return null;
-      case 1:
         if (!state.name.trim() || state.name.trim().length < 3) return 'Name must be at least 3 characters';
         return null;
-      case 2:
+      case 'upload':
+        if (!state.sample) return 'Upload a sample file to continue';
         return null;
-      case 3: {
-        // order_number mapping is required
-        if (state.connectorType === 'email') {
-          // AI mode: order_number must be a key (checkbox checked)
-          if (!state.fieldMappings['order_number']) {
-            return 'Order Number field mapping is required';
-          }
-        } else {
-          // Manual mode: some source field must map TO order_number
-          const mappedValues = Object.values(state.fieldMappings);
-          if (!mappedValues.includes('order_number')) {
-            return 'Order Number field mapping is required';
-          }
-        }
+      case 'review': {
+        const result = validateFieldMappings(state.fieldMappings);
+        if (!result.ok) return result.errors[0];
         return null;
       }
-      default:
+      case 'preview':
+        return null;
+      case 'connection':
+        return null;
+      case 'save':
         return null;
     }
   };
@@ -239,27 +297,24 @@ export function ConnectorWizard() {
     }
     setError('');
 
-    // When leaving type step, seed defaults if config is empty
-    if (activeStep === 0 && state.connectorType) {
-      const currentConfig = Object.keys(state.config).length === 0;
-      const currentMappings = Object.keys(state.fieldMappings).length === 0;
-      if (currentConfig) {
-        const defaults = DEFAULT_CONFIGS[state.connectorType];
-        updateState({ config: defaults });
-      }
-      if (currentMappings) {
-        const defaults = DEFAULT_FIELD_MAPPINGS[state.connectorType];
-        updateState({ fieldMappings: defaults });
+    // Seed field_mappings with the backend's suggestions the first time we
+    // enter the Review step after an upload. This way the user sees the AI
+    // guesses applied, and can adjust or hit "Accept all" to confirm.
+    const role = stepRoleAt(activeStep);
+    if (role === 'upload' && state.sample) {
+      const isBlank = !state.fieldMappings.core.order_number?.source_labels.length;
+      if (isBlank) {
+        updateState({ fieldMappings: normalizeFieldMappings(state.sample.suggested_mappings) });
       }
     }
 
-    setActiveStep((prev) => Math.min(prev + 1, STEPS.length - 1));
+    setActiveStep((prev) => Math.min(prev + 1, lastStepIndex));
   };
 
   const handleBack = () => {
     setError('');
-    // In edit mode, don't go back to type step
-    if (isEditMode && activeStep === 1) return;
+    // In edit mode, don't go back before the upload step.
+    if (isEditMode && activeStep <= 1) return;
     setActiveStep((prev) => Math.max(prev - 1, 0));
   };
 
@@ -275,17 +330,15 @@ export function ConnectorWizard() {
         field_mappings: state.fieldMappings,
         schedule: state.schedule || undefined,
         active: activate,
+        sample_r2_key: state.sample?.sample_id,
       };
 
       let resultId: string;
       if (isEditMode && connectorId) {
-        const result = await api.connectors.update(connectorId, data) as any;
+        const result = await api.connectors.update(connectorId, data) as { connector?: { id?: string } };
         resultId = result.connector?.id || connectorId;
       } else {
-        const tenantId = isSuperAdmin
-          ? (selectedTenantId || user?.tenant_id)
-          : user?.tenant_id;
-        if (!tenantId) {
+        if (!currentTenantId) {
           setError('No tenant selected. Please select a tenant first.');
           setSaving(false);
           return;
@@ -295,11 +348,12 @@ export function ConnectorWizard() {
           connector_type: data.connector_type as string,
           system_type: data.system_type as string,
           config: data.config as Record<string, unknown>,
-          field_mappings: data.field_mappings as Record<string, string>,
+          field_mappings: data.field_mappings,
           schedule: data.schedule as string | undefined,
-          tenant_id: tenantId,
-        }) as any;
-        resultId = result.connector?.id || result.id;
+          tenant_id: currentTenantId,
+          sample_r2_key: state.sample?.sample_id,
+        }) as { connector?: { id?: string }; id?: string };
+        resultId = result.connector?.id || result.id || '';
       }
       navigate(`/admin/connectors/${resultId}`);
     } catch (err) {
@@ -317,6 +371,8 @@ export function ConnectorWizard() {
     );
   }
 
+  const role = stepRoleAt(activeStep);
+
   return (
     <Box>
       <Button
@@ -329,7 +385,7 @@ export function ConnectorWizard() {
       </Button>
 
       <Typography variant="h4" fontWeight={700} sx={{ mb: 3 }}>
-        {isEditMode ? 'Edit Connector' : 'New Connector'}
+        {isEditMode ? (locationState.remapMode ? 'Remap Connector' : 'Edit Connector') : 'New Connector'}
       </Typography>
 
       {error && (
@@ -344,7 +400,7 @@ export function ConnectorWizard() {
         orientation={isMobile ? 'vertical' : 'horizontal'}
         sx={{ mb: 4 }}
       >
-        {STEPS.map((label) => (
+        {stepLabels.map((label) => (
           <Step key={label}>
             <StepLabel>{label}</StepLabel>
           </Step>
@@ -353,28 +409,37 @@ export function ConnectorWizard() {
 
       {/* Step content */}
       <Box sx={{ minHeight: 300, mb: 4 }}>
-        {activeStep === 0 && (
-          <StepChooseType
-            selected={state.connectorType}
-            onSelect={(type) => updateState({ connectorType: type })}
+        {role === 'type' && (
+          <StepNameAndType
+            state={state}
+            onChange={updateState}
             isEditMode={isEditMode}
           />
         )}
-        {activeStep === 1 && (
-          <StepBasicInfo
-            name={state.name}
-            systemType={state.systemType}
-            onNameChange={(name) => updateState({ name })}
-            onSystemTypeChange={(systemType) => updateState({ systemType })}
+        {role === 'upload' && (
+          <StepUploadSample
+            sample={state.sample}
+            onSample={(sample) => updateState({ sample })}
+            currentTenantId={currentTenantId}
           />
         )}
-        {activeStep === 2 && (
+        {role === 'review' && (
+          <StepSchemaReview
+            sample={state.sample}
+            fieldMappings={state.fieldMappings}
+            onFieldMappingsChange={(mappings) => updateState({ fieldMappings: mappings })}
+          />
+        )}
+        {role === 'preview' && (
+          <StepLivePreview
+            sample={state.sample}
+            fieldMappings={state.fieldMappings}
+          />
+        )}
+        {role === 'connection' && (
           <StepConnectionConfig state={state} onChange={updateState} />
         )}
-        {activeStep === 3 && (
-          <StepFieldMapping state={state} onChange={updateState} />
-        )}
-        {activeStep === 4 && (
+        {role === 'save' && (
           <StepTestAndActivate state={state} onChange={updateState} />
         )}
       </Box>
@@ -405,7 +470,7 @@ export function ConnectorWizard() {
             </Button>
           )}
 
-          {activeStep < STEPS.length - 1 ? (
+          {activeStep < lastStepIndex ? (
             <Button variant="contained" onClick={handleNext}>
               Next
             </Button>
@@ -433,121 +498,112 @@ export function ConnectorWizard() {
   );
 }
 
-// --- Step Components ---
+// =============================================================================
+// StepNameAndType — merged "Choose Type" + "Basic Info"
+// =============================================================================
 
-function StepChooseType({
-  selected,
-  onSelect,
+function StepNameAndType({
+  state,
+  onChange,
   isEditMode,
 }: {
-  selected: ConnectorType | null;
-  onSelect: (type: ConnectorType) => void;
+  state: WizardState;
+  onChange: (patch: Partial<WizardState>) => void;
   isEditMode: boolean;
 }) {
-  if (isEditMode && selected) {
-    const option = CONNECTOR_TYPE_OPTIONS.find((o) => o.type === selected);
-    return (
-      <Alert severity="info" sx={{ mb: 2 }}>
-        Connector type: <strong>{option?.label || selected}</strong> (cannot be changed after creation)
-      </Alert>
-    );
-  }
-
   return (
     <Box>
-      <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
-        Choose how this connector will receive data from your external system.
-      </Typography>
-      <Grid container spacing={2}>
-        {CONNECTOR_TYPE_OPTIONS.map((option) => {
-          const isSelected = selected === option.type;
-          return (
-            <Grid item xs={12} sm={6} key={option.type}>
-              <Card
-                variant="outlined"
-                sx={{
-                  border: isSelected ? 2 : 1,
-                  borderColor: isSelected ? 'primary.main' : 'divider',
-                  bgcolor: isSelected ? 'primary.50' : 'background.paper',
-                  transition: 'all 0.15s',
-                  height: '100%',
-                }}
-              >
-                <CardActionArea
-                  onClick={() => onSelect(option.type)}
-                  sx={{ height: '100%', p: 2 }}
-                >
-                  <CardContent sx={{ textAlign: 'center', p: 0 }}>
-                    <Box
-                      sx={{
-                        color: isSelected ? 'primary.main' : 'text.secondary',
-                        mb: 1.5,
-                      }}
-                    >
-                      {option.icon}
-                    </Box>
-                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, mb: 1 }}>
-                      <Typography variant="h6" fontWeight={600}>
-                        {option.label}
-                      </Typography>
-                      {option.recommended && (
-                        <Chip label="Recommended" size="small" color="primary" variant="outlined" />
-                      )}
-                    </Box>
-                    <Typography variant="body2" color="text.secondary">
-                      {option.description}
-                    </Typography>
-                  </CardContent>
-                </CardActionArea>
-              </Card>
-            </Grid>
-          );
-        })}
-      </Grid>
-    </Box>
-  );
-}
-
-function StepBasicInfo({
-  name,
-  systemType,
-  onNameChange,
-  onSystemTypeChange,
-}: {
-  name: string;
-  systemType: SystemType;
-  onNameChange: (name: string) => void;
-  onSystemTypeChange: (type: SystemType) => void;
-}) {
-  return (
-    <Box sx={{ maxWidth: 560 }}>
       <Alert severity="info" sx={{ mb: 3 }}>
-        Connectors feed the order pipeline — they create orders and customers from your external systems.
+        Connectors feed the order pipeline — they create orders and customers from your
+        external systems.
       </Alert>
 
       <TextField
-        label="Name"
+        label="Connector name"
         fullWidth
         required
-        value={name}
-        onChange={(e) => onNameChange(e.target.value)}
+        value={state.name}
+        onChange={(e) => onChange({ name: e.target.value })}
         helperText="A name you'll recognize, like 'Daily ERP Report'"
         sx={{ mb: 3 }}
-        error={name.length > 0 && name.trim().length < 3}
+        error={state.name.length > 0 && state.name.trim().length < 3}
       />
 
-      <FormControl>
-        <FormLabel>System Type</FormLabel>
+      <FormControl sx={{ mb: 3 }}>
+        <FormLabel>System type</FormLabel>
         <RadioGroup
-          value={systemType}
-          onChange={(e) => onSystemTypeChange(e.target.value as SystemType)}
+          row
+          value={state.systemType}
+          onChange={(e) => onChange({ systemType: e.target.value as SystemType })}
         >
-          <FormControlLabel value="erp" control={<Radio />} label="ERP (order management)" />
-          <FormControlLabel value="wms" control={<Radio />} label="WMS (warehouse/shipping)" />
+          <FormControlLabel value="erp" control={<Radio />} label="ERP" />
+          <FormControlLabel value="wms" control={<Radio />} label="WMS" />
           <FormControlLabel value="other" control={<Radio />} label="Other" />
         </RadioGroup>
       </FormControl>
+
+      {isEditMode && state.connectorType ? (
+        <Alert severity="info">
+          Connector type: <strong>{state.connectorType}</strong> (cannot be changed after creation)
+        </Alert>
+      ) : (
+        <Box>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>
+            Connector type
+          </Typography>
+          <Grid container spacing={2}>
+            {CONNECTOR_TYPE_OPTIONS.map((option) => {
+              const isSelected = state.connectorType === option.type;
+              return (
+                <Grid item xs={12} sm={6} key={option.type}>
+                  <Card
+                    variant="outlined"
+                    sx={{
+                      border: isSelected ? 2 : 1,
+                      borderColor: isSelected ? 'primary.main' : 'divider',
+                      bgcolor: isSelected ? 'primary.50' : 'background.paper',
+                      transition: 'all 0.15s',
+                      height: '100%',
+                      opacity: option.disabled ? 0.5 : 1,
+                    }}
+                  >
+                    <CardActionArea
+                      disabled={option.disabled}
+                      onClick={() => onChange({ connectorType: option.type })}
+                      sx={{ height: '100%', p: 2 }}
+                    >
+                      <CardContent sx={{ textAlign: 'center', p: 0 }}>
+                        <Box
+                          sx={{
+                            color: isSelected ? 'primary.main' : 'text.secondary',
+                            mb: 1.5,
+                          }}
+                        >
+                          {option.icon}
+                        </Box>
+                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
+                          <Typography variant="h6" fontWeight={600}>
+                            {option.label}
+                          </Typography>
+                          {option.recommended && (
+                            <Chip label="Recommended" size="small" color="primary" variant="outlined" />
+                          )}
+                          {option.badge && (
+                            <Chip label={option.badge} size="small" variant="outlined" />
+                          )}
+                        </Box>
+                        <Typography variant="body2" color="text.secondary">
+                          {option.description}
+                        </Typography>
+                      </CardContent>
+                    </CardActionArea>
+                  </Card>
+                </Grid>
+              );
+            })}
+          </Grid>
+        </Box>
+      )}
     </Box>
   );
 }
-

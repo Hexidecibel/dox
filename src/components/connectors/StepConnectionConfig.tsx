@@ -25,15 +25,19 @@ import {
   ContentCopy as ContentCopyIcon,
 } from '@mui/icons-material';
 
+import type { ConnectorFieldMappings } from './doxFields';
+import type { DiscoverSchemaResponse } from '../../types/connectorSchema';
+
 interface WizardState {
   connectorType: 'email' | 'api_poll' | 'webhook' | 'file_watch' | null;
   name: string;
   systemType: 'erp' | 'wms' | 'other';
   config: Record<string, unknown>;
-  fieldMappings: Record<string, string>;
+  fieldMappings: ConnectorFieldMappings;
   credentials: Record<string, unknown> | null;
   schedule: string | null;
   active: boolean;
+  sample: DiscoverSchemaResponse | null;
 }
 
 interface StepProps {

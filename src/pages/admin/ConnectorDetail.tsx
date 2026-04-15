@@ -1,37 +1,82 @@
-import { useState, useEffect, useCallback } from 'react';
+/**
+ * ConnectorDetail page — "see everything + edit inline" rework.
+ *
+ * The previous incarnation split config and runs into tabs and forced the
+ * user to either (a) edit raw JSON via the "Edit" toggle or (b) round-trip
+ * back through the multi-step wizard just to change a single subject
+ * pattern. This rewrite surfaces the full connector config as a set of
+ * cards with in-place editing, using PUT /api/connectors/:id as a PATCH
+ * (the backend already treats omitted fields as "leave alone").
+ *
+ * Saves are fired on blur / toggle change and reflected optimistically —
+ * failures roll the state back and show an Alert. A snackbar confirms
+ * successful saves.
+ *
+ * The wizard is still reachable (for full re-discovery with a new sample
+ * file) via the "Remap" and "Re-test" buttons on the Sample card.
+ */
+
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { formatDate } from '../../utils/format';
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Alert,
+  Autocomplete,
   Box,
-  Typography,
   Button,
+  Chip,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
+  FormControl,
+  FormHelperText,
+  InputLabel,
+  MenuItem,
+  Pagination,
+  Paper,
+  Select,
+  Snackbar,
+  Stack,
+  Switch,
   Table,
   TableBody,
   TableCell,
   TableContainer,
   TableHead,
   TableRow,
-  Paper,
-  Chip,
   TextField,
-  CircularProgress,
-  Alert,
   Tooltip,
-  Tab,
-  Tabs,
-  Pagination,
-  Select,
-  MenuItem,
-  FormControl,
-  InputLabel,
+  Typography,
 } from '@mui/material';
 import {
-  Edit as EditIcon,
   ArrowBack as BackIcon,
   PlayArrow as RunIcon,
   Science as TestIcon,
+  FileUpload as UploadIcon,
+  Refresh as RefreshIcon,
+  Delete as DeleteIcon,
+  Edit as EditIcon,
+  ExpandMore as ExpandMoreIcon,
+  ContentCopy as CopyIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
+import type { Tenant } from '../../lib/types';
+import {
+  defaultFieldMappings,
+  normalizeFieldMappings,
+  type ConnectorFieldMappings,
+} from '../../components/connectors/doxFields';
+import { FieldMappingEditor } from '../../components/connectors/FieldMappingEditor';
+
+// ---------------------------------------------------------------------------
+// Local types
+// ---------------------------------------------------------------------------
 
 const SYSTEM_TYPES = ['erp', 'wms', 'other'] as const;
 type SystemType = typeof SYSTEM_TYPES[number];
@@ -39,16 +84,17 @@ type SystemType = typeof SYSTEM_TYPES[number];
 interface Connector {
   id: string;
   name: string;
-  connector_type: string;
+  connector_type: 'email' | 'api_poll' | 'webhook' | 'file_watch';
   system_type: SystemType;
-  config: string | Record<string, unknown>;
-  field_mappings: string | Record<string, unknown> | null;
+  config: Record<string, unknown>;
+  field_mappings: ConnectorFieldMappings;
   schedule: string | null;
   active: boolean;
   last_run_at: string | null;
   created_at: string;
   updated_at: string;
   tenant_id: string;
+  sample_r2_key: string | null;
 }
 
 interface ConnectorRun {
@@ -63,19 +109,9 @@ interface ConnectorRun {
   error_message: string | null;
 }
 
-interface TabPanelProps {
-  children?: React.ReactNode;
-  index: number;
-  value: number;
-}
-
-function TabPanel({ children, value, index }: TabPanelProps) {
-  return (
-    <Box role="tabpanel" hidden={value !== index} sx={{ pt: 2 }}>
-      {value === index && children}
-    </Box>
-  );
-}
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
 
 function runStatusColor(status: ConnectorRun['status']): 'success' | 'error' | 'warning' | 'info' {
   switch (status) {
@@ -101,27 +137,64 @@ function formatRelativeTime(dateStr: string | null): string {
   return formatDate(dateStr);
 }
 
+function asRecord(v: unknown): Record<string, unknown> {
+  if (v && typeof v === 'object' && !Array.isArray(v)) return v as Record<string, unknown>;
+  if (typeof v === 'string') {
+    try {
+      const parsed = JSON.parse(v);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch { /* fallthrough */ }
+  }
+  return {};
+}
+
+function asStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return (v as unknown[]).filter((x): x is string => typeof x === 'string');
+}
+
+function normalizeConnector(raw: unknown): Connector {
+  const r = raw as Record<string, unknown>;
+  return {
+    id: String(r.id),
+    name: String(r.name ?? ''),
+    connector_type: (r.connector_type as Connector['connector_type']) || 'email',
+    system_type: (r.system_type as SystemType) || 'other',
+    config: asRecord(r.config),
+    field_mappings: normalizeFieldMappings(r.field_mappings),
+    schedule: (r.schedule as string | null) ?? null,
+    active: !!r.active,
+    last_run_at: (r.last_run_at as string | null) ?? null,
+    created_at: String(r.created_at ?? ''),
+    updated_at: String(r.updated_at ?? ''),
+    tenant_id: String(r.tenant_id ?? ''),
+    sample_r2_key: (r.sample_r2_key as string | null) ?? null,
+  };
+}
+
 const RUNS_PER_PAGE = 20;
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
 
 export function ConnectorDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+
   const [connector, setConnector] = useState<Connector | null>(null);
+  const [tenant, setTenant] = useState<Tenant | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-  const [tab, setTab] = useState(0);
+  const [saveSnack, setSaveSnack] = useState('');
 
-  // Edit state
-  const [editing, setEditing] = useState(false);
-  const [formName, setFormName] = useState('');
-  const [formSystemType, setFormSystemType] = useState<SystemType>('erp');
-  const [formConfig, setFormConfig] = useState('{}');
-  const [formFieldMappings, setFormFieldMappings] = useState('{}');
-  const [formSchedule, setFormSchedule] = useState('');
-  const [saving, setSaving] = useState(false);
+  // Inline edit state — name is the only field with a "click to edit" cycle.
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
 
-  // Runs state
+  // Runs
   const [runs, setRuns] = useState<ConnectorRun[]>([]);
   const [runsTotal, setRunsTotal] = useState(0);
   const [runsPage, setRunsPage] = useState(1);
@@ -130,28 +203,31 @@ export function ConnectorDetail() {
   // Action state
   const [testing, setTesting] = useState(false);
   const [running, setRunning] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // ---------------------------------------------------------------------
+  // Loaders
+  // ---------------------------------------------------------------------
 
   const loadConnector = useCallback(async () => {
     if (!id) return;
     setLoading(true);
     setError('');
     try {
-      const result = await api.connectors.get(id) as any;
-      const c = result.connector;
+      const result = (await api.connectors.get(id)) as { connector: unknown };
+      const c = normalizeConnector(result.connector);
       setConnector(c);
-      setFormName(c.name);
-      setFormSystemType(c.system_type);
-      setFormConfig(
-        typeof c.config === 'string' ? c.config : JSON.stringify(c.config, null, 2)
-      );
-      setFormFieldMappings(
-        c.field_mappings
-          ? typeof c.field_mappings === 'string'
-            ? c.field_mappings
-            : JSON.stringify(c.field_mappings, null, 2)
-          : '{}'
-      );
-      setFormSchedule(c.schedule || '');
+      setNameDraft(c.name);
+      // Fetch tenant for the "receive address" display. Non-fatal if it fails.
+      if (c.tenant_id) {
+        try {
+          const t = await api.tenants.get(c.tenant_id);
+          setTenant(t);
+        } catch {
+          setTenant(null);
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load connector');
     } finally {
@@ -163,10 +239,10 @@ export function ConnectorDetail() {
     if (!id) return;
     setRunsLoading(true);
     try {
-      const result = await api.connectors.runs(id, {
+      const result = (await api.connectors.runs(id, {
         limit: RUNS_PER_PAGE,
         offset: (runsPage - 1) * RUNS_PER_PAGE,
-      }) as any;
+      })) as { runs: ConnectorRun[]; total: number };
       setRuns(result.runs);
       setRunsTotal(result.total);
     } catch {
@@ -176,56 +252,52 @@ export function ConnectorDetail() {
     }
   }, [id, runsPage]);
 
-  useEffect(() => {
-    loadConnector();
-  }, [loadConnector]);
+  useEffect(() => { loadConnector(); }, [loadConnector]);
+  useEffect(() => { loadRuns(); }, [loadRuns]);
 
-  useEffect(() => {
-    if (tab === 1) loadRuns();
-  }, [tab, loadRuns]);
+  // ---------------------------------------------------------------------
+  // Patch helper — optimistic update with rollback on error.
+  // ---------------------------------------------------------------------
 
-  const handleSave = async () => {
-    if (!id) return;
-    try {
-      JSON.parse(formConfig);
-    } catch {
-      setError('Config must be valid JSON');
-      return;
-    }
-    try {
-      JSON.parse(formFieldMappings);
-    } catch {
-      setError('Field mappings must be valid JSON');
-      return;
-    }
+  const patchConnector = useCallback(
+    async (partial: Record<string, unknown>, optimistic?: Partial<Connector>) => {
+      if (!id || !connector) return;
+      const prev = connector;
+      if (optimistic) {
+        setConnector({ ...prev, ...optimistic });
+      }
+      try {
+        const result = (await api.connectors.patch(id, partial)) as { connector: unknown };
+        setConnector(normalizeConnector(result.connector));
+        setSaveSnack('Changes saved');
+      } catch (err) {
+        setConnector(prev);
+        setError(err instanceof Error ? err.message : 'Failed to save changes');
+      }
+    },
+    [id, connector],
+  );
 
-    setSaving(true);
-    setError('');
-    try {
-      const result = await api.connectors.update(id, {
-        name: formName.trim(),
-        system_type: formSystemType,
-        config: JSON.parse(formConfig),
-        field_mappings: JSON.parse(formFieldMappings),
-        schedule: formSchedule.trim() || undefined,
-      }) as any;
-      setConnector(result.connector);
-      setEditing(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update connector');
-    } finally {
-      setSaving(false);
-    }
-  };
+  // ---------------------------------------------------------------------
+  // Action handlers
+  // ---------------------------------------------------------------------
 
   const handleTest = async () => {
     if (!id) return;
     setTesting(true);
     setError('');
-    setSuccess('');
     try {
-      const result = await api.connectors.test(id) as any;
-      setSuccess(result.message || 'Connection test successful');
+      const result = (await api.connectors.test(id)) as {
+        success: boolean;
+        message: string;
+        warnings?: string[];
+      };
+      const warnings = result.warnings ?? [];
+      if (warnings.length > 0) {
+        setSaveSnack(`${result.message}: ${warnings[0]}`);
+      } else {
+        setSaveSnack(result.message || 'Connection test successful');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection test failed');
     } finally {
@@ -237,12 +309,10 @@ export function ConnectorDetail() {
     if (!id) return;
     setRunning(true);
     setError('');
-    setSuccess('');
     try {
       await api.connectors.run(id);
-      setSuccess('Manual run started');
-      // Refresh runs tab
-      if (tab === 1) loadRuns();
+      setSaveSnack('Manual run started');
+      loadRuns();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start manual run');
     } finally {
@@ -250,29 +320,44 @@ export function ConnectorDetail() {
     }
   };
 
-  const handleToggleActive = async () => {
-    if (!id || !connector) return;
+  const handleDelete = async () => {
+    if (!id) return;
+    setDeleting(true);
     try {
-      const result = await api.connectors.update(id, { active: !connector.active }) as any;
-      setConnector(result.connector);
+      await api.connectors.delete(id);
+      navigate('/admin/connectors');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update connector');
+      setError(err instanceof Error ? err.message : 'Failed to delete connector');
+      setDeleting(false);
+      setDeleteOpen(false);
     }
   };
 
-  const formatConfig = (config: string | Record<string, unknown> | null): string => {
-    if (!config) return '{}';
-    if (typeof config === 'string') {
-      try {
-        return JSON.stringify(JSON.parse(config), null, 2);
-      } catch {
-        return config;
-      }
+  const commitName = () => {
+    if (!connector) return;
+    const trimmed = nameDraft.trim();
+    setEditingName(false);
+    if (!trimmed || trimmed === connector.name) {
+      setNameDraft(connector.name);
+      return;
     }
-    return JSON.stringify(config, null, 2);
+    patchConnector({ name: trimmed }, { name: trimmed });
   };
 
-  const runsTotalPages = Math.ceil(runsTotal / RUNS_PER_PAGE);
+  const updateConfigKey = (key: string, value: unknown) => {
+    if (!connector) return;
+    const nextConfig = { ...connector.config, [key]: value };
+    patchConnector({ config: nextConfig }, { config: nextConfig });
+  };
+
+  const commitFieldMappings = (next: ConnectorFieldMappings) => {
+    if (!connector) return;
+    patchConnector({ field_mappings: next }, { field_mappings: next });
+  };
+
+  // ---------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------
 
   if (loading) {
     return (
@@ -293,9 +378,12 @@ export function ConnectorDetail() {
     );
   }
 
+  const runsTotalPages = Math.max(1, Math.ceil(runsTotal / RUNS_PER_PAGE));
+  const isEmail = connector.connector_type === 'email';
+  const hasStoredSample = !!connector.sample_r2_key;
+
   return (
     <Box>
-      {/* Back button */}
       <Button
         startIcon={<BackIcon />}
         onClick={() => navigate('/admin/connectors')}
@@ -310,20 +398,48 @@ export function ConnectorDetail() {
           {error}
         </Alert>
       )}
-      {success && (
-        <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>
-          {success}
-        </Alert>
-      )}
 
-      {/* Header */}
+      {/* ------------------------------------------------------------ */}
+      {/* 1. Header card                                                */}
+      {/* ------------------------------------------------------------ */}
       <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
-        <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 2 }}>
-          <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 1 }}>
-              <Typography variant="h4" fontWeight={700}>
-                {connector.name}
-              </Typography>
+        <Stack
+          direction={{ xs: 'column', md: 'row' }}
+          spacing={2}
+          justifyContent="space-between"
+          alignItems={{ xs: 'stretch', md: 'flex-start' }}
+        >
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            {editingName ? (
+              <TextField
+                size="small"
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitName();
+                  if (e.key === 'Escape') {
+                    setNameDraft(connector.name);
+                    setEditingName(false);
+                  }
+                }}
+                autoFocus
+                sx={{ mb: 1, minWidth: 320 }}
+              />
+            ) : (
+              <Box
+                sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, cursor: 'pointer' }}
+                onClick={() => setEditingName(true)}
+                role="button"
+                aria-label="Edit connector name"
+              >
+                <Typography variant="h4" fontWeight={700}>
+                  {connector.name}
+                </Typography>
+                <EditIcon fontSize="small" color="action" />
+              </Box>
+            )}
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
               <Chip
                 label={connector.connector_type.replace('_', ' ')}
                 size="small"
@@ -331,25 +447,52 @@ export function ConnectorDetail() {
                 variant="outlined"
               />
               <Chip
+                label={connector.system_type.toUpperCase()}
+                size="small"
+                color={connector.system_type === 'erp' ? 'info' : connector.system_type === 'wms' ? 'success' : 'default'}
+                variant="outlined"
+              />
+              <Chip
                 label={connector.active ? 'Active' : 'Inactive'}
                 size="small"
                 color={connector.active ? 'success' : 'default'}
-                variant="outlined"
               />
-            </Box>
+            </Stack>
             <Typography variant="body2" color="text.secondary">
-              System: {connector.system_type.toUpperCase()} &middot; Last run: {formatRelativeTime(connector.last_run_at)}
+              Last run: {formatRelativeTime(connector.last_run_at)}
+              {tenant && <> &middot; Tenant: {tenant.name}</>}
             </Typography>
           </Box>
-          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<EditIcon />}
-              onClick={() => navigate(`/admin/connectors/${id}/edit`)}
-            >
-              Edit
-            </Button>
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap alignItems="center">
+            <Stack direction="row" spacing={0.5} alignItems="center">
+              <Typography variant="caption" color="text.secondary">
+                {connector.active ? 'Active' : 'Inactive'}
+              </Typography>
+              <Switch
+                checked={connector.active}
+                onChange={(e) =>
+                  patchConnector({ active: e.target.checked }, { active: e.target.checked })
+                }
+                size="small"
+              />
+            </Stack>
+            <FormControl size="small" sx={{ minWidth: 110 }}>
+              <InputLabel>System</InputLabel>
+              <Select
+                value={connector.system_type}
+                label="System"
+                onChange={(e) => {
+                  const next = e.target.value as SystemType;
+                  patchConnector({ system_type: next }, { system_type: next });
+                }}
+              >
+                {SYSTEM_TYPES.map((t) => (
+                  <MenuItem key={t} value={t}>
+                    {t.toUpperCase()}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
             <Button
               variant="outlined"
               size="small"
@@ -357,217 +500,161 @@ export function ConnectorDetail() {
               onClick={handleTest}
               disabled={testing}
             >
-              {testing ? 'Testing...' : 'Test'}
+              {testing ? 'Testing…' : 'Test'}
             </Button>
+            <Tooltip title={isEmail ? 'Email connectors cannot be run manually' : 'Trigger a run now'}>
+              <span>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<RunIcon />}
+                  onClick={handleRun}
+                  disabled={running || isEmail}
+                >
+                  {running ? 'Running…' : 'Run'}
+                </Button>
+              </span>
+            </Tooltip>
             <Button
               variant="outlined"
               size="small"
-              startIcon={<RunIcon />}
-              onClick={handleRun}
-              disabled={running || connector.connector_type === 'email'}
+              color="error"
+              startIcon={<DeleteIcon />}
+              onClick={() => setDeleteOpen(true)}
             >
-              {running ? 'Running...' : 'Manual Run'}
+              Delete
             </Button>
-            <Tooltip title={connector.active ? 'Deactivate' : 'Activate'}>
-              <Button
-                variant="outlined"
-                size="small"
-                color={connector.active ? 'warning' : 'success'}
-                onClick={handleToggleActive}
-              >
-                {connector.active ? 'Deactivate' : 'Activate'}
-              </Button>
-            </Tooltip>
-          </Box>
-        </Box>
+          </Stack>
+        </Stack>
       </Paper>
 
-      {/* Tabs */}
-      <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-        <Tabs value={tab} onChange={(_, v) => setTab(v)}>
-          <Tab label="Config" />
-          <Tab label={`Runs${runsTotal ? ` (${runsTotal})` : ''}`} />
-        </Tabs>
-      </Box>
+      {/* ------------------------------------------------------------ */}
+      {/* 2. Receive Info card (email only)                             */}
+      {/* ------------------------------------------------------------ */}
+      {isEmail && (
+        <ReceiveInfoCard
+          connector={connector}
+          tenantSlug={tenant?.slug ?? null}
+          onConfigChange={updateConfigKey}
+        />
+      )}
 
-      {/* Config Tab */}
-      <TabPanel value={tab} index={0}>
-        {editing ? (
+      {/* ------------------------------------------------------------ */}
+      {/* 3. Connection Config card (non-email)                         */}
+      {/* ------------------------------------------------------------ */}
+      {!isEmail && (
+        <ConnectionConfigCard connector={connector} onConfigChange={updateConfigKey} />
+      )}
+
+      {/* ------------------------------------------------------------ */}
+      {/* 4. Field Mappings card                                        */}
+      {/* ------------------------------------------------------------ */}
+      <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
           <Box>
-            <TextField
-              label="Name"
-              fullWidth
-              value={formName}
-              onChange={(e) => setFormName(e.target.value)}
-              disabled={saving}
-              sx={{ mb: 2 }}
-            />
-            <FormControl fullWidth sx={{ mb: 2 }}>
-              <InputLabel>System Type</InputLabel>
-              <Select
-                value={formSystemType}
-                label="System Type"
-                onChange={(e) => setFormSystemType(e.target.value as SystemType)}
-                disabled={saving}
-              >
-                {SYSTEM_TYPES.map((type) => (
-                  <MenuItem key={type} value={type}>
-                    {type.toUpperCase()}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <TextField
-              label="Schedule"
-              fullWidth
-              value={formSchedule}
-              onChange={(e) => setFormSchedule(e.target.value)}
-              disabled={saving}
-              helperText="Cron expression or interval"
-              sx={{ mb: 2 }}
-            />
-            <TextField
-              label="Config (JSON)"
-              fullWidth
-              multiline
-              rows={8}
-              value={formConfig}
-              onChange={(e) => setFormConfig(e.target.value)}
-              disabled={saving}
-              sx={{ mb: 2 }}
-              InputProps={{ sx: { fontFamily: 'monospace', fontSize: '0.85rem' } }}
-            />
-            <TextField
-              label="Field Mappings (JSON)"
-              fullWidth
-              multiline
-              rows={6}
-              value={formFieldMappings}
-              onChange={(e) => setFormFieldMappings(e.target.value)}
-              disabled={saving}
-              sx={{ mb: 2 }}
-              InputProps={{ sx: { fontFamily: 'monospace', fontSize: '0.85rem' } }}
-            />
-            <Box sx={{ display: 'flex', gap: 1 }}>
-              <Button
-                variant="contained"
-                size="small"
-                onClick={handleSave}
-                disabled={!formName.trim() || saving}
-              >
-                {saving ? 'Saving...' : 'Save'}
-              </Button>
-              <Button
-                size="small"
-                onClick={() => {
-                  setEditing(false);
-                  setFormName(connector.name);
-                  setFormSystemType(connector.system_type);
-                  setFormConfig(formatConfig(connector.config));
-                  setFormFieldMappings(formatConfig(connector.field_mappings));
-                  setFormSchedule(connector.schedule || '');
-                }}
-                disabled={saving}
-              >
-                Cancel
-              </Button>
-            </Box>
+            <Typography variant="h6" fontWeight={600}>
+              Field mappings
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Which source columns map onto canonical dox fields. Changes auto-save on blur.
+            </Typography>
           </Box>
+          <Button
+            size="small"
+            startIcon={<EditIcon />}
+            onClick={() =>
+              navigate(`/admin/connectors/${id}/edit`, {
+                state: { startAtStep: 2, remapMode: true },
+              })
+            }
+          >
+            Edit in wizard
+          </Button>
+        </Box>
+        <FieldMappingEditor
+          mappings={connector.field_mappings || defaultFieldMappings()}
+          onCommit={commitFieldMappings}
+        />
+      </Paper>
+
+      {/* ------------------------------------------------------------ */}
+      {/* 5. Sample + Actions card                                      */}
+      {/* ------------------------------------------------------------ */}
+      <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" fontWeight={600} sx={{ mb: 1 }}>
+          Stored sample
+        </Typography>
+        {hasStoredSample ? (
+          <>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2, wordBreak: 'break-all' }}>
+              {connector.sample_r2_key}
+            </Typography>
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<RefreshIcon />}
+                onClick={() =>
+                  navigate(`/admin/connectors/${id}/edit`, {
+                    state: { startAtStep: 3, remapMode: true },
+                  })
+                }
+              >
+                Re-test with stored sample
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<UploadIcon />}
+                onClick={() =>
+                  navigate(`/admin/connectors/${id}/edit`, {
+                    state: { startAtStep: 1, remapMode: true },
+                  })
+                }
+              >
+                Remap with new sample
+              </Button>
+            </Stack>
+          </>
         ) : (
-          <Box>
-            <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}>
-              <Button
-                variant="outlined"
-                size="small"
-                startIcon={<EditIcon />}
-                onClick={() => setEditing(true)}
-              >
-                Edit
-              </Button>
-            </Box>
-
-            <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                System Type
-              </Typography>
-              <Chip
-                label={connector.system_type.toUpperCase()}
-                size="small"
-                color={connector.system_type === 'erp' ? 'info' : connector.system_type === 'wms' ? 'success' : 'default'}
-                variant="outlined"
-              />
-            </Paper>
-
-            <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                Schedule
-              </Typography>
-              <Typography variant="body2">
-                {connector.schedule || 'Not configured'}
-              </Typography>
-            </Paper>
-
-            <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                Config
-              </Typography>
-              <Box
-                component="pre"
-                sx={{
-                  fontFamily: 'monospace',
-                  fontSize: '0.85rem',
-                  bgcolor: 'grey.50',
-                  p: 1.5,
-                  borderRadius: 1,
-                  overflow: 'auto',
-                  maxHeight: 400,
-                  m: 0,
-                }}
-              >
-                {formatConfig(connector.config)}
-              </Box>
-            </Paper>
-
-            {connector.field_mappings && (
-              <Paper variant="outlined" sx={{ p: 2 }}>
-                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                  Field Mappings
-                </Typography>
-                <Box
-                  component="pre"
-                  sx={{
-                    fontFamily: 'monospace',
-                    fontSize: '0.85rem',
-                    bgcolor: 'grey.50',
-                    p: 1.5,
-                    borderRadius: 1,
-                    overflow: 'auto',
-                    maxHeight: 400,
-                    m: 0,
-                  }}
-                >
-                  {formatConfig(connector.field_mappings)}
-                </Box>
-              </Paper>
-            )}
-          </Box>
+          <>
+            <Alert severity="info" sx={{ mb: 2 }}>
+              No sample file stored yet. Upload one to enable the "Re-test" preview and seed
+              field-mapping suggestions from real data.
+            </Alert>
+            <Button
+              variant="contained"
+              size="small"
+              startIcon={<UploadIcon />}
+              onClick={() =>
+                navigate(`/admin/connectors/${id}/edit`, {
+                  state: { startAtStep: 1, remapMode: true },
+                })
+              }
+            >
+              Upload sample
+            </Button>
+          </>
         )}
-      </TabPanel>
+      </Paper>
 
-      {/* Runs Tab */}
-      <TabPanel value={tab} index={1}>
+      {/* ------------------------------------------------------------ */}
+      {/* 6. Runs card                                                  */}
+      {/* ------------------------------------------------------------ */}
+      <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" fontWeight={600} sx={{ mb: 2 }}>
+          Recent runs {runsTotal > 0 && <Typography component="span" variant="body2" color="text.secondary">({runsTotal})</Typography>}
+        </Typography>
         {runsLoading ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
             <CircularProgress size={24} />
           </Box>
         ) : runs.length === 0 ? (
-          <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}>
-            <Typography color="text.secondary">No runs yet</Typography>
-          </Paper>
+          <Typography color="text.secondary">No runs yet</Typography>
         ) : (
           <>
             <TableContainer component={Paper} variant="outlined">
-              <Table>
+              <Table size="small">
                 <TableHead>
                   <TableRow>
                     <TableCell>Status</TableCell>
@@ -582,29 +669,12 @@ export function ConnectorDetail() {
                   {runs.map((run) => (
                     <TableRow key={run.id} hover>
                       <TableCell>
-                        <Chip
-                          label={run.status}
-                          size="small"
-                          color={runStatusColor(run.status)}
-                          variant="filled"
-                        />
+                        <Chip label={run.status} size="small" color={runStatusColor(run.status)} />
                       </TableCell>
-                      <TableCell>
-                        <Typography variant="body2">
-                          {formatDate(run.started_at)}
-                        </Typography>
-                      </TableCell>
-                      <TableCell>
-                        <Typography variant="body2">
-                          {run.completed_at ? formatDate(run.completed_at) : '-'}
-                        </Typography>
-                      </TableCell>
-                      <TableCell align="right">
-                        <Typography variant="body2">{run.records_found}</Typography>
-                      </TableCell>
-                      <TableCell align="right">
-                        <Typography variant="body2">{run.records_created}</Typography>
-                      </TableCell>
+                      <TableCell>{formatDate(run.started_at)}</TableCell>
+                      <TableCell>{run.completed_at ? formatDate(run.completed_at) : '-'}</TableCell>
+                      <TableCell align="right">{run.records_found}</TableCell>
+                      <TableCell align="right">{run.records_created}</TableCell>
                       <TableCell align="right">
                         <Typography variant="body2" color={run.records_errored > 0 ? 'error' : 'text.primary'}>
                           {run.records_errored}
@@ -615,20 +685,444 @@ export function ConnectorDetail() {
                 </TableBody>
               </Table>
             </TableContainer>
-
             {runsTotalPages > 1 && (
-              <Box sx={{ display: 'flex', justifyContent: 'center', mt: 3 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
                 <Pagination
                   count={runsTotalPages}
                   page={runsPage}
                   onChange={(_, p) => setRunsPage(p)}
                   color="primary"
+                  size="small"
                 />
               </Box>
             )}
           </>
         )}
-      </TabPanel>
+      </Paper>
+
+      {/* Delete confirm */}
+      <Dialog open={deleteOpen} onClose={() => !deleting && setDeleteOpen(false)}>
+        <DialogTitle>Delete connector?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This deactivates the connector. Existing runs and ingested orders are preserved.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteOpen(false)} disabled={deleting}>
+            Cancel
+          </Button>
+          <Button color="error" onClick={handleDelete} disabled={deleting}>
+            {deleting ? 'Deleting…' : 'Delete'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Snackbar
+        open={!!saveSnack}
+        autoHideDuration={3500}
+        onClose={() => setSaveSnack('')}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        message={saveSnack}
+      />
     </Box>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Receive Info card (email connectors only)
+// ---------------------------------------------------------------------------
+
+function ReceiveInfoCard({
+  connector,
+  tenantSlug,
+  onConfigChange,
+}: {
+  connector: Connector;
+  tenantSlug: string | null;
+  onConfigChange: (key: string, value: unknown) => void;
+}) {
+  const subjectPatterns = useMemo(
+    () => asStringArray(connector.config.subject_patterns),
+    [connector.config.subject_patterns],
+  );
+  const senderFilterInitial = useMemo(
+    () => (typeof connector.config.sender_filter === 'string' ? connector.config.sender_filter : ''),
+    [connector.config.sender_filter],
+  );
+  const [senderFilterLocal, setSenderFilterLocal] = useState(senderFilterInitial);
+  useEffect(() => { setSenderFilterLocal(senderFilterInitial); }, [senderFilterInitial]);
+
+  // Buffered input for the subject_patterns Autocomplete — lets us auto-commit
+  // on comma/semicolon and on blur, not just Enter.
+  const [subjectInput, setSubjectInput] = useState('');
+  const subjectPatternsRef = useRef(subjectPatterns);
+  useEffect(() => { subjectPatternsRef.current = subjectPatterns; }, [subjectPatterns]);
+
+  const commitPatterns = useCallback(
+    (nextList: string[]) => {
+      const cleaned = nextList.map((s) => s.trim()).filter((s) => s.length > 0);
+      // Dedupe while preserving order.
+      const seen = new Set<string>();
+      const deduped: string[] = [];
+      for (const s of cleaned) {
+        if (!seen.has(s)) {
+          seen.add(s);
+          deduped.push(s);
+        }
+      }
+      onConfigChange('subject_patterns', deduped);
+    },
+    [onConfigChange],
+  );
+
+  // Local draft for the "test a subject" preview field.
+  const [testSubject, setTestSubject] = useState('');
+  const testResult = useMemo(() => {
+    if (!testSubject.trim()) return null;
+    if (subjectPatterns.length === 0) {
+      return { matched: true, reason: 'No patterns set — matches ALL emails' };
+    }
+    for (const p of subjectPatterns) {
+      try {
+        if (new RegExp(p, 'i').test(testSubject)) {
+          return { matched: true, reason: `Matched pattern: ${p}` };
+        }
+      } catch {
+        /* skip invalid */
+      }
+    }
+    return { matched: false, reason: 'No pattern matches this subject' };
+  }, [testSubject, subjectPatterns]);
+
+  const receiveAddress = tenantSlug ? `${tenantSlug}@supdox.com` : null;
+  const hasNoFilter = subjectPatterns.length === 0 && !senderFilterInitial.trim();
+
+  const copyToClipboard = (text: string) => {
+    try {
+      navigator.clipboard?.writeText(text);
+    } catch { /* no-op */ }
+  };
+
+  const curlExample = useMemo(() => {
+    return [
+      `curl -X POST https://dox.supdox.com/api/webhooks/connector-email-ingest \\`,
+      `  -H "Content-Type: application/json" \\`,
+      `  -H "X-API-Key: $EMAIL_INGEST_API_KEY" \\`,
+      `  -d '{`,
+      `    "connector_id": "${connector.id}",`,
+      `    "tenant_id": "${connector.tenant_id}",`,
+      `    "subject": "Test order email",`,
+      `    "sender": "sender@example.com",`,
+      `    "body": "plain text body",`,
+      `    "attachments": []`,
+      `  }'`,
+    ].join('\n');
+  }, [connector.id, connector.tenant_id]);
+
+  return (
+    <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+      <Typography variant="h6" fontWeight={600} sx={{ mb: 2 }}>
+        Receive info
+      </Typography>
+
+      {hasNoFilter && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          No subject patterns or sender filter are set — this connector will match <strong>every</strong> inbound
+          email for its tenant. Add at least one subject pattern or a sender filter to scope it.
+        </Alert>
+      )}
+
+      <Box sx={{ mb: 2 }}>
+        <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+          Receive address
+        </Typography>
+        {receiveAddress ? (
+          <Stack direction="row" spacing={1} alignItems="center">
+            <TextField size="small" value={receiveAddress} fullWidth InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }} />
+            <Tooltip title="Copy">
+              <Button size="small" onClick={() => copyToClipboard(receiveAddress)}>
+                <CopyIcon fontSize="small" />
+              </Button>
+            </Tooltip>
+          </Stack>
+        ) : (
+          <Typography variant="body2" color="text.secondary">
+            (Tenant slug unavailable — cannot derive receive address)
+          </Typography>
+        )}
+        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+          Emails sent to this address with subject matching the patterns below route to this connector.
+          If no patterns are set, this connector matches any email for its tenant.
+        </Typography>
+      </Box>
+
+      <Box sx={{ mb: 2 }}>
+        <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+          Subject patterns
+        </Typography>
+        <Autocomplete
+          multiple
+          freeSolo
+          size="small"
+          options={[]}
+          value={subjectPatterns}
+          inputValue={subjectInput}
+          onChange={(_, next) => {
+            commitPatterns(next as string[]);
+          }}
+          onInputChange={(_, newInput, reason) => {
+            // Auto-commit on comma or semicolon (user mental model: separated list).
+            if (reason === 'input' && /[,;]/.test(newInput)) {
+              const parts = newInput.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+              if (parts.length > 0) {
+                commitPatterns([...subjectPatternsRef.current, ...parts]);
+              }
+              setSubjectInput('');
+              return;
+            }
+            if (reason !== 'reset') {
+              setSubjectInput(newInput);
+            } else {
+              setSubjectInput('');
+            }
+          }}
+          onBlur={() => {
+            // Commit any buffered text when focus leaves the field.
+            const text = subjectInput.trim();
+            if (text) {
+              commitPatterns([...subjectPatternsRef.current, text]);
+              setSubjectInput('');
+            }
+          }}
+          renderTags={(value: readonly string[], getTagProps) =>
+            value.map((option: string, index: number) => {
+              const { key, ...tagProps } = getTagProps({ index });
+              return <Chip key={key} label={option} size="small" {...tagProps} />;
+            })
+          }
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              placeholder={
+                subjectPatterns.length === 0
+                  ? 'e.g. Daily COA Report  (leave empty to match ALL emails)'
+                  : 'Type a pattern and press Enter, comma, or Tab'
+              }
+            />
+          )}
+        />
+        <FormHelperText sx={{ mt: 0.5 }}>
+          Each chip is a <strong>regex</strong> matched (case-insensitive) against the email
+          Subject. Type literal text like{' '}
+          <Box component="code" sx={{ fontFamily: 'monospace' }}>Daily COA Report</Box>{' '}
+          for a substring match, or use regex wildcards like{' '}
+          <Box component="code" sx={{ fontFamily: 'monospace' }}>Order.*Report</Box>. Press
+          Enter, comma, semicolon, or Tab to add a pattern. Leave empty to match{' '}
+          <strong>every</strong> inbound email (dangerous).
+        </FormHelperText>
+        {subjectPatterns.length > 0 && (
+          <Box sx={{ mt: 1.5 }}>
+            <TextField
+              size="small"
+              fullWidth
+              label="Test a subject"
+              placeholder="Paste a sample subject to see if it matches"
+              value={testSubject}
+              onChange={(e) => setTestSubject(e.target.value)}
+            />
+            {testResult && (
+              <Box
+                sx={{
+                  mt: 0.5,
+                  px: 1,
+                  py: 0.5,
+                  borderRadius: 1,
+                  bgcolor: testResult.matched ? 'success.50' : 'error.50',
+                  border: '1px solid',
+                  borderColor: testResult.matched ? 'success.main' : 'error.main',
+                }}
+              >
+                <Typography
+                  variant="caption"
+                  sx={{ color: testResult.matched ? 'success.dark' : 'error.dark' }}
+                >
+                  {testResult.matched ? 'Match — ' : 'No match — '}
+                  {testResult.reason}
+                </Typography>
+              </Box>
+            )}
+          </Box>
+        )}
+      </Box>
+
+      <Box sx={{ mb: 2 }}>
+        <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+          Sender filter
+        </Typography>
+        <TextField
+          size="small"
+          fullWidth
+          placeholder="e.g. @supplier.com or vendor@example.com"
+          value={senderFilterLocal}
+          onChange={(e) => setSenderFilterLocal(e.target.value)}
+          onBlur={() => {
+            const trimmed = senderFilterLocal.trim();
+            if (trimmed !== senderFilterInitial.trim()) {
+              onConfigChange('sender_filter', trimmed || undefined);
+            }
+          }}
+          helperText="Optional. Matches senders containing this substring."
+        />
+      </Box>
+
+      <Accordion variant="outlined" disableGutters sx={{ mt: 2 }}>
+        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+          <Typography variant="subtitle2">How to send a test email via webhook</Typography>
+        </AccordionSummary>
+        <AccordionDetails>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            Send email-shaped payloads directly to the webhook endpoint (bypasses SMTP). The
+            <code> X-API-Key</code> value is the <code>EMAIL_INGEST_API_KEY</code> secret from your deployment
+            environment.
+          </Typography>
+          <Box
+            component="pre"
+            sx={{
+              fontFamily: 'monospace',
+              fontSize: '0.8rem',
+              bgcolor: 'grey.50',
+              p: 1.5,
+              borderRadius: 1,
+              m: 0,
+              overflow: 'auto',
+              whiteSpace: 'pre-wrap',
+            }}
+          >
+            {curlExample}
+          </Box>
+          <Button
+            size="small"
+            startIcon={<CopyIcon />}
+            onClick={() => copyToClipboard(curlExample)}
+            sx={{ mt: 1 }}
+          >
+            Copy curl
+          </Button>
+        </AccordionDetails>
+      </Accordion>
+    </Paper>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Connection Config card (non-email connectors)
+// ---------------------------------------------------------------------------
+
+function ConnectionConfigCard({
+  connector,
+  onConfigChange,
+}: {
+  connector: Connector;
+  onConfigChange: (key: string, value: unknown) => void;
+}) {
+  const type = connector.connector_type;
+  return (
+    <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+      <Typography variant="h6" fontWeight={600} sx={{ mb: 2 }}>
+        Connection config
+      </Typography>
+      {type === 'api_poll' && (
+        <Stack spacing={2}>
+          <ConfigTextField
+            label="Endpoint URL"
+            configKey="endpoint_url"
+            connector={connector}
+            onConfigChange={onConfigChange}
+            helperText="Full URL the connector polls for new records"
+          />
+          <ConfigTextField
+            label="Auth header"
+            configKey="auth_header"
+            connector={connector}
+            onConfigChange={onConfigChange}
+            helperText="e.g. Bearer xxx (stored in config — use credentials for secrets)"
+          />
+          <ConfigTextField
+            label="Schedule (cron)"
+            configKey="schedule"
+            connector={connector}
+            onConfigChange={onConfigChange}
+            helperText="Cron expression controlling poll frequency"
+          />
+        </Stack>
+      )}
+      {type === 'webhook' && (
+        <Stack spacing={2}>
+          <ConfigTextField
+            label="Signing secret"
+            configKey="signing_secret"
+            connector={connector}
+            onConfigChange={onConfigChange}
+            helperText="HMAC secret used to verify inbound payloads"
+          />
+          <Box>
+            <Typography variant="subtitle2" color="text.secondary">
+              Webhook URL
+            </Typography>
+            <TextField
+              size="small"
+              fullWidth
+              value={`https://dox.supdox.com/api/webhooks/connector/${connector.id}`}
+              InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
+            />
+          </Box>
+        </Stack>
+      )}
+      {type === 'file_watch' && (
+        <Stack spacing={2}>
+          <ConfigTextField
+            label="R2 prefix"
+            configKey="r2_prefix"
+            connector={connector}
+            onConfigChange={onConfigChange}
+            helperText="Watches new objects landing under this R2 prefix"
+          />
+        </Stack>
+      )}
+    </Paper>
+  );
+}
+
+function ConfigTextField({
+  label,
+  configKey,
+  connector,
+  onConfigChange,
+  helperText,
+}: {
+  label: string;
+  configKey: string;
+  connector: Connector;
+  onConfigChange: (key: string, value: unknown) => void;
+  helperText?: string;
+}) {
+  const initial = typeof connector.config[configKey] === 'string' ? (connector.config[configKey] as string) : '';
+  const [local, setLocal] = useState(initial);
+  useEffect(() => { setLocal(initial); }, [initial]);
+  return (
+    <TextField
+      size="small"
+      label={label}
+      value={local}
+      onChange={(e) => setLocal(e.target.value)}
+      onBlur={() => {
+        if (local !== initial) {
+          onConfigChange(configKey, local || undefined);
+        }
+      }}
+      fullWidth
+      helperText={helperText}
+    />
   );
 }

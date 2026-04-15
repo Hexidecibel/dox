@@ -1,4 +1,5 @@
 import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+import type { ConnectorFieldMappings } from '../../../shared/fieldMappings';
 
 // === Connector Output Types ===
 
@@ -8,7 +9,20 @@ export interface ParsedOrder {
   customer_number?: string;
   customer_name?: string;
   items: ParsedOrderItem[];
+  /** Raw, untouched source row — preserved verbatim for audit. */
   source_data: Record<string, unknown>;
+  /**
+   * Canonical-core fields AFTER field-mapping was applied. Mirrors the
+   * documents.primary_metadata pattern so consumers can index/search without
+   * reparsing source_data. Keys are CoreFieldKey values from fieldMappings.ts.
+   */
+  primary_metadata?: Record<string, unknown>;
+  /**
+   * User-defined extended fields. Keys come from the connector's
+   * field_mappings.extended[].key entries. Populated by parseCSVAttachment,
+   * parseWithAI, and preview-extraction.
+   */
+  extended_metadata?: Record<string, unknown>;
 }
 
 export interface ParsedOrderItem {
@@ -54,13 +68,18 @@ export interface ConnectorOutput {
 
 // === Connector Context & Input ===
 
+/**
+ * Runtime context handed to a connector executor. `fieldMappings` is ALWAYS
+ * the v2 shape — callers MUST run their raw stored JSON through
+ * `normalizeFieldMappings()` before constructing a ConnectorContext.
+ */
 export interface ConnectorContext {
   db: D1Database;
   r2?: R2Bucket;
   tenantId: string;
   connectorId: string;
   config: Record<string, unknown>;
-  fieldMappings: Record<string, string>;
+  fieldMappings: ConnectorFieldMappings;
   credentials?: Record<string, unknown>;
   qwenUrl?: string;
   qwenSecret?: string;

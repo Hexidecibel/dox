@@ -19,15 +19,20 @@ import {
   CloudUpload as UploadIcon,
 } from '@mui/icons-material';
 
+import type { ConnectorFieldMappings } from './doxFields';
+import type { DiscoverSchemaResponse } from '../../types/connectorSchema';
+import { CORE_FIELD_DEFINITIONS } from './doxFields';
+
 interface WizardState {
   connectorType: 'email' | 'api_poll' | 'webhook' | 'file_watch' | null;
   name: string;
   systemType: 'erp' | 'wms' | 'other';
   config: Record<string, unknown>;
-  fieldMappings: Record<string, string>;
+  fieldMappings: ConnectorFieldMappings;
   credentials: Record<string, unknown> | null;
   schedule: string | null;
   active: boolean;
+  sample: DiscoverSchemaResponse | null;
 }
 
 interface StepProps {
@@ -80,7 +85,18 @@ function SummarySection({ state }: { state: WizardState }) {
     }
   };
 
-  const mappedFields = Object.values(state.fieldMappings);
+  // Collect all canonical field keys + extended keys that have at least one
+  // source label bound. These drive the "Mapped fields" chip list below.
+  const mappedFields: string[] = [];
+  for (const def of CORE_FIELD_DEFINITIONS) {
+    const core = state.fieldMappings?.core?.[def.key];
+    if (core?.enabled && core.source_labels.length > 0) {
+      mappedFields.push(def.key);
+    }
+  }
+  for (const ext of state.fieldMappings?.extended ?? []) {
+    if (ext.source_labels.length > 0) mappedFields.push(ext.key);
+  }
 
   return (
     <Paper variant="outlined" sx={{ p: 2.5 }}>
@@ -102,6 +118,12 @@ function SummarySection({ state }: { state: WizardState }) {
         <Typography variant="body2" color="text.secondary">
           {connectionDetails()}
         </Typography>
+
+        {state.sample && (
+          <Typography variant="body2" color="text.secondary">
+            Sample: <strong>{state.sample.file_name}</strong> · {state.sample.layout_hint}
+          </Typography>
+        )}
 
         {state.schedule && (
           <Typography variant="body2" color="text.secondary">

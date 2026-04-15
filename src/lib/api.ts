@@ -956,11 +956,30 @@ export const api = {
       return fetchApi(`/connectors?${query}`);
     },
     get(id: string) { return fetchApi(`/connectors/${id}`); },
-    create(data: { name: string; connector_type: string; system_type?: string; config?: Record<string, unknown>; field_mappings?: Record<string, string>; credentials?: Record<string, unknown>; schedule?: string; tenant_id?: string }) {
+    create(data: {
+      name: string;
+      connector_type: string;
+      system_type?: string;
+      config?: Record<string, unknown>;
+      field_mappings?: unknown;
+      credentials?: Record<string, unknown>;
+      schedule?: string;
+      tenant_id?: string;
+      sample_r2_key?: string;
+    }) {
       return fetchApi('/connectors', { method: 'POST', body: JSON.stringify(data) });
     },
-    update(id: string, data: Record<string, unknown>) {
+    update(id: string, data: Record<string, unknown> & { sample_r2_key?: string }) {
       return fetchApi(`/connectors/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+    },
+    /**
+     * Patch a connector with a partial update. Thin alias over `update()` —
+     * the backend's PUT handler already treats omitted fields as "leave
+     * alone" so PATCH semantics map 1:1 onto PUT. Kept as a named helper so
+     * the ConnectorDetail page's inline-edit handlers read naturally.
+     */
+    patch(id: string, partial: Record<string, unknown> & { sample_r2_key?: string | null }) {
+      return fetchApi(`/connectors/${id}`, { method: 'PUT', body: JSON.stringify(partial) });
     },
     delete(id: string) { return fetchApi(`/connectors/${id}`, { method: 'DELETE' }); },
     test(id: string) { return fetchApi(`/connectors/${id}/test`, { method: 'POST' }); },
@@ -970,6 +989,38 @@ export const api = {
       if (params?.limit) query.set('limit', String(params.limit));
       if (params?.offset) query.set('offset', String(params.offset));
       return fetchApi(`/connectors/${id}/runs?${query}`);
+    },
+    /**
+     * POST /api/connectors/discover-schema
+     * Multipart upload: drop a sample file and get back detected fields +
+     * suggested v2 field_mappings. Used by StepUploadSample in the wizard.
+     */
+    discoverSchema(formData: FormData) {
+      return fetchApi<import('../types/connectorSchema').DiscoverSchemaResponse>(
+        '/connectors/discover-schema',
+        { method: 'POST', body: formData },
+      );
+    },
+    /**
+     * POST /api/connectors/preview-extraction
+     * Pure preview — runs the parser over a stored sample with the given
+     * field_mappings and returns extracted rows. Never writes to D1.
+     */
+    previewExtraction(payload: import('../types/connectorSchema').PreviewExtractionRequest) {
+      return fetchApi<import('../types/connectorSchema').PreviewExtractionResponse>(
+        '/connectors/preview-extraction',
+        { method: 'POST', body: JSON.stringify(payload) },
+      );
+    },
+    /**
+     * GET /api/connectors/:id/sample
+     * Rehydrates the stored sample for an existing connector — same shape as
+     * discoverSchema(), used by the ConnectorDetail "Re-test" button.
+     */
+    rehydrateSample(id: string) {
+      return fetchApi<import('../types/connectorSchema').DiscoverSchemaResponse>(
+        `/connectors/${id}/sample`,
+      );
     },
   },
 

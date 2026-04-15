@@ -2,6 +2,7 @@ import { generateId, logAudit } from '../db';
 import type { ConnectorContext, ConnectorOutput, ConnectorInput, ParsedContact, ParsedCustomer } from './types';
 import { getConnectorExecutor } from './index';
 import type { ConnectorType } from '../../../shared/types';
+import { normalizeFieldMappings } from '../../../shared/fieldMappings';
 
 interface OrchestratorParams {
   db: D1Database;
@@ -10,7 +11,12 @@ interface OrchestratorParams {
   connectorId: string;
   connectorType: ConnectorType;
   config: Record<string, unknown>;
-  fieldMappings: Record<string, string>;
+  /**
+   * Raw field_mappings blob read from the connectors table. Accepted in any
+   * legacy shape and normalized to v2 internally — callers don't need to
+   * preprocess.
+   */
+  fieldMappings: unknown;
   credentials?: Record<string, unknown>;
   input: ConnectorInput;
   userId?: string;
@@ -72,8 +78,14 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
 
   try {
     const executor = getConnectorExecutor(connectorType);
+    // Normalize the stored field_mappings blob into the v2 shape once per
+    // run. The email executor, parseCSVAttachment, and parseWithAI all rely
+    // on ctx.fieldMappings being v2.
+    const normalizedMappings = normalizeFieldMappings(fieldMappings);
     const ctx: ConnectorContext = {
-      db, r2, tenantId, connectorId, config, fieldMappings, credentials,
+      db, r2, tenantId, connectorId, config,
+      fieldMappings: normalizedMappings,
+      credentials,
       qwenUrl, qwenSecret,
     };
 
@@ -183,29 +195,41 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
 
       let orderId: string;
 
+      // Serialize the new metadata blobs. Pass `null` for empty objects so
+      // the DB columns match the legacy-no-mapping behavior exactly.
+      const primaryJson = order.primary_metadata && Object.keys(order.primary_metadata).length > 0
+        ? JSON.stringify(order.primary_metadata)
+        : null;
+      const extendedJson = order.extended_metadata && Object.keys(order.extended_metadata).length > 0
+        ? JSON.stringify(order.extended_metadata)
+        : null;
+
       if (existing) {
         orderId = existing.id;
         await db.prepare(
           `UPDATE orders SET po_number = COALESCE(?, po_number), customer_id = COALESCE(?, customer_id),
            customer_number = COALESCE(?, customer_number), customer_name = COALESCE(?, customer_name),
-           source_data = ?, updated_at = datetime('now')
+           source_data = ?, primary_metadata = ?, extended_metadata = ?, updated_at = datetime('now')
            WHERE id = ?`
         ).bind(
           order.po_number || null, customerId,
           order.customer_number || null, order.customer_name || null,
-          JSON.stringify(order.source_data), orderId
+          JSON.stringify(order.source_data),
+          primaryJson, extendedJson,
+          orderId
         ).run();
       } else {
         orderId = generateId();
         await db.prepare(
           `INSERT INTO orders (id, tenant_id, connector_id, connector_run_id, order_number, po_number,
-           customer_id, customer_number, customer_name, source_data)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           customer_id, customer_number, customer_name, source_data, primary_metadata, extended_metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           orderId, tenantId, connectorId, runId, order.order_number,
           order.po_number || null, customerId,
           order.customer_number || null, order.customer_name || null,
-          JSON.stringify(order.source_data)
+          JSON.stringify(order.source_data),
+          primaryJson, extendedJson
         ).run();
         ordersCreated++;
       }

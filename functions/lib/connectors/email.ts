@@ -1,14 +1,32 @@
 import type { ConnectorExecuteFn, ConnectorOutput, ConnectorContext, ConnectorInput, ParsedOrder, ParsedCustomer, ParsedContact, EmailAttachment } from './types';
+import {
+  buildAiFieldsSection,
+  buildJsonShapeForPrompt,
+  CORE_FIELD_DEFINITIONS,
+  type ConnectorFieldMappings,
+  type CoreFieldKey,
+  defaultFieldMappings,
+  normalizeFieldMappings,
+} from '../../../shared/fieldMappings';
 
 /**
  * Email connector: parses inbound emails into orders and customers.
  * Supports plain text, HTML, and CSV/PDF/XLSX attachments.
  * Uses Qwen AI for unstructured text, direct parsing for CSV.
  */
-export const execute: ConnectorExecuteFn = async (ctx, input) => {
+export const execute: ConnectorExecuteFn = async (ctxIn, input) => {
   if (input.type !== 'email') {
     return { orders: [], customers: [], errors: [{ message: 'Expected email input' }] };
   }
+
+  // Belt-and-suspenders normalization. The orchestrator already does this,
+  // but direct callers (tests, the standalone webhook path) may pass a
+  // legacy v1 field_mappings shape. Normalizing here ensures parseCSV and
+  // parseWithAI see a proper v2 config no matter who invoked us.
+  const ctx: ConnectorContext = {
+    ...ctxIn,
+    fieldMappings: normalizeFieldMappings(ctxIn.fieldMappings),
+  };
 
   const { body, html, subject, attachments } = input;
   const results: ConnectorOutput[] = [];
@@ -440,60 +458,138 @@ function stripHtml(html: string): string {
     .trim();
 }
 
-function parseCSVAttachment(ctx: ConnectorContext, attachment: EmailAttachment): ConnectorOutput {
-  const decoder = new TextDecoder();
-  const text = decoder.decode(attachment.content);
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+/**
+ * Normalize a label for fuzzy alias matching: lowercase, collapse whitespace,
+ * strip punctuation except alphanumerics. "Order #" and "order_number" and
+ * "Order No." all collapse to "ordernumber".
+ */
+function normalizeLabel(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
 
-  if (lines.length < 2) {
-    return { orders: [], customers: [], errors: [{ message: 'CSV has no data rows' }] };
+/**
+ * Match a detected CSV header to a list of candidate source labels using the
+ * normalized-label comparison. Returns the first match, or undefined.
+ */
+function labelMatches(header: string, candidates: readonly string[]): boolean {
+  const n = normalizeLabel(header);
+  for (const c of candidates) {
+    if (normalizeLabel(c) === n) return true;
   }
+  return false;
+}
+
+/**
+ * Parse a CSV string into an array of row records (lowercased header keys).
+ * Exported for preview-extraction and schema discovery helpers.
+ */
+export function parseCSVText(text: string): { headers: string[]; rows: Record<string, string>[] } {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return { headers: [], rows: [] };
 
   const delimiter = text.includes('\t') ? '\t' : ',';
-  const headers = lines[0].split(delimiter).map(h => h.trim().toLowerCase().replace(/^["']|["']$/g, ''));
-  const fieldMappings = ctx.fieldMappings || {};
+  const headers = lines[0]
+    .split(delimiter)
+    .map(h => h.trim().replace(/^["']|["']$/g, ''));
 
-  const orders: ParsedOrder[] = [];
-  const customers: ParsedCustomer[] = [];
-  const errors: { record_index?: number; field?: string; message: string }[] = [];
-  const seenCustomers = new Set<string>();
-
+  const rows: Record<string, string>[] = [];
   for (let i = 1; i < lines.length; i++) {
     const values = lines[i].split(delimiter).map(v => v.trim().replace(/^["']|["']$/g, ''));
     const row: Record<string, string> = {};
     headers.forEach((h, idx) => {
       row[h] = values[idx] || '';
     });
+    rows.push(row);
+  }
 
-    // Apply field mappings: map source column names to standard fields
-    const mapped: Record<string, string> = {};
-    for (const [sourceField, targetField] of Object.entries(fieldMappings)) {
-      if (row[sourceField.toLowerCase()] !== undefined) {
-        mapped[targetField] = row[sourceField.toLowerCase()];
+  return { headers, rows };
+}
+
+/**
+ * Parse a CSV attachment using the v2 field-mappings config. For each core
+ * field, walk its source_labels aliases against the detected headers and
+ * collect the matched value into primary_metadata. Extended-field mappings
+ * feed extended_metadata. Any header that didn't match ANY declared alias is
+ * still retained verbatim in source_data for audit / downstream workflows.
+ *
+ * Exported so the preview-extraction endpoint and in-process tests can drive
+ * it directly without going through the email entry point.
+ */
+export function parseCSVAttachment(ctx: ConnectorContext, attachment: EmailAttachment): ConnectorOutput {
+  const decoder = new TextDecoder();
+  const text = decoder.decode(attachment.content);
+  const { headers, rows } = parseCSVText(text);
+
+  if (rows.length === 0) {
+    return { orders: [], customers: [], errors: [{ message: 'CSV has no data rows' }] };
+  }
+
+  const mappings = ctx.fieldMappings;
+  const orders: ParsedOrder[] = [];
+  const customers: ParsedCustomer[] = [];
+  const errors: { record_index?: number; field?: string; message: string }[] = [];
+  const seenCustomers = new Set<string>();
+
+  // Precompute which header maps to which target (once per CSV, not per row).
+  // Shape: { header: { core?: CoreFieldKey; extendedKey?: string } }
+  const headerMap: Record<string, { core?: CoreFieldKey; extendedKey?: string }> = {};
+  for (const header of headers) {
+    // Core first — canonical fields win over extended if both claim the same column.
+    let matched = false;
+    for (const def of CORE_FIELD_DEFINITIONS) {
+      const c = mappings.core[def.key];
+      if (!c || !c.enabled) continue;
+      if (labelMatches(header, c.source_labels)) {
+        headerMap[header] = { core: def.key };
+        matched = true;
+        break;
       }
     }
+    if (matched) continue;
+    for (const ext of mappings.extended) {
+      if (labelMatches(header, ext.source_labels)) {
+        headerMap[header] = { extendedKey: ext.key };
+        break;
+      }
+    }
+  }
 
-    // Fallback to common column names if no mapping
-    const orderNumber = mapped['order_number'] || row['order_number'] || row['order'] || row['order_no'] || row['ordernumber'];
-    const customerNumber = mapped['customer_number'] || row['customer_number'] || row['customer'] || row['customer_no'] || row['cust_no'];
-    const customerName = mapped['customer_name'] || row['customer_name'] || row['name'] || row['business_name'];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const primary: Record<string, string> = {};
+    const extended: Record<string, string> = {};
 
+    for (const [header, val] of Object.entries(row)) {
+      const mapping = headerMap[header];
+      if (!mapping) continue;
+      if (mapping.core) primary[mapping.core] = val;
+      if (mapping.extendedKey) extended[mapping.extendedKey] = val;
+    }
+
+    const orderNumber = primary.order_number;
     if (!orderNumber) {
-      errors.push({ record_index: i, message: 'Missing order number' });
+      errors.push({ record_index: i + 1, message: 'Missing order number' });
       continue;
     }
 
+    const customerNumber = primary.customer_number || undefined;
+    const customerName = primary.customer_name || undefined;
+
     orders.push({
       order_number: orderNumber,
-      po_number: mapped['po_number'] || row['po_number'] || row['po'] || undefined,
-      customer_number: customerNumber || undefined,
-      customer_name: customerName || undefined,
+      po_number: primary.po_number || undefined,
+      customer_number: customerNumber,
+      customer_name: customerName,
       items: [],
       source_data: row,
+      primary_metadata: Object.keys(primary).length > 0 ? { ...primary } : undefined,
+      extended_metadata: Object.keys(extended).length > 0 ? { ...extended } : undefined,
     });
 
     if (customerNumber && !seenCustomers.has(customerNumber)) {
       seenCustomers.add(customerNumber);
+      // Email / customer_email still uses the legacy header fallback — the
+      // customers registry path is not part of this wave's scope.
       customers.push({
         customer_number: customerNumber,
         name: customerName || customerNumber,
@@ -512,7 +608,13 @@ async function parseWithAI(
   maxChars: number = 8000,
 ): Promise<ConnectorOutput> {
   const config = ctx.config as Record<string, unknown>;
-  const parsingPrompt = (config.parsing_prompt as string) || getDefaultParsingPrompt();
+  // Dynamic prompt built from the v2 field_mappings config so enabled core
+  // fields, source-label aliases, format hints, and extended fields all make
+  // it into the Qwen system message. Fall back to a hand-written prompt if
+  // the config provides `parsing_prompt` verbatim (rare; escape hatch).
+  const parsingPrompt = typeof config.parsing_prompt === 'string' && config.parsing_prompt.length > 0
+    ? (config.parsing_prompt as string)
+    : buildParsingPrompt(ctx.fieldMappings);
 
   if (!ctx.qwenUrl) {
     return { orders: [], customers: [], errors: [{ message: 'AI extraction not configured (QWEN_URL missing)' }] };
@@ -581,6 +683,8 @@ async function parseWithAI(
           quantity?: number;
           lot_number?: string;
         }>;
+        primary_metadata?: Record<string, unknown>;
+        extended_metadata?: Record<string, unknown>;
       }>;
       customers?: Array<{
         customer_number?: string;
@@ -596,21 +700,41 @@ async function parseWithAI(
       }>;
     };
 
-    const orders: ParsedOrder[] = (parsed.orders || []).map(o => ({
-      order_number: o.order_number,
-      po_number: o.po_number,
-      customer_number: o.customer_number,
-      // Safety net: scrub trailing digit groups even if the prompt rule
-      // slipped through. See sanitizeCustomerName() for the full contract.
-      customer_name: o.customer_name ? sanitizeCustomerName(o.customer_name) : o.customer_name,
-      items: (o.items || []).map(item => ({
-        product_name: item.product_name,
-        product_code: item.product_code,
-        quantity: item.quantity,
-        lot_number: item.lot_number,
-      })),
-      source_data: o as Record<string, unknown>,
-    }));
+    const orders: ParsedOrder[] = (parsed.orders || [])
+      // Validate that order_number is present on every row — fabricated
+      // order records with empty/missing order_numbers are dropped with an
+      // error surfaced upstream.
+      .filter(o => {
+        if (!o.order_number || typeof o.order_number !== 'string' || !o.order_number.trim()) {
+          return false;
+        }
+        return true;
+      })
+      .map(o => ({
+        order_number: o.order_number,
+        po_number: o.po_number,
+        customer_number: o.customer_number,
+        // Safety net: scrub trailing digit groups even if the prompt rule
+        // slipped through. See sanitizeCustomerName() for the full contract.
+        customer_name: o.customer_name ? sanitizeCustomerName(o.customer_name) : o.customer_name,
+        items: (o.items || []).map(item => ({
+          product_name: item.product_name,
+          product_code: item.product_code,
+          quantity: item.quantity,
+          lot_number: item.lot_number,
+        })),
+        source_data: o as Record<string, unknown>,
+        // Open-ended metadata — whatever the model populated under
+        // primary_metadata / extended_metadata comes through verbatim. The
+        // prompt schema describes exactly these keys so the model doesn't
+        // have to guess.
+        primary_metadata: o.primary_metadata && typeof o.primary_metadata === 'object'
+          ? o.primary_metadata
+          : undefined,
+        extended_metadata: o.extended_metadata && typeof o.extended_metadata === 'object'
+          ? o.extended_metadata
+          : undefined,
+      }));
 
     // Collect unique customers: first from the standalone `customers` array
     // the AI may return (customer-registry payloads like the weekly XLSX),
@@ -687,51 +811,11 @@ async function parseWithAI(
 }
 
 /**
- * Default system prompt for Qwen parsing. Exported so regression tests can
- * assert on the hard-coded rules (no-think directive, fabrication guard,
- * customer-name digit-strip rule).
+ * Static body shared by every prompt variant: rules block, customer-name
+ * digit-strip rule, fabrication guard, few-shot examples A/B/C. The dynamic
+ * fields section and JSON shape block are prepended by buildParsingPrompt().
  */
-export function getDefaultParsingPrompt(): string {
-  return `/no_think
-You are an ERP report parser. Extract order AND customer data from the input.
-The input may be an order email, a PDF order confirmation, or a customer-registry
-spreadsheet (one customer per block, followed by that customer's expected products).
-
-Return JSON in this exact format:
-{
-  "orders": [
-    {
-      "order_number": "string (required)",
-      "po_number": "string or null",
-      "customer_number": "string (e.g. K00123 or P000456)",
-      "customer_name": "string",
-      "items": [
-        {
-          "product_name": "string or null",
-          "product_code": "string or null",
-          "quantity": number or null,
-          "lot_number": "string or null"
-        }
-      ]
-    }
-  ],
-  "customers": [
-    {
-      "customer_number": "string (e.g. K00123)",
-      "name": "string",
-      "email": "string or null (primary contact email if multiple)",
-      "contacts": [
-        {
-          "name": "string or null (contact person's name if known)",
-          "email": "string (required)",
-          "role": "string or null (e.g. AP, Receiving, QA, Orders)"
-        }
-      ]
-    }
-  ]
-}
-
-Rules:
+const STATIC_PROMPT_BODY = `Rules:
 - If a field is not clearly present in the source text, leave it null. Do NOT
   infer or fabricate values from adjacent columns. po_number must only be
   populated if the source explicitly labels a column as PO, P.O., or Purchase
@@ -846,4 +930,52 @@ Output:
     }
   ]
 }`;
+
+/**
+ * Static preamble — describes the task without enumerating fields. The
+ * dynamic field section is slotted in between this and STATIC_PROMPT_BODY.
+ */
+const STATIC_PROMPT_PREAMBLE = `/no_think
+You are an ERP report parser. Extract order AND customer data from the input.
+The input may be an order email, a PDF order confirmation, or a customer-registry
+spreadsheet (one customer per block, followed by that customer's expected products).
+`;
+
+/**
+ * Compose a full Qwen system prompt from a v2 field-mappings config.
+ *
+ * Structure:
+ *   /no_think header + preamble
+ *   -> dynamic "Fields to extract" section (per-field with aliases + hints)
+ *   -> dynamic "Return JSON in this exact format" block
+ *   -> static rules block + few-shot examples A/B/C
+ *
+ * The static tail preserves every hard rule the regression tests assert on:
+ *   - fabrication guard / PO label gate
+ *   - customer-name digit-strip rule
+ *   - "Do NOT use customer_number as the order_number"
+ *   - Few-shot anchors (K13957 ACME, 1784767 CHUCKANUT)
+ */
+export function buildParsingPrompt(
+  mappings: ConnectorFieldMappings,
+  options?: { customPreamble?: string },
+): string {
+  const preamble = options?.customPreamble ?? STATIC_PROMPT_PREAMBLE;
+  const fieldsSection = buildAiFieldsSection(mappings);
+  const jsonShape = buildJsonShapeForPrompt(mappings);
+  return `${preamble}
+${fieldsSection}
+
+${jsonShape}
+
+${STATIC_PROMPT_BODY}`;
+}
+
+/**
+ * Back-compat wrapper returning the prompt for the default field-mapping
+ * config. The regression tests in tests/unit/extraction-prompt.test.ts target
+ * this signature.
+ */
+export function getDefaultParsingPrompt(): string {
+  return buildParsingPrompt(defaultFieldMappings());
 }

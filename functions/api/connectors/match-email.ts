@@ -3,6 +3,7 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import type { Env } from '../../lib/types';
+import { subjectMatches, senderMatches } from '../../lib/connectors/matchEmail';
 
 /**
  * GET /api/connectors/match-email
@@ -50,38 +51,22 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         continue;
       }
 
-      // Check sender filter
+      // Check sender filter (case-insensitive, via shared helper).
+      // Preserve historical behavior: a set filter with no sender = skip.
       const senderFilter = config.sender_filter as string | undefined;
-      if (senderFilter && sender) {
-        try {
-          const senderRegex = new RegExp(senderFilter, 'i');
-          if (!senderRegex.test(sender)) {
-            continue;
-          }
-        } catch {
-          // Invalid regex in config, skip sender check
-        }
+      if (senderFilter) {
+        if (!sender) continue;
+        if (!senderMatches(sender, senderFilter)) continue;
       }
 
-      // Check subject patterns
-      const subjectPatterns = config.subject_patterns as string[] | undefined;
-      if (subjectPatterns && Array.isArray(subjectPatterns) && subject) {
-        let subjectMatched = false;
-        for (const pattern of subjectPatterns) {
-          try {
-            const regex = new RegExp(pattern, 'i');
-            if (regex.test(subject)) {
-              subjectMatched = true;
-              break;
-            }
-          } catch {
-            // Invalid regex pattern, skip
-          }
-        }
-
-        if (!subjectMatched) {
-          continue;
-        }
+      // Check subject patterns (case-insensitive, via shared helper).
+      // Preserve historical behavior: configured patterns with no subject = skip.
+      const subjectPatterns = Array.isArray(config.subject_patterns)
+        ? (config.subject_patterns as string[])
+        : undefined;
+      if (subjectPatterns && subjectPatterns.length > 0) {
+        if (!subject) continue;
+        if (!subjectMatches(subject, subjectPatterns)) continue;
       }
 
       // Connector matched

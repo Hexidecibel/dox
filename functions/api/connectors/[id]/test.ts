@@ -7,8 +7,17 @@ import {
 } from '../../../lib/permissions';
 import type { Env, User } from '../../../lib/types';
 
+/**
+ * Hard requirements per connector type — config keys that MUST be present
+ * for the connector to have any chance of working. Keep this list
+ * conservative: anything optional belongs in the "warnings" list below, not
+ * here. Historically `email` required `subject_patterns` in this list, which
+ * made the Test button always fail for freshly-created connectors; that rule
+ * has been moved to a warning now that an email connector with no subject
+ * patterns is a legitimate configuration (matches any inbound email).
+ */
 const REQUIRED_CONFIG_FIELDS: Record<string, string[]> = {
-  email: ['subject_patterns'],
+  email: [],
   api_poll: ['endpoint_url'],
   webhook: [],
   file_watch: ['r2_prefix'],
@@ -16,7 +25,10 @@ const REQUIRED_CONFIG_FIELDS: Record<string, string[]> = {
 
 /**
  * POST /api/connectors/:id/test
- * Validate connector configuration.
+ * Validate connector configuration. Returns `{ success, message, warnings[] }`.
+ * Missing-but-required fields raise a 400; soft configuration concerns
+ * (e.g. an email connector with no subject filter at all) come back in
+ * `warnings` so the UI can surface them without blocking the user.
  */
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -65,10 +77,27 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw new BadRequestError('Connector field_mappings is not valid JSON');
     }
 
+    // Soft warnings — surface actionable concerns without failing the test.
+    const warnings: string[] = [];
+    if (connectorType === 'email') {
+      const subjectPatterns = Array.isArray(config.subject_patterns)
+        ? (config.subject_patterns as unknown[]).filter((p) => typeof p === 'string' && p)
+        : [];
+      const senderFilter = typeof config.sender_filter === 'string' ? config.sender_filter.trim() : '';
+      if (subjectPatterns.length === 0 && !senderFilter) {
+        warnings.push(
+          'No subject patterns or sender filter set — this connector will match EVERY inbound email for its tenant. Add at least one subject pattern or a sender filter to scope it.'
+        );
+      }
+    }
+
     return new Response(
       JSON.stringify({
         success: true,
-        message: 'Connector configuration is valid',
+        message: warnings.length > 0
+          ? 'Connector configuration is valid (with warnings)'
+          : 'Connector configuration is valid',
+        warnings,
       }),
       { headers: { 'Content-Type': 'application/json' } }
     );

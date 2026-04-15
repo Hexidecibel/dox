@@ -700,6 +700,16 @@ export interface OrderNaturalSearchResponse {
   total: number;
 }
 
+// Re-export the open-ended field-mapping shape from its canonical module so
+// API types and connector types can pull from a single location.
+export type {
+  ConnectorFieldMappings,
+  FieldMappingCore,
+  FieldMappingExtended,
+  CoreFieldKey,
+  CoreFieldDefinition,
+} from './fieldMappings';
+
 // === Connector, Order & Customer Enums ===
 export type ConnectorType = 'email' | 'api_poll' | 'webhook' | 'file_watch';
 export type SystemType = 'erp' | 'wms' | 'other';
@@ -715,13 +725,15 @@ export interface ConnectorRow {
   connector_type: ConnectorType;
   system_type: SystemType;
   config: string; // JSON
-  field_mappings: string; // JSON
+  field_mappings: string; // JSON — v2 ConnectorFieldMappings shape (see shared/fieldMappings.ts)
   credentials_encrypted: string | null;
   credentials_iv: string | null;
   schedule: string | null;
   active: number;
   last_run_at: string | null;
   last_error: string | null;
+  /** R2 key of the sample file uploaded during the wizard discover-schema step. */
+  sample_r2_key: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -808,7 +820,11 @@ export interface OrderRow {
   customer_number: string | null;
   customer_name: string | null;
   status: OrderStatus;
-  source_data: string | null; // JSON
+  source_data: string | null; // JSON — raw untouched source row
+  /** Canonical-core fields mapped from source. JSON string keyed by CoreFieldKey. */
+  primary_metadata: string | null;
+  /** User-defined extended fields. JSON string keyed by FieldMappingExtended.key. */
+  extended_metadata: string | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;

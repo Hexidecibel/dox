@@ -8,14 +8,30 @@ import {
 import { sanitizeString } from '../../lib/validation';
 import { encryptCredentials } from '../../lib/connectors/crypto';
 import type { Env, User } from '../../lib/types';
+import { normalizeFieldMappings, validateFieldMappings } from '../../../shared/fieldMappings';
 
 const VALID_CONNECTOR_TYPES = ['email', 'api_poll', 'webhook', 'file_watch'];
 const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
 
+/**
+ * Transform a DB row into the API-facing shape. Parses field_mappings JSON
+ * through normalizeFieldMappings so the client always sees a fresh v2 shape
+ * even if the stored row is a legacy v1 config. We do NOT rewrite the row
+ * in the DB on GET — that happens on the next PUT.
+ */
 function transformConnector(row: Record<string, unknown>): Record<string, unknown> {
-  const { credentials_encrypted, credentials_iv, ...rest } = row;
+  const { credentials_encrypted, credentials_iv, field_mappings, ...rest } = row;
+  let parsedMappings: unknown = field_mappings;
+  if (typeof field_mappings === 'string') {
+    try {
+      parsedMappings = JSON.parse(field_mappings);
+    } catch {
+      parsedMappings = {};
+    }
+  }
   return {
     ...rest,
+    field_mappings: normalizeFieldMappings(parsedMappings),
     has_credentials: !!(credentials_encrypted && credentials_iv),
   };
 }
@@ -126,10 +142,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       connector_type?: string;
       system_type?: string;
       config?: Record<string, unknown>;
-      field_mappings?: Record<string, unknown>;
+      field_mappings?: unknown;
       credentials?: Record<string, unknown>;
       schedule?: string;
       tenant_id?: string;
+      sample_r2_key?: string | null;
     };
 
     if (!body.name?.trim()) {
@@ -168,8 +185,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const connectorType = body.connector_type;
     const systemType = body.system_type || 'other';
     const config = body.config ? JSON.stringify(body.config) : '{}';
-    const fieldMappings = body.field_mappings ? JSON.stringify(body.field_mappings) : '{}';
+
+    // Normalize + validate the open-ended field-mapping config. Legacy v1
+    // shapes are transparently upgraded; invalid shapes produce a structured
+    // 400 with a list of errors the wizard can surface inline.
+    const normalizedMappings = normalizeFieldMappings(body.field_mappings);
+    const mappingValidation = validateFieldMappings(normalizedMappings);
+    if (!mappingValidation.ok) {
+      throw new BadRequestError(
+        `field_mappings invalid: ${mappingValidation.errors.join('; ')}`,
+      );
+    }
+    const fieldMappings = JSON.stringify(normalizedMappings);
     const schedule = body.schedule ? sanitizeString(body.schedule) : null;
+    const sampleR2Key = typeof body.sample_r2_key === 'string' && body.sample_r2_key.length > 0
+      ? sanitizeString(body.sample_r2_key)
+      : null;
 
     let credentialsEncrypted: string | null = null;
     let credentialsIv: string | null = null;
@@ -189,13 +220,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       `INSERT INTO connectors (
         id, tenant_id, name, connector_type, system_type,
         config, field_mappings, credentials_encrypted, credentials_iv,
-        schedule, active, created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'))`
+        schedule, sample_r2_key, active, created_by, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'))`
     )
       .bind(
         id, tenantId, name, connectorType, systemType,
         config, fieldMappings, credentialsEncrypted, credentialsIv,
-        schedule, user.id
+        schedule, sampleR2Key, user.id
       )
       .run();
 

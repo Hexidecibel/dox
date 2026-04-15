@@ -9,14 +9,30 @@ import {
 import { sanitizeString } from '../../lib/validation';
 import { encryptCredentials } from '../../lib/connectors/crypto';
 import type { Env, User } from '../../lib/types';
+import { normalizeFieldMappings, validateFieldMappings } from '../../../shared/fieldMappings';
 
 const VALID_CONNECTOR_TYPES = ['email', 'api_poll', 'webhook', 'file_watch'];
 const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
 
+/**
+ * Transform a DB row into the API-facing shape. Parses field_mappings JSON
+ * through normalizeFieldMappings so legacy v1 configs load transparently.
+ * We do NOT rewrite the DB on GET — the upgrade is only persisted on the
+ * next successful PUT.
+ */
 function transformConnector(row: Record<string, unknown>): Record<string, unknown> {
-  const { credentials_encrypted, credentials_iv, ...rest } = row;
+  const { credentials_encrypted, credentials_iv, field_mappings, ...rest } = row;
+  let parsedMappings: unknown = field_mappings;
+  if (typeof field_mappings === 'string') {
+    try {
+      parsedMappings = JSON.parse(field_mappings);
+    } catch {
+      parsedMappings = {};
+    }
+  }
   return {
     ...rest,
+    field_mappings: normalizeFieldMappings(parsedMappings),
     has_credentials: !!(credentials_encrypted && credentials_iv),
   };
 }
@@ -91,10 +107,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       connector_type?: string;
       system_type?: string;
       config?: Record<string, unknown>;
-      field_mappings?: Record<string, unknown>;
+      field_mappings?: unknown;
       credentials?: Record<string, unknown>;
       schedule?: string | null;
       active?: number | boolean;
+      sample_r2_key?: string | null;
     };
 
     const updates: string[] = [];
@@ -135,8 +152,23 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     }
 
     if (body.field_mappings !== undefined) {
+      const normalizedMappings = normalizeFieldMappings(body.field_mappings);
+      const mappingValidation = validateFieldMappings(normalizedMappings);
+      if (!mappingValidation.ok) {
+        throw new BadRequestError(
+          `field_mappings invalid: ${mappingValidation.errors.join('; ')}`,
+        );
+      }
       updates.push('field_mappings = ?');
-      params.push(JSON.stringify(body.field_mappings));
+      params.push(JSON.stringify(normalizedMappings));
+    }
+
+    if (body.sample_r2_key !== undefined) {
+      const key = typeof body.sample_r2_key === 'string' && body.sample_r2_key.length > 0
+        ? sanitizeString(body.sample_r2_key)
+        : null;
+      updates.push('sample_r2_key = ?');
+      params.push(key);
     }
 
     if (body.credentials !== undefined) {
