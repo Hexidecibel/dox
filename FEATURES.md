@@ -1,5 +1,53 @@
 # Features
 
+## 2026-04-17: Prod Deploy — Session Promotion to supdox.com
+
+Promoted 17 commits (`9d09b0e..a91e11f`) from master to production in a
+single gated deploy.
+
+### Migrations applied to prod D1
+- `0034_vlm_extraction_fields` — `vlm_*` columns on `processing_queue`
+- `0035_supplier_extraction_instructions` — new table with UNIQUE on
+  `(supplier_id, document_type_id)`
+- `0036_extraction_evaluations` — new table with UNIQUE on
+  `(queue_item_id, evaluator_user_id)`
+- `0037_connector_soft_delete` — `connectors.deleted_at` column +
+  `idx_connectors_deleted_at`
+
+All four are additive (ALTER TABLE ADD COLUMN / CREATE TABLE IF NOT
+EXISTS). Prod data integrity preserved: documents=113, processing_queue=183
+both unchanged across the deploy.
+
+### Code shipped to supdox.com
+- VLM dual-extraction wiring (controlled by `QWEN_VLM_MODE`, still `off`
+  in prod until manually flipped on the GPU host)
+- Per-supplier extraction instructions (reviewer textarea + worker
+  prompt injection)
+- Tinder-style A/B eval (`/eval` + `/eval/report`)
+- Connector stabilization pass (webhook column fix, draft-vs-deleted
+  list disambiguation, wizard rehydrate fix, file_watch manual upload
+  runner, per-type live test probes)
+- Playwright e2e gate baked into `bin/deploy`
+- +18 new vitest API regression tests
+
+### Deploy gate
+- Pre-flight: `bin/e2e` ran 707 vitest + 10 playwright tests in ~1m20s
+  against staging — all green
+- Staging promotion: `045b76b8.doc-upload-site-staging.pages.dev`
+- Prod deployment: `51e5ad80.doc-upload-site.pages.dev`
+  (https://supdox.com)
+- Prod process-worker (PID 3319237) intentionally **not restarted** —
+  the new instruction-injection and VLM code paths only activate after a
+  worker restart, which the user will trigger when ready
+
+### Operational note
+`bin/migrate` is not idempotent against an already-migrated prod DB.
+The four new migrations were applied directly via `wrangler d1 execute`
+because `npm run migrate:remote` errored on already-applied 0006
+(`duplicate column name: force_password_change`). Future cleanup:
+mirror `bin/migrate-staging`'s `(tolerated: ...)` re-run logic into
+`bin/migrate`.
+
 ## 2026-04-17: End-to-End Test Gate
 
 ### `bin/e2e` — one command, no more manual clicking

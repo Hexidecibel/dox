@@ -4,22 +4,76 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-## Tinder-Style A/B Evaluation — STAGING ONLY (2026-04-17)
+## 2026-04-17 Prod Deploy — LIVE on supdox.com
+
+Promoted the full session's work from staging to production.
+
+### What's now live in prod (commit 9d09b0e -> a91e11f, 17 commits)
+- **VLM extraction fields** (migration 0034) — `vlm_*` columns on
+  `processing_queue` ready to receive dual-mode results. **`QWEN_VLM_MODE`
+  on the prod worker is still `off` — flip to `dual` when ready.**
+- **Per-supplier extraction instructions** (migration 0035 +
+  `supplier_extraction_instructions` table) — reviewer textarea on
+  `/queue/:id`, autosaves, prompt injection wired in `bin/process-worker`.
+- **Tinder-style A/B eval** (migration 0036 + `extraction_evaluations`
+  table) — `/eval` and `/eval/report` routes live. Will only show
+  eligible items once the prod worker runs in `dual` mode.
+- **Connector soft-delete** (migration 0037 + `connectors.deleted_at`) —
+  Drafts vs deleted now disambiguated in the list.
+- **Connector stabilization** — webhook column fix, draft list visibility,
+  wizard edit rehydrate, file_watch manual upload runner, live test
+  probes per connector type.
+- **Playwright e2e gate** — `bin/e2e` runs vitest (707 tests) + playwright
+  (10 tests against staging) in ~1m20s. `bin/deploy` now auto-gates on it.
+- **API regression coverage** — +18 vitest cases for ingest, email
+  webhook, search, versioning.
+
+### Prod deploy details
+- **Pre-flight**: vitest 707/707, playwright 10/10 — all green
+- **Migrations applied to prod D1**: 0034, 0035, 0036, 0037 (only the four
+  new ones; 0023-0033 were already on prod from prior sessions)
+- **Staging deployment**: `045b76b8.doc-upload-site-staging.pages.dev`
+- **Prod deployment**: `51e5ad80.doc-upload-site.pages.dev` (custom
+  domain: https://supdox.com)
+- **Prod data integrity**: documents=113, processing_queue=183 — both
+  match pre-deploy counts (no data loss)
+- **Prod worker**: PID 3319237 still running uninterrupted (3+ days
+  ETIME). **Not restarted**, by design. The new code paths (instruction
+  injection, VLM dual mode) only activate when the worker picks up the
+  new code, which happens on its next restart. Until then, prod
+  continues running the prior worker code unchanged.
+
+### What the user needs to decide next
+1. **Restart prod worker** when ready to start ingesting prod COAs
+   through the new instruction-injection path. Set
+   `QWEN_VLM_MODE=dual` on the worker host (`192.168.1.67`) before
+   restart if you want VLM dual-extraction to start populating prod
+   `vlm_*` columns. Without that, instruction-injection still works for
+   text-mode extractions.
+2. **A/B eval in prod** is wired but blank until the worker runs dual
+   mode — there are zero eligible items right now in the prod DB.
+3. **`bin/migrate` is still not idempotent** — it tried and failed at
+   0006 because prod was already past it. We applied 0034-0037 directly
+   via `wrangler d1 execute`. Worth fixing `bin/migrate` to mirror
+   `bin/migrate-staging`'s `(tolerated: ...)` logic so future prod
+   migrations can re-run safely.
+
+---
+
+## Tinder-Style A/B Evaluation (2026-04-17)
 
 Blind-compare eval flow for text vs VLM extraction so the partner can pick a
 winner per document and we can measure reviewer preference at the
-supplier + doctype level.
+supplier + doctype level. **Now live in both staging and prod.**
 
 ### URLs
-- Eval: https://doc-upload-site-staging.pages.dev/eval
-- Report: https://doc-upload-site-staging.pages.dev/eval/report
-- Login: `a@a.a` / `a` (staging admin from `STAGING_CREDENTIALS.md`)
+- Staging: https://doc-upload-site-staging.pages.dev/eval
+- Prod: https://supdox.com/eval
+- Login (staging): `a@a.a` / `a` (from `STAGING_CREDENTIALS.md`)
 
 ### Status
-- Migration 0036 applied to `doc-upload-db-staging` only — prod untouched.
-- 8 of the 31 staged COAs are currently eligible (both text and VLM
-  extractions ready, no VLM error). Remaining items will surface as the
-  process worker finishes dual-mode runs.
+- Migration 0036 applied to both staging and prod D1.
+- Prod has zero eligible items until the prod worker runs in `dual` mode.
 - Staging smoke test passed: login → `/api/eval/next` returns an eligible
   item with a random `a_side` → POST `/api/eval/:id` upserts → `/api/eval/report`
   aggregates. Smoke-test row was cleaned out of the DB.
@@ -43,14 +97,6 @@ The `/eval` page launders both payloads through a randomizer before
 rendering — no "text" / "vlm" strings are emitted in DOM attributes or
 class names for the Method A / Method B cards. The report unblinds using
 `resolveWinningSide(winner, a_side)`.
-
-### To validate in staging
-- Click through `/eval`, pick winners on the 8 ready items.
-- Confirm `/eval/report` shows a sensible breakdown — Country Morning
-  Farms is the supplier for most docs in the current batch.
-- Export CSV, verify `a_side` and `winning_side` columns are consistent.
-- Wait for the rest of the 31 COAs to finish dual-mode extraction;
-  re-visit `/eval` and confirm the counter picks them up.
 
 ---
 
@@ -119,14 +165,10 @@ All Phase 1 features are live on supdox.com.
 
 ---
 
-## Phase 2: Connector System, Orders, Customers — CODE COMPLETE (2026-04-09)
+## Phase 2: Connector System, Orders, Customers — LIVE (2026-04-17)
 
-Phase 2 is code-complete and ready for testing.
-
-### Before deploying
-- Migration 0030 applied locally — run `npm run migrate:remote` for production
-- Test plan at `test-plan-phase2.md` — follow it to verify everything works
-- After testing passes, deploy with `./bin/deploy`
+Phase 2 is deployed to prod. Connector stabilization pass also live (see
+the 2026-04-17 prod deploy section above).
 
 ### Also completed (order search)
 - Enhanced order list search covers all fields (order number, PO, customer name/number, product names, lot numbers) via LIKE queries
@@ -138,7 +180,7 @@ Phase 2 is code-complete and ready for testing.
 
 ---
 
-## Per-Supplier Extraction Instructions — STAGING ONLY (2026-04-17)
+## Per-Supplier Extraction Instructions — LIVE (2026-04-17)
 
 Reviewers can now type plain-English guidance per (supplier, document_type) that
 gets prepended to the Qwen system prompt on every future extraction of that
@@ -146,12 +188,12 @@ pair. Sits alongside the existing silent few-shot loop — this is the explicit
 "teach the model" surface that reviewers can see and edit.
 
 ### Status
-- Migration 0035 applied to `doc-upload-db-staging` only — prod is still
-  untouched. Run `npm run migrate:remote` when the feature is validated in
-  staging.
-- Deployed to `doc-upload-site-staging.pages.dev`.
-- Staging process worker restarted and picked up the new prompt injection
-  wiring (VLM mode: dual).
+- Migration 0035 applied to both staging and prod D1.
+- Deployed to staging (`doc-upload-site-staging.pages.dev`) AND prod
+  (`supdox.com`).
+- **Prod worker not restarted** — the prompt-injection wiring lives in
+  `bin/process-worker` and only takes effect after the next worker
+  restart. Until then, prod ingest still runs the previous worker code.
 
 ### Surfaces
 - Table: `supplier_extraction_instructions` (supplier_id + document_type_id
@@ -171,16 +213,9 @@ pair. Sits alongside the existing silent few-shot loop — this is the explicit
 - Existing few-shot `extraction_examples` — those are silent field-level
   corrections, still work as-is.
 
-### To validate in staging
-- Approve a COA, write instructions like "COAG values go in column A, not B"
-  against the review queue textarea.
-- Re-queue another doc from the same supplier + doctype and confirm
-  `Reviewer instructions loaded: N chars` appears in the worker log.
-- Check extraction improves after guidance.
-
 ---
 
-## VLM Extraction Upgrade — CODE COMPLETE (2026-04-16)
+## VLM Extraction Upgrade — LIVE (2026-04-17)
 
 Adds a Vision-Language Model (Qwen2.5-VL-7B) extraction path that runs alongside the existing text/OCR pipeline, plus a side-by-side review UI for reviewers to pick the better result per field.
 
@@ -191,7 +226,7 @@ Adds a Vision-Language Model (Qwen2.5-VL-7B) extraction path that runs alongside
 - `selected_source` is recorded in the audit log so we can later measure reviewer preference.
 
 ### Files changed (high level)
-- Migration `0034_vlm_extraction_fields.sql` — adds `vlm_extracted_fields/tables/confidence/error/model/duration_ms/extracted_at` columns to `processing_queue`.
+- Migration `0034_vlm_extraction_fields.sql` — adds `vlm_extracted_fields/tables/confidence/error/model/duration_ms/extracted_at` columns to `processing_queue`. **Applied to prod D1 on 2026-04-17.**
 - `bin/process-worker` — VLM config wiring, PDF-to-PNG renderer with safety guards (rejects <100-byte PNGs to avoid the GGML_ASSERT 2x2-pixel CLIP crash seen on the Windows GPU host), prompt builder, dual-run control flow.
 - `src/pages/reviewVlmDiff.ts` + `reviewTableActions.ts` — extracted as pure modules so the diff/merge and table-edit logic are unit-testable without React.
 - `src/pages/ReviewQueue.tsx` — compare panel, source picker, merge-on-approve.
@@ -199,18 +234,17 @@ Adds a Vision-Language Model (Qwen2.5-VL-7B) extraction path that runs alongside
 - `shared/types.ts` + `src/lib/types.ts` — VLM fields on `ProcessingQueueItem`.
 - New tests: `tests/api/queue-approve-vlm.test.ts`, `tests/api/queue-results-vlm.test.ts`, `tests/unit/processWorkerVlm.test.ts`, `tests/unit/reviewVlmCompare.test.ts`, `tests/unit/reviewTableActions.test.ts`.
 
-### Also bundled in this commit
-- **Unified Activity feed** — new `/api/activity` + `/api/activity/event` endpoints and Activity page that merge connector runs, document ingests, orders, and audit log into one timeline. Backed by `functions/lib/activityMerge.ts` (pure merge/sort/paginate) with full unit + API test coverage.
-- **Connector flow tightening** — wizard/CRUD/test-connection improvements. Stabilization of these flows is the focus of the next session.
-
 ### Status
-- Code complete, all new tests added.
-- Awaiting full `npm test` run + deploy.
-- Migration 0034 is local-only — run `npm run migrate:remote` before deploy.
-- VLM stays off in production until `QWEN_VLM_MODE=dual` is flipped on the worker host (Qwen GPU box at 192.168.1.67); default behaviour is unchanged.
+- Code complete, all tests passing.
+- Migration 0034 applied to prod D1.
+- **VLM stays off in production until `QWEN_VLM_MODE=dual` is flipped on the
+  worker host (Qwen GPU box at 192.168.1.67) and the worker is restarted.**
+  Default behaviour is unchanged — prod continues running text-only
+  extraction until you flip the switch.
 
-### Next session focus
-- Connector flow end-to-end done (see "Connector Flow — End-to-End Working" below). Playwright e2e harness is pending — that's the next session's job.
+### Connector flow
+- End-to-end working in staging and prod (see "2026-04-17 Prod Deploy" at top).
+- Playwright e2e harness covers the full file_watch loop.
 
 ---
 
