@@ -85,3 +85,37 @@ Phase 2 is code-complete and ready for testing.
 
 ### Follow-up items to consider (Phase 3)
 - Order-to-COA auto-matching — automatically match order items to existing COA documents by product + lot
+
+---
+
+## VLM Extraction Upgrade — CODE COMPLETE (2026-04-16)
+
+Adds a Vision-Language Model (Qwen2.5-VL-7B) extraction path that runs alongside the existing text/OCR pipeline, plus a side-by-side review UI for reviewers to pick the better result per field.
+
+### What it does
+- New `QWEN_VLM_MODE` env on the process worker: `off` (default), `dual` (run both paths, store both), `vlm` (VLM only).
+- Dual mode renders PDF pages to PNG (scale 2.0, capped at `QWEN_VLM_MAX_PAGES=5` for VRAM safety) and sends them to the VLM endpoint, storing the result in new `vlm_*` columns on `processing_queue`.
+- Review Queue UI shows a side-by-side compare panel when both extractions exist — per-field source picker (text vs vlm), match/differ/text-only/vlm-only summary badge, then merges the user's picks on approve.
+- `selected_source` is recorded in the audit log so we can later measure reviewer preference.
+
+### Files changed (high level)
+- Migration `0034_vlm_extraction_fields.sql` — adds `vlm_extracted_fields/tables/confidence/error/model/duration_ms/extracted_at` columns to `processing_queue`.
+- `bin/process-worker` — VLM config wiring, PDF-to-PNG renderer with safety guards (rejects <100-byte PNGs to avoid the GGML_ASSERT 2x2-pixel CLIP crash seen on the Windows GPU host), prompt builder, dual-run control flow.
+- `src/pages/reviewVlmDiff.ts` + `reviewTableActions.ts` — extracted as pure modules so the diff/merge and table-edit logic are unit-testable without React.
+- `src/pages/ReviewQueue.tsx` — compare panel, source picker, merge-on-approve.
+- `functions/api/queue/[id].ts`, `functions/lib/queue-approve.ts`, `functions/api/queue/[id]/results.ts` — accept `selected_source`, expose VLM payload to frontend.
+- `shared/types.ts` + `src/lib/types.ts` — VLM fields on `ProcessingQueueItem`.
+- New tests: `tests/api/queue-approve-vlm.test.ts`, `tests/api/queue-results-vlm.test.ts`, `tests/unit/processWorkerVlm.test.ts`, `tests/unit/reviewVlmCompare.test.ts`, `tests/unit/reviewTableActions.test.ts`.
+
+### Also bundled in this commit
+- **Unified Activity feed** — new `/api/activity` + `/api/activity/event` endpoints and Activity page that merge connector runs, document ingests, orders, and audit log into one timeline. Backed by `functions/lib/activityMerge.ts` (pure merge/sort/paginate) with full unit + API test coverage.
+- **Connector flow tightening** — wizard/CRUD/test-connection improvements. Stabilization of these flows is the focus of the next session.
+
+### Status
+- Code complete, all new tests added.
+- Awaiting full `npm test` run + deploy.
+- Migration 0034 is local-only — run `npm run migrate:remote` before deploy.
+- VLM stays off in production until `QWEN_VLM_MODE=dual` is flipped on the worker host (Qwen GPU box at 192.168.1.67); default behaviour is unchanged.
+
+### Next session focus
+- Stabilize / bug-fix the connector flow (wizard, schema discovery, field mapping v2, preview extraction, test-connection, runs).

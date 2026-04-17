@@ -37,6 +37,7 @@ import {
   LocalShipping as SuppliersIcon,
   Category as DocTypesIcon,
   History as HistoryIcon,
+  Timeline as ActivityIcon,
   FileUpload as ImportIcon,
   RateReview as RateReviewIcon,
   ShoppingCart as OrdersIcon,
@@ -58,6 +59,7 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { label: 'Dashboard', path: '/dashboard', icon: <DashboardIcon /> },
+  { label: 'Activity', path: '/activity', icon: <ActivityIcon /> },
   { label: 'Documents', path: '/documents', icon: <DocsIcon /> },
   { label: 'Search', path: '/search', icon: <SearchIcon /> },
   { label: 'Import', path: '/import', icon: <ImportIcon />, roles: ['super_admin', 'org_admin', 'user'] },

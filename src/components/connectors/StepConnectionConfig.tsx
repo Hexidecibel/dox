@@ -187,6 +187,11 @@ function SchedulePicker({
 
 function EmailConfig({ state, onChange }: StepProps) {
   const subjectPatterns = (state.config.subject_patterns as string[]) || [];
+  const senderFilter = ((state.config.sender_filter as string) || '').trim();
+  // Mirror the validation rule enforced by the wizard's validateStep + the
+  // backend: need patterns or a sender filter. Surface inline so the user
+  // doesn't have to click Next to find out.
+  const hasNoFilter = subjectPatterns.length === 0 && senderFilter.length === 0;
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
@@ -194,11 +199,18 @@ function EmailConfig({ state, onChange }: StepProps) {
         Emails sent to your inbox will be checked against these rules. Matching emails are automatically parsed for order data.
       </Alert>
 
+      {hasNoFilter && (
+        <Alert severity="error">
+          Email connectors need at least one subject pattern or a sender filter —
+          otherwise they'll match every inbound email for your tenant.
+        </Alert>
+      )}
+
       <ChipInput
         label="Subject keywords"
         value={subjectPatterns}
         onChangeValue={(v) => updateConfig(state, onChange, 'subject_patterns', v)}
-        helperText="Enter words that appear in the email subject"
+        helperText="Enter words that appear in the email subject. Press Enter to add each pattern."
       />
 
       <Accordion variant="outlined" disableGutters>

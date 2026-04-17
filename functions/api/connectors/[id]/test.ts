@@ -11,10 +11,12 @@ import type { Env, User } from '../../../lib/types';
  * Hard requirements per connector type — config keys that MUST be present
  * for the connector to have any chance of working. Keep this list
  * conservative: anything optional belongs in the "warnings" list below, not
- * here. Historically `email` required `subject_patterns` in this list, which
- * made the Test button always fail for freshly-created connectors; that rule
- * has been moved to a warning now that an email connector with no subject
- * patterns is a legitimate configuration (matches any inbound email).
+ * here.
+ *
+ * Email connectors are validated separately via {@link validateEmailConfig}
+ * below — they must have at least one `subject_patterns` entry OR a non-empty
+ * `sender_filter`. An email connector with neither is greedy (matches every
+ * inbound email for its tenant) which is almost always a misconfiguration.
  */
 const REQUIRED_CONFIG_FIELDS: Record<string, string[]> = {
   email: [],
@@ -22,6 +24,33 @@ const REQUIRED_CONFIG_FIELDS: Record<string, string[]> = {
   webhook: [],
   file_watch: ['r2_prefix'],
 };
+
+/**
+ * Shared validation for email-connector config. Exported so the create/update
+ * handlers enforce the exact same rule — "must have patterns OR a sender
+ * filter, otherwise it's greedy" — without drift.
+ *
+ * Returns `null` when the config is acceptable, or an `{ error, code }` tuple
+ * that the caller should surface as a 400 response body.
+ */
+export function validateEmailConfig(
+  config: Record<string, unknown>,
+): { error: string; code: string } | null {
+  const subjectPatterns = Array.isArray(config.subject_patterns)
+    ? (config.subject_patterns as unknown[]).filter(
+        (p): p is string => typeof p === 'string' && p.trim().length > 0,
+      )
+    : [];
+  const senderFilter = typeof config.sender_filter === 'string' ? config.sender_filter.trim() : '';
+  if (subjectPatterns.length === 0 && senderFilter.length === 0) {
+    return {
+      error:
+        'Email connector requires at least one subject pattern or a sender filter',
+      code: 'empty_email_config',
+    };
+  }
+  return null;
+}
 
 /**
  * POST /api/connectors/:id/test
@@ -77,16 +106,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw new BadRequestError('Connector field_mappings is not valid JSON');
     }
 
-    // Soft warnings — surface actionable concerns without failing the test.
-    const warnings: string[] = [];
+    // Email connectors must be scoped — no subject patterns AND no sender
+    // filter means "match every inbound email for this tenant" which is
+    // almost always a mistake. Upgraded from a soft warning to a hard error.
     if (connectorType === 'email') {
-      const subjectPatterns = Array.isArray(config.subject_patterns)
-        ? (config.subject_patterns as unknown[]).filter((p) => typeof p === 'string' && p)
-        : [];
-      const senderFilter = typeof config.sender_filter === 'string' ? config.sender_filter.trim() : '';
-      if (subjectPatterns.length === 0 && !senderFilter) {
-        warnings.push(
-          'No subject patterns or sender filter set — this connector will match EVERY inbound email for its tenant. Add at least one subject pattern or a sender filter to scope it.'
+      const emailErr = validateEmailConfig(config);
+      if (emailErr) {
+        return new Response(
+          JSON.stringify({ error: emailErr.error, code: emailErr.code }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
         );
       }
     }
@@ -94,10 +122,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return new Response(
       JSON.stringify({
         success: true,
-        message: warnings.length > 0
-          ? 'Connector configuration is valid (with warnings)'
-          : 'Connector configuration is valid',
-        warnings,
+        message: 'Connector configuration is valid',
+        warnings: [],
       }),
       { headers: { 'Content-Type': 'application/json' } }
     );

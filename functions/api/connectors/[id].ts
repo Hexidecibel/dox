@@ -10,6 +10,7 @@ import { sanitizeString } from '../../lib/validation';
 import { encryptCredentials } from '../../lib/connectors/crypto';
 import type { Env, User } from '../../lib/types';
 import { normalizeFieldMappings, validateFieldMappings } from '../../../shared/fieldMappings';
+import { validateEmailConfig } from './[id]/test';
 
 const VALID_CONNECTOR_TYPES = ['email', 'api_poll', 'webhook', 'file_watch'];
 const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
@@ -149,6 +150,32 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.config !== undefined) {
       updates.push('config = ?');
       params.push(JSON.stringify(body.config));
+    }
+
+    // Email connectors must stay scoped — if this PATCH targets (or leaves
+    // unchanged) an email connector, enforce the "patterns OR sender_filter"
+    // rule against the effective config the row will end up with. This
+    // catches both "create an email connector with nothing" AND "wipe the
+    // patterns off an already-configured one" on the same code path.
+    const effectiveType = (body.connector_type as string | undefined) ?? (connector.connector_type as string);
+    if (effectiveType === 'email') {
+      let effectiveConfig: Record<string, unknown>;
+      if (body.config !== undefined) {
+        effectiveConfig = (body.config as Record<string, unknown>) || {};
+      } else {
+        try {
+          effectiveConfig = JSON.parse((connector.config as string) || '{}');
+        } catch {
+          effectiveConfig = {};
+        }
+      }
+      const emailErr = validateEmailConfig(effectiveConfig);
+      if (emailErr) {
+        return new Response(
+          JSON.stringify({ error: emailErr.error, code: emailErr.code }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
     }
 
     if (body.field_mappings !== undefined) {

@@ -14,7 +14,7 @@
  * flow), we skip straight from Live Preview to Review & Save.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import {
   Box,
@@ -60,6 +60,7 @@ import {
   validateFieldMappings,
   type ConnectorFieldMappings,
 } from '../../components/connectors/doxFields';
+import { acceptAllHighConfidenceSuggestions } from '../../components/connectors/fieldMappingActions';
 import type { DiscoverSchemaResponse } from '../../types/connectorSchema';
 
 type ConnectorType = 'email' | 'api_poll' | 'webhook' | 'file_watch';
@@ -169,6 +170,11 @@ export function ConnectorWizard() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  // Which sample_id we've already auto-applied suggestions for. Prevents the
+  // "apply high-confidence suggestions on first entry to Review Schema" logic
+  // from stomping on the user's manual edits if they go back and forth.
+  const appliedSuggestionsForSampleRef = useRef<string | null>(null);
 
   const stepLabels = useMemo(() => buildStepLabels(state), [state]);
   const totalSteps = stepLabels.length;
@@ -283,8 +289,39 @@ export function ConnectorWizard() {
       case 'preview':
         return null;
       case 'connection':
+        // Email connectors must be scoped — block the Next button when
+        // neither a subject pattern nor a sender filter is set. Matches the
+        // backend rule in POST /api/connectors + POST/:id/test.
+        if (state.connectorType === 'email') {
+          const cfg = state.config || {};
+          const patterns = Array.isArray(cfg.subject_patterns)
+            ? (cfg.subject_patterns as unknown[]).filter(
+                (p): p is string => typeof p === 'string' && p.trim().length > 0,
+              )
+            : [];
+          const senderFilter =
+            typeof cfg.sender_filter === 'string' ? (cfg.sender_filter as string).trim() : '';
+          if (patterns.length === 0 && senderFilter.length === 0) {
+            return "Email connectors need at least one subject pattern or a sender filter — otherwise they'll match every inbound email.";
+          }
+        }
         return null;
       case 'save':
+        // Same rule enforced one last time before save so users can't fall
+        // through the cracks by skipping validateStep checks via Back/Save.
+        if (state.connectorType === 'email') {
+          const cfg = state.config || {};
+          const patterns = Array.isArray(cfg.subject_patterns)
+            ? (cfg.subject_patterns as unknown[]).filter(
+                (p): p is string => typeof p === 'string' && p.trim().length > 0,
+              )
+            : [];
+          const senderFilter =
+            typeof cfg.sender_filter === 'string' ? (cfg.sender_filter as string).trim() : '';
+          if (patterns.length === 0 && senderFilter.length === 0) {
+            return "Email connectors need at least one subject pattern or a sender filter — otherwise they'll match every inbound email.";
+          }
+        }
         return null;
     }
   };
@@ -297,14 +334,39 @@ export function ConnectorWizard() {
     }
     setError('');
 
-    // Seed field_mappings with the backend's suggestions the first time we
-    // enter the Review step after an upload. This way the user sees the AI
-    // guesses applied, and can adjust or hit "Accept all" to confirm.
+    // Auto-apply high-confidence AI suggestions the first time we enter the
+    // Review step for a given sample. Start from a CLEAN default mapping
+    // (stripped of all source_labels — the built-in aliases like "order_id"
+    // would otherwise look like real mappings even though they weren't seen
+    // in the sample) and then run acceptAllHighConfidenceSuggestions over
+    // the detected fields to pre-apply only candidate_targets at
+    // confidence >= 0.7. Low-confidence guesses stay unmapped so the user
+    // can review them manually.
+    //
+    // After this runs once per sample, the user's manual edits are sticky —
+    // going back to Upload and clicking Next again won't re-stomp their
+    // work unless they replace the sample itself (new sample_id).
     const role = stepRoleAt(activeStep);
     if (role === 'upload' && state.sample) {
-      const isBlank = !state.fieldMappings.core.order_number?.source_labels.length;
-      if (isBlank) {
-        updateState({ fieldMappings: normalizeFieldMappings(state.sample.suggested_mappings) });
+      const sampleId = state.sample.sample_id || '';
+      if (appliedSuggestionsForSampleRef.current !== sampleId) {
+        const base = defaultFieldMappings();
+        // Strip the default alias lists so nothing appears mapped that
+        // wasn't actually in the uploaded sample.
+        for (const key of Object.keys(base.core) as Array<keyof typeof base.core>) {
+          base.core[key].source_labels = [];
+          base.core[key].enabled = false;
+        }
+        const merged = acceptAllHighConfidenceSuggestions(base, state.sample.detected_fields);
+        // order_number is required by validateFieldMappings; make sure it's
+        // enabled even if nothing crossed the confidence threshold. The user
+        // will see the "Order Number must be mapped" error and can point it
+        // at a detected column.
+        if (!merged.core.order_number.enabled) {
+          merged.core.order_number.enabled = true;
+        }
+        updateState({ fieldMappings: merged });
+        appliedSuggestionsForSampleRef.current = sampleId;
       }
     }
 
@@ -319,6 +381,14 @@ export function ConnectorWizard() {
   };
 
   const handleSave = async (activate: boolean) => {
+    // Final client-side guard — email connectors without any filter would
+    // otherwise be greedy. Backend enforces the same rule, this just saves a
+    // round-trip and gives inline feedback.
+    const guard = validateStep();
+    if (guard) {
+      setError(guard);
+      return;
+    }
     setSaving(true);
     setError('');
     try {

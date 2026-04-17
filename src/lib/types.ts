@@ -53,6 +53,17 @@ export type {
   SupplierLookupOrCreateResponse,
   TemplateFieldMapping,
   ExtractionTemplateRow,
+  ActivityEvent,
+  ActivityEventType,
+  ActivitySourceFilter,
+  ActivityStatusFilter,
+  ActivityConnectorRunEvent,
+  ActivityDocumentIngestEvent,
+  ActivityOrderCreatedEvent,
+  ActivityAuditEvent,
+  ActivityFilters,
+  ActivityListResponse,
+  ActivityEventDetailResponse,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';
 

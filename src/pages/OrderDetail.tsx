@@ -40,6 +40,7 @@ import {
   Check as CheckIcon,
   Remove as DashIcon,
   Description as DocIcon,
+  History as HistoryIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -78,6 +79,8 @@ interface Order {
   status: OrderStatus;
   item_count: number;
   matched_count: number;
+  connector_id: string | null;
+  connector_run_id: string | null;
   connector_name: string | null;
   source_data: string | null;
   created_at: string;
@@ -266,6 +269,63 @@ export function OrderDetail() {
           </Box>
         </Box>
       </Paper>
+
+      {/* Source / Connector run back-link */}
+      {(order.connector_run_id || order.connector_id) && (
+        <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, mb: 3, bgcolor: 'action.hover' }}>
+          <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+            Source
+          </Typography>
+          <Typography variant="body2" sx={{ mb: 1 }}>
+            Created by{' '}
+            {order.connector_name && (
+              <strong>{order.connector_name}</strong>
+            )}
+            {' '}on {formatDateTime(order.created_at)}
+          </Typography>
+          {(() => {
+            if (!order.source_data) return null;
+            try {
+              const parsed = typeof order.source_data === 'string' ? JSON.parse(order.source_data) : order.source_data;
+              const sender = parsed?._email_sender || parsed?.sender || parsed?.from;
+              const subject = parsed?._email_subject || parsed?.subject;
+              if (!sender && !subject) return null;
+              return (
+                <Typography variant="body2" color="text.secondary">
+                  {sender && <>From <strong>{sender}</strong></>}
+                  {sender && subject && ' — '}
+                  {subject && <em>{subject}</em>}
+                </Typography>
+              );
+            } catch {
+              return null;
+            }
+          })()}
+          <Box sx={{ display: 'flex', gap: 1, mt: 1.5, flexWrap: 'wrap' }}>
+            {order.connector_run_id && order.connector_id && (
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<HistoryIcon />}
+                component={RouterLink}
+                to={`/activity?connector_id=${order.connector_id}`}
+              >
+                View the run
+              </Button>
+            )}
+            {order.connector_id && (
+              <Button
+                size="small"
+                variant="outlined"
+                component={RouterLink}
+                to={`/admin/connectors/${order.connector_id}`}
+              >
+                View connector
+              </Button>
+            )}
+          </Box>
+        </Paper>
+      )}
 
       {/* Status Change + Delete */}
       <Box sx={{ display: 'flex', gap: 1, mb: 3, flexWrap: 'wrap', alignItems: 'center' }}>

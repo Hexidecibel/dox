@@ -605,6 +605,14 @@ export interface ProcessingQueueItem {
   auto_ingested: number;
   source: string | null;
   source_detail: string | null;
+  // VLM dual-run extraction (null when QWEN_VLM_MODE=off, which is the default)
+  vlm_extracted_fields: string | null;
+  vlm_extracted_tables: string | null;
+  vlm_confidence: number | null;
+  vlm_error: string | null;
+  vlm_model: string | null;
+  vlm_duration_ms: number | null;
+  vlm_extracted_at: string | null;
   // Joined fields from list/get queries
   document_type_name?: string;
   document_type_slug?: string;
@@ -868,6 +876,135 @@ export interface OrderItemRow {
 export interface ApiOrderItem extends OrderItemRow {
   product_name_resolved?: string;
   coa_document_title?: string;
+}
+
+// === Unified Activity Feed ===
+//
+// The `/api/activity` endpoint returns a discriminated union of events
+// drawn from four underlying tables (connector_runs, processing_queue,
+// orders, audit_log). See functions/lib/activityMerge.ts for the mappers
+// and functions/api/activity/index.ts for the handler.
+
+export type ActivityEventType =
+  | 'connector_run'
+  | 'document_ingest'
+  | 'order_created'
+  | 'audit';
+
+export type ActivitySourceFilter =
+  | 'email'
+  | 'api'
+  | 'import'
+  | 'file_watch'
+  | 'all';
+
+export type ActivityStatusFilter =
+  | 'success'
+  | 'error'
+  | 'partial'
+  | 'running'
+  | 'queued'
+  | 'all';
+
+export interface ActivityConnectorRunEvent {
+  type: 'connector_run';
+  id: string;
+  timestamp: string;
+  connector_id: string;
+  connector_name: string | null;
+  status: 'running' | 'success' | 'partial' | 'error';
+  records_found: number;
+  records_created: number;
+  records_updated: number;
+  records_errored: number;
+  started_at: string;
+  completed_at: string | null;
+  error_message: string | null;
+  tenant_id: string;
+}
+
+export interface ActivityDocumentIngestEvent {
+  type: 'document_ingest';
+  id: string;
+  timestamp: string;
+  file_name: string;
+  source: string | null;
+  sender_email: string | null;
+  processing_status: 'queued' | 'processing' | 'ready' | 'error';
+  review_status: 'pending' | 'approved' | 'rejected';
+  confidence: number | null;
+  document_type_name: string | null;
+  supplier: string | null;
+  created_at: string;
+  completed_at: string | null;
+  error_message: string | null;
+  tenant_id: string;
+}
+
+export interface ActivityOrderCreatedEvent {
+  type: 'order_created';
+  id: string;
+  timestamp: string;
+  order_number: string;
+  customer_name: string | null;
+  customer_number: string | null;
+  connector_run_id: string | null;
+  connector_id: string | null;
+  connector_name: string | null;
+  status: string;
+  created_at: string;
+  tenant_id: string;
+}
+
+export interface ActivityAuditEvent {
+  type: 'audit';
+  id: string;
+  timestamp: string;
+  action: string;
+  user_id: string | null;
+  user_name: string | null;
+  resource_type: string | null;
+  resource_id: string | null;
+  created_at: string;
+  tenant_id: string | null;
+}
+
+export type ActivityEvent =
+  | ActivityConnectorRunEvent
+  | ActivityDocumentIngestEvent
+  | ActivityOrderCreatedEvent
+  | ActivityAuditEvent;
+
+export interface ActivityFilters {
+  from?: string;
+  to?: string;
+  connector_id?: string;
+  source?: ActivitySourceFilter;
+  status?: ActivityStatusFilter;
+  event_type?: ActivityEventType | 'all';
+  limit?: number;
+  offset?: number;
+  tenant_id?: string;
+}
+
+export interface ActivityListResponse {
+  events: ActivityEvent[];
+  total_count: number;
+  limit: number;
+  offset: number;
+  filters_applied: {
+    from: string;
+    to: string;
+    connector_id: string | null;
+    source: ActivitySourceFilter;
+    status: ActivityStatusFilter;
+    event_type: ActivityEventType | 'all';
+    tenant_id: string;
+  };
+}
+
+export interface ActivityEventDetailResponse {
+  event: Record<string, unknown>;
 }
 
 // === Auth Token Storage Key (single constant) ===

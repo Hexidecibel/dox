@@ -54,6 +54,15 @@ import PdfViewer from '../components/PdfViewer';
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { api } from '../lib/api';
 import type { ProcessingQueueItem, ApiDocumentType, TemplateFieldMapping, ExtractedTable } from '../lib/types';
+import { renameTableHeader as renameTableHeaderPure } from './reviewTableActions';
+import {
+  shouldShowDualCompare,
+  readTextPayload,
+  readVlmPayload,
+  diffFields,
+  summarizeDiff,
+  type ExtractionSource,
+} from './reviewVlmDiff';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 
@@ -66,6 +75,91 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Small readonly field renderer used inside the VLM compare tabs. Kept
+ * intentionally dumb — no editing, no dismiss, no add — so users treat it as
+ * "view the raw extraction output" before committing to one side.
+ */
+function VlmReadonlyFieldList({ fields }: { fields: Record<string, string> }) {
+  const entries = Object.entries(fields);
+  if (entries.length === 0) {
+    return (
+      <Typography variant="caption" color="text.secondary">
+        No fields extracted
+      </Typography>
+    );
+  }
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+      {entries.map(([k, v]) => (
+        <Box key={k} sx={{ display: 'flex', gap: 1, fontSize: '0.8rem' }}>
+          <Typography variant="caption" color="text.secondary" sx={{ minWidth: 140, fontWeight: 600 }}>
+            {k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}:
+          </Typography>
+          <Typography variant="caption" sx={{ fontFamily: 'monospace', flex: 1, wordBreak: 'break-word' }}>
+            {v || <Typography component="span" variant="caption" color="text.disabled">—</Typography>}
+          </Typography>
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+/**
+ * Readonly table renderer for the VLM compare view. Shows headers + all rows,
+ * no inline editing. Users who want to edit must first click
+ * "Use these results" on whichever side they prefer, which copies that
+ * payload into the existing editable table widget.
+ */
+function VlmReadonlyTableList({ tables, label }: { tables: ExtractedTable[]; label: string }) {
+  if (!tables || tables.length === 0) {
+    return (
+      <Box sx={{ mt: 1 }}>
+        <Typography variant="caption" color="text.secondary">{label}: none</Typography>
+      </Box>
+    );
+  }
+  return (
+    <Box sx={{ mt: 1 }}>
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, display: 'block', mb: 0.5 }}>
+        {label}
+      </Typography>
+      {tables.map((table, ti) => (
+        <Box key={ti} sx={{ mb: 1 }}>
+          <Typography variant="caption" sx={{ display: 'block', fontWeight: 600 }}>
+            {(table.name || `Table ${ti + 1}`).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+            {' '}({table.rows.length} rows)
+          </Typography>
+          <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 240 }}>
+            <Table size="small" stickyHeader>
+              <TableHead>
+                <TableRow>
+                  {table.headers.map((h, hi) => (
+                    <TableCell key={hi} sx={{ fontWeight: 600, fontSize: '0.7rem' }}>
+                      {h.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {table.rows.map((row, ri) => (
+                  <TableRow key={ri}>
+                    {row.map((cell, ci) => (
+                      <TableCell key={ci} sx={{ fontSize: '0.7rem', fontFamily: 'monospace' }}>
+                        {cell}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Box>
+      ))}
+    </Box>
+  );
 }
 
 export default function ReviewQueue() {
@@ -96,6 +190,14 @@ export default function ReviewQueue() {
   const [excludedColumns, setExcludedColumns] = useState<Record<string, Record<number, Set<number>>>>({});
   const [editedTables, setEditedTables] = useState<Record<string, ExtractedTable[]>>({});
   const blobUrlsRef = useRef<Record<string, string>>({});
+
+  // VLM dual-run compare state —
+  // only non-null when a queue item has both text and VLM extraction
+  // populated (QWEN_VLM_MODE=dual on the worker). Each entry tracks which
+  // tab the user is viewing (text / vlm / side-by-side) and which source
+  // was last "committed" into editedFields via "Use these results".
+  const [vlmTab, setVlmTab] = useState<Record<string, 'text' | 'vlm' | 'compare'>>({});
+  const [vlmSelectedSource, setVlmSelectedSource] = useState<Record<string, ExtractionSource>>({});
 
   // Multi-product support
   const SHARED_FIELD_KEYS = new Set([
@@ -360,6 +462,12 @@ export default function ReviewQueue() {
         }
       }
 
+      // Which extraction source is the user approving? Defaults to 'text'
+      // (the historical behavior). When the dual-compare UI is shown and the
+      // user clicked "Use these results" on the VLM tab, vlmSelectedSource
+      // gets set to 'vlm' and we forward that to the backend.
+      const selectedSource: ExtractionSource = vlmSelectedSource[id] || 'text';
+
       if (isMultiProduct(id)) {
         // Multi-product approval
         const products = multiProducts[id] || [];
@@ -371,12 +479,14 @@ export default function ReviewQueue() {
             fields: p.fields,
             tables: p.tableIndices.map(i => tables[i]).filter(Boolean),
           })),
+          selected_source: selectedSource,
         });
         setSnackbar({ open: true, message: `${products.length} documents created from multi-product approval`, severity: 'success' });
       } else {
         await api.queue.approve(id, {
           fields: primaryFields,
           product_name: productName || undefined,
+          selected_source: selectedSource,
         });
         setSnackbar({ open: true, message: 'Item approved and imported', severity: 'success' });
       }
@@ -414,6 +524,43 @@ export default function ReviewQueue() {
       setActionLoading(prev => ({ ...prev, [id]: false }));
     }
   };
+
+  /**
+   * Commit one of the two extraction sources as the "source of truth" for a
+   * dual-run queue item. Called when the user clicks "Use these results" on
+   * the Text or VLM tab. This swaps editedFields + editedTables over to
+   * the chosen payload so the existing approve/edit flow picks it up
+   * unchanged. The tab still reflects whatever the user is viewing.
+   */
+  const useVlmSource = useCallback((itemId: string, source: ExtractionSource) => {
+    const item = items.find(i => i.id === itemId);
+    if (!item) return;
+    const payload = source === 'vlm' ? readVlmPayload(item) : readTextPayload(item);
+    setEditedFields(prev => ({
+      ...prev,
+      [itemId]: { ...payload.fields },
+    }));
+    setEditedTables(prev => ({
+      ...prev,
+      [itemId]: payload.tables.map(t => ({
+        ...t,
+        headers: [...t.headers],
+        rows: t.rows.map(r => [...r]),
+      })),
+    }));
+    // Reset dismissed / excluded state — the chosen source is a fresh start.
+    setDismissedFields(prev => ({ ...prev, [itemId]: new Set() }));
+    setExcludedTables(prev => ({ ...prev, [itemId]: new Set() }));
+    setExcludedColumns(prev => ({ ...prev, [itemId]: {} }));
+    setVlmSelectedSource(prev => ({ ...prev, [itemId]: source }));
+    setSnackbar({
+      open: true,
+      message: source === 'vlm'
+        ? 'VLM extraction loaded — edit and approve as usual'
+        : 'Text extraction loaded — edit and approve as usual',
+      severity: 'success',
+    });
+  }, [items]);
 
   const handleReject = async (id: string) => {
     setActionLoading(prev => ({ ...prev, [id]: true }));
@@ -625,18 +772,27 @@ export default function ReviewQueue() {
   };
 
   const updateTableHeader = (itemId: string, tableIdx: number, colIdx: number, newHeader: string) => {
+    // Guard against empty headers up front so we can show a clear error and
+    // skip the state update entirely.
+    if (!newHeader.trim()) {
+      setSnackbar({ open: true, message: "Column headers can't be empty", severity: 'error' });
+      return;
+    }
+    let duplicateDetected = false;
     setEditedTables(prev => {
-      const tables = prev[itemId]
-        ? prev[itemId].map(t => ({ ...t, headers: [...t.headers], rows: t.rows.map(r => [...r]) }))
-        : parseTables(itemId);
-      if (tables[tableIdx]) {
-        tables[tableIdx] = {
-          ...tables[tableIdx],
-          headers: tables[tableIdx].headers.map((h, i) => i === colIdx ? newHeader : h),
-        };
-      }
-      return { ...prev, [itemId]: tables };
+      const current = prev[itemId] ? prev[itemId] : parseTables(itemId);
+      const result = renameTableHeaderPure(current, tableIdx, colIdx, newHeader);
+      if (result.rejected) return prev;
+      if (result.duplicate) duplicateDetected = true;
+      return { ...prev, [itemId]: result.tables };
     });
+    if (duplicateDetected) {
+      setSnackbar({
+        open: true,
+        message: `Heads up — another column in this table is already named "${newHeader.trim()}"`,
+        severity: 'info',
+      });
+    }
   };
 
   const parseTables = (itemId: string): ExtractedTable[] => {
@@ -1247,11 +1403,60 @@ export default function ReviewQueue() {
                                                 <Table size="small">
                                                   <TableHead>
                                                     <TableRow>
-                                                      {table.headers.map((h, colIdx) => (
-                                                        <TableCell key={colIdx} sx={{ fontWeight: 600 }}>
-                                                          {h.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
-                                                        </TableCell>
-                                                      ))}
+                                                      {table.headers.map((h, colIdx) => {
+                                                        const isEditingThisHeader = editingHeader?.itemId === item.id && editingHeader?.tableIdx === tableIndex && editingHeader?.colIdx === colIdx;
+                                                        return (
+                                                          <TableCell key={colIdx} sx={{ fontWeight: 600 }}>
+                                                            {isEditingThisHeader ? (
+                                                              <TextField
+                                                                value={editingHeaderValue}
+                                                                onChange={(e) => setEditingHeaderValue(e.target.value)}
+                                                                onBlur={() => {
+                                                                  if (editingHeaderValue.trim()) {
+                                                                    updateTableHeader(item.id, tableIndex, colIdx, editingHeaderValue.trim());
+                                                                  }
+                                                                  setEditingHeader(null);
+                                                                }}
+                                                                onKeyDown={(e) => {
+                                                                  if (e.key === 'Enter') {
+                                                                    if (editingHeaderValue.trim()) {
+                                                                      updateTableHeader(item.id, tableIndex, colIdx, editingHeaderValue.trim());
+                                                                    }
+                                                                    setEditingHeader(null);
+                                                                  } else if (e.key === 'Escape') {
+                                                                    setEditingHeader(null);
+                                                                  }
+                                                                }}
+                                                                size="small"
+                                                                variant="standard"
+                                                                autoFocus
+                                                                sx={{ minWidth: 80 }}
+                                                              />
+                                                            ) : (
+                                                              <Box
+                                                                component="span"
+                                                                sx={{
+                                                                  cursor: item.status === 'pending' ? 'pointer' : 'default',
+                                                                  display: 'inline-flex',
+                                                                  alignItems: 'center',
+                                                                  gap: 0.5,
+                                                                  '&:hover .edit-icon': item.status === 'pending' ? { opacity: 0.7 } : {},
+                                                                }}
+                                                                onClick={() => {
+                                                                  if (item.status !== 'pending') return;
+                                                                  setEditingHeader({ itemId: item.id, tableIdx: tableIndex, colIdx });
+                                                                  setEditingHeaderValue(h);
+                                                                }}
+                                                              >
+                                                                {h.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                                                {item.status === 'pending' && (
+                                                                  <EditIcon className="edit-icon" sx={{ fontSize: 12, opacity: 0.3 }} />
+                                                                )}
+                                                              </Box>
+                                                            )}
+                                                          </TableCell>
+                                                        );
+                                                      })}
                                                     </TableRow>
                                                   </TableHead>
                                                   <TableBody>
@@ -1304,6 +1509,196 @@ export default function ReviewQueue() {
                           </>
                         ) : (
                           <>
+                        {/* VLM dual-run compare — only when both text and VLM extractions are populated */}
+                        {shouldShowDualCompare(item) && (() => {
+                          const textPayload = readTextPayload(item);
+                          const vlmPayload = readVlmPayload(item);
+                          const diffRows = diffFields(textPayload.fields, vlmPayload.fields);
+                          const summary = summarizeDiff(diffRows);
+                          const currentTab = vlmTab[item.id] || 'compare';
+                          const currentSource = vlmSelectedSource[item.id] || 'text';
+
+                          const renderConfidenceChip = (score: number | null) => (
+                            <Chip
+                              label={score != null ? `${Math.round(score * 100)}%` : 'n/a'}
+                              size="small"
+                              color={confidenceColor(score)}
+                              variant="outlined"
+                            />
+                          );
+
+                          return (
+                            <Box sx={{ mb: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1, overflow: 'hidden' }}>
+                              <Alert severity="info" icon={false} sx={{ borderRadius: 0, py: 0.5 }}>
+                                <Typography variant="caption">
+                                  Dual-run mode: this document was extracted twice. Compare the text-based and VLM (vision) results below and pick the best one.
+                                </Typography>
+                              </Alert>
+                              <Box sx={{ borderBottom: 1, borderColor: 'divider', bgcolor: 'action.hover' }}>
+                                <Tabs
+                                  value={currentTab}
+                                  onChange={(_, v) => setVlmTab(prev => ({ ...prev, [item.id]: v }))}
+                                  variant="fullWidth"
+                                >
+                                  <Tab value="text" label={`Text (${Math.round((textPayload.confidence ?? 0) * 100)}%)`} />
+                                  <Tab value="vlm" label={`VLM (${Math.round((vlmPayload.confidence ?? 0) * 100)}%)`} />
+                                  <Tab value="compare" label={`Side by side — ${summary.differ} differ, ${summary.match} match`} />
+                                </Tabs>
+                              </Box>
+
+                              {/* Current source indicator */}
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, py: 1, bgcolor: 'background.paper' }}>
+                                <Typography variant="caption" color="text.secondary">
+                                  Currently editing:
+                                </Typography>
+                                <Chip
+                                  label={currentSource === 'vlm' ? 'VLM extraction' : 'Text extraction'}
+                                  size="small"
+                                  color={currentSource === 'vlm' ? 'secondary' : 'primary'}
+                                />
+                                <Box sx={{ flex: 1 }} />
+                                {vlmPayload.model && (
+                                  <Typography variant="caption" color="text.secondary">
+                                    {vlmPayload.model}
+                                    {vlmPayload.durationMs != null && ` · ${(vlmPayload.durationMs / 1000).toFixed(1)}s`}
+                                  </Typography>
+                                )}
+                              </Box>
+
+                              {/* VLM error banner */}
+                              {vlmPayload.error && (
+                                <Alert severity="error" sx={{ borderRadius: 0 }}>
+                                  VLM extraction failed: {vlmPayload.error}
+                                </Alert>
+                              )}
+
+                              {/* Tab content */}
+                              <Box sx={{ p: 2 }}>
+                                {currentTab === 'text' && (
+                                  <Box>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                                      <Typography variant="subtitle2">Text extraction (Qwen3-8B)</Typography>
+                                      {renderConfidenceChip(textPayload.confidence)}
+                                      <Box sx={{ flex: 1 }} />
+                                      <Button
+                                        size="small"
+                                        variant={currentSource === 'text' ? 'contained' : 'outlined'}
+                                        onClick={() => useVlmSource(item.id, 'text')}
+                                        disabled={item.status !== 'pending'}
+                                      >
+                                        Use these results
+                                      </Button>
+                                    </Box>
+                                    <VlmReadonlyFieldList fields={textPayload.fields} />
+                                    <VlmReadonlyTableList tables={textPayload.tables} label="Text extraction tables" />
+                                  </Box>
+                                )}
+                                {currentTab === 'vlm' && (
+                                  <Box>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                                      <Typography variant="subtitle2">VLM extraction (Qwen2.5-VL-7B)</Typography>
+                                      {renderConfidenceChip(vlmPayload.confidence)}
+                                      <Box sx={{ flex: 1 }} />
+                                      <Button
+                                        size="small"
+                                        variant={currentSource === 'vlm' ? 'contained' : 'outlined'}
+                                        onClick={() => useVlmSource(item.id, 'vlm')}
+                                        disabled={item.status !== 'pending'}
+                                      >
+                                        Use these results
+                                      </Button>
+                                    </Box>
+                                    <VlmReadonlyFieldList fields={vlmPayload.fields} />
+                                    <VlmReadonlyTableList tables={vlmPayload.tables} label="VLM extraction tables" />
+                                  </Box>
+                                )}
+                                {currentTab === 'compare' && (
+                                  <Box>
+                                    <Box sx={{ display: 'flex', gap: 1, mb: 1, flexWrap: 'wrap' }}>
+                                      <Chip size="small" color="success" variant="outlined" label={`${summary.match} match`} />
+                                      <Chip size="small" color="warning" variant="outlined" label={`${summary.differ} differ`} />
+                                      {summary.textOnly > 0 && <Chip size="small" variant="outlined" label={`${summary.textOnly} text-only`} />}
+                                      {summary.vlmOnly > 0 && <Chip size="small" variant="outlined" label={`${summary.vlmOnly} vlm-only`} />}
+                                    </Box>
+                                    <TableContainer component={Paper} variant="outlined" sx={{ mb: 2 }}>
+                                      <Table size="small">
+                                        <TableHead>
+                                          <TableRow>
+                                            <TableCell sx={{ fontWeight: 600, width: '20%' }}>Field</TableCell>
+                                            <TableCell sx={{ fontWeight: 600 }}>Text</TableCell>
+                                            <TableCell sx={{ fontWeight: 600 }}>VLM</TableCell>
+                                            <TableCell sx={{ fontWeight: 600, width: 60 }}></TableCell>
+                                          </TableRow>
+                                        </TableHead>
+                                        <TableBody>
+                                          {diffRows.map(row => {
+                                            const label = row.key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                                            const statusColor =
+                                              row.status === 'match' ? 'success.main'
+                                              : row.status === 'differ' ? 'warning.main'
+                                              : 'text.secondary';
+                                            const statusLabel =
+                                              row.status === 'match' ? 'match'
+                                              : row.status === 'differ' ? 'differ'
+                                              : row.status === 'text_only' ? 'text only'
+                                              : 'vlm only';
+                                            return (
+                                              <TableRow key={row.key}>
+                                                <TableCell>
+                                                  <Typography variant="body2" fontWeight={600}>{label}</Typography>
+                                                </TableCell>
+                                                <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                                                  {row.textValue ?? <Typography component="span" variant="caption" color="text.disabled">—</Typography>}
+                                                </TableCell>
+                                                <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                                                  {row.vlmValue ?? <Typography component="span" variant="caption" color="text.disabled">—</Typography>}
+                                                </TableCell>
+                                                <TableCell>
+                                                  <Typography variant="caption" sx={{ color: statusColor }}>
+                                                    {statusLabel}
+                                                  </Typography>
+                                                </TableCell>
+                                              </TableRow>
+                                            );
+                                          })}
+                                        </TableBody>
+                                      </Table>
+                                    </TableContainer>
+                                    <Box sx={{ display: 'flex', gap: 1 }}>
+                                      <Button
+                                        size="small"
+                                        variant={currentSource === 'text' ? 'contained' : 'outlined'}
+                                        onClick={() => useVlmSource(item.id, 'text')}
+                                        disabled={item.status !== 'pending'}
+                                      >
+                                        Use text results
+                                      </Button>
+                                      <Button
+                                        size="small"
+                                        variant={currentSource === 'vlm' ? 'contained' : 'outlined'}
+                                        color="secondary"
+                                        onClick={() => useVlmSource(item.id, 'vlm')}
+                                        disabled={item.status !== 'pending'}
+                                      >
+                                        Use VLM results
+                                      </Button>
+                                    </Box>
+                                    {/* Stacked tables for visual comparison */}
+                                    <Box sx={{ mt: 2, display: 'flex', gap: 2, flexDirection: { xs: 'column', lg: 'row' } }}>
+                                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                                        <VlmReadonlyTableList tables={textPayload.tables} label="Text extraction tables" />
+                                      </Box>
+                                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                                        <VlmReadonlyTableList tables={vlmPayload.tables} label="VLM extraction tables" />
+                                      </Box>
+                                    </Box>
+                                  </Box>
+                                )}
+                              </Box>
+                            </Box>
+                          );
+                        })()}
+
                         {/* Editable fields */}
                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
                           {Object.entries(fields)

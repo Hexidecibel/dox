@@ -16,7 +16,7 @@
  * file) via the "Remap" and "Re-test" buttons on the Sample card.
  */
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { formatDate } from '../../utils/format';
 import {
@@ -24,7 +24,6 @@ import {
   AccordionDetails,
   AccordionSummary,
   Alert,
-  Autocomplete,
   Box,
   Button,
   Chip,
@@ -753,11 +752,10 @@ function ReceiveInfoCard({
   const [senderFilterLocal, setSenderFilterLocal] = useState(senderFilterInitial);
   useEffect(() => { setSenderFilterLocal(senderFilterInitial); }, [senderFilterInitial]);
 
-  // Buffered input for the subject_patterns Autocomplete — lets us auto-commit
-  // on comma/semicolon and on blur, not just Enter.
+  // Chip input state — a simple controlled TextField + Enter-to-commit keeps
+  // the commit path bulletproof (MUI's Autocomplete freeSolo flow dropped
+  // values on certain keystroke sequences during live testing).
   const [subjectInput, setSubjectInput] = useState('');
-  const subjectPatternsRef = useRef(subjectPatterns);
-  useEffect(() => { subjectPatternsRef.current = subjectPatterns; }, [subjectPatterns]);
 
   const commitPatterns = useCallback(
     (nextList: string[]) => {
@@ -775,6 +773,39 @@ function ReceiveInfoCard({
     },
     [onConfigChange],
   );
+
+  const addPatternsFromInput = useCallback(
+    (raw: string) => {
+      // Split on comma/semicolon/newline so pasting a CSV list works too.
+      const parts = raw
+        .split(/[,;\n]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (parts.length === 0) return;
+      commitPatterns([...subjectPatterns, ...parts]);
+      setSubjectInput('');
+    },
+    [commitPatterns, subjectPatterns],
+  );
+
+  const handlePatternKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' || e.key === ',' || e.key === ';' || e.key === 'Tab') {
+      if (subjectInput.trim().length > 0) {
+        e.preventDefault();
+        addPatternsFromInput(subjectInput);
+      }
+    }
+  };
+
+  const handlePatternBlur = () => {
+    if (subjectInput.trim().length > 0) {
+      addPatternsFromInput(subjectInput);
+    }
+  };
+
+  const handleDeletePattern = (pattern: string) => {
+    commitPatterns(subjectPatterns.filter((p) => p !== pattern));
+  };
 
   // Local draft for the "test a subject" preview field.
   const [testSubject, setTestSubject] = useState('');
@@ -796,7 +827,7 @@ function ReceiveInfoCard({
   }, [testSubject, subjectPatterns]);
 
   const receiveAddress = tenantSlug ? `${tenantSlug}@supdox.com` : null;
-  const hasNoFilter = subjectPatterns.length === 0 && !senderFilterInitial.trim();
+  const hasNoFilter = subjectPatterns.length === 0 && !senderFilterLocal.trim();
 
   const copyToClipboard = (text: string) => {
     try {
@@ -827,9 +858,10 @@ function ReceiveInfoCard({
       </Typography>
 
       {hasNoFilter && (
-        <Alert severity="warning" sx={{ mb: 2 }}>
-          No subject patterns or sender filter are set — this connector will match <strong>every</strong> inbound
-          email for its tenant. Add at least one subject pattern or a sender filter to scope it.
+        <Alert severity="error" sx={{ mb: 2 }}>
+          Email connectors need at least one subject pattern or a sender filter —
+          otherwise they'll match every inbound email for your tenant. Add one
+          below to keep this connector working.
         </Alert>
       )}
 
@@ -861,65 +893,41 @@ function ReceiveInfoCard({
         <Typography variant="subtitle2" color="text.secondary" gutterBottom>
           Subject patterns
         </Typography>
-        <Autocomplete
-          multiple
-          freeSolo
+        <TextField
           size="small"
-          options={[]}
-          value={subjectPatterns}
-          inputValue={subjectInput}
-          onChange={(_, next) => {
-            commitPatterns(next as string[]);
-          }}
-          onInputChange={(_, newInput, reason) => {
-            // Auto-commit on comma or semicolon (user mental model: separated list).
-            if (reason === 'input' && /[,;]/.test(newInput)) {
-              const parts = newInput.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
-              if (parts.length > 0) {
-                commitPatterns([...subjectPatternsRef.current, ...parts]);
-              }
-              setSubjectInput('');
-              return;
-            }
-            if (reason !== 'reset') {
-              setSubjectInput(newInput);
-            } else {
-              setSubjectInput('');
-            }
-          }}
-          onBlur={() => {
-            // Commit any buffered text when focus leaves the field.
-            const text = subjectInput.trim();
-            if (text) {
-              commitPatterns([...subjectPatternsRef.current, text]);
-              setSubjectInput('');
-            }
-          }}
-          renderTags={(value: readonly string[], getTagProps) =>
-            value.map((option: string, index: number) => {
-              const { key, ...tagProps } = getTagProps({ index });
-              return <Chip key={key} label={option} size="small" {...tagProps} />;
-            })
+          fullWidth
+          value={subjectInput}
+          onChange={(e) => setSubjectInput(e.target.value)}
+          onKeyDown={handlePatternKeyDown}
+          onBlur={handlePatternBlur}
+          placeholder={
+            subjectPatterns.length === 0
+              ? 'e.g. Daily COA Report  (required)'
+              : 'Type a pattern and press Enter'
           }
-          renderInput={(params) => (
-            <TextField
-              {...params}
-              placeholder={
-                subjectPatterns.length === 0
-                  ? 'e.g. Daily COA Report  (leave empty to match ALL emails)'
-                  : 'Type a pattern and press Enter, comma, or Tab'
-              }
-            />
-          )}
+          error={hasNoFilter}
+          inputProps={{ 'aria-label': 'Add subject pattern' }}
         />
-        <FormHelperText sx={{ mt: 0.5 }}>
+        {subjectPatterns.length > 0 && (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 1 }}>
+            {subjectPatterns.map((p) => (
+              <Chip
+                key={p}
+                label={p}
+                size="small"
+                onDelete={() => handleDeletePattern(p)}
+              />
+            ))}
+          </Box>
+        )}
+        <FormHelperText sx={{ mt: 0.5 }} error={hasNoFilter}>
           Each chip is a <strong>regex</strong> matched (case-insensitive) against the email
           Subject. Type literal text like{' '}
           <Box component="code" sx={{ fontFamily: 'monospace' }}>Daily COA Report</Box>{' '}
           for a substring match, or use regex wildcards like{' '}
           <Box component="code" sx={{ fontFamily: 'monospace' }}>Order.*Report</Box>. Press
-          Enter, comma, semicolon, or Tab to add a pattern. Leave empty to match{' '}
-          <strong>every</strong> inbound email (dangerous).
+          Enter, comma, or semicolon to add a pattern. At least one pattern
+          (or a sender filter below) is required.
         </FormHelperText>
         {subjectPatterns.length > 0 && (
           <Box sx={{ mt: 1.5 }}>
@@ -972,7 +980,12 @@ function ReceiveInfoCard({
               onConfigChange('sender_filter', trimmed || undefined);
             }
           }}
-          helperText="Optional. Matches senders containing this substring."
+          error={hasNoFilter}
+          helperText={
+            hasNoFilter
+              ? 'Set this OR add a subject pattern above to scope the connector.'
+              : 'Optional. Matches senders containing this substring.'
+          }
         />
       </Box>
 

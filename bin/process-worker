@@ -34,6 +34,25 @@ const QWEN_URL = (process.env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$
 const QWEN_SECRET = process.env.QWEN_SECRET || '';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000', 10);
 
+// === VLM (Vision-Language Model) dual-run config ===
+// Modes:
+//   'off'  (default) — text path only, no VLM call, no vlm_ columns populated.
+//   'dual'           — run text path AND VLM path. Text result is primary
+//                      (writes to extracted_text/ai_fields/tables/etc).
+//                      VLM result is saved to the vlm_ columns for comparison.
+//   'vlm'            — run ONLY the VLM path. VLM result is primary.
+//                      On VLM failure, fall back to text path.
+// VLM model defaults to qwen2.5-vl-7b which must be served at QWEN_URL
+// alongside the text model.
+const QWEN_VLM_MODE = (process.env.QWEN_VLM_MODE || 'off').toLowerCase();
+const QWEN_VLM_MODEL = process.env.QWEN_VLM_MODEL || 'qwen2.5-vl-7b';
+const QWEN_VLM_MAX_PAGES = parseInt(process.env.QWEN_VLM_MAX_PAGES || '5', 10);
+
+if (!['off', 'dual', 'vlm'].includes(QWEN_VLM_MODE)) {
+  console.error(`Error: QWEN_VLM_MODE must be one of: off, dual, vlm (got "${QWEN_VLM_MODE}")`);
+  process.exit(1);
+}
+
 if (!DOX_API_KEY) {
   console.error('Error: DOX_API_KEY environment variable is required');
   console.error('Create an API key in dox admin, then set DOX_API_KEY=dox_sk_...');
@@ -287,6 +306,9 @@ async function processItem(item) {
 
     // Keep a copy of fileBuffer for OCR fallback (unpdf may detach the ArrayBuffer)
     const fileBufferCopy = fileBuffer.slice(0);
+    // And another copy for VLM page rendering (if enabled) — unpdf's
+    // getDocumentProxy also detaches the array buffer it's given.
+    const fileBufferForVlm = fileBuffer.slice(0);
 
     if (item.mime_type === 'application/pdf') {
       try {
@@ -382,63 +404,139 @@ async function processItem(item) {
       // Non-critical — continue without examples
     }
 
-    // Call Qwen (with retry + 5 min timeout for cold starts)
-    let qwenData;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 1_800_000); // 30 min
-        const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(QWEN_SECRET ? { Authorization: `Bearer ${QWEN_SECRET}` } : {}),
-          },
-          signal: controller.signal,
-          dispatcher: llmDispatcher,
-          body: JSON.stringify({
-            model: 'Qwen3-8B',
-            temperature: 0,
-            max_tokens: 4096,
-            messages: [
-              { role: 'system', content: buildPrompt(examples) },
-              {
-                role: 'user',
-                content: `<filename>${item.file_name}</filename>\n<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
-              },
-            ],
-          }),
-        });
-        clearTimeout(timeout);
-        if (!qwenRes.ok) {
-          const errText = await qwenRes.text().catch(() => '');
-          throw new Error(`Qwen HTTP ${qwenRes.status}: ${errText.substring(0, 200)}`);
+    // Helper: call the text-path Qwen3-8B model.
+    // Returns a `parsed` object or throws.
+    async function runTextQwen() {
+      let qwenData;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 1_800_000); // 30 min
+          const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(QWEN_SECRET ? { Authorization: `Bearer ${QWEN_SECRET}` } : {}),
+            },
+            signal: controller.signal,
+            dispatcher: llmDispatcher,
+            body: JSON.stringify({
+              model: 'Qwen3-8B',
+              temperature: 0,
+              max_tokens: 4096,
+              messages: [
+                { role: 'system', content: buildPrompt(examples) },
+                {
+                  role: 'user',
+                  content: `<filename>${item.file_name}</filename>\n<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+                },
+              ],
+            }),
+          });
+          clearTimeout(timeout);
+          if (!qwenRes.ok) {
+            const errText = await qwenRes.text().catch(() => '');
+            throw new Error(`Qwen HTTP ${qwenRes.status}: ${errText.substring(0, 200)}`);
+          }
+          qwenData = await qwenRes.json();
+          break;
+        } catch (err) {
+          if (attempt === 2) throw new Error(`Qwen call failed: ${err.message}`);
+          console.warn(`  Qwen retry ${attempt}/2 for ${item.file_name}: ${err.message}`);
+          console.warn('  Waiting 60s for model to load...');
+          await new Promise(r => setTimeout(r, 60_000));
         }
-        qwenData = await qwenRes.json();
-        break;
+      }
+      const content = qwenData.choices?.[0]?.message?.content || '';
+      console.log(`  Qwen response (${content.length} chars): ${content.substring(0, 200)}...`);
+      return parseExtraction(content);
+    }
+
+    // ===== VLM dual-run dispatcher =====
+    // In 'off' mode:     only the text path runs (unchanged legacy behavior).
+    // In 'dual' mode:    text path is primary, VLM runs in parallel after and
+    //                    its result is saved to the vlm_* columns for review.
+    // In 'vlm' mode:     VLM is primary; skip the text Qwen call entirely.
+    //                    On VLM failure, fall back to the text path.
+    let parsed;
+    let vlmResult = null;   // always holds the VLM output (or null)
+    let vlmError = null;    // stringified VLM error (if any)
+    let vlmDurationMs = null;
+    let vlmStartedAt = null;
+
+    // Helper: run VLM, time it, capture error. Never throws.
+    async function runVlmSafe() {
+      const vlmStart = Date.now();
+      vlmStartedAt = new Date().toISOString();
+      try {
+        const res = await extractWithVLM(
+          fileBufferForVlm,
+          buildVlmPrompt(examples),
+          'Extract all structured data from the document image(s). Return JSON only.',
+          item.file_name
+        );
+        vlmDurationMs = Date.now() - vlmStart;
+        // Canonicalize VLM fields the same way as text-path fields.
+        const canonicalizedVlm = canonicalizeFields(res.fields || {});
+        if (canonicalizedVlm.supplier_name && isLikelyAddress(canonicalizedVlm.supplier_name)) {
+          canonicalizedVlm.supplier_name = null;
+        }
+        res.fields = canonicalizedVlm;
+        console.log(`  VLM done: ${res.pageCount} page(s), ${Object.keys(res.fields).length} fields, ${((vlmDurationMs) / 1000).toFixed(1)}s`);
+        return res;
       } catch (err) {
-        if (attempt === 2) throw new Error(`Qwen call failed: ${err.message}`);
-        console.warn(`  Qwen retry ${attempt}/2 for ${item.file_name}: ${err.message}`);
-        // Wait 60s on retry — give model time to load
-        console.warn('  Waiting 60s for model to load...');
-        await new Promise(r => setTimeout(r, 60_000));
+        vlmDurationMs = Date.now() - vlmStart;
+        vlmError = err.message || String(err);
+        console.warn(`  VLM failed: ${vlmError}`);
+        return null;
       }
     }
-    const content = qwenData.choices?.[0]?.message?.content || '';
-    console.log(`  Qwen response (${content.length} chars): ${content.substring(0, 200)}...`);
 
-    // Parse response
-    const parsed = parseExtraction(content);
+    const canRunVlm = QWEN_VLM_MODE !== 'off' && item.mime_type === 'application/pdf';
 
-    // Canonicalize field names and detect supplier
-    const canonicalized = canonicalizeFields(parsed.fields || {});
-    if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
-      canonicalized.supplier_name = null;
+    if (QWEN_VLM_MODE === 'vlm' && canRunVlm) {
+      // VLM-primary mode: run VLM first, fall back to text on failure.
+      vlmResult = await runVlmSafe();
+      if (vlmResult) {
+        parsed = {
+          fields: vlmResult.fields,
+          tables: vlmResult.tables,
+          products: vlmResult.products,
+          summary: vlmResult.summary,
+          confidence: vlmResult.confidence,
+          documentType: vlmResult.documentType,
+        };
+      } else {
+        console.log('  VLM primary failed — falling back to text path');
+        parsed = await runTextQwen();
+        // Canonicalize text fields
+        const canonicalized = canonicalizeFields(parsed.fields || {});
+        if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
+          canonicalized.supplier_name = null;
+        }
+        parsed.fields = canonicalized;
+      }
+    } else {
+      // 'off' or 'dual' mode: text path is primary.
+      parsed = await runTextQwen();
+
+      // Canonicalize field names and detect supplier
+      const canonicalized = canonicalizeFields(parsed.fields || {});
+      if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
+        canonicalized.supplier_name = null;
+      }
+      parsed.fields = canonicalized;
+
+      // In dual mode, now run VLM and capture its separate result.
+      if (QWEN_VLM_MODE === 'dual' && canRunVlm) {
+        console.log('  Running VLM dual-pass...');
+        vlmResult = await runVlmSafe();
+      }
     }
-    parsed.fields = canonicalized;
-    const supplier = canonicalized.supplier_name || null;
 
-    // Compute confidence score
+    const supplier = parsed.fields?.supplier_name || null;
+
+    // Compute confidence score (on primary path only)
     const confidenceScore = computeConfidenceScore(parsed.confidence, parsed.fields || {}, parsed.tables || []);
 
     // Resolve document type if AI guessed one and queue item has no doc type set
@@ -469,6 +567,27 @@ async function processItem(item) {
 
     if (resolvedDocTypeId && !item.document_type_id) {
       resultBody.document_type_id = resolvedDocTypeId;
+    }
+
+    // Attach VLM columns when VLM ran (success or failure).
+    if (canRunVlm && (vlmResult || vlmError)) {
+      resultBody.vlm_model = QWEN_VLM_MODEL;
+      resultBody.vlm_duration_ms = vlmDurationMs;
+      resultBody.vlm_extracted_at = vlmStartedAt;
+      if (vlmResult) {
+        resultBody.vlm_extracted_fields = JSON.stringify(vlmResult.fields || {});
+        resultBody.vlm_extracted_tables = JSON.stringify(vlmResult.tables || []);
+        // Map high/medium/low to a numeric for vlm_confidence (REAL column).
+        resultBody.vlm_confidence =
+          vlmResult.confidence === 'high' ? 0.9 :
+          vlmResult.confidence === 'medium' ? 0.6 : 0.3;
+        resultBody.vlm_error = null;
+      } else {
+        resultBody.vlm_extracted_fields = null;
+        resultBody.vlm_extracted_tables = null;
+        resultBody.vlm_confidence = null;
+        resultBody.vlm_error = vlmError;
+      }
     }
 
     await postResults(item.id, resultBody);
@@ -712,6 +831,232 @@ function buildPrompt(examples = []) {
   return prompt;
 }
 
+// === VLM (Vision-Language Model) dual-run helpers ===
+//
+// These render PDF pages to PNG via unpdf and send them as an OpenAI-style
+// multimodal chat completion to a Qwen2.5-VL model served at QWEN_URL.
+// Text path remains the primary source of truth in 'dual' mode; VLM results
+// are saved alongside for human side-by-side review in the UI.
+
+/**
+ * Render up to `maxPages` pages of a PDF to PNG buffers via unpdf.
+ * Throws if the PDF exceeds the page cap (VRAM on the 10GB GPU is tight
+ * and each 1500x2000 page costs real tokens).
+ * Returns an array of { pageNumber, png } objects.
+ */
+async function renderPdfPagesToPng(pdfBuffer, maxPages) {
+  const { getDocumentProxy, renderPageAsImage } = await import('unpdf');
+
+  // getDocumentProxy may detach the underlying ArrayBuffer, so make a copy
+  // for the numPages read and a fresh copy per renderPageAsImage call.
+  const probe = new Uint8Array(pdfBuffer.slice(0));
+  const pdf = await getDocumentProxy(probe);
+  const numPages = pdf.numPages;
+
+  if (numPages > maxPages) {
+    throw new Error(
+      `VLM skipped: PDF has ${numPages} pages, exceeds cap of ${maxPages}`
+    );
+  }
+
+  const pages = [];
+  for (let n = 1; n <= numPages; n++) {
+    try {
+      // scale: 2.0 produces roughly 1500x2000+ px for a US Letter page.
+      // renderPageAsImage returns a Uint8Array of PNG bytes.
+      const pngBytes = await renderPageAsImage(
+        new Uint8Array(pdfBuffer.slice(0)),
+        n,
+        { scale: 2.0 }
+      );
+      const png = Buffer.from(pngBytes);
+
+      // Safety check for the 2x2-pixel minimum that crashes llama.cpp with
+      // GGML_ASSERT (see Windows GPU infra step 1 for the original crash).
+      // A real rendered page is always thousands of bytes; anything tiny
+      // here means the renderer silently produced a garbage image.
+      if (png.length < 100) {
+        throw new Error(
+          `VLM skipped: page ${n} produced a ${png.length}-byte PNG (likely < 2x2 pixels)`
+        );
+      }
+
+      pages.push({ pageNumber: n, png });
+    } catch (err) {
+      // Wrap so the caller knows which page failed.
+      throw new Error(`VLM render failed on page ${n}: ${err.message}`);
+    }
+  }
+
+  return pages;
+}
+
+/**
+ * Build the VLM-flavored system prompt.
+ * Same output schema as the text-path prompt so downstream parsing,
+ * canonicalization, and confidence scoring work unchanged, but with
+ * VLM-specific rules that lean on the model's ability to read the image
+ * directly (no OCR garble to worry about).
+ */
+function buildVlmPrompt(examples = []) {
+  const VLM_HEADER = `You are a document data extraction assistant looking at an IMAGE of the document (no OCR text — you read the pixels directly).
+
+VLM-SPECIFIC RULES:
+- You are looking at an image of the document. Read each column by its physical position on the page.
+- Extract values column-by-column, left-to-right, preserving column boundaries.
+- Never merge or infer values from adjacent columns.
+- Customer names do NOT end in numbers — strip trailing digits that bleed in from weight/count columns. If you see "ACME FOODS 705" the name is "ACME FOODS".
+- When a header row and a data row are visually aligned, trust the alignment — do not shift values sideways.
+- If a cell is blank in the image, leave the field null. Do NOT fabricate values from neighboring columns.
+
+DOCUMENT TYPES:
+- Certificate of Analysis (COA): Lab/QA results proving a product batch meets specifications. Structure: header info (supplier, customer, dates, lot) + test results table + approval.
+- Bill of Lading (BOL): Shipping document with carrier, origin, destination, weights.
+- Spec Sheet: Product specification with allowable ranges for tests.
+- Invoice / PO: Purchase order or invoice with line items, quantities, prices.
+- Safety Data Sheet (SDS): Chemical safety information.
+
+FIELD EXTRACTION RULES:
+1. Use these EXACT canonical field names (snake_case):
+   - supplier_name — company/organization that PRODUCED, TESTED, or SHIPPED the product. Typically on the letterhead, the lab that ran the tests, or the "From" entity. NOT the customer/recipient. If only an address is visible with no company name, look for the company name in: letterhead, "Approved by" signatures, facility name, or document footer. Set to null only if truly unidentifiable.
+   - customer_name — company RECEIVING the product. Often labeled "Ship To", "Customer", "Sold To", or "Attention". Strip trailing digits (see VLM rules above).
+   - product_name — full product name (e.g., "Unsalted Sweet Cream Butter 68#")
+   - product_code — supplier's internal product/item code or SKU
+   - lot_number — lot, batch, or run number
+   - po_number — purchase order number. ONLY populate if an explicit "PO", "P.O.", or "Purchase Order" label is visible in the image. Do NOT infer or fabricate from adjacent columns.
+   - code_date — production/pack/code date
+   - expiration_date — expiration, best-by, use-by, or sell-by date
+   - ship_date — date shipped
+   - grade — quality grade (e.g., "Grade A", "Grade AA", "US Extra")
+   - plant_number — facility ID or plant number
+   - net_weight — net weight with units
+   - order_number — sales order or reference number
+
+2. For dates: normalize to YYYY-MM-DD. Two-digit years mean 2000s (e.g., '26 = 2026, 03/08/26 = 2026-03-08). Julian dates (e.g., "6094") mean day 094 of 2026 — convert when identifiable. If ambiguous, keep as-is.
+
+3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signatures, titles, disclaimers, individual test values (those go in tables).
+
+4. FILENAME CONTEXT: The filename is provided in <filename> tags. Use it as supplementary context but prefer values visible in the image body when both are available.
+
+5. SUPPLIER vs CUSTOMER: A common error is confusing supplier and customer. The supplier PRODUCES the product; the customer RECEIVES it. The company at the TOP of the document (letterhead, header) is usually the supplier.
+
+TABLE EXTRACTION RULES:
+1. Extract ALL tabular data visible in the image. Preserve every column present — do not drop columns.
+2. Name tables descriptively: "test_results", "line_items", "physical_properties", "microbiological_analysis", etc.
+3. Use the column headers exactly as they appear visually. If no headers exist, infer them from context.
+4. For COA test results, common columns include: test, test_method, unit_of_measure, specification, result, units, pass_fail.
+5. Preserve units (CFU/mL, %, mg/kg, etc.) and pass/fail values as written.
+6. Multiple distinct tables in the image → separate entries for each.
+7. Keep row order as it appears visually.
+
+Return JSON with:
+{
+  "fields": { ... },
+  "tables": [{ "name": "string", "headers": [...], "rows": [[...]] }],
+  "products": ["product name 1", ...],
+  "summary": "one-sentence description",
+  "_confidence": "high" | "medium" | "low",
+  "document_type": "Certificate of Analysis" | "Bill of Lading" | etc.
+}`;
+
+  let prompt = VLM_HEADER + '\n\n' + DAIRY_FOOD_INDUSTRY_PROMPT;
+
+  if (examples.length > 0) {
+    prompt += '\n\nPREVIOUS CORRECTIONS FOR THIS SUPPLIER/DOCUMENT TYPE:';
+    prompt += '\nLearn from these past corrections. The "corrected" output is what the human verified as correct.\n';
+
+    for (const ex of examples) {
+      const inputSnippet = (ex.input_text || '').substring(0, 500);
+      const corrected = ex.corrected_output || ex.ai_output || '{}';
+      prompt += `\nExample input (truncated):\n${inputSnippet}\n`;
+      prompt += `Corrected extraction:\n${corrected}\n`;
+    }
+
+    prompt += '\nUse these examples to guide your extraction. Match the field names and formatting from the corrections.';
+  }
+
+  return prompt;
+}
+
+/**
+ * Extract structured fields from a PDF via the Qwen VLM (vision) model.
+ * Renders each page to PNG, sends them all in a single multimodal
+ * chat-completion request, parses the JSON response with parseExtraction().
+ *
+ * Throws on any failure — callers handle fallback to the text path.
+ */
+async function extractWithVLM(pdfBuffer, systemPrompt, userPrompt, fileName) {
+  const pages = await renderPdfPagesToPng(pdfBuffer, QWEN_VLM_MAX_PAGES);
+
+  const userContent = [
+    { type: 'text', text: `<filename>${fileName}</filename>\n${userPrompt}` },
+  ];
+  for (const p of pages) {
+    userContent.push({
+      type: 'image_url',
+      image_url: { url: `data:image/png;base64,${p.png.toString('base64')}` },
+    });
+  }
+
+  const payload = {
+    model: QWEN_VLM_MODEL,
+    temperature: 0.1,
+    max_tokens: 8192,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userContent },
+    ],
+  };
+
+  // Same retry/timeout pattern as the text-path Qwen call.
+  let qwenData;
+  let lastErr;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 1_800_000); // 30 min
+      const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(QWEN_SECRET ? { Authorization: `Bearer ${QWEN_SECRET}` } : {}),
+        },
+        signal: controller.signal,
+        dispatcher: llmDispatcher,
+        body: JSON.stringify(payload),
+      });
+      clearTimeout(timeout);
+      if (!qwenRes.ok) {
+        const errText = await qwenRes.text().catch(() => '');
+        throw new Error(`VLM HTTP ${qwenRes.status}: ${errText.substring(0, 200)}`);
+      }
+      qwenData = await qwenRes.json();
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 2) throw new Error(`VLM call failed: ${err.message}`);
+      console.warn(`  VLM retry ${attempt}/2: ${err.message}`);
+      await new Promise(r => setTimeout(r, 60_000));
+    }
+  }
+
+  const content = qwenData?.choices?.[0]?.message?.content || '';
+  if (!content) {
+    throw new Error(`VLM returned empty response${lastErr ? ` (last error: ${lastErr.message})` : ''}`);
+  }
+
+  const parsed = parseExtraction(content);
+  return {
+    fields: parsed.fields || {},
+    tables: parsed.tables || [],
+    products: parsed.products || [],
+    summary: parsed.summary || '',
+    confidence: parsed.confidence || 'low',
+    documentType: parsed.documentType || null,
+    pageCount: pages.length,
+  };
+}
+
 // === Response parser (same logic as functions/lib/llm.ts) ===
 
 function parseExtraction(content) {
@@ -852,6 +1197,7 @@ function computeConfidenceScore(aiConfidence, extractedFields, tables = []) {
 console.log(`Dox process worker started`);
 console.log(`  API: ${DOX_API_URL}`);
 console.log(`  Qwen: ${QWEN_URL}`);
+console.log(`  VLM mode: ${QWEN_VLM_MODE}${QWEN_VLM_MODE !== 'off' ? ` (model=${QWEN_VLM_MODEL}, max_pages=${QWEN_VLM_MAX_PAGES})` : ''}`);
 console.log(`  Poll interval: ${POLL_INTERVAL / 1000}s`);
 console.log('');
 

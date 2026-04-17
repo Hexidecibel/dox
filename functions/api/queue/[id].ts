@@ -87,6 +87,13 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         auto_ingest_enabled?: boolean;
         confidence_threshold?: number;
       };
+      /**
+       * Which extraction source the user approved. Defaults to 'text' for
+       * backwards compat — dual-run queue items let the user pick 'vlm' to
+       * indicate the vision-model output was better. Only used for audit
+       * logging; the actual approved values arrive in `fields` regardless.
+       */
+      selected_source?: 'text' | 'vlm';
     };
 
     if (!body.status || !['approved', 'rejected'].includes(body.status)) {
@@ -114,10 +121,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     }
 
     if (body.status === 'approved') {
+      const selectedSource: 'text' | 'vlm' = body.selected_source === 'vlm' ? 'vlm' : 'text';
       if (body.products && body.products.length > 0) {
-        return await handleMultiProductApprove(context, user, item, body.shared_fields, body.products, body.save_template);
+        return await handleMultiProductApprove(context, user, item, body.shared_fields, body.products, body.save_template, selectedSource);
       }
-      return await handleApprove(context, user, item, body.fields, body.product_name, body.save_template);
+      return await handleApprove(context, user, item, body.fields, body.product_name, body.save_template, selectedSource);
     } else {
       return await handleReject(context, user, item);
     }
@@ -143,7 +151,8 @@ async function handleApprove(
     field_mappings: TemplateFieldMapping[];
     auto_ingest_enabled?: boolean;
     confidence_threshold?: number;
-  }
+  },
+  selectedSource: 'text' | 'vlm' = 'text'
 ): Promise<Response> {
   const result = await approveQueueItem(
     context.env.DB,
@@ -154,6 +163,7 @@ async function handleApprove(
       productName,
       userId: user.id,
       clientIp: getClientIp(context.request),
+      selectedSource,
     }
   );
 
@@ -212,7 +222,8 @@ async function handleMultiProductApprove(
     field_mappings: TemplateFieldMapping[];
     auto_ingest_enabled?: boolean;
     confidence_threshold?: number;
-  }
+  },
+  selectedSource: 'text' | 'vlm' = 'text'
 ): Promise<Response> {
   const result = await approveMultiProductQueueItem(
     context.env.DB,
@@ -227,6 +238,7 @@ async function handleMultiProductApprove(
       })),
       userId: user.id,
       clientIp: getClientIp(context.request),
+      selectedSource,
     }
   );
 

@@ -27,6 +27,12 @@ export interface ApproveOptions {
   userId: string;
   clientIp?: string;
   autoIngested?: boolean;
+  /**
+   * Which extraction path the user approved. Defaults to 'text' to match the
+   * pre-VLM behavior. Recorded in the audit log so we can measure how often
+   * reviewers pick the VLM output when dual-run is enabled.
+   */
+  selectedSource?: 'text' | 'vlm';
 }
 
 export interface ApproveResult {
@@ -42,7 +48,7 @@ export async function approveQueueItem(
   item: QueueItem,
   options: ApproveOptions
 ): Promise<ApproveResult> {
-  const { fields, productName, userId, clientIp, autoIngested } = options;
+  const { fields, productName, userId, clientIp, autoIngested, selectedSource = 'text' } = options;
 
   // Download file from pending R2 location
   const pendingFile = await downloadFile(files, item.file_r2_key);
@@ -231,6 +237,7 @@ export async function approveQueueItem(
       document_id: docId,
       file_name: item.file_name,
       fields_corrected: fields && item.ai_fields ? JSON.stringify(fields) !== item.ai_fields : false,
+      selected_source: selectedSource,
     }),
     clientIp || null
   );
@@ -252,6 +259,8 @@ export interface MultiProductApproveOptions {
   }>;
   userId: string;
   clientIp?: string;
+  /** Which extraction path the user approved — see ApproveOptions.selectedSource. */
+  selectedSource?: 'text' | 'vlm';
 }
 
 export interface MultiProductApproveResult {
@@ -270,7 +279,7 @@ export async function approveMultiProductQueueItem(
   item: QueueItem,
   options: MultiProductApproveOptions
 ): Promise<MultiProductApproveResult> {
-  const { sharedFields = {}, products, userId, clientIp } = options;
+  const { sharedFields = {}, products, userId, clientIp, selectedSource = 'text' } = options;
 
   // Download file from pending R2 location ONCE
   const pendingFile = await downloadFile(files, item.file_r2_key);
@@ -427,6 +436,7 @@ export async function approveMultiProductQueueItem(
       document_ids: results.map(r => r.documentId),
       file_name: item.file_name,
       product_count: products.length,
+      selected_source: selectedSource,
     }),
     clientIp || null
   );

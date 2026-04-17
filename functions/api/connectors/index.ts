@@ -9,6 +9,7 @@ import { sanitizeString } from '../../lib/validation';
 import { encryptCredentials } from '../../lib/connectors/crypto';
 import type { Env, User } from '../../lib/types';
 import { normalizeFieldMappings, validateFieldMappings } from '../../../shared/fieldMappings';
+import { validateEmailConfig } from './[id]/test';
 
 const VALID_CONNECTOR_TYPES = ['email', 'api_poll', 'webhook', 'file_watch'];
 const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
@@ -167,6 +168,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw new BadRequestError(
         `system_type must be one of: ${VALID_SYSTEM_TYPES.join(', ')}`
       );
+    }
+
+    // Email connectors must be scoped — subject patterns or a sender filter
+    // required. Matches the rule enforced by POST /api/connectors/:id/test.
+    if (body.connector_type === 'email') {
+      const emailErr = validateEmailConfig((body.config as Record<string, unknown>) || {});
+      if (emailErr) {
+        return new Response(
+          JSON.stringify({ error: emailErr.error, code: emailErr.code }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
     }
 
     let tenantId = body.tenant_id || null;

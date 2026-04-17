@@ -31,6 +31,7 @@ import { Customers } from './pages/admin/Customers';
 import { CustomerDetail } from './pages/admin/CustomerDetail';
 import { Orders } from './pages/Orders';
 import { OrderDetail } from './pages/OrderDetail';
+import { Activity } from './pages/Activity';
 
 function App() {
   return (
@@ -53,6 +54,7 @@ function App() {
               <Route path="/bundles" element={<Bundles />} />
               <Route path="/bundles/:id" element={<BundleDetail />} />
               <Route path="/ingest-history" element={<IngestHistory />} />
+              <Route path="/activity" element={<Activity />} />
               <Route path="/import" element={<Import />} />
               <Route path="/review" element={<ReviewQueue />} />
               <Route path="/orders" element={<Orders />} />

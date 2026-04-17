@@ -32,6 +32,14 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       error_message?: string;
       document_type_id?: string | null;
       document_type_guess?: string | null;
+      // VLM dual-run fields (optional, populated when QWEN_VLM_MODE != 'off')
+      vlm_extracted_fields?: string | null;
+      vlm_extracted_tables?: string | null;
+      vlm_confidence?: number | null;
+      vlm_error?: string | null;
+      vlm_model?: string | null;
+      vlm_duration_ms?: number | null;
+      vlm_extracted_at?: string | null;
     };
 
     if (!body.processing_status || !['processing', 'ready', 'error'].includes(body.processing_status)) {
@@ -106,6 +114,43 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.document_type_guess !== undefined) {
       updates.push('document_type_guess = ?');
       params.push(body.document_type_guess);
+    }
+
+    // VLM dual-run columns — accepted but never required.
+    // Any column not provided is left unchanged (preserves backward compat).
+    if (body.vlm_extracted_fields !== undefined) {
+      updates.push('vlm_extracted_fields = ?');
+      params.push(body.vlm_extracted_fields);
+    }
+
+    if (body.vlm_extracted_tables !== undefined) {
+      updates.push('vlm_extracted_tables = ?');
+      params.push(body.vlm_extracted_tables);
+    }
+
+    if (body.vlm_confidence !== undefined) {
+      updates.push('vlm_confidence = ?');
+      params.push(body.vlm_confidence);
+    }
+
+    if (body.vlm_error !== undefined) {
+      updates.push('vlm_error = ?');
+      params.push(body.vlm_error);
+    }
+
+    if (body.vlm_model !== undefined) {
+      updates.push('vlm_model = ?');
+      params.push(body.vlm_model);
+    }
+
+    if (body.vlm_duration_ms !== undefined) {
+      updates.push('vlm_duration_ms = ?');
+      params.push(body.vlm_duration_ms);
+    }
+
+    if (body.vlm_extracted_at !== undefined) {
+      updates.push('vlm_extracted_at = ?');
+      params.push(body.vlm_extracted_at);
     }
 
     params.push(queueId);

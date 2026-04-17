@@ -174,6 +174,47 @@ describe('currentTargetFor', () => {
   });
 });
 
+describe('wizard auto-apply suggestions on Review Schema entry (Issue 2)', () => {
+  it('merges suggested_mappings + high-confidence detected fields into a usable mapping', () => {
+    // Simulates what ConnectorWizard.handleNext does when the user clicks
+    // Next after uploading a sample: start from the backend's
+    // suggested_mappings, then layer acceptAllHighConfidenceSuggestions over
+    // the detected fields so any candidate_target at confidence >= 0.7 is
+    // pre-applied. The user should land on the Review step with every
+    // obvious column already mapped — not with default aliases in place.
+    const base = defaultFieldMappings();
+    // Strip defaults to mimic `normalizeFieldMappings(suggested_mappings)`
+    // which the backend returns with only the fields it actually spotted.
+    for (const key of Object.keys(base.core) as Array<keyof typeof base.core>) {
+      base.core[key].source_labels = [];
+      base.core[key].enabled = false;
+    }
+    base.core.order_number.source_labels = ['Order #'];
+    base.core.order_number.enabled = true;
+
+    const detected: DetectedField[] = [
+      field('Order #', { candidate_target: 'order_number', confidence: 0.95 }),
+      field('Cust #', { candidate_target: 'customer_number', confidence: 0.9 }),
+      field('Customer Name', { candidate_target: 'customer_name', confidence: 0.85 }),
+      // Below the 0.7 threshold — should NOT be applied.
+      field('Maybe PO', { candidate_target: 'po_number', confidence: 0.4 }),
+    ];
+
+    const merged = acceptAllHighConfidenceSuggestions(base, detected);
+
+    // High-confidence fields are applied and marked enabled.
+    expect(merged.core.order_number.source_labels).toContain('Order #');
+    expect(merged.core.order_number.enabled).toBe(true);
+    expect(merged.core.customer_number.source_labels).toEqual(['Cust #']);
+    expect(merged.core.customer_number.enabled).toBe(true);
+    expect(merged.core.customer_name.source_labels).toEqual(['Customer Name']);
+    expect(merged.core.customer_name.enabled).toBe(true);
+    // Low-confidence candidate is left alone.
+    expect(merged.core.po_number.source_labels).toEqual([]);
+    expect(merged.core.po_number.enabled).toBe(false);
+  });
+});
+
 describe('acceptAllHighConfidenceSuggestions', () => {
   it('only applies suggestions at or above the default threshold', () => {
     const m = defaultFieldMappings();

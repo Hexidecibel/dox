@@ -39,6 +39,10 @@ import type {
   SupplierLookupOrCreateResponse,
   ExtractionTemplate,
   TemplateFieldMapping,
+  ActivityFilters,
+  ActivityListResponse,
+  ActivityEventType,
+  ActivityEventDetailResponse,
 } from './types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -880,6 +884,8 @@ export const api = {
         auto_ingest_enabled?: boolean;
         confidence_threshold?: number;
       };
+      /** Which extraction source the user picked when dual-run compare was shown. Defaults to 'text'. */
+      selected_source?: 'text' | 'vlm';
     }) =>
       fetchApi<{ document?: any; documents?: any[] }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     reject: (id: string) =>
@@ -1074,6 +1080,36 @@ export const api = {
       const query = new URLSearchParams({ customer_number: params.customer_number });
       if (params.tenant_id) query.set('tenant_id', params.tenant_id);
       return fetchApi(`/customers/lookup?${query}`);
+    },
+  },
+
+  activity: {
+    /**
+     * GET /api/activity
+     * Unified ingest+connector+order+audit feed scoped to the user's tenant
+     * (or ?tenant_id=all for super_admin cross-tenant view).
+     */
+    list(filters?: ActivityFilters): Promise<ActivityListResponse> {
+      const query = new URLSearchParams();
+      if (filters?.from) query.set('from', filters.from);
+      if (filters?.to) query.set('to', filters.to);
+      if (filters?.connector_id) query.set('connector_id', filters.connector_id);
+      if (filters?.source) query.set('source', filters.source);
+      if (filters?.status) query.set('status', filters.status);
+      if (filters?.event_type) query.set('event_type', filters.event_type);
+      if (filters?.limit != null) query.set('limit', String(filters.limit));
+      if (filters?.offset != null) query.set('offset', String(filters.offset));
+      if (filters?.tenant_id) query.set('tenant_id', filters.tenant_id);
+      const qs = query.toString();
+      return fetchApi<ActivityListResponse>(`/activity${qs ? `?${qs}` : ''}`);
+    },
+    /**
+     * GET /api/activity/event?type=...&id=...
+     * Drilldown into a single event — full row + parsed JSON fields.
+     */
+    getEvent(type: ActivityEventType, id: string): Promise<ActivityEventDetailResponse> {
+      const query = new URLSearchParams({ type, id });
+      return fetchApi<ActivityEventDetailResponse>(`/activity/event?${query.toString()}`);
     },
   },
 };

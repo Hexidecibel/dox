@@ -85,3 +85,27 @@
 - Connectors: list, detail view, creation wizard with step-by-step configuration
 - Customers: list with search, detail view with order history
 - Orders page with status filtering, search, and item progress tracking
+
+## 2026-04-16: VLM Extraction & Unified Activity Feed
+
+### VLM Dual-Run Extraction (Qwen2.5-VL-7B)
+- New vision-language model extraction path runs alongside the existing text/OCR pipeline
+- `QWEN_VLM_MODE` env on process worker: `off` (default), `dual` (run both, store both), `vlm` (VLM only)
+- Renders PDF pages to PNG at scale 2.0, capped at 5 pages per doc for VRAM safety on the Qwen GPU host
+- Safety guard rejects sub-100-byte PNGs to avoid the llama.cpp CLIP encoder GGML_ASSERT 2x2-pixel crash
+- New `vlm_*` columns on `processing_queue` (migration 0034) hold the VLM result independently of the primary extraction
+- Side-by-side compare UI in Review Queue when both extractions exist: per-field source picker (text vs vlm), match/differ/text-only/vlm-only summary badge
+- Reviewer's `selected_source` choice is recorded in the audit log for future preference analysis
+- Pure, unit-tested helpers (`reviewVlmDiff.ts`, `reviewTableActions.ts`) keep the diff and table-edit logic out of the React component
+
+### Unified Activity Feed
+- New Activity page merges every ingest event in the system into one timeline: connector runs, document ingests, orders created, and audit log entries
+- `GET /api/activity` and `GET /api/activity/event` endpoints with date-range, event-type, connector, source, and status filters
+- Expandable rows show the full details JSON; cross-navigation links jump to the relevant connector/order/document/user
+- Load-more pagination, backend-enforced max 200 per page
+- Pure `activityMerge.ts` module with full unit coverage handles sort + pagination
+
+### Connector System Refinements
+- Connector CRUD, test-connection, and creation wizard tightened
+- Schema-discovery wizard, field-mapping v2, and preview-extraction pipeline (from previous commit) wired into the admin UI
+- Additional API + unit tests covering connector CRUD and wizard field mappings

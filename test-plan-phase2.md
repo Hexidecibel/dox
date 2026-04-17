@@ -1,54 +1,65 @@
 # Phase 2 Test Plan: UI/Frontend Manual Testing
 
-> **Dev environment:** Running locally on the user's machine, exposed at `https://dox-dev.tunnel.cush.rocks` via cush-tools tunnel (auto-expires ~1 hour from start, extend with `bin/status extend dox-dev`). Login: `admin@docportal.local` / `admin123`.
+> **Phase 2 is live in production as of 2026-04-15** (commit `6737312`). This plan covers both the prod and local dev environments. **Decide which environment you're testing against before you start and stick with it** — do not mix creds or data mid-walkthrough.
 
-> **API layer is automated.** 306 tests cover all REST endpoints (customers, orders, connectors, ingest, edge cases). Run with `npm test`. This plan focuses on **manual UI/frontend testing** only.
+## Environments
+
+**Prod:** `https://supdox.com`
+- Live Phase 2 deploy with all tables, file-first wizard, connectors, orders, customers, email auto-detect, and case-insensitive subject matching.
+- Use **your real super_admin credentials**.
+- Real inbound email works: `{tenant_slug}@supdox.com`.
+
+**Local dev (optional):** `https://dox-dev.tunnel.cush.rocks`
+- Only available when the cush-tools tunnel is running. The tunnel auto-expires ~1 hour after start — extend with `bin/status extend dox-dev`.
+- Seeded admin: `admin@docportal.local` / `admin123` (local only — do not try this on prod).
+- Requires `npm run dev` + the tunnel on the host machine.
+
+> **API layer is automated.** 503 tests cover all REST endpoints (customers, orders, connectors, ingest, webhooks, edge cases). Run with `npm test`. This plan focuses on **manual UI/frontend testing** only.
 
 **Prerequisites:**
-- Dev server running locally (`npm run dev`), exposed via tunnel at `https://dox-dev.tunnel.cush.rocks`
-- Seeded admin user exists (run `./bin/seed` if needed)
-- Tenant exists (the seed creates one)
-- Some test data helps -- either seed via the API tests (`npm test`) or create manually during testing
+- One of the two environments above is reachable.
+- You know which super_admin you're logging in with.
+- Some test data helps — either seed via the API tests (`npm test`) locally, or create manually during testing.
 
 ---
 
 ## 0. Get Auth Token (Reference)
 
-For any ad-hoc API calls during testing:
+For any ad-hoc API calls during testing. Examples below target prod; swap the host for `https://dox-dev.tunnel.cush.rocks` if you're testing locally.
 
 ```bash
-# Login and capture token
-TOKEN=$(curl -s https://dox-dev.tunnel.cush.rocks/api/auth/login \
+# Login and capture token — use your super_admin creds
+TOKEN=$(curl -s https://supdox.com/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","password":"admin123"}' \
+  -d '{"email":"YOUR_SUPER_ADMIN_EMAIL","password":"YOUR_PASSWORD"}' \
   | jq -r '.token')
 
 echo $TOKEN
 
 # Also grab the tenant_id from the login response
-TENANT_ID=$(curl -s https://dox-dev.tunnel.cush.rocks/api/auth/login \
+TENANT_ID=$(curl -s https://supdox.com/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","password":"admin123"}' \
+  -d '{"email":"YOUR_SUPER_ADMIN_EMAIL","password":"YOUR_PASSWORD"}' \
   | jq -r '.user.tenant_id')
 
 echo $TENANT_ID
 ```
 
-> Adjust email/password to match your seed user. If using the UI, grab the token from browser DevTools (Application > Local Storage > `token`).
+> If using the UI, grab the token from browser DevTools (Application > Local Storage > `token`).
 
 ---
 
 ## 1. API Tests (Automated)
 
-Covered by the automated test suite -- run `npm test` (306 tests).
+Covered by the automated test suite — run `npm test` (503 tests).
 
-Covers: Customers CRUD, Orders CRUD, Connectors CRUD, Connector Email Ingest, edge cases, error handling, role-based access, and validation.
+Covers: Customers CRUD, Orders CRUD, Connectors CRUD, Connector Email Ingest, webhook routing, schema discovery, edge cases, error handling, role-based access, and validation.
 
 ---
 
 ## 2. Sample ERP Email Data (Reference)
 
-Use these sample email bodies for testing the AI parser or manual connector ingest testing.
+Use these sample email bodies for testing the AI parser, the wizard's Paste Text tab, or manual connector ingest testing.
 
 ### 2.1 Plain Text (Tabular)
 
@@ -164,7 +175,7 @@ SO-2026-0103,M000789,"Mars Wrigley Confections",PO-90003,2026-04-14,Cocoa Extrac
 SO-2026-0103,M000789,"Mars Wrigley Confections",PO-90003,2026-04-14,Vanilla Oleoresin,300,L2026-0416
 ```
 
-To send the CSV as an attachment via the ingest endpoint, base64-encode it:
+To send the CSV as an attachment via the ingest endpoint, base64-encode it. The example below targets prod — swap `https://supdox.com` for `https://dox-dev.tunnel.cush.rocks` when testing locally.
 
 ```bash
 CSV_CONTENT=$(base64 -w0 <<'CSVEOF'
@@ -177,7 +188,7 @@ SO-2026-0103,M000789,"Mars Wrigley Confections",PO-90003,2026-04-14,Vanilla Oleo
 CSVEOF
 )
 
-curl -s https://dox-dev.tunnel.cush.rocks/api/webhooks/connector-email-ingest \
+curl -s https://supdox.com/api/webhooks/connector-email-ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -199,24 +210,24 @@ curl -s https://dox-dev.tunnel.cush.rocks/api/webhooks/connector-email-ingest \
 
 ## 3. UI Walkthrough
 
-Open `https://dox-dev.tunnel.cush.rocks` in browser, login as admin (email/password from seed), verify dashboard loads.
+Open your chosen environment in a browser, login as your super_admin, verify the dashboard loads.
 
 ### 3.1 Orders Page (`/orders`)
 
 - [ ] Navigate to **Orders** in the left nav
 - [ ] Page loads without errors
-- [ ] Order list renders (table or card layout) -- may be empty initially
+- [ ] Order list renders (table or card layout) — may be empty initially
 - [ ] If empty, create test orders via API (see Section 2) or the Create button if available
 - [ ] **Create order** (if UI button exists): click Create, fill in order number, customer, items, save
-- [ ] **Search**: type a customer name in the search box -- verify results filter
-- [ ] **Search**: type an order number -- verify match
-- [ ] **Search**: type a lot number -- verify match
-- [ ] **Status filter**: select a status from the dropdown (e.g. "pending") -- verify list filters
-- [ ] **Status filter**: select "All" -- verify full list returns
+- [ ] **Search**: type a customer name in the search box — verify results filter
+- [ ] **Search**: type an order number — verify match
+- [ ] **Search**: type a lot number — verify match
+- [ ] **Status filter**: select a status from the dropdown (e.g. "pending") — verify list filters
+- [ ] **Status filter**: select "All" — verify full list returns
 - [ ] **Pagination**: if enough orders exist, verify pagination controls appear and work
-- [ ] **Click an order row** -- verify navigation to `/orders/:id` detail page
-- [ ] **Back navigation**: use browser back or breadcrumb -- verify return to list
-- [ ] **Mobile responsive**: resize browser to ~375px width -- verify card layout (not broken table)
+- [ ] **Click an order row** — verify navigation to `/orders/:id` detail page
+- [ ] **Back navigation**: use browser back or breadcrumb — verify return to list
+- [ ] **Mobile responsive**: resize browser to ~375px width — verify card layout (not broken table)
 
 ### 3.2 Order Detail (`/orders/:id`)
 
@@ -228,29 +239,29 @@ Open `https://dox-dev.tunnel.cush.rocks` in browser, login as admin (email/passw
 - [ ] PO number displayed if present
 - [ ] **Items table**: shows product names, product codes, quantities, lot numbers, match status
 - [ ] Items table is readable (columns aligned, no overflow)
-- [ ] **Status change** (org_admin+ only): dropdown or button to change status -- select a new status, verify it updates
+- [ ] **Status change** (org_admin+ only): dropdown or button to change status — select a new status, verify it updates
 - [ ] **Status change**: verify the status chip updates after change
-- [ ] **Delete button** (org_admin+ only): click delete -- verify confirmation dialog appears
-- [ ] **Delete**: confirm deletion -- verify redirect back to orders list, order is gone
+- [ ] **Delete button** (org_admin+ only): click delete — verify confirmation dialog appears
+- [ ] **Delete**: confirm deletion — verify redirect back to orders list, order is gone
 - [ ] **Source data**: if order came from a connector, verify expandable section shows source info (connector name, run ID)
-- [ ] **Mobile responsive**: resize browser -- verify layout stacks vertically, still usable
+- [ ] **Mobile responsive**: resize browser — verify layout stacks vertically, still usable
 
-### 3.3 Search Page -- Orders Tab (`/search`)
+### 3.3 Search Page — Orders Tab (`/search`)
 
 - [ ] Navigate to the **Search** page
 - [ ] Verify the page has a Documents tab and an Orders tab
 - [ ] **Switch to Orders tab**
-- [ ] **Regular search**: type a customer name (e.g. "Kraft") -- verify order results appear
-- [ ] **Regular search**: type a lot number (e.g. "L2026-0412") -- verify matching orders appear
-- [ ] **Status filter**: select a status from dropdown -- verify results filter accordingly
+- [ ] **Regular search**: type a customer name (e.g. "Kraft") — verify order results appear
+- [ ] **Regular search**: type a lot number (e.g. "L2026-0412") — verify matching orders appear
+- [ ] **Status filter**: select a status from dropdown — verify results filter accordingly
 - [ ] Clear search, verify results reset
 - [ ] **Toggle AI search** (switch/toggle control)
-- [ ] **AI search**: type "show me pending orders" -- verify interpretation card shows parsed intent + results
-- [ ] **AI search**: type "orders for Kraft" -- verify customer matching works, results show Kraft orders
-- [ ] **AI search**: type a natural query like "recent orders with lot L2026" -- verify reasonable results
-- [ ] **Switch back to Documents tab** -- verify existing document search still works correctly
-- [ ] **Click an order result** -- verify navigation to `/orders/:id`
-- [ ] **Back navigation**: return to search -- verify search state is preserved (or gracefully reset)
+- [ ] **AI search**: type "show me pending orders" — verify interpretation card shows parsed intent + results
+- [ ] **AI search**: type "orders for Kraft" — verify customer matching works, results show Kraft orders
+- [ ] **AI search**: type a natural query like "recent orders with lot L2026" — verify reasonable results
+- [ ] **Switch back to Documents tab** — verify existing document search still works correctly
+- [ ] **Click an order result** — verify navigation to `/orders/:id`
+- [ ] **Back navigation**: return to search — verify search state is preserved (or gracefully reset)
 
 ### 3.4 Admin > Customers (`/admin/customers`)
 
@@ -258,86 +269,140 @@ Open `https://dox-dev.tunnel.cush.rocks` in browser, login as admin (email/passw
 - [ ] Page loads, customer list renders (may be empty)
 - [ ] **Add Customer**: click Add Customer button
 - [ ] Fill in form: customer number (e.g. "TEST-001"), name (e.g. "Test Customer Inc"), email, delivery method
-- [ ] Save -- verify success message/redirect
+- [ ] Save — verify success message/redirect
 - [ ] Verify new customer appears in the list
-- [ ] **Search**: type customer name in search box -- verify filtering works
-- [ ] **Search**: type customer number -- verify filtering works
-- [ ] **Click a customer row** -- verify navigation to customer detail page
+- [ ] **Search**: type customer name in search box — verify filtering works
+- [ ] **Search**: type customer number — verify filtering works
+- [ ] **Click a customer row** — verify navigation to customer detail page
 - [ ] **Customer detail**: verify customer number, name, email, delivery method displayed
 - [ ] **Customer detail**: verify order count field (should be 0 for new customer, or correct count if orders exist)
-- [ ] **Edit customer**: click edit button -- change name -- save
+- [ ] **Edit customer**: click edit button — change name — save
 - [ ] Verify updated name appears in detail and list views
-- [ ] **Delete customer**: click delete button -- verify confirmation dialog
-- [ ] Confirm delete -- verify customer disappears from default list (soft delete)
-- [ ] **Mobile responsive**: resize browser -- verify card layout, forms still usable
+- [ ] **Delete customer**: click delete button — verify confirmation dialog
+- [ ] Confirm delete — verify customer disappears from default list (soft delete)
+- [ ] **Mobile responsive**: resize browser — verify card layout, forms still usable
 
-### 3.5 Admin > Connectors (`/admin/connectors`)
+### 3.5 Admin > Connectors — File-First Wizard (`/admin/connectors`)
 
-- [ ] Navigate to **Admin > Connectors** in the left nav
+The wizard is **file-first**: you upload or paste a sample, AI discovers the schema, you map fields, and you only configure connection details at the end (for source types that need them).
+
+- [ ] Navigate to **Admin > Connectors**
 - [ ] Page loads, connector list renders (may be empty)
-- [ ] **Add Connector**: click Add Connector button -- navigates to wizard
+- [ ] Click **Add Connector** — navigates to the wizard
 
-**Wizard Step 1 -- Basics:**
-- [ ] Select connector type: **Email**
-- [ ] Select system type: **ERP**
-- [ ] Enter name: "Test ERP Email Connector"
-- [ ] Click **Next** -- verify advances to step 2
+**Wizard Step 1 — Name & Type (merged):**
+- [ ] Enter connector name: "Test ERP Connector"
+- [ ] Select a source type. The wizard supports multiple types — test at least **Email** first, and repeat the flow later with **CSV Upload**, **XLSX Upload**, **PDF**, **.eml**, and the **Paste Text** path.
+- [ ] Click **Next**
 
-**Wizard Step 2 -- Configuration:**
-- [ ] Add subject pattern: "Daily COA Report"
-- [ ] Add a second subject pattern: "COA Requirements"
-- [ ] Enter sender filter: "erp-reports@company.example.com"
-- [ ] Click **Next** -- verify advances to step 3
+**Wizard Step 2 — Upload Sample:**
 
-**Wizard Step 3 -- Field Mappings:**
-- [ ] Verify default mappings are pre-populated (order_number, customer_number, customer_name)
-- [ ] Adjust a mapping if needed, or leave defaults
-- [ ] Click **Next** -- verify advances to step 4
+*Upload File tab:*
+- [ ] Drag a CSV from Section 2.3 into the dropzone (or click to browse)
+- [ ] Verify the file name and size appear
+- [ ] Repeat with an XLSX, a sample PDF, and a `.eml` file — each should accept and show a parsed preview
+- [ ] Click **Next**
 
-**Wizard Step 4 -- Review:**
-- [ ] Verify all entered values are displayed correctly in the summary
-- [ ] Name, type, system type, subject patterns, sender filter, mappings all correct
+*Paste Text tab (important for the new flow):*
+- [ ] Switch to the **Paste Text** tab
+- [ ] Paste the plain-text email body from Section 2.1
+- [ ] Verify the wizard **auto-detects** the content as tabular/plain text
+- [ ] Paste the HTML table from Section 2.2 — verify it is auto-detected as HTML and still parses
+- [ ] Click **Next**
+
+**Wizard Step 3 — Review Schema:**
+- [ ] Verify the UI calls `POST /api/connectors/discover-schema` and shows the detected fields
+- [ ] Verify each detected column shows an **AI confidence pill** (high/med/low)
+- [ ] Click **Accept All AI Suggestions** — verify all suggested mappings populate at once
+- [ ] Manually map a column to a **core** field (e.g. `order_number`)
+- [ ] Map another column to an **extended metadata** slot with a custom snake_case key (e.g. `internal_lot_code`)
+- [ ] Verify the custom key is validated (must be snake_case, no spaces)
+- [ ] Verify you can unmap / skip columns you don't want
+- [ ] Click **Next**
+
+**Wizard Step 4 — Live Preview:**
+- [ ] Verify the preview calls `POST /api/connectors/preview-extraction` and shows the parsed row output
+- [ ] Verify the preview is **debounced** — rapid mapping changes don't spam the backend
+- [ ] Go back to Step 3, change one mapping, return to Step 4 — verify the preview updates to reflect the new mapping
+- [ ] Verify the preview table is readable (columns match what you mapped)
+
+**Wizard Step 4.5 — Connection Config (conditional, only for email / api_poll / webhook):**
+
+*Email connector:*
+- [ ] Verify the receive address is shown: `{tenant_slug}@supdox.com`
+- [ ] Enter a subject pattern in the **chip input**: type "Daily COA Report" and press **Enter** — verify it commits as a chip
+- [ ] Type "COA Requirements," (with trailing comma) — verify the comma triggers auto-commit
+- [ ] Type "Shipment Update;" (with trailing semicolon) — verify the semicolon triggers auto-commit
+- [ ] Type "Invoice" and click outside the input — verify blur triggers auto-commit
+- [ ] Remove a chip — verify it is deleted from the list
+- [ ] Enter a sender filter: "erp-reports@company.example.com"
+- [ ] Use the **"Test a subject"** live-preview field: type a subject that should match, verify the UI shows a match; type one that shouldn't, verify it shows no match (and that matching is case-insensitive)
+- [ ] Expand the **"How to send a test email via webhook"** accordion
+- [ ] Verify the curl example is pre-filled with the correct URL and connector id
+- [ ] Click the **Copy** button — verify the command lands on the clipboard
+
+*Non-email (api_poll / webhook):*
+- [ ] Verify the relevant fields appear (endpoint URL, auth, etc.)
+
+**Wizard Step 5 — Review & Save:**
+- [ ] Verify all entered values are displayed correctly in the summary (name, type, subject patterns, sender filter, mappings, stored sample reference)
 - [ ] Click **Create** / **Save**
 
 **Post-creation:**
-- [ ] Verify redirect to connector list (or detail page)
-- [ ] Verify new connector appears in the list with correct name, type "email", system "erp", status Active
-- [ ] **Edit**: click edit on a connector -- verify form loads with existing values
-- [ ] **Delete**: click delete on a connector -- verify confirmation and removal from active list
+- [ ] Verify redirect to the connector detail page (or list)
+- [ ] Verify the new connector appears in the list with correct name, source type, and Active status
 
-### 3.6 Connector Detail (`/admin/connectors/:id`)
+### 3.6 Connector Detail (`/admin/connectors/:id`) — Card Stack
 
-- [ ] Click a connector name to open the detail page
+> ConnectorDetail is **no longer a tabbed layout**. It's a vertical stack of cards, each with inline editing.
+
+- [ ] Click a connector name from the list to open the detail page
 - [ ] Page loads without errors
 
-**Overview tab:**
-- [ ] Name, type, system type displayed
-- [ ] Status shown (active/inactive)
-- [ ] Created by name shown
-- [ ] Stats displayed (run count, last run time, etc.)
+**Header card:**
+- [ ] Name is shown; click it to enter inline-edit mode; change text; blur to save; verify a **"Saved"** snackbar appears
+- [ ] Active toggle switches state; verify the status chip updates immediately
+- [ ] `system_type` dropdown — change it; verify save
+- [ ] Action buttons: **Test**, **Run**, **Delete**
+- [ ] Click **Test** — verify success toast: "Connector configuration is valid"; for a bad config, verify an error toast
 
-**Configuration tab:**
-- [ ] JSON config displayed (subject_patterns, sender_filter, etc.)
-- [ ] Config is readable (formatted, not raw minified JSON)
+**Receive Info card (email connectors only):**
+- [ ] Receive address displayed as `{tenant_slug}@supdox.com`
+- [ ] `subject_patterns` chip input — add/remove chips, verify auto-save on Enter/comma/semicolon/blur
+- [ ] `sender_filter` text field — edit and blur; verify auto-save
+- [ ] **"Test a subject"** live preview — type a sample subject and verify match/no-match feedback
+- [ ] Expand the **webhook curl accordion** — verify a pre-filled curl command with a **Copy** button
 
-**Field Mappings tab:**
-- [ ] Source-to-target mappings displayed (e.g. order_number -> order_number)
-- [ ] Mappings are correct per what was configured
+**Connection Config card (non-email only):**
+- [ ] Source-specific fields render inline (endpoint URL, auth, polling interval, etc.)
+- [ ] Edit a field, blur, verify auto-save snackbar
 
-**Runs tab:**
+**Field Mappings card:**
+- [ ] Inline `FieldMappingEditor` with a row per mapping
+- [ ] Core fields section and extended metadata section are both visible
+- [ ] Edit a mapping (change source column), blur — verify auto-save
+- [ ] Add a new extended field row with a custom snake_case key — verify auto-save
+- [ ] Click the **"Edit in wizard"** button — verify it jumps to **Step 3** of the wizard in remap mode (schema already loaded from stored sample)
+
+**Stored Sample card:**
+- [ ] Shows reference to the sample that was used during wizard creation (calls `GET /api/connectors/:id/sample`)
+- [ ] **Re-test** button — runs extraction against the stored sample and shows output
+- [ ] **Remap** button — opens the wizard in remap mode
+
+**Recent Runs card:**
 - [ ] Initially empty (shows "No runs yet" or similar)
-- [ ] After running an ingest (via API), verify run appears with: status, started_at, completed_at, orders_created, customers_created
+- [ ] After an ingest runs, the card shows: status, started_at, completed_at, orders_created, customers_created
+- [ ] Paginated runs table if enough runs exist
 - [ ] Run details are expandable or clickable for more info
 
-**Test Connection:**
-- [ ] Click **Test Connection** button
-- [ ] Verify success toast/message: "Connector configuration is valid"
-- [ ] For a connector with bad config, verify error message is shown
+**Delete:**
+- [ ] Click **Delete** on the Header card — verify a confirmation dialog appears
+- [ ] Confirm — verify redirect back to the connector list and removal from the active list
 
 ### 3.7 Cross-Feature Flows
 
 - [ ] **Customer -> Order flow**: Create a customer (e.g. "Flow Test Corp", customer number "FT-001") -> Create an order referencing that customer -> Verify customer name shows on the order detail page
-- [ ] **Connector -> Orders flow**: Create a connector -> Send a test email via the ingest API (Section 2) -> Verify orders appear on the Orders page -> Verify connector run history shows the run
+- [ ] **Connector -> Orders flow**: Create a connector -> Send a test email via the ingest API (Section 2) -> Verify orders appear on the Orders page -> Verify the connector's Recent Runs card shows the run
 - [ ] **Navigation consistency**: Navigate Orders -> click order -> back -> verify list state preserved
 - [ ] **Nav highlighting**: verify the correct nav item is highlighted when on each page (Orders, Customers, Connectors)
 - [ ] **Breadcrumbs/back links**: verify detail pages have a way to navigate back to the parent list
@@ -352,10 +417,49 @@ Test at ~375px browser width (or use DevTools device emulation):
 - [ ] **Customer list**: shows card layout, search still accessible
 - [ ] **Customer detail**: form fields stack, still editable
 - [ ] **Connector list**: shows card layout
-- [ ] **Connector wizard**: steps are usable, form fields don't overflow
+- [ ] **Connector wizard**: steps are usable, form fields don't overflow, chip input wraps properly
+- [ ] **Connector detail**: card stack is readable, inline-edit targets are tappable
 - [ ] **Search page**: tabs are accessible, search input full-width, results readable
 - [ ] **Nav drawer**: collapses to hamburger menu
 - [ ] **Hamburger menu**: opens drawer, all nav items accessible
 - [ ] **Drawer closes**: after selecting a nav item, drawer closes on mobile
 - [ ] **All pages**: no horizontal scroll on the page body (content fits viewport)
 - [ ] **Touch targets**: buttons and links are large enough to tap (~44px minimum)
+
+### 3.9 Real Email Test (Prod only)
+
+> This test requires a real inbox to send from. It exercises the actual inbound email pipeline end-to-end (Cloudflare Email Routing -> tenant routing -> connector match -> extraction -> orders/customers). The wizard's Paste Text mode does **not** cover this path.
+
+- [ ] From any real email account, compose a new email **to** `{your_tenant_slug}@supdox.com`
+- [ ] Set the subject to something that matches one of your connector's `subject_patterns` (remember: matching is case-insensitive)
+- [ ] Attach a sample CSV (from Section 2.3) or paste a tabular body (from Section 2.1)
+- [ ] Send the email
+- [ ] Wait ~30s and reload the connector's detail page
+- [ ] Verify the **Recent Runs** card shows a new run with `status=success`
+- [ ] Verify the run reports orders_created / customers_created > 0 (assuming the sample has new records)
+- [ ] Spot-check **Admin > Customers** — the new customers from the CSV should appear
+- [ ] Spot-check **Orders** — the new orders should appear with correct order numbers, lot numbers, and customer links
+- [ ] Verify the run routed through the **new connector pipeline**, not the Phase 1 fallback (the order's source expansion should reference your connector name and run id)
+
+> ⚠️ **Warning:** If a connector has no `subject_patterns` and no `sender_filter` set, it matches **every** email that arrives for the tenant. Keep at least one filter set on any active connector on prod, or you will catch unrelated mail.
+
+### 3.10 Connector Detail — Inline Editing Deep Dive
+
+This section verifies the auto-save plumbing on the card stack.
+
+- [ ] Open a connector's detail page
+- [ ] **Name inline edit**: click the name, type a new value, blur — verify "Saved" snackbar and that the new name appears in the list when you go back
+- [ ] **Active toggle**: flip the toggle — verify the status chip and the list row both update
+- [ ] **system_type dropdown**: pick a different value — verify "Saved" snackbar
+- [ ] **subject_patterns chips (Receive Info)**:
+  - [ ] Add a chip via Enter — verify auto-save
+  - [ ] Add a chip via comma — verify auto-save
+  - [ ] Add a chip via blur — verify auto-save
+  - [ ] Remove a chip via the delete icon — verify auto-save
+- [ ] **sender_filter text**: edit and blur — verify auto-save
+- [ ] **"Test a subject" preview**: type a subject that matches one of the chips — verify positive feedback; type one that doesn't — verify negative feedback
+- [ ] **Webhook curl accordion**: expand, click **Copy**, paste into a terminal — verify the command is syntactically valid
+- [ ] **Field Mappings — add extended field**: click "Add field", enter a snake_case key, pick a source column, blur — verify auto-save
+- [ ] **Field Mappings — remove a mapping**: delete a row — verify auto-save
+- [ ] **"Edit in wizard"**: click the escape hatch — verify the wizard opens at Step 3 (Review Schema) in remap mode with the stored sample already loaded, not at Step 1
+- [ ] Back out of the wizard without saving — verify the detail page is unchanged
