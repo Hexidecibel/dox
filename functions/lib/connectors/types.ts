@@ -96,7 +96,20 @@ export type ConnectorInput =
   | { type: 'email'; body: string; html?: string; subject: string; sender: string; attachments?: EmailAttachment[] }
   | { type: 'webhook'; payload: unknown; headers: Record<string, string> }
   | { type: 'api_poll' }
-  | { type: 'file_watch'; r2Key: string; fileName: string };
+  | {
+      type: 'file_watch';
+      /** R2 key if the file was uploaded to R2 first; null/absent when the
+       * file content is carried inline via the `content` field (manual
+       * run path from the REST API). */
+      r2Key?: string | null;
+      fileName: string;
+      /** Content type like text/csv, application/pdf, etc. */
+      contentType?: string;
+      /** Inline file bytes. Only one of r2Key / content should be set at a
+       * time — if both are present, content wins and r2Key is treated as
+       * metadata only. */
+      content?: ArrayBuffer;
+    };
 
 export type ConnectorExecuteFn = (
   ctx: ConnectorContext,
