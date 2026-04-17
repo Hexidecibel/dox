@@ -24,6 +24,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.14.3",
     "@cloudflare/workers-types": "^4.20260317.1",
+    "@playwright/test": "^1.59.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.7.0",
@@ -44,6 +45,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
-    "test:api": "vitest run tests/api"
+    "test:api": "vitest run tests/api",
+    "test:e2e": "playwright test",
+    "e2e": "./bin/e2e"
   }
 }

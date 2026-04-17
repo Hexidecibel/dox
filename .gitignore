@@ -36,3 +36,8 @@ wrangler.toml
 
 # Claude harness
 .claude/
+
+# Playwright
+test-results/
+playwright-report/
+tests/e2e/.auth/

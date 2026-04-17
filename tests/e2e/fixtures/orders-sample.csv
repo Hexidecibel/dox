@@ -1,0 +1,6 @@
+order_number,po_number,customer_name,product_code,lot_number,quantity
+ORD-E2E-001,PO-55501,Playwright Foods,PRD-APL-01,LOT-A001,24
+ORD-E2E-002,PO-55502,Playwright Foods,PRD-BER-02,LOT-B217,12
+ORD-E2E-003,PO-55503,Harness Dairy,PRD-MLK-01,LOT-M442,48
+ORD-E2E-004,PO-55504,Harness Dairy,PRD-CHZ-01,LOT-M443,6
+ORD-E2E-005,PO-55505,Regression Bakery,PRD-FLR-00,LOT-F118,30
