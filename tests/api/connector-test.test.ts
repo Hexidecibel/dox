@@ -104,9 +104,14 @@ describe('POST /api/connectors/:id/test', () => {
 
     const response = await testConnector(makeContext(connectorId, user));
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { success: boolean; warnings: string[] };
+    const body = (await response.json()) as {
+      success: boolean;
+      warnings: string[];
+      probe?: { probe: string; ok: boolean };
+    };
     expect(body.success).toBe(true);
-    expect(body.warnings).toEqual([]);
+    // probe is present and identifies itself as email.
+    expect(body.probe?.probe).toBe('email');
   });
 
   it('accepts an email connector with only a sender filter', async () => {
@@ -117,9 +122,13 @@ describe('POST /api/connectors/:id/test', () => {
 
     const response = await testConnector(makeContext(connectorId, user));
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { success: boolean; warnings: string[] };
+    const body = (await response.json()) as {
+      success: boolean;
+      warnings: string[];
+      probe?: { probe: string; ok: boolean };
+    };
     expect(body.success).toBe(true);
-    expect(body.warnings).toEqual([]);
+    expect(body.probe?.probe).toBe('email');
   });
 
   it('still rejects api_poll connectors missing endpoint_url', async () => {

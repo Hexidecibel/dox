@@ -16,7 +16,6 @@ import {
 import {
   ContentCopy as ContentCopyIcon,
   CheckCircle as CheckIcon,
-  CloudUpload as UploadIcon,
 } from '@mui/icons-material';
 
 import type { ConnectorFieldMappings } from './doxFields';
@@ -159,62 +158,38 @@ function SummarySection({ state }: { state: WizardState }) {
   );
 }
 
-function EmailTestSection() {
-  const [sampleEmail, setSampleEmail] = useState('');
-
+function EmailTestSection({ state }: { state: WizardState }) {
+  const patterns = (state.config.subject_patterns as string[]) || [];
+  const senderFilter = (state.config.sender_filter as string) || '';
+  const hasScoping = patterns.length > 0 || senderFilter.trim().length > 0;
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <Typography variant="subtitle2">Test Email Parsing</Typography>
-
-      <TextField
-        fullWidth
-        size="small"
-        multiline
-        rows={5}
-        value={sampleEmail}
-        onChange={(e) => setSampleEmail(e.target.value)}
-        placeholder="Paste a sample email body here to test parsing..."
-        sx={{ '& .MuiInputBase-input': { fontFamily: 'monospace', fontSize: '0.8rem' } }}
-      />
-
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-        <Button variant="contained" size="small" disabled>
-          Parse
-        </Button>
-        <Typography variant="caption" color="text.secondary">
-          Testing will be available after saving the connector.
-        </Typography>
-      </Box>
+      <Typography variant="subtitle2">Email ingest</Typography>
+      {hasScoping ? (
+        <Alert severity="info">
+          Once saved, emails sent to your tenant's inbound address with a subject matching
+          your pattern(s) — or from a sender matching your filter — will route through this
+          connector. Use the "Test" button on the connector detail page after saving for a
+          live probe of the inbound address and sender-domain mappings.
+        </Alert>
+      ) : (
+        <Alert severity="warning">
+          No subject patterns or sender filter set yet. Add at least one in the Connection
+          step so this connector doesn't match every inbound email.
+        </Alert>
+      )}
     </Box>
   );
 }
 
 function ApiPollTestSection() {
-  const [testResult] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
-
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <Typography variant="subtitle2">Test Connection</Typography>
-
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-        <Button
-          variant="contained"
-          size="small"
-          disabled={testResult === 'testing'}
-        >
-          {testResult === 'testing' ? 'Testing...' : 'Test Connection'}
-        </Button>
-        <Typography variant="caption" color="text.secondary">
-          Testing will be available after saving the connector.
-        </Typography>
-      </Box>
-
-      {testResult === 'success' && (
-        <Alert severity="success">Connection successful.</Alert>
-      )}
-      {testResult === 'error' && (
-        <Alert severity="error">Connection failed. Check your credentials and URL.</Alert>
-      )}
+      <Typography variant="subtitle2">API poll</Typography>
+      <Alert severity="info">
+        API poll connectors aren't fully wired for live testing yet. Save the connector and
+        monitor the run history on the detail page once scheduled polling comes online.
+      </Alert>
     </Box>
   );
 }
@@ -288,26 +263,18 @@ function WebhookTestSection({ state }: { state: WizardState }) {
   );
 }
 
-function FileWatchTestSection() {
+function FileWatchTestSection({ state }: { state: WizardState }) {
+  const sampleName = state.sample?.file_name;
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <Typography variant="subtitle2">Test File Upload</Typography>
-
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-        <Button
-          variant="outlined"
-          size="small"
-          startIcon={<UploadIcon />}
-          component="label"
-          disabled
-        >
-          Upload test file
-          <input type="file" hidden />
-        </Button>
-        <Typography variant="caption" color="text.secondary">
-          Testing will be available after saving the connector.
-        </Typography>
-      </Box>
+      <Typography variant="subtitle2">File upload</Typography>
+      <Alert severity="info">
+        {sampleName
+          ? `Your sample "${sampleName}" is saved. After this connector is active you can
+             run POST /api/connectors/:id/run (or use the Run button on the detail page)
+             to push a fresh file through the same field-mapping pipeline.`
+          : 'Upload a sample file in the earlier step so the wizard can seed field mappings.'}
+      </Alert>
     </Box>
   );
 }
@@ -324,10 +291,10 @@ export function StepTestAndActivate({ state, onChange }: StepProps) {
       <Divider />
 
       {/* Test section varies by type */}
-      {state.connectorType === 'email' && <EmailTestSection />}
+      {state.connectorType === 'email' && <EmailTestSection state={state} />}
       {state.connectorType === 'api_poll' && <ApiPollTestSection />}
       {state.connectorType === 'webhook' && <WebhookTestSection state={state} />}
-      {state.connectorType === 'file_watch' && <FileWatchTestSection />}
+      {state.connectorType === 'file_watch' && <FileWatchTestSection state={state} />}
 
       <Divider />
 

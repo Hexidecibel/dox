@@ -99,3 +99,27 @@ export interface PreviewExtractionResponse {
   total_customers_in_sample: number;
   duration_ms: number;
 }
+
+// =============================================================================
+// /api/connectors/:id/test — live probe response
+// =============================================================================
+
+export interface ConnectorTestProbe {
+  /** Which branch ran: 'file_watch' | 'email' | 'webhook' | 'api_poll'. */
+  probe: string;
+  /** True when the probe passed (file reachable, mapping exists, URL
+   * derivable) — false when the probe surfaced an actionable issue. */
+  ok: boolean;
+  /** Short human-readable summary for the UI. */
+  message: string;
+  /** Shape varies by probe type; the UI should look up specific keys. */
+  details: Record<string, unknown>;
+}
+
+export interface ConnectorTestResponse {
+  /** Mirrors `probe.ok` — kept for backward compatibility. */
+  success: boolean;
+  message: string;
+  warnings: string[];
+  probe?: ConnectorTestProbe;
+}

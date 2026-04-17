@@ -281,6 +281,12 @@ export function ConnectorDetail() {
   // Action handlers
   // ---------------------------------------------------------------------
 
+  const [probeResult, setProbeResult] = useState<{
+    ok: boolean;
+    message: string;
+    details: Record<string, unknown>;
+  } | null>(null);
+
   const handleTest = async () => {
     if (!id) return;
     setTesting(true);
@@ -290,15 +296,31 @@ export function ConnectorDetail() {
         success: boolean;
         message: string;
         warnings?: string[];
+        probe?: {
+          probe: string;
+          ok: boolean;
+          message: string;
+          details: Record<string, unknown>;
+        };
       };
-      const warnings = result.warnings ?? [];
-      if (warnings.length > 0) {
-        setSaveSnack(`${result.message}: ${warnings[0]}`);
+      if (result.probe) {
+        setProbeResult({
+          ok: result.probe.ok,
+          message: result.probe.message,
+          details: result.probe.details,
+        });
       } else {
-        setSaveSnack(result.message || 'Connection test successful');
+        // Legacy shape — fall back to top-level message.
+        setProbeResult({
+          ok: result.success,
+          message: result.message,
+          details: {},
+        });
       }
+      setSaveSnack(result.message || 'Connection test complete');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection test failed');
+      setProbeResult(null);
     } finally {
       setTesting(false);
     }
@@ -526,6 +548,20 @@ export function ConnectorDetail() {
           </Stack>
         </Stack>
       </Paper>
+
+      {/* Live probe result — surfaces after the user clicks Test */}
+      {probeResult && (
+        <Alert
+          severity={probeResult.ok ? 'success' : 'warning'}
+          sx={{ mb: 3 }}
+          onClose={() => setProbeResult(null)}
+        >
+          <Typography variant="body2" fontWeight={600}>
+            {probeResult.message}
+          </Typography>
+          <ProbeDetails details={probeResult.details} />
+        </Alert>
+      )}
 
       {/* ------------------------------------------------------------ */}
       {/* 2. Receive Info card (email only)                             */}
@@ -1138,4 +1174,40 @@ function ConfigTextField({
       helperText={helperText}
     />
   );
+}
+
+// ---------------------------------------------------------------------------
+// ProbeDetails — renders the per-type probe payload from POST /:id/test.
+// ---------------------------------------------------------------------------
+
+function ProbeDetails({ details }: { details: Record<string, unknown> }) {
+  const entries = Object.entries(details).filter(([, v]) => v !== undefined && v !== null);
+  if (entries.length === 0) return null;
+
+  return (
+    <Box component="dl" sx={{ mt: 1, display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '4px 12px', fontSize: '0.85rem' }}>
+      {entries.map(([key, value]) => (
+        <Box key={key} sx={{ display: 'contents' }}>
+          <Typography component="dt" variant="caption" fontWeight={600} sx={{ color: 'text.secondary' }}>
+            {key.replace(/_/g, ' ')}
+          </Typography>
+          <Typography component="dd" variant="caption" sx={{ m: 0, fontFamily: typeof value === 'string' && value.length > 40 ? 'monospace' : undefined, wordBreak: 'break-all' }}>
+            {formatProbeValue(value)}
+          </Typography>
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+function formatProbeValue(value: unknown): string {
+  if (value === null || value === undefined) return '—';
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '(none)';
+    return value.join(', ');
+  }
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+  return String(value);
 }
