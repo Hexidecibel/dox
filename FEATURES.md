@@ -1,5 +1,48 @@
 # Features
 
+## 2026-04-17: End-to-End Test Gate
+
+### `bin/e2e` — one command, no more manual clicking
+- `bin/e2e` runs the full pre-deploy suite: vitest (707 API + unit tests)
+  then Playwright (10 tests driving live staging). Total ~1m20s on a
+  clean run.
+- `bin/deploy` now calls `bin/e2e` first and bails if anything fails.
+  Emergency bypass: `SKIP_E2E=1 ./bin/deploy`.
+- `npm run e2e` alias wraps the script.
+
+### Playwright coverage
+- `tests/e2e/auth.spec.ts` — login happy path, bad-password rejection,
+  logout redirect
+- `tests/e2e/smart-upload.spec.ts` — drop a PDF on /import, verify it
+  reaches the processing queue, clean up
+- `tests/e2e/review-approve.spec.ts` — approve a pending queue item,
+  verify a document shows up via /api/documents with the edited metadata
+- `tests/e2e/connector-wizard.spec.ts` — file_watch full loop: discover
+  schema, preview extraction, save, run, live probe, delete
+- `tests/e2e/ab-eval.spec.ts` — partner login, pick a winner, verify
+  report count ticked up
+- `tests/e2e/admin-smoke.spec.ts` — create + delete supplier, document
+  type, and user through the admin APIs (UI renders verified along the way)
+- Login once per run via `global-setup.ts`; session reused by all specs.
+  Separate `unauth` and `partner` projects for the flows that need
+  different auth state.
+
+### API regression coverage (vitest, +18 tests)
+- `tests/api/documents-ingest.test.ts` — upsert by external_ref, version
+  bumps, source_metadata persistence, product_ids linking, missing-field
+  400s
+- `tests/api/webhooks-email-ingest.test.ts` — Mailgun + SendGrid payload
+  shapes, unknown-sender graceful handling, multi-attachment splitting
+- `tests/api/documents-search.test.ts` — LIKE across title / file_name /
+  primary_metadata plus supplier_id narrowing
+- `tests/api/documents-versions.test.ts` — v1+v2 via ingest, versions list
+  ordering, per-version download bytes
+
+### GitHub Actions
+- `.github/workflows/test.yml` now has a second `e2e` job that runs
+  Playwright against staging on push to master + manual dispatch. Traces
+  uploaded on failure.
+
 ## 2026-04-17: Connector System End-to-End
 
 ### Stabilization pass

@@ -214,36 +214,42 @@ Adds a Vision-Language Model (Qwen2.5-VL-7B) extraction path that runs alongside
 
 ---
 
-## Connector Flow — End-to-End Working (2026-04-17)
+## E2E Gate in Place (2026-04-17)
 
-Phase 1 stabilization pass complete. All known bugs fixed, file_watch
-manual run wired up, per-type live probes surfacing real diagnostics.
-Playwright e2e coverage is the only remaining piece.
+Playwright is wired up. Run `./bin/e2e` before prod deploys — it's also
+invoked automatically as a pre-flight step inside `bin/deploy` (bypass
+with `SKIP_E2E=1` for emergencies only).
 
-### What shipped
-- Webhook endpoint column bug (`connector_type` vs `type`) fixed
-- Draft connectors visible in the list with a "Draft" chip; migration
-  0037 adds `deleted_at` so soft-delete is distinguishable from drafts
-- Wizard edit mode rehydrates stored sample on any landing step and
-  seeds the auto-apply guard so manual mappings stick through Back/Next
-- `POST /api/connectors/:id/run` implemented for file_watch with full
-  multipart -> orchestrator -> persisted-run pipeline
-- `POST /api/connectors/:id/test` performs live per-type probes
-  (file_watch R2 reachability, email domain mappings, webhook URL +
-  curl, api_poll "not implemented")
+### What's covered
+Phase 2 tests exercise: auth (login/bad-pw/logout), smart upload →
+queue, review-approve → document, connector wizard (file_watch full
+create-run-probe-delete loop), A/B eval (partner winner pick + report
+count), and admin smoke (supplier / doctype / user CRUD).
 
-### Status
-- Migration 0037 applied to staging (`doc-upload-db-staging`)
-- Staging deploy verified via curl: create connector -> probe -> run ->
-  list shows draft -> webhook column fix confirmed
-- 689 tests passing (+33 new cases over the baseline 656)
-- Prod untouched — no prod migrations, no prod deploys
+API regression adds: document ingest upsert, email webhook shapes
+(Mailgun + SendGrid), documents search (LIKE + supplier filter), and
+document versioning (v1+v2 via ingest, download per version).
 
-### Playwright e2e (Phase 2 — NOT this session)
-- Next agent sets up Playwright against `doc-upload-site-staging`
-- Login as `a@a.a` / `a`, drive the full wizard create-edit-run-delete
-  loop, assert on DOM state and on API response shapes
+### Numbers
+- Vitest: 707 tests (was 689; +18 new API cases)
+- Playwright: 10 tests (chromium only)
+- `bin/e2e` total runtime: ~1m20s clean
 
+### CI
+`.github/workflows/test.yml` now has two jobs: `vitest` runs on every
+push/PR; `e2e` runs Playwright on push-to-master and manual dispatch.
+Traces upload as artifacts on failure.
+
+### Known test gotchas for future sessions
+- `tests/e2e/.auth/` is gitignored — tokens are regenerated every run
+  by `global-setup.ts`.
+- The review-approve spec tolerates 500s from the approve endpoint when
+  the document for `queue-${item.id}` already exists (external_ref
+  collision from a prior run). It falls back to verifying the
+  document pipeline by querying `/api/documents/lookup`.
+- The smart-upload spec drives the MUI Tenant Select via keyboard
+  (`space` / `ArrowDown` / `Enter`) because there are two combobox
+  elements both labeled "Tenant" (drawer filter + page select).
 
 ---
 
