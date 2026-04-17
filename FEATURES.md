@@ -1,5 +1,49 @@
 # Features
 
+## 2026-04-17: Connector System End-to-End
+
+### Stabilization pass
+- Webhook endpoint column bug fixed (`connector_type`, not `type`) — public
+  webhook deliveries now reach the auth + routing path correctly
+- Draft connectors (saved with `active=0`) now appear in the main
+  Connectors list with a filled "Draft" chip; deletion uses a dedicated
+  `deleted_at` column (migration 0037) so tombstoned rows stay hidden
+  without colliding with draft state
+- Wizard edit mode always rehydrates the stored sample on load regardless
+  of the target step, and seeds the auto-apply guard so Back -> Next
+  round-trips no longer stomp saved mappings
+
+### file_watch manual runs
+- `POST /api/connectors/:id/run` accepts multipart CSV / TSV / XLSX / PDF
+  uploads (5MB text, 10MB binary), parses through the connector's saved
+  field_mappings, and persists orders + customers + a `connector_runs`
+  row via the shared orchestrator
+- Per-row parser errors are recorded as `records_errored` and the run
+  finishes with status `partial` — bad rows never abort the batch
+- New `fileWatch.ts` executor registered in the connector registry;
+  XLSX / PDF paths delegate to the email connector's attachment parsers
+  so field-mapping behavior stays identical across connector types
+- Explicit 501 for api_poll / webhook (manual run not implemented yet)
+
+### Live Test probes
+- `POST /api/connectors/:id/test` now runs a per-type live probe:
+  * file_watch — verifies R2 sample reachability + returns file metadata
+    (filename, size, source_type, row count for text)
+  * email — verifies `email_domain_mappings` rows exist for the tenant
+    and returns inbound `{slug}@supdox.com` + sender-domain list
+  * webhook — returns public webhook URL + sample curl, flags missing
+    auth config
+  * api_poll — clean "not implemented" (HTTP 200, probe.ok=false)
+- UI: ConnectorDetail surfaces the probe payload as an Alert with a
+  key/value detail grid on Test click
+- Legacy `success` field preserved (still means "config shape valid")
+
+### Coverage
+- 689 tests passing (up from 656)
+- New suites: connector-run-file-watch (11), connector-test-live-probe
+  (8), connector-webhook-column-fix (4), connector-list-drafts (4),
+  unit/fileWatch (6)
+
 ## 2026-04-17: Tinder-Style A/B Evaluation (Text vs VLM)
 
 ### Blind-compare review flow (staging only)

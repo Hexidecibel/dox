@@ -210,7 +210,40 @@ Adds a Vision-Language Model (Qwen2.5-VL-7B) extraction path that runs alongside
 - VLM stays off in production until `QWEN_VLM_MODE=dual` is flipped on the worker host (Qwen GPU box at 192.168.1.67); default behaviour is unchanged.
 
 ### Next session focus
-- Stabilize / bug-fix the connector flow (wizard, schema discovery, field mapping v2, preview extraction, test-connection, runs).
+- Connector flow end-to-end done (see "Connector Flow — End-to-End Working" below). Playwright e2e harness is pending — that's the next session's job.
+
+---
+
+## Connector Flow — End-to-End Working (2026-04-17)
+
+Phase 1 stabilization pass complete. All known bugs fixed, file_watch
+manual run wired up, per-type live probes surfacing real diagnostics.
+Playwright e2e coverage is the only remaining piece.
+
+### What shipped
+- Webhook endpoint column bug (`connector_type` vs `type`) fixed
+- Draft connectors visible in the list with a "Draft" chip; migration
+  0037 adds `deleted_at` so soft-delete is distinguishable from drafts
+- Wizard edit mode rehydrates stored sample on any landing step and
+  seeds the auto-apply guard so manual mappings stick through Back/Next
+- `POST /api/connectors/:id/run` implemented for file_watch with full
+  multipart -> orchestrator -> persisted-run pipeline
+- `POST /api/connectors/:id/test` performs live per-type probes
+  (file_watch R2 reachability, email domain mappings, webhook URL +
+  curl, api_poll "not implemented")
+
+### Status
+- Migration 0037 applied to staging (`doc-upload-db-staging`)
+- Staging deploy verified via curl: create connector -> probe -> run ->
+  list shows draft -> webhook column fix confirmed
+- 689 tests passing (+33 new cases over the baseline 656)
+- Prod untouched — no prod migrations, no prod deploys
+
+### Playwright e2e (Phase 2 — NOT this session)
+- Next agent sets up Playwright against `doc-upload-site-staging`
+- Login as `a@a.a` / `a`, drive the full wizard create-edit-run-delete
+  loop, assert on DOM state and on API response shapes
+
 
 ---
 
