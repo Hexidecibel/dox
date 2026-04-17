@@ -38,12 +38,13 @@ import m0032 from '../../migrations/0032_order_metadata_and_field_mappings.sql?r
 import m0033 from '../../migrations/0033_connector_sample_ref.sql?raw';
 import m0034 from '../../migrations/0034_vlm_extraction_fields.sql?raw';
 import m0035 from '../../migrations/0035_supplier_extraction_instructions.sql?raw';
+import m0036 from '../../migrations/0036_extraction_evaluations.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
   m0011, m0012, m0013, m0014, m0015, m0016, m0017, m0018, m0019, m0020,
   m0021, m0022, m0023a, m0023b, m0024, m0025, m0026, m0027, m0028, m0029,
-  m0030, m0031, m0032, m0033, m0034, m0035,
+  m0030, m0031, m0032, m0033, m0034, m0035, m0036,
 ];
 
 /**

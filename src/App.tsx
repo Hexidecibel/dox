@@ -24,6 +24,8 @@ import { BundleDetail } from './pages/BundleDetail';
 import { IngestHistory } from './pages/IngestHistory';
 import { Import } from './pages/Import';
 import ReviewQueue from './pages/ReviewQueue';
+import Eval from './pages/Eval';
+import EvalReport from './pages/EvalReport';
 import { Connectors } from './pages/admin/Connectors';
 import { ConnectorDetail } from './pages/admin/ConnectorDetail';
 import { ConnectorWizard } from './pages/admin/ConnectorWizard';
@@ -57,6 +59,8 @@ function App() {
               <Route path="/activity" element={<Activity />} />
               <Route path="/import" element={<Import />} />
               <Route path="/review" element={<ReviewQueue />} />
+              <Route path="/eval" element={<Eval />} />
+              <Route path="/eval/report" element={<EvalReport />} />
               <Route path="/orders" element={<Orders />} />
               <Route path="/orders/:id" element={<OrderDetail />} />
 

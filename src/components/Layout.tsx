@@ -40,6 +40,7 @@ import {
   Timeline as ActivityIcon,
   FileUpload as ImportIcon,
   RateReview as RateReviewIcon,
+  Compare as CompareIcon,
   ShoppingCart as OrdersIcon,
   Hub as ConnectorsIcon,
   ContactMail as CustomersIcon,
@@ -64,6 +65,7 @@ const navItems: NavItem[] = [
   { label: 'Search', path: '/search', icon: <SearchIcon /> },
   { label: 'Import', path: '/import', icon: <ImportIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Review Queue', path: '/review', icon: <RateReviewIcon />, roles: ['super_admin', 'org_admin'] },
+  { label: 'A/B Eval', path: '/eval', icon: <CompareIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Ingest History', path: '/ingest-history', icon: <HistoryIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Orders', path: '/orders', icon: <OrdersIcon />, roles: ['super_admin', 'org_admin', 'user'] },
 ];

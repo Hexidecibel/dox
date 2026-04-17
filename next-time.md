@@ -4,6 +4,56 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## Tinder-Style A/B Evaluation — STAGING ONLY (2026-04-17)
+
+Blind-compare eval flow for text vs VLM extraction so the partner can pick a
+winner per document and we can measure reviewer preference at the
+supplier + doctype level.
+
+### URLs
+- Eval: https://doc-upload-site-staging.pages.dev/eval
+- Report: https://doc-upload-site-staging.pages.dev/eval/report
+- Login: `a@a.a` / `a` (staging admin from `STAGING_CREDENTIALS.md`)
+
+### Status
+- Migration 0036 applied to `doc-upload-db-staging` only — prod untouched.
+- 8 of the 31 staged COAs are currently eligible (both text and VLM
+  extractions ready, no VLM error). Remaining items will surface as the
+  process worker finishes dual-mode runs.
+- Staging smoke test passed: login → `/api/eval/next` returns an eligible
+  item with a random `a_side` → POST `/api/eval/:id` upserts → `/api/eval/report`
+  aggregates. Smoke-test row was cleaned out of the DB.
+
+### Surfaces
+- Table: `extraction_evaluations (id, queue_item_id, evaluator_user_id,
+  winner, a_side, comment, evaluated_at)` with UNIQUE on
+  `(queue_item_id, evaluator_user_id)`.
+- API: `GET /api/eval/next`, `POST /api/eval/:queue_item_id`,
+  `GET /api/eval/report`. All tenant-scoped via `requireTenantAccess`.
+- Aggregator: `functions/lib/evalAggregate.ts` — pure function, unit-tested
+  separately from the DB layer.
+- UI: `src/pages/Eval.tsx` (full-screen flow) + `src/pages/EvalReport.tsx`
+  (results dashboard with CSV export). Routes wired into `src/App.tsx`,
+  nav item "A/B Eval" added to `src/components/Layout.tsx` for
+  super_admin / org_admin / user.
+
+### Load-bearing blindness
+The `a_side` column is the only place text-vs-VLM identity lives post-GET.
+The `/eval` page launders both payloads through a randomizer before
+rendering — no "text" / "vlm" strings are emitted in DOM attributes or
+class names for the Method A / Method B cards. The report unblinds using
+`resolveWinningSide(winner, a_side)`.
+
+### To validate in staging
+- Click through `/eval`, pick winners on the 8 ready items.
+- Confirm `/eval/report` shows a sensible breakdown — Country Morning
+  Farms is the supplier for most docs in the current batch.
+- Export CSV, verify `a_side` and `winning_side` columns are consistent.
+- Wait for the rest of the 31 COAs to finish dual-mode extraction;
+  re-visit `/eval` and confirm the counter picks them up.
+
+---
+
 ## Phase 1: Smart COA Intake — COMPLETE (2026-04-08)
 
 All Phase 1 features are live on supdox.com.

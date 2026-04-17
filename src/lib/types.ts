@@ -67,6 +67,17 @@ export type {
   ActivityFilters,
   ActivityListResponse,
   ActivityEventDetailResponse,
+  ExtractionEvaluation,
+  ExtractionEvalWinner,
+  ExtractionEvalSide,
+  EvalNextResponse,
+  EvalSubmitRequest,
+  EvalSubmitResponse,
+  EvalReportTotals,
+  EvalReportBreakdownRow,
+  EvalReportCommentRow,
+  EvalReportEvaluationRow,
+  EvalReportResponse,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';
 

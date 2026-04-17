@@ -1035,6 +1035,99 @@ export interface ActivityEventDetailResponse {
   event: Record<string, unknown>;
 }
 
+// === Extraction A/B Evaluations (Tinder-style text-vs-VLM comparison) ===
+
+export type ExtractionEvalWinner = 'a' | 'b' | 'tie';
+export type ExtractionEvalSide = 'text' | 'vlm';
+
+/**
+ * One row per (queue_item, evaluator). The `a_side` column stores which real
+ * extraction method was presented to the reviewer as "Method A" — the UI
+ * randomizes it per doc so the reviewer is blind to text-vs-VLM identity,
+ * and we unblind at report time using this mapping.
+ */
+export interface ExtractionEvaluation {
+  id: string;
+  queue_item_id: string;
+  evaluator_user_id: string;
+  winner: ExtractionEvalWinner;
+  a_side: ExtractionEvalSide;
+  comment: string | null;
+  evaluated_at: number;
+}
+
+export interface EvalNextResponse {
+  /** null when nothing left to evaluate (the UI shows the completion screen). */
+  item: ProcessingQueueItem | null;
+  /** Which real method is presented as "Method A" for this doc. Client echoes this back on POST. */
+  a_side: ExtractionEvalSide | null;
+  /** Docs still unevaluated (including the current one). 0 means done. */
+  remaining: number;
+  /** Total eligible docs (both extractions present). */
+  total: number;
+}
+
+export interface EvalSubmitRequest {
+  winner: ExtractionEvalWinner;
+  a_side: ExtractionEvalSide;
+  comment?: string;
+}
+
+export interface EvalSubmitResponse {
+  evaluation: ExtractionEvaluation;
+  remaining: number;
+  total: number;
+}
+
+export interface EvalReportTotals {
+  evaluated: number;
+  text_wins: number;
+  vlm_wins: number;
+  ties: number;
+  remaining: number;
+  total: number;
+}
+
+export interface EvalReportBreakdownRow {
+  /** Display key: supplier name or document-type name. Empty string means "unknown". */
+  key: string;
+  text_wins: number;
+  vlm_wins: number;
+  ties: number;
+}
+
+export interface EvalReportCommentRow {
+  queue_item_id: string;
+  file_name: string;
+  winner: ExtractionEvalWinner;
+  /** Which side actually won (text or vlm), unblinded. null for ties. */
+  winning_side: ExtractionEvalSide | null;
+  comment: string;
+  evaluated_at: number;
+  evaluator_name: string | null;
+}
+
+export interface EvalReportEvaluationRow {
+  queue_item_id: string;
+  file_name: string;
+  supplier: string | null;
+  document_type_name: string | null;
+  winner: ExtractionEvalWinner;
+  a_side: ExtractionEvalSide;
+  winning_side: ExtractionEvalSide | null;
+  comment: string | null;
+  evaluated_at: number;
+  evaluator_name: string | null;
+}
+
+export interface EvalReportResponse {
+  totals: EvalReportTotals;
+  by_supplier: EvalReportBreakdownRow[];
+  by_doctype: EvalReportBreakdownRow[];
+  comments: EvalReportCommentRow[];
+  evaluations: EvalReportEvaluationRow[];
+}
+
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'auth_user';

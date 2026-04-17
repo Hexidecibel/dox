@@ -45,6 +45,10 @@ import type {
   ActivityListResponse,
   ActivityEventType,
   ActivityEventDetailResponse,
+  EvalNextResponse,
+  EvalSubmitRequest,
+  EvalSubmitResponse,
+  EvalReportResponse,
 } from './types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -894,6 +898,21 @@ export const api = {
       fetchApi<void>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'rejected' }) }),
     postResults: (id: string, data: Record<string, unknown>) =>
       fetchApi<{ success: boolean }>(`/queue/${id}/results`, { method: 'PUT', body: JSON.stringify(data) }),
+  },
+
+  /**
+   * A/B evaluation flow for text vs VLM extraction. Blind-labeled as
+   * "Method A" / "Method B" in the UI — the backend keeps the text/vlm
+   * mapping so the aggregate report can unblind it.
+   */
+  eval: {
+    next: () => fetchApi<EvalNextResponse>('/eval/next'),
+    submit: (queueItemId: string, data: EvalSubmitRequest) =>
+      fetchApi<EvalSubmitResponse>(`/eval/${queueItemId}`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    report: () => fetchApi<EvalReportResponse>('/eval/report'),
   },
 
   extractionExamples: {

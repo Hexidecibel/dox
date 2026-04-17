@@ -1,5 +1,22 @@
 # Features
 
+## 2026-04-17: Tinder-Style A/B Evaluation (Text vs VLM)
+
+### Blind-compare review flow (staging only)
+- `/eval` full-screen page: doc preview on the left, two blind-labeled
+  extraction cards ("Method A" / "Method B") on the right
+- Three-button pick (A wins / B wins / Tie or both wrong), optional comment,
+  auto-advance to the next unevaluated doc
+- Server randomizes which real method is shown as Method A per request and
+  the client echoes that back on POST so the aggregate report can unblind
+  without leaking labels into the UI
+- `/eval/report` dashboard: headline text vs VLM win counts, per-supplier
+  and per-doctype breakdowns, list of all reviewer comments, CSV export
+- Upsert on submit — reviewers can re-evaluate an item to correct mistakes
+- Migration 0036 adds `extraction_evaluations` with a
+  UNIQUE(queue_item_id, evaluator_user_id) constraint
+- Staging-only; prod remains untouched until the eval feedback is collected
+
 ## 2026-04-17: Per-Supplier Extraction Instructions
 
 ### Reviewer-authored natural-language guidance (staging only)
