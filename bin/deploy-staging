@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Build and deploy the dox app to the staging Pages project.
+# Staging is a separate Pages project (doc-upload-site-staging) — NOT a
+# preview environment of prod. Direct upload, matching prod's source mode.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PROJECT="doc-upload-site-staging"
+BRANCH="master"
+
+if [ ! -f .dev.vars ]; then
+  echo "ERROR: .dev.vars not found (needs CLOUDFLARE_API_TOKEN / ACCOUNT_ID for wrangler)." >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1091
+source .dev.vars
+set +a
+
+echo "=== Deploying dox to Cloudflare Pages (STAGING) ==="
+echo "Project: $PROJECT"
+echo "Branch:  $BRANCH"
+
+echo "Building frontend..."
+npm run build
+
+echo "Uploading to Cloudflare Pages..."
+# Pages deploy doesn't accept --config; we must swap wrangler.toml in place
+# so the staging D1/R2 bindings get uploaded (instead of prod's). Restore
+# the prod config afterwards (even on failure) so future `bin/deploy` calls
+# still target prod correctly.
+if [ ! -f wrangler.staging.toml ]; then
+  echo "ERROR: wrangler.staging.toml missing — cannot deploy without staging bindings." >&2
+  exit 1
+fi
+
+BACKUP="wrangler.toml.bak.$$"
+cp wrangler.toml "$BACKUP"
+restore() { mv "$BACKUP" wrangler.toml; }
+trap restore EXIT
+
+cp wrangler.staging.toml wrangler.toml
+npx wrangler pages deploy dist \
+  --project-name "$PROJECT" \
+  --branch "$BRANCH" \
+  --commit-dirty=true
+
+echo ""
+echo "=== Staging deploy complete ==="
+echo "URL: https://${PROJECT}.pages.dev"

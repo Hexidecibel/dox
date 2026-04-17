@@ -119,3 +119,37 @@ Adds a Vision-Language Model (Qwen2.5-VL-7B) extraction path that runs alongside
 
 ### Next session focus
 - Stabilize / bug-fix the connector flow (wizard, schema discovery, field mapping v2, preview extraction, test-connection, runs).
+
+---
+
+## Cloudflare Staging Environment (2026-04-17)
+
+Staging is a **second, fully-isolated Pages project** (NOT a prod preview env).
+
+### Resources
+- Pages project: `doc-upload-site-staging`
+- URL: https://doc-upload-site-staging.pages.dev
+- D1: `doc-upload-db-staging` (separate id from prod)
+- R2: `doc-upload-files-staging`
+- Env vars on the project: `JWT_SECRET` (fresh, staging-only), `RESEND_API_KEY`, `QWEN_URL`, `QWEN_SECRET`
+
+### Credentials
+- Admin email + password are in `STAGING_CREDENTIALS.md` at the repo root (gitignored).
+- Re-run `./bin/seed-staging` to rotate them.
+
+### Operating
+- Deploy: `npm run deploy:staging` (or `./bin/deploy-staging`)
+- Migrate: `npm run migrate:staging` (runs all `migrations/*.sql` against staging D1, `--remote`)
+- Seed admin: `./bin/seed-staging`
+- Clean slate: `./bin/reset-staging-db` (drops all tables, re-runs migrations, does NOT seed)
+
+### Deploy internals
+`bin/deploy-staging` temporarily swaps `wrangler.toml` with `wrangler.staging.toml`
+(which has the staging D1 id + R2 bucket), runs the Pages deploy, then restores
+the prod `wrangler.toml` on exit. This is required because `wrangler pages deploy`
+uploads the bindings from `wrangler.toml` and doesn't support a `--config` flag.
+
+### Migration quirk
+Migrations 0015 creates `email_domain_mappings`, 0017 drops it, 0020 ALTERs it.
+Prod was fixed by manually recreating the table; `bin/migrate-staging` does the
+same recreate step automatically before 0020.

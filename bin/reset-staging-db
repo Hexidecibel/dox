@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Drop all tables in the staging D1 database and re-run migrations.
+# Intended for clean-slate testing. NEVER run against prod (doc-upload-db).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+STAGING_DB="doc-upload-db-staging"
+
+if [ ! -f .dev.vars ]; then
+  echo "ERROR: .dev.vars not found." >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1091
+source .dev.vars
+set +a
+
+echo "WARNING: This will DROP all tables in $STAGING_DB and re-run migrations."
+echo "Press Ctrl+C within 5 seconds to cancel..."
+sleep 5
+
+echo "Enumerating tables..."
+TABLES=$(npx wrangler d1 execute "$STAGING_DB" --remote --json \
+  --command="SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'd1_%';" \
+  2>/dev/null | node -e "
+    let data = '';
+    process.stdin.on('data', c => data += c);
+    process.stdin.on('end', () => {
+      const parsed = JSON.parse(data);
+      const rows = (parsed[0]?.results) || [];
+      console.log(rows.map(r => r.name).join(' '));
+    });
+  ")
+
+if [ -n "$TABLES" ]; then
+  echo "Dropping: $TABLES"
+  DROPS=""
+  for t in $TABLES; do
+    DROPS+="DROP TABLE IF EXISTS \"$t\";"$'\n'
+  done
+  npx wrangler d1 execute "$STAGING_DB" --remote --command="$DROPS" >/dev/null
+else
+  echo "(no tables to drop)"
+fi
+
+echo "Re-applying migrations..."
+./bin/migrate-staging
+
+echo ""
+echo "Reset complete. Run ./bin/seed-staging to recreate admin user."

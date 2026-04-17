@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Apply all migrations to the staging D1 database (remote).
+# Prod D1 is never touched by this script.
+#
+# Notes:
+# - The migration chain has a historical quirk: 0017 drops email_domain_mappings
+#   (feature-removed at the time) but 0020 ALTERs it back. Prod was fixed by
+#   manually recreating the table; we replicate that here between 0019 and 0020.
+# - Some later migrations are not strictly idempotent; this script tolerates
+#   "already exists" / "duplicate column" / "no such column" when re-running.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+STAGING_DB="doc-upload-db-staging"
+
+if [ ! -f .dev.vars ]; then
+  echo "ERROR: .dev.vars not found. Create it with CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID." >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1091
+source .dev.vars
+set +a
+
+run_migration() {
+  local file="$1"
+  local name
+  name=$(basename "$file")
+  echo "--> $name"
+  local out
+  if ! out=$(npx wrangler d1 execute "$STAGING_DB" --remote --file="$file" 2>&1); then
+    # Tolerate known idempotent re-run errors
+    if echo "$out" | grep -qE "already exists|duplicate column name|no such column"; then
+      echo "    (tolerated: non-fatal re-run error)"
+      return 0
+    fi
+    echo "$out" | tail -40
+    return 1
+  fi
+}
+
+echo "=== Applying migrations to $STAGING_DB (remote) ==="
+for migration in migrations/*.sql; do
+  name=$(basename "$migration")
+
+  # Before 0020, ensure email_domain_mappings exists (0017 dropped it, 0020 expects it).
+  if [ "$name" = "0020_email_domain_default_doctype.sql" ]; then
+    echo "--> (recreate email_domain_mappings for 0020)"
+    npx wrangler d1 execute "$STAGING_DB" --remote --command="
+      CREATE TABLE IF NOT EXISTS email_domain_mappings (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+        domain TEXT NOT NULL,
+        tenant_id TEXT NOT NULL REFERENCES tenants(id),
+        default_user_id TEXT REFERENCES users(id),
+        active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(domain)
+      );
+      CREATE INDEX IF NOT EXISTS idx_email_domain_mappings_domain ON email_domain_mappings(domain);
+    " >/dev/null
+  fi
+
+  run_migration "$migration"
+done
+
+echo ""
+echo "=== Verifying tables ==="
+npx wrangler d1 execute "$STAGING_DB" --remote \
+  --command="SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'd1_%' ORDER BY name;"
+
+echo ""
+echo "Staging migrations complete."

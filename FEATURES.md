@@ -109,3 +109,13 @@
 - Connector CRUD, test-connection, and creation wizard tightened
 - Schema-discovery wizard, field-mapping v2, and preview-extraction pipeline (from previous commit) wired into the admin UI
 - Additional API + unit tests covering connector CRUD and wizard field mappings
+
+## 2026-04-17: Cloudflare Staging Environment
+
+- New Pages project `doc-upload-site-staging` at `https://doc-upload-site-staging.pages.dev`, fully isolated from prod
+- Separate D1 (`doc-upload-db-staging`) and R2 (`doc-upload-files-staging`) so staging traffic never touches the prod DB/bucket
+- Fresh `JWT_SECRET`, fresh seeded `super_admin`; `RESEND_API_KEY` / `QWEN_URL` / `QWEN_SECRET` reuse the same shared infrastructure
+- Reusable scripts: `bin/deploy-staging`, `bin/migrate-staging`, `bin/seed-staging`, `bin/reset-staging-db`
+- `wrangler.staging.toml` holds the staging bindings; `bin/deploy-staging` temporarily swaps it into `wrangler.toml` for the upload, then restores the prod config on exit
+- `migrate-staging` recreates `email_domain_mappings` before 0020 (migration 0017 drops it — prod has the same historical quirk)
+- Package scripts: `npm run migrate:staging`, `npm run seed:staging`, `npm run deploy:staging`

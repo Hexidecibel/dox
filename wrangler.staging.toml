@@ -1,0 +1,13 @@
+name = "dox-staging"
+compatibility_date = "2024-12-01"
+pages_build_output_dir = "dist"
+
+# Staging-only bindings. DO NOT copy prod IDs here.
+[[d1_databases]]
+binding = "DB"
+database_name = "doc-upload-db-staging"
+database_id = "c6a4c856-0f13-4f29-8e34-f4a2c80060f0"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "doc-upload-files-staging"

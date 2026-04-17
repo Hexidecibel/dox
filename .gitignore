@@ -23,10 +23,12 @@ logs/
 
 # Environment / secrets
 .dev.vars
+.dev.vars.*
 .env
 .env.*
 !.env.example
 .qwen-proxy-secret
+STAGING_CREDENTIALS.md
 
 # Wrangler
 .wrangler/
