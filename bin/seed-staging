@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Seed the staging D1 with a super_admin user and a default tenant.
-# The admin password is generated fresh and written to STAGING_CREDENTIALS.md (gitignored).
+# Staging uses trivial credentials (a@a.a / a) for fast manual login.
+# The login endpoint does not enforce email/password validation — only
+# register/create-user does — so we can bypass those rules by seeding
+# directly into the DB. STAGING IS NOT EXPOSED WITH REAL DATA. Do not
+# copy this pattern into bin/seed (prod).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 STAGING_DB="doc-upload-db-staging"
-ADMIN_EMAIL="admin@staging.local"
+ADMIN_EMAIL="a@a.a"
+ADMIN_PASSWORD="a"
 
 if [ ! -f .dev.vars ]; then
   echo "ERROR: .dev.vars not found." >&2
@@ -16,9 +21,6 @@ set -a
 # shellcheck disable=SC1091
 source .dev.vars
 set +a
-
-# Generate a fresh random admin password. Do not echo it to logs.
-ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=' | head -c 20)
 
 # PBKDF2 hash (format: hex(salt):hex(derived)) — matches functions/lib/auth.ts
 PASSWORD_HASH=$(ADMIN_PASSWORD="$ADMIN_PASSWORD" node -e "
