@@ -864,10 +864,11 @@ async function renderPdfPagesToPng(pdfBuffer, maxPages) {
     try {
       // scale: 2.0 produces roughly 1500x2000+ px for a US Letter page.
       // renderPageAsImage returns a Uint8Array of PNG bytes.
+      // canvasImport is required in Node — unpdf ships no default canvas.
       const pngBytes = await renderPageAsImage(
         new Uint8Array(pdfBuffer.slice(0)),
         n,
-        { scale: 2.0 }
+        { scale: 2.0, canvasImport: () => import('@napi-rs/canvas') }
       );
       const png = Buffer.from(pngBytes);
 
