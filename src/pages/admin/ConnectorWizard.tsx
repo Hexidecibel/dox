@@ -41,8 +41,6 @@ import {
 } from '@mui/material';
 import {
   Email as EmailIcon,
-  Sync as SyncIcon,
-  Webhook as WebhookIcon,
   InsertDriveFile as FileIcon,
   ArrowBack as BackIcon,
 } from '@mui/icons-material';
@@ -110,20 +108,6 @@ const CONNECTOR_TYPE_OPTIONS: {
     label: 'Email Parser',
     description: 'Receive documents via email (attachments + body parsing)',
     icon: <EmailIcon sx={{ fontSize: 40 }} />,
-  },
-  {
-    type: 'api_poll',
-    label: 'API Connection',
-    description: 'Connect directly to your ERP/WMS REST API',
-    icon: <SyncIcon sx={{ fontSize: 40 }} />,
-    badge: 'Coming soon',
-  },
-  {
-    type: 'webhook',
-    label: 'Webhook Receiver',
-    description: 'Receive data pushed from your systems',
-    icon: <WebhookIcon sx={{ fontSize: 40 }} />,
-    badge: 'Coming soon',
   },
 ];
 
