@@ -51,6 +51,7 @@ import {
   Edit as EditIcon,
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
+import ExtractionInstructionsBox from './ExtractionInstructionsBox';
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { api } from '../lib/api';
 import type { ProcessingQueueItem, ApiDocumentType, TemplateFieldMapping, ExtractedTable } from '../lib/types';
@@ -1696,6 +1697,32 @@ export default function ReviewQueue() {
                                 )}
                               </Box>
                             </Box>
+                          );
+                        })()}
+
+                        {/* Per-(supplier, document_type) extraction instructions.
+                            Only render when both are resolvable — we key on the
+                            supplier_id from the already-loaded suppliers list
+                            (item.supplier is a name, not an id) and on
+                            item.document_type_id. If either is missing there's
+                            nothing to scope instructions to, so skip the box. */}
+                        {(() => {
+                          if (!item.supplier || !item.document_type_id) return null;
+                          const supplierRow = suppliers.find(
+                            (s) => s.name.toLowerCase() === (item.supplier || '').toLowerCase()
+                          );
+                          if (!supplierRow) return null;
+                          const docType = documentTypes.find((dt: any) => dt.id === item.document_type_id);
+                          if (!docType) return null;
+                          return (
+                            <ExtractionInstructionsBox
+                              supplierId={supplierRow.id}
+                              supplierName={supplierRow.name}
+                              docTypeId={item.document_type_id}
+                              docTypeName={docType.name}
+                              tenantId={isSuperAdmin ? (item.tenant_id || undefined) : undefined}
+                              disabled={item.status !== 'pending'}
+                            />
                           );
                         })()}
 

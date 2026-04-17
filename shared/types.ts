@@ -88,6 +88,34 @@ export interface ExtractionTemplateRow {
   document_type_name?: string;
 }
 
+/**
+ * Per-(supplier, document_type) natural-language extraction guidance authored
+ * by reviewers. Prepended to the Qwen system prompt on future extractions so
+ * reviewers can explicitly "teach" the model without having to correct every
+ * doc.
+ */
+export interface SupplierExtractionInstructions {
+  id: string;
+  supplier_id: string;
+  document_type_id: string;
+  tenant_id: string;
+  instructions: string;
+  created_at: string;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+export interface SupplierExtractionInstructionsGetResponse {
+  // null when no row exists yet for the (supplier, document_type) pair.
+  instructions: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+export interface SupplierExtractionInstructionsPutResponse {
+  instructions: SupplierExtractionInstructions;
+}
+
 export interface DocumentTypeRow {
   id: string;
   tenant_id: string;

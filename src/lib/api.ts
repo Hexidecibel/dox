@@ -39,6 +39,8 @@ import type {
   SupplierLookupOrCreateResponse,
   ExtractionTemplate,
   TemplateFieldMapping,
+  SupplierExtractionInstructionsGetResponse,
+  SupplierExtractionInstructionsPutResponse,
   ActivityFilters,
   ActivityListResponse,
   ActivityEventType,
@@ -941,6 +943,34 @@ export const api = {
       body: JSON.stringify(data),
     }),
     delete: (id: string) => fetchApi<void>(`/extraction-templates/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * Per-supplier + document-type natural-language extraction instructions.
+   * Reviewer-authored guidance that gets prepended to the Qwen prompt on future
+   * extractions of the same (supplier, document_type) pair.
+   */
+  extractionInstructions: {
+    get: (params: { supplier_id: string; document_type_id: string; tenant_id?: string }) => {
+      const qs = new URLSearchParams({
+        supplier_id: params.supplier_id,
+        document_type_id: params.document_type_id,
+      });
+      if (params.tenant_id) qs.set('tenant_id', params.tenant_id);
+      return fetchApi<SupplierExtractionInstructionsGetResponse>(
+        `/extraction-instructions?${qs.toString()}`
+      );
+    },
+    put: (data: {
+      supplier_id: string;
+      document_type_id: string;
+      instructions: string;
+      tenant_id?: string;
+    }) =>
+      fetchApi<SupplierExtractionInstructionsPutResponse>('/extraction-instructions', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
   },
 
   naturalSearch: (query: string, tenantId?: string) =>

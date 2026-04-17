@@ -1,5 +1,18 @@
 # Features
 
+## 2026-04-17: Per-Supplier Extraction Instructions
+
+### Reviewer-authored natural-language guidance (staging only)
+- Per (supplier, document_type) textarea in the Review Queue
+- Autosaves on blur (500ms debounce) to `/api/extraction-instructions`
+- Worker prepends guidance to both the text and VLM Qwen prompts on every
+  future extraction for that pair
+- Complements the silent few-shot correction loop with an explicit
+  "teach the model" surface reviewers can see and edit
+- Migration 0035 adds `supplier_extraction_instructions` table with a
+  UNIQUE(supplier_id, document_type_id) constraint
+- Staging-only deploy; prod remains pristine until validated
+
 ## 2026-03-26: Regulatory Document Management Expansion
 
 ### Products (Global Catalog)

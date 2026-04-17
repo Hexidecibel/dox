@@ -88,6 +88,48 @@ Phase 2 is code-complete and ready for testing.
 
 ---
 
+## Per-Supplier Extraction Instructions — STAGING ONLY (2026-04-17)
+
+Reviewers can now type plain-English guidance per (supplier, document_type) that
+gets prepended to the Qwen system prompt on every future extraction of that
+pair. Sits alongside the existing silent few-shot loop — this is the explicit
+"teach the model" surface that reviewers can see and edit.
+
+### Status
+- Migration 0035 applied to `doc-upload-db-staging` only — prod is still
+  untouched. Run `npm run migrate:remote` when the feature is validated in
+  staging.
+- Deployed to `doc-upload-site-staging.pages.dev`.
+- Staging process worker restarted and picked up the new prompt injection
+  wiring (VLM mode: dual).
+
+### Surfaces
+- Table: `supplier_extraction_instructions` (supplier_id + document_type_id
+  UNIQUE — one row per pair per tenant).
+- API: `GET /api/extraction-instructions?supplier_id=X&document_type_id=Y`
+  and `PUT /api/extraction-instructions` (upsert).
+- UI: textarea below the VLM compare panel in `ReviewQueue.tsx`. Autosaves
+  500ms after the user stops typing; flushes on blur. Only renders when
+  both supplier + document_type are resolvable on the queue item.
+- Worker: `bin/process-worker` now resolves `item.supplier` → supplier_id,
+  looks up instructions, and prepends them to both the text and VLM system
+  prompts via `prependReviewerInstructions()`.
+
+### Leaves alone
+- Per-item `notes` field in the review queue — that's a reviewer scratchpad,
+  separate from this teach-the-model surface.
+- Existing few-shot `extraction_examples` — those are silent field-level
+  corrections, still work as-is.
+
+### To validate in staging
+- Approve a COA, write instructions like "COAG values go in column A, not B"
+  against the review queue textarea.
+- Re-queue another doc from the same supplier + doctype and confirm
+  `Reviewer instructions loaded: N chars` appears in the worker log.
+- Check extraction improves after guidance.
+
+---
+
 ## VLM Extraction Upgrade — CODE COMPLETE (2026-04-16)
 
 Adds a Vision-Language Model (Qwen2.5-VL-7B) extraction path that runs alongside the existing text/OCR pipeline, plus a side-by-side review UI for reviewers to pick the better result per field.
