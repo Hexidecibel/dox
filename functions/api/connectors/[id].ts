@@ -309,8 +309,12 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
 
     requireTenantAccess(user, connector.tenant_id as string);
 
+    // Soft-delete: flip active=0 AND stamp deleted_at so the list endpoint
+    // can distinguish this tombstoned row from a draft. Historical rows that
+    // were deleted before migration 0037 will have deleted_at=NULL and show
+    // up in the list as drafts — user can re-hit Delete to tombstone them.
     await context.env.DB.prepare(
-      "UPDATE connectors SET active = 0, updated_at = datetime('now') WHERE id = ?"
+      "UPDATE connectors SET active = 0, deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?"
     )
       .bind(connectorId)
       .run();

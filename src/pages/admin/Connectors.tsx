@@ -315,10 +315,10 @@ export function Connectors() {
                       variant="outlined"
                     />
                     <Chip
-                      label={connector.active ? 'Active' : 'Inactive'}
+                      label={connector.active ? 'Active' : 'Draft'}
                       size="small"
-                      color={connector.active ? 'success' : 'default'}
-                      variant="outlined"
+                      color={connector.active ? 'success' : 'warning'}
+                      variant={connector.active ? 'outlined' : 'filled'}
                     />
                   </Box>
                 </CardContent>
@@ -382,10 +382,10 @@ export function Connectors() {
                     </TableCell>
                     <TableCell>
                       <Chip
-                        label={connector.active ? 'Active' : 'Inactive'}
+                        label={connector.active ? 'Active' : 'Draft'}
                         size="small"
-                        color={connector.active ? 'success' : 'default'}
-                        variant="outlined"
+                        color={connector.active ? 'success' : 'warning'}
+                        variant={connector.active ? 'outlined' : 'filled'}
                       />
                     </TableCell>
                     <TableCell align="right" onClick={(e) => e.stopPropagation()}>

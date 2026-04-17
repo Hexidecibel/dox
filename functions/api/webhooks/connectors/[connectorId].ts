@@ -12,14 +12,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   const connectorId = context.params.connectorId as string;
 
   try {
-    // 1. Fetch connector
+    // 1. Fetch connector. NOTE: the DB column is `connector_type`, NOT
+    //    `type` — the latter was an early naming pre-migration 0030. Using
+    //    the wrong column silently produced `undefined` and every lookup
+    //    failed the "is this a webhook?" gate with a 400.
     const connector = await context.env.DB.prepare(
-      `SELECT id, tenant_id, type, config, field_mappings, credentials_encrypted, credentials_iv, active
+      `SELECT id, tenant_id, connector_type, config, field_mappings, credentials_encrypted, credentials_iv, active
        FROM connectors WHERE id = ?`
     ).bind(connectorId).first<{
       id: string;
       tenant_id: string;
-      type: string;
+      connector_type: string;
       config: string;
       field_mappings: string;
       credentials_encrypted: string | null;
@@ -35,7 +38,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return jsonResponse({ error: 'Connector is not active' }, 400);
     }
 
-    if (connector.type !== 'webhook') {
+    if (connector.connector_type !== 'webhook') {
       return jsonResponse({ error: 'Connector is not a webhook type' }, 400);
     }
 

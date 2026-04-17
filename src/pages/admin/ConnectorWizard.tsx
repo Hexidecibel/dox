@@ -182,13 +182,17 @@ export function ConnectorWizard() {
         const c = result.connector;
         const config = typeof c.config === 'string' ? JSON.parse(c.config as string) : (c.config || {});
         const mappings = normalizeFieldMappings(c.field_mappings);
-        // If this connector has a stored sample and the caller wants to jump
-        // straight into the live-preview or review step ("Re-test" / "Remap"),
-        // fetch the stored sample from R2 and re-run discovery so the wizard
-        // has a populated detected_fields list — not an empty stub.
+        // Always rehydrate the stored sample in edit mode when one exists,
+        // regardless of which step we're landing on. Previously this only
+        // ran when startAtStep was 2 or 3, which meant bookmarking
+        // /admin/connectors/:id/edit (no location state -> startAtStep
+        // defaults to 1 / Upload) would show an empty upload card and nag
+        // the user to re-upload, even though the connector already has a
+        // stored sample. Now Upload correctly shows the existing sample
+        // and the user can keep it OR overwrite by uploading something new.
         const storedSampleKey = (c.sample_r2_key as string | null) || null;
         let rehydratedSample: DiscoverSchemaResponse | null = null;
-        if (storedSampleKey && (locationState.startAtStep === 2 || locationState.startAtStep === 3)) {
+        if (storedSampleKey) {
           try {
             rehydratedSample = await api.connectors.rehydrateSample(connectorId);
           } catch (hydrateErr) {
@@ -221,6 +225,15 @@ export function ConnectorWizard() {
           active: !!c.active,
           sample: rehydratedSample,
         });
+        // Seed the auto-apply guard with the rehydrated sample_id. Without
+        // this, the FIRST Back-to-Upload -> Next round-trip in edit mode
+        // would re-trigger acceptAllHighConfidenceSuggestions and stomp on
+        // whatever manual mappings the user already saved. Treat the
+        // rehydrated sample as "already applied" so the guard lets the
+        // saved mappings through untouched.
+        if (rehydratedSample?.sample_id) {
+          appliedSuggestionsForSampleRef.current = rehydratedSample.sample_id;
+        }
         // Skip the Name & Type step in edit mode; allow caller to override via location state.
         setActiveStep(locationState.startAtStep ?? 1);
       } catch (err) {

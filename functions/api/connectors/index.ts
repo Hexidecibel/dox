@@ -64,14 +64,18 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     requireTenantAccess(user, tenantId);
 
-    const conditions: string[] = ['c.tenant_id = ?'];
+    const conditions: string[] = ['c.tenant_id = ?', 'c.deleted_at IS NULL'];
     const params: (string | number)[] = [tenantId];
 
+    // Filter by active only when the caller explicitly asked. The default
+    // now returns BOTH active=1 and active=0 so wizard drafts surface in
+    // the list (previously they were invisible until you activated them).
+    // Hard-deleted rows are excluded via the deleted_at IS NULL predicate
+    // added above — soft-delete now stamps that column instead of just
+    // flipping active=0, so the two states are distinguishable.
     if (active !== null && active !== undefined && active !== '') {
       conditions.push('c.active = ?');
       params.push(parseInt(active, 10));
-    } else {
-      conditions.push('c.active = 1');
     }
 
     if (connectorType) {
