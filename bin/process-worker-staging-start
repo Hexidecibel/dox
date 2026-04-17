@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Start a process-worker instance pointed at the staging Pages deployment.
+# Runs alongside the prod worker (separate PID + log files). Idempotent:
+# if a staging worker is already running, just report its PID and exit.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PID_FILE="logs/process-worker-staging.pid"
+LOG_FILE="logs/process-worker-staging.log"
+
+mkdir -p logs
+
+# Idempotency — don't double-start.
+if [ -f "$PID_FILE" ]; then
+  OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [ -n "${OLD_PID:-}" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    echo "Staging process worker already running (PID: $OLD_PID)"
+    echo "Logs: $LOG_FILE"
+    echo "Stop: bin/process-worker-staging-stop"
+    exit 0
+  fi
+  rm -f "$PID_FILE"
+fi
+
+# Load staging secrets (API key lives here, gitignored).
+if [ -f .dev.vars.staging ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . .dev.vars.staging
+  set +a
+fi
+
+# Allow STAGING_API_KEY (canonical) or DOX_API_KEY override.
+STAGING_KEY="${DOX_API_KEY:-${STAGING_API_KEY:-}}"
+if [ -z "$STAGING_KEY" ]; then
+  echo "Error: STAGING_API_KEY (or DOX_API_KEY) required"
+  echo "Add STAGING_API_KEY=dox_sk_... to .dev.vars.staging"
+  exit 1
+fi
+
+export DOX_API_URL="${DOX_API_URL:-https://doc-upload-site-staging.pages.dev}"
+export DOX_API_KEY="$STAGING_KEY"
+export QWEN_URL="${QWEN_URL:-https://qwen.cush.rocks}"
+export QWEN_SECRET="${QWEN_SECRET:-}"
+
+nohup node bin/process-worker > "$LOG_FILE" 2>&1 &
+NEW_PID=$!
+echo "$NEW_PID" > "$PID_FILE"
+
+echo "Staging process worker started (PID: $NEW_PID)"
+echo "API:  $DOX_API_URL"
+echo "Logs: $LOG_FILE"
+echo "Stop: bin/process-worker-staging-stop"

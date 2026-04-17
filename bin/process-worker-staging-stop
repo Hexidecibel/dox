@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Stop the staging process-worker instance (leaves the prod worker alone).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PID_FILE="logs/process-worker-staging.pid"
+
+if [ ! -f "$PID_FILE" ]; then
+  echo "No staging process worker PID file at $PID_FILE"
+  exit 0
+fi
+
+PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+if [ -z "${PID:-}" ]; then
+  echo "Empty PID file at $PID_FILE — removing"
+  rm -f "$PID_FILE"
+  exit 0
+fi
+
+if kill -0 "$PID" 2>/dev/null; then
+  kill "$PID"
+  # Give it a moment to shut down cleanly, then force if needed.
+  for _ in 1 2 3 4 5; do
+    if kill -0 "$PID" 2>/dev/null; then sleep 1; else break; fi
+  done
+  if kill -0 "$PID" 2>/dev/null; then
+    echo "Process $PID still alive — sending SIGKILL"
+    kill -9 "$PID" || true
+  fi
+  echo "Stopped staging process worker (PID: $PID)"
+else
+  echo "No live process at PID $PID (stale PID file)"
+fi
+
+rm -f "$PID_FILE"
