@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Full pre-deploy test gate.
+#
+# Runs the vitest API/unit suite, then drives Playwright against the live
+# staging Pages project. Exits non-zero on the first failing tier so the
+# deploy script can bail before touching prod.
+#
+# Staging target: https://doc-upload-site-staging.pages.dev
+#   (override with E2E_BASE_URL)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "==> Running API + unit tests (vitest)"
+npm test
+
+echo
+echo "==> Running e2e against staging"
+E2E_BASE_URL="${E2E_BASE_URL:-https://doc-upload-site-staging.pages.dev}" \
+  npx playwright test
+
+echo
+echo "==> All tests passed. Safe to deploy prod."
