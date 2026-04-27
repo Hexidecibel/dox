@@ -2,6 +2,7 @@ import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
 import { generateId, logAudit } from '../lib/db';
 import { buildR2Key, uploadFile, downloadFile, deleteFile, computeChecksum } from '../lib/r2';
 import { findOrCreateSupplier } from '../lib/suppliers';
+import { getLearnedPreferences } from '../lib/learnedPreferences';
 
 /**
  * Order-insensitive diff between approved fields and the original AI text-path
@@ -26,6 +27,117 @@ function diffApprovedVsAi(
     if (norm(approved[k]) !== norm(ai[k])) return true;
   }
   return false;
+}
+
+/**
+ * Compute SHA-256 of a string and return the hex digest. Used to dedupe
+ * synthetic extraction_examples rows from the Phase 3 backfill (the partial
+ * unique index from migration 0038 keys on input_text_hash).
+ */
+async function sha256Hex(input: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const buf = await crypto.subtle.digest('SHA-256', encoder.encode(input));
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/**
+ * Phase 3.4: backfill a synthetic extraction_examples row when the learned
+ * preferences for this (supplier, doctype) just crossed a high-confidence
+ * "rung". Triggered ONLY when at least one field's pick_count is a non-zero
+ * multiple of 5 — i.e. we just landed on a new threshold and might have
+ * meaningful new signal to canonicalize.
+ *
+ * The synthesized row captures "what right looks like" for the pair: the
+ * extracted_text as input, the original ai_fields as the AI output, and a
+ * compact record of {field: most_common_value} from the learned prefs as the
+ * corrected output. The partial unique index on (document_type_id, tenant_id,
+ * supplier, input_text_hash) dedupes — re-runs are no-ops. Failures are
+ * swallowed so the approve flow is never blocked.
+ */
+async function maybeBackfillExtractionExample(
+  db: D1Database,
+  args: {
+    tenantId: string;
+    supplierId: string | null;
+    documentTypeId: string | null;
+    extractedText: string | null;
+    aiFields: string | null;
+    supplierName: string | null;
+    userId: string;
+  }
+): Promise<void> {
+  const { tenantId, supplierId, documentTypeId, extractedText, aiFields, supplierName, userId } = args;
+  if (!documentTypeId || !extractedText) return;
+
+  let prefs;
+  try {
+    prefs = await getLearnedPreferences(db, tenantId, supplierId, documentTypeId);
+  } catch {
+    return;
+  }
+
+  const fieldEntries = Object.entries(prefs.fields);
+  if (fieldEntries.length === 0) return;
+
+  // Trigger gate: at least one field's pick_count is a multiple of 5 with >=5
+  // picks — the "we just crossed a rung" signal.
+  const crossedRung = fieldEntries.some(
+    ([, p]) => p.pick_count >= 5 && p.pick_count % 5 === 0
+  );
+  if (!crossedRung) return;
+
+  // Quality gate: aggregate confidence across fields with >=5 picks must be
+  // high (>=0.85). This avoids backfilling when the signal is mostly weak.
+  const strongFields = fieldEntries.filter(([, p]) => p.pick_count >= 5);
+  if (strongFields.length === 0) return;
+  const aggregateConfidence =
+    strongFields.reduce((sum, [, p]) => sum + p.confidence, 0) / strongFields.length;
+  if (aggregateConfidence < 0.85) return;
+
+  const corrected: Record<string, string> = {};
+  for (const [fieldKey, p] of fieldEntries) {
+    if (p.most_common_value) corrected[fieldKey] = p.most_common_value;
+  }
+  if (Object.keys(corrected).length === 0) return;
+
+  const inputText = extractedText.substring(0, 5000);
+  const inputTextHash = await sha256Hex(inputText);
+
+  try {
+    await db
+      .prepare(
+        `INSERT INTO extraction_examples
+           (id, document_type_id, tenant_id, input_text, ai_output, corrected_output,
+            score, supplier, input_text_hash, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        generateId(),
+        documentTypeId,
+        tenantId,
+        inputText,
+        aiFields ?? '{}',
+        JSON.stringify(corrected),
+        aggregateConfidence,
+        supplierName,
+        inputTextHash,
+        userId
+      )
+      .run();
+    console.info(
+      `[queue-approve] Phase 3 backfill: synthesized extraction_example for ` +
+      `(supplier=${supplierName}, doctype=${documentTypeId}) at confidence=${aggregateConfidence.toFixed(2)}`
+    );
+  } catch (err) {
+    // Most likely a unique-violation from the dedup index — that's the
+    // expected no-op path. Anything else gets logged but never thrown.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/UNIQUE|constraint/i.test(msg)) {
+      console.warn(`[queue-approve] Phase 3 backfill insert failed:`, msg);
+    }
+  }
 }
 
 /**
@@ -393,6 +505,20 @@ export async function approveQueueItem(
     tableEdits,
   });
 
+  // Phase 3.4: synthesize a canonical extraction_example when the latest
+  // picks just rolled the (supplier, doctype) into a new high-confidence
+  // rung. Read AFTER the Phase 2 inserts above so the freshly-recorded
+  // picks count toward the rollup. Best-effort, never blocks approve.
+  await maybeBackfillExtractionExample(db, {
+    tenantId: item.tenant_id,
+    supplierId,
+    documentTypeId: item.document_type_id,
+    extractedText: item.extracted_text,
+    aiFields: item.ai_fields,
+    supplierName: item.supplier,
+    userId,
+  });
+
   // Update queue item status
   await db.prepare(
     `UPDATE processing_queue SET status = 'approved', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?`
@@ -607,6 +733,18 @@ export async function approveMultiProductQueueItem(
     fieldPicks,
     dismissals,
     tableEdits,
+  });
+
+  // Phase 3.4: see approveQueueItem for the full rationale. Same backfill
+  // for the multi-product path.
+  await maybeBackfillExtractionExample(db, {
+    tenantId: item.tenant_id,
+    supplierId,
+    documentTypeId: item.document_type_id,
+    extractedText: item.extracted_text,
+    aiFields: item.ai_fields,
+    supplierName: item.supplier,
+    userId,
   });
 
   // Update queue item status

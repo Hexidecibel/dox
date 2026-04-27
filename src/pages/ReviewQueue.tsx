@@ -73,6 +73,8 @@ import {
   buildDismissals,
   buildTableEdits,
 } from './reviewCaptureBuilder';
+import { sortFieldsByUncertainty, bandFor } from './reviewFieldOrder';
+import type { LearnedFieldHint } from '../../shared/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 
@@ -208,6 +210,16 @@ export default function ReviewQueue() {
   // was last "committed" into editedFields via "Use these results".
   const [vlmTab, setVlmTab] = useState<Record<string, 'text' | 'vlm' | 'compare'>>({});
   const [vlmSelectedSource, setVlmSelectedSource] = useState<Record<string, ExtractionSource>>({});
+
+  // Phase 3: per-item parsed sidecars from the worker.
+  // learnedHints: pre-fill suggestions keyed by field. Keys present here are
+  //   what we render the "from N past reviews" badge on.
+  // uncertainty: per-field 0..1 score; drives sort order + "needs your eyes".
+  // showLearnedEmpty: per-item toggle to expose fields that learned_preferences
+  //   marked as default-hidden (dismissed_fields). Defaults to off.
+  const [learnedHints, setLearnedHints] = useState<Record<string, Record<string, LearnedFieldHint>>>({});
+  const [uncertaintyByItem, setUncertaintyByItem] = useState<Record<string, Record<string, number>>>({});
+  const [showLowConfident, setShowLowConfident] = useState<Record<string, boolean>>({});
 
   // Multi-product support
   const SHARED_FIELD_KEYS = new Set([
@@ -346,20 +358,57 @@ export default function ReviewQueue() {
       // otherwise VLM-only items would approve with empty fields.
       const fields: Record<string, Record<string, string>> = {};
       const names: Record<string, string> = {};
+      const parsedHints: Record<string, Record<string, LearnedFieldHint>> = {};
+      const parsedUncertainty: Record<string, Record<string, number>> = {};
       for (const item of (result.items || [])) {
+        let textParsed: Record<string, unknown> = {};
+        let vlmParsed: Record<string, unknown> = {};
         try {
-          let parsed: Record<string, unknown> = {};
-          if (item.ai_fields) {
-            parsed = JSON.parse(item.ai_fields);
-          } else if ((item as any).vlm_extracted_fields) {
-            parsed = JSON.parse((item as any).vlm_extracted_fields);
+          if (item.ai_fields) textParsed = JSON.parse(item.ai_fields);
+        } catch { /* ignore */ }
+        try {
+          if ((item as any).vlm_extracted_fields) {
+            vlmParsed = JSON.parse((item as any).vlm_extracted_fields);
           }
-          fields[item.id] = Object.fromEntries(
-            Object.entries(parsed).map(([k, v]) => [k, String(v ?? '')])
-          );
-        } catch {
-          fields[item.id] = {};
+        } catch { /* ignore */ }
+
+        // Parse Phase 3 sidecars; both are optional. Hints get pre-applied
+        // into editedFields for any field NOT already populated.
+        let hintsForItem: Record<string, LearnedFieldHint> = {};
+        try {
+          if ((item as any).learned_field_hints) {
+            const raw = JSON.parse((item as any).learned_field_hints);
+            if (raw && typeof raw === 'object') hintsForItem = raw;
+          }
+        } catch { /* ignore */ }
+        let uncertaintyForItem: Record<string, number> = {};
+        try {
+          if ((item as any).uncertainty) {
+            const raw = JSON.parse((item as any).uncertainty);
+            if (raw && typeof raw === 'object') uncertaintyForItem = raw;
+          }
+        } catch { /* ignore */ }
+
+        const seedFields: Record<string, string> =
+          Object.keys(textParsed).length > 0
+            ? Object.fromEntries(Object.entries(textParsed).map(([k, v]) => [k, String(v ?? '')]))
+            : Object.fromEntries(Object.entries(vlmParsed).map(([k, v]) => [k, String(v ?? '')]));
+
+        // Apply learned-hint pre-fill: only when we have a suggested_value
+        // AND the seed field is empty. We never overwrite a non-empty
+        // extracted value — the worker already stamped it from the doc.
+        for (const [hintKey, hint] of Object.entries(hintsForItem)) {
+          if (!hint || hint.suggested_value == null) continue;
+          const current = seedFields[hintKey];
+          if (current == null || current === '') {
+            seedFields[hintKey] = String(hint.suggested_value);
+          }
         }
+
+        fields[item.id] = seedFields;
+        parsedHints[item.id] = hintsForItem;
+        parsedUncertainty[item.id] = uncertaintyForItem;
+
         try {
           const prodNames = item.product_names ? JSON.parse(item.product_names) : [];
           names[item.id] = Array.isArray(prodNames) ? prodNames[0] || '' : '';
@@ -369,18 +418,32 @@ export default function ReviewQueue() {
       }
       setEditedFields(fields);
       setProductNames(names);
+      setLearnedHints(parsedHints);
+      setUncertaintyByItem(parsedUncertainty);
 
-      // Initialize vlmSelectedSource for single-side items. Without this,
-      // VLM-only queue items default to 'text' on approve (the historical
-      // fallback) and we'd record the wrong selected_source. Dual-extraction
-      // items keep the default unset until the user explicitly picks a side
-      // via "Use these results".
+      // Initialize vlmSelectedSource. Two paths:
+      //   1. Single-side items: default to whichever side ran (text vs vlm).
+      //   2. Dual items with a confident learned hint: pre-pick the
+      //      preferred_source from the most-confident hint, so the reviewer
+      //      starts on the side past reviews favored.
       const initSources: Record<string, ExtractionSource> = {};
       for (const item of (result.items || [])) {
         const hasText = hasTextExtraction(item);
         const hasVlm = hasVlmExtraction(item);
         if (hasVlm && !hasText) initSources[item.id] = 'vlm';
         else if (hasText && !hasVlm) initSources[item.id] = 'text';
+        else if (hasText && hasVlm) {
+          const hints = parsedHints[item.id] || {};
+          let bestSource: ExtractionSource | null = null;
+          let bestConfidence = 0;
+          for (const hint of Object.values(hints)) {
+            if (hint && hint.confidence > bestConfidence) {
+              bestConfidence = hint.confidence;
+              bestSource = hint.preferred_source;
+            }
+          }
+          if (bestSource) initSources[item.id] = bestSource;
+        }
       }
       if (Object.keys(initSources).length > 0) {
         setVlmSelectedSource(prev => ({ ...initSources, ...prev }));
@@ -1825,71 +1888,142 @@ export default function ReviewQueue() {
                           );
                         })()}
 
-                        {/* Editable fields */}
-                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                          {Object.entries(fields)
-                            .filter(([key]) => !dismissedFields[item.id]?.has(key))
-                            .map(([fieldName, fieldValue]) => (
-                            <Box key={fieldName} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                              <Box sx={{ flex: 1 }}>
-                                {editingLabel?.itemId === item.id && editingLabel?.fieldKey === fieldName ? (
-                                  <TextField
-                                    value={editingLabelValue}
-                                    onChange={(e) => setEditingLabelValue(e.target.value)}
-                                    onBlur={() => {
-                                      renameField(item.id, fieldName, editingLabelValue);
-                                      setEditingLabel(null);
-                                    }}
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter') {
+                        {/* Editable fields — Phase 3.5 sort: uncertainty >=0.7 at top
+                            with "needs your eyes" badges; low-uncertainty fields collapse
+                            into a "looks good" accordion. Pre-filled fields from
+                            learned_field_hints render a sparkle chip + tooltip. */}
+                        {(() => {
+                          const itemUncertainty = uncertaintyByItem[item.id] || {};
+                          const itemHints = learnedHints[item.id] || {};
+                          const visibleEntries = Object.entries(fields).filter(([key]) => !dismissedFields[item.id]?.has(key));
+                          const sortedKeys = sortFieldsByUncertainty(
+                            visibleEntries.map(([k]) => k),
+                            itemUncertainty
+                          );
+                          const renderFieldRow = (fieldName: string) => {
+                            const fieldValue = fields[fieldName] ?? '';
+                            const u = itemUncertainty[fieldName];
+                            const band = bandFor(u);
+                            const hint = itemHints[fieldName];
+                            return (
+                              <Box key={fieldName} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                                <Box sx={{ flex: 1 }}>
+                                  {editingLabel?.itemId === item.id && editingLabel?.fieldKey === fieldName ? (
+                                    <TextField
+                                      value={editingLabelValue}
+                                      onChange={(e) => setEditingLabelValue(e.target.value)}
+                                      onBlur={() => {
                                         renameField(item.id, fieldName, editingLabelValue);
                                         setEditingLabel(null);
-                                      } else if (e.key === 'Escape') {
-                                        setEditingLabel(null);
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          renameField(item.id, fieldName, editingLabelValue);
+                                          setEditingLabel(null);
+                                        } else if (e.key === 'Escape') {
+                                          setEditingLabel(null);
+                                        }
+                                      }}
+                                      size="small"
+                                      fullWidth
+                                      autoFocus
+                                      variant="outlined"
+                                      label="Field name"
+                                      sx={{ mb: 0.5 }}
+                                    />
+                                  ) : (
+                                    <TextField
+                                      label={
+                                        <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, cursor: item.status === 'pending' ? 'pointer' : 'default' }}
+                                          onClick={(e) => {
+                                            if (item.status !== 'pending' || isActioning || isProcessing) return;
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            setEditingLabel({ itemId: item.id, fieldKey: fieldName });
+                                            setEditingLabelValue(fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+                                          }}
+                                        >
+                                          {fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                          {item.status === 'pending' && <EditIcon sx={{ fontSize: 12, opacity: 0.5 }} />}
+                                        </Box>
                                       }
-                                    }}
-                                    size="small"
-                                    fullWidth
-                                    autoFocus
-                                    variant="outlined"
-                                    label="Field name"
-                                    sx={{ mb: 0.5 }}
-                                  />
-                                ) : (
-                                  <TextField
-                                    label={
-                                      <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, cursor: item.status === 'pending' ? 'pointer' : 'default' }}
-                                        onClick={(e) => {
-                                          if (item.status !== 'pending' || isActioning || isProcessing) return;
-                                          e.preventDefault();
-                                          e.stopPropagation();
-                                          setEditingLabel({ itemId: item.id, fieldKey: fieldName });
-                                          setEditingLabelValue(fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
-                                        }}
-                                      >
-                                        {fieldName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                                        {item.status === 'pending' && <EditIcon sx={{ fontSize: 12, opacity: 0.5 }} />}
-                                      </Box>
-                                    }
-                                    value={fieldValue}
-                                    onChange={(e) => updateField(item.id, fieldName, e.target.value)}
-                                    size="small"
-                                    fullWidth
-                                    disabled={item.status !== 'pending' || isActioning || isProcessing}
-                                  />
-                                )}
+                                      value={fieldValue}
+                                      onChange={(e) => updateField(item.id, fieldName, e.target.value)}
+                                      size="small"
+                                      fullWidth
+                                      disabled={item.status !== 'pending' || isActioning || isProcessing}
+                                    />
+                                  )}
+                                  {(band === 'high' || hint) && (
+                                    <Box sx={{ display: 'flex', gap: 0.5, mt: 0.5, flexWrap: 'wrap' }}>
+                                      {band === 'high' && (
+                                        <Chip
+                                          label="needs your eyes"
+                                          size="small"
+                                          color="warning"
+                                          sx={{ fontSize: '0.65rem', height: 20 }}
+                                        />
+                                      )}
+                                      {hint && (
+                                        <Tooltip title={`${hint.preferred_source.toUpperCase()} preferred · ${Math.round((hint.confidence || 0) * 100)}% confidence · ${hint.pick_count} past picks`}>
+                                          <Chip
+                                            label={`✨ from ${hint.pick_count} past reviews`}
+                                            size="small"
+                                            color="info"
+                                            variant="outlined"
+                                            sx={{ fontSize: '0.65rem', height: 20 }}
+                                          />
+                                        </Tooltip>
+                                      )}
+                                    </Box>
+                                  )}
+                                </Box>
+                                <IconButton
+                                  size="small"
+                                  onClick={() => dismissField(item.id, fieldName)}
+                                  disabled={item.status !== 'pending' || isActioning || isProcessing}
+                                  title="Move to extended metadata"
+                                >
+                                  <CloseIcon fontSize="small" />
+                                </IconButton>
                               </Box>
-                              <IconButton
-                                size="small"
-                                onClick={() => dismissField(item.id, fieldName)}
-                                disabled={item.status !== 'pending' || isActioning || isProcessing}
-                                title="Move to extended metadata"
-                              >
-                                <CloseIcon fontSize="small" />
-                              </IconButton>
-                            </Box>
-                          ))}
+                            );
+                          };
 
+                          const highMidKeys = sortedKeys.filter(e => e.band !== 'low').map(e => e.key);
+                          const lowKeys = sortedKeys.filter(e => e.band === 'low').map(e => e.key);
+
+                          return (
+                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                              {highMidKeys.map(renderFieldRow)}
+                              {lowKeys.length > 0 && (
+                                showLowConfident[item.id] ? (
+                                  <>
+                                    {lowKeys.map(renderFieldRow)}
+                                    <Button
+                                      size="small"
+                                      onClick={() => setShowLowConfident(prev => ({ ...prev, [item.id]: false }))}
+                                      sx={{ alignSelf: 'flex-start', textTransform: 'none' }}
+                                    >
+                                      Hide looks-good fields
+                                    </Button>
+                                  </>
+                                ) : (
+                                  <Button
+                                    size="small"
+                                    variant="text"
+                                    onClick={() => setShowLowConfident(prev => ({ ...prev, [item.id]: true }))}
+                                    sx={{ alignSelf: 'flex-start', textTransform: 'none', color: 'text.secondary' }}
+                                  >
+                                    Looks good ({lowKeys.length} {lowKeys.length === 1 ? 'field' : 'fields'}) — click to expand
+                                  </Button>
+                                )
+                              )}
+                            </Box>
+                          );
+                        })()}
+
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
                           {item.status === 'pending' && !isActioning && !isProcessing && (
                             <Button
                               size="small"

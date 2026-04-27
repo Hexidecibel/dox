@@ -346,6 +346,134 @@ async function fetchReviewerInstructions(tenantId, supplierId, documentTypeId) {
 }
 
 /**
+ * Fetch the Phase 3 learned preferences for a (supplier, doctype) pair, if
+ * any exist. Returns null on missing inputs / failure / no signal — never
+ * throws. The worker uses this for two things:
+ *   1. Build a `learned_field_hints` sidecar in the result payload that the
+ *      UI uses to pre-fill fields.
+ *   2. Append a short attention-bias line to the system prompt so the model
+ *      pays extra attention to fields where past reviewers consistently
+ *      chose one source over the other.
+ */
+async function fetchLearnedPreferences(tenantId, supplierId, documentTypeId) {
+  if (!tenantId || !supplierId || !documentTypeId) return null;
+  try {
+    const params = new URLSearchParams({
+      supplier_id: supplierId,
+      document_type_id: documentTypeId,
+      tenant_id: tenantId,
+    });
+    const res = await fetch(
+      `${DOX_API_URL}/api/learned-preferences?${params.toString()}`,
+      { headers }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data || !data.fields) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build the `learned_field_hints` sidecar from the aggregator output. Only
+ * fields with confidence >= 0.8 graduate into the hint payload — below that,
+ * the signal is too noisy to bother the reviewer with a pre-fill badge.
+ * Shape matches the LearnedFieldPreference type in shared/types.ts.
+ */
+function buildLearnedFieldHints(preferences) {
+  if (!preferences || !preferences.fields) return null;
+  const hints = {};
+  for (const [fieldKey, pref] of Object.entries(preferences.fields)) {
+    if (typeof pref?.confidence !== 'number' || pref.confidence < 0.8) continue;
+    hints[fieldKey] = {
+      preferred_source: pref.preferred_source,
+      suggested_value: pref.most_common_value ?? null,
+      confidence: pref.confidence,
+      pick_count: pref.pick_count,
+    };
+  }
+  return Object.keys(hints).length > 0 ? hints : null;
+}
+
+/**
+ * Prepend the Phase 3 attention-bias line to the system prompt. Tells the
+ * model that past reviewers consistently picked a particular source for
+ * a list of fields — pure attention bias, NOT a hard "always pick X" rule
+ * (the model still sees the document and can disagree).
+ */
+function prependAttentionBias(prompt, preferences) {
+  if (!preferences || !preferences.fields) return prompt;
+  const fieldsBySource = { text: [], vlm: [] };
+  for (const [fieldKey, pref] of Object.entries(preferences.fields)) {
+    if (typeof pref?.confidence !== 'number' || pref.confidence < 0.8) continue;
+    if (pref.preferred_source === 'text' || pref.preferred_source === 'vlm') {
+      fieldsBySource[pref.preferred_source].push(fieldKey);
+    }
+  }
+  const lines = [];
+  for (const src of ['text', 'vlm']) {
+    if (fieldsBySource[src].length > 0) {
+      lines.push(
+        `Past reviewers consistently chose ${src.toUpperCase()} for the following fields: ${fieldsBySource[src].join(', ')}. Pay extra attention to extracting those correctly.`
+      );
+    }
+  }
+  if (lines.length === 0) return prompt;
+  return lines.join('\n') + '\n\n' + prompt;
+}
+
+/**
+ * Heuristic per-field uncertainty score in [0, 1]. Higher = needs reviewer
+ * eyes. Dumb on purpose for now — empty / suspicious-looking values bump up,
+ * dual-mode disagreement gets layered on top later.
+ */
+function computeFieldUncertainty(fieldKey, value) {
+  if (value == null) return 1.0;
+  const s = String(value).trim();
+  if (s === '') return 1.0;
+  if (s.includes('(?)') || s === '?') return 0.7;
+  if (/lot/i.test(fieldKey) && s.length < 3) return 0.6;
+  if (/date/i.test(fieldKey)) {
+    const looksLikeDate = /\d{4}-\d{2}-\d{2}/.test(s) || /\d{1,2}\/\d{1,2}\/\d{2,4}/.test(s);
+    if (!looksLikeDate) return 0.7;
+  }
+  if ((/number|code|qty|count|weight/i.test(fieldKey)) && /^[A-Za-z]+$/.test(s)) return 0.7;
+  return 0.2;
+}
+
+/**
+ * Build a Record<field_key, 0..1> uncertainty payload for ALL keys present
+ * on either side of a dual extraction. When text and VLM disagree on a key,
+ * that key's uncertainty is forced to max(current, 0.7) — disagreement IS
+ * uncertainty. In single-side mode (one of textFields/vlmFields is empty),
+ * just runs the per-field heuristic on the side that ran.
+ */
+function computeUncertaintyPayload(textFields, vlmFields) {
+  const text = textFields || {};
+  const vlm = vlmFields || {};
+  const allKeys = new Set([...Object.keys(text), ...Object.keys(vlm)]);
+  const out = {};
+  for (const key of allKeys) {
+    const tVal = text[key];
+    const vVal = vlm[key];
+    // Prefer the value the reviewer would see (text first, vlm fallback)
+    // when running the heuristic.
+    const seedValue = tVal != null ? tVal : vVal;
+    let score = computeFieldUncertainty(key, seedValue);
+    // Dual-mode disagreement: both sides extracted SOMETHING but they differ.
+    const hasText = tVal != null && String(tVal).trim() !== '';
+    const hasVlm = vVal != null && String(vVal).trim() !== '';
+    if (hasText && hasVlm && String(tVal).trim() !== String(vVal).trim()) {
+      score = Math.max(score, 0.7);
+    }
+    out[key] = score;
+  }
+  return out;
+}
+
+/**
  * Prepend the reviewer-authored guidance to a Qwen system prompt.
  * No-op when `instructions` is empty. The header matches the one spec'd in
  * the feature brief so future tweaks live in exactly one place.
@@ -535,20 +663,22 @@ async function processItem(item) {
       // Non-critical — continue without examples
     }
 
-    // Fetch reviewer-authored natural-language instructions for this
-    // (supplier, document_type) pair, if the supplier is resolvable. First
-    // try the item.supplier field (set on re-extraction runs) and fall back
-    // to the filename-guessed supplier. If nothing resolves, instructions
-    // will be an empty string and prependReviewerInstructions() becomes a
-    // no-op. See migration 0035 + /api/extraction-instructions.
+    // Fetch reviewer-authored natural-language instructions and learned
+    // Phase 3 preferences for this (supplier, document_type) pair. Resolves
+    // supplier_id once via the same heuristic both helpers need. Both fall
+    // back to no-ops on missing inputs / failure — extraction must always
+    // proceed. See migration 0035 + /api/extraction-instructions and
+    // /api/learned-preferences.
     let reviewerInstructions = '';
+    let learnedPreferences = null;
+    let resolvedSupplierIdForLearning = null;
     try {
       const supplierName = item.supplier || guessedSupplier || null;
-      const supplierId = await resolveSupplierIdByName(item.tenant_id, supplierName);
-      if (supplierId && item.document_type_id) {
+      resolvedSupplierIdForLearning = await resolveSupplierIdByName(item.tenant_id, supplierName);
+      if (resolvedSupplierIdForLearning && item.document_type_id) {
         reviewerInstructions = await fetchReviewerInstructions(
           item.tenant_id,
-          supplierId,
+          resolvedSupplierIdForLearning,
           item.document_type_id
         );
         if (reviewerInstructions) {
@@ -557,9 +687,20 @@ async function processItem(item) {
             `(supplier=${supplierName}, doctype=${item.document_type_id})`
           );
         }
+        learnedPreferences = await fetchLearnedPreferences(
+          item.tenant_id,
+          resolvedSupplierIdForLearning,
+          item.document_type_id
+        );
+        if (learnedPreferences && Object.keys(learnedPreferences.fields || {}).length > 0) {
+          console.log(
+            `  Learned preferences loaded: ${Object.keys(learnedPreferences.fields).length} field(s) ` +
+            `(supplier=${supplierName}, doctype=${item.document_type_id})`
+          );
+        }
       }
     } catch {
-      // Non-critical — continue without instructions
+      // Non-critical — continue without instructions or learned hints
     }
 
     // Helper: call the text-path Qwen3-8B model.
@@ -586,7 +727,10 @@ async function processItem(item) {
                 {
                   role: 'system',
                   content: prependFilenameHint(
-                    prependReviewerInstructions(buildPrompt(examples), reviewerInstructions),
+                    prependAttentionBias(
+                      prependReviewerInstructions(buildPrompt(examples), reviewerInstructions),
+                      learnedPreferences
+                    ),
                     item.file_name
                   ),
                 },
@@ -635,7 +779,10 @@ async function processItem(item) {
       try {
         const res = await extractWithVLM(
           fileBufferForVlm,
-          prependReviewerInstructions(buildVlmPrompt(examples), reviewerInstructions),
+          prependAttentionBias(
+            prependReviewerInstructions(buildVlmPrompt(examples), reviewerInstructions),
+            learnedPreferences
+          ),
           'Extract all structured data from the document image(s). Return JSON only.',
           item.file_name
         );
@@ -771,6 +918,27 @@ async function processItem(item) {
         resultBody.vlm_confidence = null;
         resultBody.vlm_error = vlmError;
       }
+    }
+
+    // Phase 3: attach learned_field_hints sidecar from the Phase 2 capture
+    // tables. Only fields with confidence >= 0.8 graduate; the UI uses these
+    // to pre-fill values + render a "from N past reviews" badge.
+    const learnedHints = buildLearnedFieldHints(learnedPreferences);
+    if (learnedHints) {
+      resultBody.learned_field_hints = JSON.stringify(learnedHints);
+    }
+
+    // Phase 3: per-field uncertainty payload — heuristic + dual-mode
+    // disagreement. UI sorts >= 0.7 fields under a "needs your eyes" banner.
+    // In 'vlm' primary mode parsed.fields IS vlmResult.fields — feed only
+    // one side so we don't compare the same payload to itself.
+    const dualSidesDistinct = QWEN_VLM_MODE === 'dual' && vlmResult && vlmResult.fields;
+    const uncertainty = computeUncertaintyPayload(
+      parsed.fields || {},
+      dualSidesDistinct ? vlmResult.fields : {}
+    );
+    if (Object.keys(uncertainty).length > 0) {
+      resultBody.uncertainty = JSON.stringify(uncertainty);
     }
 
     await postResults(item.id, resultBody);

@@ -31,6 +31,7 @@ import { ConnectorDetail } from './pages/admin/ConnectorDetail';
 import { ConnectorWizard } from './pages/admin/ConnectorWizard';
 import { Customers } from './pages/admin/Customers';
 import { CustomerDetail } from './pages/admin/CustomerDetail';
+import LearningDashboard from './pages/admin/LearningDashboard';
 import { Orders } from './pages/Orders';
 import { OrderDetail } from './pages/OrderDetail';
 import { Activity } from './pages/Activity';
@@ -79,6 +80,7 @@ function App() {
                 <Route path="/admin/connectors/:id" element={<ConnectorDetail />} />
                 <Route path="/admin/customers" element={<Customers />} />
                 <Route path="/admin/customers/:id" element={<CustomerDetail />} />
+                <Route path="/admin/learning-dashboard" element={<LearningDashboard />} />
               </Route>
               {/* Super admin only routes */}
               <Route element={<ProtectedRoute roles={['super_admin']} />}>

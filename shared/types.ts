@@ -641,6 +641,12 @@ export interface ProcessingQueueItem {
   vlm_model: string | null;
   vlm_duration_ms: number | null;
   vlm_extracted_at: string | null;
+  // Phase 3: per-field pre-fill hints derived from past reviewer picks.
+  // JSON-stringified Record<field_key, LearnedFieldHint>; null when no signal.
+  learned_field_hints: string | null;
+  // Phase 3: per-field heuristic uncertainty score in [0, 1]. JSON-stringified
+  // Record<field_key, number>; null when uncertainty was not computed.
+  uncertainty: string | null;
   // Joined fields from list/get queries
   document_type_name?: string;
   document_type_slug?: string;
@@ -648,6 +654,19 @@ export interface ProcessingQueueItem {
   tenant_slug?: string;
   created_by_name?: string;
   reviewed_by_name?: string;
+}
+
+/**
+ * Phase 3: per-field pre-fill hint derived from accumulated reviewer picks for
+ * a given (supplier, doctype) pair. Worker writes only entries with
+ * confidence >= 0.8; the UI uses these to pre-populate edited fields and
+ * render the "from N past reviews" badge.
+ */
+export interface LearnedFieldHint {
+  preferred_source: 'text' | 'vlm';
+  suggested_value: string | null;
+  confidence: number;
+  pick_count: number;
 }
 
 export interface QueuedResponse {

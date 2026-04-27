@@ -44,6 +44,7 @@ import {
   ShoppingCart as OrdersIcon,
   Hub as ConnectorsIcon,
   ContactMail as CustomersIcon,
+  Insights as InsightsIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -77,6 +78,7 @@ const adminItems: NavItem[] = [
   { label: 'Document Types', path: '/admin/document-types', icon: <DocTypesIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Connectors', path: '/admin/connectors', icon: <ConnectorsIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Customers', path: '/admin/customers', icon: <CustomersIcon />, roles: ['super_admin', 'org_admin'] },
+  { label: 'Learning Dashboard', path: '/admin/learning-dashboard', icon: <InsightsIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Tenants', path: '/admin/tenants', icon: <TenantsIcon />, roles: ['super_admin'] },
 ];
 

@@ -41,6 +41,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       vlm_model?: string | null;
       vlm_duration_ms?: number | null;
       vlm_extracted_at?: string | null;
+      // Phase 3 sidecars
+      learned_field_hints?: string | null;
+      uncertainty?: string | null;
     };
 
     if (!body.processing_status || !['processing', 'ready', 'error'].includes(body.processing_status)) {
@@ -152,6 +155,16 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.vlm_extracted_at !== undefined) {
       updates.push('vlm_extracted_at = ?');
       params.push(body.vlm_extracted_at);
+    }
+
+    if (body.learned_field_hints !== undefined) {
+      updates.push('learned_field_hints = ?');
+      params.push(body.learned_field_hints);
+    }
+
+    if (body.uncertainty !== undefined) {
+      updates.push('uncertainty = ?');
+      params.push(body.uncertainty);
     }
 
     params.push(queueId);
