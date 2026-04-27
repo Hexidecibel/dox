@@ -1,4 +1,4 @@
-import { generateId, logAudit, getClientIp } from '../../lib/db';
+import { getClientIp } from '../../lib/db';
 import {
   requireRole,
   requireTenantAccess,
@@ -6,19 +6,19 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
+import { findOrCreateSupplier } from '../../lib/suppliers';
 import type { Env, User } from '../../lib/types';
-
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
-}
 
 /**
  * POST /api/suppliers/lookup-or-create
- * Fuzzy match: try exact slug match first, then LIKE on name and aliases.
- * If found: return existing. If not: create and return.
+ * Normalize the incoming name (strip Inc / LLC / Co / trailing punctuation,
+ * lowercase, collapse whitespace) and match against existing suppliers'
+ * names AND aliases. On match, append the raw incoming name to that
+ * supplier's aliases so future lookups by that exact spelling are O(1).
+ * On no-match, create a new supplier.
+ *
+ * Shared logic lives in functions/lib/suppliers.ts so the queue-approve
+ * path uses the same matching semantics.
  */
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -46,66 +46,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     requireTenantAccess(user, tenantId);
 
     const name = sanitizeString(body.name.trim());
-    const slug = slugify(name);
 
-    // 1. Try exact slug match
-    let supplier = await context.env.DB.prepare(
-      'SELECT * FROM suppliers WHERE tenant_id = ? AND slug = ?'
-    )
-      .bind(tenantId, slug)
-      .first();
+    const result = await findOrCreateSupplier(context.env.DB, tenantId, name, {
+      userId: user.id,
+      ip: getClientIp(context.request),
+    });
 
-    if (supplier) {
-      return new Response(
-        JSON.stringify({ supplier, created: false }),
-        { headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // 2. Try LIKE on name and aliases
-    supplier = await context.env.DB.prepare(
-      `SELECT * FROM suppliers
-       WHERE tenant_id = ? AND (LOWER(name) = LOWER(?) OR aliases LIKE ?)
-       LIMIT 1`
-    )
-      .bind(tenantId, name, `%${name}%`)
-      .first();
-
-    if (supplier) {
-      return new Response(
-        JSON.stringify({ supplier, created: false }),
-        { headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // 3. Create new supplier
-    const id = generateId();
-    await context.env.DB.prepare(
-      `INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)`
-    )
-      .bind(id, tenantId, name, slug)
-      .run();
-
-    await logAudit(
-      context.env.DB,
-      user.id,
-      tenantId,
-      'supplier.created',
-      'supplier',
-      id,
-      JSON.stringify({ name, source: 'lookup-or-create' }),
-      getClientIp(context.request)
-    );
-
-    const newSupplier = await context.env.DB.prepare(
+    const supplier = await context.env.DB.prepare(
       'SELECT * FROM suppliers WHERE id = ?'
     )
-      .bind(id)
+      .bind(result.id)
       .first();
 
     return new Response(
-      JSON.stringify({ supplier: newSupplier, created: true }),
-      { status: 201, headers: { 'Content-Type': 'application/json' } }
+      JSON.stringify({ supplier, created: result.created }),
+      {
+        status: result.created ? 201 : 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
     );
   } catch (err) {
     const httpErr = errorToResponse(err);

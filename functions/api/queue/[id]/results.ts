@@ -5,6 +5,7 @@ import {
   errorToResponse,
 } from '../../../lib/permissions';
 import { sendEmail } from '../../../lib/email';
+import { logAudit, getClientIp } from '../../../lib/db';
 import type { Env, User } from '../../../lib/types';
 
 /**
@@ -160,6 +161,33 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     )
       .bind(...params)
       .run();
+
+    // Audit log when the worker promotes document_type_guess → document_type_id.
+    // This only fires when the queue item previously had no doctype set and
+    // the worker resolved one (typically from an exact fuzzyMatchDocType hit).
+    if (
+      body.document_type_id &&
+      !item.document_type_id &&
+      body.document_type_id !== item.document_type_id
+    ) {
+      try {
+        await logAudit(
+          context.env.DB,
+          user.id,
+          item.tenant_id,
+          'queue_item.doctype_promoted',
+          'processing_queue',
+          queueId,
+          JSON.stringify({
+            document_type_id: body.document_type_id,
+            document_type_guess: body.document_type_guess ?? null,
+          }),
+          getClientIp(context.request)
+        );
+      } catch {
+        // Non-fatal — audit failure shouldn't break the worker.
+      }
+    }
 
     // --- Template matching & auto-ingest ---
     let wasAutoIngested = false;

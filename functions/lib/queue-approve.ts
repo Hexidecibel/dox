@@ -1,6 +1,32 @@
 import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
 import { generateId, logAudit } from '../lib/db';
 import { buildR2Key, uploadFile, downloadFile, deleteFile, computeChecksum } from '../lib/r2';
+import { findOrCreateSupplier } from '../lib/suppliers';
+
+/**
+ * Order-insensitive diff between approved fields and the original AI text-path
+ * output. Compares the union of keys, normalizing both sides to trimmed
+ * strings so "L-123" vs " L-123 " is not a false-positive. Empty/whitespace
+ * values are treated as missing so a key only present on one side as "" does
+ * not register as a difference.
+ *
+ * Returns true when there is any real difference worth recording as a
+ * training example.
+ */
+function diffApprovedVsAi(
+  approved: Record<string, string>,
+  ai: Record<string, unknown>
+): boolean {
+  const norm = (v: unknown): string => {
+    if (v == null) return '';
+    return String(v).trim();
+  };
+  const keys = new Set<string>([...Object.keys(approved), ...Object.keys(ai)]);
+  for (const k of keys) {
+    if (norm(approved[k]) !== norm(ai[k])) return true;
+  }
+  return false;
+}
 
 export interface QueueItem {
   id: string;
@@ -82,31 +108,16 @@ export async function approveQueueItem(
   }
   const primaryMetadataStr = Object.keys(primaryMetadata).length > 0 ? JSON.stringify(primaryMetadata) : null;
 
-  // Resolve supplier from queue item
+  // Resolve supplier from queue item via the shared alias-aware helper.
   let supplierId: string | null = null;
   const supplierName = item.supplier || approvedFields.supplier || approvedFields.supplier_name || null;
   if (supplierName) {
     try {
-      const slug = supplierName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-      let existing = await db.prepare(
-        'SELECT id FROM suppliers WHERE tenant_id = ? AND slug = ?'
-      ).bind(item.tenant_id, slug).first<{ id: string }>();
-
-      if (!existing) {
-        existing = await db.prepare(
-          'SELECT id FROM suppliers WHERE tenant_id = ? AND LOWER(name) = LOWER(?)'
-        ).bind(item.tenant_id, supplierName).first<{ id: string }>();
-      }
-
-      if (existing) {
-        supplierId = existing.id;
-      } else {
-        const newId = generateId();
-        await db.prepare(
-          'INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)'
-        ).bind(newId, item.tenant_id, supplierName, slug).run();
-        supplierId = newId;
-      }
+      const r = await findOrCreateSupplier(db, item.tenant_id, supplierName, {
+        userId,
+        ip: clientIp || null,
+      });
+      supplierId = r.id;
     } catch {
       // Non-critical
     }
@@ -181,10 +192,16 @@ export async function approveQueueItem(
       .run();
   }
 
-  // Save extraction example if user corrected fields (with supplier for training gate)
+  // Save extraction example as a training signal whenever the approved fields
+  // diverge from the text-path AI output. Two cases trigger a write:
+  //   1. The reviewer manually edited any field (classic correction).
+  //   2. The reviewer picked the VLM side via "Use these results" — the act
+  //      of picking VLM IS the correction, even if no further edit happened.
+  //      Without this branch the learning loop is starved (Apr 2026 staging:
+  //      27 A/B evals, 0 extraction_examples rows).
   if (fields && item.ai_fields && item.extracted_text) {
-    const aiFields = JSON.parse(item.ai_fields);
-    const fieldsChanged = JSON.stringify(fields) !== JSON.stringify(aiFields);
+    const aiFields = JSON.parse(item.ai_fields) as Record<string, unknown>;
+    const fieldsDiffer = diffApprovedVsAi(fields, aiFields);
 
     // Detect supplier from fields or queue item
     const supplier = item.supplier || (() => {
@@ -193,7 +210,7 @@ export async function approveQueueItem(
       return approvedSupplier || null;
     })();
 
-    if (fieldsChanged) {
+    if (fieldsDiffer && item.document_type_id) {
       const exampleId = generateId();
       const inputText = item.extracted_text.substring(0, 2000);
 
@@ -212,6 +229,13 @@ export async function approveQueueItem(
           userId
         )
         .run();
+    } else if (fieldsDiffer && !item.document_type_id) {
+      // extraction_examples.document_type_id is NOT NULL — we can't write a
+      // training row without one. Log a single line so we can grep for lost
+      // learning signals without making this noisy.
+      console.info(
+        `[queue-approve] Skipping extraction_example insert for queue item ${item.id}: no document_type_id (lost training signal)`
+      );
     }
   }
 
@@ -289,31 +313,16 @@ export async function approveMultiProductQueueItem(
   const fileData = await pendingFile.arrayBuffer();
   const checksum = await computeChecksum(fileData);
 
-  // Resolve supplier ONCE
+  // Resolve supplier ONCE via the shared alias-aware helper.
   let supplierId: string | null = null;
   const supplierName = item.supplier || sharedFields.supplier_name || sharedFields.supplier || null;
   if (supplierName) {
     try {
-      const slug = supplierName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-      let existing = await db.prepare(
-        'SELECT id FROM suppliers WHERE tenant_id = ? AND slug = ?'
-      ).bind(item.tenant_id, slug).first<{ id: string }>();
-
-      if (!existing) {
-        existing = await db.prepare(
-          'SELECT id FROM suppliers WHERE tenant_id = ? AND LOWER(name) = LOWER(?)'
-        ).bind(item.tenant_id, supplierName).first<{ id: string }>();
-      }
-
-      if (existing) {
-        supplierId = existing.id;
-      } else {
-        const newId = generateId();
-        await db.prepare(
-          'INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)'
-        ).bind(newId, item.tenant_id, supplierName, slug).run();
-        supplierId = newId;
-      }
+      const r = await findOrCreateSupplier(db, item.tenant_id, supplierName, {
+        userId,
+        ip: clientIp || null,
+      });
+      supplierId = r.id;
     } catch {
       // Non-critical
     }
@@ -406,19 +415,26 @@ export async function approveMultiProductQueueItem(
 
   // Save extraction example with full multi-product correction
   if (item.ai_fields && item.extracted_text) {
-    const exampleId = generateId();
-    const inputText = item.extracted_text.substring(0, 2000);
-    const correctedOutput = JSON.stringify({
-      shared_fields: sharedFields,
-      products: products.map(p => ({ product_name: p.productName, fields: p.fields })),
-    });
+    if (item.document_type_id) {
+      const exampleId = generateId();
+      const inputText = item.extracted_text.substring(0, 2000);
+      const correctedOutput = JSON.stringify({
+        shared_fields: sharedFields,
+        products: products.map(p => ({ product_name: p.productName, fields: p.fields })),
+      });
 
-    const supplier = item.supplier || sharedFields.supplier_name || sharedFields.supplier || null;
+      const supplier = item.supplier || sharedFields.supplier_name || sharedFields.supplier || null;
 
-    await db.prepare(
-      `INSERT INTO extraction_examples (id, document_type_id, tenant_id, input_text, ai_output, corrected_output, score, supplier, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, 1.0, ?, ?)`
-    ).bind(exampleId, item.document_type_id, item.tenant_id, inputText, item.ai_fields, correctedOutput, supplier, userId).run();
+      await db.prepare(
+        `INSERT INTO extraction_examples (id, document_type_id, tenant_id, input_text, ai_output, corrected_output, score, supplier, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, 1.0, ?, ?)`
+      ).bind(exampleId, item.document_type_id, item.tenant_id, inputText, item.ai_fields, correctedOutput, supplier, userId).run();
+    } else {
+      // extraction_examples.document_type_id is NOT NULL — skip insert and log.
+      console.info(
+        `[queue-approve] Skipping multi-product extraction_example insert for queue item ${item.id}: no document_type_id (lost training signal)`
+      );
+    }
   }
 
   // Update queue item status

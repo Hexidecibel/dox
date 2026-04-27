@@ -32,7 +32,7 @@ const DOX_API_URL = (process.env.DOX_API_URL || 'https://supdox.com').replace(/\
 const DOX_API_KEY = process.env.DOX_API_KEY || '';
 const QWEN_URL = (process.env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
 const QWEN_SECRET = process.env.QWEN_SECRET || '';
-const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000', 10);
+const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '30000', 10);
 
 // === VLM (Vision-Language Model) dual-run config ===
 // Modes:
@@ -67,9 +67,10 @@ const headers = {
 let processing = false;
 
 async function poll() {
-  if (processing) return; // skip if still working on previous batch
+  if (processing) return true; // skip if still working on previous batch — not a failure
   processing = true;
 
+  let ok = true;
   try {
     // Reset stale "processing" items (stuck for >10 min)
     try {
@@ -99,7 +100,7 @@ async function poll() {
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       console.error(`Poll failed: ${res.status} ${text.substring(0, 200)}`);
-      return;
+      return false;
     }
 
     const data = await res.json();
@@ -110,9 +111,11 @@ async function poll() {
     }
   } catch (err) {
     console.error('Poll error:', err.message);
+    ok = false;
   } finally {
     processing = false;
   }
+  return ok;
 }
 
 async function postResults(id, body) {
@@ -361,6 +364,47 @@ function prependReviewerInstructions(prompt, instructions) {
   return header + prompt;
 }
 
+/**
+ * Prepend a strict <filename_hint> block to the system prompt. The filename
+ * is provided ONLY so the model can guess the supplier from familiar prefixes —
+ * it is NOT a source of structured field values. Fields like lot_number /
+ * code_date / etc. that bleed in from the filename poison downstream data
+ * (see Pacific Cheese smoking gun, Apr 2026 A/B eval).
+ */
+function prependFilenameHint(prompt, fileName) {
+  if (!fileName) return prompt;
+  const block = [
+    '<filename_hint>',
+    fileName,
+    '</filename_hint>',
+    '',
+    'The filename above is provided ONLY for supplier identification context.',
+    'NEVER extract lot_number, code_date, production_date, expiration_date, product_code, or sub_lot_number from this filename.',
+    "If those values aren't in the document body, return null.",
+    '',
+    '---',
+    '',
+  ].join('\n');
+  return block + prompt;
+}
+
+/**
+ * Drop keys whose values are null, undefined, empty, or whitespace-only. The
+ * VLM model in particular emits null padding for every canonical field it
+ * doesn't see; carrying those nulls downstream makes the compare panel render
+ * "12 fields vs 4" when the real signal is 4 vs 4.
+ */
+function compactFields(rec) {
+  if (!rec || typeof rec !== 'object') return {};
+  const out = {};
+  for (const [k, v] of Object.entries(rec)) {
+    if (v == null) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 async function processItem(item) {
   const startTime = Date.now();
   console.log(`Processing ${item.file_name} (${item.id})...`);
@@ -539,10 +583,16 @@ async function processItem(item) {
               temperature: 0,
               max_tokens: 4096,
               messages: [
-                { role: 'system', content: prependReviewerInstructions(buildPrompt(examples), reviewerInstructions) },
+                {
+                  role: 'system',
+                  content: prependFilenameHint(
+                    prependReviewerInstructions(buildPrompt(examples), reviewerInstructions),
+                    item.file_name
+                  ),
+                },
                 {
                   role: 'user',
-                  content: `<filename>${item.file_name}</filename>\n<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+                  content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
                 },
               ],
             }),
@@ -595,7 +645,9 @@ async function processItem(item) {
         if (canonicalizedVlm.supplier_name && isLikelyAddress(canonicalizedVlm.supplier_name)) {
           canonicalizedVlm.supplier_name = null;
         }
-        res.fields = canonicalizedVlm;
+        // Strip null / empty / whitespace-only padding the VLM tends to emit
+        // for canonical fields it didn't actually see in the image.
+        res.fields = compactFields(canonicalizedVlm);
         console.log(`  VLM done: ${res.pageCount} page(s), ${Object.keys(res.fields).length} fields, ${((vlmDurationMs) / 1000).toFixed(1)}s`);
         return res;
       } catch (err) {
@@ -628,7 +680,7 @@ async function processItem(item) {
         if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
           canonicalized.supplier_name = null;
         }
-        parsed.fields = canonicalized;
+        parsed.fields = compactFields(canonicalized);
       }
     } else {
       // 'off' or 'dual' mode: text path is primary.
@@ -639,7 +691,7 @@ async function processItem(item) {
       if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
         canonicalized.supplier_name = null;
       }
-      parsed.fields = canonicalized;
+      parsed.fields = compactFields(canonicalized);
 
       // In dual mode, now run VLM and capture its separate result.
       if (QWEN_VLM_MODE === 'dual' && canRunVlm) {
@@ -653,13 +705,30 @@ async function processItem(item) {
     // Compute confidence score (on primary path only)
     const confidenceScore = computeConfidenceScore(parsed.confidence, parsed.fields || {}, parsed.tables || []);
 
-    // Resolve document type if AI guessed one and queue item has no doc type set
+    // Resolve document type if AI guessed one and queue item has no doc type set.
+    // Only PROMOTE (write document_type_id) on an exact name/slug match —
+    // substring / acronym hits are still recorded in document_type_guess for
+    // the reviewer to confirm but won't silently rewrite the queue row.
     let resolvedDocTypeId = item.document_type_id || null;
+    let docTypeMatchType = null;
     const docTypeGuess = parsed.documentType || null;
 
     if (docTypeGuess && !resolvedDocTypeId) {
       try {
-        resolvedDocTypeId = await fuzzyMatchDocType(docTypeGuess, item.tenant_id);
+        const match = await fuzzyMatchDocType(docTypeGuess, item.tenant_id);
+        if (match) {
+          docTypeMatchType = match.matchType;
+          if (match.matchType === 'exact') {
+            resolvedDocTypeId = match.id;
+            console.log(
+              `  Doctype promoted: guess="${docTypeGuess}" matched doctype ${match.id} (exact)`
+            );
+          } else {
+            console.log(
+              `  Doctype guess matched doctype ${match.id} (${match.matchType}) — leaving document_type_id null for reviewer to confirm`
+            );
+          }
+        }
       } catch (err) {
         console.warn(`  Doc type matching failed:`, err.message);
       }
@@ -784,6 +853,16 @@ function isTextGarbled(text) {
 
 // === Document type fuzzy matching ===
 
+/**
+ * Fuzzy-match a free-form document type guess against the tenant's catalog.
+ * Returns { id, matchType } where matchType is one of:
+ *   - 'exact'     — guess matches a doctype name or slug after normalization
+ *   - 'substring' — guess is contained in (or contains) a doctype name
+ *   - 'acronym'   — guess is the initialism of a multi-word doctype name
+ * Returns null when no candidate is found. Callers should only auto-promote
+ * the queue item's document_type_id on 'exact' — substring/acronym hits are
+ * informative but not safe to commit unattended.
+ */
 async function fuzzyMatchDocType(guess, tenantId) {
   const res = await fetch(
     `${DOX_API_URL}/api/document-types?tenant_id=${encodeURIComponent(tenantId)}&active=1`,
@@ -801,7 +880,7 @@ async function fuzzyMatchDocType(guess, tenantId) {
   // Exact name/slug match
   for (const dt of docTypes) {
     if (normalize(dt.name) === guessNorm || dt.slug === guessNorm.replace(/\s+/g, '-')) {
-      return dt.id;
+      return { id: dt.id, matchType: 'exact' };
     }
   }
 
@@ -809,7 +888,7 @@ async function fuzzyMatchDocType(guess, tenantId) {
   for (const dt of docTypes) {
     const dtNorm = normalize(dt.name);
     if (guessNorm.includes(dtNorm) || dtNorm.includes(guessNorm)) {
-      return dt.id;
+      return { id: dt.id, matchType: 'substring' };
     }
   }
 
@@ -818,7 +897,7 @@ async function fuzzyMatchDocType(guess, tenantId) {
     const dtNorm = normalize(dt.name);
     const acronym = dtNorm.split(' ').map(w => w[0]).join('');
     if (acronym === guessNorm || guessNorm === acronym) {
-      return dt.id;
+      return { id: dt.id, matchType: 'acronym' };
     }
   }
 
@@ -856,7 +935,7 @@ FIELD EXTRACTION RULES:
 
 3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signatures, titles, disclaimers, individual test values (those go in tables).
 
-4. FILENAME CONTEXT: The filename is provided in <filename> tags. It often contains metadata like item numbers, product codes, lot numbers, and dates. Use this as supplementary context when the document text is incomplete or ambiguous, but prefer values from the document body when both are available.
+4. FILENAME CONTEXT: The filename hint (<filename_hint> in the system prompt) is provided ONLY for supplier identification context. NEVER extract lot_number, code_date, production_date, expiration_date, product_code, or sub_lot_number from the filename. If those values aren't in the document body, return null.
 
 5. SUPPLIER vs CUSTOMER: A common error is confusing supplier and customer. The supplier PRODUCES the product; the customer RECEIVES it. If "MEDOSWEET FARMS" appears after "Ship To:", it is the customer_name, not the supplier_name. The company at the TOP of the document (letterhead, header) is usually the supplier.
 
@@ -1051,7 +1130,7 @@ FIELD EXTRACTION RULES:
 
 3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signatures, titles, disclaimers, individual test values (those go in tables).
 
-4. FILENAME CONTEXT: The filename is provided in <filename> tags. Use it as supplementary context but prefer values visible in the image body when both are available.
+4. FILENAME CONTEXT: The filename hint (<filename_hint> in the system prompt) is provided ONLY for supplier identification context. NEVER extract lot_number, code_date, production_date, expiration_date, product_code, or sub_lot_number from the filename. If those values aren't in the image body, return null.
 
 5. SUPPLIER vs CUSTOMER: A common error is confusing supplier and customer. The supplier PRODUCES the product; the customer RECEIVES it. The company at the TOP of the document (letterhead, header) is usually the supplier.
 
@@ -1104,7 +1183,7 @@ async function extractWithVLM(pdfBuffer, systemPrompt, userPrompt, fileName) {
   const pages = await renderPdfPagesToPng(pdfBuffer, QWEN_VLM_MAX_PAGES);
 
   const userContent = [
-    { type: 'text', text: `<filename>${fileName}</filename>\n${userPrompt}` },
+    { type: 'text', text: userPrompt },
   ];
   for (const p of pages) {
     userContent.push({
@@ -1118,7 +1197,7 @@ async function extractWithVLM(pdfBuffer, systemPrompt, userPrompt, fileName) {
     temperature: 0.1,
     max_tokens: 8192,
     messages: [
-      { role: 'system', content: systemPrompt },
+      { role: 'system', content: prependFilenameHint(systemPrompt, fileName) },
       { role: 'user', content: userContent },
     ],
   };
@@ -1316,6 +1395,34 @@ console.log(`  VLM mode: ${QWEN_VLM_MODE}${QWEN_VLM_MODE !== 'off' ? ` (model=${
 console.log(`  Poll interval: ${POLL_INTERVAL / 1000}s`);
 console.log('');
 
-// Immediate first poll, then interval
-poll();
-setInterval(poll, POLL_INTERVAL);
+// Self-scheduling loop with exponential backoff on consecutive failures.
+// Backoff doubles on each failure (POLL_INTERVAL, 2x, 4x, ...) capped at 5
+// minutes, and resets to POLL_INTERVAL on the next successful poll. This
+// prevents the worker from hammering the API (and burning CF requests) when
+// /api/queue starts returning errors in a loop.
+let consecutiveFailures = 0;
+const MAX_BACKOFF_MS = 5 * 60 * 1000;
+async function loop() {
+  let success = false;
+  try {
+    success = await poll();
+  } catch (err) {
+    // poll() already catches internally, but belt-and-suspenders in case a
+    // future change lets something slip through.
+    console.error(`[worker] poll threw (attempt ${consecutiveFailures + 1}):`, err?.message || err);
+    success = false;
+  }
+  if (success) {
+    consecutiveFailures = 0;
+  } else {
+    consecutiveFailures++;
+  }
+  const backoff = consecutiveFailures === 0
+    ? POLL_INTERVAL
+    : Math.min(POLL_INTERVAL * Math.pow(2, consecutiveFailures - 1), MAX_BACKOFF_MS);
+  if (consecutiveFailures > 0) {
+    console.warn(`[worker] next poll in ${(backoff / 1000).toFixed(0)}s (failure #${consecutiveFailures})`);
+  }
+  setTimeout(loop, backoff);
+}
+loop();

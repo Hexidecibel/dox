@@ -36,10 +36,27 @@ export interface ExtractionPayload {
 }
 
 /**
+ * Drop keys whose values are null, undefined, empty, or whitespace-only. Mirrors
+ * the worker-side helper of the same name (bin/process-worker) so the field
+ * counts the UI shows exactly match what the backend would persist.
+ */
+export function compactFields<T = unknown>(rec: Record<string, T> | null | undefined): Record<string, T> {
+  if (!rec || typeof rec !== 'object') return {};
+  const out: Record<string, T> = {};
+  for (const [k, v] of Object.entries(rec)) {
+    if (v == null) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    out[k] = v as T;
+  }
+  return out;
+}
+
+/**
  * Best-effort parser for a JSON blob that came back from the worker. Returns
  * an empty object / array on parse failure so the caller can always rely on
  * the output shape — bad JSON should degrade gracefully in the UI, never
- * crash it.
+ * crash it. Empty / whitespace-only string values are dropped so the field
+ * counts match what compactFields() produces server-side.
  */
 function parseFields(raw: string | null | undefined): Record<string, string> {
   if (!raw) return {};
@@ -49,7 +66,9 @@ function parseFields(raw: string | null | undefined): Record<string, string> {
     const out: Record<string, string> = {};
     for (const [k, v] of Object.entries(parsed)) {
       if (v == null) continue;
-      out[k] = String(v);
+      const s = String(v);
+      if (s.trim() === '') continue;
+      out[k] = s;
     }
     return out;
   } catch {

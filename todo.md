@@ -3,7 +3,7 @@
 ## Upcoming
 
 - Full-text content search — extract text from PDFs on upload, index with Cloudflare Vectorize for semantic search ("find docs about emissions compliance")
-- Auto-categorization — AI classifies uploaded docs into document types/tags automatically on upload
+- Auto-categorization — AI classifies uploaded docs into document types/tags automatically on upload (moved to plan.md — covered by Smarter Extraction Phase 1.3 doctype promotion)
 - Document summarization — AI-generated summary shown on each document detail page
 - Product filter on documents list — requires server-side product filter support (document_products join)
 - Cron trigger for expiration alerts — configure Cloudflare Workers Cron to call POST /api/expirations/notify daily
