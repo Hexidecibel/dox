@@ -28,6 +28,113 @@ function diffApprovedVsAi(
   return false;
 }
 
+/**
+ * Persist Phase 2 reviewer-decision captures: per-field source picks,
+ * explicit dismissals, and table-level edits. Failures are logged but
+ * never block the approve flow — capture is a learning signal, not a
+ * correctness guarantee. Keeps the approve path resilient even if
+ * a capture insert hits a constraint or the DB hiccups.
+ */
+async function persistReviewerCaptures(
+  db: D1Database,
+  args: {
+    tenantId: string;
+    queueItemId: string;
+    supplierId: string | null;
+    documentTypeId: string | null;
+    userId: string;
+    fieldPicks?: FieldPickCapture[];
+    dismissals?: FieldDismissalCapture[];
+    tableEdits?: TableEditCapture[];
+  }
+): Promise<void> {
+  const now = new Date().toISOString();
+  const { tenantId, queueItemId, supplierId, documentTypeId, userId, fieldPicks, dismissals, tableEdits } = args;
+
+  for (const pick of fieldPicks ?? []) {
+    try {
+      await db
+        .prepare(
+          `INSERT INTO reviewer_field_picks
+             (id, tenant_id, queue_item_id, supplier_id, document_type_id,
+              field_key, text_value, vlm_value, chosen_source, final_value,
+              created_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          generateId(),
+          tenantId,
+          queueItemId,
+          supplierId,
+          documentTypeId,
+          pick.field_key,
+          pick.text_value ?? null,
+          pick.vlm_value ?? null,
+          pick.chosen_source,
+          pick.final_value ?? null,
+          now,
+          userId
+        )
+        .run();
+    } catch (err) {
+      console.warn(`[queue-approve] reviewer_field_picks insert failed for ${queueItemId}/${pick.field_key}:`, err);
+    }
+  }
+
+  for (const dismissal of dismissals ?? []) {
+    try {
+      await db
+        .prepare(
+          `INSERT INTO reviewer_field_dismissals
+             (id, tenant_id, queue_item_id, supplier_id, document_type_id,
+              field_key, action, created_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          generateId(),
+          tenantId,
+          queueItemId,
+          supplierId,
+          documentTypeId,
+          dismissal.field_key,
+          dismissal.action,
+          now,
+          userId
+        )
+        .run();
+    } catch (err) {
+      console.warn(`[queue-approve] reviewer_field_dismissals insert failed for ${queueItemId}/${dismissal.field_key}:`, err);
+    }
+  }
+
+  for (const edit of tableEdits ?? []) {
+    try {
+      await db
+        .prepare(
+          `INSERT INTO reviewer_table_edits
+             (id, tenant_id, queue_item_id, supplier_id, document_type_id,
+              table_idx, operation, detail, created_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          generateId(),
+          tenantId,
+          queueItemId,
+          supplierId,
+          documentTypeId,
+          edit.table_idx,
+          edit.operation,
+          JSON.stringify(edit.detail ?? {}),
+          now,
+          userId
+        )
+        .run();
+    } catch (err) {
+      console.warn(`[queue-approve] reviewer_table_edits insert failed for ${queueItemId}/${edit.operation}:`, err);
+    }
+  }
+}
+
 export interface QueueItem {
   id: string;
   tenant_id: string;
@@ -47,6 +154,34 @@ export interface QueueItem {
   tenant_slug: string;
 }
 
+/**
+ * Per-field source pick captured from the reviewer's UI. Derived at approve
+ * time by diffing the final values against text/vlm payloads. chosen_source
+ * is one of:
+ *   'text'     — final value matches the text-extraction payload
+ *   'vlm'      — final value matches the VLM payload
+ *   'edited'   — final value matches neither (manual correction)
+ *   'dismissed' — reviewer removed the field entirely
+ */
+export interface FieldPickCapture {
+  field_key: string;
+  text_value?: string | null;
+  vlm_value?: string | null;
+  chosen_source: 'text' | 'vlm' | 'edited' | 'dismissed';
+  final_value?: string | null;
+}
+
+export interface FieldDismissalCapture {
+  field_key: string;
+  action: 'dismissed' | 'extended';
+}
+
+export interface TableEditCapture {
+  table_idx: number;
+  operation: string;
+  detail: unknown;
+}
+
 export interface ApproveOptions {
   fields?: Record<string, string>;
   productName?: string;
@@ -59,6 +194,12 @@ export interface ApproveOptions {
    * reviewers pick the VLM output when dual-run is enabled.
    */
   selectedSource?: 'text' | 'vlm';
+  /** Phase 2 capture: per-field source picks derived in the UI. */
+  fieldPicks?: FieldPickCapture[];
+  /** Phase 2 capture: explicit field dismissals. */
+  dismissals?: FieldDismissalCapture[];
+  /** Phase 2 capture: table-level edits (column excludes, header renames, etc). */
+  tableEdits?: TableEditCapture[];
 }
 
 export interface ApproveResult {
@@ -74,7 +215,7 @@ export async function approveQueueItem(
   item: QueueItem,
   options: ApproveOptions
 ): Promise<ApproveResult> {
-  const { fields, productName, userId, clientIp, autoIngested, selectedSource = 'text' } = options;
+  const { fields, productName, userId, clientIp, autoIngested, selectedSource = 'text', fieldPicks, dismissals, tableEdits } = options;
 
   // Download file from pending R2 location
   const pendingFile = await downloadFile(files, item.file_r2_key);
@@ -239,6 +380,19 @@ export async function approveQueueItem(
     }
   }
 
+  // Phase 2: persist reviewer decisions (picks/dismissals/table edits).
+  // Pure capture, never blocks the approve flow on failure.
+  await persistReviewerCaptures(db, {
+    tenantId: item.tenant_id,
+    queueItemId: item.id,
+    supplierId,
+    documentTypeId: item.document_type_id,
+    userId,
+    fieldPicks,
+    dismissals,
+    tableEdits,
+  });
+
   // Update queue item status
   await db.prepare(
     `UPDATE processing_queue SET status = 'approved', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?`
@@ -285,6 +439,12 @@ export interface MultiProductApproveOptions {
   clientIp?: string;
   /** Which extraction path the user approved — see ApproveOptions.selectedSource. */
   selectedSource?: 'text' | 'vlm';
+  /** Phase 2 capture: per-field source picks derived in the UI. */
+  fieldPicks?: FieldPickCapture[];
+  /** Phase 2 capture: explicit field dismissals. */
+  dismissals?: FieldDismissalCapture[];
+  /** Phase 2 capture: table-level edits (column excludes, header renames, etc). */
+  tableEdits?: TableEditCapture[];
 }
 
 export interface MultiProductApproveResult {
@@ -303,7 +463,7 @@ export async function approveMultiProductQueueItem(
   item: QueueItem,
   options: MultiProductApproveOptions
 ): Promise<MultiProductApproveResult> {
-  const { sharedFields = {}, products, userId, clientIp, selectedSource = 'text' } = options;
+  const { sharedFields = {}, products, userId, clientIp, selectedSource = 'text', fieldPicks, dismissals, tableEdits } = options;
 
   // Download file from pending R2 location ONCE
   const pendingFile = await downloadFile(files, item.file_r2_key);
@@ -436,6 +596,18 @@ export async function approveMultiProductQueueItem(
       );
     }
   }
+
+  // Phase 2: persist reviewer decisions (picks/dismissals/table edits).
+  await persistReviewerCaptures(db, {
+    tenantId: item.tenant_id,
+    queueItemId: item.id,
+    supplierId,
+    documentTypeId: item.document_type_id,
+    userId,
+    fieldPicks,
+    dismissals,
+    tableEdits,
+  });
 
   // Update queue item status
   await db.prepare(

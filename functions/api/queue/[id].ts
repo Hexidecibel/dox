@@ -8,7 +8,7 @@ import {
 } from '../../lib/permissions';
 import { deleteFile } from '../../lib/r2';
 import { approveQueueItem, approveMultiProductQueueItem } from '../../lib/queue-approve';
-import type { QueueItem } from '../../lib/queue-approve';
+import type { QueueItem, FieldPickCapture, FieldDismissalCapture, TableEditCapture } from '../../lib/queue-approve';
 import type { Env, User } from '../../lib/types';
 import type { TemplateFieldMapping } from '../../../shared/types';
 
@@ -94,6 +94,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
        * logging; the actual approved values arrive in `fields` regardless.
        */
       selected_source?: 'text' | 'vlm';
+      /** Phase 2 capture: per-field source picks derived in the UI. */
+      field_picks?: FieldPickCapture[];
+      /** Phase 2 capture: explicit field dismissals. */
+      dismissals?: FieldDismissalCapture[];
+      /** Phase 2 capture: table-level edits (column excludes, header renames, etc). */
+      table_edits?: TableEditCapture[];
     };
 
     if (!body.status || !['approved', 'rejected'].includes(body.status)) {
@@ -122,10 +128,15 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
     if (body.status === 'approved') {
       const selectedSource: 'text' | 'vlm' = body.selected_source === 'vlm' ? 'vlm' : 'text';
+      const captures = {
+        fieldPicks: body.field_picks,
+        dismissals: body.dismissals,
+        tableEdits: body.table_edits,
+      };
       if (body.products && body.products.length > 0) {
-        return await handleMultiProductApprove(context, user, item, body.shared_fields, body.products, body.save_template, selectedSource);
+        return await handleMultiProductApprove(context, user, item, body.shared_fields, body.products, body.save_template, selectedSource, captures);
       }
-      return await handleApprove(context, user, item, body.fields, body.product_name, body.save_template, selectedSource);
+      return await handleApprove(context, user, item, body.fields, body.product_name, body.save_template, selectedSource, captures);
     } else {
       return await handleReject(context, user, item);
     }
@@ -152,7 +163,12 @@ async function handleApprove(
     auto_ingest_enabled?: boolean;
     confidence_threshold?: number;
   },
-  selectedSource: 'text' | 'vlm' = 'text'
+  selectedSource: 'text' | 'vlm' = 'text',
+  captures?: {
+    fieldPicks?: FieldPickCapture[];
+    dismissals?: FieldDismissalCapture[];
+    tableEdits?: TableEditCapture[];
+  }
 ): Promise<Response> {
   const result = await approveQueueItem(
     context.env.DB,
@@ -164,6 +180,9 @@ async function handleApprove(
       userId: user.id,
       clientIp: getClientIp(context.request),
       selectedSource,
+      fieldPicks: captures?.fieldPicks,
+      dismissals: captures?.dismissals,
+      tableEdits: captures?.tableEdits,
     }
   );
 
@@ -223,7 +242,12 @@ async function handleMultiProductApprove(
     auto_ingest_enabled?: boolean;
     confidence_threshold?: number;
   },
-  selectedSource: 'text' | 'vlm' = 'text'
+  selectedSource: 'text' | 'vlm' = 'text',
+  captures?: {
+    fieldPicks?: FieldPickCapture[];
+    dismissals?: FieldDismissalCapture[];
+    tableEdits?: TableEditCapture[];
+  }
 ): Promise<Response> {
   const result = await approveMultiProductQueueItem(
     context.env.DB,
@@ -239,6 +263,9 @@ async function handleMultiProductApprove(
       userId: user.id,
       clientIp: getClientIp(context.request),
       selectedSource,
+      fieldPicks: captures?.fieldPicks,
+      dismissals: captures?.dismissals,
+      tableEdits: captures?.tableEdits,
     }
   );
 

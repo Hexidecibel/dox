@@ -49,6 +49,8 @@ import {
   RotateRight as RotateIcon,
   Add as AddIcon,
   Edit as EditIcon,
+  ChevronLeft as ChevronLeftIcon,
+  ChevronRight as ChevronRightIcon,
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
 import ExtractionInstructionsBox from './ExtractionInstructionsBox';
@@ -62,8 +64,15 @@ import {
   readVlmPayload,
   diffFields,
   summarizeDiff,
+  hasTextExtraction,
+  hasVlmExtraction,
   type ExtractionSource,
 } from './reviewVlmDiff';
+import {
+  buildFieldPicks,
+  buildDismissals,
+  buildTableEdits,
+} from './reviewCaptureBuilder';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 
@@ -332,12 +341,19 @@ export default function ReviewQueue() {
       const result = await api.queue.list(params);
       setItems(result.items || []);
 
-      // Initialize edited fields for each item
+      // Initialize edited fields for each item. Prefer text extraction
+      // (ai_fields), but fall back to VLM extraction when only VLM ran —
+      // otherwise VLM-only items would approve with empty fields.
       const fields: Record<string, Record<string, string>> = {};
       const names: Record<string, string> = {};
       for (const item of (result.items || [])) {
         try {
-          const parsed = item.ai_fields ? JSON.parse(item.ai_fields) : {};
+          let parsed: Record<string, unknown> = {};
+          if (item.ai_fields) {
+            parsed = JSON.parse(item.ai_fields);
+          } else if ((item as any).vlm_extracted_fields) {
+            parsed = JSON.parse((item as any).vlm_extracted_fields);
+          }
           fields[item.id] = Object.fromEntries(
             Object.entries(parsed).map(([k, v]) => [k, String(v ?? '')])
           );
@@ -353,6 +369,23 @@ export default function ReviewQueue() {
       }
       setEditedFields(fields);
       setProductNames(names);
+
+      // Initialize vlmSelectedSource for single-side items. Without this,
+      // VLM-only queue items default to 'text' on approve (the historical
+      // fallback) and we'd record the wrong selected_source. Dual-extraction
+      // items keep the default unset until the user explicitly picks a side
+      // via "Use these results".
+      const initSources: Record<string, ExtractionSource> = {};
+      for (const item of (result.items || [])) {
+        const hasText = hasTextExtraction(item);
+        const hasVlm = hasVlmExtraction(item);
+        if (hasVlm && !hasText) initSources[item.id] = 'vlm';
+        else if (hasText && !hasVlm) initSources[item.id] = 'text';
+      }
+      if (Object.keys(initSources).length > 0) {
+        setVlmSelectedSource(prev => ({ ...initSources, ...prev }));
+      }
+
       // Initialize edited tables
       const tables: Record<string, ExtractedTable[]> = {};
       for (const item of (result.items || [])) {
@@ -469,10 +502,32 @@ export default function ReviewQueue() {
       // gets set to 'vlm' and we forward that to the backend.
       const selectedSource: ExtractionSource = vlmSelectedSource[id] || 'text';
 
+      // Phase 2 capture: derive per-field source picks, dismissals, and
+      // table edits from the current UI state. Pure capture — no behavior
+      // change, no blocking.
+      const textPayload = item ? readTextPayload(item) : null;
+      const vlmPayload = item ? readVlmPayload(item) : null;
+      const fieldPicks = textPayload && vlmPayload
+        ? buildFieldPicks({
+            editedFields: fields,
+            textFields: textPayload.fields,
+            vlmFields: vlmPayload.fields,
+            dismissedFields: dismissed,
+          })
+        : [];
+      const dismissalCaptures = buildDismissals(dismissed);
+      const originalTables = parseTables(id);
+      const tableEditCaptures = buildTableEdits({
+        excludedTables: excludedTables[id],
+        excludedColumns: excludedColumns[id],
+        editedTables: editedTables[id],
+        originalTables,
+      });
+
       if (isMultiProduct(id)) {
         // Multi-product approval
         const products = multiProducts[id] || [];
-        const tables = editedTables[id] || parseTables(id);
+        const tables = editedTables[id] || originalTables;
         await api.queue.approve(id, {
           shared_fields: primaryFields,
           products: products.map(p => ({
@@ -481,6 +536,9 @@ export default function ReviewQueue() {
             tables: p.tableIndices.map(i => tables[i]).filter(Boolean),
           })),
           selected_source: selectedSource,
+          field_picks: fieldPicks,
+          dismissals: dismissalCaptures,
+          table_edits: tableEditCaptures,
         });
         setSnackbar({ open: true, message: `${products.length} documents created from multi-product approval`, severity: 'success' });
       } else {
@@ -488,6 +546,9 @@ export default function ReviewQueue() {
           fields: primaryFields,
           product_name: productName || undefined,
           selected_source: selectedSource,
+          field_picks: fieldPicks,
+          dismissals: dismissalCaptures,
+          table_edits: tableEditCaptures,
         });
         setSnackbar({ open: true, message: 'Item approved and imported', severity: 'success' });
       }
@@ -1627,6 +1688,7 @@ export default function ReviewQueue() {
                                           <TableRow>
                                             <TableCell sx={{ fontWeight: 600, width: '20%' }}>Field</TableCell>
                                             <TableCell sx={{ fontWeight: 600 }}>Text</TableCell>
+                                            <TableCell sx={{ fontWeight: 600, width: 80 }}>Pick</TableCell>
                                             <TableCell sx={{ fontWeight: 600 }}>VLM</TableCell>
                                             <TableCell sx={{ fontWeight: 600, width: 60 }}></TableCell>
                                           </TableRow>
@@ -1643,6 +1705,15 @@ export default function ReviewQueue() {
                                               : row.status === 'differ' ? 'differ'
                                               : row.status === 'text_only' ? 'text only'
                                               : 'vlm only';
+                                            // Per-row picker disabled when:
+                                            //   - item not pending (already approved/rejected)
+                                            //   - that side has no value (nothing to pick)
+                                            //   - status === 'match' (both sides identical, no choice to make)
+                                            const canPickText = item.status === 'pending' && row.textValue != null;
+                                            const canPickVlm = item.status === 'pending' && row.vlmValue != null;
+                                            const currentEdited = editedFields[item.id]?.[row.key] ?? '';
+                                            const textPicked = canPickText && currentEdited === row.textValue;
+                                            const vlmPicked = canPickVlm && currentEdited === row.vlmValue;
                                             return (
                                               <TableRow key={row.key}>
                                                 <TableCell>
@@ -1650,6 +1721,34 @@ export default function ReviewQueue() {
                                                 </TableCell>
                                                 <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
                                                   {row.textValue ?? <Typography component="span" variant="caption" color="text.disabled">—</Typography>}
+                                                </TableCell>
+                                                <TableCell>
+                                                  <Box sx={{ display: 'flex', gap: 0.25 }}>
+                                                    <Tooltip title="Pick text value for this field">
+                                                      <span>
+                                                        <IconButton
+                                                          size="small"
+                                                          color={textPicked ? 'primary' : 'default'}
+                                                          disabled={!canPickText}
+                                                          onClick={() => updateField(item.id, row.key, row.textValue ?? '')}
+                                                        >
+                                                          <ChevronLeftIcon fontSize="small" />
+                                                        </IconButton>
+                                                      </span>
+                                                    </Tooltip>
+                                                    <Tooltip title="Pick VLM value for this field">
+                                                      <span>
+                                                        <IconButton
+                                                          size="small"
+                                                          color={vlmPicked ? 'secondary' : 'default'}
+                                                          disabled={!canPickVlm}
+                                                          onClick={() => updateField(item.id, row.key, row.vlmValue ?? '')}
+                                                        >
+                                                          <ChevronRightIcon fontSize="small" />
+                                                        </IconButton>
+                                                      </span>
+                                                    </Tooltip>
+                                                  </Box>
                                                 </TableCell>
                                                 <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
                                                   {row.vlmValue ?? <Typography component="span" variant="caption" color="text.disabled">—</Typography>}

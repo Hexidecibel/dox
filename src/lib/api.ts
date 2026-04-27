@@ -892,6 +892,18 @@ export const api = {
       };
       /** Which extraction source the user picked when dual-run compare was shown. Defaults to 'text'. */
       selected_source?: 'text' | 'vlm';
+      /** Phase 2 capture: per-field source picks derived in the UI. */
+      field_picks?: Array<{
+        field_key: string;
+        text_value: string | null;
+        vlm_value: string | null;
+        chosen_source: 'text' | 'vlm' | 'edited' | 'dismissed';
+        final_value: string | null;
+      }>;
+      /** Phase 2 capture: explicit field dismissals. */
+      dismissals?: Array<{ field_key: string; action: 'dismissed' | 'extended' }>;
+      /** Phase 2 capture: table-level edits (column excludes, header renames, etc). */
+      table_edits?: Array<{ table_idx: number; operation: string; detail: Record<string, unknown> }>;
     }) =>
       fetchApi<{ document?: any; documents?: any[] }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     reject: (id: string) =>
