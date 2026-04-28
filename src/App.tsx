@@ -38,6 +38,8 @@ import LearningDashboard from './pages/admin/LearningDashboard';
 import { Orders } from './pages/Orders';
 import { OrderDetail } from './pages/OrderDetail';
 import { Activity } from './pages/Activity';
+import { Sheets } from './pages/records/Sheets';
+import { SheetDetail } from './pages/records/SheetDetail';
 
 function App() {
   return (
@@ -68,6 +70,8 @@ function App() {
               <Route path="/eval/report" element={<EvalReport />} />
               <Route path="/orders" element={<Orders />} />
               <Route path="/orders/:id" element={<OrderDetail />} />
+              <Route path="/records" element={<Sheets />} />
+              <Route path="/records/:sheetId" element={<SheetDetail />} />
 
               {/* Admin routes - users management and audit for super_admin and org_admin */}
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>

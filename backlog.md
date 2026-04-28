@@ -39,3 +39,22 @@ Deferred ideas, long-term research, and items not in the daily workflow.
   or single transaction so any failure rolls back cleanly. Surfaced during
   Phase 1 staging verification when the extraction_examples doctype-NULL
   constraint half-committed a document.
+
+## Native Mobile App — Deferred
+
+- **Native mobile app for dox (iOS + Android)** — The Records module's
+  killer use case is field data capture: QC photos in a warehouse,
+  supplier intake on the floor, approvals on the go. PWA gets us most of
+  the way, but native unlocks real camera integration
+  (auto-capture/burst), push notifications for Update Requests and
+  approval requests, offline-first record creation that syncs when back
+  online, biometric auth, and deep links from email/SMS into specific
+  records.
+
+  Stack candidates TBD — leaning React Native (code reuse with the
+  existing React app) or Expo (faster dev loop); native iOS/Android out
+  of scope unless we have a specific reason. Prerequisite: dox API
+  surface needs to be 100% functional for mobile clients before native
+  makes sense — Records' REST + WebSocket + auth surface is most of it,
+  so write a "mobile-friendly API audit" task before kickoff. **Status:**
+  Backlog — revisit after Records Phase 4 ships.

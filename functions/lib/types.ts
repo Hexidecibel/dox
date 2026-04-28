@@ -7,6 +7,8 @@ export interface Env {
   QWEN_URL?: string;
   QWEN_SECRET?: string;
   CONNECTOR_ENCRYPTION_KEY?: string;
+  /** Records module: per-Sheet collaborative session relay. */
+  SHEET_SESSION: DurableObjectNamespace;
 }
 
 export interface User {

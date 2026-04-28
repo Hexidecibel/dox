@@ -11,3 +11,18 @@ database_id = "c6a4c856-0f13-4f29-8e34-f4a2c80060f0"
 [[r2_buckets]]
 binding = "FILES"
 bucket_name = "doc-upload-files-staging"
+
+# Records module — per-Sheet collaborative session relay (staging).
+# DO class is hosted by the staging twin Worker `dox-sheet-session-staging`
+# (see `workers/sheet-session/wrangler.staging.toml`). Pages cannot host
+# DO classes, hence the `script_name` cross-binding. Migrations live with
+# the Worker config — NEVER here.
+[[durable_objects.bindings]]
+name = "SHEET_SESSION"
+class_name = "SheetSession"
+script_name = "dox-sheet-session-staging"
+
+# Cloudflare Turnstile bindings (staging). Use the always-passes test
+# secret in staging via `wrangler pages secret put TURNSTILE_SECRET`.
+[vars]
+TURNSTILE_SITE_KEY = "1x00000000000000000000AA"

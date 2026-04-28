@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# Attach a custom domain to a Cloudflare Pages project, then wait for DNS
+# + cert provisioning to finish. Idempotent: if the domain is already on
+# the project we skip the create and go straight to verification.
+#
+# Usage: bin/add-pages-domain <pages-project-name> <custom-domain>
+# Env:   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID (sourced from
+#        .dev.vars if present, else expected to be exported already).
+#
+# There is no first-class `wrangler` command for Pages custom domains —
+# this is the documented REST endpoint.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [ "$#" -ne 2 ]; then
+  echo "Usage: $0 <pages-project-name> <custom-domain>" >&2
+  exit 2
+fi
+
+PAGES_PROJECT="$1"
+DOMAIN="$2"
+
+# Pull credentials from .dev.vars if present (matches sibling scripts).
+if [ -f .dev.vars ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .dev.vars
+  set +a
+fi
+
+: "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN must be set (in env or .dev.vars)}"
+: "${CLOUDFLARE_ACCOUNT_ID:?CLOUDFLARE_ACCOUNT_ID must be set (in env or .dev.vars)}"
+
+API_BASE="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${PAGES_PROJECT}/domains"
+
+echo "=== Adding custom domain to Cloudflare Pages ==="
+echo "Project: $PAGES_PROJECT"
+echo "Domain:  $DOMAIN"
+echo ""
+
+TMP_BODY=$(mktemp)
+trap 'rm -f "$TMP_BODY"' EXIT
+
+# --- Create domain (idempotent) ----------------------------------------
+HTTP_CODE=$(curl -sS -o "$TMP_BODY" -w '%{http_code}' \
+  -X POST "$API_BASE" \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data "{\"name\":\"${DOMAIN}\"}" || echo "000")
+
+echo "POST $API_BASE -> HTTP $HTTP_CODE"
+
+ALREADY_EXISTS=0
+case "$HTTP_CODE" in
+  200|201)
+    echo "Domain attachment created."
+    ;;
+  401|403)
+    echo "ERROR: Cloudflare rejected the token (HTTP $HTTP_CODE). Token likely lacks Pages:Edit on this account/project." >&2
+    cat "$TMP_BODY" >&2
+    echo >&2
+    exit 1
+    ;;
+  409)
+    echo "Domain is already attached to this project — proceeding to verification."
+    ALREADY_EXISTS=1
+    ;;
+  4*)
+    # Some "already exists" responses come back as 400 with a specific
+    # error code in the JSON body, not as 409. Detect those and treat
+    # as success too.
+    if grep -qE '"code":\s*(8000007|8000018)|already exists|already added this custom domain' "$TMP_BODY"; then
+      echo "Domain is already attached to this project (per error body) — proceeding to verification."
+      ALREADY_EXISTS=1
+    else
+      echo "ERROR: Cloudflare returned HTTP $HTTP_CODE." >&2
+      cat "$TMP_BODY" >&2
+      echo >&2
+      exit 1
+    fi
+    ;;
+  5*)
+    echo "WARN: Cloudflare 5xx ($HTTP_CODE). Retrying once after 30s..." >&2
+    sleep 30
+    HTTP_CODE=$(curl -sS -o "$TMP_BODY" -w '%{http_code}' \
+      -X POST "$API_BASE" \
+      -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+      -H "Content-Type: application/json" \
+      --data "{\"name\":\"${DOMAIN}\"}" || echo "000")
+    echo "Retry -> HTTP $HTTP_CODE"
+    if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "409" ]; then
+      echo "ERROR: Cloudflare still failing after retry." >&2
+      cat "$TMP_BODY" >&2
+      echo >&2
+      exit 1
+    fi
+    [ "$HTTP_CODE" = "409" ] && ALREADY_EXISTS=1
+    ;;
+  *)
+    echo "ERROR: Unexpected HTTP $HTTP_CODE from Cloudflare." >&2
+    cat "$TMP_BODY" >&2
+    echo >&2
+    exit 1
+    ;;
+esac
+
+# Print just the interesting result fields if we have jq, else raw body.
+echo ""
+echo "--- API response ---"
+if command -v jq >/dev/null 2>&1; then
+  jq '{success, errors, messages, result: (.result | {id, name, status, verification_data, validation_data, certificate_authority, zone_tag})}' "$TMP_BODY" 2>/dev/null \
+    || cat "$TMP_BODY"
+else
+  cat "$TMP_BODY"
+fi
+echo ""
+
+# --- Ensure CNAME exists ----------------------------------------------
+# Cloudflare Pages does NOT auto-create the DNS record for custom domains
+# even when the parent zone is on Cloudflare — the domain attachment just
+# sits in `pending` with `"CNAME record not set"` until the record exists.
+# Re-fetch the domain to grab zone_tag, then upsert a CNAME pointing at
+# <project>.pages.dev.
+echo "--- Ensuring CNAME record ---"
+DOMAIN_DETAIL=$(curl -sS \
+  "${API_BASE}/${DOMAIN}" \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
+ZONE_TAG=$(echo "$DOMAIN_DETAIL" | jq -r '.result.zone_tag // empty')
+
+if [ -z "$ZONE_TAG" ]; then
+  echo "ERROR: could not determine zone_tag for $DOMAIN — is the parent zone on this Cloudflare account?" >&2
+  echo "$DOMAIN_DETAIL" >&2
+  exit 1
+fi
+
+CNAME_TARGET="${PAGES_PROJECT}.pages.dev"
+DNS_API="https://api.cloudflare.com/client/v4/zones/${ZONE_TAG}/dns_records"
+
+# Look for an existing record on this exact name.
+EXISTING=$(curl -sS "${DNS_API}?name=${DOMAIN}" \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
+EXISTING_ID=$(echo "$EXISTING" | jq -r '.result[0].id // empty')
+EXISTING_TYPE=$(echo "$EXISTING" | jq -r '.result[0].type // empty')
+EXISTING_CONTENT=$(echo "$EXISTING" | jq -r '.result[0].content // empty')
+
+DNS_BODY=$(printf '{"type":"CNAME","name":"%s","content":"%s","proxied":true,"ttl":1}' "$DOMAIN" "$CNAME_TARGET")
+
+if [ -z "$EXISTING_ID" ]; then
+  echo "Creating CNAME ${DOMAIN} -> ${CNAME_TARGET} (proxied)..."
+  CREATE_RESP=$(curl -sS -X POST "$DNS_API" \
+    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    --data "$DNS_BODY")
+  if [ "$(echo "$CREATE_RESP" | jq -r '.success')" != "true" ]; then
+    echo "ERROR: failed to create CNAME." >&2
+    echo "$CREATE_RESP" >&2
+    exit 1
+  fi
+  echo "CNAME created."
+elif [ "$EXISTING_TYPE" = "CNAME" ] && [ "$EXISTING_CONTENT" = "$CNAME_TARGET" ]; then
+  echo "CNAME already correct: ${DOMAIN} -> ${EXISTING_CONTENT}"
+else
+  echo "Updating existing record ($EXISTING_TYPE -> CNAME, $EXISTING_CONTENT -> $CNAME_TARGET)..."
+  UPDATE_RESP=$(curl -sS -X PUT "${DNS_API}/${EXISTING_ID}" \
+    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    --data "$DNS_BODY")
+  if [ "$(echo "$UPDATE_RESP" | jq -r '.success')" != "true" ]; then
+    echo "ERROR: failed to update DNS record." >&2
+    echo "$UPDATE_RESP" >&2
+    exit 1
+  fi
+  echo "CNAME updated."
+fi
+echo ""
+
+# --- Poll for live HTTPS ----------------------------------------------
+echo "=== Waiting for DNS + SSL to come live (up to 5 minutes) ==="
+START_TS=$(date +%s)
+DEADLINE=$((START_TS + 300))
+LAST_NUDGE=$START_TS
+DNS_OK=0
+HTTPS_OK=0
+
+while :; do
+  NOW=$(date +%s)
+  ELAPSED=$((NOW - START_TS))
+
+  # 1. DNS resolution. Query a public resolver directly (1.1.1.1) so we
+  #    don't get fooled by a stale local stub resolver / negative cache.
+  if [ "$DNS_OK" -eq 0 ]; then
+    RESOLVED=$(dig +short +time=3 +tries=1 @1.1.1.1 "$DOMAIN" | tr '\n' ' ')
+    if [ -n "${RESOLVED// /}" ]; then
+      echo "[+${ELAPSED}s] DNS resolves (via 1.1.1.1): $RESOLVED"
+      DNS_OK=1
+      # Pick the first A/CNAME-resolved IP for --resolve so curl doesn't
+      # rely on the local stub resolver either.
+      RESOLVED_IP=$(echo "$RESOLVED" | awk '{print $NF}')
+    fi
+  fi
+
+  # 2. HTTPS handshake + 2xx/3xx response.
+  if [ "$DNS_OK" -eq 1 ] && [ "$HTTPS_OK" -eq 0 ]; then
+    CURL_ARGS=( -sS -o /dev/null -w '%{http_code}' --max-time 10 )
+    if [ -n "${RESOLVED_IP:-}" ]; then
+      CURL_ARGS+=( --resolve "${DOMAIN}:443:${RESOLVED_IP}" )
+    fi
+    CODE=$(curl "${CURL_ARGS[@]}" "https://${DOMAIN}/" 2>/dev/null || echo "000")
+    if [ "$CODE" = "200" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ] || [ "$CODE" = "304" ]; then
+      echo "[+${ELAPSED}s] HTTPS up: GET / -> $CODE"
+      HTTPS_OK=1
+      break
+    fi
+  fi
+
+  if [ "$NOW" -ge "$DEADLINE" ]; then
+    echo "ERROR: Timed out after 5 minutes (DNS_OK=$DNS_OK, HTTPS_OK=$HTTPS_OK)." >&2
+    exit 1
+  fi
+
+  if [ $((NOW - LAST_NUDGE)) -ge 30 ]; then
+    if [ "$DNS_OK" -eq 0 ]; then
+      echo "[+${ELAPSED}s] still waiting for DNS to propagate for $DOMAIN..."
+    else
+      echo "[+${ELAPSED}s] DNS resolved; still waiting on HTTPS / cert provisioning..."
+    fi
+    LAST_NUDGE=$NOW
+  fi
+
+  sleep 5
+done
+
+echo ""
+echo "=== Done ==="
+if [ "$ALREADY_EXISTS" -eq 1 ]; then
+  echo "Status: domain was already attached; verified live."
+else
+  echo "Status: freshly attached and verified live."
+fi
+echo "URL: https://${DOMAIN}/"

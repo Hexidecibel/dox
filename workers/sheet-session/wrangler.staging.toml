@@ -1,0 +1,15 @@
+name = "dox-sheet-session-staging"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Staging twin of dox-sheet-session. The staging Pages project
+# (`doc-upload-site-staging`) binds to this Worker via `script_name`.
+
+[[durable_objects.bindings]]
+name = "SHEET_SESSION"
+class_name = "SheetSession"
+
+# SQLite-backed DO storage (required on the free plan; works on paid too).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SheetSession"]

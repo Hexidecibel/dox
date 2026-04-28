@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+# Seed realistic Records sample data into the staging D1
+# (doc-upload-db-staging) for evaluating the Records list page and the
+# upcoming Grid view against data that mirrors the partner's actual
+# Smartsheet workflow.
+#
+# Idempotent: every INSERT keys on a stable id and uses
+# ON CONFLICT(id) DO UPDATE SET ... so re-running converges. Safe to
+# re-run after schema migrations or while iterating on copy.
+#
+# Scope: tenant_id='default' only. Never touches other tenants, never
+# touches prod (uses --config=wrangler.staging.toml which targets
+# doc-upload-db-staging).
+#
+# Tables touched:
+#   suppliers, products
+#   records_sheets, records_columns, records_rows, records_row_refs,
+#   records_views, records_activity
+# Tables intentionally skipped (per spec):
+#   records_row_attachments, records_comments, plus any
+#   forms/workflows/automations tables which don't exist yet (Phase 2/3).
+#
+# Usage:
+#   ./bin/seed-records-staging
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+STAGING_DB="doc-upload-db-staging"
+WRANGLER_CFG="wrangler.staging.toml"
+TENANT_ID="default"
+
+echo "==> Seeding Records sample data into ${STAGING_DB}"
+
+# --- Pre-flight: confirm default tenant exists ---------------------
+TENANT_CHECK=$(npx wrangler d1 execute "$STAGING_DB" --remote --config="$WRANGLER_CFG" \
+  --command="SELECT COUNT(*) as n FROM tenants WHERE id='${TENANT_ID}';" 2>/dev/null \
+  | grep -oE '"n": *[0-9]+' | grep -oE '[0-9]+' || echo "0")
+if [ "${TENANT_CHECK}" = "0" ]; then
+  echo "ERROR: tenant '${TENANT_ID}' missing in ${STAGING_DB}. Run bin/seed-staging first."
+  exit 1
+fi
+
+TMPFILE=$(mktemp /tmp/seed-records-staging.XXXXXX.sql)
+trap "rm -f $TMPFILE" EXIT
+
+# ------------------------------------------------------------------
+# Step 1: suppliers + products (idempotent via stable IDs)
+# ------------------------------------------------------------------
+cat > "$TMPFILE" <<'SQL'
+-- =========================================================
+-- SUPPLIERS (tenant=default)
+-- =========================================================
+INSERT INTO suppliers (id, tenant_id, name, slug, aliases, active)
+VALUES
+  ('sup-auburn',    'default', 'Auburn Dairy Products', 'auburn-dairy-products', NULL, 1),
+  ('sup-pacific',   'default', 'Pacific Coast Foods',   'pacific-coast-foods',   NULL, 1),
+  ('sup-northern',  'default', 'Northern Mills Co.',    'northern-mills-co',     NULL, 1),
+  ('sup-riverside', 'default', 'Riverside Packaging',   'riverside-packaging',   NULL, 1)
+ON CONFLICT(id) DO UPDATE SET
+  name=excluded.name, slug=excluded.slug, active=1, updated_at=datetime('now');
+
+-- =========================================================
+-- PRODUCTS (tenant=default)
+-- =========================================================
+INSERT INTO products (id, tenant_id, name, slug, description, active)
+VALUES
+  ('prod-yogurt-32oz',  'default', 'Yogurt 32oz',     'yogurt-32oz',     'Plain whole-milk yogurt, 32oz cup', 1),
+  ('prod-cheese-block', 'default', 'Cheese Block 5lb','cheese-block-5lb','Cheddar block, 5lb',                1),
+  ('prod-milk-gallon',  'default', 'Milk Gallon',     'milk-gallon',     'Whole milk, 1gal jug',              1),
+  ('prod-kraft-roll',   'default', 'Kraft Paper Roll','kraft-paper-roll','Brown kraft roll, 36in wide',       1)
+ON CONFLICT(id) DO UPDATE SET
+  name=excluded.name, slug=excluded.slug, description=excluded.description, active=1, updated_at=datetime('now');
+
+-- =========================================================
+-- SHEETS
+-- =========================================================
+INSERT INTO records_sheets (id, tenant_id, name, slug, description, icon, color, template_key, archived)
+VALUES
+  ('sheet-quality', 'default', 'Quality Intake', 'quality-intake',
+   'Customer complaints and quality issues, captured as they come in. One row per incident.',
+   NULL, NULL, NULL, 0),
+  ('sheet-credits', 'default', 'Quality Credit Tracker', 'quality-credit-tracker',
+   'Vendor credit requests stemming from quality incidents. Owned by accounting; sourced from Quality Intake.',
+   NULL, NULL, NULL, 0),
+  ('sheet-audit', 'default', 'Supplier Audit Schedule', 'supplier-audit-schedule',
+   'Quarterly supplier audit calendar and outcomes.',
+   NULL, NULL, NULL, 0)
+ON CONFLICT(id) DO UPDATE SET
+  name=excluded.name, slug=excluded.slug, description=excluded.description, archived=0, updated_at=datetime('now');
+
+-- =========================================================
+-- COLUMNS — Sheet 1: Quality Intake
+-- =========================================================
+INSERT INTO records_columns (id, sheet_id, tenant_id, key, label, type, config, required, is_title, display_order)
+VALUES
+  ('col-qi-date',     'sheet-quality', 'default', 'date_reported', 'Date Reported', 'date',            NULL,                                                                                                                                                                                                                                                                  0, 0, 1),
+  ('col-qi-customer', 'sheet-quality', 'default', 'customer',      'Customer',      'text',            NULL,                                                                                                                                                                                                                                                                  0, 1, 2),
+  ('col-qi-supplier', 'sheet-quality', 'default', 'supplier',      'Supplier',      'supplier_ref',    NULL,                                                                                                                                                                                                                                                                  0, 0, 3),
+  ('col-qi-product',  'sheet-quality', 'default', 'product',       'Product',       'product_ref',     NULL,                                                                                                                                                                                                                                                                  0, 0, 4),
+  ('col-qi-issue',    'sheet-quality', 'default', 'issue_type',    'Issue Type',    'dropdown_single', '{"options":[{"value":"Mold"},{"value":"Off-flavor"},{"value":"Packaging defect"},{"value":"Foreign material"},{"value":"Other"}]}',                                                                                                                                       0, 0, 5),
+  ('col-qi-severity', 'sheet-quality', 'default', 'severity',      'Severity',      'dropdown_single', '{"options":[{"value":"Low"},{"value":"Medium"},{"value":"High"},{"value":"Critical"}]}',                                                                                                                                                                                 0, 0, 6),
+  ('col-qi-status',   'sheet-quality', 'default', 'status',        'Status',        'dropdown_single', '{"options":[{"value":"Open"},{"value":"Investigating"},{"value":"Awaiting supplier"},{"value":"Resolved"},{"value":"Closed"}]}',                                                                                                                                          0, 0, 7),
+  ('col-qi-notes',    'sheet-quality', 'default', 'notes',         'Notes',         'long_text',       NULL,                                                                                                                                                                                                                                                                  0, 0, 8)
+ON CONFLICT(id) DO UPDATE SET
+  key=excluded.key, label=excluded.label, type=excluded.type, config=excluded.config,
+  is_title=excluded.is_title, display_order=excluded.display_order, archived=0, updated_at=datetime('now');
+
+-- =========================================================
+-- COLUMNS — Sheet 2: Quality Credit Tracker
+-- =========================================================
+INSERT INTO records_columns (id, sheet_id, tenant_id, key, label, type, config, required, is_title, display_order)
+VALUES
+  ('col-cr-date',    'sheet-credits', 'default', 'request_date',    'Request Date',   'date',            NULL,                                                                                                                                                                                                                              0, 0, 1),
+  ('col-cr-vendor',  'sheet-credits', 'default', 'vendor',          'Vendor',         'supplier_ref',    NULL,                                                                                                                                                                                                                              0, 1, 2),
+  ('col-cr-amount',  'sheet-credits', 'default', 'amount_usd',      'Amount (USD)',   'number',          '{"format":"currency","currency_code":"USD","precision":2}',                                                                                                                                                                       0, 0, 3),
+  ('col-cr-reason',  'sheet-credits', 'default', 'reason',          'Reason',         'long_text',       NULL,                                                                                                                                                                                                                              0, 0, 4),
+  ('col-cr-status',  'sheet-credits', 'default', 'status',          'Status',         'dropdown_single', '{"options":[{"value":"Pending submission"},{"value":"Submitted"},{"value":"Approved"},{"value":"Paid"},{"value":"Denied"}]}',                                                                                                       0, 0, 5),
+  ('col-cr-source',  'sheet-credits', 'default', 'source_incident', 'Source Incident','record_ref',      '{"target_sheet_id":"sheet-quality"}',                                                                                                                                                                                              0, 0, 6)
+ON CONFLICT(id) DO UPDATE SET
+  key=excluded.key, label=excluded.label, type=excluded.type, config=excluded.config,
+  is_title=excluded.is_title, display_order=excluded.display_order, archived=0, updated_at=datetime('now');
+
+-- =========================================================
+-- COLUMNS — Sheet 3: Supplier Audit Schedule
+-- =========================================================
+INSERT INTO records_columns (id, sheet_id, tenant_id, key, label, type, config, required, is_title, display_order)
+VALUES
+  ('col-au-date',     'sheet-audit', 'default', 'audit_date',   'Audit Date',    'date',            NULL,                                                                                                                                                                                                                                                                                                                                                                  0, 0, 1),
+  ('col-au-supplier', 'sheet-audit', 'default', 'supplier',     'Supplier',      'supplier_ref',    NULL,                                                                                                                                                                                                                                                                                                                                                                  0, 1, 2),
+  ('col-au-lead',     'sheet-audit', 'default', 'lead_auditor', 'Lead Auditor',  'text',            NULL,                                                                                                                                                                                                                                                                                                                                                                  0, 0, 3),
+  ('col-au-type',     'sheet-audit', 'default', 'audit_type',   'Audit Type',    'dropdown_single', '{"options":[{"value":"Initial"},{"value":"Annual"},{"value":"Follow-up"},{"value":"For-cause"}]}',                                                                                                                                                                                                                                                                  0, 0, 4),
+  ('col-au-outcome',  'sheet-audit', 'default', 'outcome',      'Outcome',       'dropdown_single', '{"options":[{"value":"Scheduled"},{"value":"In progress"},{"value":"Pass"},{"value":"Pass with findings"},{"value":"Fail"},{"value":"Cancelled"}]}',                                                                                                                                                                                                                  0, 0, 5)
+ON CONFLICT(id) DO UPDATE SET
+  key=excluded.key, label=excluded.label, type=excluded.type, config=excluded.config,
+  is_title=excluded.is_title, display_order=excluded.display_order, archived=0, updated_at=datetime('now');
+
+-- =========================================================
+-- ROWS — Sheet 1: Quality Intake
+-- (data is JSON keyed by column.key; supplier/product values are entity IDs.)
+-- =========================================================
+INSERT INTO records_rows (id, sheet_id, tenant_id, display_title, data, position, created_at, updated_at)
+VALUES
+  ('row-qi-1', 'sheet-quality', 'default', 'Whole Foods Bellevue',
+   '{"date_reported":"2026-04-10","customer":"Whole Foods Bellevue","supplier":"sup-auburn","product":"prod-yogurt-32oz","issue_type":"Mold","severity":"High","status":"Investigating","notes":"Customer found mold inside three sealed cups, lot DA-0410. Photos requested."}',
+   1, '2026-04-10 09:15:00', '2026-04-11 14:22:00'),
+  ('row-qi-2', 'sheet-quality', 'default', 'Costco Kirkland',
+   '{"date_reported":"2026-04-15","customer":"Costco Kirkland","supplier":"sup-auburn","product":"prod-yogurt-32oz","issue_type":"Mold","severity":"High","status":"Awaiting supplier","notes":"Same supplier, different lot. Trending issue. Reaching out."}',
+   2, '2026-04-15 10:40:00', '2026-04-16 11:05:00'),
+  ('row-qi-3', 'sheet-quality', 'default', 'PCC Edmonds',
+   '{"date_reported":"2026-04-18","customer":"PCC Edmonds","supplier":"sup-pacific","product":"prod-cheese-block","issue_type":"Off-flavor","severity":"Medium","status":"Resolved","notes":"Customer credited. Single batch, supplier confirmed root cause."}',
+   3, '2026-04-18 13:30:00', '2026-04-20 09:00:00'),
+  ('row-qi-4', 'sheet-quality', 'default', 'Town & Country Mill Creek',
+   '{"date_reported":"2026-04-21","customer":"Town & Country Mill Creek","supplier":"sup-northern","product":"prod-milk-gallon","issue_type":"Packaging defect","severity":"Low","status":"Resolved","notes":"Cap loose on one unit, customer satisfied with replacement."}',
+   4, '2026-04-21 08:55:00', '2026-04-22 16:10:00'),
+  ('row-qi-5', 'sheet-quality', 'default', 'Met Market',
+   '{"date_reported":"2026-04-24","customer":"Met Market","supplier":"sup-auburn","product":"prod-yogurt-32oz","issue_type":"Mold","severity":"Critical","status":"Open","notes":"Third mold incident this month from same supplier. Escalated."}',
+   5, '2026-04-24 15:20:00', '2026-04-24 15:20:00'),
+  ('row-qi-6', 'sheet-quality', 'default', 'Whole Foods Roosevelt',
+   '{"date_reported":"2026-04-26","customer":"Whole Foods Roosevelt","supplier":"sup-riverside","product":"prod-kraft-roll","issue_type":"Foreign material","severity":"Medium","status":"Open","notes":"Customer complaint about debris in packaging."}',
+   6, '2026-04-26 11:45:00', '2026-04-26 11:45:00')
+ON CONFLICT(id) DO UPDATE SET
+  display_title=excluded.display_title, data=excluded.data,
+  position=excluded.position, archived=0, updated_at=excluded.updated_at;
+
+-- =========================================================
+-- ROWS — Sheet 2: Quality Credit Tracker
+-- (source_incident points at row-qi-* IDs, exercising record_ref.)
+-- =========================================================
+INSERT INTO records_rows (id, sheet_id, tenant_id, display_title, data, position, created_at, updated_at)
+VALUES
+  ('row-cr-1', 'sheet-credits', 'default', 'Auburn Dairy Products',
+   '{"request_date":"2026-04-12","vendor":"sup-auburn","amount_usd":1240.00,"reason":"Mold incident at Whole Foods Bellevue, lot DA-0410","status":"Submitted","source_incident":"row-qi-1"}',
+   1, '2026-04-12 10:00:00', '2026-04-13 09:30:00'),
+  ('row-cr-2', 'sheet-credits', 'default', 'Pacific Coast Foods',
+   '{"request_date":"2026-04-19","vendor":"sup-pacific","amount_usd":580.00,"reason":"Off-flavor batch resolved with replacement","status":"Paid","source_incident":"row-qi-3"}',
+   2, '2026-04-19 11:30:00', '2026-04-23 15:45:00'),
+  ('row-cr-3', 'sheet-credits', 'default', 'Northern Mills Co.',
+   '{"request_date":"2026-04-22","vendor":"sup-northern","amount_usd":95.00,"reason":"Single unit packaging defect, customer goodwill credit","status":"Approved","source_incident":"row-qi-4"}',
+   3, '2026-04-22 14:00:00', '2026-04-25 10:10:00'),
+  ('row-cr-4', 'sheet-credits', 'default', 'Auburn Dairy Products',
+   '{"request_date":"2026-04-25","vendor":"sup-auburn","amount_usd":2400.00,"reason":"Critical mold escalation, multi-store impact","status":"Pending submission","source_incident":"row-qi-5"}',
+   4, '2026-04-25 09:25:00', '2026-04-25 09:25:00')
+ON CONFLICT(id) DO UPDATE SET
+  display_title=excluded.display_title, data=excluded.data,
+  position=excluded.position, archived=0, updated_at=excluded.updated_at;
+
+-- =========================================================
+-- ROWS — Sheet 3: Supplier Audit Schedule
+-- =========================================================
+INSERT INTO records_rows (id, sheet_id, tenant_id, display_title, data, position, created_at, updated_at)
+VALUES
+  ('row-au-1', 'sheet-audit', 'default', 'Auburn Dairy Products',
+   '{"audit_date":"2026-03-15","supplier":"sup-auburn","lead_auditor":"Sarah Chen","audit_type":"For-cause","outcome":"Pass with findings"}',
+   1, '2026-03-01 08:00:00', '2026-03-16 17:00:00'),
+  ('row-au-2', 'sheet-audit', 'default', 'Pacific Coast Foods',
+   '{"audit_date":"2026-04-02","supplier":"sup-pacific","lead_auditor":"Mike Rodriguez","audit_type":"Annual","outcome":"Pass"}',
+   2, '2026-03-20 09:00:00', '2026-04-02 18:00:00'),
+  ('row-au-3', 'sheet-audit', 'default', 'Northern Mills Co.',
+   '{"audit_date":"2026-04-30","supplier":"sup-northern","lead_auditor":"Sarah Chen","audit_type":"Annual","outcome":"Scheduled"}',
+   3, '2026-04-05 09:00:00', '2026-04-05 09:00:00'),
+  ('row-au-4', 'sheet-audit', 'default', 'Riverside Packaging',
+   '{"audit_date":"2026-05-12","supplier":"sup-riverside","lead_auditor":"Diane Park","audit_type":"Initial","outcome":"Scheduled"}',
+   4, '2026-04-10 10:30:00', '2026-04-10 10:30:00'),
+  ('row-au-5', 'sheet-audit', 'default', 'Auburn Dairy Products',
+   '{"audit_date":"2026-06-01","supplier":"sup-auburn","lead_auditor":"Sarah Chen","audit_type":"Follow-up","outcome":"Scheduled"}',
+   5, '2026-04-12 11:00:00', '2026-04-12 11:00:00')
+ON CONFLICT(id) DO UPDATE SET
+  display_title=excluded.display_title, data=excluded.data,
+  position=excluded.position, archived=0, updated_at=excluded.updated_at;
+
+-- =========================================================
+-- ROW REFS — mirror entity-typed cell values into records_row_refs
+-- so the reverse-lookup index works without scanning JSON.
+-- ref_type is one of: supplier, product, document, record, contact.
+-- Idempotent via stable id = "ref-<row>-<col>".
+-- =========================================================
+
+-- Sheet 1: supplier_ref + product_ref
+INSERT INTO records_row_refs (id, tenant_id, sheet_id, row_id, column_key, ref_type, ref_id) VALUES
+  ('ref-row-qi-1-supplier', 'default','sheet-quality','row-qi-1','supplier','supplier','sup-auburn'),
+  ('ref-row-qi-1-product',  'default','sheet-quality','row-qi-1','product', 'product', 'prod-yogurt-32oz'),
+  ('ref-row-qi-2-supplier', 'default','sheet-quality','row-qi-2','supplier','supplier','sup-auburn'),
+  ('ref-row-qi-2-product',  'default','sheet-quality','row-qi-2','product', 'product', 'prod-yogurt-32oz'),
+  ('ref-row-qi-3-supplier', 'default','sheet-quality','row-qi-3','supplier','supplier','sup-pacific'),
+  ('ref-row-qi-3-product',  'default','sheet-quality','row-qi-3','product', 'product', 'prod-cheese-block'),
+  ('ref-row-qi-4-supplier', 'default','sheet-quality','row-qi-4','supplier','supplier','sup-northern'),
+  ('ref-row-qi-4-product',  'default','sheet-quality','row-qi-4','product', 'product', 'prod-milk-gallon'),
+  ('ref-row-qi-5-supplier', 'default','sheet-quality','row-qi-5','supplier','supplier','sup-auburn'),
+  ('ref-row-qi-5-product',  'default','sheet-quality','row-qi-5','product', 'product', 'prod-yogurt-32oz'),
+  ('ref-row-qi-6-supplier', 'default','sheet-quality','row-qi-6','supplier','supplier','sup-riverside'),
+  ('ref-row-qi-6-product',  'default','sheet-quality','row-qi-6','product', 'product', 'prod-kraft-roll')
+ON CONFLICT(id) DO UPDATE SET ref_type=excluded.ref_type, ref_id=excluded.ref_id;
+
+-- Sheet 2: vendor (supplier_ref) + source_incident (record_ref)
+INSERT INTO records_row_refs (id, tenant_id, sheet_id, row_id, column_key, ref_type, ref_id) VALUES
+  ('ref-row-cr-1-vendor', 'default','sheet-credits','row-cr-1','vendor',         'supplier','sup-auburn'),
+  ('ref-row-cr-1-source', 'default','sheet-credits','row-cr-1','source_incident','record',  'row-qi-1'),
+  ('ref-row-cr-2-vendor', 'default','sheet-credits','row-cr-2','vendor',         'supplier','sup-pacific'),
+  ('ref-row-cr-2-source', 'default','sheet-credits','row-cr-2','source_incident','record',  'row-qi-3'),
+  ('ref-row-cr-3-vendor', 'default','sheet-credits','row-cr-3','vendor',         'supplier','sup-northern'),
+  ('ref-row-cr-3-source', 'default','sheet-credits','row-cr-3','source_incident','record',  'row-qi-4'),
+  ('ref-row-cr-4-vendor', 'default','sheet-credits','row-cr-4','vendor',         'supplier','sup-auburn'),
+  ('ref-row-cr-4-source', 'default','sheet-credits','row-cr-4','source_incident','record',  'row-qi-5')
+ON CONFLICT(id) DO UPDATE SET ref_type=excluded.ref_type, ref_id=excluded.ref_id;
+
+-- Sheet 3: supplier_ref only
+INSERT INTO records_row_refs (id, tenant_id, sheet_id, row_id, column_key, ref_type, ref_id) VALUES
+  ('ref-row-au-1-supplier','default','sheet-audit','row-au-1','supplier','supplier','sup-auburn'),
+  ('ref-row-au-2-supplier','default','sheet-audit','row-au-2','supplier','supplier','sup-pacific'),
+  ('ref-row-au-3-supplier','default','sheet-audit','row-au-3','supplier','supplier','sup-northern'),
+  ('ref-row-au-4-supplier','default','sheet-audit','row-au-4','supplier','supplier','sup-riverside'),
+  ('ref-row-au-5-supplier','default','sheet-audit','row-au-5','supplier','supplier','sup-auburn')
+ON CONFLICT(id) DO UPDATE SET ref_type=excluded.ref_type, ref_id=excluded.ref_id;
+
+-- =========================================================
+-- DEFAULT GRID VIEWS (one per sheet, shared, default)
+-- config: sort by display_order=1 column ascending, all columns visible
+-- (visible_columns omitted = all visible per API convention).
+-- =========================================================
+INSERT INTO records_views (id, sheet_id, tenant_id, name, view_type, config, is_default, shared)
+VALUES
+  ('view-quality-grid', 'sheet-quality', 'default', 'Grid', 'grid',
+   '{"filters":[],"sorts":[{"column_key":"date_reported","direction":"asc"}],"row_height":"medium"}', 1, 1),
+  ('view-credits-grid', 'sheet-credits', 'default', 'Grid', 'grid',
+   '{"filters":[],"sorts":[{"column_key":"request_date","direction":"asc"}],"row_height":"medium"}', 1, 1),
+  ('view-audit-grid',   'sheet-audit',   'default', 'Grid', 'grid',
+   '{"filters":[],"sorts":[{"column_key":"audit_date","direction":"asc"}],"row_height":"medium"}',   1, 1)
+ON CONFLICT(id) DO UPDATE SET
+  name=excluded.name, view_type=excluded.view_type, config=excluded.config,
+  is_default=1, shared=1, updated_at=datetime('now');
+
+-- =========================================================
+-- ACTIVITY — one "created" entry per row + "updated" entries for rows
+-- whose status moved (resolved / awaiting / investigating). Stable id
+-- = "act-<row>-<kind>" so re-runs converge.
+-- details JSON shape per kind:
+--   created -> {} (or omitted)
+--   updated -> {"column":"status","from":"...","to":"..."}
+-- =========================================================
+INSERT INTO records_activity (id, tenant_id, sheet_id, row_id, actor_id, kind, details, created_at) VALUES
+  -- Sheet 1: created
+  ('act-row-qi-1-created','default','sheet-quality','row-qi-1',NULL,'created',NULL,'2026-04-10 09:15:00'),
+  ('act-row-qi-2-created','default','sheet-quality','row-qi-2',NULL,'created',NULL,'2026-04-15 10:40:00'),
+  ('act-row-qi-3-created','default','sheet-quality','row-qi-3',NULL,'created',NULL,'2026-04-18 13:30:00'),
+  ('act-row-qi-4-created','default','sheet-quality','row-qi-4',NULL,'created',NULL,'2026-04-21 08:55:00'),
+  ('act-row-qi-5-created','default','sheet-quality','row-qi-5',NULL,'created',NULL,'2026-04-24 15:20:00'),
+  ('act-row-qi-6-created','default','sheet-quality','row-qi-6',NULL,'created',NULL,'2026-04-26 11:45:00'),
+  -- Sheet 1: status transitions
+  ('act-row-qi-1-updated','default','sheet-quality','row-qi-1',NULL,'updated','{"column":"status","from":"Open","to":"Investigating"}','2026-04-11 14:22:00'),
+  ('act-row-qi-2-updated','default','sheet-quality','row-qi-2',NULL,'updated','{"column":"status","from":"Open","to":"Awaiting supplier"}','2026-04-16 11:05:00'),
+  ('act-row-qi-3-updated','default','sheet-quality','row-qi-3',NULL,'updated','{"column":"status","from":"Investigating","to":"Resolved"}','2026-04-20 09:00:00'),
+  ('act-row-qi-4-updated','default','sheet-quality','row-qi-4',NULL,'updated','{"column":"status","from":"Open","to":"Resolved"}','2026-04-22 16:10:00'),
+
+  -- Sheet 2: created
+  ('act-row-cr-1-created','default','sheet-credits','row-cr-1',NULL,'created',NULL,'2026-04-12 10:00:00'),
+  ('act-row-cr-2-created','default','sheet-credits','row-cr-2',NULL,'created',NULL,'2026-04-19 11:30:00'),
+  ('act-row-cr-3-created','default','sheet-credits','row-cr-3',NULL,'created',NULL,'2026-04-22 14:00:00'),
+  ('act-row-cr-4-created','default','sheet-credits','row-cr-4',NULL,'created',NULL,'2026-04-25 09:25:00'),
+  -- Sheet 2: status transitions
+  ('act-row-cr-1-updated','default','sheet-credits','row-cr-1',NULL,'updated','{"column":"status","from":"Pending submission","to":"Submitted"}','2026-04-13 09:30:00'),
+  ('act-row-cr-2-updated','default','sheet-credits','row-cr-2',NULL,'updated','{"column":"status","from":"Submitted","to":"Paid"}','2026-04-23 15:45:00'),
+  ('act-row-cr-3-updated','default','sheet-credits','row-cr-3',NULL,'updated','{"column":"status","from":"Submitted","to":"Approved"}','2026-04-25 10:10:00'),
+
+  -- Sheet 3: created
+  ('act-row-au-1-created','default','sheet-audit','row-au-1',NULL,'created',NULL,'2026-03-01 08:00:00'),
+  ('act-row-au-2-created','default','sheet-audit','row-au-2',NULL,'created',NULL,'2026-03-20 09:00:00'),
+  ('act-row-au-3-created','default','sheet-audit','row-au-3',NULL,'created',NULL,'2026-04-05 09:00:00'),
+  ('act-row-au-4-created','default','sheet-audit','row-au-4',NULL,'created',NULL,'2026-04-10 10:30:00'),
+  ('act-row-au-5-created','default','sheet-audit','row-au-5',NULL,'created',NULL,'2026-04-12 11:00:00'),
+  -- Sheet 3: outcome transitions for completed audits
+  ('act-row-au-1-updated','default','sheet-audit','row-au-1',NULL,'updated','{"column":"outcome","from":"In progress","to":"Pass with findings"}','2026-03-16 17:00:00'),
+  ('act-row-au-2-updated','default','sheet-audit','row-au-2',NULL,'updated','{"column":"outcome","from":"Scheduled","to":"Pass"}','2026-04-02 18:00:00')
+ON CONFLICT(id) DO UPDATE SET
+  kind=excluded.kind, details=excluded.details, created_at=excluded.created_at;
+SQL
+
+# ------------------------------------------------------------------
+# Apply the seed via wrangler (--remote = staging cloud DB)
+# ------------------------------------------------------------------
+echo "==> Applying seed SQL to ${STAGING_DB} (remote)..."
+npx wrangler d1 execute "$STAGING_DB" --remote --config="$WRANGLER_CFG" --file="$TMPFILE"
+
+# ------------------------------------------------------------------
+# Verification
+# ------------------------------------------------------------------
+echo ""
+echo "==> Verification queries:"
+
+echo "-- Sheets:"
+npx wrangler d1 execute "$STAGING_DB" --remote --config="$WRANGLER_CFG" \
+  --command="SELECT id, name FROM records_sheets WHERE tenant_id='default' ORDER BY id;" 2>/dev/null \
+  | grep -E '"id"|"name"' | head -10
+
+echo "-- Columns per sheet:"
+npx wrangler d1 execute "$STAGING_DB" --remote --config="$WRANGLER_CFG" \
+  --command="SELECT sheet_id, COUNT(*) as n FROM records_columns WHERE tenant_id='default' GROUP BY sheet_id ORDER BY sheet_id;" 2>/dev/null \
+  | grep -E '"sheet_id"|"n"' | head -10
+
+echo "-- Rows per sheet:"
+npx wrangler d1 execute "$STAGING_DB" --remote --config="$WRANGLER_CFG" \
+  --command="SELECT sheet_id, COUNT(*) as n FROM records_rows WHERE tenant_id='default' GROUP BY sheet_id ORDER BY sheet_id;" 2>/dev/null \
+  | grep -E '"sheet_id"|"n"' | head -10
+
+echo "-- Row refs per sheet:"
+npx wrangler d1 execute "$STAGING_DB" --remote --config="$WRANGLER_CFG" \
+  --command="SELECT sheet_id, COUNT(*) as n FROM records_row_refs WHERE tenant_id='default' GROUP BY sheet_id ORDER BY sheet_id;" 2>/dev/null \
+  | grep -E '"sheet_id"|"n"' | head -10
+
+echo "-- Activity total:"
+npx wrangler d1 execute "$STAGING_DB" --remote --config="$WRANGLER_CFG" \
+  --command="SELECT COUNT(*) as n FROM records_activity WHERE tenant_id='default';" 2>/dev/null \
+  | grep -E '"n"' | head -2
+
+echo ""
+echo "==> Done."

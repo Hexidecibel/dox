@@ -1147,6 +1147,505 @@ export interface EvalReportResponse {
   evaluations: EvalReportEvaluationRow[];
 }
 
+// =====================================================================
+// === Records Module ===================================================
+// =====================================================================
+//
+// Smartsheet-class collaborative surface. A `records_sheet` owns
+// `records_columns` (typed schema) and `records_rows` (the records
+// themselves). Cells live in `records_rows.data` as a JSON object keyed
+// by column.key. Entity-typed columns (supplier_ref, product_ref,
+// document_ref, record_ref, contact) are mirrored into
+// `records_row_refs` so reverse lookups don't have to scan JSON.
+//
+// Schema source: migrations/0040_records_core.sql.
+
+// --- Enums (must match CHECK constraints in 0040) ---
+
+export type RecordColumnType =
+  | 'text'
+  | 'long_text'
+  | 'number'
+  | 'currency'
+  | 'percent'
+  | 'date'
+  | 'datetime'
+  | 'duration'
+  | 'checkbox'
+  | 'dropdown_single'
+  | 'dropdown_multi'
+  | 'contact'
+  | 'email'
+  | 'url'
+  | 'phone'
+  | 'attachment'
+  | 'formula'
+  | 'rollup'
+  | 'supplier_ref'
+  | 'product_ref'
+  | 'document_ref'
+  | 'record_ref';
+
+export type RecordRefType =
+  | 'supplier'
+  | 'product'
+  | 'document'
+  | 'record'
+  | 'contact';
+
+export type RecordViewType =
+  | 'grid'
+  | 'kanban'
+  | 'timeline'
+  | 'gallery'
+  | 'calendar';
+
+// --- JSON-payload shapes ---
+
+/**
+ * Cell value bag stored in records_rows.data. Keys are column.key (the
+ * immutable slug), values are whatever the column type permits. The
+ * value space is intentionally open — the API layer enforces shape per
+ * column type.
+ */
+export type RecordRowData = Record<string, unknown>;
+
+/**
+ * Column-type-specific config stored in records_columns.config (JSON).
+ * Variants are loose by design: the schema doesn't pin shape, and new
+ * column types accrete config keys over time. The discriminant is the
+ * owning column's `type`, not a field on the config itself.
+ */
+export interface RecordColumnConfigBase {
+  [key: string]: unknown;
+}
+
+export interface RecordColumnDropdownOption {
+  value: string;
+  label?: string;
+  color?: string;
+}
+
+export interface RecordColumnDropdownConfig extends RecordColumnConfigBase {
+  options?: RecordColumnDropdownOption[];
+  allow_custom?: boolean;
+}
+
+export interface RecordColumnNumberConfig extends RecordColumnConfigBase {
+  precision?: number;
+  format?: 'plain' | 'currency' | 'percent';
+  currency_code?: string;
+}
+
+export interface RecordColumnDateConfig extends RecordColumnConfigBase {
+  format?: string;
+  include_time?: boolean;
+}
+
+export interface RecordColumnRefConfig extends RecordColumnConfigBase {
+  /** For record_ref columns: which sheet the reference points at. */
+  target_sheet_id?: string;
+  /** For multi-value ref columns. */
+  multiple?: boolean;
+}
+
+export interface RecordColumnFormulaConfig extends RecordColumnConfigBase {
+  expression?: string;
+  result_type?: RecordColumnType;
+}
+
+export interface RecordColumnRollupConfig extends RecordColumnConfigBase {
+  source_column_key?: string;
+  target_sheet_id?: string;
+  aggregation?: 'sum' | 'avg' | 'min' | 'max' | 'count' | 'first' | 'last';
+}
+
+export type RecordColumnConfig =
+  | RecordColumnDropdownConfig
+  | RecordColumnNumberConfig
+  | RecordColumnDateConfig
+  | RecordColumnRefConfig
+  | RecordColumnFormulaConfig
+  | RecordColumnRollupConfig
+  | RecordColumnConfigBase;
+
+// --- View config (records_views.config, JSON) ---
+
+export type RecordViewFilterOperator =
+  | 'equals'
+  | 'not_equals'
+  | 'contains'
+  | 'not_contains'
+  | 'is_empty'
+  | 'is_not_empty'
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'between'
+  | 'in';
+
+export interface RecordViewFilter {
+  column_key: string;
+  operator: RecordViewFilterOperator;
+  value?: unknown;
+}
+
+export interface RecordViewSort {
+  column_key: string;
+  direction: 'asc' | 'desc';
+}
+
+export interface RecordViewConfigBase {
+  filters?: RecordViewFilter[];
+  sorts?: RecordViewSort[];
+  group_by?: string;
+  visible_columns?: string[];
+  column_widths?: Record<string, number>;
+}
+
+export interface RecordGridViewConfig extends RecordViewConfigBase {
+  view_type?: 'grid';
+  row_height?: 'short' | 'medium' | 'tall';
+  frozen_columns?: number;
+}
+
+export interface RecordKanbanViewConfig extends RecordViewConfigBase {
+  view_type?: 'kanban';
+  /** dropdown_single column whose options become board columns. */
+  status_column_key?: string;
+  card_columns?: string[];
+}
+
+export interface RecordTimelineViewConfig extends RecordViewConfigBase {
+  view_type?: 'timeline';
+  start_column_key?: string;
+  end_column_key?: string;
+  /** Bucket size when rendering the timeline. */
+  scale?: 'day' | 'week' | 'month' | 'quarter' | 'year';
+}
+
+export interface RecordGalleryViewConfig extends RecordViewConfigBase {
+  view_type?: 'gallery';
+  cover_column_key?: string;
+  card_columns?: string[];
+}
+
+export interface RecordCalendarViewConfig extends RecordViewConfigBase {
+  view_type?: 'calendar';
+  date_column_key?: string;
+  end_date_column_key?: string;
+}
+
+export type RecordViewConfig =
+  | RecordGridViewConfig
+  | RecordKanbanViewConfig
+  | RecordTimelineViewConfig
+  | RecordGalleryViewConfig
+  | RecordCalendarViewConfig;
+
+// --- D1 row types (raw shape coming back from the database) ---
+
+export interface RecordSheetRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  icon: string | null;
+  color: string | null;
+  template_key: string | null;
+  archived: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecordColumnRow {
+  id: string;
+  sheet_id: string;
+  tenant_id: string;
+  key: string;
+  label: string;
+  type: RecordColumnType;
+  config: string | null; // JSON<RecordColumnConfig>
+  required: number;
+  is_title: number;
+  display_order: number;
+  width: number | null;
+  archived: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecordRowRow {
+  id: string;
+  sheet_id: string;
+  tenant_id: string;
+  display_title: string | null;
+  data: string | null; // JSON<RecordRowData>
+  position: number;
+  parent_row_id: string | null;
+  archived: number;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecordRowRefRow {
+  id: string;
+  tenant_id: string;
+  sheet_id: string;
+  row_id: string;
+  column_key: string;
+  ref_type: RecordRefType;
+  ref_id: string;
+  created_at: string;
+}
+
+export interface RecordRowAttachmentRow {
+  id: string;
+  tenant_id: string;
+  row_id: string;
+  column_key: string | null;
+  r2_key: string;
+  file_name: string;
+  file_size: number | null;
+  mime_type: string | null;
+  checksum: string | null;
+  uploaded_by: string | null;
+  created_at: string;
+}
+
+export interface RecordViewRow {
+  id: string;
+  sheet_id: string;
+  tenant_id: string;
+  name: string;
+  view_type: RecordViewType;
+  config: string | null; // JSON<RecordViewConfig>
+  is_default: number;
+  shared: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecordCommentRow {
+  id: string;
+  tenant_id: string;
+  row_id: string;
+  parent_comment_id: string | null;
+  author_id: string;
+  body: string;
+  mentions: string | null; // JSON<string[]> of user_ids
+  created_at: string;
+  edited_at: string | null;
+}
+
+export interface RecordActivityRow {
+  id: string;
+  tenant_id: string;
+  sheet_id: string;
+  row_id: string;
+  actor_id: string | null;
+  kind: string;
+  details: string | null; // JSON; shape varies by kind
+  created_at: string;
+}
+
+// --- API response shapes (joins surface as optional fields) ---
+
+export interface ApiRecordSheet extends RecordSheetRow {
+  creator_name?: string;
+  column_count?: number;
+  row_count?: number;
+}
+
+export interface ApiRecordColumn extends RecordColumnRow {}
+
+export interface ApiRecordRow extends RecordRowRow {
+  creator_name?: string;
+  updater_name?: string;
+  comment_count?: number;
+  attachment_count?: number;
+}
+
+export interface ApiRecordRowRef extends RecordRowRefRow {
+  ref_label?: string;
+}
+
+export interface ApiRecordRowAttachment extends RecordRowAttachmentRow {
+  uploader_name?: string;
+}
+
+export interface ApiRecordView extends RecordViewRow {
+  creator_name?: string;
+}
+
+export interface ApiRecordComment extends RecordCommentRow {
+  author_name?: string;
+  author_email?: string;
+}
+
+export interface ApiRecordActivity extends RecordActivityRow {
+  actor_name?: string;
+}
+
+// --- List response wrappers ---
+
+export interface RecordSheetListResponse {
+  sheets: ApiRecordSheet[];
+  total: number;
+}
+
+export interface RecordSheetGetResponse {
+  sheet: ApiRecordSheet;
+  columns: ApiRecordColumn[];
+  views: ApiRecordView[];
+}
+
+export interface RecordColumnListResponse {
+  columns: ApiRecordColumn[];
+}
+
+export interface RecordRowListResponse {
+  rows: ApiRecordRow[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface RecordRowGetResponse {
+  row: ApiRecordRow;
+  refs: ApiRecordRowRef[];
+  attachments: ApiRecordRowAttachment[];
+}
+
+export interface RecordViewListResponse {
+  views: ApiRecordView[];
+}
+
+export interface RecordCommentListResponse {
+  comments: ApiRecordComment[];
+  total: number;
+}
+
+export interface RecordActivityListResponse {
+  activity: ApiRecordActivity[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// --- Single-resource responses ---
+
+export interface RecordSheetCreateResponse { sheet: ApiRecordSheet; }
+export interface RecordSheetUpdateResponse { sheet: ApiRecordSheet; }
+export interface RecordColumnCreateResponse { column: ApiRecordColumn; }
+export interface RecordColumnUpdateResponse { column: ApiRecordColumn; }
+export interface RecordRowCreateResponse { row: ApiRecordRow; }
+export interface RecordRowUpdateResponse { row: ApiRecordRow; }
+export interface RecordViewCreateResponse { view: ApiRecordView; }
+export interface RecordViewUpdateResponse { view: ApiRecordView; }
+export interface RecordCommentCreateResponse { comment: ApiRecordComment; }
+
+// --- Request shapes ---
+
+export interface CreateSheetRequest {
+  name: string;
+  slug?: string;
+  description?: string | null;
+  icon?: string | null;
+  color?: string | null;
+  template_key?: string | null;
+}
+
+export interface UpdateSheetRequest {
+  name?: string;
+  slug?: string;
+  description?: string | null;
+  icon?: string | null;
+  color?: string | null;
+  archived?: boolean;
+}
+
+export interface CreateColumnRequest {
+  key?: string;
+  label: string;
+  type: RecordColumnType;
+  config?: RecordColumnConfig | null;
+  required?: boolean;
+  is_title?: boolean;
+  display_order?: number;
+  width?: number | null;
+}
+
+export interface UpdateColumnRequest {
+  key?: string;
+  label?: string;
+  type?: RecordColumnType;
+  config?: RecordColumnConfig | null;
+  required?: boolean;
+  is_title?: boolean;
+  display_order?: number;
+  width?: number | null;
+  archived?: boolean;
+}
+
+export interface ReorderColumnsRequest {
+  /** Ordered list of column ids; index becomes new display_order. */
+  column_ids: string[];
+}
+
+export interface CreateRowRequest {
+  data?: RecordRowData;
+  display_title?: string | null;
+  parent_row_id?: string | null;
+  /** Fractional index. If omitted, server appends to the end. */
+  position?: number;
+}
+
+export interface UpdateRowRequest {
+  data?: RecordRowData;
+  display_title?: string | null;
+  parent_row_id?: string | null;
+  position?: number;
+  archived?: boolean;
+}
+
+/**
+ * Patch a single cell. The server merges into records_rows.data and
+ * keeps records_row_refs in sync for entity-typed columns.
+ */
+export interface UpdateCellRequest {
+  column_key: string;
+  value: unknown;
+}
+
+export interface CreateViewRequest {
+  name: string;
+  view_type: RecordViewType;
+  config?: RecordViewConfig | null;
+  is_default?: boolean;
+  shared?: boolean;
+}
+
+export interface UpdateViewRequest {
+  name?: string;
+  view_type?: RecordViewType;
+  config?: RecordViewConfig | null;
+  is_default?: boolean;
+  shared?: boolean;
+}
+
+export interface CreateCommentRequest {
+  body: string;
+  parent_comment_id?: string | null;
+  mentions?: string[];
+}
+
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'auth_user';

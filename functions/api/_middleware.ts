@@ -185,3 +185,8 @@ const auth: PagesFunction<Env> = async (context) => {
 };
 
 export const onRequest: PagesFunction<Env>[] = [cors, auth];
+
+// Durable Object classes are NOT hosted by this Pages project. They live
+// in dedicated Workers (see `workers/sheet-session/`) and are bound here
+// via `script_name` in `wrangler.toml`. Cloudflare Pages cannot host DO
+// classes — every DO must be deployed as its own Worker first.

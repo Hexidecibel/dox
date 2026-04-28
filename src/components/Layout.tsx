@@ -45,6 +45,7 @@ import {
   Hub as ConnectorsIcon,
   ContactMail as CustomersIcon,
   Insights as InsightsIcon,
+  TableView as RecordsIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -69,6 +70,7 @@ const navItems: NavItem[] = [
   { label: 'A/B Eval', path: '/eval', icon: <CompareIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Ingest History', path: '/ingest-history', icon: <HistoryIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Orders', path: '/orders', icon: <OrdersIcon />, roles: ['super_admin', 'org_admin', 'user'] },
+  { label: 'Records', path: '/records', icon: <RecordsIcon /> },
 ];
 
 const adminItems: NavItem[] = [
