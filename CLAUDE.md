@@ -162,17 +162,28 @@ Use the slash commands for common tasks:
 |------|---------|
 | `todo.md` | Quick capture for ideas and tasks. Items are raw, unplanned. |
 | `plan.md` | Detailed implementation plans with status, design, file lists, and steps. |
-| `FEATURES.md` | Completed features — living changelog of what's been shipped. |
+| `FEATURES.md` | Index of release notes — see `releases/v*.md` for per-version detail. |
+| `releases/` | Per-version release notes (markdown + YAML frontmatter). Mirrored to `public/releases/` so they're served as static assets and rendered in the in-app release notes modal. |
 | `backlog.md` | Deferred ideas, long-term research, and items not in the daily workflow. |
 | `next-time.md` | User's notes/thoughts for the next session. Read on startup, address first. |
 
-**Flow:** `todo.md` (idea) -> `plan.md` (planned -> in-progress -> done) -> `FEATURES.md` (shipped)
+**Flow:** `todo.md` (idea) -> `plan.md` (planned -> in-progress -> done) -> `releases/vX.Y.Z.md` (shipped, via `bin/release`)
 **Deferred:** Items moved from `todo.md` to `backlog.md` when not prioritized.
 
 When committing (`/commit`), update tracking files:
 1. Remove completed items from `todo.md`
 2. Set status to `done` in `plan.md`
-3. Add/update entries in `FEATURES.md`
+
+When cutting a release, use `bin/release` (NOT a hand-edited
+`FEATURES.md` entry):
+- `bin/release` (default `--patch`, also `--minor` / `--major` /
+  `--dry-run`) drafts notes from `git log $LAST_TAG..HEAD`, opens them
+  in `$EDITOR` for polish, bumps `package.json`, commits, tags
+  `vX.Y.Z`, and prompts to deploy.
+- The script auto-updates `releases/vX.Y.Z.md`,
+  `public/releases/vX.Y.Z.md`, `public/releases/index.json`, and the
+  `FEATURES.md` index. The footer chip + What's-new toast pick up the
+  new version on next page load.
 
 ## Task Management
 

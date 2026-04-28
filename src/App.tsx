@@ -1,8 +1,11 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
 import { TenantProvider } from './contexts/TenantContext';
+import { ReleaseNotesProvider } from './contexts/ReleaseNotesContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { Layout } from './components/Layout';
+import { VersionChip } from './components/VersionChip';
+import { WhatsNewToast } from './components/WhatsNewToast';
 import { Login } from './pages/Login';
 import { ForgotPassword } from './pages/ForgotPassword';
 import { ResetPassword } from './pages/ResetPassword';
@@ -40,6 +43,7 @@ function App() {
   return (
     <AuthProvider>
       <TenantProvider>
+        <ReleaseNotesProvider>
         <Routes>
           {/* Public routes */}
           <Route path="/login" element={<Login />} />
@@ -93,6 +97,9 @@ function App() {
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
+        <VersionChip />
+        <WhatsNewToast />
+        </ReleaseNotesProvider>
       </TenantProvider>
     </AuthProvider>
   );

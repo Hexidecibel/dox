@@ -41,3 +41,6 @@ wrangler.toml
 test-results/
 playwright-report/
 tests/e2e/.auth/
+
+# Local R2 sim cruft from wrangler dev
+pending/

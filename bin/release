@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+# Draft + cut a versioned release.
+#
+# Usage:
+#   bin/release [--patch | --minor | --major] [--dry-run]
+#
+# Default bump: patch.
+#
+# Steps:
+#   1. Find the last release tag.
+#   2. Compute new version off package.json.
+#   3. Draft release notes from `git log $LAST_TAG..HEAD`, classifying
+#      commits into Added / Changed / Fixed / Internal.
+#   4. Write `releases/v$NEW.md` and mirror to `public/releases/`.
+#   5. Update `public/releases/index.json` and the FEATURES.md index.
+#   6. Bump `package.json` version (no auto tag, no auto commit).
+#   7. Open the draft in $EDITOR for human polish.
+#   8. Commit + tag + prompt to deploy.
+#
+# --dry-run stops after step 4 (prints the draft, touches nothing on disk
+# beyond a temp file).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+BUMP="patch"
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --patch) BUMP="patch" ;;
+    --minor) BUMP="minor" ;;
+    --major) BUMP="major" ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help)
+      sed -n '2,20p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# --- 1. Last tag --------------------------------------------------------
+LAST_TAG=$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo "")
+if [[ -z "$LAST_TAG" ]]; then
+  LAST_TAG="v0.0.0"
+  RANGE="HEAD"
+  echo "==> No prior tag found; drafting from full history"
+else
+  RANGE="$LAST_TAG..HEAD"
+  echo "==> Last tag: $LAST_TAG"
+fi
+
+# --- 2. New version -----------------------------------------------------
+CURRENT_VERSION=$(node -p "require('./package.json').version")
+NEW_VERSION=$(node -e "
+  const v = require('./package.json').version.split('.').map(Number);
+  const bump = '$BUMP';
+  if (bump === 'major') { v[0]++; v[1] = 0; v[2] = 0; }
+  else if (bump === 'minor') { v[1]++; v[2] = 0; }
+  else { v[2]++; }
+  console.log(v.join('.'));
+")
+echo "==> Current: $CURRENT_VERSION  ->  New: $NEW_VERSION  ($BUMP)"
+
+NEW_TAG="v$NEW_VERSION"
+SHORT_SHA=$(git rev-parse --short HEAD)
+TODAY=$(date +%Y-%m-%d)
+
+# --- 3. Draft notes -----------------------------------------------------
+TMP_DRAFT=$(mktemp -t "dox-release-XXXXXX.md")
+trap "rm -f $TMP_DRAFT" EXIT
+
+# Pull commits in range, write draft via node so we get access to the
+# pure classifier and don't have to re-implement it in awk.
+export TMP_DRAFT NEW_VERSION TODAY SHORT_SHA
+git log "$RANGE" --pretty=format:"%H%x09%s%x09%b%x1e" --no-merges \
+  | node -e "
+    const fs = require('fs');
+    const path = require('path');
+    const { classifyCommit } = require(path.resolve('bin/lib/classifyCommit.js'));
+
+    const raw = fs.readFileSync(0, 'utf8');
+    const records = raw.split('\x1e').map(r => r.trim()).filter(Boolean);
+
+    const buckets = { added: [], changed: [], fixed: [], internal: [] };
+    for (const rec of records) {
+      const [sha, subject, ...rest] = rec.split('\x09');
+      const body = rest.join('\x09').trim();
+      const klass = classifyCommit({ subject, body });
+      if (klass === 'skip') continue;
+      const short = (sha || '').slice(0, 7);
+      buckets[klass].push({ sha: short, subject: subject.trim(), body });
+    }
+
+    const order = [
+      ['Added', 'added'],
+      ['Changed', 'changed'],
+      ['Fixed', 'fixed'],
+      ['Internal', 'internal'],
+    ];
+
+    let out = '';
+    out += '---\n';
+    out += 'version: ' + process.env.NEW_VERSION + '\n';
+    out += 'date: ' + process.env.TODAY + '\n';
+    out += 'sha: ' + process.env.SHORT_SHA + '\n';
+    out += 'title: TODO\n';
+    out += '---\n\n';
+    out += '## TODO — write a one-line summary\n\n';
+    out += 'TODO: paragraph describing the why.\n\n';
+
+    for (const [label, key] of order) {
+      out += '### ' + label + '\n';
+      const items = buckets[key];
+      if (items.length === 0) {
+        out += '- _nothing_\n\n';
+        continue;
+      }
+      for (const it of items) {
+        out += '- ' + it.subject + ' (' + it.sha + ')\n';
+      }
+      out += '\n';
+    }
+
+    fs.writeFileSync(process.env.TMP_DRAFT, out);
+  "
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo
+  echo "==> Dry run — draft for v$NEW_VERSION:"
+  echo "----------------------------------------"
+  cat "$TMP_DRAFT"
+  echo "----------------------------------------"
+  echo "==> No files changed."
+  exit 0
+fi
+
+# --- 4. Write release file ---------------------------------------------
+RELEASE_FILE="releases/v$NEW_VERSION.md"
+PUBLIC_FILE="public/releases/v$NEW_VERSION.md"
+mkdir -p releases public/releases
+cp "$TMP_DRAFT" "$RELEASE_FILE"
+cp "$TMP_DRAFT" "$PUBLIC_FILE"
+echo "==> Wrote $RELEASE_FILE (and $PUBLIC_FILE)"
+
+# --- 5. Update index.json + FEATURES.md --------------------------------
+INDEX_FILE="public/releases/index.json"
+NEW_VERSION="$NEW_VERSION" TODAY="$TODAY" INDEX_FILE="$INDEX_FILE" node -e "
+  const fs = require('fs');
+  const file = process.env.INDEX_FILE;
+  const idx = fs.existsSync(file)
+    ? JSON.parse(fs.readFileSync(file, 'utf8'))
+    : { current: '', versions: [] };
+  const ver = process.env.NEW_VERSION;
+  idx.current = ver;
+  idx.versions = idx.versions.filter(v => v.version !== ver);
+  idx.versions.unshift({ version: ver, date: process.env.TODAY, title: 'TODO' });
+  fs.writeFileSync(file, JSON.stringify(idx, null, 2) + '\n');
+"
+echo "==> Updated $INDEX_FILE"
+
+NEW_VERSION="$NEW_VERSION" TODAY="$TODAY" node -e "
+  const fs = require('fs');
+  const file = 'FEATURES.md';
+  const ver = process.env.NEW_VERSION;
+  const today = process.env.TODAY;
+  const newLine = '- [v' + ver + '](releases/v' + ver + '.md) — ' + today + ' — TODO';
+  let content = fs.readFileSync(file, 'utf8');
+  const marker = '## Releases\n';
+  const i = content.indexOf(marker);
+  if (i === -1) {
+    fs.writeFileSync(file, '## Releases\n\n' + newLine + '\n\n' + content);
+    return;
+  }
+  const insertAt = i + marker.length;
+  // Skip a blank line right after the heading if present.
+  const after = content.slice(insertAt);
+  if (after.startsWith('\n')) {
+    content = content.slice(0, insertAt + 1) + newLine + '\n' + content.slice(insertAt + 1);
+  } else {
+    content = content.slice(0, insertAt) + newLine + '\n' + content.slice(insertAt);
+  }
+  fs.writeFileSync(file, content);
+"
+echo "==> Updated FEATURES.md"
+
+# --- 6. Bump package.json (no tag) -------------------------------------
+npm version "$NEW_VERSION" --no-git-tag-version >/dev/null
+echo "==> Bumped package.json to $NEW_VERSION"
+
+# --- 7. Open in editor for polish --------------------------------------
+EDITOR_BIN="${EDITOR:-vi}"
+echo "==> Opening $RELEASE_FILE in $EDITOR_BIN for polish (close to continue)"
+"$EDITOR_BIN" "$RELEASE_FILE"
+# Mirror any edits back to the public copy.
+cp "$RELEASE_FILE" "$PUBLIC_FILE"
+
+# Pull the polished title out of frontmatter and propagate to index +
+# FEATURES.md. If the user left "TODO", we leave it.
+POLISHED_TITLE=$(NEW_VERSION="$NEW_VERSION" RELEASE_FILE="$RELEASE_FILE" node -e "
+  const fs = require('fs');
+  const md = fs.readFileSync(process.env.RELEASE_FILE, 'utf8');
+  const m = md.match(/^---[\s\S]*?^title:\s*(.+?)\s*$/m);
+  process.stdout.write(m ? m[1].trim() : '');
+")
+if [[ -n "$POLISHED_TITLE" && "$POLISHED_TITLE" != "TODO" ]]; then
+  POLISHED_TITLE="$POLISHED_TITLE" NEW_VERSION="$NEW_VERSION" INDEX_FILE="$INDEX_FILE" node -e "
+    const fs = require('fs');
+    const idx = JSON.parse(fs.readFileSync(process.env.INDEX_FILE, 'utf8'));
+    const v = idx.versions.find(v => v.version === process.env.NEW_VERSION);
+    if (v) v.title = process.env.POLISHED_TITLE;
+    fs.writeFileSync(process.env.INDEX_FILE, JSON.stringify(idx, null, 2) + '\n');
+  "
+  POLISHED_TITLE="$POLISHED_TITLE" NEW_VERSION="$NEW_VERSION" node -e "
+    const fs = require('fs');
+    const file = 'FEATURES.md';
+    let content = fs.readFileSync(file, 'utf8');
+    const ver = process.env.NEW_VERSION;
+    const title = process.env.POLISHED_TITLE;
+    const re = new RegExp('^- \\\\[v' + ver.replace(/\./g, '\\\\.') + '\\\\].*?— TODO\\\\s*$', 'm');
+    content = content.replace(re, (line) => line.replace(/— TODO\\s*$/, '— ' + title));
+    fs.writeFileSync(file, content);
+  "
+  echo "==> Propagated title \"$POLISHED_TITLE\" to index + FEATURES.md"
+fi
+
+# --- 8. Commit + tag ---------------------------------------------------
+git add releases/ public/releases/ FEATURES.md package.json package-lock.json 2>/dev/null || true
+git commit -m "Release v$NEW_VERSION"
+git tag "$NEW_TAG"
+echo "==> Committed and tagged $NEW_TAG"
+
+# --- 9. Deploy prompt --------------------------------------------------
+echo
+read -r -p "Deploy now via ./bin/deploy? [y/N] " ANSWER
+if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
+  exec ./bin/deploy
+fi
+
+echo
+echo "Next steps:"
+echo "  - Review: git show $NEW_TAG"
+echo "  - Push:   git push && git push --tags"
+echo "  - Deploy: ./bin/deploy"

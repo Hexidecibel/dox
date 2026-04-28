@@ -1,5 +1,23 @@
 # Features
 
+This file is an index of release notes. See [`releases/`](releases/) for
+per-version detail. New entries are added by `bin/release` — do not
+hand-edit historical entries.
+
+## Releases
+
+- [v2.5.0](releases/v2.5.0.md) — 2026-04-28 — Release versioning system
+- [v2.4.3](releases/v2.4.3.md) — 2026-04-27 — Phase 3a — pre-fill, uncertainty, dashboard
+- [v2.4.2](releases/v2.4.2.md) — 2026-04-27 — Phase 2 — capture reviewer decisions
+- [v2.4.1](releases/v2.4.1.md) — 2026-04-27 — Phase 1 — foundation fixes
+
+---
+
+# Pre-versioning history
+
+The entries below pre-date the `bin/release` workflow and are kept for
+context. Going forward, ship notes live under `releases/v*.md`.
+
 ## 2026-04-17: Prod Deploy — Session Promotion to supdox.com
 
 Promoted 17 commits (`9d09b0e..a91e11f`) from master to production in a
