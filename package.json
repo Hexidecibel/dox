@@ -36,7 +36,8 @@
   "scripts": {
     "dev": "npx wrangler pages dev dist --d1 DB --r2 FILES --port 8788",
     "dev:frontend": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc -b ./tsconfig.app.json && vite build",
+    "typecheck": "tsc -b --noEmit",
     "preview": "vite preview",
     "migrate": "./bin/migrate",
     "migrate:remote": "./bin/migrate --remote",
