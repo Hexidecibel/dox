@@ -1,20 +1,159 @@
 #!/usr/bin/env bash
+# Apply pending D1 migrations, tracked via a `_migrations` table.
+#
+# Usage:
+#   ./bin/migrate                 # apply pending migrations to LOCAL D1
+#   ./bin/migrate --remote        # apply pending migrations to PROD D1
+#   ./bin/migrate --mark-applied  # one-time backfill: mark every file in
+#                                 # migrations/ as already applied without
+#                                 # running it. Use this once per env when
+#                                 # adopting the tracking table on a DB that
+#                                 # already had the older "run-everything"
+#                                 # script applied to it. Add --remote to
+#                                 # backfill the prod tracking table.
+#
+# How it works:
+#   - Ensures a `_migrations (filename TEXT PRIMARY KEY, applied_at TEXT
+#     NOT NULL DEFAULT (datetime('now')))` table exists in the target D1.
+#   - Iterates migrations/*.sql in lexical (== numeric) order.
+#   - Skips any filename already present in `_migrations`.
+#   - Runs the migration via `wrangler d1 execute --file=...`. On success,
+#     INSERTs the filename into `_migrations`. On failure, surfaces the SQL
+#     error and aborts WITHOUT marking the migration as applied.
+#
+# Notes:
+#   - Sister script `bin/migrate-staging` has its own quirks (0017 drop /
+#     0020 recreate workaround) and is not changed here.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REMOTE=""
-if [ "${1:-}" = "--remote" ] || [ "${1:-}" = "-r" ]; then
-  REMOTE="--remote"
-  echo "Running migrations REMOTELY against production D1..."
+DB="doc-upload-db"
+REMOTE_FLAG=""
+MARK_APPLIED=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --remote|-r)
+      REMOTE_FLAG="--remote"
+      ;;
+    --mark-applied)
+      MARK_APPLIED=1
+      ;;
+    -h|--help)
+      sed -n '2,20p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ -n "$REMOTE_FLAG" ]; then
+  echo "Target: REMOTE (production D1)"
   echo "Press Ctrl+C within 3 seconds to cancel..."
   sleep 3
 else
-  echo "Running migrations locally..."
+  echo "Target: local D1"
 fi
 
+# wrangler d1 execute helpers
+d1_exec_cmd() {
+  npx wrangler d1 execute "$DB" $REMOTE_FLAG --command="$1"
+}
+
+d1_exec_file() {
+  npx wrangler d1 execute "$DB" $REMOTE_FLAG --file="$1"
+}
+
+# 1. Ensure the tracking table exists.
+echo "Ensuring _migrations tracking table exists..."
+d1_exec_cmd "CREATE TABLE IF NOT EXISTS _migrations (
+  filename TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);" >/dev/null
+
+# 2. Fetch the set of already-applied filenames.
+#    We query as JSON and parse out the filename column.
+applied_json="$(npx wrangler d1 execute "$DB" $REMOTE_FLAG \
+  --command="SELECT filename FROM _migrations;" --json 2>/dev/null || echo '[]')"
+
+# Extract filenames into a newline-delimited list. Tolerate either a top-level
+# array or a {results:[...]} shape that wrangler may emit.
+APPLIED_FILE="$(mktemp)"
+trap 'rm -f "$APPLIED_FILE"' EXIT
+node -e "
+  let raw = process.argv[1] || '[]';
+  let data;
+  try { data = JSON.parse(raw); } catch (e) { data = []; }
+  // wrangler returns an array of statement results; flatten to rows.
+  const rows = [];
+  const visit = (v) => {
+    if (!v) return;
+    if (Array.isArray(v)) { v.forEach(visit); return; }
+    if (typeof v === 'object') {
+      if (Array.isArray(v.results)) { v.results.forEach(visit); return; }
+      if (typeof v.filename === 'string') { rows.push(v.filename); return; }
+      Object.values(v).forEach(visit);
+    }
+  };
+  visit(data);
+  console.log([...new Set(rows)].join('\n'));
+" "$applied_json" > "$APPLIED_FILE"
+
+is_applied() {
+  local name="$1"
+  grep -Fxq "$name" "$APPLIED_FILE"
+}
+
+mark_applied() {
+  local name="$1"
+  # Use parameterized escaping by replacing single quotes.
+  local escaped="${name//\'/\'\'}"
+  d1_exec_cmd "INSERT OR IGNORE INTO _migrations (filename) VALUES ('$escaped');" >/dev/null
+}
+
+# 3. Mark-applied mode: stamp every file as applied without running it.
+if [ "$MARK_APPLIED" = "1" ]; then
+  echo "Mark-applied mode: stamping every migration in migrations/ as applied without running it."
+  count=0
+  for migration in migrations/*.sql; do
+    name=$(basename "$migration")
+    if is_applied "$name"; then
+      echo "  already tracked: $name"
+    else
+      echo "  marking: $name"
+      mark_applied "$name"
+      count=$((count + 1))
+    fi
+  done
+  echo "Done. Marked $count new migration(s) as applied."
+  exit 0
+fi
+
+# 4. Normal mode: apply pending migrations in order.
+pending=0
+applied=0
 for migration in migrations/*.sql; do
-  echo "Running: $(basename "$migration")"
-  npx wrangler d1 execute doc-upload-db $REMOTE --file="$migration"
+  name=$(basename "$migration")
+  if is_applied "$name"; then
+    continue
+  fi
+  pending=$((pending + 1))
+  echo "Applying: $name"
+  if ! d1_exec_file "$migration"; then
+    echo "" >&2
+    echo "ERROR: migration $name failed. Aborting." >&2
+    echo "Tracking row NOT inserted; rerun after fixing the SQL." >&2
+    exit 1
+  fi
+  mark_applied "$name"
+  applied=$((applied + 1))
 done
 
-echo "All migrations complete."
+if [ "$pending" = "0" ]; then
+  echo "No pending migrations. Database is up to date."
+else
+  echo "Applied $applied migration(s)."
+fi
