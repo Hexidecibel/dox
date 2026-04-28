@@ -229,7 +229,7 @@ fi
 # --- 8. Commit + tag ---------------------------------------------------
 git add releases/ public/releases/ FEATURES.md package.json package-lock.json 2>/dev/null || true
 git commit -m "Release v$NEW_VERSION"
-git tag "$NEW_TAG"
+git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
 echo "==> Committed and tagged $NEW_TAG"
 
 # --- 9. Deploy prompt --------------------------------------------------
