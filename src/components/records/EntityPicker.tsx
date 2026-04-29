@@ -38,6 +38,8 @@ import type { RecordColumnType } from '../../../shared/types';
 export interface EntityOption {
   id: string;
   name: string;
+  /** Optional secondary line shown under the primary label in the picker. */
+  secondary?: string;
 }
 
 interface EntityPickerProps {
@@ -59,7 +61,8 @@ export function EntityPicker({ open, type, tenantId, initialValue, onClose, onSe
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const supported = type === 'supplier_ref' || type === 'product_ref';
+  const supported =
+    type === 'supplier_ref' || type === 'product_ref' || type === 'customer_ref';
 
   useEffect(() => {
     if (!open) {
@@ -94,6 +97,23 @@ export function EntityPicker({ open, type, tenantId, initialValue, onClose, onSe
             if (!cancelled) {
               setResults(res.products.map((p) => ({ id: p.id, name: p.name })));
             }
+          } else if (type === 'customer_ref') {
+            // The customers list endpoint takes `search` and only returns
+            // active customers by default — exactly what the picker wants.
+            const res = (await api.customers.list({
+              search: search || undefined,
+              tenant_id: tenantId ?? undefined,
+              limit: 25,
+            })) as { customers: { id: string; name: string; customer_number?: string | null; email?: string | null }[] };
+            if (!cancelled) {
+              setResults(
+                res.customers.map((c) => ({
+                  id: c.id,
+                  name: c.name,
+                  secondary: [c.customer_number, c.email].filter(Boolean).join(' · ') || undefined,
+                })),
+              );
+            }
           }
         } catch (err) {
           if (!cancelled) setError(err instanceof Error ? err.message : 'Search failed');
@@ -111,6 +131,7 @@ export function EntityPicker({ open, type, tenantId, initialValue, onClose, onSe
 
   const title = type === 'supplier_ref' ? 'Pick a supplier'
     : type === 'product_ref' ? 'Pick a product'
+    : type === 'customer_ref' ? 'Pick a customer'
     : type === 'document_ref' ? 'Pick a document'
     : type === 'record_ref' ? 'Pick a record'
     : type === 'contact' ? 'Pick a contact'
@@ -128,7 +149,7 @@ export function EntityPicker({ open, type, tenantId, initialValue, onClose, onSe
         {!supported ? (
           <Box sx={{ textAlign: 'center', py: 6 }}>
             <Typography variant="body2" color="text.secondary">
-              {title} is coming in a follow-up. Phase 1 supports supplier and product references.
+              {title} is coming in a follow-up. Phase 1 supports supplier, product, and customer references.
             </Typography>
           </Box>
         ) : (
@@ -169,7 +190,7 @@ export function EntityPicker({ open, type, tenantId, initialValue, onClose, onSe
                     onClick={() => onSelect(opt)}
                     sx={{ minHeight: 48, borderRadius: 1, mb: 0.5 }}
                   >
-                    <ListItemText primary={opt.name} />
+                    <ListItemText primary={opt.name} secondary={opt.secondary} />
                   </ListItemButton>
                 ))}
               </List>

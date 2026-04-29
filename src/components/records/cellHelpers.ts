@@ -182,6 +182,7 @@ function mobileColumnScore(c: ApiRecordColumn): number {
       return 4;
     case 'supplier_ref':
     case 'product_ref':
+    case 'customer_ref':
     case 'document_ref':
     case 'record_ref':
     case 'contact':

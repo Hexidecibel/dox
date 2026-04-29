@@ -9,6 +9,10 @@ export interface Env {
   CONNECTOR_ENCRYPTION_KEY?: string;
   /** Records module: per-Sheet collaborative session relay. */
   SHEET_SESSION: DurableObjectNamespace;
+  /** Cloudflare Turnstile site key (public; safe to ship to browser). */
+  TURNSTILE_SITE_KEY?: string;
+  /** Cloudflare Turnstile secret (server-side verify only). */
+  TURNSTILE_SECRET?: string;
 }
 
 export interface User {

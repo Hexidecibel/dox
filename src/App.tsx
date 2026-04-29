@@ -40,6 +40,8 @@ import { OrderDetail } from './pages/OrderDetail';
 import { Activity } from './pages/Activity';
 import { Sheets } from './pages/records/Sheets';
 import { SheetDetail } from './pages/records/SheetDetail';
+import { FormBuilder } from './pages/records/FormBuilder';
+import { PublicForm } from './pages/forms/PublicForm';
 
 function App() {
   return (
@@ -51,6 +53,9 @@ function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
+
+          {/* Public form route — no app shell, no auth, full-screen takeover */}
+          <Route path="/f/:slug" element={<PublicForm />} />
 
           {/* Protected routes with layout */}
           <Route element={<ProtectedRoute />}>
@@ -72,6 +77,7 @@ function App() {
               <Route path="/orders/:id" element={<OrderDetail />} />
               <Route path="/records" element={<Sheets />} />
               <Route path="/records/:sheetId" element={<SheetDetail />} />
+              <Route path="/records/:sheetId/forms/:formId" element={<FormBuilder />} />
 
               {/* Admin routes - users management and audit for super_admin and org_admin */}
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>

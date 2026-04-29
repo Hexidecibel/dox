@@ -72,6 +72,8 @@ export function refTypeForColumn(columnType: string): RecordRefType | null {
       return 'record';
     case 'contact':
       return 'contact';
+    case 'customer_ref':
+      return 'customer';
     default:
       return null;
   }

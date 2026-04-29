@@ -41,6 +41,7 @@ const COLUMN_TYPE_CHOICES: { value: RecordColumnType; label: string; hint: strin
   { value: 'dropdown_single', label: 'Dropdown',       hint: 'Pick one of a fixed list' },
   { value: 'supplier_ref',    label: 'Supplier',       hint: 'Link to a supplier record' },
   { value: 'product_ref',     label: 'Product',        hint: 'Link to a product record' },
+  { value: 'customer_ref',    label: 'Customer',       hint: 'Link to a customer record' },
 ];
 
 export function AddColumnDialog({ open, onClose, onCreate }: AddColumnDialogProps) {

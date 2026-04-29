@@ -65,7 +65,9 @@ import { GridView, type CellHighlight } from '../../components/records/GridView'
 import { MobileList } from '../../components/records/MobileList';
 import { RowEditPanel } from '../../components/records/RowEditPanel';
 import { AddColumnDialog } from '../../components/records/AddColumnDialog';
+import { EditColumnDialog } from '../../components/records/EditColumnDialog';
 import { PresenceStack } from '../../components/records/PresenceStack';
+import { FormsTab } from '../../components/records/FormsTab';
 import { parseRowData } from '../../components/records/cellHelpers';
 import type {
   ApiRecordColumn,
@@ -74,6 +76,7 @@ import type {
   ApiRecordView,
   CreateColumnRequest,
   RecordRowData,
+  UpdateColumnRequest,
 } from '../../../shared/types';
 
 // Highlight TTL: how long the yellow flash sticks around. The CSS handles
@@ -108,9 +111,13 @@ export function SheetDetail() {
 
   // ------ dialogs ------
   const [addColumnOpen, setAddColumnOpen] = useState(false);
+  const [editColumnTarget, setEditColumnTarget] = useState<ApiRecordColumn | null>(null);
   const [archiveSheetOpen, setArchiveSheetOpen] = useState(false);
   const [archiveRowTarget, setArchiveRowTarget] = useState<ApiRecordRow | null>(null);
   const [settingsAnchor, setSettingsAnchor] = useState<HTMLElement | null>(null);
+
+  // ------ tabs (Phase 2: Forms is a peer of the grid view) ------
+  const [activeTab, setActiveTab] = useState<'data' | 'forms'>('data');
 
   // ------ realtime ------
   const session = useSheetSession(sheetId);
@@ -276,6 +283,18 @@ export function SheetDetail() {
     [sheetId],
   );
 
+  const handleUpdateColumn = useCallback(
+    async (columnId: string, data: UpdateColumnRequest) => {
+      if (!sheetId) return;
+      const res = await recordsApi.columns.update(sheetId, columnId, data);
+      // Replace the matching column in place. CellEditor / FormsTab read
+      // column.config on each render so the new options propagate to all
+      // dropdown cells without any further plumbing.
+      setColumns((prev) => prev.map((c) => (c.id === columnId ? res.column : c)));
+    },
+    [sheetId],
+  );
+
   const handleArchiveSheet = useCallback(async () => {
     if (!sheetId) return;
     try {
@@ -383,13 +402,30 @@ export function SheetDetail() {
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexShrink: 0, alignSelf: { xs: 'stretch', sm: 'flex-start' } }}>
           <PresenceStack presence={session.presence} selfUserId={user?.id ?? null} />
           {!isMobile && (
+            <ToggleButtonGroup
+              size="small"
+              value={activeTab}
+              exclusive
+              onChange={(_, val) => val && setActiveTab(val)}
+              sx={{ height: 36 }}
+              aria-label="Sheet section"
+            >
+              <ToggleButton value="data" sx={{ px: 1.5, fontWeight: 500 }}>
+                Data
+              </ToggleButton>
+              <ToggleButton value="forms" sx={{ px: 1.5, fontWeight: 500 }}>
+                Forms
+              </ToggleButton>
+            </ToggleButtonGroup>
+          )}
+          {!isMobile && activeTab === 'data' && (
             <ViewSwitcher
               views={views}
               activeViewId={activeViewId}
               onChange={setActiveViewId}
             />
           )}
-          {headerActions}
+          {activeTab === 'data' && headerActions}
           {canMutate && (
             <>
               <IconButton
@@ -436,9 +472,28 @@ export function SheetDetail() {
         </Box>
       </Box>
 
+      {/* Mobile tab switcher (data/forms) */}
+      {isMobile && (
+        <Box sx={{ mb: 2, display: 'flex', flexShrink: 0 }}>
+          <ToggleButtonGroup
+            size="small"
+            value={activeTab}
+            exclusive
+            onChange={(_, val) => val && setActiveTab(val)}
+            fullWidth
+            sx={{ width: '100%' }}
+          >
+            <ToggleButton value="data" sx={{ flex: 1, fontWeight: 500, minHeight: 44 }}>Data</ToggleButton>
+            <ToggleButton value="forms" sx={{ flex: 1, fontWeight: 500, minHeight: 44 }}>Forms</ToggleButton>
+          </ToggleButtonGroup>
+        </Box>
+      )}
+
       {/* Body */}
       <Box sx={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        {loadingRows ? (
+        {activeTab === 'forms' ? (
+          <FormsTab sheetId={sheetId} canMutate={canMutate} />
+        ) : loadingRows ? (
           <RowSkeletons mobile={isMobile} />
         ) : isMobile ? (
           <MobileList
@@ -463,6 +518,7 @@ export function SheetDetail() {
             onOpenRow={(r) => setDrawerRowId(r.id)}
             onAddRow={handleAddRow}
             onAddColumn={() => setAddColumnOpen(true)}
+            onEditColumn={(col) => setEditColumnTarget(col)}
           />
         )}
       </Box>
@@ -563,6 +619,14 @@ export function SheetDetail() {
         onCreate={async (data) => {
           await handleAddColumn(data);
         }}
+      />
+
+      {/* Edit column dialog */}
+      <EditColumnDialog
+        open={Boolean(editColumnTarget)}
+        column={editColumnTarget}
+        onClose={() => setEditColumnTarget(null)}
+        onSave={handleUpdateColumn}
       />
 
       {/* Archive sheet confirm */}

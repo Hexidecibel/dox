@@ -15,8 +15,22 @@
  */
 
 import { useCallback, useState, useRef, useEffect } from 'react';
-import { Box, Button, IconButton, Typography } from '@mui/material';
-import { Add as AddIcon, EditOutlined as EditOutlinedIcon } from '@mui/icons-material';
+import {
+  Box,
+  Button,
+  IconButton,
+  Menu,
+  MenuItem,
+  ListItemIcon,
+  ListItemText,
+  Typography,
+} from '@mui/material';
+import {
+  Add as AddIcon,
+  EditOutlined as EditOutlinedIcon,
+  MoreVert as MoreVertIcon,
+  Tune as TuneIcon,
+} from '@mui/icons-material';
 import { CellRenderer } from './CellRenderer';
 import { CellEditor } from './CellEditor';
 import type { ApiRecordColumn, ApiRecordRow, RecordRowData } from '../../../shared/types';
@@ -45,6 +59,8 @@ interface GridViewProps {
   onOpenRow: (row: ApiRecordRow) => void;
   onAddRow: () => void;
   onAddColumn: () => void;
+  /** Optional — opens the column edit dialog for the given column. */
+  onEditColumn?: (col: ApiRecordColumn) => void;
 }
 
 export function GridView({
@@ -58,9 +74,14 @@ export function GridView({
   onOpenRow,
   onAddRow,
   onAddColumn,
+  onEditColumn,
 }: GridViewProps) {
   const [activeCell, setActiveCell] = useState<{ rowId: string; columnKey: string } | null>(null);
   const tableRef = useRef<HTMLDivElement | null>(null);
+  // Column-header overflow menu. Anchored on the three-dot icon; the
+  // referenced column is held alongside so the same menu instance can be
+  // reused across columns without remounting.
+  const [colMenu, setColMenu] = useState<{ anchor: HTMLElement; col: ApiRecordColumn } | null>(null);
 
   // Sort columns: title first, then display_order.
   const sortedColumns = [...columns]
@@ -205,7 +226,29 @@ export function GridView({
                     }),
                   }}
                 >
-                  {col.label}
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0 }}>
+                    <Box sx={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {col.label}
+                    </Box>
+                    {canMutate && onEditColumn && (
+                      <IconButton
+                        size="small"
+                        aria-label={`Column options for ${col.label}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setColMenu({ anchor: e.currentTarget, col });
+                        }}
+                        sx={{
+                          p: 0.25,
+                          color: 'text.secondary',
+                          opacity: 0.6,
+                          '&:hover': { opacity: 1 },
+                        }}
+                      >
+                        <MoreVertIcon fontSize="inherit" />
+                      </IconButton>
+                    )}
+                  </Box>
                 </Box>
               );
             })}
@@ -244,8 +287,17 @@ export function GridView({
                 sx={{
                   cursor: 'pointer',
                   transition: 'background-color 120ms ease',
+                  // OPAQUE hover background. MUI's `action.hover` is a
+                  // semi-transparent overlay; that's fine for non-sticky
+                  // tables, but sticky cells layer on top of other rows
+                  // and a translucent background lets the row underneath
+                  // bleed through. Use an opaque grey so the hovered row
+                  // fully obscures whatever it's over.
                   '&:hover td': {
-                    bgcolor: 'action.hover',
+                    bgcolor: (theme) =>
+                      theme.palette.mode === 'light'
+                        ? theme.palette.grey[100]
+                        : theme.palette.grey[800],
                   },
                   // Brighten the leftmost edit-row icon on row hover so the
                   // affordance only obtrudes when the user is on the row.
@@ -376,6 +428,24 @@ export function GridView({
           })}
         </tbody>
       </Box>
+      {/* Column-header overflow menu. Renders outside the table so its
+          portal isn't constrained by the scroll container. */}
+      <Menu
+        anchorEl={colMenu?.anchor ?? null}
+        open={Boolean(colMenu)}
+        onClose={() => setColMenu(null)}
+      >
+        <MenuItem
+          onClick={() => {
+            const col = colMenu?.col;
+            setColMenu(null);
+            if (col && onEditColumn) onEditColumn(col);
+          }}
+        >
+          <ListItemIcon><TuneIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>Edit column</ListItemText>
+        </MenuItem>
+      </Menu>
     </Box>
   );
 }

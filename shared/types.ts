@@ -1184,14 +1184,16 @@ export type RecordColumnType =
   | 'supplier_ref'
   | 'product_ref'
   | 'document_ref'
-  | 'record_ref';
+  | 'record_ref'
+  | 'customer_ref';
 
 export type RecordRefType =
   | 'supplier'
   | 'product'
   | 'document'
   | 'record'
-  | 'contact';
+  | 'contact'
+  | 'customer';
 
 export type RecordViewType =
   | 'grid'
@@ -1644,6 +1646,220 @@ export interface CreateCommentRequest {
   body: string;
   parent_comment_id?: string | null;
   mentions?: string[];
+}
+
+// --- Records Forms (Phase 2 Slice 1) ---
+//
+// Forms are derived 1:1 from a sheet's columns. There is no separate
+// form designer — adding/removing/renaming a column flows straight to
+// the form. `field_config` selects which columns appear and lets the
+// builder override label/help text and reorder fields independently of
+// the column display_order on the sheet.
+
+export type RecordFormStatus = 'draft' | 'live' | 'archived';
+
+/** One field in a form, mapped 1:1 to a column on the sheet. */
+export interface RecordFormFieldConfig {
+  /** records_columns.id this field renders. */
+  column_id: string;
+  /** Required at submit time even if the column itself isn't required. */
+  required?: boolean;
+  /** Override the column.label for this form context. */
+  label_override?: string | null;
+  /** Optional helper text rendered below the input. */
+  help_text?: string | null;
+  /** 0-based render order. Independent of column.display_order on the grid. */
+  position: number;
+}
+
+/** Presentation knobs for the public form. */
+export interface RecordFormSettings {
+  /** Shown after a successful submit. Optional. */
+  thank_you_message?: string | null;
+  /** If set, public form redirects here after success. */
+  redirect_url?: string | null;
+  /** Hex color (e.g. "#1A365D") used for buttons + accents. */
+  accent_color?: string | null;
+  /** R2/public URL for an optional logo at the top of the form. */
+  logo_url?: string | null;
+}
+
+export interface RecordFormRow {
+  id: string;
+  tenant_id: string;
+  sheet_id: string;
+  name: string;
+  description: string | null;
+  public_slug: string | null;
+  is_public: number;
+  status: RecordFormStatus;
+  field_config: string | null; // JSON<RecordFormFieldConfig[]>
+  settings: string | null; // JSON<RecordFormSettings>
+  archived: number;
+  created_by_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecordFormSubmissionRow {
+  id: string;
+  tenant_id: string;
+  form_id: string;
+  sheet_id: string;
+  row_id: string;
+  submitter_metadata: string | null; // JSON
+  turnstile_verified: number;
+  created_at: string;
+}
+
+/** API-shape (joins surface as optional fields). */
+export interface RecordForm extends RecordFormRow {
+  creator_name?: string;
+  submission_count?: number;
+}
+
+export interface RecordFormSubmitterMetadata {
+  ip?: string | null;
+  user_agent?: string | null;
+  email?: string | null;
+}
+
+export interface RecordFormSubmission extends RecordFormSubmissionRow {
+  /** Resolved row title for the admin submission list. */
+  row_display_title?: string | null;
+}
+
+// --- Admin request/response shapes ---
+
+export interface RecordFormListResponse {
+  forms: RecordForm[];
+  total: number;
+}
+
+export interface RecordFormGetResponse {
+  form: RecordForm;
+}
+
+export interface RecordFormCreateResponse {
+  form: RecordForm;
+}
+
+export interface RecordFormUpdateResponse {
+  form: RecordForm;
+}
+
+export interface RecordFormSubmissionListResponse {
+  submissions: RecordFormSubmission[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface CreateFormRequest {
+  name: string;
+  description?: string | null;
+  is_public?: boolean;
+  status?: RecordFormStatus;
+  field_config?: RecordFormFieldConfig[];
+  settings?: RecordFormSettings;
+}
+
+export interface UpdateFormRequest {
+  name?: string;
+  description?: string | null;
+  is_public?: boolean;
+  status?: RecordFormStatus;
+  field_config?: RecordFormFieldConfig[];
+  settings?: RecordFormSettings;
+  /** Regenerate the public_slug. */
+  rotate_slug?: boolean;
+}
+
+// --- Public endpoint shapes (NO auth) ---
+//
+// PublicFormView is a sanitized projection: only visible columns are
+// included, only the fields needed to render and validate. We never
+// expose tenant_id, hidden columns, or sheet metadata that wasn't
+// explicitly opted into the form.
+
+/** Column definition shipped to the public form renderer. */
+export interface PublicFormFieldDef {
+  /** Stable column key — used as the data payload key on submit. */
+  key: string;
+  /** Column type — drives the input renderer + server validation. */
+  type: RecordColumnType;
+  /** Display label (label_override > column.label). */
+  label: string;
+  help_text?: string | null;
+  required: boolean;
+  /** Type-specific config (dropdown options, etc). */
+  config?: RecordColumnConfig | null;
+  position: number;
+}
+
+/**
+ * Tenant-scoped entity option safe to expose on a public form.
+ *
+ * Intentionally minimal — id, display name, and a single optional
+ * disambiguator (e.g. customer_number, sku). NEVER include PII like
+ * email, phone, or address; this rides on an unauthenticated route.
+ */
+export interface PublicEntityOption {
+  id: string;
+  name: string;
+  /** Optional disambiguator shown as a subtle subtitle in the picker. */
+  secondary?: string;
+}
+
+/**
+ * Pre-fetched entity options for any entity-ref columns visible on the
+ * form. Keyed by entity-ref kind so the renderer can match a column's
+ * type to its dropdown options without an extra network roundtrip.
+ *
+ * Only `customer`, `supplier`, and `product` are populated. Other ref
+ * types (`record_ref`, `document_ref`, `contact`) are intentionally
+ * excluded — their listings have different security profiles and are
+ * not safe to enumerate publicly.
+ */
+export interface PublicFormEntityOptions {
+  customer?: PublicEntityOption[];
+  supplier?: PublicEntityOption[];
+  product?: PublicEntityOption[];
+}
+
+export interface PublicFormView {
+  /** Form display metadata. */
+  form: {
+    name: string;
+    description: string | null;
+    accent_color: string | null;
+    logo_url: string | null;
+  };
+  fields: PublicFormFieldDef[];
+  /** Cloudflare Turnstile site key. Public — safe to ship to the browser. */
+  turnstile_site_key: string;
+  /**
+   * Tenant-scoped entity dropdown options for any visible
+   * customer_ref / supplier_ref / product_ref columns. Absent (or empty
+   * sub-keys) when the form has no such columns. Capped at 500 entries
+   * per kind — see [slug].ts for the search/pagination TODO.
+   */
+  entity_options?: PublicFormEntityOptions;
+}
+
+export interface PublicFormSubmitRequest {
+  /** Cell values keyed by column.key. */
+  data: RecordRowData;
+  /** Cloudflare Turnstile token, captured client-side. */
+  turnstile_token: string;
+  /** Optional submitter email — captured for audit, not auth. */
+  submitter_email?: string | null;
+}
+
+export interface PublicFormSubmitResponse {
+  success: boolean;
+  thank_you_message?: string | null;
+  redirect_url?: string | null;
 }
 
 // === Auth Token Storage Key (single constant) ===

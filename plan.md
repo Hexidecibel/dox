@@ -512,22 +512,29 @@ comment on it, see entity hover cards work, view audit history
 end-to-end, and have a second browser tab show the edit live via the
 Sheet's Durable Object.
 
-**Phase 1 → Phase 2 gate.** Phase 2 work does not begin until the
-author has dogfooded Phase 1 on real Quality data for at least one
-full intake cycle (receive → log → review → close-out), and we have
-a written list of friction points and missing primitives surfaced
-from that use. The point of the gate is to let real workflow expose
-the gaps in our primitives before we pile views, forms, and
-workflows on top of them.
+**Phase 1 → Phase 2 transition (originally a hard gate, now optional).**
+The original plan made dogfooding Phase 1 with real Quality data a
+prerequisite for Phase 2. The user has chosen to defer this in favor
+of velocity — Phase 2 work proceeds in parallel. Friction surfaced
+during eventual dogfood use will land as follow-up adjustments rather
+than a re-plan. Risk acknowledged: Phase 2 features may sit on
+primitives with hidden gaps; mitigation is that primitive refactors
+are cheaper than waiting weeks on dogfood feedback.
 
-**Phase 2 — Views + Forms.** Saved views (`records_views`), Kanban,
-Timeline, Gallery, Calendar — each with their config UI. Form
-builder + public form route + form submissions writing rows.
-Mobile-first form renderer. Update Request flow (token URLs, partial
-row updates). **Ships when:** the Quality Intake template can be
-used end-to-end on a phone — open public form link, snap photo,
-pick supplier from chip picker, submit; the row appears in the
-Quality sheet's Gallery view sorted by date.
+**Phase 2 — Views + Forms.** **Status: in-progress (Slice 1 — Forms +
+Public Intake)**. Saved views (`records_views`), Kanban, Timeline,
+Gallery, Calendar — each with their config UI. Form builder + public
+form route + form submissions writing rows. Mobile-first form
+renderer. Update Request flow (token URLs, partial row updates).
+**Ships when:** the Quality Intake template can be used end-to-end
+on a phone — open public form link, snap photo, pick supplier from
+chip picker, submit; the row appears in the Quality sheet's Gallery
+view sorted by date.
+
+Slicing Phase 2 into three sequential chunks: (1) Forms + Public
+Intake (in-progress), (2) Update Requests (depends on form renderer),
+(3) Alternate Views (orthogonal, can ship anytime). Slice 1 starts
+now.
 
 **Phase 3 — Workflows + Automations.** Workflow engine, the graph
 visualization, approval steps with assignees and SLAs, automations

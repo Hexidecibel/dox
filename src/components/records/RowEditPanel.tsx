@@ -33,6 +33,7 @@ import type { ApiRecordActivity, ApiRecordColumn, ApiRecordRow, RecordColumnType
 const ENTITY_REF_TYPES: RecordColumnType[] = [
   'supplier_ref',
   'product_ref',
+  'customer_ref',
   'document_ref',
   'record_ref',
   'contact',
@@ -69,12 +70,31 @@ function formatActivityTime(iso: string | null | undefined): string {
 
 function activityKindLabel(kind: string): string {
   switch (kind) {
-    case 'created': return 'Row created';
-    case 'updated': return 'Row updated';
-    case 'cell_updated': return 'Cell updated';
-    case 'archived': return 'Row archived';
+    case 'created': return 'created this row';
+    case 'updated': return 'updated this row';
+    case 'cell_updated': return 'updated a cell';
+    case 'archived': return 'archived this row';
+    case 'created_via_form': return 'submitted via form';
     default: return kind.replace(/_/g, ' ');
   }
+}
+
+/**
+ * Resolve the display name for an activity actor. Activity rows include
+ * `actor_name` from a LEFT JOIN on users — when the actor still exists
+ * we use that. NULL actor_id covers two cases:
+ *   - public form submission (kind='created_via_form') — credit the form
+ *   - seeded / system rows — fall back to "Someone" so the feed line
+ *     still scans naturally without dangling subject.
+ */
+function actorDisplay(activity: ApiRecordActivity): string {
+  if (activity.actor_name && activity.actor_name.trim()) {
+    return activity.actor_name;
+  }
+  if (activity.kind === 'created_via_form') {
+    return 'Form submission';
+  }
+  return 'Someone';
 }
 
 const EM_DASH = '—';
@@ -254,6 +274,7 @@ export function RowEditPanel({
               if ((a.kind === 'cell_updated' || a.kind === 'updated') && col && hasFromTo) {
                 const from = formatActivityValue(col, details!.from, refs);
                 const to = formatActivityValue(col, details!.to, refs);
+                const actor = actorDisplay(a);
                 return (
                   <Box
                     key={a.id}
@@ -272,6 +293,10 @@ export function RowEditPanel({
                       color="text.secondary"
                       sx={{ flex: 1, minWidth: 0, lineHeight: 1.5 }}
                     >
+                      <Box component="span" sx={{ fontWeight: 600, color: 'text.primary' }}>
+                        {actor}
+                      </Box>
+                      {' changed '}
                       <Box component="span" sx={{ fontWeight: 600, color: 'text.primary' }}>
                         {col.label}
                       </Box>
@@ -304,7 +329,9 @@ export function RowEditPanel({
                 );
               }
 
-              // Fallback for created / archived / unknown kinds.
+              // Fallback for created / archived / created_via_form / unknown kinds.
+              const actor = actorDisplay(a);
+              const verb = activityKindLabel(a.kind);
               return (
                 <Box
                   key={a.id}
@@ -323,7 +350,11 @@ export function RowEditPanel({
                     color="text.secondary"
                     sx={{ flex: 1, minWidth: 0, lineHeight: 1.5 }}
                   >
-                    {activityKindLabel(a.kind)}
+                    <Box component="span" sx={{ fontWeight: 600, color: 'text.primary' }}>
+                      {actor}
+                    </Box>
+                    {' '}
+                    {verb}
                     <Box component="span" sx={{ mx: 0.75 }}>·</Box>
                     <Box component="span">{time}</Box>
                   </Typography>

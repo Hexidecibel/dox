@@ -17,8 +17,22 @@ const securityHeaders: Record<string, string> = {
     "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'",
 };
 
-/** Public routes that do not require authentication. */
-const PUBLIC_ROUTES = ['/api/auth/login', '/api/auth/forgot-password', '/api/auth/reset-password', '/api/graphql', '/api/webhooks/email-ingest', '/api/webhooks/connectors'];
+/**
+ * Public routes that do not require authentication.
+ *
+ * Note on /api/forms/public: scoped narrowly so we don't accidentally
+ * expose any future /api/forms/* admin route. /api/records/* stays
+ * gated — only the public-facing slug endpoints are open.
+ */
+const PUBLIC_ROUTES = [
+  '/api/auth/login',
+  '/api/auth/forgot-password',
+  '/api/auth/reset-password',
+  '/api/graphql',
+  '/api/webhooks/email-ingest',
+  '/api/webhooks/connectors',
+  '/api/forms/public',
+];
 
 function isPublicRoute(pathname: string): boolean {
   return PUBLIC_ROUTES.some((route) => pathname === route || pathname.startsWith(route + '/'));

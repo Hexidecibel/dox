@@ -134,6 +134,7 @@ export function CellEditor({
   if (
     column.type === 'supplier_ref' ||
     column.type === 'product_ref' ||
+    column.type === 'customer_ref' ||
     column.type === 'document_ref' ||
     column.type === 'record_ref' ||
     column.type === 'contact'

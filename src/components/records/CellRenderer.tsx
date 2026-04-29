@@ -20,6 +20,7 @@ interface CellRendererProps {
 const ENTITY_REF_TYPES: RecordColumnType[] = [
   'supplier_ref',
   'product_ref',
+  'customer_ref',
   'document_ref',
   'record_ref',
   'contact',

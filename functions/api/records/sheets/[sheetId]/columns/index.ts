@@ -21,7 +21,7 @@ const COLUMN_TYPES: RecordColumnType[] = [
   'text', 'long_text', 'number', 'currency', 'percent', 'date', 'datetime',
   'duration', 'checkbox', 'dropdown_single', 'dropdown_multi', 'contact',
   'email', 'url', 'phone', 'attachment', 'formula', 'rollup',
-  'supplier_ref', 'product_ref', 'document_ref', 'record_ref',
+  'supplier_ref', 'product_ref', 'document_ref', 'record_ref', 'customer_ref',
 ];
 
 /**

@@ -16,6 +16,7 @@ import {
   DescriptionOutlined as DocumentIcon,
   TableRowsOutlined as RecordIcon,
   PersonOutline as ContactIcon,
+  BusinessOutlined as CustomerIcon,
 } from '@mui/icons-material';
 import type { RecordColumnType } from '../../../shared/types';
 
@@ -36,6 +37,8 @@ function iconForRefType(type: RecordColumnType): typeof SupplierIcon {
       return RecordIcon;
     case 'contact':
       return ContactIcon;
+    case 'customer_ref':
+      return CustomerIcon;
     case 'supplier_ref':
     default:
       return SupplierIcon;
@@ -53,6 +56,9 @@ function accentForRefType(type: RecordColumnType): { fg: string; bg: string; bor
       return { fg: '#4A148C', bg: 'rgba(123, 31, 162, 0.10)', border: 'rgba(123, 31, 162, 0.28)' };
     case 'contact':
       return { fg: '#01579B', bg: 'rgba(2, 136, 209, 0.10)', border: 'rgba(2, 136, 209, 0.28)' };
+    case 'customer_ref':
+      // Teal — distinct from supplier (green) and document (navy).
+      return { fg: '#00695C', bg: 'rgba(0, 121, 107, 0.10)', border: 'rgba(0, 121, 107, 0.28)' };
     case 'supplier_ref':
     default:
       return { fg: '#1B5E20', bg: 'rgba(46, 125, 50, 0.10)', border: 'rgba(46, 125, 50, 0.28)' };
@@ -138,6 +144,8 @@ function refTypeLabel(type: RecordColumnType): string {
       return 'Record';
     case 'contact':
       return 'Contact';
+    case 'customer_ref':
+      return 'Customer';
     case 'supplier_ref':
     default:
       return 'Supplier';

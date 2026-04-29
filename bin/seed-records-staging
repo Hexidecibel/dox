@@ -13,7 +13,7 @@
 # doc-upload-db-staging).
 #
 # Tables touched:
-#   suppliers, products
+#   suppliers, products, customers
 #   records_sheets, records_columns, records_rows, records_row_refs,
 #   records_views, records_activity
 # Tables intentionally skipped (per spec):
@@ -72,6 +72,25 @@ ON CONFLICT(id) DO UPDATE SET
   name=excluded.name, slug=excluded.slug, description=excluded.description, active=1, updated_at=datetime('now');
 
 -- =========================================================
+-- CUSTOMERS (tenant=default)
+-- The Quality Intake "customer" column is a customer_ref now, so the
+-- values that used to live in records_rows.data as strings are seeded
+-- here as real customer rows. customer_number is synthesized (CUST-####)
+-- since these are dogfood retailers, not ERP-driven.
+-- =========================================================
+INSERT INTO customers (id, tenant_id, customer_number, name, email, coa_delivery_method, active)
+VALUES
+  ('cust-wf-bellevue',   'default', 'CUST-1001', 'Whole Foods Bellevue',       NULL, 'email', 1),
+  ('cust-costco-kirk',   'default', 'CUST-1002', 'Costco Kirkland',            NULL, 'email', 1),
+  ('cust-pcc-edmonds',   'default', 'CUST-1003', 'PCC Edmonds',                NULL, 'email', 1),
+  ('cust-tc-millcreek',  'default', 'CUST-1004', 'Town & Country Mill Creek',  NULL, 'email', 1),
+  ('cust-met-market',    'default', 'CUST-1005', 'Met Market',                 NULL, 'email', 1),
+  ('cust-wf-roosevelt',  'default', 'CUST-1006', 'Whole Foods Roosevelt',      NULL, 'email', 1)
+ON CONFLICT(id) DO UPDATE SET
+  customer_number=excluded.customer_number, name=excluded.name, email=excluded.email,
+  coa_delivery_method=excluded.coa_delivery_method, active=1, updated_at=datetime('now');
+
+-- =========================================================
 -- SHEETS
 -- =========================================================
 INSERT INTO records_sheets (id, tenant_id, name, slug, description, icon, color, template_key, archived)
@@ -94,7 +113,7 @@ ON CONFLICT(id) DO UPDATE SET
 INSERT INTO records_columns (id, sheet_id, tenant_id, key, label, type, config, required, is_title, display_order)
 VALUES
   ('col-qi-date',     'sheet-quality', 'default', 'date_reported', 'Date Reported', 'date',            NULL,                                                                                                                                                                                                                                                                  0, 0, 1),
-  ('col-qi-customer', 'sheet-quality', 'default', 'customer',      'Customer',      'text',            NULL,                                                                                                                                                                                                                                                                  0, 1, 2),
+  ('col-qi-customer', 'sheet-quality', 'default', 'customer',      'Customer',      'customer_ref',    NULL,                                                                                                                                                                                                                                                                  0, 1, 2),
   ('col-qi-supplier', 'sheet-quality', 'default', 'supplier',      'Supplier',      'supplier_ref',    NULL,                                                                                                                                                                                                                                                                  0, 0, 3),
   ('col-qi-product',  'sheet-quality', 'default', 'product',       'Product',       'product_ref',     NULL,                                                                                                                                                                                                                                                                  0, 0, 4),
   ('col-qi-issue',    'sheet-quality', 'default', 'issue_type',    'Issue Type',    'dropdown_single', '{"options":[{"value":"Mold"},{"value":"Off-flavor"},{"value":"Packaging defect"},{"value":"Foreign material"},{"value":"Other"}]}',                                                                                                                                       0, 0, 5),
@@ -141,22 +160,22 @@ ON CONFLICT(id) DO UPDATE SET
 INSERT INTO records_rows (id, sheet_id, tenant_id, display_title, data, position, created_at, updated_at)
 VALUES
   ('row-qi-1', 'sheet-quality', 'default', 'Whole Foods Bellevue',
-   '{"date_reported":"2026-04-10","customer":"Whole Foods Bellevue","supplier":"sup-auburn","product":"prod-yogurt-32oz","issue_type":"Mold","severity":"High","status":"Investigating","notes":"Customer found mold inside three sealed cups, lot DA-0410. Photos requested."}',
+   '{"date_reported":"2026-04-10","customer":{"id":"cust-wf-bellevue","name":"Whole Foods Bellevue"},"supplier":{"id":"sup-auburn","name":"Auburn Dairy Products"},"product":{"id":"prod-yogurt-32oz","name":"Yogurt 32oz"},"issue_type":"Mold","severity":"High","status":"Investigating","notes":"Customer found mold inside three sealed cups, lot DA-0410. Photos requested."}',
    1, '2026-04-10 09:15:00', '2026-04-11 14:22:00'),
   ('row-qi-2', 'sheet-quality', 'default', 'Costco Kirkland',
-   '{"date_reported":"2026-04-15","customer":"Costco Kirkland","supplier":"sup-auburn","product":"prod-yogurt-32oz","issue_type":"Mold","severity":"High","status":"Awaiting supplier","notes":"Same supplier, different lot. Trending issue. Reaching out."}',
+   '{"date_reported":"2026-04-15","customer":{"id":"cust-costco-kirk","name":"Costco Kirkland"},"supplier":{"id":"sup-auburn","name":"Auburn Dairy Products"},"product":{"id":"prod-yogurt-32oz","name":"Yogurt 32oz"},"issue_type":"Mold","severity":"High","status":"Awaiting supplier","notes":"Same supplier, different lot. Trending issue. Reaching out."}',
    2, '2026-04-15 10:40:00', '2026-04-16 11:05:00'),
   ('row-qi-3', 'sheet-quality', 'default', 'PCC Edmonds',
-   '{"date_reported":"2026-04-18","customer":"PCC Edmonds","supplier":"sup-pacific","product":"prod-cheese-block","issue_type":"Off-flavor","severity":"Medium","status":"Resolved","notes":"Customer credited. Single batch, supplier confirmed root cause."}',
+   '{"date_reported":"2026-04-18","customer":{"id":"cust-pcc-edmonds","name":"PCC Edmonds"},"supplier":{"id":"sup-pacific","name":"Pacific Coast Foods"},"product":{"id":"prod-cheese-block","name":"Cheese Block 5lb"},"issue_type":"Off-flavor","severity":"Medium","status":"Resolved","notes":"Customer credited. Single batch, supplier confirmed root cause."}',
    3, '2026-04-18 13:30:00', '2026-04-20 09:00:00'),
   ('row-qi-4', 'sheet-quality', 'default', 'Town & Country Mill Creek',
-   '{"date_reported":"2026-04-21","customer":"Town & Country Mill Creek","supplier":"sup-northern","product":"prod-milk-gallon","issue_type":"Packaging defect","severity":"Low","status":"Resolved","notes":"Cap loose on one unit, customer satisfied with replacement."}',
+   '{"date_reported":"2026-04-21","customer":{"id":"cust-tc-millcreek","name":"Town & Country Mill Creek"},"supplier":{"id":"sup-northern","name":"Northern Mills Co."},"product":{"id":"prod-milk-gallon","name":"Milk Gallon"},"issue_type":"Packaging defect","severity":"Low","status":"Resolved","notes":"Cap loose on one unit, customer satisfied with replacement."}',
    4, '2026-04-21 08:55:00', '2026-04-22 16:10:00'),
   ('row-qi-5', 'sheet-quality', 'default', 'Met Market',
-   '{"date_reported":"2026-04-24","customer":"Met Market","supplier":"sup-auburn","product":"prod-yogurt-32oz","issue_type":"Mold","severity":"Critical","status":"Open","notes":"Third mold incident this month from same supplier. Escalated."}',
+   '{"date_reported":"2026-04-24","customer":{"id":"cust-met-market","name":"Met Market"},"supplier":{"id":"sup-auburn","name":"Auburn Dairy Products"},"product":{"id":"prod-yogurt-32oz","name":"Yogurt 32oz"},"issue_type":"Mold","severity":"Critical","status":"Open","notes":"Third mold incident this month from same supplier. Escalated."}',
    5, '2026-04-24 15:20:00', '2026-04-24 15:20:00'),
   ('row-qi-6', 'sheet-quality', 'default', 'Whole Foods Roosevelt',
-   '{"date_reported":"2026-04-26","customer":"Whole Foods Roosevelt","supplier":"sup-riverside","product":"prod-kraft-roll","issue_type":"Foreign material","severity":"Medium","status":"Open","notes":"Customer complaint about debris in packaging."}',
+   '{"date_reported":"2026-04-26","customer":{"id":"cust-wf-roosevelt","name":"Whole Foods Roosevelt"},"supplier":{"id":"sup-riverside","name":"Riverside Packaging"},"product":{"id":"prod-kraft-roll","name":"Kraft Paper Roll"},"issue_type":"Foreign material","severity":"Medium","status":"Open","notes":"Customer complaint about debris in packaging."}',
    6, '2026-04-26 11:45:00', '2026-04-26 11:45:00')
 ON CONFLICT(id) DO UPDATE SET
   display_title=excluded.display_title, data=excluded.data,
@@ -169,16 +188,16 @@ ON CONFLICT(id) DO UPDATE SET
 INSERT INTO records_rows (id, sheet_id, tenant_id, display_title, data, position, created_at, updated_at)
 VALUES
   ('row-cr-1', 'sheet-credits', 'default', 'Auburn Dairy Products',
-   '{"request_date":"2026-04-12","vendor":"sup-auburn","amount_usd":1240.00,"reason":"Mold incident at Whole Foods Bellevue, lot DA-0410","status":"Submitted","source_incident":"row-qi-1"}',
+   '{"request_date":"2026-04-12","vendor":{"id":"sup-auburn","name":"Auburn Dairy Products"},"amount_usd":1240.00,"reason":"Mold incident at Whole Foods Bellevue, lot DA-0410","status":"Submitted","source_incident":{"id":"row-qi-1","name":"Whole Foods Bellevue"}}',
    1, '2026-04-12 10:00:00', '2026-04-13 09:30:00'),
   ('row-cr-2', 'sheet-credits', 'default', 'Pacific Coast Foods',
-   '{"request_date":"2026-04-19","vendor":"sup-pacific","amount_usd":580.00,"reason":"Off-flavor batch resolved with replacement","status":"Paid","source_incident":"row-qi-3"}',
+   '{"request_date":"2026-04-19","vendor":{"id":"sup-pacific","name":"Pacific Coast Foods"},"amount_usd":580.00,"reason":"Off-flavor batch resolved with replacement","status":"Paid","source_incident":{"id":"row-qi-3","name":"PCC Edmonds"}}',
    2, '2026-04-19 11:30:00', '2026-04-23 15:45:00'),
   ('row-cr-3', 'sheet-credits', 'default', 'Northern Mills Co.',
-   '{"request_date":"2026-04-22","vendor":"sup-northern","amount_usd":95.00,"reason":"Single unit packaging defect, customer goodwill credit","status":"Approved","source_incident":"row-qi-4"}',
+   '{"request_date":"2026-04-22","vendor":{"id":"sup-northern","name":"Northern Mills Co."},"amount_usd":95.00,"reason":"Single unit packaging defect, customer goodwill credit","status":"Approved","source_incident":{"id":"row-qi-4","name":"Town & Country Mill Creek"}}',
    3, '2026-04-22 14:00:00', '2026-04-25 10:10:00'),
   ('row-cr-4', 'sheet-credits', 'default', 'Auburn Dairy Products',
-   '{"request_date":"2026-04-25","vendor":"sup-auburn","amount_usd":2400.00,"reason":"Critical mold escalation, multi-store impact","status":"Pending submission","source_incident":"row-qi-5"}',
+   '{"request_date":"2026-04-25","vendor":{"id":"sup-auburn","name":"Auburn Dairy Products"},"amount_usd":2400.00,"reason":"Critical mold escalation, multi-store impact","status":"Pending submission","source_incident":{"id":"row-qi-5","name":"Met Market"}}',
    4, '2026-04-25 09:25:00', '2026-04-25 09:25:00')
 ON CONFLICT(id) DO UPDATE SET
   display_title=excluded.display_title, data=excluded.data,
@@ -190,19 +209,19 @@ ON CONFLICT(id) DO UPDATE SET
 INSERT INTO records_rows (id, sheet_id, tenant_id, display_title, data, position, created_at, updated_at)
 VALUES
   ('row-au-1', 'sheet-audit', 'default', 'Auburn Dairy Products',
-   '{"audit_date":"2026-03-15","supplier":"sup-auburn","lead_auditor":"Sarah Chen","audit_type":"For-cause","outcome":"Pass with findings"}',
+   '{"audit_date":"2026-03-15","supplier":{"id":"sup-auburn","name":"Auburn Dairy Products"},"lead_auditor":"Sarah Chen","audit_type":"For-cause","outcome":"Pass with findings"}',
    1, '2026-03-01 08:00:00', '2026-03-16 17:00:00'),
   ('row-au-2', 'sheet-audit', 'default', 'Pacific Coast Foods',
-   '{"audit_date":"2026-04-02","supplier":"sup-pacific","lead_auditor":"Mike Rodriguez","audit_type":"Annual","outcome":"Pass"}',
+   '{"audit_date":"2026-04-02","supplier":{"id":"sup-pacific","name":"Pacific Coast Foods"},"lead_auditor":"Mike Rodriguez","audit_type":"Annual","outcome":"Pass"}',
    2, '2026-03-20 09:00:00', '2026-04-02 18:00:00'),
   ('row-au-3', 'sheet-audit', 'default', 'Northern Mills Co.',
-   '{"audit_date":"2026-04-30","supplier":"sup-northern","lead_auditor":"Sarah Chen","audit_type":"Annual","outcome":"Scheduled"}',
+   '{"audit_date":"2026-04-30","supplier":{"id":"sup-northern","name":"Northern Mills Co."},"lead_auditor":"Sarah Chen","audit_type":"Annual","outcome":"Scheduled"}',
    3, '2026-04-05 09:00:00', '2026-04-05 09:00:00'),
   ('row-au-4', 'sheet-audit', 'default', 'Riverside Packaging',
-   '{"audit_date":"2026-05-12","supplier":"sup-riverside","lead_auditor":"Diane Park","audit_type":"Initial","outcome":"Scheduled"}',
+   '{"audit_date":"2026-05-12","supplier":{"id":"sup-riverside","name":"Riverside Packaging"},"lead_auditor":"Diane Park","audit_type":"Initial","outcome":"Scheduled"}',
    4, '2026-04-10 10:30:00', '2026-04-10 10:30:00'),
   ('row-au-5', 'sheet-audit', 'default', 'Auburn Dairy Products',
-   '{"audit_date":"2026-06-01","supplier":"sup-auburn","lead_auditor":"Sarah Chen","audit_type":"Follow-up","outcome":"Scheduled"}',
+   '{"audit_date":"2026-06-01","supplier":{"id":"sup-auburn","name":"Auburn Dairy Products"},"lead_auditor":"Sarah Chen","audit_type":"Follow-up","outcome":"Scheduled"}',
    5, '2026-04-12 11:00:00', '2026-04-12 11:00:00')
 ON CONFLICT(id) DO UPDATE SET
   display_title=excluded.display_title, data=excluded.data,
@@ -215,20 +234,26 @@ ON CONFLICT(id) DO UPDATE SET
 -- Idempotent via stable id = "ref-<row>-<col>".
 -- =========================================================
 
--- Sheet 1: supplier_ref + product_ref
+-- Sheet 1: supplier_ref + product_ref + customer_ref
 INSERT INTO records_row_refs (id, tenant_id, sheet_id, row_id, column_key, ref_type, ref_id) VALUES
   ('ref-row-qi-1-supplier', 'default','sheet-quality','row-qi-1','supplier','supplier','sup-auburn'),
   ('ref-row-qi-1-product',  'default','sheet-quality','row-qi-1','product', 'product', 'prod-yogurt-32oz'),
+  ('ref-row-qi-1-customer', 'default','sheet-quality','row-qi-1','customer','customer','cust-wf-bellevue'),
   ('ref-row-qi-2-supplier', 'default','sheet-quality','row-qi-2','supplier','supplier','sup-auburn'),
   ('ref-row-qi-2-product',  'default','sheet-quality','row-qi-2','product', 'product', 'prod-yogurt-32oz'),
+  ('ref-row-qi-2-customer', 'default','sheet-quality','row-qi-2','customer','customer','cust-costco-kirk'),
   ('ref-row-qi-3-supplier', 'default','sheet-quality','row-qi-3','supplier','supplier','sup-pacific'),
   ('ref-row-qi-3-product',  'default','sheet-quality','row-qi-3','product', 'product', 'prod-cheese-block'),
+  ('ref-row-qi-3-customer', 'default','sheet-quality','row-qi-3','customer','customer','cust-pcc-edmonds'),
   ('ref-row-qi-4-supplier', 'default','sheet-quality','row-qi-4','supplier','supplier','sup-northern'),
   ('ref-row-qi-4-product',  'default','sheet-quality','row-qi-4','product', 'product', 'prod-milk-gallon'),
+  ('ref-row-qi-4-customer', 'default','sheet-quality','row-qi-4','customer','customer','cust-tc-millcreek'),
   ('ref-row-qi-5-supplier', 'default','sheet-quality','row-qi-5','supplier','supplier','sup-auburn'),
   ('ref-row-qi-5-product',  'default','sheet-quality','row-qi-5','product', 'product', 'prod-yogurt-32oz'),
+  ('ref-row-qi-5-customer', 'default','sheet-quality','row-qi-5','customer','customer','cust-met-market'),
   ('ref-row-qi-6-supplier', 'default','sheet-quality','row-qi-6','supplier','supplier','sup-riverside'),
-  ('ref-row-qi-6-product',  'default','sheet-quality','row-qi-6','product', 'product', 'prod-kraft-roll')
+  ('ref-row-qi-6-product',  'default','sheet-quality','row-qi-6','product', 'product', 'prod-kraft-roll'),
+  ('ref-row-qi-6-customer', 'default','sheet-quality','row-qi-6','customer','customer','cust-wf-roosevelt')
 ON CONFLICT(id) DO UPDATE SET ref_type=excluded.ref_type, ref_id=excluded.ref_id;
 
 -- Sheet 2: vendor (supplier_ref) + source_incident (record_ref)
@@ -279,39 +304,40 @@ ON CONFLICT(id) DO UPDATE SET
 -- =========================================================
 INSERT INTO records_activity (id, tenant_id, sheet_id, row_id, actor_id, kind, details, created_at) VALUES
   -- Sheet 1: created
-  ('act-row-qi-1-created','default','sheet-quality','row-qi-1',NULL,'created',NULL,'2026-04-10 09:15:00'),
-  ('act-row-qi-2-created','default','sheet-quality','row-qi-2',NULL,'created',NULL,'2026-04-15 10:40:00'),
-  ('act-row-qi-3-created','default','sheet-quality','row-qi-3',NULL,'created',NULL,'2026-04-18 13:30:00'),
-  ('act-row-qi-4-created','default','sheet-quality','row-qi-4',NULL,'created',NULL,'2026-04-21 08:55:00'),
-  ('act-row-qi-5-created','default','sheet-quality','row-qi-5',NULL,'created',NULL,'2026-04-24 15:20:00'),
-  ('act-row-qi-6-created','default','sheet-quality','row-qi-6',NULL,'created',NULL,'2026-04-26 11:45:00'),
+  ('act-row-qi-1-created','default','sheet-quality','row-qi-1','partner','created',NULL,'2026-04-10 09:15:00'),
+  ('act-row-qi-2-created','default','sheet-quality','row-qi-2','partner','created',NULL,'2026-04-15 10:40:00'),
+  ('act-row-qi-3-created','default','sheet-quality','row-qi-3','partner','created',NULL,'2026-04-18 13:30:00'),
+  ('act-row-qi-4-created','default','sheet-quality','row-qi-4','partner','created',NULL,'2026-04-21 08:55:00'),
+  ('act-row-qi-5-created','default','sheet-quality','row-qi-5','partner','created',NULL,'2026-04-24 15:20:00'),
+  ('act-row-qi-6-created','default','sheet-quality','row-qi-6','partner','created',NULL,'2026-04-26 11:45:00'),
   -- Sheet 1: status transitions
-  ('act-row-qi-1-updated','default','sheet-quality','row-qi-1',NULL,'updated','{"column":"status","from":"Open","to":"Investigating"}','2026-04-11 14:22:00'),
-  ('act-row-qi-2-updated','default','sheet-quality','row-qi-2',NULL,'updated','{"column":"status","from":"Open","to":"Awaiting supplier"}','2026-04-16 11:05:00'),
-  ('act-row-qi-3-updated','default','sheet-quality','row-qi-3',NULL,'updated','{"column":"status","from":"Investigating","to":"Resolved"}','2026-04-20 09:00:00'),
-  ('act-row-qi-4-updated','default','sheet-quality','row-qi-4',NULL,'updated','{"column":"status","from":"Open","to":"Resolved"}','2026-04-22 16:10:00'),
+  ('act-row-qi-1-updated','default','sheet-quality','row-qi-1','partner','updated','{"column":"status","from":"Open","to":"Investigating"}','2026-04-11 14:22:00'),
+  ('act-row-qi-2-updated','default','sheet-quality','row-qi-2','partner','updated','{"column":"status","from":"Open","to":"Awaiting supplier"}','2026-04-16 11:05:00'),
+  ('act-row-qi-3-updated','default','sheet-quality','row-qi-3','partner','updated','{"column":"status","from":"Investigating","to":"Resolved"}','2026-04-20 09:00:00'),
+  ('act-row-qi-4-updated','default','sheet-quality','row-qi-4','partner','updated','{"column":"status","from":"Open","to":"Resolved"}','2026-04-22 16:10:00'),
 
   -- Sheet 2: created
-  ('act-row-cr-1-created','default','sheet-credits','row-cr-1',NULL,'created',NULL,'2026-04-12 10:00:00'),
-  ('act-row-cr-2-created','default','sheet-credits','row-cr-2',NULL,'created',NULL,'2026-04-19 11:30:00'),
-  ('act-row-cr-3-created','default','sheet-credits','row-cr-3',NULL,'created',NULL,'2026-04-22 14:00:00'),
-  ('act-row-cr-4-created','default','sheet-credits','row-cr-4',NULL,'created',NULL,'2026-04-25 09:25:00'),
+  ('act-row-cr-1-created','default','sheet-credits','row-cr-1','partner','created',NULL,'2026-04-12 10:00:00'),
+  ('act-row-cr-2-created','default','sheet-credits','row-cr-2','partner','created',NULL,'2026-04-19 11:30:00'),
+  ('act-row-cr-3-created','default','sheet-credits','row-cr-3','partner','created',NULL,'2026-04-22 14:00:00'),
+  ('act-row-cr-4-created','default','sheet-credits','row-cr-4','partner','created',NULL,'2026-04-25 09:25:00'),
   -- Sheet 2: status transitions
-  ('act-row-cr-1-updated','default','sheet-credits','row-cr-1',NULL,'updated','{"column":"status","from":"Pending submission","to":"Submitted"}','2026-04-13 09:30:00'),
-  ('act-row-cr-2-updated','default','sheet-credits','row-cr-2',NULL,'updated','{"column":"status","from":"Submitted","to":"Paid"}','2026-04-23 15:45:00'),
-  ('act-row-cr-3-updated','default','sheet-credits','row-cr-3',NULL,'updated','{"column":"status","from":"Submitted","to":"Approved"}','2026-04-25 10:10:00'),
+  ('act-row-cr-1-updated','default','sheet-credits','row-cr-1','partner','updated','{"column":"status","from":"Pending submission","to":"Submitted"}','2026-04-13 09:30:00'),
+  ('act-row-cr-2-updated','default','sheet-credits','row-cr-2','partner','updated','{"column":"status","from":"Submitted","to":"Paid"}','2026-04-23 15:45:00'),
+  ('act-row-cr-3-updated','default','sheet-credits','row-cr-3','partner','updated','{"column":"status","from":"Submitted","to":"Approved"}','2026-04-25 10:10:00'),
 
   -- Sheet 3: created
-  ('act-row-au-1-created','default','sheet-audit','row-au-1',NULL,'created',NULL,'2026-03-01 08:00:00'),
-  ('act-row-au-2-created','default','sheet-audit','row-au-2',NULL,'created',NULL,'2026-03-20 09:00:00'),
-  ('act-row-au-3-created','default','sheet-audit','row-au-3',NULL,'created',NULL,'2026-04-05 09:00:00'),
-  ('act-row-au-4-created','default','sheet-audit','row-au-4',NULL,'created',NULL,'2026-04-10 10:30:00'),
-  ('act-row-au-5-created','default','sheet-audit','row-au-5',NULL,'created',NULL,'2026-04-12 11:00:00'),
+  ('act-row-au-1-created','default','sheet-audit','row-au-1','partner','created',NULL,'2026-03-01 08:00:00'),
+  ('act-row-au-2-created','default','sheet-audit','row-au-2','partner','created',NULL,'2026-03-20 09:00:00'),
+  ('act-row-au-3-created','default','sheet-audit','row-au-3','partner','created',NULL,'2026-04-05 09:00:00'),
+  ('act-row-au-4-created','default','sheet-audit','row-au-4','partner','created',NULL,'2026-04-10 10:30:00'),
+  ('act-row-au-5-created','default','sheet-audit','row-au-5','partner','created',NULL,'2026-04-12 11:00:00'),
   -- Sheet 3: outcome transitions for completed audits
-  ('act-row-au-1-updated','default','sheet-audit','row-au-1',NULL,'updated','{"column":"outcome","from":"In progress","to":"Pass with findings"}','2026-03-16 17:00:00'),
-  ('act-row-au-2-updated','default','sheet-audit','row-au-2',NULL,'updated','{"column":"outcome","from":"Scheduled","to":"Pass"}','2026-04-02 18:00:00')
+  ('act-row-au-1-updated','default','sheet-audit','row-au-1','partner','updated','{"column":"outcome","from":"In progress","to":"Pass with findings"}','2026-03-16 17:00:00'),
+  ('act-row-au-2-updated','default','sheet-audit','row-au-2','partner','updated','{"column":"outcome","from":"Scheduled","to":"Pass"}','2026-04-02 18:00:00')
 ON CONFLICT(id) DO UPDATE SET
-  kind=excluded.kind, details=excluded.details, created_at=excluded.created_at;
+  kind=excluded.kind, details=excluded.details, created_at=excluded.created_at,
+  actor_id=excluded.actor_id;
 SQL
 
 # ------------------------------------------------------------------

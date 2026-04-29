@@ -31,6 +31,16 @@ import type {
   RecordRowUpdateResponse,
   RecordViewListResponse,
   RecordActivityListResponse,
+  CreateFormRequest,
+  UpdateFormRequest,
+  RecordFormListResponse,
+  RecordFormGetResponse,
+  RecordFormCreateResponse,
+  RecordFormUpdateResponse,
+  RecordFormSubmissionListResponse,
+  PublicFormView,
+  PublicFormSubmitRequest,
+  PublicFormSubmitResponse,
 } from '../../shared/types';
 
 const API_BASE = '/api';
@@ -220,6 +230,96 @@ export const recordsApi = {
     list(sheetId: string): Promise<RecordViewListResponse> {
       return fetchRecords<RecordViewListResponse>(`/records/sheets/${sheetId}/views`);
     },
+  },
+
+  forms: {
+    /** GET /api/records/sheets/:sheetId/forms */
+    list(sheetId: string, params?: { archived?: boolean }): Promise<RecordFormListResponse> {
+      const qs = params?.archived ? '?archived=1' : '';
+      return fetchRecords<RecordFormListResponse>(`/records/sheets/${sheetId}/forms${qs}`);
+    },
+
+    /** GET /api/records/sheets/:sheetId/forms/:formId */
+    get(sheetId: string, formId: string): Promise<RecordFormGetResponse> {
+      return fetchRecords<RecordFormGetResponse>(`/records/sheets/${sheetId}/forms/${formId}`);
+    },
+
+    /** POST /api/records/sheets/:sheetId/forms */
+    create(sheetId: string, data: CreateFormRequest): Promise<RecordFormCreateResponse> {
+      return fetchRecords<RecordFormCreateResponse>(`/records/sheets/${sheetId}/forms`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    },
+
+    /** PUT /api/records/sheets/:sheetId/forms/:formId */
+    update(sheetId: string, formId: string, data: UpdateFormRequest): Promise<RecordFormUpdateResponse> {
+      return fetchRecords<RecordFormUpdateResponse>(`/records/sheets/${sheetId}/forms/${formId}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      });
+    },
+
+    /** DELETE /api/records/sheets/:sheetId/forms/:formId */
+    archive(sheetId: string, formId: string): Promise<{ success: true }> {
+      return fetchRecords<{ success: true }>(`/records/sheets/${sheetId}/forms/${formId}`, {
+        method: 'DELETE',
+      });
+    },
+
+    /** GET /api/records/sheets/:sheetId/forms/:formId/submissions */
+    submissions(
+      sheetId: string,
+      formId: string,
+      params?: { limit?: number; offset?: number },
+    ): Promise<RecordFormSubmissionListResponse> {
+      const query = new URLSearchParams();
+      if (params?.limit != null) query.set('limit', String(params.limit));
+      if (params?.offset != null) query.set('offset', String(params.offset));
+      const qs = query.toString();
+      return fetchRecords<RecordFormSubmissionListResponse>(
+        `/records/sheets/${sheetId}/forms/${formId}/submissions${qs ? `?${qs}` : ''}`,
+      );
+    },
+  },
+};
+
+/**
+ * Public form client — no auth header, never redirects on 401, never
+ * touches localStorage. Used by the /f/<slug> renderer which is reached
+ * by anonymous external users.
+ */
+export const publicFormsApi = {
+  /** GET /api/forms/public/:slug — sanitized PublicFormView. */
+  async get(slug: string): Promise<PublicFormView> {
+    const res = await fetch(`/api/forms/public/${encodeURIComponent(slug)}`, {
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) {
+      const code = res.status === 404 ? 'not_found' : 'fetch_failed';
+      throw Object.assign(new Error('Form unavailable'), { code });
+    }
+    return res.json();
+  },
+
+  /** POST /api/forms/public/:slug/submit. */
+  async submit(slug: string, payload: PublicFormSubmitRequest): Promise<PublicFormSubmitResponse> {
+    const res = await fetch(`/api/forms/public/${encodeURIComponent(slug)}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        const body = await res.json();
+        message = body.error || body.message || message;
+      } catch {
+        // ignore parse errors
+      }
+      throw new Error(message);
+    }
+    return res.json();
   },
 };
 
