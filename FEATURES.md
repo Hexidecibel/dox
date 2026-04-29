@@ -6,7 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
-- [v2.6.0](releases/v2.6.0.md) — 2026-04-28 — TODO
+- [v2.6.0](releases/v2.6.0.md) — 2026-04-28 — Records module — collaborative trackers, forms, update requests, and workflows
 - [v2.5.0](releases/v2.5.0.md) — 2026-04-28 — Release versioning system
 - [v2.4.3](releases/v2.4.3.md) — 2026-04-27 — Phase 3a — pre-fill, uncertainty, dashboard
 - [v2.4.2](releases/v2.4.2.md) — 2026-04-27 — Phase 2 — capture reviewer decisions
