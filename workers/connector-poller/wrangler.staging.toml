@@ -1,0 +1,21 @@
+name = "dox-connector-poller-staging"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Staging twin of dox-connector-poller. Drives the */5 cron against the
+# staging Pages project (`doc-upload-site-staging`) instead of prod.
+# See `wrangler.toml` for the rationale on why this companion Worker
+# exists at all (Pages cannot host crons).
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+# Staging Pages project URL — MUST stay distinct from prod (`supdox.com`)
+# so a misconfigured token can never reach prod. The bearer is also
+# different in 1Password (`op://cush/doc-upload-site-staging/...`).
+DOX_API_BASE = "https://doc-upload-site-staging.pages.dev"
+
+# Secrets (set via `npx wrangler secret put --config wrangler.staging.toml`):
+#   CONNECTOR_POLL_TOKEN - bearer token sent to /api/connectors/poll on
+#                          the staging Pages project. MUST match the
+#                          value set on `doc-upload-site-staging`.

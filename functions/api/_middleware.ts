@@ -31,6 +31,10 @@ const PUBLIC_ROUTES = [
   '/api/graphql',
   '/api/webhooks/email-ingest',
   '/api/webhooks/connectors',
+  // Scheduled R2 prefix poller endpoint. Authed by a bearer token
+  // (CONNECTOR_POLL_TOKEN) checked inside the handler — bypasses JWT so
+  // the companion `dox-connector-poller` Worker can drive it on cron.
+  '/api/connectors/poll',
   '/api/forms/public',
   // Records update requests — recipient form gate is the unguessable
   // token in the URL, not a login. Same scoping rule as /api/forms/public:

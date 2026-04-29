@@ -106,6 +106,7 @@ bin/                    # Operational scripts (deploy, migrate, seed)
 | 0020 | email_domain_default_doctype | default_document_type_id on email_domain_mappings |
 | 0021 | extraction_example_supplier | Add supplier column to extraction_examples |
 | 0022 | suppliers_and_dynamic_metadata | Suppliers table, supplier_id + primary_metadata + extended_metadata on documents |
+| 0046 | connector_processed_keys | Dedup table for the scheduled R2-prefix poller (file_watch Phase 2). Tracks (connector_id, r2_key) pairs already dispatched. |
 
 ## Role Model (4 roles)
 

@@ -13,6 +13,13 @@ export interface Env {
   TURNSTILE_SITE_KEY?: string;
   /** Cloudflare Turnstile secret (server-side verify only). */
   TURNSTILE_SECRET?: string;
+  /**
+   * Bearer token for the `/api/connectors/poll` scheduled endpoint —
+   * shared with the companion `dox-connector-poller` Worker. Set the
+   * SAME value on both sides via `wrangler secret put`. Absence
+   * disables the endpoint (fails closed with 401).
+   */
+  CONNECTOR_POLL_TOKEN?: string;
 }
 
 export interface User {

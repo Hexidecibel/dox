@@ -26,3 +26,9 @@ npx wrangler pages deploy dist --project-name doc-upload-site
 echo ""
 echo "=== Deployment complete ==="
 echo "URL: https://supdox.com"
+echo
+echo "Note: companion Workers are separate deploy artifacts and are NOT"
+echo "redeployed here. Run them only when their own source has changed:"
+echo "  - dox-sheet-session     -> cd workers/sheet-session   && npx wrangler deploy"
+echo "  - dox-connector-poller  -> bin/deploy-connector-poller"
+echo "  - dox-email-worker      -> cd email-worker            && npx wrangler deploy"

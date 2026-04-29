@@ -42,12 +42,14 @@ import m0036 from '../../migrations/0036_extraction_evaluations.sql?raw';
 import m0037 from '../../migrations/0037_connector_soft_delete.sql?raw';
 import m0038 from '../../migrations/0038_reviewer_decisions.sql?raw';
 import m0039 from '../../migrations/0039_learned_field_hints.sql?raw';
+import m0046 from '../../migrations/0046_connector_processed_keys.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
   m0011, m0012, m0013, m0014, m0015, m0016, m0017, m0018, m0019, m0020,
   m0021, m0022, m0023a, m0023b, m0024, m0025, m0026, m0027, m0028, m0029,
   m0030, m0031, m0032, m0033, m0034, m0035, m0036, m0037, m0038, m0039,
+  m0046,
 ];
 
 /**

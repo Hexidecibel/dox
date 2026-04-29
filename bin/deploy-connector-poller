@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+#
+# Deploy the companion `dox-connector-poller` Worker.
+#
+# This is a SEPARATE deploy artifact from the main Pages project — the
+# Worker hosts the cron schedule that drives `/api/connectors/poll` on
+# the Pages side every 5 minutes. Pages cannot host its own cron, hence
+# the split.
+#
+# Secrets:
+#   CONNECTOR_POLL_TOKEN must be set on BOTH sides — the Pages project
+#   (via `bin/set-pages-secret`) and this Worker (via `wrangler secret put`).
+#   The Worker sends it as a bearer token; the Pages handler compares
+#   exactly. Use the SAME value on both sides.
+#
+#     # one-time, from this script's directory:
+#     cd workers/connector-poller
+#     npx wrangler secret put CONNECTOR_POLL_TOKEN                              # prod
+#     npx wrangler secret put CONNECTOR_POLL_TOKEN --config wrangler.staging.toml  # staging
+#
+# Usage:
+#   ./bin/deploy-connector-poller            # prod deploy (dox-connector-poller)
+#   ./bin/deploy-connector-poller --staging  # staging deploy (dox-connector-poller-staging)
+#   ./bin/deploy-connector-poller --dry-run  # validate config only (combine with --staging)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DRY_RUN=0
+STAGING=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --staging) STAGING=1 ;;
+    -h|--help)
+      grep '^#' "$0" | sed 's/^#//'
+      exit 0
+      ;;
+  esac
+done
+
+if [[ "$STAGING" == "1" ]]; then
+  CONFIG_ARGS=(--config wrangler.staging.toml)
+  LABEL="dox-connector-poller-staging (STAGING)"
+else
+  CONFIG_ARGS=()
+  LABEL="dox-connector-poller (PROD)"
+fi
+
+echo "==> Deploying $LABEL"
+cd workers/connector-poller
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  npx wrangler deploy "${CONFIG_ARGS[@]}" --dry-run
+  echo "==> Dry run complete (no upload)"
+else
+  npx wrangler deploy "${CONFIG_ARGS[@]}"
+  echo
+  echo "==> Reminder: ensure CONNECTOR_POLL_TOKEN is set on BOTH the"
+  echo "    Worker (here) and the Pages project. The endpoint fails closed"
+  echo "    with 401 if the Pages-side env var is unset."
+fi

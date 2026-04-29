@@ -1,0 +1,14 @@
+{
+  "name": "dox-connector-poller",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260408.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^3.114.17"
+  }
+}

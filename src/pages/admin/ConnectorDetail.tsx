@@ -16,7 +16,7 @@
  * file) via the "Remap" and "Re-test" buttons on the Sample card.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, type DragEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { formatDate } from '../../utils/format';
 import {
@@ -69,7 +69,9 @@ import type { Tenant } from '../../lib/types';
 import {
   defaultFieldMappings,
   normalizeFieldMappings,
+  DOX_FIELD_LABELS,
   type ConnectorFieldMappings,
+  type CoreFieldKey,
 } from '../../components/connectors/doxFields';
 import { FieldMappingEditor } from '../../components/connectors/FieldMappingEditor';
 
@@ -205,6 +207,14 @@ export function ConnectorDetail() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  // file_watch drop-zone state — separate from `running` so we can drive the
+  // visual hover state independently. The hidden file-input ref lets a click
+  // on the zone open the native file picker without rendering a separate
+  // button.
+  const [dragActive, setDragActive] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const runsRef = useRef<HTMLDivElement>(null);
+
   // ---------------------------------------------------------------------
   // Loaders
   // ---------------------------------------------------------------------
@@ -326,19 +336,79 @@ export function ConnectorDetail() {
     }
   };
 
-  const handleRun = async () => {
+  // Mirror of the backend's classifyFile() in functions/api/connectors/[id]/run.ts.
+  // Keep this list in sync with the server-side accept set so users get a
+  // friendly inline error instead of a 400 round-trip.
+  const ACCEPTED_EXTENSIONS = ['.csv', '.tsv', '.txt', '.xlsx', '.xls', '.pdf'];
+  const MAX_FILE_BYTES = 50 * 1024 * 1024; // 50 MB — safety cap; the backend
+                                            // enforces tighter per-kind limits.
+
+  const validateRunFile = useCallback((file: File): string | null => {
+    const name = file.name.toLowerCase();
+    if (!ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext))) {
+      return `Unsupported file type. Accepted: ${ACCEPTED_EXTENSIONS.join(', ')}`;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      return `File too large (${Math.round(file.size / 1024 / 1024)}MB). Limit is ${Math.round(MAX_FILE_BYTES / 1024 / 1024)}MB.`;
+    }
+    return null;
+  }, []);
+
+  const handleRunFile = useCallback(async (file: File) => {
     if (!id) return;
+    const validationError = validateRunFile(file);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     setRunning(true);
     setError('');
     try {
-      await api.connectors.run(id);
+      await api.connectors.run(id, file);
       setSaveSnack('Manual run started');
-      loadRuns();
+      await loadRuns();
+      // Bring the runs panel into view so the new row is visible without a
+      // manual scroll. `behavior: 'smooth'` is fine here — the table is
+      // already populated by the awaited loadRuns() above.
+      requestAnimationFrame(() => {
+        runsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start manual run');
     } finally {
       setRunning(false);
     }
+  }, [id, loadRuns, validateRunFile]);
+
+  const handleDropZoneClick = () => {
+    if (running) return;
+    fileInputRef.current?.click();
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleRunFile(file);
+    // Reset so picking the same filename twice still fires onChange.
+    e.target.value = '';
+  };
+
+  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (running) return;
+    setDragActive(true);
+  };
+
+  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragActive(false);
+  };
+
+  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragActive(false);
+    if (running) return;
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleRunFile(file);
   };
 
   const handleDelete = async () => {
@@ -401,7 +471,29 @@ export function ConnectorDetail() {
 
   const runsTotalPages = Math.max(1, Math.ceil(runsTotal / RUNS_PER_PAGE));
   const isEmail = connector.connector_type === 'email';
+  const isFileWatch = connector.connector_type === 'file_watch';
   const hasStoredSample = !!connector.sample_r2_key;
+  const r2Prefix =
+    typeof connector.config.r2_prefix === 'string' ? connector.config.r2_prefix.trim() : '';
+
+  // Field-mapping summary for the drop zone — show how many enabled core
+  // fields exist so the user knows what columns the file should contain.
+  // Core fields don't carry their own label on the mapping value; labels come
+  // from the canonical CORE_FIELD_DEFINITIONS catalog (re-exported as
+  // DOX_FIELD_LABELS).
+  const enabledCoreFieldLabels: string[] = (() => {
+    const core = connector.field_mappings?.core;
+    if (!core) return [];
+    const out: string[] = [];
+    for (const key of Object.keys(core) as CoreFieldKey[]) {
+      if (core[key]?.enabled) {
+        out.push(DOX_FIELD_LABELS[key] ?? key);
+      }
+    }
+    return out;
+  })();
+  const extendedCount = connector.field_mappings?.extended?.length ?? 0;
+  const totalEnabledMappings = enabledCoreFieldLabels.length + extendedCount;
 
   return (
     <Box>
@@ -523,19 +615,30 @@ export function ConnectorDetail() {
             >
               {testing ? 'Testing…' : 'Test'}
             </Button>
-            <Tooltip title={isEmail ? 'Email connectors cannot be run manually' : 'Trigger a run now'}>
-              <span>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  startIcon={<RunIcon />}
-                  onClick={handleRun}
-                  disabled={running || isEmail}
-                >
-                  {running ? 'Running…' : 'Run'}
-                </Button>
-              </span>
-            </Tooltip>
+            {/*
+              File-watch connectors trigger runs from the drop zone below
+              (the backend requires a multipart `file` payload — an empty
+              POST always 400s). Email connectors run from inbound webhooks.
+              The header Run button is therefore only meaningful for
+              api_poll / webhook types, which the backend currently 501s
+              anyway, but we leave it visible so its eventual implementation
+              has an entry point.
+            */}
+            {!isEmail && !isFileWatch && (
+              <Tooltip title="Trigger a run now">
+                <span>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    startIcon={<RunIcon />}
+                    onClick={() => setError('Manual runs for this connector type are not yet implemented')}
+                    disabled={running}
+                  >
+                    {running ? 'Running…' : 'Run'}
+                  </Button>
+                </span>
+              </Tooltip>
+            )}
             <Button
               variant="outlined"
               size="small"
@@ -561,6 +664,161 @@ export function ConnectorDetail() {
           </Typography>
           <ProbeDetails details={probeResult.details} />
         </Alert>
+      )}
+
+      {/* ------------------------------------------------------------ */}
+      {/* Manual upload drop zone (file_watch only) — surfaced at the   */}
+      {/* top because dropping a file is the primary action on this     */}
+      {/* page for file_watch connectors.                               */}
+      {/* ------------------------------------------------------------ */}
+      {isFileWatch && (
+        <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+          <Typography variant="h6" fontWeight={600} sx={{ mb: 0.5 }}>
+            Manual upload
+          </Typography>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
+            Drop a file to run this connector against it now. Uses the field
+            mappings configured below; results appear in the runs panel below.
+          </Typography>
+
+          <Box
+            sx={{
+              mb: 2,
+              p: 1.5,
+              bgcolor: 'grey.50',
+              border: '1px solid',
+              borderColor: 'divider',
+              borderRadius: 1,
+            }}
+          >
+            <Typography variant="caption" color="text.secondary" fontWeight={600}>
+              {totalEnabledMappings} field mapping{totalEnabledMappings === 1 ? '' : 's'} configured
+            </Typography>
+            {enabledCoreFieldLabels.length > 0 ? (
+              <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>
+                Expected fields:{' '}
+                {enabledCoreFieldLabels.slice(0, 6).join(', ')}
+                {enabledCoreFieldLabels.length > 6 && ` +${enabledCoreFieldLabels.length - 6} more`}
+                {extendedCount > 0 && ` (+${extendedCount} extended)`}
+              </Typography>
+            ) : (
+              <Typography variant="caption" display="block" sx={{ mt: 0.5 }} color="warning.main">
+                No core fields enabled — configure mappings before uploading.
+              </Typography>
+            )}
+          </Box>
+
+          <Box
+            onClick={handleDropZoneClick}
+            onDragEnter={handleDragOver}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            role="button"
+            tabIndex={0}
+            aria-label="Drop a file to run the connector"
+            onKeyDown={(e) => {
+              if ((e.key === 'Enter' || e.key === ' ') && !running) {
+                e.preventDefault();
+                handleDropZoneClick();
+              }
+            }}
+            sx={{
+              p: 4,
+              border: '2px dashed',
+              borderColor: dragActive ? 'primary.main' : 'divider',
+              borderRadius: 2,
+              textAlign: 'center',
+              cursor: running ? 'not-allowed' : 'pointer',
+              bgcolor: dragActive ? 'primary.50' : running ? 'grey.100' : 'background.paper',
+              opacity: running ? 0.7 : 1,
+              transition: 'background-color 120ms, border-color 120ms',
+              '&:hover': running ? undefined : { borderColor: 'primary.main', bgcolor: 'primary.50' },
+              '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: 2 },
+            }}
+          >
+            <UploadIcon
+              fontSize="large"
+              color={dragActive ? 'primary' : 'action'}
+              sx={{ mb: 1 }}
+            />
+            <Typography variant="body1" fontWeight={500}>
+              {running
+                ? 'Running…'
+                : dragActive
+                  ? 'Drop to upload'
+                  : 'Drop a CSV, TSV, XLSX, or PDF here, or click to pick a file'}
+            </Typography>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+              Accepted: .csv, .tsv, .txt, .xlsx, .xls, .pdf · max 50 MB
+            </Typography>
+            {running && (
+              <Box sx={{ display: 'flex', justifyContent: 'center', mt: 1.5 }}>
+                <CircularProgress size={20} />
+              </Box>
+            )}
+          </Box>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.tsv,.txt,.xlsx,.xls,.pdf"
+            onChange={handleFileInputChange}
+            style={{ display: 'none' }}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+        </Paper>
+      )}
+
+      {/* ------------------------------------------------------------ */}
+      {/* Remote drop (R2 prefix) card — file_watch only. Paired with   */}
+      {/* the manual upload zone above as the "ways to send files"      */}
+      {/* group.                                                        */}
+      {/* ------------------------------------------------------------ */}
+      {isFileWatch && (
+        <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+          <Typography variant="h6" fontWeight={600} sx={{ mb: 0.5 }}>
+            Remote drop
+          </Typography>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
+            For unattended ingestion. A scheduled poller checks the prefix
+            below every 5 minutes and runs this connector against any new
+            files it finds.
+          </Typography>
+
+          {r2Prefix ? (
+            <Box>
+              <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                Watching prefix
+              </Typography>
+              <Box
+                sx={{
+                  mt: 0.5,
+                  p: 1.5,
+                  bgcolor: 'grey.50',
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  borderRadius: 1,
+                  fontFamily: 'monospace',
+                  fontSize: '0.85rem',
+                  wordBreak: 'break-all',
+                }}
+              >
+                r2://doc-upload-files/{r2Prefix}
+              </Box>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+                Upload files into this prefix — they'll be ingested within
+                5 minutes. Each filename is processed once; re-uploading a
+                file with the same key has no effect.
+              </Typography>
+            </Box>
+          ) : (
+            <Alert severity="info" variant="outlined">
+              Configure an R2 prefix in connection config below to enable
+              scheduled ingestion.
+            </Alert>
+          )}
+        </Paper>
       )}
 
       {/* ------------------------------------------------------------ */}
@@ -676,7 +934,7 @@ export function ConnectorDetail() {
       {/* ------------------------------------------------------------ */}
       {/* 6. Runs card                                                  */}
       {/* ------------------------------------------------------------ */}
-      <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+      <Paper ref={runsRef} variant="outlined" sx={{ p: 3, mb: 3 }}>
         <Typography variant="h6" fontWeight={600} sx={{ mb: 2 }}>
           Recent runs {runsTotal > 0 && <Typography component="span" variant="body2" color="text.secondary">({runsTotal})</Typography>}
         </Typography>

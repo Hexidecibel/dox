@@ -4,6 +4,112 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-04-29 file_watch connector — Phases 1 + 2 SHIPPED (unstaged)
+
+Both phases of the file_watch connector finish-up landed in the working
+tree but are NOT yet committed/deployed. The user will commit + deploy
+themselves.
+
+### Phase 1 (already in the tree at session start)
+- Drag-and-drop manual upload zone on `ConnectorDetail.tsx` for
+  `file_watch` connectors. Replaces the old broken Run-button flow.
+- `api.connectors.run(id, file)` now sends `multipart/form-data` with
+  the `file` field — matches what the backend already required.
+
+### Phase 2 (this session)
+- **Migration 0046** (`migrations/0046_connector_processed_keys.sql`)
+  — dedup table for the scheduled poller. One row per
+  `(connector_id, r2_key)` pair, written after a successful (non-
+  throwing) run. Failures don't get a dedup row so they retry on the
+  next tick. **Run `bin/migrate` and `bin/migrate-staging` before
+  deploying.**
+- **`functions/lib/connectors/pollR2.ts`** — `pollAllR2Connectors(env)`
+  walks active `file_watch` connectors with a non-empty
+  `config.r2_prefix`, lists R2 objects (cap 100/connector), filters
+  out already-processed keys, and dispatches via the existing
+  `executeConnectorRun` orchestrator. Global cap of 25 dispatched
+  files per tick. Pure backend module.
+- **`POST /api/connectors/poll`** — bearer-auth endpoint at
+  `functions/api/connectors/poll.ts`. Allowlisted in
+  `functions/api/_middleware.ts` so it bypasses JWT (the bearer
+  comparison is the gate). Single-flight via a 4-minute lock row in
+  `app_state` (table created lazily on first call). Returns 429 if
+  another poll is in flight, 401 on bad/missing bearer, 200 with
+  summary on success.
+- **`workers/connector-poller/`** — companion Worker that holds the
+  `*/5 * * * *` cron trigger. Cloudflare Pages can't host crons, so
+  this Worker just `fetch()`es `${DOX_API_BASE}/api/connectors/poll`
+  with the bearer token on every tick. Mirrors the
+  `workers/sheet-session/` layout.
+- **`bin/deploy-connector-poller`** — deploy script for the new
+  Worker. `bin/deploy` updated with a reminder note that companion
+  Workers are separate deploy artifacts.
+- **UI** — added a "Remote drop" card on `ConnectorDetail.tsx` (gated
+  to `file_watch`). Shows `r2://doc-upload-files/<prefix>` and the
+  helper line "Upload files into this prefix — they'll be ingested
+  within 5 minutes." Falls back to a muted "Configure an R2 prefix..."
+  hint when none is set.
+- **Tests** — `tests/api/connector-poll-r2.test.ts` (4 cases: dedup,
+  inactive skip, missing-prefix skip, MAX_FILES_PER_TICK cap) and
+  `tests/api/connector-poll-endpoint.test.ts` (5 cases: missing env
+  var, missing/wrong/correct bearer, GET 405).
+
+### Secrets to set BEFORE deploying
+Same `CONNECTOR_POLL_TOKEN` value on BOTH sides:
+1. **Pages project**: `bin/set-pages-secret CONNECTOR_POLL_TOKEN`
+   (or via the Cloudflare dashboard).
+2. **Worker**: `cd workers/connector-poller && npx wrangler secret
+   put CONNECTOR_POLL_TOKEN`.
+
+The Pages handler fails closed (401) if its env var is unset, so
+forgetting either side just disables the poller — nothing leaks.
+
+### Local verification end-to-end
+```bash
+# 1. Apply the migration locally
+./bin/migrate
+
+# 2. Spin up the dev server (uses local D1 + R2 via miniflare)
+npm run dev
+
+# 3. In another terminal: create a file_watch connector via the UI,
+#    set its R2 prefix to `imports/test/`, then drop a sample CSV:
+npx wrangler r2 object put doc-upload-files/imports/test/sample.csv \
+  --file=./fixtures/sample.csv --local
+
+# 4. Drive a poll tick manually (set CONNECTOR_POLL_TOKEN in
+#    .dev.vars first):
+curl -X POST http://localhost:8788/api/connectors/poll \
+  -H "Authorization: Bearer $CONNECTOR_POLL_TOKEN"
+# -> {"connectors_checked":1,"total_dispatched":1,...}
+
+# 5. Refresh the connector detail page — a new run row appears.
+# 6. Re-curl the poll endpoint — same connector returns 0 dispatched
+#    (dedup confirmed).
+```
+
+### Deploy order (when ready)
+1. `bin/migrate-staging` then verify on staging:
+   `npx wrangler pages deploy dist --project-name doc-upload-site-staging`
+2. Smoke-test the staging poll endpoint with the staging
+   CONNECTOR_POLL_TOKEN.
+3. `bin/deploy-connector-poller --dry-run` to validate, then deploy
+   for real.
+4. Set both secrets in prod, then `bin/deploy` (Pages) +
+   `bin/deploy-connector-poller` (Worker).
+5. Tail `npx wrangler tail dox-connector-poller` to confirm the cron
+   is firing.
+
+### Still pending — for the next conversation
+- **Email connector polish.** That's the topic for the follow-up
+  session. Phase 2 deliberately ignored email; the existing
+  `/api/webhooks/connector-email-ingest` flow stays as-is for now.
+- The CLAUDE.md migrations table is still missing rows 0023-0045 (only
+  0046 was added this session, since that was what the new work
+  introduced). Backfilling the rest is a low-priority cleanup.
+
+---
+
 ## 2026-04-17 Prod Deploy — LIVE on supdox.com
 
 Promoted the full session's work from staging to production.

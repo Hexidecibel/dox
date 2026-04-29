@@ -1050,7 +1050,24 @@ export const api = {
     },
     delete(id: string) { return fetchApi(`/connectors/${id}`, { method: 'DELETE' }); },
     test(id: string) { return fetchApi(`/connectors/${id}/test`, { method: 'POST' }); },
-    run(id: string) { return fetchApi(`/connectors/${id}/run`, { method: 'POST' }); },
+    /**
+     * POST /api/connectors/:id/run
+     *
+     * Triggers a manual connector run. For `file_watch` connectors the backend
+     * requires a multipart payload with a `file` field — without it the run
+     * endpoint rejects the request with a 400. Pass the user-selected file as
+     * the second arg; we wrap it in a FormData and let the browser set the
+     * multipart boundary (the shared `fetchApi` helper already skips the
+     * default JSON Content-Type when the body is a FormData instance).
+     *
+     * Future connector types that support manual runs without a payload can
+     * make `file` optional here; today the endpoint only accepts file_watch.
+     */
+    run(id: string, file: File) {
+      const form = new FormData();
+      form.append('file', file);
+      return fetchApi(`/connectors/${id}/run`, { method: 'POST', body: form });
+    },
     runs(id: string, params?: { limit?: number; offset?: number }) {
       const query = new URLSearchParams();
       if (params?.limit) query.set('limit', String(params.limit));
