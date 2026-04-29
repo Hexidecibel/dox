@@ -46,6 +46,11 @@ export function WhatsNewToast() {
     markSeen();
   };
 
+  const handleClose = (e: React.SyntheticEvent) => {
+    e.stopPropagation();
+    markSeen();
+  };
+
   return (
     <Snackbar
       open={open}
@@ -58,13 +63,21 @@ export function WhatsNewToast() {
       <Alert
         severity="info"
         variant="filled"
-        onClose={markSeen}
+        onClose={handleClose}
+        onClick={handleView}
         action={
-          <Button color="inherit" size="small" onClick={handleView}>
+          <Button
+            color="inherit"
+            size="small"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleView();
+            }}
+          >
             View
           </Button>
         }
-        sx={{ alignItems: 'center' }}
+        sx={{ alignItems: 'center', cursor: 'pointer' }}
       >
         ✨ What's new in v{versionInfo.version} — view changes
       </Alert>
