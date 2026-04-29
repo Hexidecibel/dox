@@ -1,9 +1,30 @@
 {
-  "current": "2.5.0",
+  "current": "2.6.0",
   "versions": [
-    { "version": "2.5.0", "date": "2026-04-28", "title": "Release versioning system" },
-    { "version": "2.4.3", "date": "2026-04-27", "title": "Phase 3a — pre-fill, uncertainty, dashboard" },
-    { "version": "2.4.2", "date": "2026-04-27", "title": "Phase 2 — capture reviewer decisions" },
-    { "version": "2.4.1", "date": "2026-04-27", "title": "Phase 1 — foundation fixes" }
+    {
+      "version": "2.6.0",
+      "date": "2026-04-28",
+      "title": "TODO"
+    },
+    {
+      "version": "2.5.0",
+      "date": "2026-04-28",
+      "title": "Release versioning system"
+    },
+    {
+      "version": "2.4.3",
+      "date": "2026-04-27",
+      "title": "Phase 3a — pre-fill, uncertainty, dashboard"
+    },
+    {
+      "version": "2.4.2",
+      "date": "2026-04-27",
+      "title": "Phase 2 — capture reviewer decisions"
+    },
+    {
+      "version": "2.4.1",
+      "date": "2026-04-27",
+      "title": "Phase 1 — foundation fixes"
+    }
   ]
 }
