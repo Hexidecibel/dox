@@ -23,8 +23,10 @@ import type {
   PublicFormFieldDef,
   PublicFormEntityOptions,
   PublicEntityOption,
+  PublicFormAttachmentPolicy,
   RecordRowData,
 } from '../../../shared/types';
+import { FORM_ATTACHMENT_DEFAULTS } from '../../../shared/types';
 
 /**
  * Generate a URL-safe random slug. ~96 bits of entropy is plenty for
@@ -111,13 +113,70 @@ export function normalizeSettings(input: unknown): RecordFormSettings {
     throw new BadRequestError('settings must be an object');
   }
   const s = input as Partial<RecordFormSettings>;
-  return {
+  const out: RecordFormSettings = {
     thank_you_message:
       typeof s.thank_you_message === 'string' ? s.thank_you_message : null,
     redirect_url: typeof s.redirect_url === 'string' ? s.redirect_url : null,
     accent_color: typeof s.accent_color === 'string' ? s.accent_color : null,
     logo_url: typeof s.logo_url === 'string' ? s.logo_url : null,
   };
+  if (typeof s.allow_attachments === 'boolean') {
+    out.allow_attachments = s.allow_attachments;
+  }
+  if (typeof s.max_attachments === 'number' && Number.isFinite(s.max_attachments)) {
+    // Hard ceiling so a misconfigured form can't tip a worker over.
+    out.max_attachments = Math.max(1, Math.min(20, Math.floor(s.max_attachments)));
+  }
+  if (typeof s.max_file_size_mb === 'number' && Number.isFinite(s.max_file_size_mb)) {
+    out.max_file_size_mb = Math.max(1, Math.min(50, Math.floor(s.max_file_size_mb)));
+  }
+  if (Array.isArray(s.allowed_mime_types)) {
+    const types = s.allowed_mime_types
+      .filter((t): t is string => typeof t === 'string' && t.includes('/'))
+      .slice(0, 20);
+    if (types.length > 0) out.allowed_mime_types = types;
+  }
+  return out;
+}
+
+/**
+ * Resolve the live attachment policy for a form. Returns null if the
+ * form did not opt in (allow_attachments is missing or false). Defaults
+ * are filled in from FORM_ATTACHMENT_DEFAULTS so the upload endpoint
+ * never has to "is this set" twice.
+ */
+export function resolveAttachmentPolicy(
+  settings: RecordFormSettings,
+): PublicFormAttachmentPolicy | null {
+  if (!settings.allow_attachments) return null;
+  return {
+    enabled: true,
+    max_attachments: settings.max_attachments ?? FORM_ATTACHMENT_DEFAULTS.max_attachments,
+    max_file_size_mb: settings.max_file_size_mb ?? FORM_ATTACHMENT_DEFAULTS.max_file_size_mb,
+    allowed_mime_types: settings.allowed_mime_types?.length
+      ? settings.allowed_mime_types
+      : [...FORM_ATTACHMENT_DEFAULTS.allowed_mime_types],
+  };
+}
+
+/**
+ * Check a MIME type against an allowlist. Wildcards `image/*` match the
+ * first segment; exact strings must match in full. Comparison is case
+ * insensitive on the type/subtype tokens.
+ */
+export function mimeAllowed(mime: string, allowlist: string[]): boolean {
+  const m = (mime || '').toLowerCase().split(';')[0].trim();
+  if (!m) return false;
+  for (const raw of allowlist) {
+    const a = raw.toLowerCase().trim();
+    if (!a) continue;
+    if (a === m) return true;
+    if (a.endsWith('/*')) {
+      const prefix = a.slice(0, -1); // keep "image/"
+      if (m.startsWith(prefix)) return true;
+    }
+  }
+  return false;
 }
 
 /** Hydrate a raw D1 row into the RecordForm shape (parses JSON columns lazily on consume). */
@@ -141,6 +200,7 @@ export function buildPublicFormView(
   fields: PublicFormFieldDef[];
   turnstile_site_key: string;
   entity_options?: PublicFormEntityOptions;
+  attachments?: PublicFormAttachmentPolicy;
 } {
   const settings = parseFormSettings(form.settings);
   const fieldConfig = parseFieldConfig(form.field_config);
@@ -173,6 +233,8 @@ export function buildPublicFormView(
   }
   fields.sort((a, b) => a.position - b.position);
 
+  const attachments = resolveAttachmentPolicy(settings);
+
   return {
     form: {
       name: form.name,
@@ -183,6 +245,7 @@ export function buildPublicFormView(
     fields,
     turnstile_site_key: turnstileSiteKey,
     ...(entityOptions ? { entity_options: entityOptions } : {}),
+    ...(attachments ? { attachments } : {}),
   };
 }
 
@@ -537,6 +600,77 @@ export async function createRowFromSubmission(
   });
 
   return id;
+}
+
+/**
+ * Link a list of pending attachments (issued by the public upload
+ * endpoint) to a freshly-created row. Validates each attachment matches
+ * the form, tenant, and is still pending + unexpired before flipping
+ * row_id and clearing pending_*.
+ *
+ * Throws BadRequestError on the first mismatch. Caller is responsible
+ * for transactional cleanup (the submit handler archives the row on
+ * failure so the user sees a clean error rather than a half-linked row).
+ */
+export async function linkPendingAttachments(
+  db: D1Database,
+  params: {
+    tenantId: string;
+    formId: string;
+    rowId: string;
+    attachmentIds: string[];
+    maxAttachments: number;
+  },
+): Promise<number> {
+  const { tenantId, formId, rowId, attachmentIds, maxAttachments } = params;
+  if (attachmentIds.length === 0) return 0;
+  if (attachmentIds.length > maxAttachments) {
+    throw new BadRequestError(
+      `Too many attachments (max ${maxAttachments})`,
+    );
+  }
+
+  // Drop duplicate ids in the request — protects us from double-click
+  // submission shenanigans on the renderer side.
+  const seen = new Set<string>();
+  const unique = attachmentIds.filter((id) => {
+    if (typeof id !== 'string' || !id) return false;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+
+  const nowIso = new Date().toISOString();
+  let linked = 0;
+
+  for (const attId of unique) {
+    // Conditional UPDATE so the link operation is atomic per row. If
+    // someone already linked or expired the attachment between our
+    // check and the write, `changes` returns 0 and we surface a
+    // BadRequestError. Cheaper than a SELECT-then-UPDATE round trip.
+    const res = await db
+      .prepare(
+        `UPDATE records_row_attachments
+         SET row_id = ?, pending_token = NULL, pending_expires_at = NULL
+         WHERE id = ?
+           AND tenant_id = ?
+           AND form_id = ?
+           AND row_id IS NULL
+           AND pending_token IS NOT NULL
+           AND (pending_expires_at IS NULL OR pending_expires_at >= ?)`,
+      )
+      .bind(rowId, attId, tenantId, formId, nowIso)
+      .run();
+
+    const changes = res.meta?.changes ?? 0;
+    if (changes < 1) {
+      throw new BadRequestError(
+        'One or more attachments are no longer available. Please try uploading again.',
+      );
+    }
+    linked += 1;
+  }
+  return linked;
 }
 
 /**

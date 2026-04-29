@@ -27,6 +27,8 @@ import {
   verifyTurnstileToken,
   broadcastRowInserted,
   parseFormSettings,
+  resolveAttachmentPolicy,
+  linkPendingAttachments,
 } from '../../../../lib/records/forms';
 import type { Env } from '../../../../lib/types';
 import type {
@@ -137,6 +139,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw err;
     }
 
+    // ---- Resolve attachment policy + sanitize the attachment_ids array
+    //      _before_ we write anything, so the failure mode is "row never
+    //      created" rather than "row created but attachments rejected". ----
+    const settings = parseFormSettings(form.settings);
+    const attachmentPolicy = resolveAttachmentPolicy(settings);
+    const requestedAttachmentIds = Array.isArray(body.attachment_ids)
+      ? body.attachment_ids.filter((id): id is string => typeof id === 'string' && !!id)
+      : [];
+    if (requestedAttachmentIds.length > 0 && !attachmentPolicy) {
+      // Form doesn't allow attachments — silently drop, don't 400. Keeps
+      // the response shape stable for renderers that may have stale
+      // form metadata.
+      requestedAttachmentIds.length = 0;
+    }
+    if (
+      attachmentPolicy &&
+      requestedAttachmentIds.length > attachmentPolicy.max_attachments
+    ) {
+      return jsonResponse(
+        { error: `Too many attachments (max ${attachmentPolicy.max_attachments})` },
+        400,
+      );
+    }
+
     // ---- Persist row + submission record. ----
     const rowId = await createRowFromSubmission(context.env.DB, {
       sheetId: form.sheet_id,
@@ -146,6 +172,33 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       data: cleanData,
     });
 
+    // ---- Link any pending attachments. On failure, archive the row so
+    //      the submission appears to have failed atomically (the row
+    //      stays in the DB with archived=1 for audit; the orphaned R2
+    //      objects get GC'd by the sweeper). ----
+    if (attachmentPolicy && requestedAttachmentIds.length > 0) {
+      try {
+        await linkPendingAttachments(context.env.DB, {
+          tenantId: form.tenant_id,
+          formId: form.id,
+          rowId,
+          attachmentIds: requestedAttachmentIds,
+          maxAttachments: attachmentPolicy.max_attachments,
+        });
+      } catch (err) {
+        // Roll the row back. We can't transactionally undo the INSERT,
+        // so archive it (matches the pattern used elsewhere — soft
+        // delete is the contract).
+        await context.env.DB
+          .prepare('UPDATE records_rows SET archived = 1 WHERE id = ?')
+          .bind(rowId)
+          .run();
+        const httpErr = errorToResponse(err);
+        if (httpErr) return httpErr;
+        throw err;
+      }
+    }
+
     const submitterMeta = {
       ip,
       user_agent: context.request.headers.get('User-Agent') ?? null,
@@ -153,6 +206,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         typeof body.submitter_email === 'string' && body.submitter_email
           ? body.submitter_email
           : null,
+      attachment_count: requestedAttachmentIds.length,
     };
 
     await context.env.DB.prepare(
@@ -187,7 +241,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // Best-effort live update — never blocks the response.
     void broadcastRowInserted(context.env.SHEET_SESSION, form.sheet_id, rowId);
 
-    const settings = parseFormSettings(form.settings);
     const response: PublicFormSubmitResponse = {
       success: true,
       thank_you_message: settings.thank_you_message ?? null,

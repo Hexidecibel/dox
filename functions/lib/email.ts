@@ -149,6 +149,109 @@ export function buildPasswordResetEmail(params: {
   return { subject, html };
 }
 
+/**
+ * Build an "X asked you to update Y" email. Used by the Records update
+ * request flow (Phase 2 Slice 2). Friendly tone — the recipient is most
+ * often an external supplier/customer, not a power user.
+ */
+export function buildUpdateRequestEmail(params: {
+  recipientName: string | null;
+  senderName: string;
+  senderEmail: string;
+  sheetName: string;
+  rowTitle: string | null;
+  message: string | null;
+  dueDate: string | null;
+  fieldCount: number;
+  publicUrl: string;
+}): { subject: string; html: string } {
+  const subject = `${params.senderName} asked you to update ${params.sheetName}`;
+  const greeting = params.recipientName ? `Hi ${params.recipientName},` : 'Hi,';
+  const rowLine = params.rowTitle ? ` for <strong>${escapeHtml(params.rowTitle)}</strong>` : '';
+  const fieldNoun = params.fieldCount === 1 ? '1 field' : `${params.fieldCount} fields`;
+  const messageBlock = params.message
+    ? `<p style="margin:0 0 16px;color:#555;line-height:1.6;font-style:italic;">"${escapeHtml(params.message)}"</p>`
+    : '';
+  const dueLine = params.dueDate
+    ? `<p style="margin:0 0 16px;color:#555;line-height:1.6;">They'd like a response by <strong>${escapeHtml(formatFriendlyDate(params.dueDate))}</strong>.</p>`
+    : '';
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr>
+      <td style="background:#1A365D;padding:24px 32px;">
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox</h1>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:32px;">
+        <h2 style="margin:0 0 16px;color:#333;font-size:18px;">Quick update needed</h2>
+        <p style="margin:0 0 16px;color:#555;line-height:1.6;">
+          ${greeting}
+        </p>
+        <p style="margin:0 0 16px;color:#555;line-height:1.6;">
+          <strong>${escapeHtml(params.senderName)}</strong> (${escapeHtml(params.senderEmail)}) is asking you to fill in ${fieldNoun}${rowLine} on <strong>${escapeHtml(params.sheetName)}</strong>.
+        </p>
+        ${messageBlock}
+        ${dueLine}
+        <a href="${params.publicUrl}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;font-size:14px;">
+          Open the form
+        </a>
+        <p style="margin:24px 0 0;color:#999;font-size:12px;">
+          If the button doesn't work, copy and paste this URL into your browser:<br>
+          <a href="${params.publicUrl}" style="color:#1A365D;">${params.publicUrl}</a>
+        </p>
+        <p style="margin:24px 0 0;color:#888;font-size:13px;line-height:1.6;">
+          This link is unique to you. You can fill it in later — no account needed.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
+        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+          This is an automated message from SupDox. If you weren't expecting it, you can ignore it.
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  return { subject, html };
+}
+
+/** Minimal HTML escape for interpolated strings in emails. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Best-effort friendly date — falls back to the raw string if unparseable. */
+function formatFriendlyDate(iso: string): string {
+  try {
+    const ts = Date.parse(iso);
+    if (Number.isNaN(ts)) return iso;
+    return new Date(ts).toLocaleDateString('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  } catch {
+    return iso;
+  }
+}
+
 export function buildAdminResetEmail(params: {
   userName: string;
   adminName: string;

@@ -29,6 +29,7 @@ import {
   CircularProgress,
   FormControlLabel,
   IconButton,
+  LinearProgress,
   TextField,
   Typography,
   useMediaQuery,
@@ -39,9 +40,17 @@ import {
   ArrowBack as BackIcon,
   ArrowForward as NextIcon,
   CheckCircleOutline as CheckIcon,
+  CloudUploadOutlined as UploadIcon,
+  PhotoCameraOutlined as CameraIcon,
+  InsertDriveFileOutlined as FileIcon,
+  CloseOutlined as CloseIcon,
+  ErrorOutlineOutlined as ErrorIcon,
 } from '@mui/icons-material';
+import { publicFormsApi } from '../../lib/recordsApi';
 import type {
+  PublicAttachmentUpload,
   PublicEntityOption,
+  PublicFormAttachmentPolicy,
   PublicFormEntityOptions,
   PublicFormFieldDef,
   PublicFormView,
@@ -51,14 +60,78 @@ import type {
 
 interface Props {
   view: PublicFormView;
-  /** Submit handler. Throws on failure (caller surfaces the error). */
-  onSubmit: (data: RecordRowData, turnstileToken: string) => Promise<void>;
+  /**
+   * Submit handler. Throws on failure (caller surfaces the error). The
+   * `attachmentIds` array is the list of pending attachment ids issued
+   * by the upload endpoint and held in form state until submit.
+   */
+  onSubmit: (
+    data: RecordRowData,
+    turnstileToken: string,
+    attachmentIds: string[],
+  ) => Promise<void>;
   /**
    * When true (preview mode), Turnstile and submit are stubbed: the
    * Submit button just calls onSubmit('preview-token') so the builder
    * can confirm the layout without burning Turnstile traffic.
    */
   preview?: boolean;
+  /**
+   * Slug of the current public form. Required for the upload endpoint;
+   * the builder preview omits it (preview mode disables uploads).
+   */
+  slug?: string;
+}
+
+/** Browser-side state for one pending file upload. */
+interface AttachmentEntry {
+  /** Local-only id used as React key while the upload is in flight. */
+  localId: string;
+  file: File;
+  /** ObjectURL for image thumbnails; revoked on remove + on unmount. */
+  previewUrl: string | null;
+  status: 'uploading' | 'done' | 'error';
+  progress: number; // 0-100
+  /** Server response after a successful upload. */
+  upload?: PublicAttachmentUpload;
+  errorMessage?: string;
+  /** AbortController so the user can cancel an in-flight upload. */
+  controller?: AbortController;
+}
+
+function makeLocalId(): string {
+  return `loc_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Mirror of the server-side `mimeAllowed` check for client-side UX. */
+function mimeAllowed(mime: string, allowlist: string[]): boolean {
+  const m = (mime || '').toLowerCase().split(';')[0].trim();
+  if (!m) return false;
+  for (const raw of allowlist) {
+    const a = raw.toLowerCase().trim();
+    if (!a) continue;
+    if (a === m) return true;
+    if (a.endsWith('/*')) {
+      const prefix = a.slice(0, -1);
+      if (m.startsWith(prefix)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Build the `accept` attribute string for the file picker. Most browsers
+ * accept the same MIME wildcards we store in the policy, but we expand
+ * `image/*` so iOS shows the camera as a source.
+ */
+function buildAcceptAttr(allowed: string[]): string {
+  return allowed.join(',');
 }
 
 type PreviewState =
@@ -108,16 +181,25 @@ function loadTurnstileScript(): Promise<void> {
   });
 }
 
-export function PublicFormRenderer({ view, onSubmit, preview = false }: Props) {
+export function PublicFormRenderer({ view, onSubmit, preview = false, slug }: Props) {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
 
   const accent = view.form.accent_color || '#1A365D';
   const fields = view.fields;
-  const totalSteps = fields.length + 1; // +1 for the review/submit step
+  // Attachments policy controls whether we insert an attachment step
+  // between the last field and the review screen. Preview mode hides the
+  // step (uploads are slug-bound and the builder doesn't have a slug).
+  const attachmentPolicy: PublicFormAttachmentPolicy | null =
+    !preview && view.attachments?.enabled ? view.attachments : null;
+  const hasAttachmentStep = !!attachmentPolicy;
+  const attachmentStepIndex = fields.length; // right after the last field
+  const reviewStepIndex = fields.length + (hasAttachmentStep ? 1 : 0);
+  const totalSteps = fields.length + (hasAttachmentStep ? 1 : 0) + 1;
 
   const [stepIndex, setStepIndex] = useState(0);
   const [data, setData] = useState<RecordRowData>({});
+  const [attachments, setAttachments] = useState<AttachmentEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [state, setState] = useState<PreviewState>({ kind: 'idle' });
   const [turnstileToken, setTurnstileToken] = useState<string | null>(
@@ -126,10 +208,24 @@ export function PublicFormRenderer({ view, onSubmit, preview = false }: Props) {
   const [enterKey, setEnterKey] = useState(0); // remounts the step for transition
   const turnstileRef = useRef<HTMLDivElement | null>(null);
 
+  // Revoke all object URLs on unmount so we don't leak blob memory if the
+  // form is closed mid-upload.
+  useEffect(() => {
+    return () => {
+      attachments.forEach((a) => {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+        if (a.status === 'uploading') a.controller?.abort();
+      });
+    };
+    // We intentionally only run this on unmount — the per-attachment
+    // revoke happens in handleRemoveAttachment for live changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Mount Turnstile widget on the review step.
   useEffect(() => {
     if (preview) return;
-    if (stepIndex !== fields.length) return;
+    if (stepIndex !== reviewStepIndex) return;
     if (!view.turnstile_site_key) return;
     let widgetId: string | undefined;
     let cancelled = false;
@@ -152,7 +248,7 @@ export function PublicFormRenderer({ view, onSubmit, preview = false }: Props) {
         try { window.turnstile.reset(widgetId); } catch { /* noop */ }
       }
     };
-  }, [stepIndex, fields.length, preview, view.turnstile_site_key]);
+  }, [stepIndex, reviewStepIndex, preview, view.turnstile_site_key]);
 
   // ---- Step navigation ----
 
@@ -172,13 +268,136 @@ export function PublicFormRenderer({ view, onSubmit, preview = false }: Props) {
     setData((prev) => ({ ...prev, [key]: value }));
   }, []);
 
+  // ---- Attachment uploads ----
+  //
+  // Upload-as-you-go: when the user picks files, we kick off an XHR per
+  // file immediately, track progress in the entry's `progress` field,
+  // and switch the entry to 'done' on success. The parent's onSubmit
+  // gets the list of completed attachment_ids on final submit.
+  const handleAddFiles = useCallback(
+    (files: FileList | File[]) => {
+      if (!attachmentPolicy) return;
+      if (!slug) {
+        setError('Cannot upload in preview.');
+        return;
+      }
+      const arr = Array.from(files);
+      // Cap at the policy max accounting for files already on the entry list.
+      const remainingSlots = Math.max(0, attachmentPolicy.max_attachments - attachments.length);
+      if (remainingSlots === 0) {
+        setError(`Maximum of ${attachmentPolicy.max_attachments} files reached.`);
+        return;
+      }
+      const accepted = arr.slice(0, remainingSlots);
+      const sizeLimit = attachmentPolicy.max_file_size_mb * 1024 * 1024;
+
+      const entries: AttachmentEntry[] = [];
+      for (const file of accepted) {
+        if (file.size <= 0) continue;
+        if (file.size > sizeLimit) {
+          setError(`"${file.name}" exceeds the ${attachmentPolicy.max_file_size_mb} MB limit.`);
+          continue;
+        }
+        if (!mimeAllowed(file.type || 'application/octet-stream', attachmentPolicy.allowed_mime_types)) {
+          setError(`"${file.name}" is not an allowed file type.`);
+          continue;
+        }
+        const isImage = (file.type || '').toLowerCase().startsWith('image/');
+        const previewUrl = isImage ? URL.createObjectURL(file) : null;
+        entries.push({
+          localId: makeLocalId(),
+          file,
+          previewUrl,
+          status: 'uploading',
+          progress: 0,
+          controller: new AbortController(),
+        });
+      }
+      if (entries.length === 0) return;
+      setError(null);
+      setAttachments((prev) => [...prev, ...entries]);
+
+      // Kick off uploads in parallel.
+      void (async () => {
+        for (const entry of entries) {
+          try {
+            const upload = await publicFormsApi.uploadAttachment(slug, entry.file, {
+              onProgress: (loaded, total) => {
+                const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
+                setAttachments((prev) =>
+                  prev.map((a) => (a.localId === entry.localId ? { ...a, progress: pct } : a)),
+                );
+              },
+              signal: entry.controller!.signal,
+            });
+            setAttachments((prev) =>
+              prev.map((a) =>
+                a.localId === entry.localId
+                  ? { ...a, status: 'done', progress: 100, upload }
+                  : a,
+              ),
+            );
+          } catch (err) {
+            if (err instanceof DOMException && err.name === 'AbortError') {
+              // Cancelled by user; entry already removed.
+              continue;
+            }
+            const msg = err instanceof Error ? err.message : 'Upload failed';
+            setAttachments((prev) =>
+              prev.map((a) =>
+                a.localId === entry.localId ? { ...a, status: 'error', errorMessage: msg } : a,
+              ),
+            );
+          }
+        }
+      })();
+    },
+    [attachmentPolicy, attachments.length, slug],
+  );
+
+  const handleRemoveAttachment = useCallback(
+    (localId: string) => {
+      setAttachments((prev) => {
+        const target = prev.find((a) => a.localId === localId);
+        if (target) {
+          if (target.previewUrl) URL.revokeObjectURL(target.previewUrl);
+          if (target.status === 'uploading') {
+            target.controller?.abort();
+          } else if (target.status === 'done' && target.upload && slug) {
+            // Best-effort server-side cleanup of the pending row + R2 obj.
+            // Failures are harmless — the sweeper will eventually GC.
+            void publicFormsApi
+              .cancelAttachment(
+                slug,
+                target.upload.attachment_id,
+                target.upload.pending_token,
+              )
+              .catch(() => {
+                // ignore
+              });
+          }
+        }
+        return prev.filter((a) => a.localId !== localId);
+      });
+    },
+    [slug],
+  );
+
   const currentField = stepIndex < fields.length ? fields[stepIndex] : null;
-  const isReviewStep = stepIndex === fields.length;
+  const isAttachmentStep = hasAttachmentStep && stepIndex === attachmentStepIndex;
+  const isReviewStep = stepIndex === reviewStepIndex;
   const isCurrentValid = useMemo(() => {
     if (!currentField) return true;
     if (!currentField.required) return true;
     return !isFieldEmpty(data[currentField.key]);
   }, [currentField, data]);
+  // Attachment step gates "Next" only on completed uploads — in-flight or
+  // errored uploads shouldn't slip past, but zero attachments is fine
+  // (uploads are always optional in this v1).
+  const isAttachmentStepValid = useMemo(() => {
+    if (!isAttachmentStep) return true;
+    return attachments.every((a) => a.status === 'done');
+  }, [isAttachmentStep, attachments]);
 
   // ---- Submit ----
 
@@ -202,9 +421,17 @@ export function PublicFormRenderer({ view, onSubmit, preview = false }: Props) {
         return;
       }
     }
+    // Don't submit if any upload is still in flight or errored.
+    if (attachments.some((a) => a.status !== 'done')) {
+      setError('Wait for all uploads to finish before submitting.');
+      return;
+    }
     setState({ kind: 'submitting' });
     try {
-      await onSubmit(data, turnstileToken);
+      const attachmentIds = attachments
+        .map((a) => a.upload?.attachment_id)
+        .filter((id): id is string => !!id);
+      await onSubmit(data, turnstileToken, attachmentIds);
       setState({
         kind: 'success',
         thankYou: null,
@@ -214,7 +441,7 @@ export function PublicFormRenderer({ view, onSubmit, preview = false }: Props) {
       const msg = err instanceof Error ? err.message : 'Submission failed.';
       setState({ kind: 'error', message: msg });
     }
-  }, [data, fields, onSubmit, preview, turnstileToken]);
+  }, [attachments, data, fields, onSubmit, preview, turnstileToken]);
 
   // ---- Success / error states ----
 
@@ -320,10 +547,20 @@ export function PublicFormRenderer({ view, onSubmit, preview = false }: Props) {
             accent={accent}
             entityOptions={view.entity_options}
           />
+        ) : isAttachmentStep && attachmentPolicy ? (
+          <AttachmentStep
+            policy={attachmentPolicy}
+            attachments={attachments}
+            onAdd={handleAddFiles}
+            onRemove={handleRemoveAttachment}
+            accent={accent}
+            isMobile={isMobile}
+          />
         ) : (
           <ReviewStep
             fields={fields}
             data={data}
+            attachments={attachments}
             accent={accent}
             preview={preview}
             turnstileRef={turnstileRef}
@@ -398,9 +635,17 @@ export function PublicFormRenderer({ view, onSubmit, preview = false }: Props) {
           <Button
             variant="contained"
             disableElevation
-            disabled={!isCurrentValid}
+            disabled={!(isAttachmentStep ? isAttachmentStepValid : isCurrentValid)}
             endIcon={<NextIcon />}
             onClick={() => {
+              if (isAttachmentStep) {
+                if (!isAttachmentStepValid) {
+                  setError('Wait for all uploads to finish.');
+                  return;
+                }
+                goNext();
+                return;
+              }
               if (currentField?.required && isFieldEmpty(data[currentField.key])) {
                 setError(`"${currentField.label}" is required.`);
                 return;
@@ -418,7 +663,7 @@ export function PublicFormRenderer({ view, onSubmit, preview = false }: Props) {
               '&:hover': { bgcolor: alpha(accent, 0.85) },
             }}
           >
-            Next
+            {isAttachmentStep && attachments.length === 0 ? 'Skip' : 'Next'}
           </Button>
         )}
       </Box>
@@ -442,7 +687,7 @@ interface FieldStepProps {
   entityOptions?: PublicFormEntityOptions;
 }
 
-function FieldStep({ field, value, onChange, onSubmit, isMobile, accent, entityOptions }: FieldStepProps) {
+export function FieldStep({ field, value, onChange, onSubmit, isMobile, accent, entityOptions }: FieldStepProps) {
   const labelStyle = {
     fontSize: { xs: 28, md: 36 },
     fontWeight: 600,
@@ -884,6 +1129,7 @@ function DropdownChips({ options, multi, value, onChange, accent, isMobile }: Dr
 interface ReviewStepProps {
   fields: PublicFormFieldDef[];
   data: RecordRowData;
+  attachments: AttachmentEntry[];
   accent: string;
   preview: boolean;
   turnstileRef: React.MutableRefObject<HTMLDivElement | null>;
@@ -891,7 +1137,7 @@ interface ReviewStepProps {
   description: string | null;
 }
 
-function ReviewStep({ fields, data, accent, preview, turnstileRef, turnstileSiteKey, description }: ReviewStepProps) {
+function ReviewStep({ fields, data, attachments, accent, preview, turnstileRef, turnstileSiteKey, description }: ReviewStepProps) {
   return (
     <Box sx={{ width: '100%' }}>
       <Typography sx={{ fontSize: { xs: 28, md: 36 }, fontWeight: 600, letterSpacing: -0.5, mb: 1 }}>
@@ -938,6 +1184,83 @@ function ReviewStep({ fields, data, accent, preview, turnstileRef, turnstileSite
         })}
       </Box>
 
+      {attachments.length > 0 && (
+        <Box sx={{ mb: 4 }}>
+          <Typography
+            sx={{
+              fontSize: 13,
+              fontWeight: 600,
+              textTransform: 'uppercase',
+              letterSpacing: 0.5,
+              color: 'text.secondary',
+              mb: 1.25,
+            }}
+          >
+            Attachments ({attachments.length})
+          </Typography>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5 }}>
+            {attachments.map((a) => (
+              <Box
+                key={a.localId}
+                sx={{
+                  width: 96,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 0.5,
+                  alignItems: 'center',
+                }}
+              >
+                {a.previewUrl ? (
+                  <Box
+                    component="img"
+                    src={a.previewUrl}
+                    alt={a.file.name}
+                    sx={{
+                      width: 96,
+                      height: 96,
+                      objectFit: 'cover',
+                      borderRadius: 1,
+                      border: 1,
+                      borderColor: 'divider',
+                    }}
+                  />
+                ) : (
+                  <Box
+                    sx={{
+                      width: 96,
+                      height: 96,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      bgcolor: alpha(accent, 0.06),
+                      borderRadius: 1,
+                      border: 1,
+                      borderColor: 'divider',
+                    }}
+                  >
+                    <FileIcon sx={{ fontSize: 36, color: alpha(accent, 0.5) }} />
+                  </Box>
+                )}
+                <Typography
+                  sx={{
+                    fontSize: 11,
+                    color: 'text.secondary',
+                    width: '100%',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    textAlign: 'center',
+                  }}
+                  title={a.file.name}
+                >
+                  {a.file.name}
+                </Typography>
+              </Box>
+            ))}
+          </Box>
+        </Box>
+      )}
+
       {!preview && turnstileSiteKey && (
         <Box sx={{ mb: 1 }}>
           <div ref={turnstileRef} />
@@ -964,17 +1287,324 @@ function ReviewStep({ fields, data, accent, preview, turnstileRef, turnstileSite
 }
 
 // ---------------------------------------------------------------------
+// Attachment step — drag-drop area + native file picker (with
+// capture="environment" so iOS / Android open the rear camera by
+// default for QC photos). Uploads are streamed to the server as soon
+// as files are picked; the user sees a per-file progress bar that
+// switches to a checkmark on completion.
+// ---------------------------------------------------------------------
+
+interface AttachmentStepProps {
+  policy: PublicFormAttachmentPolicy;
+  attachments: AttachmentEntry[];
+  onAdd: (files: FileList | File[]) => void;
+  onRemove: (localId: string) => void;
+  accent: string;
+  isMobile: boolean;
+}
+
+function AttachmentStep({ policy, attachments, onAdd, onRemove, accent, isMobile }: AttachmentStepProps) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const acceptAttr = useMemo(() => buildAcceptAttr(policy.allowed_mime_types), [policy.allowed_mime_types]);
+  const canAddMore = attachments.length < policy.max_attachments;
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      onAdd(e.target.files);
+      // Allow re-picking the same file by resetting the input.
+      e.target.value = '';
+    }
+  };
+
+  return (
+    <Box sx={{ width: '100%' }}>
+      <Typography
+        sx={{
+          fontSize: { xs: 28, md: 36 },
+          fontWeight: 600,
+          letterSpacing: -0.5,
+          lineHeight: 1.2,
+          mb: 1,
+          color: 'text.primary',
+        }}
+      >
+        Add photos or files
+      </Typography>
+      <Typography sx={{ fontSize: { xs: 14, md: 16 }, color: 'text.secondary', mb: 3 }}>
+        Up to {policy.max_attachments} files, {policy.max_file_size_mb} MB each. This step is optional.
+      </Typography>
+
+      {/* Hidden inputs — triggered by visible buttons / drop zone clicks. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={acceptAttr}
+        multiple
+        onChange={handleInputChange}
+        style={{ display: 'none' }}
+      />
+      {/* Mobile-only camera input. capture="environment" makes the OS
+          jump straight into the rear camera, which is the QC tech's
+          most common path. We keep a separate "Browse files" button
+          that doesn't pass capture so they can pick from photos too. */}
+      <input
+        ref={cameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={handleInputChange}
+        style={{ display: 'none' }}
+      />
+
+      {/* Drop zone (also clickable to open the file picker). */}
+      <Box
+        role="button"
+        tabIndex={0}
+        onClick={() => fileInputRef.current?.click()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            fileInputRef.current?.click();
+          }
+        }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          if (canAddMore) setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          if (!canAddMore) return;
+          if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            onAdd(e.dataTransfer.files);
+          }
+        }}
+        sx={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 1.5,
+          minHeight: 160,
+          borderRadius: 2,
+          border: 2,
+          borderStyle: 'dashed',
+          borderColor: dragOver ? accent : alpha(accent, 0.3),
+          bgcolor: dragOver ? alpha(accent, 0.06) : alpha(accent, 0.02),
+          cursor: canAddMore ? 'pointer' : 'not-allowed',
+          opacity: canAddMore ? 1 : 0.5,
+          transition: 'all 150ms',
+          px: 2,
+          py: 3,
+          '&:hover': canAddMore ? { borderColor: accent, bgcolor: alpha(accent, 0.05) } : undefined,
+          '&:focus-visible': {
+            outline: 'none',
+            borderColor: accent,
+            boxShadow: `0 0 0 3px ${alpha(accent, 0.18)}`,
+          },
+        }}
+      >
+        <UploadIcon sx={{ fontSize: 40, color: alpha(accent, 0.7) }} />
+        <Typography sx={{ fontSize: { xs: 15, md: 16 }, fontWeight: 500, textAlign: 'center' }}>
+          {isMobile ? 'Tap to select files' : 'Drop files here or click to browse'}
+        </Typography>
+        <Typography sx={{ fontSize: 12, color: 'text.secondary' }}>
+          {policy.allowed_mime_types.includes('image/*') ? 'Photos and ' : ''}
+          {policy.allowed_mime_types.filter((t) => !t.startsWith('image/')).map((t) => t.split('/')[1]?.toUpperCase()).filter(Boolean).join(', ') || 'documents'}
+        </Typography>
+      </Box>
+
+      {/* Mobile-friendly action row: explicit Camera button so the QC
+          tech doesn't have to dig through a system "choose source"
+          sheet. The browse button on desktop opens the picker via the
+          dropzone click, but having an explicit button helps a11y. */}
+      {(isMobile || true) && canAddMore && (
+        <Box sx={{ display: 'flex', gap: 1, mt: 2, flexWrap: 'wrap' }}>
+          {isMobile && (
+            <Button
+              variant="outlined"
+              startIcon={<CameraIcon />}
+              onClick={() => cameraInputRef.current?.click()}
+              sx={{
+                minHeight: 48,
+                borderColor: alpha(accent, 0.4),
+                color: accent,
+                fontWeight: 600,
+                flex: 1,
+                '&:hover': { borderColor: accent, bgcolor: alpha(accent, 0.05) },
+              }}
+            >
+              Take photo
+            </Button>
+          )}
+          <Button
+            variant="outlined"
+            startIcon={<UploadIcon />}
+            onClick={() => fileInputRef.current?.click()}
+            sx={{
+              minHeight: 48,
+              borderColor: alpha(accent, 0.4),
+              color: accent,
+              fontWeight: 600,
+              flex: 1,
+              '&:hover': { borderColor: accent, bgcolor: alpha(accent, 0.05) },
+            }}
+          >
+            {isMobile ? 'Choose files' : 'Browse files'}
+          </Button>
+        </Box>
+      )}
+
+      {/* Selected files list */}
+      {attachments.length > 0 && (
+        <Box sx={{ mt: 3, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+          {attachments.map((a) => (
+            <AttachmentRow
+              key={a.localId}
+              entry={a}
+              onRemove={() => onRemove(a.localId)}
+              accent={accent}
+            />
+          ))}
+        </Box>
+      )}
+
+      {!canAddMore && (
+        <Typography sx={{ mt: 2, fontSize: 13, color: 'text.secondary', fontStyle: 'italic' }}>
+          Maximum number of files reached. Remove one to add more.
+        </Typography>
+      )}
+    </Box>
+  );
+}
+
+interface AttachmentRowProps {
+  entry: AttachmentEntry;
+  onRemove: () => void;
+  accent: string;
+}
+
+function AttachmentRow({ entry, onRemove, accent }: AttachmentRowProps) {
+  const isImage = !!entry.previewUrl;
+  return (
+    <Box
+      sx={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 1.5,
+        p: 1.25,
+        borderRadius: 1.5,
+        border: 1,
+        borderColor: entry.status === 'error' ? '#9A1F1F' : 'divider',
+        bgcolor: entry.status === 'error' ? 'rgba(154, 31, 31, 0.04)' : 'background.paper',
+      }}
+    >
+      {/* Thumbnail / icon */}
+      {isImage ? (
+        <Box
+          component="img"
+          src={entry.previewUrl!}
+          alt={entry.file.name}
+          sx={{
+            width: 80,
+            height: 80,
+            objectFit: 'cover',
+            borderRadius: 1,
+            flexShrink: 0,
+          }}
+        />
+      ) : (
+        <Box
+          sx={{
+            width: 80,
+            height: 80,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bgcolor: alpha(accent, 0.06),
+            borderRadius: 1,
+            flexShrink: 0,
+          }}
+        >
+          <FileIcon sx={{ fontSize: 36, color: alpha(accent, 0.6) }} />
+        </Box>
+      )}
+
+      {/* Info + progress */}
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <Typography
+          sx={{
+            fontSize: 14,
+            fontWeight: 500,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+          title={entry.file.name}
+        >
+          {entry.file.name}
+        </Typography>
+        <Typography sx={{ fontSize: 12, color: 'text.secondary' }}>
+          {formatBytes(entry.file.size)}
+          {entry.status === 'uploading' && ` · Uploading… ${entry.progress}%`}
+          {entry.status === 'done' && ' · Ready'}
+        </Typography>
+        {entry.status === 'uploading' && (
+          <LinearProgress
+            variant="determinate"
+            value={entry.progress}
+            sx={{
+              mt: 0.75,
+              height: 4,
+              borderRadius: 2,
+              bgcolor: alpha(accent, 0.12),
+              '& .MuiLinearProgress-bar': { bgcolor: accent },
+            }}
+          />
+        )}
+        {entry.status === 'error' && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mt: 0.5 }}>
+            <ErrorIcon sx={{ fontSize: 14, color: '#9A1F1F' }} />
+            <Typography sx={{ fontSize: 12, color: '#9A1F1F' }}>
+              {entry.errorMessage || 'Upload failed'}
+            </Typography>
+          </Box>
+        )}
+      </Box>
+
+      {/* Status icon + remove */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+        {entry.status === 'done' && <CheckIcon sx={{ color: 'success.main', fontSize: 22 }} />}
+        <IconButton
+          aria-label={`Remove ${entry.file.name}`}
+          onClick={onRemove}
+          sx={{ minWidth: 44, minHeight: 44 }}
+        >
+          <CloseIcon />
+        </IconButton>
+      </Box>
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------
 // Success screen
 // ---------------------------------------------------------------------
 
-function SuccessScreen({
+export function SuccessScreen({
   accent,
   thankYou,
   redirect,
+  title,
 }: {
   accent: string;
   thankYou: string | null;
   redirect: string | null;
+  /** Override the headline. Defaults to the form-flavoured copy. */
+  title?: string;
 }) {
   useEffect(() => {
     if (redirect) {
@@ -999,7 +1629,7 @@ function SuccessScreen({
     >
       <CheckIcon sx={{ fontSize: 96, color: accent, mb: 3 }} />
       <Typography sx={{ fontSize: { xs: 28, md: 36 }, fontWeight: 600, mb: 2, letterSpacing: -0.5 }}>
-        Thanks for your submission!
+        {title ?? 'Thanks for your submission!'}
       </Typography>
       <Typography sx={{ fontSize: 16, color: 'text.secondary', maxWidth: 480 }}>
         {thankYou || 'Your response has been recorded. The team has been notified.'}
@@ -1017,7 +1647,7 @@ function SuccessScreen({
 // Helpers
 // ---------------------------------------------------------------------
 
-function isFieldEmpty(v: unknown): boolean {
+export function isFieldEmpty(v: unknown): boolean {
   if (v == null) return true;
   if (typeof v === 'string' && v.trim() === '') return true;
   if (Array.isArray(v) && v.length === 0) return true;

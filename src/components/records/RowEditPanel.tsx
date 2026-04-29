@@ -24,11 +24,21 @@ import {
   ChatBubbleOutline as CommentIcon,
   AttachFileOutlined as AttachIcon,
   DeleteOutline as DeleteIcon,
+  SendOutlined as SendIcon,
 } from '@mui/icons-material';
 import { CellEditor } from './CellEditor';
 import { dropdownOptions, formatCellValue, refLabel } from './cellHelpers';
+import { UpdateRequestDialog } from './UpdateRequestDialog';
 import { recordsApi } from '../../lib/recordsApi';
-import type { ApiRecordActivity, ApiRecordColumn, ApiRecordRow, RecordColumnType, RecordRowData } from '../../../shared/types';
+import type {
+  ApiRecordActivity,
+  ApiRecordColumn,
+  ApiRecordRow,
+  ApiRecordRowAttachment,
+  RecordColumnType,
+  RecordRowData,
+  RecordUpdateRequest,
+} from '../../../shared/types';
 
 const ENTITY_REF_TYPES: RecordColumnType[] = [
   'supplier_ref',
@@ -75,6 +85,9 @@ function activityKindLabel(kind: string): string {
     case 'cell_updated': return 'updated a cell';
     case 'archived': return 'archived this row';
     case 'created_via_form': return 'submitted via form';
+    case 'update_request_sent': return 'sent an update request';
+    case 'update_request_responded': return 'filled an update request';
+    case 'update_request_cancelled': return 'cancelled an update request';
     default: return kind.replace(/_/g, ' ');
   }
 }
@@ -90,6 +103,14 @@ function activityKindLabel(kind: string): string {
 function actorDisplay(activity: ApiRecordActivity): string {
   if (activity.actor_name && activity.actor_name.trim()) {
     return activity.actor_name;
+  }
+  // Update-request submissions: actor_id is NULL because recipients
+  // aren't authed users. Surface the recipient_email from details so
+  // the feed reads "bob@example.com" instead of a generic "Someone".
+  if (activity.kind === 'cell_updated' || activity.kind === 'update_request_responded') {
+    const details = parseActivityDetails(activity.details);
+    const email = details && typeof details.recipient_email === 'string' ? details.recipient_email : null;
+    if (email) return email;
   }
   if (activity.kind === 'created_via_form') {
     return 'Form submission';
@@ -178,6 +199,13 @@ export function RowEditPanel({
   const [activity, setActivity] = useState<ApiRecordActivity[] | null>(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityError, setActivityError] = useState('');
+  const [attachments, setAttachments] = useState<ApiRecordRowAttachment[] | null>(null);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const [attachmentsError, setAttachmentsError] = useState('');
+  const [updateRequests, setUpdateRequests] = useState<RecordUpdateRequest[]>([]);
+  const [updateRequestsLoading, setUpdateRequestsLoading] = useState(false);
+  const [requestDialogOpen, setRequestDialogOpen] = useState(false);
+  const [activityRefreshTick, setActivityRefreshTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -193,6 +221,43 @@ export function RowEditPanel({
       })
       .finally(() => {
         if (!cancelled) setActivityLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [sheetId, row.id, activityRefreshTick]);
+
+  // Pending update requests for this row. Failure is silent — the
+  // section just doesn't render — same posture as Comments/Attachments.
+  useEffect(() => {
+    let cancelled = false;
+    setUpdateRequestsLoading(true);
+    recordsApi.updateRequests
+      .list(sheetId, row.id)
+      .then((res) => {
+        if (!cancelled) setUpdateRequests(res.requests);
+      })
+      .catch(() => {
+        if (!cancelled) setUpdateRequests([]);
+      })
+      .finally(() => {
+        if (!cancelled) setUpdateRequestsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [sheetId, row.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAttachmentsLoading(true);
+    setAttachmentsError('');
+    recordsApi.rows
+      .attachments(sheetId, row.id)
+      .then((res) => {
+        if (!cancelled) setAttachments(res.attachments);
+      })
+      .catch((err) => {
+        if (!cancelled) setAttachmentsError(err instanceof Error ? err.message : 'Failed to load attachments');
+      })
+      .finally(() => {
+        if (!cancelled) setAttachmentsLoading(false);
       });
     return () => { cancelled = true; };
   }, [sheetId, row.id]);
@@ -380,13 +445,79 @@ export function RowEditPanel({
 
       <Divider />
 
-      {/* Attachments — placeholder */}
+      {/* Attachments */}
       <Box sx={{ p: mobile ? 2 : 3 }}>
         <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
           <AttachIcon fontSize="small" sx={{ color: 'text.secondary' }} />
-          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>Attachments</Typography>
+          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+            Attachments
+            {attachments && attachments.length > 0 && (
+              <Box component="span" sx={{ ml: 0.75, color: 'text.secondary', fontWeight: 400 }}>
+                ({attachments.length})
+              </Box>
+            )}
+          </Typography>
         </Stack>
-        <Typography variant="body2" color="text.secondary">Attachments coming soon.</Typography>
+        {attachmentsLoading ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
+            <CircularProgress size={20} />
+          </Box>
+        ) : attachmentsError ? (
+          <Typography variant="body2" color="error">{attachmentsError}</Typography>
+        ) : attachments && attachments.length > 0 ? (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.25 }}>
+            {attachments.map((a) => (
+              <AttachmentTile key={a.id} attachment={a} />
+            ))}
+          </Box>
+        ) : (
+          <Typography variant="body2" color="text.secondary">No attachments yet.</Typography>
+        )}
+      </Box>
+
+      <Divider />
+
+      {/* Pending update requests */}
+      <Box sx={{ p: mobile ? 2 : 3 }}>
+        <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
+          <SendIcon fontSize="small" sx={{ color: 'text.secondary' }} />
+          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+            Update requests
+            {updateRequests.filter((r) => r.status === 'pending').length > 0 && (
+              <Box component="span" sx={{ ml: 0.75, color: 'text.secondary', fontWeight: 400 }}>
+                ({updateRequests.filter((r) => r.status === 'pending').length} pending)
+              </Box>
+            )}
+          </Typography>
+        </Stack>
+        {updateRequestsLoading && updateRequests.length === 0 ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
+            <CircularProgress size={20} />
+          </Box>
+        ) : updateRequests.length > 0 ? (
+          <Stack spacing={1}>
+            {updateRequests.map((req) => (
+              <UpdateRequestRow
+                key={req.id}
+                req={req}
+                sheetId={sheetId}
+                rowId={row.id}
+                onCancelled={() => {
+                  setUpdateRequests((prev) =>
+                    prev.map((r) =>
+                      r.id === req.id ? { ...r, status: 'cancelled' } : r,
+                    ),
+                  );
+                  setActivityRefreshTick((t) => t + 1);
+                }}
+              />
+            ))}
+          </Stack>
+        ) : (
+          <Typography variant="body2" color="text.secondary">
+            No requests yet. Use "Send update request" to ask someone to fill specific fields.
+          </Typography>
+        )}
       </Box>
 
       <Divider />
@@ -404,6 +535,13 @@ export function RowEditPanel({
         <Button startIcon={<OpenIcon />} disabled>
           Open full page
         </Button>
+        <Button
+          variant="outlined"
+          startIcon={<SendIcon />}
+          onClick={() => setRequestDialogOpen(true)}
+        >
+          Send update request
+        </Button>
         <Box sx={{ flex: 1 }} />
         <IconButton
           aria-label="Archive row"
@@ -414,6 +552,228 @@ export function RowEditPanel({
           <DeleteIcon />
         </IconButton>
       </Box>
+
+      <UpdateRequestDialog
+        open={requestDialogOpen}
+        onClose={() => setRequestDialogOpen(false)}
+        sheetId={sheetId}
+        rowId={row.id}
+        rowTitle={row.display_title}
+        columns={columns}
+        onSent={(req) => {
+          setUpdateRequests((prev) => [req, ...prev]);
+          setActivityRefreshTick((t) => t + 1);
+        }}
+      />
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------
+// UpdateRequestRow — one entry in the "Update requests" mini-section.
+// Shows recipient + status + cancel/copy actions.
+// ---------------------------------------------------------------------
+
+function formatRequestRecipient(req: RecordUpdateRequest): string {
+  return req.recipient_email;
+}
+
+function formatRequestStatus(req: RecordUpdateRequest): { label: string; color: 'default' | 'success' | 'warning' | 'error' } {
+  switch (req.status) {
+    case 'pending':
+      return { label: 'Pending', color: 'warning' };
+    case 'responded':
+      return { label: 'Responded', color: 'success' };
+    case 'expired':
+      return { label: 'Expired', color: 'default' };
+    case 'cancelled':
+      return { label: 'Cancelled', color: 'default' };
+    default:
+      return { label: req.status, color: 'default' };
+  }
+}
+
+function UpdateRequestRow({
+  req,
+  sheetId,
+  rowId,
+  onCancelled,
+}: {
+  req: RecordUpdateRequest;
+  sheetId: string;
+  rowId: string;
+  onCancelled: () => void;
+}) {
+  const [cancelling, setCancelling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleCancel = async () => {
+    setError(null);
+    setCancelling(true);
+    try {
+      await recordsApi.updateRequests.cancel(sheetId, rowId, req.id);
+      onCancelled();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to cancel.');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const status = formatRequestStatus(req);
+  const fieldCount = req.fields_requested_keys?.length ?? 0;
+  const created = formatActivityTime(req.created_at);
+
+  return (
+    <Box
+      sx={{
+        p: 1.25,
+        borderRadius: 1,
+        border: 1,
+        borderColor: 'divider',
+        bgcolor: 'background.default',
+      }}
+    >
+      <Stack direction="row" alignItems="center" spacing={1}>
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography
+            variant="body2"
+            sx={{
+              fontWeight: 500,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {formatRequestRecipient(req)}
+          </Typography>
+          <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+            {fieldCount} {fieldCount === 1 ? 'field' : 'fields'} · {created}
+            {req.due_date && ` · due ${req.due_date}`}
+          </Typography>
+        </Box>
+        <Box
+          sx={{
+            px: 1,
+            py: 0.25,
+            borderRadius: 0.75,
+            fontSize: 11,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+            color:
+              status.color === 'warning'
+                ? '#9A6B00'
+                : status.color === 'success'
+                ? '#1B5E20'
+                : status.color === 'error'
+                ? '#9A1F1F'
+                : 'text.secondary',
+            bgcolor:
+              status.color === 'warning'
+                ? 'rgba(255,193,7,0.12)'
+                : status.color === 'success'
+                ? 'rgba(76,175,80,0.12)'
+                : status.color === 'error'
+                ? 'rgba(244,67,54,0.12)'
+                : 'rgba(0,0,0,0.06)',
+          }}
+        >
+          {status.label}
+        </Box>
+        {req.status === 'pending' && (
+          <Button
+            size="small"
+            variant="text"
+            color="inherit"
+            disabled={cancelling}
+            onClick={handleCancel}
+            sx={{ minWidth: 0, color: 'text.secondary' }}
+          >
+            Cancel
+          </Button>
+        )}
+      </Stack>
+      {error && (
+        <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.5 }}>
+          {error}
+        </Typography>
+      )}
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Attachment tile — image thumbnail or file card. Click opens the
+// authenticated download URL in a new tab. The download endpoint
+// supports `?preview=true` for inline disposition; we use that for
+// images so they render directly in the new tab rather than triggering
+// a save dialog.
+// ---------------------------------------------------------------------
+
+function AttachmentTile({ attachment }: { attachment: ApiRecordRowAttachment }) {
+  const isImage = (attachment.mime_type || '').toLowerCase().startsWith('image/');
+  const url = recordsApi.attachments.downloadUrl(attachment.id, { preview: isImage });
+  return (
+    <Box
+      component="a"
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      sx={{
+        textDecoration: 'none',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 0.5,
+        width: 96,
+      }}
+      title={attachment.file_name}
+    >
+      {isImage ? (
+        <Box
+          component="img"
+          src={url}
+          alt={attachment.file_name}
+          sx={{
+            width: 96,
+            height: 96,
+            objectFit: 'cover',
+            borderRadius: 1,
+            border: 1,
+            borderColor: 'divider',
+            bgcolor: 'background.default',
+          }}
+        />
+      ) : (
+        <Box
+          sx={{
+            width: 96,
+            height: 96,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: 1,
+            border: 1,
+            borderColor: 'divider',
+            bgcolor: 'background.default',
+            color: 'text.secondary',
+          }}
+        >
+          <AttachIcon sx={{ fontSize: 36 }} />
+        </Box>
+      )}
+      <Typography
+        sx={{
+          fontSize: 11,
+          color: 'text.secondary',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          textAlign: 'center',
+        }}
+      >
+        {attachment.file_name}
+      </Typography>
     </Box>
   );
 }

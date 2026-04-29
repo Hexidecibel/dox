@@ -32,6 +32,10 @@ const PUBLIC_ROUTES = [
   '/api/webhooks/email-ingest',
   '/api/webhooks/connectors',
   '/api/forms/public',
+  // Records update requests — recipient form gate is the unguessable
+  // token in the URL, not a login. Same scoping rule as /api/forms/public:
+  // narrow prefix so we don't leak any future admin route here.
+  '/api/update-requests/public',
 ];
 
 function isPublicRoute(pathname: string): boolean {

@@ -113,11 +113,13 @@ export function PublicForm() {
   return (
     <PublicFormRenderer
       view={view}
-      onSubmit={async (data: RecordRowData, turnstileToken: string) => {
+      slug={slug}
+      onSubmit={async (data: RecordRowData, turnstileToken: string, attachmentIds: string[]) => {
         if (!slug) throw new Error('No slug');
         await publicFormsApi.submit(slug, {
           data,
           turnstile_token: turnstileToken,
+          attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
         });
       }}
     />

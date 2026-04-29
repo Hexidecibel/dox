@@ -10,6 +10,7 @@ import type {
   ApiRecordSheet,
   ApiRecordColumn,
   ApiRecordRow,
+  ApiRecordRowAttachment,
   ApiRecordView,
   CreateSheetRequest,
   UpdateSheetRequest,
@@ -38,9 +39,16 @@ import type {
   RecordFormCreateResponse,
   RecordFormUpdateResponse,
   RecordFormSubmissionListResponse,
+  PublicAttachmentUpload,
   PublicFormView,
   PublicFormSubmitRequest,
   PublicFormSubmitResponse,
+  CreateUpdateRequestRequest,
+  RecordUpdateRequestCreateResponse,
+  RecordUpdateRequestListResponse,
+  PublicUpdateRequestView,
+  PublicUpdateRequestSubmitRequest,
+  PublicUpdateRequestSubmitResponse,
 } from '../../shared/types';
 
 const API_BASE = '/api';
@@ -223,12 +231,54 @@ export const recordsApi = {
       const qs = query.toString();
       return fetchRecords<RecordActivityListResponse>(`/records/sheets/${sheetId}/rows/${rowId}/activity${qs ? `?${qs}` : ''}`);
     },
+
+    /** GET /api/records/sheets/:sheetId/rows/:rowId/attachments — drawer attachments. */
+    attachments(sheetId: string, rowId: string): Promise<{ attachments: ApiRecordRowAttachment[] }> {
+      return fetchRecords<{ attachments: ApiRecordRowAttachment[] }>(
+        `/records/sheets/${sheetId}/rows/${rowId}/attachments`,
+      );
+    },
+  },
+
+  attachments: {
+    /** Authenticated download URL for an attachment (used as <img src> / <a href>). */
+    downloadUrl(attachmentId: string, opts?: { preview?: boolean }): string {
+      const qs = opts?.preview ? '?preview=true' : '';
+      return `${API_BASE}/records/attachments/${encodeURIComponent(attachmentId)}/download${qs}`;
+    },
   },
 
   views: {
     /** GET /api/records/sheets/:sheetId/views */
     list(sheetId: string): Promise<RecordViewListResponse> {
       return fetchRecords<RecordViewListResponse>(`/records/sheets/${sheetId}/views`);
+    },
+  },
+
+  updateRequests: {
+    /** GET /api/records/sheets/:sheetId/rows/:rowId/update-requests */
+    list(sheetId: string, rowId: string): Promise<RecordUpdateRequestListResponse> {
+      return fetchRecords<RecordUpdateRequestListResponse>(
+        `/records/sheets/${sheetId}/rows/${rowId}/update-requests`,
+      );
+    },
+    /** POST /api/records/sheets/:sheetId/rows/:rowId/update-requests */
+    create(
+      sheetId: string,
+      rowId: string,
+      data: CreateUpdateRequestRequest,
+    ): Promise<RecordUpdateRequestCreateResponse> {
+      return fetchRecords<RecordUpdateRequestCreateResponse>(
+        `/records/sheets/${sheetId}/rows/${rowId}/update-requests`,
+        { method: 'POST', body: JSON.stringify(data) },
+      );
+    },
+    /** DELETE /api/records/sheets/:sheetId/rows/:rowId/update-requests/:requestId */
+    cancel(sheetId: string, rowId: string, requestId: string): Promise<{ success: true }> {
+      return fetchRecords<{ success: true }>(
+        `/records/sheets/${sheetId}/rows/${rowId}/update-requests/${requestId}`,
+        { method: 'DELETE' },
+      );
     },
   },
 
@@ -305,6 +355,124 @@ export const publicFormsApi = {
   /** POST /api/forms/public/:slug/submit. */
   async submit(slug: string, payload: PublicFormSubmitRequest): Promise<PublicFormSubmitResponse> {
     const res = await fetch(`/api/forms/public/${encodeURIComponent(slug)}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        const body = await res.json();
+        message = body.error || body.message || message;
+      } catch {
+        // ignore parse errors
+      }
+      throw new Error(message);
+    }
+    return res.json();
+  },
+
+  /**
+   * POST /api/forms/public/:slug/upload — single-file streaming upload.
+   *
+   * Uses XHR (not fetch) so we get progress events; fetch's
+   * ReadableStream upload progress isn't supported in any major browser
+   * yet. The returned PublicAttachmentUpload contains the attachment_id
+   * the renderer holds in form state until submit.
+   */
+  uploadAttachment(
+    slug: string,
+    file: File,
+    opts?: { onProgress?: (loaded: number, total: number) => void; signal?: AbortSignal },
+  ): Promise<PublicAttachmentUpload> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/forms/public/${encodeURIComponent(slug)}/upload`);
+      if (xhr.upload && opts?.onProgress) {
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) opts.onProgress!(e.loaded, e.total);
+        });
+      }
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText) as PublicAttachmentUpload);
+          } catch {
+            reject(new Error('Invalid upload response'));
+          }
+        } else {
+          let message = xhr.statusText || 'Upload failed';
+          try {
+            const body = JSON.parse(xhr.responseText);
+            if (body?.error) message = body.error;
+          } catch {
+            // ignore
+          }
+          reject(new Error(message));
+        }
+      });
+      xhr.addEventListener('error', () => reject(new Error('Upload failed')));
+      xhr.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      if (opts?.signal) {
+        if (opts.signal.aborted) {
+          xhr.abort();
+          return;
+        }
+        opts.signal.addEventListener('abort', () => xhr.abort(), { once: true });
+      }
+      const fd = new FormData();
+      fd.append('file', file, file.name);
+      xhr.send(fd);
+    });
+  },
+
+  /** DELETE /api/forms/public/:slug/attachment/:attachmentId — cancel a pending upload. */
+  async cancelAttachment(
+    slug: string,
+    attachmentId: string,
+    pendingToken: string,
+  ): Promise<void> {
+    const res = await fetch(
+      `/api/forms/public/${encodeURIComponent(slug)}/attachment/${encodeURIComponent(attachmentId)}?pending_token=${encodeURIComponent(pendingToken)}`,
+      { method: 'DELETE' },
+    );
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        const body = await res.json();
+        message = body.error || message;
+      } catch {
+        // ignore
+      }
+      throw new Error(message);
+    }
+  },
+};
+
+/**
+ * Public update-request client — recipient form at /u/<token>. Same
+ * "no auth, no localStorage" rules as publicFormsApi. The token in the
+ * URL is the gate; tokens are 32 random bytes encoded as base64url.
+ */
+export const publicUpdateRequestsApi = {
+  /** GET /api/update-requests/public/:token */
+  async get(token: string): Promise<PublicUpdateRequestView> {
+    const res = await fetch(`/api/update-requests/public/${encodeURIComponent(token)}`, {
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) {
+      const code = res.status === 404 ? 'not_found' : 'fetch_failed';
+      throw Object.assign(new Error('Request unavailable'), { code });
+    }
+    return res.json();
+  },
+
+  /** POST /api/update-requests/public/:token */
+  async submit(
+    token: string,
+    payload: PublicUpdateRequestSubmitRequest,
+  ): Promise<PublicUpdateRequestSubmitResponse> {
+    const res = await fetch(`/api/update-requests/public/${encodeURIComponent(token)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

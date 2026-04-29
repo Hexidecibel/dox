@@ -19,7 +19,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Alert,
   Box,
@@ -62,6 +62,8 @@ import { recordsApi } from '../../lib/recordsApi';
 import { useAuth } from '../../contexts/AuthContext';
 import { useSheetSession, type SheetCellUpdate } from '../../hooks/useSheetSession';
 import { GridView, type CellHighlight } from '../../components/records/GridView';
+import { KanbanView } from '../../components/records/KanbanView';
+import { CalendarView } from '../../components/records/CalendarView';
 import { MobileList } from '../../components/records/MobileList';
 import { RowEditPanel } from '../../components/records/RowEditPanel';
 import { AddColumnDialog } from '../../components/records/AddColumnDialog';
@@ -70,6 +72,7 @@ import { PresenceStack } from '../../components/records/PresenceStack';
 import { FormsTab } from '../../components/records/FormsTab';
 import { parseRowData } from '../../components/records/cellHelpers';
 import type {
+  AnyRecordViewType,
   ApiRecordColumn,
   ApiRecordRow,
   ApiRecordSheet,
@@ -91,14 +94,77 @@ export function SheetDetail() {
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
   const canMutate = !isReader;
 
+  // ------ active view (URL-controlled) ------
+  // The active view is held in the URL so links are shareable. Persisting
+  // the user's last-used view to records_views is deferred — see plan.md
+  // and the AnyRecordViewType comment in shared/types.ts. Disabled view
+  // types ("timeline", "gallery") are placeholders for slice 3b.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeView: AnyRecordViewType = ((): AnyRecordViewType => {
+    const v = searchParams.get('view');
+    if (v === 'kanban' || v === 'calendar' || v === 'timeline' || v === 'gallery') return v;
+    return 'grid';
+  })();
+  const groupColumnKey = searchParams.get('group');
+  const dateColumnKey = searchParams.get('date');
+
+  const setActiveView = useCallback(
+    (view: AnyRecordViewType) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (view === 'grid') next.delete('view');
+          else next.set('view', view);
+          // Don't clear `group`/`date` params — they're per-view and the
+          // user may flip back. Browsers don't mind a stale param.
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const setGroupColumnKey = useCallback(
+    (key: string | null) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (key) next.set('group', key);
+          else next.delete('group');
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const setDateColumnKey = useCallback(
+    (key: string | null) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (key) next.set('date', key);
+          else next.delete('date');
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
   // ------ data ------
   const [sheet, setSheet] = useState<ApiRecordSheet | null>(null);
   const [columns, setColumns] = useState<ApiRecordColumn[]>([]);
-  const [views, setViews] = useState<ApiRecordView[]>([]);
+  // `views` (records_views) is fetched but not yet read — view persistence
+  // is a Slice 3b follow-up. We keep the fetch warm so the response stays
+  // cached and we don't re-flight when persistence lands.
+  const [, setViews] = useState<ApiRecordView[]>([]);
   const [rows, setRows] = useState<ApiRecordRow[]>([]);
   /** Keyed map of row.id -> parsed cell data (RecordRowData). */
   const [rowData, setRowData] = useState<Record<string, RecordRowData>>({});
-  const [activeViewId, setActiveViewId] = useState<string | null>(null);
 
   // ------ flags ------
   const [loadingMeta, setLoadingMeta] = useState(true);
@@ -134,8 +200,6 @@ export function SheetDetail() {
       setSheet(res.sheet);
       setColumns(res.columns ?? []);
       setViews(res.views ?? []);
-      const def = (res.views ?? []).find((v) => v.is_default === 1) ?? (res.views ?? [])[0];
-      setActiveViewId(def?.id ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load sheet');
     } finally {
@@ -241,18 +305,24 @@ export function SheetDetail() {
     [sheetId, rowData],
   );
 
-  const handleAddRow = useCallback(async () => {
-    if (!sheetId) return;
-    try {
-      const res = await recordsApi.rows.create(sheetId, {});
-      setRows((prev) => [...prev, res.row]);
-      setRowData((m) => ({ ...m, [res.row.id]: parseRowData(res.row.data) }));
-      // Open the new row immediately so the user can fill it in.
-      setDrawerRowId(res.row.id);
-    } catch (err) {
-      setToast({ message: err instanceof Error ? err.message : 'Failed to add row', severity: 'error' });
-    }
-  }, [sheetId]);
+  const handleAddRow = useCallback(
+    async (initialData?: RecordRowData) => {
+      if (!sheetId) return;
+      try {
+        const res = await recordsApi.rows.create(
+          sheetId,
+          initialData && Object.keys(initialData).length > 0 ? { data: initialData } : {},
+        );
+        setRows((prev) => [...prev, res.row]);
+        setRowData((m) => ({ ...m, [res.row.id]: parseRowData(res.row.data) }));
+        // Open the new row immediately so the user can fill it in.
+        setDrawerRowId(res.row.id);
+      } catch (err) {
+        setToast({ message: err instanceof Error ? err.message : 'Failed to add row', severity: 'error' });
+      }
+    },
+    [sheetId],
+  );
 
   const handleArchiveRow = useCallback(
     async (row: ApiRecordRow) => {
@@ -362,7 +432,7 @@ export function SheetDetail() {
   if (!sheet || !sheetId) return null;
 
   const headerActions = !isMobile && canMutate ? (
-    <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddRow}>
+    <Button variant="contained" startIcon={<AddIcon />} onClick={() => handleAddRow()}>
       Add row
     </Button>
   ) : null;
@@ -419,11 +489,7 @@ export function SheetDetail() {
             </ToggleButtonGroup>
           )}
           {!isMobile && activeTab === 'data' && (
-            <ViewSwitcher
-              views={views}
-              activeViewId={activeViewId}
-              onChange={setActiveViewId}
-            />
+            <ViewSwitcher activeView={activeView} onChange={setActiveView} />
           )}
           {activeTab === 'data' && headerActions}
           {canMutate && (
@@ -489,12 +555,40 @@ export function SheetDetail() {
         </Box>
       )}
 
+      {/* Mobile view switcher (the desktop one lives in the header). */}
+      {isMobile && activeTab === 'data' && (
+        <Box sx={{ mb: 2, flexShrink: 0 }}>
+          <MobileViewSwitcher activeView={activeView} onChange={setActiveView} />
+        </Box>
+      )}
+
       {/* Body */}
       <Box sx={{ flex: 1, minHeight: 0, position: 'relative' }}>
         {activeTab === 'forms' ? (
           <FormsTab sheetId={sheetId} canMutate={canMutate} />
         ) : loadingRows ? (
           <RowSkeletons mobile={isMobile} />
+        ) : activeView === 'kanban' ? (
+          <KanbanView
+            columns={columns}
+            rows={rows}
+            rowData={rowData}
+            canMutate={canMutate}
+            groupColumnKey={groupColumnKey}
+            onChangeGroupColumn={setGroupColumnKey}
+            onPatchCell={patchCell}
+            onOpenRow={(r) => setDrawerRowId(r.id)}
+            onAddRow={handleAddRow}
+          />
+        ) : activeView === 'calendar' ? (
+          <CalendarView
+            columns={columns}
+            rows={rows}
+            rowData={rowData}
+            dateColumnKey={dateColumnKey}
+            onChangeDateColumn={setDateColumnKey}
+            onOpenRow={(r) => setDrawerRowId(r.id)}
+          />
         ) : isMobile ? (
           <MobileList
             columns={columns}
@@ -685,44 +779,98 @@ export function SheetDetail() {
 // ----------------------------------------------------------------------
 
 interface ViewSwitcherProps {
-  views: ApiRecordView[];
-  activeViewId: string | null;
-  onChange: (id: string) => void;
+  activeView: AnyRecordViewType;
+  onChange: (view: AnyRecordViewType) => void;
 }
 
 /**
- * ViewSwitcher — Phase 1 has only Grid views, but we render the future
- * shape (Board/Timeline/etc) as disabled toggles so the system shape is
- * obvious at a glance. This is the "communicates the system shape" part
- * of the spec — see records-with-many-views design philosophy.
+ * ViewSwitcher — flips between Grid / Kanban / Calendar in this slice.
+ * Timeline and Gallery are visible-but-disabled placeholders so the
+ * system shape (records-with-many-views) is obvious at a glance.
+ *
+ * State lives in the URL (`?view=...`) on the SheetDetail page so the
+ * active lens is shareable. No persistence to records_views yet.
  */
-function ViewSwitcher({ views, activeViewId, onChange }: ViewSwitcherProps) {
-  const grid = views.find((v) => v.view_type === 'grid');
-
+function ViewSwitcher({ activeView, onChange }: ViewSwitcherProps) {
   return (
     <ToggleButtonGroup
       size="small"
-      value={activeViewId}
+      value={activeView}
       exclusive
-      onChange={(_, val) => val && onChange(val)}
+      onChange={(_, val) => {
+        if (val === 'grid' || val === 'kanban' || val === 'calendar') onChange(val);
+      }}
       sx={{ height: 36 }}
+      aria-label="View type"
     >
-      <ToggleButton value={grid?.id ?? 'grid'} sx={{ px: 1.5 }}>
-        <Tooltip title="Grid view"><GridIcon fontSize="small" /></Tooltip>
+      <ToggleButton value="grid" sx={{ px: 1.5 }} aria-label="Grid view">
+        <Tooltip title="Grid"><GridIcon fontSize="small" /></Tooltip>
       </ToggleButton>
-      <ToggleButton value="board-disabled" disabled sx={{ px: 1.5 }}>
-        <Tooltip title="Board (coming soon)"><KanbanIcon fontSize="small" /></Tooltip>
+      <ToggleButton value="kanban" sx={{ px: 1.5 }} aria-label="Kanban view">
+        <Tooltip title="Kanban"><KanbanIcon fontSize="small" /></Tooltip>
       </ToggleButton>
-      <ToggleButton value="timeline-disabled" disabled sx={{ px: 1.5 }}>
+      <ToggleButton value="calendar" sx={{ px: 1.5 }} aria-label="Calendar view">
+        <Tooltip title="Calendar"><CalendarIcon fontSize="small" /></Tooltip>
+      </ToggleButton>
+      <ToggleButton value="timeline" disabled sx={{ px: 1.5 }} aria-label="Timeline view (coming soon)">
         <Tooltip title="Timeline (coming soon)"><TimelineIcon fontSize="small" /></Tooltip>
       </ToggleButton>
-      <ToggleButton value="gallery-disabled" disabled sx={{ px: 1.5 }}>
+      <ToggleButton value="gallery" disabled sx={{ px: 1.5 }} aria-label="Gallery view (coming soon)">
         <Tooltip title="Gallery (coming soon)"><GalleryIcon fontSize="small" /></Tooltip>
       </ToggleButton>
-      <ToggleButton value="calendar-disabled" disabled sx={{ px: 1.5 }}>
-        <Tooltip title="Calendar (coming soon)"><CalendarIcon fontSize="small" /></Tooltip>
-      </ToggleButton>
     </ToggleButtonGroup>
+  );
+}
+
+/**
+ * MobileViewSwitcher — same shape as the desktop ViewSwitcher but
+ * scrollable horizontally so it fits next to the data tab on phones.
+ * The toggle group itself wraps in a horizontally-scrollable box.
+ */
+function MobileViewSwitcher({
+  activeView,
+  onChange,
+}: {
+  activeView: AnyRecordViewType;
+  onChange: (view: AnyRecordViewType) => void;
+}) {
+  return (
+    <Box
+      sx={{
+        overflowX: 'auto',
+        overflowY: 'hidden',
+        WebkitOverflowScrolling: 'touch',
+        scrollbarWidth: 'none',
+        '&::-webkit-scrollbar': { display: 'none' },
+      }}
+    >
+      <ToggleButtonGroup
+        size="small"
+        value={activeView}
+        exclusive
+        onChange={(_, val) => {
+          if (val === 'grid' || val === 'kanban' || val === 'calendar') onChange(val);
+        }}
+        sx={{ height: 40 }}
+        aria-label="View type"
+      >
+        <ToggleButton value="grid" sx={{ px: 2, minHeight: 40 }} aria-label="Grid view">
+          <GridIcon fontSize="small" sx={{ mr: 0.75 }} /> Grid
+        </ToggleButton>
+        <ToggleButton value="kanban" sx={{ px: 2, minHeight: 40 }} aria-label="Kanban view">
+          <KanbanIcon fontSize="small" sx={{ mr: 0.75 }} /> Kanban
+        </ToggleButton>
+        <ToggleButton value="calendar" sx={{ px: 2, minHeight: 40 }} aria-label="Calendar view">
+          <CalendarIcon fontSize="small" sx={{ mr: 0.75 }} /> Calendar
+        </ToggleButton>
+        <ToggleButton value="timeline" disabled sx={{ px: 2, minHeight: 40 }}>
+          <TimelineIcon fontSize="small" sx={{ mr: 0.75 }} /> Timeline
+        </ToggleButton>
+        <ToggleButton value="gallery" disabled sx={{ px: 2, minHeight: 40 }}>
+          <GalleryIcon fontSize="small" sx={{ mr: 0.75 }} /> Gallery
+        </ToggleButton>
+      </ToggleButtonGroup>
+    </Box>
   );
 }
 

@@ -42,6 +42,7 @@ import { Sheets } from './pages/records/Sheets';
 import { SheetDetail } from './pages/records/SheetDetail';
 import { FormBuilder } from './pages/records/FormBuilder';
 import { PublicForm } from './pages/forms/PublicForm';
+import { UpdateRequestForm } from './pages/forms/UpdateRequestForm';
 
 function App() {
   return (
@@ -56,6 +57,10 @@ function App() {
 
           {/* Public form route — no app shell, no auth, full-screen takeover */}
           <Route path="/f/:slug" element={<PublicForm />} />
+
+          {/* Public update-request route — recipient-only form gated by an
+              unguessable token. Same no-shell, no-auth treatment as /f/. */}
+          <Route path="/u/:token" element={<UpdateRequestForm />} />
 
           {/* Protected routes with layout */}
           <Route element={<ProtectedRoute />}>

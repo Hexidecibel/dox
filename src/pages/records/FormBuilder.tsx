@@ -67,6 +67,7 @@ import type {
   RecordFormFieldConfig,
   RecordFormSettings,
 } from '../../../shared/types';
+import { FORM_ATTACHMENT_DEFAULTS } from '../../../shared/types';
 
 type EntityKind = 'customer' | 'supplier' | 'product';
 
@@ -755,6 +756,38 @@ export function FormBuilder() {
         </Box>
       </Paper>
 
+      {/* Attachments */}
+      <Paper variant="outlined" sx={{ p: 2.5 }}>
+        <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 0.5 }}>
+          Attachments
+        </Typography>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 1.5 }}>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={!!settings.allow_attachments}
+                onChange={(e) => updateSettings({ allow_attachments: e.target.checked })}
+              />
+            }
+            label={
+              <Box>
+                <Typography sx={{ fontWeight: 500 }}>Allow file uploads</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Adds a step where the submitter can attach photos or files. On phones, the camera opens by default.
+                </Typography>
+              </Box>
+            }
+            sx={{ alignItems: 'flex-start', m: 0, '& .MuiFormControlLabel-label': { mt: 0.25 } }}
+          />
+          {settings.allow_attachments && (
+            <AttachmentSettingsPanel
+              settings={settings}
+              onChange={(patch) => updateSettings(patch)}
+            />
+          )}
+        </Box>
+      </Paper>
+
       {/* Danger zone */}
       <Box sx={{ pt: 1 }}>
         <Button
@@ -1098,6 +1131,109 @@ interface PublicLinkPanelProps {
  *   - public + live: live URL with copy / open / rotate
  *   - public + archived: greyed URL, archived note
  */
+// ---------------------------------------------------------------------
+// Attachment settings panel — surfaced on the builder when
+// allow_attachments is enabled. Lets the form owner pick limits + MIME
+// presets without typing JSON. The renderer reads the same settings so
+// preview parity is automatic.
+// ---------------------------------------------------------------------
+
+interface AttachmentSettingsPanelProps {
+  settings: RecordFormSettings;
+  onChange: (patch: Partial<RecordFormSettings>) => void;
+}
+
+const MIME_PRESETS: Array<{ key: string; label: string; types: string[] }> = [
+  { key: 'images', label: 'Images', types: ['image/*'] },
+  { key: 'pdf', label: 'PDF', types: ['application/pdf'] },
+  {
+    key: 'office',
+    label: 'Office docs',
+    types: [
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/msword',
+      'application/vnd.ms-excel',
+    ],
+  },
+];
+
+function AttachmentSettingsPanel({ settings, onChange }: AttachmentSettingsPanelProps) {
+  const allowed = settings.allowed_mime_types ?? [...FORM_ATTACHMENT_DEFAULTS.allowed_mime_types];
+
+  const isPresetActive = (preset: (typeof MIME_PRESETS)[number]): boolean =>
+    preset.types.every((t) => allowed.includes(t));
+
+  const togglePreset = (preset: (typeof MIME_PRESETS)[number]) => {
+    const active = isPresetActive(preset);
+    let next: string[];
+    if (active) {
+      next = allowed.filter((t) => !preset.types.includes(t));
+    } else {
+      next = [...new Set([...allowed, ...preset.types])];
+    }
+    if (next.length === 0) {
+      // Refuse an empty allowlist — fall back to defaults so a misclick
+      // doesn't lock everyone out of the form.
+      next = [...FORM_ATTACHMENT_DEFAULTS.allowed_mime_types];
+    }
+    onChange({ allowed_mime_types: next });
+  };
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, pl: 4 }}>
+      <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+        <TextField
+          label="Max files"
+          type="number"
+          value={settings.max_attachments ?? FORM_ATTACHMENT_DEFAULTS.max_attachments}
+          onChange={(e) => {
+            const n = parseInt(e.target.value, 10);
+            onChange({ max_attachments: Number.isFinite(n) ? n : undefined });
+          }}
+          inputProps={{ min: 1, max: 20 }}
+          size="small"
+          sx={{ width: 140 }}
+        />
+        <TextField
+          label="Max size (MB)"
+          type="number"
+          value={settings.max_file_size_mb ?? FORM_ATTACHMENT_DEFAULTS.max_file_size_mb}
+          onChange={(e) => {
+            const n = parseInt(e.target.value, 10);
+            onChange({ max_file_size_mb: Number.isFinite(n) ? n : undefined });
+          }}
+          inputProps={{ min: 1, max: 50 }}
+          size="small"
+          sx={{ width: 160 }}
+        />
+      </Box>
+      <Box>
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+          Allowed file types
+        </Typography>
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          {MIME_PRESETS.map((preset) => {
+            const active = isPresetActive(preset);
+            return (
+              <Chip
+                key={preset.key}
+                label={preset.label}
+                color={active ? 'primary' : 'default'}
+                variant={active ? 'filled' : 'outlined'}
+                onClick={() => togglePreset(preset)}
+                sx={{ minHeight: 32 }}
+              />
+            );
+          })}
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------
+
 function PublicLinkPanel({ isPublic, status, publicUrl, onRotate, onPublish }: PublicLinkPanelProps) {
   if (!isPublic) {
     return (

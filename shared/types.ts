@@ -1409,7 +1409,8 @@ export interface RecordRowRefRow {
 export interface RecordRowAttachmentRow {
   id: string;
   tenant_id: string;
-  row_id: string;
+  /** NULL while the attachment is in the pending-upload state (pre-submit). */
+  row_id: string | null;
   column_key: string | null;
   r2_key: string;
   file_name: string;
@@ -1418,6 +1419,12 @@ export interface RecordRowAttachmentRow {
   checksum: string | null;
   uploaded_by: string | null;
   created_at: string;
+  /** Set on creation by the public-form upload endpoint; cleared on link to a row. */
+  pending_token: string | null;
+  /** ISO timestamp; cleared with pending_token. NULL once linked. */
+  pending_expires_at: string | null;
+  /** Set on creation when the upload originated from a public form. */
+  form_id: string | null;
 }
 
 export interface RecordViewRow {
@@ -1682,7 +1689,30 @@ export interface RecordFormSettings {
   accent_color?: string | null;
   /** R2/public URL for an optional logo at the top of the form. */
   logo_url?: string | null;
+  /** When true, the public renderer surfaces an attachment step. Default false. */
+  allow_attachments?: boolean;
+  /** Cap on uploads per submission. Default 5. */
+  max_attachments?: number;
+  /** Per-file size cap in megabytes. Default 10. */
+  max_file_size_mb?: number;
+  /**
+   * MIME-type allowlist. Entries may be exact (`image/png`) or wildcards
+   * (`image/*`). Default `["image/*","application/pdf"]`. The upload
+   * endpoint enforces this server-side; the renderer mirrors it for UX.
+   */
+  allowed_mime_types?: string[];
 }
+
+/**
+ * Defaults applied when settings.allow_attachments is true but a per-key
+ * value is missing. Centralized so the upload endpoint, renderer, and
+ * builder agree without copy/paste drift.
+ */
+export const FORM_ATTACHMENT_DEFAULTS = {
+  max_attachments: 5,
+  max_file_size_mb: 10,
+  allowed_mime_types: ['image/*', 'application/pdf'] as readonly string[],
+} as const;
 
 export interface RecordFormRow {
   id: string;
@@ -1827,6 +1857,20 @@ export interface PublicFormEntityOptions {
   product?: PublicEntityOption[];
 }
 
+/**
+ * Attachment policy attached to PublicFormView. Present whenever the
+ * builder enabled `allow_attachments`; absent otherwise. The upload
+ * endpoint re-enforces every constraint server-side — this projection
+ * is purely for UX (disabling the picker, showing limits, etc).
+ */
+export interface PublicFormAttachmentPolicy {
+  enabled: true;
+  max_attachments: number;
+  max_file_size_mb: number;
+  /** Wildcards allowed (e.g. `image/*`). */
+  allowed_mime_types: string[];
+}
+
 export interface PublicFormView {
   /** Form display metadata. */
   form: {
@@ -1845,6 +1889,26 @@ export interface PublicFormView {
    * per kind — see [slug].ts for the search/pagination TODO.
    */
   entity_options?: PublicFormEntityOptions;
+  /**
+   * Present when the form opted into file/photo uploads. Renderer adds
+   * an attachment step; absence means the step is skipped entirely.
+   */
+  attachments?: PublicFormAttachmentPolicy;
+}
+
+/**
+ * Server's response to a successful public file upload. Browser holds
+ * `attachment_id` + `pending_token` in form state and sends the ids in
+ * the eventual submit body.
+ */
+export interface PublicAttachmentUpload {
+  attachment_id: string;
+  pending_token: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  /** ISO; pending row is GC'd by a background sweeper after this. */
+  expires_at: string;
 }
 
 export interface PublicFormSubmitRequest {
@@ -1854,6 +1918,11 @@ export interface PublicFormSubmitRequest {
   turnstile_token: string;
   /** Optional submitter email — captured for audit, not auth. */
   submitter_email?: string | null;
+  /**
+   * Pending attachment ids issued by /api/forms/public/:slug/upload.
+   * Empty / omitted when the form has no attachments.
+   */
+  attachment_ids?: string[];
 }
 
 export interface PublicFormSubmitResponse {
@@ -1861,6 +1930,163 @@ export interface PublicFormSubmitResponse {
   thank_you_message?: string | null;
   redirect_url?: string | null;
 }
+
+// === Update Requests ===
+//
+// Phase 2 Slice 2 of the Records module. Targeted, single-recipient
+// "fill these specific fields on this specific row" flow. A user opens
+// a row drawer, picks fields + recipient + optional message + optional
+// due date, the server mints an unguessable token, an email is sent,
+// the recipient lands on /u/<token>, fills only the requested fields
+// (server-enforced), and the row is updated. The original sender sees
+// a "filled out N fields" entry in the row's activity feed.
+//
+// Schema source: migrations/0044_records_update_requests.sql.
+
+export type UpdateRequestStatus =
+  | 'pending'
+  | 'responded'
+  | 'expired'
+  | 'cancelled';
+
+/** Mirror of the records_update_requests row. */
+export interface RecordUpdateRequestRow {
+  id: string;
+  tenant_id: string;
+  sheet_id: string;
+  row_id: string;
+  token: string;
+  recipient_email: string;
+  recipient_user_id: string | null;
+  /** JSON array of column_keys (NOT column ids) the recipient must fill. */
+  fields_requested: string;
+  message: string | null;
+  due_date: string | null;
+  status: UpdateRequestStatus;
+  responded_at: string | null;
+  expires_at: string | null;
+  created_at: string;
+  created_by_user_id: string;
+}
+
+/**
+ * API-shape (joins surface as optional fields). The token is omitted
+ * from the admin list response — admins see who/what/when, but the
+ * actual gate value never leaves the create POST response so it can't
+ * be replayed by a stale GET.
+ */
+export interface RecordUpdateRequest extends Omit<RecordUpdateRequestRow, 'token'> {
+  /** Resolved column_keys parsed from fields_requested for convenience. */
+  fields_requested_keys: string[];
+  /** Sender display name from a LEFT JOIN on users. */
+  creator_name?: string | null;
+  /** Title of the row, denormalized for the drawer "pending requests" list. */
+  row_display_title?: string | null;
+}
+
+/**
+ * Response from POST /api/records/.../update-requests. The token IS
+ * included here because the caller needs the public link to copy/share
+ * if email delivery fails. After this single response, the token is
+ * never returned again to authenticated admins.
+ */
+export interface RecordUpdateRequestCreateResponse {
+  request: RecordUpdateRequest;
+  /** Full magic link the recipient will use. */
+  public_url: string;
+  /** Whether the recipient email actually went out (false if RESEND_API_KEY unset). */
+  email_sent: boolean;
+}
+
+export interface RecordUpdateRequestListResponse {
+  requests: RecordUpdateRequest[];
+  total: number;
+}
+
+/** Body for POST /api/records/sheets/:sheetId/rows/:rowId/update-requests. */
+export interface CreateUpdateRequestRequest {
+  recipient_email: string;
+  /** Optional — set when the recipient is a known user (autocomplete pick). */
+  recipient_user_id?: string | null;
+  /** Column keys the recipient must fill. Must be 1+ valid keys on this sheet. */
+  fields_requested: string[];
+  message?: string | null;
+  /** Optional ISO date the requester wants the response by. */
+  due_date?: string | null;
+  /**
+   * Optional override (ISO). Defaults to ~30 days when omitted; pass
+   * null to disable expiry entirely (e.g. "fill this whenever").
+   */
+  expires_at?: string | null;
+}
+
+// --- Public endpoint shapes (NO auth — token is the gate) ---
+
+/**
+ * Sanitized projection shipped to the recipient form at /u/:token.
+ *
+ * Includes only the columns the requester picked, and the row's CURRENT
+ * values for those columns so the recipient sees what they're updating.
+ * Never leaks other columns, full sheet metadata, or anything outside
+ * the scope of the fields_requested set.
+ */
+export interface PublicUpdateRequestView {
+  /** Row + sheet identity (recipient-friendly only). */
+  request: {
+    sheet_name: string;
+    row_title: string | null;
+    sender_name: string;
+    sender_email: string;
+    message: string | null;
+    due_date: string | null;
+    /** When this request stops accepting submissions. NULL = no expiry. */
+    expires_at: string | null;
+  };
+  /**
+   * Field defs for ONLY the requested columns. Same shape the public
+   * form renderer already understands so we can reuse PublicFormRenderer.
+   */
+  fields: PublicFormFieldDef[];
+  /**
+   * Current row values, keyed by column.key. Pre-fills the form so the
+   * recipient sees "current: X" and can change it. Only includes keys
+   * present in `fields` — values for non-requested columns are never
+   * included in this projection.
+   */
+  current_values: RecordRowData;
+}
+
+/** Body for POST /api/update-requests/public/:token (recipient submit). */
+export interface PublicUpdateRequestSubmitRequest {
+  /** Cell values keyed by column.key. Only requested keys are honored. */
+  data: RecordRowData;
+}
+
+export interface PublicUpdateRequestSubmitResponse {
+  success: boolean;
+  /** Number of cells the server actually updated (echoes for the UI). */
+  fields_updated: number;
+}
+
+// === View runtime types (Kanban / Calendar) ===
+//
+// Phase 2 Slice 3a: client-side view shapes used by the SheetDetail
+// view switcher and the new Kanban / Calendar lenses. These are NOT
+// persisted yet — `records_views` rows still drive the saved-view list.
+// Persistence of the user's active-view choice is deferred (would
+// otherwise require either a per-user `view_preferences` row or
+// expanding `records_views` with a per-user pin). For now the active
+// view is derived from URL query (?view=kanban&group=column_key) so
+// links are shareable and mechanical to test in Playwright.
+
+export type AnyRecordViewType = 'grid' | 'kanban' | 'calendar' | 'timeline' | 'gallery';
+
+/** A view that is implemented in the current build. */
+export type ImplementedRecordViewType = 'grid' | 'kanban' | 'calendar';
+
+/** Compile-time check that the implemented set is a subset. */
+const _viewSubsetCheck: ImplementedRecordViewType extends AnyRecordViewType ? true : false = true;
+void _viewSubsetCheck;
 
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
