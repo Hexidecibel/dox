@@ -26,6 +26,7 @@ import {
   parseRowData,
 } from '../../../lib/records/updateRequests';
 import { logRecordsActivity } from '../../../lib/records/helpers';
+import { handleUpdateRequestResponse } from '../../../lib/records/workflows';
 import type { Env } from '../../../lib/types';
 import type {
   PublicUpdateRequestSubmitRequest,
@@ -269,6 +270,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         request_id: ctx.request.id,
       },
     });
+
+    // If this UR was created by a workflow step, advance the run.
+    // Best-effort: never fail the recipient submit on a workflow error.
+    try {
+      const origin = new URL(context.request.url).origin;
+      await handleUpdateRequestResponse(
+        { DB: context.env.DB, RESEND_API_KEY: context.env.RESEND_API_KEY ?? null, appOrigin: origin },
+        ctx.request.id,
+      );
+    } catch (err) {
+      console.error('Workflow advance after UR submit failed:', err);
+    }
 
     await recordAttempt(context.env.DB, rlKey, RATE_LIMIT_WINDOW_SECONDS);
 

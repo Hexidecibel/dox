@@ -415,11 +415,14 @@ function EntityRefEditor({
   // Resolve the current chip label.
   const single = Array.isArray(value) ? value[0] : value;
   const label = single ? refLabel(single) : null;
+  const singleId =
+    single && typeof single === 'object' && typeof (single as { id?: unknown }).id === 'string'
+      ? String((single as { id: string }).id)
+      : undefined;
 
-  const initialOption: EntityOption | null =
-    single && typeof single === 'object' && (single as { id?: unknown }).id
-      ? { id: String((single as { id: string }).id), name: label ?? '' }
-      : null;
+  const initialOption: EntityOption | null = singleId
+    ? { id: singleId, name: label ?? '' }
+    : null;
 
   const handleSelect = (opt: EntityOption | null) => {
     setPickerOpen(false);
@@ -434,7 +437,7 @@ function EntityRefEditor({
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
       <Box sx={{ flex: 1, minWidth: 0 }}>
         {label ? (
-          <EntityChip type={column.type} label={label} />
+          <EntityChip type={column.type} label={label} id={singleId} />
         ) : (
           <Typography variant="body2" color="text.disabled" sx={{ fontStyle: 'italic' }}>
             None

@@ -36,6 +36,10 @@ const PUBLIC_ROUTES = [
   // token in the URL, not a login. Same scoping rule as /api/forms/public:
   // narrow prefix so we don't leak any future admin route here.
   '/api/update-requests/public',
+  // Workflow approval magic links — same posture as update-request
+  // public: token in URL is the gate, narrow prefix protects future
+  // admin endpoints under /api/workflow-approvals/.
+  '/api/workflow-approvals/public',
 ];
 
 function isPublicRoute(pathname: string): boolean {

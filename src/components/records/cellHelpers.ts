@@ -143,6 +143,17 @@ export function refLabel(value: unknown): string | null {
   return null;
 }
 
+/** Extract a single id from one entity-ref item, or null if absent. */
+export function refId(item: unknown): string | null {
+  if (item == null) return null;
+  if (typeof item === 'string') return item;
+  if (typeof item === 'object') {
+    const o = item as { id?: unknown };
+    if (typeof o.id === 'string' && o.id.length > 0) return o.id;
+  }
+  return null;
+}
+
 /** Extract id(s) from an entity-ref cell payload, regardless of shape. */
 export function refIds(value: unknown): string[] {
   if (value == null) return [];

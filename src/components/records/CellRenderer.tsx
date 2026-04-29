@@ -6,7 +6,7 @@
  */
 
 import { Box, Tooltip, Typography, Checkbox } from '@mui/material';
-import { dropdownOptions, formatCellValue, paletteForOption, refLabel } from './cellHelpers';
+import { dropdownOptions, formatCellValue, paletteForOption, refId, refLabel } from './cellHelpers';
 import { EntityChip } from './EntityChip';
 import type { ApiRecordColumn, RecordColumnType } from '../../../shared/types';
 
@@ -76,7 +76,8 @@ export function CellRenderer({ column, value, dense = true }: CellRendererProps)
       <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
         {items.map((item, i) => {
           const label = refLabel(item) ?? '—';
-          return <EntityChip key={i} type={column.type} label={label} />;
+          const itemId = refId(item) ?? undefined;
+          return <EntityChip key={i} type={column.type} label={label} id={itemId} />;
         })}
       </Box>
     );

@@ -19,6 +19,7 @@ import { Tenants } from './pages/admin/Tenants';
 import { AuditLog } from './pages/admin/AuditLog';
 import { ApiKeys } from './pages/admin/ApiKeys';
 import { Products } from './pages/admin/Products';
+import { ProductDetail } from './pages/admin/ProductDetail';
 import { Suppliers } from './pages/admin/Suppliers';
 import { SupplierDetail } from './pages/admin/SupplierDetail';
 import { DocumentTypes } from './pages/admin/DocumentTypes';
@@ -41,8 +42,11 @@ import { Activity } from './pages/Activity';
 import { Sheets } from './pages/records/Sheets';
 import { SheetDetail } from './pages/records/SheetDetail';
 import { FormBuilder } from './pages/records/FormBuilder';
+import { WorkflowBuilder } from './pages/records/WorkflowBuilder';
 import { PublicForm } from './pages/forms/PublicForm';
 import { UpdateRequestForm } from './pages/forms/UpdateRequestForm';
+import { PublicApprovalPage } from './pages/forms/PublicApprovalPage';
+import { Approvals } from './pages/Approvals';
 
 function App() {
   return (
@@ -61,6 +65,9 @@ function App() {
           {/* Public update-request route — recipient-only form gated by an
               unguessable token. Same no-shell, no-auth treatment as /f/. */}
           <Route path="/u/:token" element={<UpdateRequestForm />} />
+
+          {/* Public workflow approval route — magic-link decision page. */}
+          <Route path="/a/:token" element={<PublicApprovalPage />} />
 
           {/* Protected routes with layout */}
           <Route element={<ProtectedRoute />}>
@@ -83,6 +90,8 @@ function App() {
               <Route path="/records" element={<Sheets />} />
               <Route path="/records/:sheetId" element={<SheetDetail />} />
               <Route path="/records/:sheetId/forms/:formId" element={<FormBuilder />} />
+              <Route path="/records/:sheetId/workflows/:workflowId" element={<WorkflowBuilder />} />
+              <Route path="/approvals" element={<Approvals />} />
 
               {/* Admin routes - users management and audit for super_admin and org_admin */}
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>
@@ -91,6 +100,7 @@ function App() {
                 <Route path="/admin/audit" element={<AuditLog />} />
                 <Route path="/admin/document-types" element={<DocumentTypes />} />
                 <Route path="/admin/products" element={<Products />} />
+                <Route path="/admin/products/:id" element={<ProductDetail />} />
                 <Route path="/admin/suppliers" element={<Suppliers />} />
                 <Route path="/admin/suppliers/:id" element={<SupplierDetail />} />
                 <Route path="/admin/connectors" element={<Connectors />} />

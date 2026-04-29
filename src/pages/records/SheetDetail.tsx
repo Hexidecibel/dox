@@ -64,12 +64,15 @@ import { useSheetSession, type SheetCellUpdate } from '../../hooks/useSheetSessi
 import { GridView, type CellHighlight } from '../../components/records/GridView';
 import { KanbanView } from '../../components/records/KanbanView';
 import { CalendarView } from '../../components/records/CalendarView';
+import { TimelineView } from '../../components/records/TimelineView';
+import { GalleryView } from '../../components/records/GalleryView';
 import { MobileList } from '../../components/records/MobileList';
 import { RowEditPanel } from '../../components/records/RowEditPanel';
 import { AddColumnDialog } from '../../components/records/AddColumnDialog';
 import { EditColumnDialog } from '../../components/records/EditColumnDialog';
 import { PresenceStack } from '../../components/records/PresenceStack';
 import { FormsTab } from '../../components/records/FormsTab';
+import { WorkflowsTab } from '../../components/records/WorkflowsTab';
 import { parseRowData } from '../../components/records/cellHelpers';
 import type {
   AnyRecordViewType,
@@ -79,6 +82,7 @@ import type {
   ApiRecordView,
   CreateColumnRequest,
   RecordRowData,
+  TimelineScale,
   UpdateColumnRequest,
 } from '../../../shared/types';
 
@@ -95,10 +99,11 @@ export function SheetDetail() {
   const canMutate = !isReader;
 
   // ------ active view (URL-controlled) ------
-  // The active view is held in the URL so links are shareable. Persisting
-  // the user's last-used view to records_views is deferred — see plan.md
-  // and the AnyRecordViewType comment in shared/types.ts. Disabled view
-  // types ("timeline", "gallery") are placeholders for slice 3b.
+  // The active view + per-view config are held in the URL so links are
+  // shareable. Persisting the user's last-used view to records_views is
+  // deferred — see plan.md and the AnyRecordViewType comment in
+  // shared/types.ts. Slice 3b lights up Timeline + Gallery alongside the
+  // existing Grid / Kanban / Calendar.
   const [searchParams, setSearchParams] = useSearchParams();
   const activeView: AnyRecordViewType = ((): AnyRecordViewType => {
     const v = searchParams.get('view');
@@ -107,6 +112,17 @@ export function SheetDetail() {
   })();
   const groupColumnKey = searchParams.get('group');
   const dateColumnKey = searchParams.get('date');
+  // Timeline-specific zoom level. Defaults to 'month' since that's the
+  // most common "what's on the schedule this quarter" lens.
+  const timelineScale: TimelineScale = ((): TimelineScale => {
+    const v = searchParams.get('scale');
+    if (v === 'day' || v === 'week' || v === 'month' || v === 'quarter') return v;
+    return 'month';
+  })();
+  // Gallery-specific sort + filter knobs.
+  const gallerySortKey = searchParams.get('sort');
+  const gallerySortDir: 'asc' | 'desc' = searchParams.get('dir') === 'asc' ? 'asc' : 'desc';
+  const galleryPhotosOnly = searchParams.get('photos') === '1';
 
   const setActiveView = useCallback(
     (view: AnyRecordViewType) => {
@@ -155,6 +171,67 @@ export function SheetDetail() {
     [setSearchParams],
   );
 
+  const setTimelineScale = useCallback(
+    (scale: TimelineScale) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          // Don't write the default — keeps URLs short for the common case.
+          if (scale === 'month') next.delete('scale');
+          else next.set('scale', scale);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const setGallerySortKey = useCallback(
+    (key: string | null) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (key) next.set('sort', key);
+          else next.delete('sort');
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const setGallerySortDir = useCallback(
+    (dir: 'asc' | 'desc') => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (dir === 'desc') next.delete('dir');
+          else next.set('dir', dir);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const setGalleryPhotosOnly = useCallback(
+    (v: boolean) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (v) next.set('photos', '1');
+          else next.delete('photos');
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
   // ------ data ------
   const [sheet, setSheet] = useState<ApiRecordSheet | null>(null);
   const [columns, setColumns] = useState<ApiRecordColumn[]>([]);
@@ -182,8 +259,13 @@ export function SheetDetail() {
   const [archiveRowTarget, setArchiveRowTarget] = useState<ApiRecordRow | null>(null);
   const [settingsAnchor, setSettingsAnchor] = useState<HTMLElement | null>(null);
 
-  // ------ tabs (Phase 2: Forms is a peer of the grid view) ------
-  const [activeTab, setActiveTab] = useState<'data' | 'forms'>('data');
+  // ------ tabs (Phase 2: Forms is a peer of the grid view; Phase 3: Workflows added) ------
+  const initialTab = (() => {
+    const t = searchParams.get('tab');
+    if (t === 'forms' || t === 'workflows') return t;
+    return 'data';
+  })();
+  const [activeTab, setActiveTab] = useState<'data' | 'forms' | 'workflows'>(initialTab);
 
   // ------ realtime ------
   const session = useSheetSession(sheetId);
@@ -486,6 +568,9 @@ export function SheetDetail() {
               <ToggleButton value="forms" sx={{ px: 1.5, fontWeight: 500 }}>
                 Forms
               </ToggleButton>
+              <ToggleButton value="workflows" sx={{ px: 1.5, fontWeight: 500 }}>
+                Workflows
+              </ToggleButton>
             </ToggleButtonGroup>
           )}
           {!isMobile && activeTab === 'data' && (
@@ -551,6 +636,7 @@ export function SheetDetail() {
           >
             <ToggleButton value="data" sx={{ flex: 1, fontWeight: 500, minHeight: 44 }}>Data</ToggleButton>
             <ToggleButton value="forms" sx={{ flex: 1, fontWeight: 500, minHeight: 44 }}>Forms</ToggleButton>
+            <ToggleButton value="workflows" sx={{ flex: 1, fontWeight: 500, minHeight: 44 }}>Workflows</ToggleButton>
           </ToggleButtonGroup>
         </Box>
       )}
@@ -566,6 +652,8 @@ export function SheetDetail() {
       <Box sx={{ flex: 1, minHeight: 0, position: 'relative' }}>
         {activeTab === 'forms' ? (
           <FormsTab sheetId={sheetId} canMutate={canMutate} />
+        ) : activeTab === 'workflows' ? (
+          <WorkflowsTab sheetId={sheetId} canMutate={canMutate} />
         ) : loadingRows ? (
           <RowSkeletons mobile={isMobile} />
         ) : activeView === 'kanban' ? (
@@ -587,6 +675,33 @@ export function SheetDetail() {
             rowData={rowData}
             dateColumnKey={dateColumnKey}
             onChangeDateColumn={setDateColumnKey}
+            onOpenRow={(r) => setDrawerRowId(r.id)}
+          />
+        ) : activeView === 'timeline' ? (
+          <TimelineView
+            columns={columns}
+            rows={rows}
+            rowData={rowData}
+            dateColumnKey={dateColumnKey}
+            onChangeDateColumn={setDateColumnKey}
+            groupColumnKey={groupColumnKey}
+            onChangeGroupColumn={setGroupColumnKey}
+            scale={timelineScale}
+            onChangeScale={setTimelineScale}
+            onOpenRow={(r) => setDrawerRowId(r.id)}
+          />
+        ) : activeView === 'gallery' ? (
+          <GalleryView
+            sheetId={sheetId}
+            columns={columns}
+            rows={rows}
+            rowData={rowData}
+            sortColumnKey={gallerySortKey}
+            onChangeSortColumn={setGallerySortKey}
+            sortDir={gallerySortDir}
+            onChangeSortDir={setGallerySortDir}
+            photosOnly={galleryPhotosOnly}
+            onChangePhotosOnly={setGalleryPhotosOnly}
             onOpenRow={(r) => setDrawerRowId(r.id)}
           />
         ) : isMobile ? (
@@ -784,10 +899,7 @@ interface ViewSwitcherProps {
 }
 
 /**
- * ViewSwitcher — flips between Grid / Kanban / Calendar in this slice.
- * Timeline and Gallery are visible-but-disabled placeholders so the
- * system shape (records-with-many-views) is obvious at a glance.
- *
+ * ViewSwitcher — flips between Grid / Kanban / Calendar / Timeline / Gallery.
  * State lives in the URL (`?view=...`) on the SheetDetail page so the
  * active lens is shareable. No persistence to records_views yet.
  */
@@ -798,7 +910,15 @@ function ViewSwitcher({ activeView, onChange }: ViewSwitcherProps) {
       value={activeView}
       exclusive
       onChange={(_, val) => {
-        if (val === 'grid' || val === 'kanban' || val === 'calendar') onChange(val);
+        if (
+          val === 'grid' ||
+          val === 'kanban' ||
+          val === 'calendar' ||
+          val === 'timeline' ||
+          val === 'gallery'
+        ) {
+          onChange(val);
+        }
       }}
       sx={{ height: 36 }}
       aria-label="View type"
@@ -812,11 +932,11 @@ function ViewSwitcher({ activeView, onChange }: ViewSwitcherProps) {
       <ToggleButton value="calendar" sx={{ px: 1.5 }} aria-label="Calendar view">
         <Tooltip title="Calendar"><CalendarIcon fontSize="small" /></Tooltip>
       </ToggleButton>
-      <ToggleButton value="timeline" disabled sx={{ px: 1.5 }} aria-label="Timeline view (coming soon)">
-        <Tooltip title="Timeline (coming soon)"><TimelineIcon fontSize="small" /></Tooltip>
+      <ToggleButton value="timeline" sx={{ px: 1.5 }} aria-label="Timeline view">
+        <Tooltip title="Timeline"><TimelineIcon fontSize="small" /></Tooltip>
       </ToggleButton>
-      <ToggleButton value="gallery" disabled sx={{ px: 1.5 }} aria-label="Gallery view (coming soon)">
-        <Tooltip title="Gallery (coming soon)"><GalleryIcon fontSize="small" /></Tooltip>
+      <ToggleButton value="gallery" sx={{ px: 1.5 }} aria-label="Gallery view">
+        <Tooltip title="Gallery"><GalleryIcon fontSize="small" /></Tooltip>
       </ToggleButton>
     </ToggleButtonGroup>
   );
@@ -849,7 +969,15 @@ function MobileViewSwitcher({
         value={activeView}
         exclusive
         onChange={(_, val) => {
-          if (val === 'grid' || val === 'kanban' || val === 'calendar') onChange(val);
+          if (
+            val === 'grid' ||
+            val === 'kanban' ||
+            val === 'calendar' ||
+            val === 'timeline' ||
+            val === 'gallery'
+          ) {
+            onChange(val);
+          }
         }}
         sx={{ height: 40 }}
         aria-label="View type"
@@ -863,10 +991,10 @@ function MobileViewSwitcher({
         <ToggleButton value="calendar" sx={{ px: 2, minHeight: 40 }} aria-label="Calendar view">
           <CalendarIcon fontSize="small" sx={{ mr: 0.75 }} /> Calendar
         </ToggleButton>
-        <ToggleButton value="timeline" disabled sx={{ px: 2, minHeight: 40 }}>
+        <ToggleButton value="timeline" sx={{ px: 2, minHeight: 40 }} aria-label="Timeline view">
           <TimelineIcon fontSize="small" sx={{ mr: 0.75 }} /> Timeline
         </ToggleButton>
-        <ToggleButton value="gallery" disabled sx={{ px: 2, minHeight: 40 }}>
+        <ToggleButton value="gallery" sx={{ px: 2, minHeight: 40 }} aria-label="Gallery view">
           <GalleryIcon fontSize="small" sx={{ mr: 0.75 }} /> Gallery
         </ToggleButton>
       </ToggleButtonGroup>

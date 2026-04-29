@@ -2068,25 +2068,326 @@ export interface PublicUpdateRequestSubmitResponse {
   fields_updated: number;
 }
 
-// === View runtime types (Kanban / Calendar) ===
+// === View runtime types (Kanban / Calendar / Timeline / Gallery) ===
 //
-// Phase 2 Slice 3a: client-side view shapes used by the SheetDetail
-// view switcher and the new Kanban / Calendar lenses. These are NOT
-// persisted yet — `records_views` rows still drive the saved-view list.
-// Persistence of the user's active-view choice is deferred (would
-// otherwise require either a per-user `view_preferences` row or
-// expanding `records_views` with a per-user pin). For now the active
-// view is derived from URL query (?view=kanban&group=column_key) so
-// links are shareable and mechanical to test in Playwright.
+// Phase 2 Slice 3a/3b: client-side view shapes used by the SheetDetail
+// view switcher and the alternate-layout lenses. These are NOT persisted
+// yet — `records_views` rows still drive the saved-view list. The active
+// view is derived from the URL query (`?view=...&group=...&date=...`)
+// so links are shareable and mechanical to test in Playwright.
 
 export type AnyRecordViewType = 'grid' | 'kanban' | 'calendar' | 'timeline' | 'gallery';
 
-/** A view that is implemented in the current build. */
-export type ImplementedRecordViewType = 'grid' | 'kanban' | 'calendar';
+/**
+ * A view that is implemented in the current build. Slice 3b adds
+ * 'timeline' and 'gallery' so all five view buttons in the switcher are
+ * live. The set is intentionally a subset of AnyRecordViewType so the
+ * compile-time check below catches drift if a placeholder type is added
+ * but never wired up.
+ */
+export type ImplementedRecordViewType =
+  | 'grid'
+  | 'kanban'
+  | 'calendar'
+  | 'timeline'
+  | 'gallery';
 
 /** Compile-time check that the implemented set is a subset. */
 const _viewSubsetCheck: ImplementedRecordViewType extends AnyRecordViewType ? true : false = true;
 void _viewSubsetCheck;
+
+/**
+ * Timeline view runtime config (URL-driven, not persisted).
+ *
+ *   - dateColumnKey: which date/datetime column positions chips on the axis
+ *   - groupColumnKey: optional swimlane grouping (any non-date column)
+ *   - scale: zoom level — controls how many days fit in a visible width
+ *
+ * Multi-day spans (start_date_column_key + end_date_column_key) are
+ * intentionally deferred to a future slice — see TimelineView.tsx header.
+ */
+export type TimelineScale = 'day' | 'week' | 'month' | 'quarter';
+
+export interface TimelineConfig {
+  dateColumnKey: string | null;
+  groupColumnKey: string | null;
+  scale: TimelineScale;
+}
+
+/**
+ * Gallery view runtime config (URL-driven, not persisted).
+ *
+ *   - sortColumnKey: which column to order cards by (null = updated_at desc)
+ *   - sortDir: 'asc' | 'desc'
+ *   - photosOnly: hide records that have no image attachment
+ */
+export interface GalleryConfig {
+  sortColumnKey: string | null;
+  sortDir: 'asc' | 'desc';
+  photosOnly: boolean;
+}
+
+// === Workflows ===
+//
+// Phase 3 Slice 3 of the Records module. Linear, step-based workflows
+// per sheet. A workflow is a definition; a run is an instance executing
+// against a specific row. Step types in v1:
+//
+//   1. approval         -- in-app or magic-link approve/reject
+//   2. update_request   -- reuses the existing update-request infra
+//   3. set_cell         -- writes a value to a cell, no human in the loop
+//
+// Push-to-other-sheet is intentionally deferred (Phase 3b).
+//
+// Schema source: migrations/0045_records_workflows.sql.
+
+export type WorkflowStepType = 'approval' | 'update_request' | 'set_cell';
+
+export type WorkflowTriggerType = 'manual' | 'on_row_create';
+
+export type WorkflowStatus = 'draft' | 'active' | 'archived';
+
+export type WorkflowRunStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'rejected'
+  | 'cancelled';
+
+export type WorkflowStepRunStatus =
+  | 'pending'
+  | 'awaiting_response'
+  | 'approved'
+  | 'rejected'
+  | 'completed'
+  | 'skipped';
+
+/** Per-step config shapes. Discriminated by RecordWorkflowStep.type. */
+export interface ApprovalStepConfig {
+  /** Email of an external approver. Mutually exclusive with assignee_user_id at runtime. */
+  assignee_email?: string | null;
+  /** User id of an internal approver (resolves to in-app inbox). */
+  assignee_user_id?: string | null;
+  message?: string | null;
+  /** Hours-from-step-start until the magic link / inbox item expires. Optional. */
+  due_days?: number | null;
+}
+
+export interface UpdateRequestStepConfig {
+  recipient_email: string;
+  fields_requested: string[];
+  message?: string | null;
+  due_days?: number | null;
+}
+
+export interface SetCellStepConfig {
+  column_key: string;
+  value: unknown;
+}
+
+export type WorkflowStepConfig =
+  | ApprovalStepConfig
+  | UpdateRequestStepConfig
+  | SetCellStepConfig;
+
+/** A single step in records_workflows.steps (JSON array element). */
+export interface RecordWorkflowStep {
+  /** Stable id across edits — generated client-side on add. */
+  id: string;
+  type: WorkflowStepType;
+  /** User-facing label, e.g. "Manager approval". */
+  name: string;
+  config: WorkflowStepConfig;
+  /**
+   * Next step.id to execute on approve / completion. Sentinel 'complete'
+   * marks the run finished. Defaults to "next step in array, or complete".
+   */
+  on_approve_next?: string | null;
+  /**
+   * Next step.id to execute on reject. Sentinel 'rejected' fails the run.
+   * Defaults to 'rejected' for approval steps.
+   */
+  on_reject_next?: string | null;
+}
+
+/** Mirror of the records_workflows row, parsed for API consumers. */
+export interface RecordWorkflow {
+  id: string;
+  tenant_id: string;
+  sheet_id: string;
+  name: string;
+  description: string | null;
+  trigger_type: WorkflowTriggerType;
+  trigger_config: unknown | null;
+  steps: RecordWorkflowStep[];
+  status: WorkflowStatus;
+  archived: number;
+  created_at: string;
+  updated_at: string;
+  created_by_user_id: string;
+  /** LEFT JOIN convenience field. */
+  creator_name?: string | null;
+}
+
+/** Mirror of the records_workflow_runs row + step_runs hydrated. */
+export interface RecordWorkflowRun {
+  id: string;
+  tenant_id: string;
+  workflow_id: string;
+  sheet_id: string;
+  row_id: string;
+  status: WorkflowRunStatus;
+  current_step_id: string | null;
+  triggered_by_user_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  /** Hydrated children — populated on GET /workflow-runs/:runId. */
+  step_runs?: RecordWorkflowStepRun[];
+  /** Workflow snapshot — convenience for the visualization. */
+  workflow_name?: string | null;
+  workflow_steps?: RecordWorkflowStep[];
+  /** Triggered-by user display name (LEFT JOIN). */
+  triggered_by_name?: string | null;
+}
+
+/** Mirror of the records_workflow_step_runs row. */
+export interface RecordWorkflowStepRun {
+  id: string;
+  run_id: string;
+  step_id: string;
+  step_index: number;
+  step_type: WorkflowStepType;
+  status: WorkflowStepRunStatus;
+  assignee_email: string | null;
+  assignee_user_id: string | null;
+  /** Token is omitted when projecting to admin views. */
+  approver_token?: string | null;
+  token_expires_at: string | null;
+  response_value: unknown | null;
+  response_comment: string | null;
+  responded_at: string | null;
+  responded_by_email_or_user_id: string | null;
+  update_request_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  /** LEFT JOIN convenience: assignee user display name when applicable. */
+  assignee_user_name?: string | null;
+}
+
+// --- Request shapes (admin) ---
+
+export interface CreateWorkflowRequest {
+  name: string;
+  description?: string | null;
+  trigger_type?: WorkflowTriggerType;
+  trigger_config?: unknown | null;
+  steps?: RecordWorkflowStep[];
+  status?: WorkflowStatus;
+}
+
+export interface UpdateWorkflowRequest {
+  name?: string;
+  description?: string | null;
+  trigger_type?: WorkflowTriggerType;
+  trigger_config?: unknown | null;
+  steps?: RecordWorkflowStep[];
+  status?: WorkflowStatus;
+}
+
+export interface RecordWorkflowListResponse {
+  workflows: RecordWorkflow[];
+  total: number;
+}
+
+export interface RecordWorkflowGetResponse {
+  workflow: RecordWorkflow;
+}
+
+export interface RecordWorkflowCreateResponse {
+  workflow: RecordWorkflow;
+}
+
+export interface RecordWorkflowUpdateResponse {
+  workflow: RecordWorkflow;
+}
+
+/** Body for POST /api/records/sheets/:sheetId/rows/:rowId/workflow-runs */
+export interface StartWorkflowRunRequest {
+  workflow_id: string;
+}
+
+export interface RecordWorkflowRunListResponse {
+  runs: RecordWorkflowRun[];
+  total: number;
+}
+
+export interface RecordWorkflowRunGetResponse {
+  run: RecordWorkflowRun;
+}
+
+/** GET /api/records/workflow-approvals/inbox response. */
+export interface WorkflowApprovalInboxItem {
+  step_run_id: string;
+  run_id: string;
+  workflow_id: string;
+  workflow_name: string;
+  step_name: string;
+  sheet_id: string;
+  sheet_name: string;
+  row_id: string;
+  row_title: string | null;
+  message: string | null;
+  due_at: string | null;
+  started_at: string | null;
+  /** Sender display info. */
+  triggered_by_name: string | null;
+}
+
+export interface WorkflowApprovalInboxResponse {
+  items: WorkflowApprovalInboxItem[];
+  total: number;
+}
+
+// --- Public approval endpoint (NO auth -- token is the gate) ---
+
+/**
+ * Sanitized projection shipped to the approver at /a/:token. Includes
+ * minimal row context so the approver can make an informed decision
+ * without exposing the rest of the sheet.
+ */
+export interface PublicApprovalView {
+  step: {
+    name: string;
+    message: string | null;
+    workflow_name: string;
+    sender_name: string;
+    sender_email: string;
+    /** ISO timestamp at which this token will stop accepting submissions. */
+    expires_at: string | null;
+  };
+  row: {
+    sheet_name: string;
+    title: string | null;
+    /** Visible columns + their current values, surfaced read-only. */
+    fields: Array<{
+      key: string;
+      label: string;
+      type: RecordColumnType;
+      value: unknown;
+    }>;
+  };
+}
+
+export interface PublicApprovalSubmitRequest {
+  decision: 'approve' | 'reject';
+  comment?: string | null;
+}
+
+export interface PublicApprovalSubmitResponse {
+  success: true;
+  decision: 'approve' | 'reject';
+}
 
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';

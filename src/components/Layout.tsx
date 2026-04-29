@@ -46,6 +46,7 @@ import {
   ContactMail as CustomersIcon,
   Insights as InsightsIcon,
   TableView as RecordsIcon,
+  AssignmentTurnedIn as ApprovalsIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -71,6 +72,7 @@ const navItems: NavItem[] = [
   { label: 'Ingest History', path: '/ingest-history', icon: <HistoryIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Orders', path: '/orders', icon: <OrdersIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Records', path: '/records', icon: <RecordsIcon /> },
+  { label: 'Approvals', path: '/approvals', icon: <ApprovalsIcon /> },
 ];
 
 const adminItems: NavItem[] = [

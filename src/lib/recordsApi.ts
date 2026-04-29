@@ -49,6 +49,19 @@ import type {
   PublicUpdateRequestView,
   PublicUpdateRequestSubmitRequest,
   PublicUpdateRequestSubmitResponse,
+  CreateWorkflowRequest,
+  UpdateWorkflowRequest,
+  RecordWorkflowListResponse,
+  RecordWorkflowGetResponse,
+  RecordWorkflowCreateResponse,
+  RecordWorkflowUpdateResponse,
+  RecordWorkflowRunListResponse,
+  RecordWorkflowRunGetResponse,
+  StartWorkflowRunRequest,
+  WorkflowApprovalInboxResponse,
+  PublicApprovalView,
+  PublicApprovalSubmitRequest,
+  PublicApprovalSubmitResponse,
 } from '../../shared/types';
 
 const API_BASE = '/api';
@@ -282,6 +295,78 @@ export const recordsApi = {
     },
   },
 
+  workflows: {
+    /** GET /api/records/sheets/:sheetId/workflows */
+    list(sheetId: string, params?: { archived?: boolean }): Promise<RecordWorkflowListResponse> {
+      const qs = params?.archived ? '?archived=1' : '';
+      return fetchRecords<RecordWorkflowListResponse>(`/records/sheets/${sheetId}/workflows${qs}`);
+    },
+    /** GET /api/records/sheets/:sheetId/workflows/:workflowId */
+    get(sheetId: string, workflowId: string): Promise<RecordWorkflowGetResponse> {
+      return fetchRecords<RecordWorkflowGetResponse>(`/records/sheets/${sheetId}/workflows/${workflowId}`);
+    },
+    /** POST /api/records/sheets/:sheetId/workflows */
+    create(sheetId: string, data: CreateWorkflowRequest): Promise<RecordWorkflowCreateResponse> {
+      return fetchRecords<RecordWorkflowCreateResponse>(`/records/sheets/${sheetId}/workflows`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    },
+    /** PUT /api/records/sheets/:sheetId/workflows/:workflowId */
+    update(sheetId: string, workflowId: string, data: UpdateWorkflowRequest): Promise<RecordWorkflowUpdateResponse> {
+      return fetchRecords<RecordWorkflowUpdateResponse>(`/records/sheets/${sheetId}/workflows/${workflowId}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      });
+    },
+    /** DELETE /api/records/sheets/:sheetId/workflows/:workflowId — soft archive. */
+    archive(sheetId: string, workflowId: string): Promise<{ success: true }> {
+      return fetchRecords<{ success: true }>(`/records/sheets/${sheetId}/workflows/${workflowId}`, {
+        method: 'DELETE',
+      });
+    },
+  },
+
+  workflowRuns: {
+    /** GET /api/records/sheets/:sheetId/rows/:rowId/workflow-runs */
+    listForRow(sheetId: string, rowId: string): Promise<RecordWorkflowRunListResponse> {
+      return fetchRecords<RecordWorkflowRunListResponse>(
+        `/records/sheets/${sheetId}/rows/${rowId}/workflow-runs`,
+      );
+    },
+    /** POST /api/records/sheets/:sheetId/rows/:rowId/workflow-runs */
+    start(sheetId: string, rowId: string, data: StartWorkflowRunRequest): Promise<{ run_id: string }> {
+      return fetchRecords<{ run_id: string }>(
+        `/records/sheets/${sheetId}/rows/${rowId}/workflow-runs`,
+        { method: 'POST', body: JSON.stringify(data) },
+      );
+    },
+    /** GET /api/records/workflow-runs/:runId */
+    get(runId: string): Promise<RecordWorkflowRunGetResponse> {
+      return fetchRecords<RecordWorkflowRunGetResponse>(`/records/workflow-runs/${runId}`);
+    },
+    /** POST /api/records/workflow-runs/:runId/cancel */
+    cancel(runId: string): Promise<{ success: true }> {
+      return fetchRecords<{ success: true }>(`/records/workflow-runs/${runId}/cancel`, {
+        method: 'POST',
+      });
+    },
+  },
+
+  workflowApprovals: {
+    /** GET /api/records/workflow-approvals/inbox */
+    inbox(): Promise<WorkflowApprovalInboxResponse> {
+      return fetchRecords<WorkflowApprovalInboxResponse>(`/records/workflow-approvals/inbox`);
+    },
+    /** POST /api/records/workflow-approvals/:stepRunId */
+    submit(stepRunId: string, data: PublicApprovalSubmitRequest): Promise<PublicApprovalSubmitResponse> {
+      return fetchRecords<PublicApprovalSubmitResponse>(`/records/workflow-approvals/${stepRunId}`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    },
+  },
+
   forms: {
     /** GET /api/records/sheets/:sheetId/forms */
     list(sheetId: string, params?: { archived?: boolean }): Promise<RecordFormListResponse> {
@@ -473,6 +558,41 @@ export const publicUpdateRequestsApi = {
     payload: PublicUpdateRequestSubmitRequest,
   ): Promise<PublicUpdateRequestSubmitResponse> {
     const res = await fetch(`/api/update-requests/public/${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        const body = await res.json();
+        message = body.error || body.message || message;
+      } catch {
+        // ignore parse errors
+      }
+      throw new Error(message);
+    }
+    return res.json();
+  },
+};
+
+/**
+ * Public workflow-approval client. Same "no auth, no localStorage" rules
+ * as publicFormsApi / publicUpdateRequestsApi. Token in URL is the gate.
+ */
+export const publicApprovalsApi = {
+  async get(token: string): Promise<PublicApprovalView> {
+    const res = await fetch(`/api/workflow-approvals/public/${encodeURIComponent(token)}`, {
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) {
+      const code = res.status === 404 ? 'not_found' : 'fetch_failed';
+      throw Object.assign(new Error('Approval unavailable'), { code });
+    }
+    return res.json();
+  },
+  async submit(token: string, payload: PublicApprovalSubmitRequest): Promise<PublicApprovalSubmitResponse> {
+    const res = await fetch(`/api/workflow-approvals/public/${encodeURIComponent(token)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

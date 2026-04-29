@@ -1,14 +1,20 @@
 /**
- * EntityChip — renders a supplier / product / document / record / contact
- * reference as a compact chip with a type-distinct icon. Hover reveals a
- * Popper preview with the entity's name (Phase 1 surface; richer
- * previews land with each entity type's lookup endpoint).
+ * EntityChip — renders a supplier / product / document / record /
+ * customer / contact reference as a compact chip with a type-distinct
+ * icon. Hover reveals a Popper preview with the entity's name (Phase 1
+ * surface; richer previews land with each entity type's lookup
+ * endpoint).
  *
- * Click does NOT navigate (cells are read in the grid). The drawer's
- * "Open full page" button handles navigation in a future iteration.
+ * When given an `id` it becomes a navigation link to the entity's
+ * detail page. The link uses `stopPropagation` so clicking the chip
+ * inside an editable grid cell does not also bubble up and trigger
+ * the cell's edit handler — only the empty space around the chip
+ * triggers the picker. Cmd/Ctrl-click opens the target in a new tab
+ * (native `<a>` behavior preserved by react-router's `Link`).
  */
 
 import { useRef, useState } from 'react';
+import { Link as RouterLink } from 'react-router-dom';
 import { Box, Popper, Paper, Typography, Fade } from '@mui/material';
 import {
   Inventory2Outlined as ProductIcon,
@@ -23,6 +29,8 @@ import type { RecordColumnType } from '../../../shared/types';
 interface EntityChipProps {
   type: RecordColumnType;
   label: string;
+  /** Entity id — when present, the chip becomes a navigation link. */
+  id?: string;
   /** Optional secondary line in the hover preview. */
   meta?: string;
 }
@@ -65,12 +73,83 @@ function accentForRefType(type: RecordColumnType): { fg: string; bg: string; bor
   }
 }
 
-export function EntityChip({ type, label, meta }: EntityChipProps) {
+/**
+ * Map a ref type + id to its detail-page route, or `null` for ref
+ * types that don't have a navigable target (record_ref, contact —
+ * those don't have first-class detail pages today).
+ */
+function detailHref(type: RecordColumnType, id: string): string | null {
+  switch (type) {
+    case 'supplier_ref':
+      return `/admin/suppliers/${id}`;
+    case 'product_ref':
+      return `/admin/products/${id}`;
+    case 'customer_ref':
+      return `/admin/customers/${id}`;
+    case 'document_ref':
+      return `/documents/${id}`;
+    default:
+      return null;
+  }
+}
+
+export function EntityChip({ type, label, id, meta }: EntityChipProps) {
   const Icon = iconForRefType(type);
   const accent = accentForRefType(type);
   const [hover, setHover] = useState(false);
   const anchorRef = useRef<HTMLSpanElement | null>(null);
 
+  const href = id ? detailHref(type, id) : null;
+
+  const chipBaseSx = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 0.5,
+    maxWidth: '100%',
+    px: 1,
+    py: 0.25,
+    borderRadius: 999,
+    bgcolor: accent.bg,
+    color: accent.fg,
+    border: `1px solid ${accent.border}`,
+    fontSize: '0.8125rem',
+    lineHeight: 1.3,
+    fontWeight: 500,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    textDecoration: 'none',
+    cursor: href ? 'pointer' : 'default',
+    transition: 'background-color 120ms ease, border-color 120ms ease',
+    ...(href && {
+      '&:hover': {
+        // Subtle deepen — signals clickable without changing the hue.
+        bgcolor: accent.bg.replace('0.10', '0.18'),
+        borderColor: accent.border.replace('0.28', '0.50'),
+        textDecoration: 'underline',
+      },
+      '&:focus-visible': {
+        outline: `2px solid ${accent.fg}`,
+        outlineOffset: 2,
+      },
+    }),
+  } as const;
+
+  const chipInner = (
+    <>
+      <Icon sx={{ fontSize: 14, flexShrink: 0 }} />
+      <Box component="span" sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {label}
+      </Box>
+    </>
+  );
+
+  // The anchor span owns hover/popover positioning; the inner
+  // content swaps between a navigable Link and a plain span based on
+  // whether we have an id + known route. We attach onClick to the
+  // Link so it stops propagation before the surrounding cell handler
+  // fires — that way the cell only enters edit mode when the user
+  // clicks empty space around the chip.
   return (
     <>
       <Box
@@ -78,29 +157,22 @@ export function EntityChip({ type, label, meta }: EntityChipProps) {
         ref={anchorRef}
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
-        sx={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 0.5,
-          maxWidth: '100%',
-          px: 1,
-          py: 0.25,
-          borderRadius: 999,
-          bgcolor: accent.bg,
-          color: accent.fg,
-          border: `1px solid ${accent.border}`,
-          fontSize: '0.8125rem',
-          lineHeight: 1.3,
-          fontWeight: 500,
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        }}
+        sx={{ display: 'inline-flex', maxWidth: '100%' }}
       >
-        <Icon sx={{ fontSize: 14, flexShrink: 0 }} />
-        <Box component="span" sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {label}
-        </Box>
+        {href ? (
+          <Box
+            component={RouterLink}
+            to={href}
+            onClick={(e: React.MouseEvent) => e.stopPropagation()}
+            sx={chipBaseSx}
+          >
+            {chipInner}
+          </Box>
+        ) : (
+          <Box component="span" sx={chipBaseSx}>
+            {chipInner}
+          </Box>
+        )}
       </Box>
       <Popper
         open={hover && !!anchorRef.current}

@@ -226,6 +226,79 @@ export function buildUpdateRequestEmail(params: {
   return { subject, html };
 }
 
+/**
+ * Build an "X needs your sign-off on Y" email. Used by the Records
+ * workflow engine when an approval step has an external assignee_email.
+ * Mirrors the visual treatment of buildUpdateRequestEmail so external
+ * approvers and update-request recipients see a consistent brand.
+ */
+export function buildApprovalRequestEmail(params: {
+  recipientName: string | null;
+  senderName: string;
+  senderEmail: string;
+  workflowName: string;
+  stepName: string;
+  message: string | null;
+  sheetName: string;
+  rowTitle: string | null;
+  publicUrl: string;
+}): { subject: string; html: string } {
+  const subject = `${params.senderName} needs your sign-off on ${params.workflowName}`;
+  const greeting = params.recipientName ? `Hi ${params.recipientName},` : 'Hi,';
+  const rowLine = params.rowTitle ? ` for <strong>${escapeHtml(params.rowTitle)}</strong>` : '';
+  const messageBlock = params.message
+    ? `<p style="margin:0 0 16px;color:#555;line-height:1.6;font-style:italic;">"${escapeHtml(params.message)}"</p>`
+    : '';
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr>
+      <td style="background:#1A365D;padding:24px 32px;">
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox</h1>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:32px;">
+        <h2 style="margin:0 0 16px;color:#333;font-size:18px;">Sign-off needed</h2>
+        <p style="margin:0 0 16px;color:#555;line-height:1.6;">
+          ${greeting}
+        </p>
+        <p style="margin:0 0 16px;color:#555;line-height:1.6;">
+          <strong>${escapeHtml(params.senderName)}</strong> (${escapeHtml(params.senderEmail)}) needs your approval on the <strong>${escapeHtml(params.stepName)}</strong> step of the <strong>${escapeHtml(params.workflowName)}</strong> workflow${rowLine} on <strong>${escapeHtml(params.sheetName)}</strong>.
+        </p>
+        ${messageBlock}
+        <a href="${params.publicUrl}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;font-size:14px;">
+          Review and decide
+        </a>
+        <p style="margin:24px 0 0;color:#999;font-size:12px;">
+          If the button doesn't work, copy and paste this URL into your browser:<br>
+          <a href="${params.publicUrl}" style="color:#1A365D;">${params.publicUrl}</a>
+        </p>
+        <p style="margin:24px 0 0;color:#888;font-size:13px;line-height:1.6;">
+          This link is unique to you. No account needed -- just click to approve or reject.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
+        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+          This is an automated message from SupDox. If you weren't expecting it, you can ignore it.
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  return { subject, html };
+}
+
 /** Minimal HTML escape for interpolated strings in emails. */
 function escapeHtml(s: string): string {
   return s

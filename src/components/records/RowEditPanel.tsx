@@ -29,6 +29,8 @@ import {
 import { CellEditor } from './CellEditor';
 import { dropdownOptions, formatCellValue, refLabel } from './cellHelpers';
 import { UpdateRequestDialog } from './UpdateRequestDialog';
+import { WorkflowRunVisualization } from './WorkflowRunVisualization';
+import { StartWorkflowMenu } from './StartWorkflowMenu';
 import { recordsApi } from '../../lib/recordsApi';
 import type {
   ApiRecordActivity,
@@ -38,6 +40,7 @@ import type {
   RecordColumnType,
   RecordRowData,
   RecordUpdateRequest,
+  RecordWorkflowRun,
 } from '../../../shared/types';
 
 const ENTITY_REF_TYPES: RecordColumnType[] = [
@@ -88,6 +91,12 @@ function activityKindLabel(kind: string): string {
     case 'update_request_sent': return 'sent an update request';
     case 'update_request_responded': return 'filled an update request';
     case 'update_request_cancelled': return 'cancelled an update request';
+    case 'workflow_started': return 'started a workflow';
+    case 'workflow_step_assigned': return 'assigned a workflow step';
+    case 'workflow_approved': return 'approved a workflow step';
+    case 'workflow_rejected': return 'rejected a workflow step';
+    case 'workflow_completed': return 'completed a workflow';
+    case 'workflow_cancelled': return 'cancelled a workflow';
     default: return kind.replace(/_/g, ' ');
   }
 }
@@ -206,6 +215,8 @@ export function RowEditPanel({
   const [updateRequestsLoading, setUpdateRequestsLoading] = useState(false);
   const [requestDialogOpen, setRequestDialogOpen] = useState(false);
   const [activityRefreshTick, setActivityRefreshTick] = useState(0);
+  const [workflowRuns, setWorkflowRuns] = useState<RecordWorkflowRun[]>([]);
+  const [workflowRunsTick, setWorkflowRunsTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -224,6 +235,33 @@ export function RowEditPanel({
       });
     return () => { cancelled = true; };
   }, [sheetId, row.id, activityRefreshTick]);
+
+  // Workflow runs for this row. Each run gets a hydrated GET so we have
+  // the step_runs needed by WorkflowRunVisualization. Failure is silent.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await recordsApi.workflowRuns.listForRow(sheetId, row.id);
+        if (cancelled) return;
+        // Hydrate each run with its step_runs.
+        const hydrated = await Promise.all(
+          res.runs.map(async (r) => {
+            try {
+              const detail = await recordsApi.workflowRuns.get(r.id);
+              return detail.run;
+            } catch {
+              return r;
+            }
+          }),
+        );
+        if (!cancelled) setWorkflowRuns(hydrated);
+      } catch {
+        if (!cancelled) setWorkflowRuns([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [sheetId, row.id, workflowRunsTick]);
 
   // Pending update requests for this row. Failure is silent — the
   // section just doesn't render — same posture as Comments/Attachments.
@@ -477,6 +515,28 @@ export function RowEditPanel({
 
       <Divider />
 
+      {/* Workflows — runs on this row */}
+      {workflowRuns.length > 0 && (
+        <>
+          <Box sx={{ p: mobile ? 2 : 3 }}>
+            <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                Workflows
+              </Typography>
+              <Box component="span" sx={{ color: 'text.secondary', fontWeight: 400, fontSize: 13 }}>
+                ({workflowRuns.length})
+              </Box>
+            </Stack>
+            <Stack spacing={3}>
+              {workflowRuns.map((run) => (
+                <WorkflowRunVisualization key={run.id} run={run} compact />
+              ))}
+            </Stack>
+          </Box>
+          <Divider />
+        </>
+      )}
+
       {/* Pending update requests */}
       <Box sx={{ p: mobile ? 2 : 3 }}>
         <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
@@ -542,6 +602,14 @@ export function RowEditPanel({
         >
           Send update request
         </Button>
+        <StartWorkflowMenu
+          sheetId={sheetId}
+          rowId={row.id}
+          onStarted={() => {
+            setWorkflowRunsTick((t) => t + 1);
+            setActivityRefreshTick((t) => t + 1);
+          }}
+        />
         <Box sx={{ flex: 1 }} />
         <IconButton
           aria-label="Archive row"
