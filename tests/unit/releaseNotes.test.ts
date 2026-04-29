@@ -33,9 +33,14 @@ describe('bootstrap release notes (v2.5.0)', () => {
 });
 
 describe('release notes index', () => {
-  it('lists v2.5.0 as current and includes the three prior phases', () => {
+  it('current matches the first version in the list', () => {
     const idx = JSON.parse(indexJsonRaw);
-    expect(idx.current).toBe('2.5.0');
+    expect(idx.versions.length).toBeGreaterThan(0);
+    expect(idx.current).toBe(idx.versions[0].version);
+  });
+
+  it('still includes the bootstrap and prior phase versions', () => {
+    const idx = JSON.parse(indexJsonRaw);
     const versions = idx.versions.map((v: { version: string }) => v.version);
     expect(versions).toContain('2.5.0');
     expect(versions).toContain('2.4.3');
@@ -43,8 +48,20 @@ describe('release notes index', () => {
     expect(versions).toContain('2.4.1');
   });
 
-  it('orders newest version first', () => {
+  it('orders versions newest first by semver', () => {
     const idx = JSON.parse(indexJsonRaw);
-    expect(idx.versions[0].version).toBe('2.5.0');
+    const versions: string[] = idx.versions.map((v: { version: string }) => v.version);
+    const cmp = (a: string, b: string) => {
+      const pa = a.split('.').map(Number);
+      const pb = b.split('.').map(Number);
+      for (let i = 0; i < 3; i++) {
+        const da = pa[i] ?? 0;
+        const db = pb[i] ?? 0;
+        if (da !== db) return db - da;
+      }
+      return 0;
+    };
+    const sorted = [...versions].sort(cmp);
+    expect(versions).toEqual(sorted);
   });
 });
