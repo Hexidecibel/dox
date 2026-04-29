@@ -162,27 +162,29 @@ NEW_VERSION="$NEW_VERSION" TODAY="$TODAY" INDEX_FILE="$INDEX_FILE" node -e "
 echo "==> Updated $INDEX_FILE"
 
 NEW_VERSION="$NEW_VERSION" TODAY="$TODAY" node -e "
-  const fs = require('fs');
-  const file = 'FEATURES.md';
-  const ver = process.env.NEW_VERSION;
-  const today = process.env.TODAY;
-  const newLine = '- [v' + ver + '](releases/v' + ver + '.md) — ' + today + ' — TODO';
-  let content = fs.readFileSync(file, 'utf8');
-  const marker = '## Releases\n';
-  const i = content.indexOf(marker);
-  if (i === -1) {
-    fs.writeFileSync(file, '## Releases\n\n' + newLine + '\n\n' + content);
-    return;
-  }
-  const insertAt = i + marker.length;
-  // Skip a blank line right after the heading if present.
-  const after = content.slice(insertAt);
-  if (after.startsWith('\n')) {
-    content = content.slice(0, insertAt + 1) + newLine + '\n' + content.slice(insertAt + 1);
-  } else {
-    content = content.slice(0, insertAt) + newLine + '\n' + content.slice(insertAt);
-  }
-  fs.writeFileSync(file, content);
+  (() => {
+    const fs = require('fs');
+    const file = 'FEATURES.md';
+    const ver = process.env.NEW_VERSION;
+    const today = process.env.TODAY;
+    const newLine = '- [v' + ver + '](releases/v' + ver + '.md) — ' + today + ' — TODO';
+    let content = fs.readFileSync(file, 'utf8');
+    const marker = '## Releases\n';
+    const i = content.indexOf(marker);
+    if (i === -1) {
+      fs.writeFileSync(file, '## Releases\n\n' + newLine + '\n\n' + content);
+      return;
+    }
+    const insertAt = i + marker.length;
+    // Skip a blank line right after the heading if present.
+    const after = content.slice(insertAt);
+    if (after.startsWith('\n')) {
+      content = content.slice(0, insertAt + 1) + newLine + '\n' + content.slice(insertAt + 1);
+    } else {
+      content = content.slice(0, insertAt) + newLine + '\n' + content.slice(insertAt);
+    }
+    fs.writeFileSync(file, content);
+  })();
 "
 echo "==> Updated FEATURES.md"
 
