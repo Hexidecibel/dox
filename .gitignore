@@ -44,3 +44,10 @@ tests/e2e/.auth/
 
 # Local R2 sim cruft from wrangler dev
 pending/
+
+# cush-tools
+.env
+.env.*
+!.env.example
+.cush-secrets.materialized/
+.dev.vars.staging
