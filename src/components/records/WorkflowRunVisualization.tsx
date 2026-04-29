@@ -181,7 +181,10 @@ function StepNode({
   return (
     <Tooltip title={tooltipText}>
       <Box
-        onClick={(e) => onClick(e.currentTarget as HTMLElement)}
+        onClick={(e) => {
+          e.stopPropagation();
+          onClick(e.currentTarget as HTMLElement);
+        }}
         role="button"
         tabIndex={0}
         sx={{

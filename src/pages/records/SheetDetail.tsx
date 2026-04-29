@@ -57,6 +57,7 @@ import {
   DriveFileRenameOutline as RenameIcon,
   Inventory2Outlined as ArchiveIcon,
   ViewColumnOutlined as ColumnIcon,
+  TuneOutlined as ManageColumnsIcon,
 } from '@mui/icons-material';
 import { recordsApi } from '../../lib/recordsApi';
 import { useAuth } from '../../contexts/AuthContext';
@@ -70,6 +71,7 @@ import { MobileList } from '../../components/records/MobileList';
 import { RowEditPanel } from '../../components/records/RowEditPanel';
 import { AddColumnDialog } from '../../components/records/AddColumnDialog';
 import { EditColumnDialog } from '../../components/records/EditColumnDialog';
+import { ColumnManagerDialog } from '../../components/records/ColumnManagerDialog';
 import { PresenceStack } from '../../components/records/PresenceStack';
 import { FormsTab } from '../../components/records/FormsTab';
 import { WorkflowsTab } from '../../components/records/WorkflowsTab';
@@ -255,6 +257,7 @@ export function SheetDetail() {
   // ------ dialogs ------
   const [addColumnOpen, setAddColumnOpen] = useState(false);
   const [editColumnTarget, setEditColumnTarget] = useState<ApiRecordColumn | null>(null);
+  const [columnManagerOpen, setColumnManagerOpen] = useState(false);
   const [archiveSheetOpen, setArchiveSheetOpen] = useState(false);
   const [archiveRowTarget, setArchiveRowTarget] = useState<ApiRecordRow | null>(null);
   const [settingsAnchor, setSettingsAnchor] = useState<HTMLElement | null>(null);
@@ -597,6 +600,15 @@ export function SheetDetail() {
                   <ListItemIcon><RenameIcon fontSize="small" /></ListItemIcon>
                   <ListItemText>Rename (use list page)</ListItemText>
                 </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setSettingsAnchor(null);
+                    setColumnManagerOpen(true);
+                  }}
+                >
+                  <ListItemIcon><ManageColumnsIcon fontSize="small" /></ListItemIcon>
+                  <ListItemText>Manage columns</ListItemText>
+                </MenuItem>
                 {isMobile && (
                   <MenuItem
                     onClick={() => {
@@ -836,6 +848,23 @@ export function SheetDetail() {
         column={editColumnTarget}
         onClose={() => setEditColumnTarget(null)}
         onSave={handleUpdateColumn}
+      />
+
+      {/* Manage columns dialog — parallel entry point to the Grid header
+          three-dot menu, available from any view (Kanban/Calendar/etc). */}
+      <ColumnManagerDialog
+        open={columnManagerOpen}
+        onClose={() => setColumnManagerOpen(false)}
+        columns={columns}
+        sheetId={sheetId}
+        sheetName={sheet.name}
+        onColumnUpdated={(col) =>
+          setColumns((prev) => prev.map((c) => (c.id === col.id ? col : c)))
+        }
+        onColumnArchived={(colId) =>
+          setColumns((prev) => prev.filter((c) => c.id !== colId))
+        }
+        onColumnCreated={(col) => setColumns((prev) => [...prev, col])}
       />
 
       {/* Archive sheet confirm */}

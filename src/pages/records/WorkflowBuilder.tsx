@@ -153,22 +153,32 @@ export function WorkflowBuilder() {
     return () => { cancelled = true; };
   }, [sheetId, workflowId]);
 
-  // Autosave
+  // Autosave. We deliberately do NOT replace `workflow` state with the
+  // server response — local state is already the source of truth for
+  // anything the user is editing, and a setWorkflow on every save would
+  // cascade re-renders into the preview pane, unmounting things like the
+  // step-detail Popover the user just opened in WorkflowRunVisualization.
+  // Read latest workflow via a ref so the timer always sends fresh data
+  // without recreating the callback (and thus the whole render tree's
+  // closures) on every keystroke.
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const workflowRef = useRef<RecordWorkflow | null>(null);
+  workflowRef.current = workflow;
   const scheduleSave = useCallback(() => {
-    if (!hydrated.current || !workflow || !sheetId || !workflowId) return;
+    if (!hydrated.current || !workflowRef.current || !sheetId || !workflowId) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
+      const wf = workflowRef.current;
+      if (!wf) return;
       setSaving(true);
       try {
-        const res = await recordsApi.workflows.update(sheetId, workflowId, {
-          name: workflow.name,
-          description: workflow.description,
-          trigger_type: workflow.trigger_type,
-          steps: workflow.steps,
-          status: workflow.status,
+        await recordsApi.workflows.update(sheetId, workflowId, {
+          name: wf.name,
+          description: wf.description,
+          trigger_type: wf.trigger_type,
+          steps: wf.steps,
+          status: wf.status,
         });
-        setWorkflow(res.workflow);
         setSavedAt(Date.now());
         setError(null);
       } catch (err) {
@@ -177,7 +187,7 @@ export function WorkflowBuilder() {
         setSaving(false);
       }
     }, AUTOSAVE_DEBOUNCE_MS);
-  }, [workflow, sheetId, workflowId]);
+  }, [sheetId, workflowId]);
 
   const updateWorkflow = (patch: Partial<RecordWorkflow>) => {
     setWorkflow((prev) => (prev ? { ...prev, ...patch } : prev));
@@ -224,6 +234,53 @@ export function WorkflowBuilder() {
     navigate(`/records/${sheetId}?tab=workflows`);
   };
 
+  // Build a fake "preview run" for the visualization. Memoized on the
+  // narrow slice we actually depend on so that incidental re-renders of
+  // WorkflowBuilder (e.g. the autosave success path) don't push a fresh
+  // `run` reference into WorkflowRunVisualization and disrupt the
+  // child's local Popover state when a user is inspecting a step.
+  // NOTE: must be declared *before* any early return below so hook order
+  // stays stable between the loading and loaded renders (Rules of Hooks).
+  const previewRun = useMemo(() => {
+    if (!workflow) return null;
+    return {
+      id: 'preview',
+      tenant_id: workflow.tenant_id,
+      workflow_id: workflow.id,
+      sheet_id: workflow.sheet_id,
+      row_id: 'preview',
+      status: 'in_progress' as const,
+      current_step_id: workflow.steps[0]?.id ?? null,
+      triggered_by_user_id: null,
+      started_at: null,
+      completed_at: null,
+      created_at: '',
+      workflow_name: workflow.name,
+      workflow_steps: workflow.steps,
+      triggered_by_name: null,
+      step_runs: workflow.steps.map<RecordWorkflowStepRun>((s, idx) => ({
+        id: `preview-${s.id}`,
+        run_id: 'preview',
+        step_id: s.id,
+        step_index: idx,
+        step_type: s.type,
+        status: idx === 0 ? 'awaiting_response' : 'pending',
+        assignee_email: (s.config as ApprovalStepConfig).assignee_email ?? null,
+        assignee_user_id: (s.config as ApprovalStepConfig).assignee_user_id ?? null,
+        token_expires_at: null,
+        response_value: null,
+        response_comment: null,
+        responded_at: null,
+        responded_by_email_or_user_id: null,
+        update_request_id: null,
+        started_at: null,
+        completed_at: null,
+      })),
+    };
+  }, [
+    workflow,
+  ]);
+
   if (loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 320 }}>
@@ -236,43 +293,7 @@ export function WorkflowBuilder() {
     return <Alert severity="error" sx={{ m: 3 }}>{error}</Alert>;
   }
 
-  if (!workflow) return null;
-
-  // Build a fake "preview run" for the visualization.
-  const previewRun = {
-    id: 'preview',
-    tenant_id: workflow.tenant_id,
-    workflow_id: workflow.id,
-    sheet_id: workflow.sheet_id,
-    row_id: 'preview',
-    status: 'in_progress' as const,
-    current_step_id: workflow.steps[0]?.id ?? null,
-    triggered_by_user_id: null,
-    started_at: null,
-    completed_at: null,
-    created_at: '',
-    workflow_name: workflow.name,
-    workflow_steps: workflow.steps,
-    triggered_by_name: null,
-    step_runs: workflow.steps.map<RecordWorkflowStepRun>((s, idx) => ({
-      id: `preview-${s.id}`,
-      run_id: 'preview',
-      step_id: s.id,
-      step_index: idx,
-      step_type: s.type,
-      status: idx === 0 ? 'awaiting_response' : 'pending',
-      assignee_email: (s.config as ApprovalStepConfig).assignee_email ?? null,
-      assignee_user_id: (s.config as ApprovalStepConfig).assignee_user_id ?? null,
-      token_expires_at: null,
-      response_value: null,
-      response_comment: null,
-      responded_at: null,
-      responded_by_email_or_user_id: null,
-      update_request_id: null,
-      started_at: null,
-      completed_at: null,
-    })),
-  };
+  if (!workflow || !previewRun) return null;
 
   const config = (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5, p: { xs: 2, md: 3 } }}>
