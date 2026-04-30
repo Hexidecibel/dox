@@ -150,6 +150,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         contentType: file.type || undefined,
         content: buffer,
       },
+      // Manual drag-drop on the connector detail page rides the same
+      // executor as the API drop and R2 poller — `source` is the only
+      // signal that distinguishes them downstream.
+      source: 'manual',
       userId: user.id,
       qwenUrl: context.env.QWEN_URL,
       qwenSecret: context.env.QWEN_SECRET,

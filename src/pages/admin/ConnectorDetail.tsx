@@ -58,6 +58,10 @@ import {
   Delete as DeleteIcon,
   Edit as EditIcon,
   ContentCopy as CopyIcon,
+  Visibility as ShowIcon,
+  VisibilityOff as HideIcon,
+  Autorenew as RotateIcon,
+  Key as KeyIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { Tenant } from '../../lib/types';
@@ -91,6 +95,10 @@ interface Connector {
   updated_at: string;
   tenant_id: string;
   sample_r2_key: string | null;
+  /** Phase B2 — per-connector HTTP POST drop bearer token. NULL on
+   * legacy connectors created before the auto-generate flow shipped;
+   * those need a rotation to bootstrap. */
+  api_token: string | null;
 }
 
 interface ConnectorRun {
@@ -166,6 +174,7 @@ function normalizeConnector(raw: unknown): Connector {
     updated_at: String(r.updated_at ?? ''),
     tenant_id: String(r.tenant_id ?? ''),
     sample_r2_key: (r.sample_r2_key as string | null) ?? null,
+    api_token: (r.api_token as string | null) ?? null,
   };
 }
 
@@ -796,6 +805,19 @@ export function ConnectorDetail() {
       </Paper>
 
       {/* ------------------------------------------------------------ */}
+      {/* API drop card — Phase B2 HTTP POST intake door. Surfaces the */}
+      {/* per-connector bearer token + a copy-pasteable curl example.  */}
+      {/* ------------------------------------------------------------ */}
+      <ApiDropCard
+        connector={connector}
+        onTokenRotated={(newToken) => {
+          setConnector({ ...connector, api_token: newToken });
+          setSaveSnack('API token rotated. Old token has stopped working.');
+        }}
+        onError={(msg) => setError(msg)}
+      />
+
+      {/* ------------------------------------------------------------ */}
       {/* Remote drop (R2 prefix) card — Phase B0 universal-doors. Any  */}
       {/* connector can opt into the scheduled R2 poller by setting an */}
       {/* r2_prefix below.                                              */}
@@ -1375,6 +1397,285 @@ function ReceiveInfoCard({
         the secret pulled from 1Password rather than asking the user to
         construct the call from a UI hint.
       */}
+    </Paper>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ApiDropCard — Phase B2 HTTP POST drop door surface.
+// ---------------------------------------------------------------------------
+
+/**
+ * Renders the per-connector HTTP POST drop endpoint card. The card has
+ * three layers, top to bottom:
+ *
+ *   1. Endpoint URL — `<origin>/api/connectors/<id>/drop` with copy.
+ *   2. Bearer token — `connectors.api_token`, masked by default with a
+ *      show/hide toggle + copy. Rotate button cuts a new token via
+ *      `POST /api/connectors/:id/api-token/rotate`. Legacy connectors
+ *      with NULL `api_token` see a single "Generate token" button that
+ *      reuses the same rotate endpoint to bootstrap.
+ *   3. Vendor instructions — a copy-pasteable curl example with the
+ *      real endpoint baked in. We deliberately use a placeholder when
+ *      the token is hidden so vendors don't accidentally paste a fully-
+ *      assembled curl into an unredacted bug report or screenshot — the
+ *      partner has to explicitly reveal the token first.
+ *
+ * Hard cutover semantics on rotate are surfaced inline: a confirm
+ * dialog warns "old token will stop working immediately."
+ */
+function ApiDropCard({
+  connector,
+  onTokenRotated,
+  onError,
+}: {
+  connector: Connector;
+  onTokenRotated: (newToken: string) => void;
+  onError: (message: string) => void;
+}) {
+  const [showToken, setShowToken] = useState(false);
+  const [rotating, setRotating] = useState(false);
+  const [confirmRotateOpen, setConfirmRotateOpen] = useState(false);
+
+  const endpoint = useMemo(() => {
+    const origin =
+      typeof window !== 'undefined' && window.location?.origin
+        ? window.location.origin
+        : '';
+    return `${origin}/api/connectors/${connector.id}/drop`;
+  }, [connector.id]);
+
+  const hasToken = !!connector.api_token;
+  const tokenDisplay = useMemo(() => {
+    if (!hasToken) return '';
+    if (showToken) return connector.api_token!;
+    // Mask all but the last 4 chars so the partner can verify the
+    // suffix matches whatever they handed to a vendor without
+    // re-revealing the secret.
+    const t = connector.api_token!;
+    return `${'•'.repeat(Math.max(0, t.length - 4))}${t.slice(-4)}`;
+  }, [hasToken, showToken, connector.api_token]);
+
+  const curlExample = useMemo(() => {
+    const tokenStr = hasToken && showToken
+      ? connector.api_token!
+      : '<token>';
+    return [
+      'curl -X POST \\',
+      `  -H "Authorization: Bearer ${tokenStr}" \\`,
+      '  -F "file=@/path/to/your/file.csv" \\',
+      `  ${endpoint}`,
+    ].join('\n');
+  }, [endpoint, hasToken, showToken, connector.api_token]);
+
+  const copyToClipboard = (text: string) => {
+    try {
+      navigator.clipboard?.writeText(text);
+    } catch { /* no-op */ }
+  };
+
+  const performRotate = async (isBootstrap: boolean) => {
+    setRotating(true);
+    try {
+      const result = await api.connectors.rotateApiToken(connector.id);
+      onTokenRotated(result.api_token);
+      // After bootstrapping a brand-new token, reveal it automatically
+      // so the partner can copy it immediately without an extra click.
+      // Rotation (replacing an existing token) reveals it too, since
+      // the old one has just stopped working and the new one needs to
+      // be handed to whoever held the old one.
+      if (isBootstrap) {
+        setShowToken(true);
+      } else {
+        setShowToken(true);
+      }
+      setConfirmRotateOpen(false);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to rotate API token');
+    } finally {
+      setRotating(false);
+    }
+  };
+
+  return (
+    <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+        <KeyIcon fontSize="small" color="action" />
+        <Typography variant="h6" fontWeight={600}>
+          API drop
+        </Typography>
+      </Stack>
+      <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
+        Programmatic intake door. Vendors POST a multipart file body with
+        their bearer token; the connector's field mappings parse it and
+        records land alongside manual / email runs.
+      </Typography>
+
+      {/* Endpoint */}
+      <Box sx={{ mb: 2 }}>
+        <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+          Endpoint
+        </Typography>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <TextField
+            size="small"
+            fullWidth
+            value={endpoint}
+            InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
+            inputProps={{ 'aria-label': 'Connector drop endpoint URL' }}
+          />
+          <Tooltip title="Copy endpoint URL">
+            <Button size="small" onClick={() => copyToClipboard(endpoint)}>
+              <CopyIcon fontSize="small" />
+            </Button>
+          </Tooltip>
+        </Stack>
+      </Box>
+
+      {/* Bearer token */}
+      <Box sx={{ mb: 2 }}>
+        <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+          Bearer token
+        </Typography>
+        {hasToken ? (
+          <>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <TextField
+                size="small"
+                fullWidth
+                value={tokenDisplay}
+                InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
+                inputProps={{ 'aria-label': 'Connector API bearer token' }}
+              />
+              <Tooltip title={showToken ? 'Hide token' : 'Show token'}>
+                <Button
+                  size="small"
+                  onClick={() => setShowToken((s) => !s)}
+                  aria-label={showToken ? 'Hide bearer token' : 'Show bearer token'}
+                >
+                  {showToken ? <HideIcon fontSize="small" /> : <ShowIcon fontSize="small" />}
+                </Button>
+              </Tooltip>
+              <Tooltip title="Copy token">
+                <span>
+                  <Button
+                    size="small"
+                    onClick={() => connector.api_token && copyToClipboard(connector.api_token)}
+                    disabled={!connector.api_token}
+                  >
+                    <CopyIcon fontSize="small" />
+                  </Button>
+                </span>
+              </Tooltip>
+              <Tooltip title="Rotate token (old token stops working immediately)">
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="warning"
+                  startIcon={<RotateIcon fontSize="small" />}
+                  onClick={() => setConfirmRotateOpen(true)}
+                  disabled={rotating}
+                >
+                  Rotate
+                </Button>
+              </Tooltip>
+            </Stack>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+              Treat this token like a password. Vendors with this token can submit
+              files into this connector — rotate immediately if exposed.
+            </Typography>
+          </>
+        ) : (
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Alert severity="info" sx={{ flex: 1 }}>
+              No token yet — generate one to enable the API drop door.
+            </Alert>
+            <Button
+              variant="contained"
+              size="small"
+              startIcon={<KeyIcon fontSize="small" />}
+              onClick={() => performRotate(true)}
+              disabled={rotating}
+            >
+              {rotating ? 'Generating…' : 'Generate token'}
+            </Button>
+          </Stack>
+        )}
+      </Box>
+
+      {/* Vendor instructions */}
+      {hasToken && (
+        <Box>
+          <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+            Vendor instructions
+          </Typography>
+          <Box
+            sx={{
+              position: 'relative',
+              p: 1.5,
+              pr: 5,
+              bgcolor: 'grey.900',
+              color: 'grey.50',
+              borderRadius: 1,
+              fontFamily: 'monospace',
+              fontSize: '0.8rem',
+              whiteSpace: 'pre',
+              overflowX: 'auto',
+            }}
+          >
+            <Tooltip title="Copy curl command">
+              <Button
+                size="small"
+                onClick={() => copyToClipboard(curlExample)}
+                sx={{
+                  position: 'absolute',
+                  top: 4,
+                  right: 4,
+                  minWidth: 0,
+                  color: 'grey.50',
+                  '&:hover': { bgcolor: 'rgba(255,255,255,0.1)' },
+                }}
+              >
+                <CopyIcon fontSize="small" />
+              </Button>
+            </Tooltip>
+            {curlExample}
+          </Box>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+            Accepts the same file types as the upload zone above (CSV, TSV,
+            XLSX, PDF). Returns JSON with <Box component="code" sx={{ fontFamily: 'monospace' }}>run_id</Box> + <Box component="code" sx={{ fontFamily: 'monospace' }}>file_key</Box> on success;
+            results land in the runs panel below.
+          </Typography>
+        </Box>
+      )}
+
+      {/* Rotate confirmation */}
+      <Dialog
+        open={confirmRotateOpen}
+        onClose={() => !rotating && setConfirmRotateOpen(false)}
+      >
+        <DialogTitle>Rotate API token?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Anyone using the current token will be locked out immediately. Make
+            sure you have a way to deliver the new token to the vendor before
+            you rotate.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmRotateOpen(false)} disabled={rotating}>
+            Cancel
+          </Button>
+          <Button
+            color="warning"
+            variant="contained"
+            onClick={() => performRotate(false)}
+            disabled={rotating}
+          >
+            {rotating ? 'Rotating…' : 'Rotate now'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Paper>
   );
 }

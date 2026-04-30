@@ -247,6 +247,10 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
               fileName: basename(key),
               r2Key: key,
             },
+            // Tag the run row so the activity feed can distinguish
+            // scheduled R2 polls from manual uploads even though both
+            // ride the file_watch executor.
+            source: 'r2_poll',
             // userId omitted — scheduled runs aren't user-attributed.
             // The orchestrator's audit-log call is gated on userId, so
             // this just skips the audit row (run row is still written).

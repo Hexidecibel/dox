@@ -14,6 +14,23 @@ import { validateEmailConfig } from './[id]/test';
 const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
 
 /**
+ * Generate a 32-byte random hex token for the connector's HTTP POST drop
+ * door. Same shape as `openssl rand -hex 32` (64 hex chars) so the value
+ * mirrors how `CONNECTOR_POLL_TOKEN` is shaped on the env side. We
+ * generate at create time so every new connector exposes the API drop
+ * door without an extra rotation call. Matches the rotation flow in
+ * `[id]/api-token/rotate.ts`.
+ */
+function generateApiTokenForConnector(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    out += bytes[i].toString(16).padStart(2, '0');
+  }
+  return out;
+}
+
+/**
  * Transform a DB row into the API-facing shape. Parses field_mappings JSON
  * through normalizeFieldMappings so the client always sees a fresh v2 shape
  * even if the stored row is a legacy v1 config. We do NOT rewrite the row
@@ -221,17 +238,25 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       credentialsIv = iv;
     }
 
+    // Auto-generate the HTTP-POST drop bearer token at create time so the
+    // API drop door is usable from day one — vendors don't need to ask
+    // for a rotation before their first call. Matches the shape of
+    // `openssl rand -hex 32` (64 lowercase hex chars). The owner can
+    // rotate later via POST /api/connectors/:id/api-token/rotate.
+    const apiToken = generateApiTokenForConnector();
+
     await context.env.DB.prepare(
       `INSERT INTO connectors (
         id, tenant_id, name, system_type,
         config, field_mappings, credentials_encrypted, credentials_iv,
-        schedule, sample_r2_key, active, created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'))`
+        schedule, sample_r2_key, active, api_token,
+        created_by, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'), datetime('now'))`
     )
       .bind(
         id, tenantId, name, systemType,
         config, fieldMappings, credentialsEncrypted, credentialsIv,
-        schedule, sampleR2Key, user.id
+        schedule, sampleR2Key, apiToken, user.id
       )
       .run();
 

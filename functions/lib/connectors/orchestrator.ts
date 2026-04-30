@@ -27,6 +27,41 @@ interface OrchestratorParams {
   userId?: string;
   qwenUrl?: string;
   qwenSecret?: string;
+  /**
+   * Intake door this run came in through. Stored on `connector_runs.source`
+   * (migration 0049) so the activity feed + audit surfaces can group runs
+   * by their entry point. When omitted we fall back to deriving from
+   * `input.type` — the discriminator on the input is a coarse but accurate
+   * proxy. Callers that want a more specific tag (e.g. 'api' vs 'manual'
+   * for two doors that both produce file_watch input) MUST pass `source`
+   * explicitly.
+   */
+  source?: ConnectorRunSource;
+}
+
+/**
+ * Closed taxonomy of intake doors. The DB column is plain TEXT (nullable)
+ * so future doors don't need a migration; this type is the contract callers
+ * should code against.
+ */
+export type ConnectorRunSource =
+  | 'manual'
+  | 'api'
+  | 'email'
+  | 'webhook'
+  | 'r2_poll'
+  | 'public_link'
+  | 'api_poll';
+
+function deriveSource(input: ConnectorInput, override?: ConnectorRunSource): ConnectorRunSource {
+  if (override) return override;
+  switch (input.type) {
+    case 'email': return 'email';
+    case 'webhook': return 'webhook';
+    case 'api_poll': return 'api_poll';
+    case 'file_watch': return 'manual';
+    default: return 'manual';
+  }
 }
 
 export interface OrchestratorResult {
@@ -68,16 +103,33 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
   const {
     db, r2, tenantId, connectorId,
     config, fieldMappings, credentials, input, userId,
-    qwenUrl, qwenSecret,
+    qwenUrl, qwenSecret, source,
   } = params;
 
   const runId = generateId();
+  const runSource = deriveSource(input, source);
 
-  // Create run record
-  await db.prepare(
-    `INSERT INTO connector_runs (id, connector_id, tenant_id, status)
-     VALUES (?, ?, ?, 'running')`
-  ).bind(runId, connectorId, tenantId).run();
+  // Create run record. `source` is stored verbatim so a B5-era activity
+  // feed can group runs by their door without re-deriving from input
+  // metadata. Older D1 instances that haven't applied migration 0049
+  // will throw 'no such column: source' here; the catch below downgrades
+  // to a sourceless insert so a half-migrated env stays runnable.
+  try {
+    await db.prepare(
+      `INSERT INTO connector_runs (id, connector_id, tenant_id, status, source)
+       VALUES (?, ?, ?, 'running', ?)`
+    ).bind(runId, connectorId, tenantId, runSource).run();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('no such column')) {
+      await db.prepare(
+        `INSERT INTO connector_runs (id, connector_id, tenant_id, status)
+         VALUES (?, ?, ?, 'running')`
+      ).bind(runId, connectorId, tenantId).run();
+    } else {
+      throw err;
+    }
+  }
 
   let output: ConnectorOutput;
 
@@ -304,7 +356,13 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
   // Audit log
   if (userId) {
     await logAudit(db, userId, tenantId, 'connector.run', 'connector', connectorId,
-      JSON.stringify({ run_id: runId, status, orders_created: ordersCreated, customers_created: customersCreated }), null);
+      JSON.stringify({
+        run_id: runId,
+        status,
+        source: runSource,
+        orders_created: ordersCreated,
+        customers_created: customersCreated,
+      }), null);
   }
 
   return {

@@ -46,8 +46,29 @@ const PUBLIC_ROUTES = [
   '/api/workflow-approvals/public',
 ];
 
+/**
+ * Path-segment regex for parameterized public routes. Each entry MUST
+ * be anchored start-and-end so we never accidentally allowlist a
+ * sibling endpoint that happens to share a prefix. We also constrain
+ * the connector id segment to `[a-zA-Z0-9_-]+` to keep the match tight.
+ *
+ * Currently only one entry — the Phase B2 HTTP POST drop door at
+ * `/api/connectors/<id>/drop`. The handler validates the bearer
+ * (connectors.api_token) in constant time; this regex just keeps the
+ * request from being short-circuited by the JWT gate first. Sibling
+ * admin endpoints at `/api/connectors/<id>/run`, `/test`, `/runs`,
+ * `/sample`, and `/api-token/rotate` continue to require JWT/API-key
+ * auth because they are not in this list.
+ */
+const PUBLIC_ROUTE_PATTERNS: RegExp[] = [
+  /^\/api\/connectors\/[a-zA-Z0-9_-]+\/drop$/,
+];
+
 function isPublicRoute(pathname: string): boolean {
-  return PUBLIC_ROUTES.some((route) => pathname === route || pathname.startsWith(route + '/'));
+  if (PUBLIC_ROUTES.some((route) => pathname === route || pathname.startsWith(route + '/'))) {
+    return true;
+  }
+  return PUBLIC_ROUTE_PATTERNS.some((re) => re.test(pathname));
 }
 
 /**

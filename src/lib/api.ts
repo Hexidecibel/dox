@@ -1101,6 +1101,21 @@ export const api = {
         `/connectors/${id}/sample`,
       );
     },
+    /**
+     * POST /api/connectors/:id/api-token/rotate
+     *
+     * Rotate the per-connector bearer token used by the Phase B2 HTTP
+     * POST drop endpoint. Returns the new plaintext token in the
+     * response body — UI surfaces it once with a copy button + warning
+     * that the previous token has stopped working. Hard cutover, no
+     * grace period.
+     */
+    rotateApiToken(id: string) {
+      return fetchApi<{ api_token: string; rotated_at: string }>(
+        `/connectors/${id}/api-token/rotate`,
+        { method: 'POST' },
+      );
+    },
   },
 
   orders: {
