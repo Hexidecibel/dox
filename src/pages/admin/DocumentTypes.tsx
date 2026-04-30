@@ -43,6 +43,10 @@ import { api } from '../../lib/api';
 import type { ApiDocumentType } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 export function DocumentTypes() {
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
@@ -182,6 +186,10 @@ export function DocumentTypes() {
         </Button>
       </Box>
 
+      <HelpWell id="document_types.list" title={helpContent.document_types.list?.headline ?? 'Document Types'}>
+        {helpContent.document_types.list?.well ?? helpContent.document_types.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -210,11 +218,12 @@ export function DocumentTypes() {
       {isMobile ? (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           {documentTypes.length === 0 ? (
-            <Card variant="outlined">
-              <CardContent sx={{ textAlign: 'center', py: 4 }}>
-                <Typography color="text.secondary">No document types found</Typography>
-              </CardContent>
-            </Card>
+            <EmptyState
+              title={helpContent.document_types.list?.emptyTitle ?? 'No document types yet'}
+              description={helpContent.document_types.list?.emptyDescription}
+              actionLabel="Add document type"
+              onAction={openCreate}
+            />
           ) : (
             documentTypes.map((dt) => (
               <Card key={dt.id} variant="outlined">
@@ -262,29 +271,61 @@ export function DocumentTypes() {
             ))
           )}
         </Box>
+      ) : documentTypes.length === 0 ? (
+        <EmptyState
+          title={helpContent.document_types.list?.emptyTitle ?? 'No document types yet'}
+          description={helpContent.document_types.list?.emptyDescription}
+          actionLabel="Add document type"
+          onAction={openCreate}
+        />
       ) : (
         <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell>Name</TableCell>
-                <TableCell>Slug</TableCell>
-                <TableCell>Description</TableCell>
-                {isSuperAdmin && <TableCell>Tenant</TableCell>}
-                <TableCell>Status</TableCell>
-                <TableCell>Created</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Name
+                    <InfoTooltip text={helpContent.document_types.list?.columnTooltips?.name} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Slug
+                    <InfoTooltip text={helpContent.document_types.list?.columnTooltips?.slug} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Description
+                    <InfoTooltip text={helpContent.document_types.list?.columnTooltips?.description} />
+                  </Box>
+                </TableCell>
+                {isSuperAdmin && (
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Tenant
+                      <InfoTooltip text={helpContent.document_types.list?.columnTooltips?.tenant} />
+                    </Box>
+                  </TableCell>
+                )}
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.document_types.list?.columnTooltips?.status} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Created
+                    <InfoTooltip text={helpContent.document_types.list?.columnTooltips?.created} />
+                  </Box>
+                </TableCell>
                 <TableCell align="right">Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {documentTypes.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={isSuperAdmin ? 7 : 6} sx={{ textAlign: 'center', py: 4 }}>
-                    <Typography color="text.secondary">No document types found</Typography>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                documentTypes.map((dt) => (
+              {documentTypes.map((dt) => (
                   <TableRow key={dt.id} hover>
                     <TableCell>
                       <Typography variant="body2" fontWeight={500}>
@@ -330,8 +371,7 @@ export function DocumentTypes() {
                       </Tooltip>
                     </TableCell>
                   </TableRow>
-                ))
-              )}
+                ))}
             </TableBody>
           </Table>
         </TableContainer>
@@ -389,18 +429,24 @@ export function DocumentTypes() {
           <Box>
             <Typography variant="subtitle2" sx={{ mb: 1 }}>Features</Typography>
 
-            <FormControlLabel
-              control={<Switch checked={formAutoIngest} onChange={(e) => setFormAutoIngest(e.target.checked)} disabled={saving} />}
-              label="Auto-ingest"
-            />
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <FormControlLabel
+                control={<Switch checked={formAutoIngest} onChange={(e) => setFormAutoIngest(e.target.checked)} disabled={saving} />}
+                label="Auto-ingest"
+              />
+              <InfoTooltip text={helpContent.document_types.list?.columnTooltips?.autoIngest} />
+            </Box>
             <Typography variant="body2" color="text.secondary" sx={{ ml: 4, mt: -0.5, mb: 1 }}>
               Automatically import high-confidence documents (requires 3+ training examples)
             </Typography>
 
-            <FormControlLabel
-              control={<Switch checked={formExtractTables} onChange={(e) => setFormExtractTables(e.target.checked)} disabled={saving} />}
-              label="Extract tables"
-            />
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <FormControlLabel
+                control={<Switch checked={formExtractTables} onChange={(e) => setFormExtractTables(e.target.checked)} disabled={saving} />}
+                label="Extract tables"
+              />
+              <InfoTooltip text={helpContent.document_types.list?.columnTooltips?.extractTables} />
+            </Box>
             <Typography variant="body2" color="text.secondary" sx={{ ml: 4, mt: -0.5 }}>
               Extract tabular data like test results and specifications
             </Typography>

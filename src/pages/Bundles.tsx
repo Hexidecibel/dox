@@ -36,6 +36,10 @@ import {
 import { api } from '../lib/api';
 import type { ApiBundle, ApiProduct } from '../lib/types';
 import { useTenant } from '../contexts/TenantContext';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { EmptyState } from '../components/EmptyState';
+import { helpContent } from '../lib/helpContent';
 
 const ITEMS_PER_PAGE = 20;
 
@@ -137,6 +141,10 @@ export function Bundles() {
         </Button>
       </Box>
 
+      <HelpWell id="bundles.list" title={helpContent.bundles.list?.headline ?? 'Bundles'}>
+        {helpContent.bundles.list?.well ?? helpContent.bundles.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -146,11 +154,12 @@ export function Bundles() {
       {isMobile ? (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           {bundles.length === 0 ? (
-            <Card variant="outlined">
-              <CardContent sx={{ textAlign: 'center', py: 4 }}>
-                <Typography color="text.secondary">No bundles found</Typography>
-              </CardContent>
-            </Card>
+            <EmptyState
+              title={helpContent.bundles.list?.emptyTitle ?? 'No bundles yet'}
+              description={helpContent.bundles.list?.emptyDescription}
+              actionLabel="Create bundle"
+              onAction={openCreate}
+            />
           ) : (
             bundles.map((bundle) => (
               <Card key={bundle.id} variant="outlined">
@@ -180,28 +189,58 @@ export function Bundles() {
             ))
           )}
         </Box>
+      ) : bundles.length === 0 ? (
+        <EmptyState
+          title={helpContent.bundles.list?.emptyTitle ?? 'No bundles yet'}
+          description={helpContent.bundles.list?.emptyDescription}
+          actionLabel="Create bundle"
+          onAction={openCreate}
+        />
       ) : (
         <TableContainer component={Paper} variant="outlined">
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell>Name</TableCell>
-                <TableCell>Product</TableCell>
-                <TableCell>Status</TableCell>
-                <TableCell>Items</TableCell>
-                <TableCell>Created By</TableCell>
-                <TableCell>Created</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Name
+                    <InfoTooltip text={helpContent.bundles.list?.columnTooltips?.name} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Product
+                    <InfoTooltip text={helpContent.bundles.list?.columnTooltips?.product} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.bundles.list?.columnTooltips?.status} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Items
+                    <InfoTooltip text={helpContent.bundles.list?.columnTooltips?.items} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Created By
+                    <InfoTooltip text={helpContent.bundles.list?.columnTooltips?.createdBy} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Created
+                    <InfoTooltip text={helpContent.bundles.list?.columnTooltips?.created} />
+                  </Box>
+                </TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {bundles.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={6} sx={{ textAlign: 'center', py: 4 }}>
-                    <Typography color="text.secondary">No bundles found</Typography>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                bundles.map((bundle) => (
+              {bundles.map((bundle) => (
                   <TableRow
                     key={bundle.id}
                     hover
@@ -238,8 +277,7 @@ export function Bundles() {
                     <TableCell>{bundle.creator_name || '-'}</TableCell>
                     <TableCell>{formatDate(bundle.created_at)}</TableCell>
                   </TableRow>
-                ))
-              )}
+                ))}
             </TableBody>
           </Table>
         </TableContainer>

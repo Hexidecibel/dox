@@ -837,6 +837,408 @@ const search: ModuleHelpExpanded = {
 };
 
 // ---------------------------------------------------------------------------
+// Admin/config modules — Phase D3 expanded shape.
+// ---------------------------------------------------------------------------
+//
+// The shapes below mirror what D2 introduced: each module gets a `list` (or
+// `main` for non-list surfaces), per-column tooltips, empty-list copy, and a
+// long-form `help.sections` array consumed generically by /help/<module>.
+
+const documentTypes: ModuleHelpExpanded = {
+  headline: 'Document Types',
+  well:
+    "Document types (COA, Spec Sheet, SDS, etc.) are per-tenant tags. Each type carries optional naming-format hints and extraction-field guidance so the AI pipeline knows what to pull when an inbound file is classified as that type.",
+  list: {
+    headline: 'Document Types',
+    well:
+      "Per-tenant catalog of the document categories you care about — Certificate of Analysis, Spec Sheet, SDS, Lab Report, etc. Each type can flip on auto-ingest (skip review when extraction confidence clears the bar), control whether tabular data is extracted, and carry a naming-format hint plus an extraction-field list that the AI uses to tighten parsing on inbound files.",
+    emptyTitle: 'No document types yet',
+    emptyDescription:
+      "Document types are how dox classifies inbound files. Add the categories your tenant cares about (COA, Spec Sheet, SDS, etc.) and the AI pipeline will route every ingest to one of them.",
+    columnTooltips: {
+      name: 'Display name for the document type — shown on documents, in the Review Queue, and in the type filter dropdowns. Pick something users will recognize at a glance (COA, Spec Sheet, SDS).',
+      slug: 'URL-safe identifier auto-generated from the name. Stable across renames; used in API paths and as the canonical key when matching the AI\'s detected document_type to your catalog.',
+      description: "Optional free-form notes about what this type is and isn't. Surfaced as a tooltip in pickers; doesn't affect any matching logic.",
+      tenant: 'Which tenant owns this document type. Document types are tenant-scoped — every tenant maintains its own catalog.',
+      status: 'Active types show up in pickers and accept new ingests. Inactive types are hidden from new flows but keep their existing documents.',
+      created: 'When the document type was first created.',
+      autoIngest:
+        "When on, documents the AI extracts as this type with confidence >= the auto-ingest threshold skip the Review Queue and land in the library directly. Requires a few approved examples to calibrate, so the toggle is a no-op for the first 3 ingests of each (supplier, type) pair.",
+      extractTables:
+        'When on, the AI also extracts tabular data (test results, spec rows, line items) into structured tables on the document. Off keeps extraction to scalar fields only — faster, less reliable for spec / lab docs that hinge on table content.',
+      namingFormat:
+        "Per-type filename template applied at ingest, e.g. {lot_number}_{product}_{doc_type}.{ext}. Placeholders are any metadata key the AI extracts — {lot_number}, {supplier}, {expiration_date}, etc. Falls back to the source filename when a placeholder is missing. Defined on the document type so all ingests of that type get the same naming convention.",
+      extractionFields:
+        "Comma-separated list of canonical fields the AI is asked to look for when classifying a document as this type — e.g. lot_number, expiration_date, manufacturer, product_name. Acts as a hint to the LLM (and pre-populates editable fields in the Review Queue). Leave blank to let the AI guess from the file alone.",
+    },
+  },
+  detail: {
+    headline: 'Document type detail',
+    well:
+      "Configuration for one document type — naming format, extraction fields, and the auto-ingest / extract-tables toggles. Most tenants set this up once per category and revisit when they want to tighten extraction on a noisy supplier.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What document types are',
+        body:
+          "A document type is a tenant-scoped category for inbound files — Certificate of Analysis, Spec Sheet, Safety Data Sheet, Lab Report, etc. Every document in the library carries a document_type_id, set at ingest by the AI's classifier and confirmed (or corrected) by a reviewer. Document types drive: which extraction template the AI applies, the naming format used to rename the file at rest, the type filter in the Documents list, and the auto-ingest gate.",
+      },
+      {
+        heading: 'Naming format — what it is and why',
+        body:
+          "The naming_format field is a string like {lot_number}_{product}_{doc_type}.{ext}. When a file ingests as this document type, dox renames it to match — so the file in R2 (and the file_name shown in the library) follows your organization's convention rather than whatever the vendor sent. " +
+          "Placeholders are any key the AI extracts: {lot_number}, {supplier}, {expiration_date}, {document_type}, {product_name}, plus the literal {ext} for the original file extension. If a placeholder is missing from a particular document, that segment is dropped (no \"undefined\" placeholders ever land in the filename). " +
+          "Set this once per type; it applies to every future ingest of that type and to every connector / email / API that drops files in. Existing documents keep their original names unless you re-ingest them.",
+      },
+      {
+        heading: 'Extraction fields — what they do',
+        body:
+          "extraction_fields is a comma-separated list of canonical fields the AI is asked to look for when it classifies a document as this type. For a COA you might list: lot_number, expiration_date, manufacturer, product_name, batch_size. For an SDS: product_name, manufacturer, hazard_class, signal_word. " +
+          "Two effects. (1) The list is included in the AI prompt — the model is steered toward those fields and tends to fill them more reliably. (2) The Review Queue pre-renders editable fields in that order so reviewers can scan and correct quickly. " +
+          "Leave it blank for types where you trust the AI to pick the right fields on its own (small / generic types). Fill it in for high-volume regulated types where consistency matters.",
+      },
+      {
+        heading: 'Auto-ingest and extract tables',
+        body:
+          "Auto-ingest — when on, documents the AI extracts as this type with confidence >= the auto-ingest threshold skip the Review Queue and land directly in the library. dox needs a handful of reviewer-approved examples (3+ per supplier+type) to calibrate the threshold; the toggle is a no-op until that calibration completes. Use it on high-trust types where the AI is reliably right and review is bottlenecking ingest. " +
+          "Extract tables — when on, the AI also pulls tabular data (test results, line items, spec rows) into structured tables on the document. On for COA / Spec Sheet (table content is the point); off for SDS / generic notes where there's no useful table. Extracting tables is slower and noisier, so leave off when you don't need it.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "AI keeps misclassifying a file as the wrong type? Tighten the extraction_fields list — adding 2-3 distinguishing fields nudges the classifier toward the right type. " +
+          "Naming format isn't applying? Check the placeholder spelling. Placeholders are case-sensitive and must match the canonical field name (lot_number, not LotNumber). Also confirm extraction is actually pulling that field — if the AI doesn't extract {lot_number}, the filename will be missing that segment. " +
+          "Auto-ingest stays disabled? You don't have enough approved examples yet. Approve 3+ docs of this (supplier, type) pair from the Review Queue and the gate opens automatically. " +
+          "Want to retire a type? Deactivate rather than delete. Existing documents keep their type even after deactivation; new ingests just stop landing on it.",
+      },
+    ],
+  },
+};
+
+const namingTemplates: ModuleHelpExpanded = {
+  headline: 'Naming Templates',
+  well:
+    "Naming templates control how ingested files are renamed at rest. They live on the document type (since migration 0018) — set the template once per type and every inbound file of that type follows the same convention.",
+  list: {
+    headline: 'Naming Templates',
+    well:
+      "Naming templates aren't a separate page in dox — they're the naming_format field on each document type. Set the template on the Document Types page, and every inbound file classified as that type gets renamed at ingest. Use generic placeholders like {lot_number}, {supplier}, or {doc_type} — any metadata key the AI extracts is fair game.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What a naming template is',
+        body:
+          "A naming template is a string like {lot_number}_{product}_{doc_type}.{ext} that dox uses to rename inbound files. Templates live on the document_type — set the template on the Document Types page and every file ingested as that type is renamed accordingly. There is no separate Naming Templates page; the field lives on the document type itself.",
+      },
+      {
+        heading: 'Placeholder syntax',
+        body:
+          "Placeholders are wrapped in curly braces and use the canonical (snake_case) name of the metadata field. Common ones: {lot_number}, {product}, {supplier}, {doc_type}, {expiration_date}, {manufacturer}, {batch_size}. Plus the special {ext} for the original file extension. " +
+          "Anything outside the braces is treated as a literal — so {lot_number}_{product}.pdf produces filenames like 12345_ButterMilk.pdf. Underscores, dashes, dots are all fine; avoid path separators (/) and spaces — dox sanitizes them but the result is uglier than necessary. " +
+          "If a placeholder isn't extracted from a particular document, that segment is dropped entirely (no literal \"undefined\" or \"null\" lands in the filename). Order the template so missing-but-rare fields land at the tail rather than the head.",
+      },
+      {
+        heading: 'Example templates',
+        body:
+          "Strict COA convention: {lot_number}_{product}_{doc_type}_{expiration_date}.{ext} -> 12345_ButterMilk_COA_2027-08-31.pdf. " +
+          "Supplier-first sort order: {supplier}_{lot_number}_{doc_type}.{ext} -> ACMECorp_12345_COA.pdf. " +
+          "SDS with manufacturer: {manufacturer}_{product}_SDS.{ext} -> Sigma_AceticAcid_SDS.pdf. " +
+          "Always wins (least surprise): {doc_type}_{product}_{lot_number}.{ext} — the doc type prefix means alphabetical sort groups COAs together, specs together, etc.",
+      },
+      {
+        heading: 'Common gotchas',
+        body:
+          "Placeholder produces nothing? The AI didn't extract that field. Open one of the affected documents and check primary_metadata / extended_metadata; if the field is missing, either tighten the extraction_fields list on the document type or accept that this template segment will be skipped. " +
+          "Filename has __ (double underscore)? A placeholder evaluated to empty and the literals around it collapsed. dox cleans up consecutive separators automatically, but if it bothers you, drop the unreliable placeholder from the template. " +
+          "Want different conventions per supplier? Naming templates are per-type, not per-supplier+type. The recommended pattern is to keep the template generic and let supplier metadata fall in via {supplier}; if you really need supplier-specific naming, fork the document type (one COA-AcmeCorp, one COA-OtherCorp) and template each.",
+      },
+    ],
+  },
+};
+
+const bundles: ModuleHelpExpanded = {
+  headline: 'Bundles',
+  well:
+    "Bundles are named compliance packages that pin specific document versions together. Build one for an audit, a customer ship-set, or a regulatory submission, then download as a single ZIP — the version pin guarantees the package never drifts even if the underlying docs are revised.",
+  list: {
+    headline: 'Bundles',
+    well:
+      "Every bundle in your tenant. Each bundle is a named, optionally product-scoped collection of documents pinned to specific versions, with a draft / finalized status. Click into one to manage its contents or download as a ZIP.",
+    emptyTitle: 'No bundles yet',
+    emptyDescription:
+      "Bundles are how you package documents together for an audit, a customer ship-set, or a regulatory submission. Create one, add the docs you need, then finalize to lock in the versions and download as a ZIP.",
+    columnTooltips: {
+      name: "The bundle's display name. Shown in the list, in audit logs, and on the downloaded ZIP filename.",
+      product:
+        'Optional product link — scopes the bundle to a single SKU. Useful for customer ship-sets where every document needs to be for the same product. Leave blank for cross-product packages (compliance audits, regulatory submissions).',
+      status:
+        "Draft = editable; you can add / remove documents and tweak metadata. Finalized = read-only and version-pinned; the ZIP you download today will be byte-identical to the one you download in a year, even if the underlying docs are revised.",
+      items: 'How many documents are currently pinned in the bundle.',
+      createdBy: 'Which user created the bundle. Only the original creator (and admins) can finalize or delete.',
+      created: 'When the bundle was first created.',
+    },
+  },
+  detail: {
+    headline: 'Bundle detail',
+    well:
+      "One bundle's contents and controls. Drafts can be edited (add / remove documents, rename, re-link to a product). Finalized bundles are immutable — you can still download and delete them, but the document list is locked. Use Download ZIP to grab everything in one shot.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What a bundle is',
+        body:
+          "A bundle is a named collection of documents that travel together as a single deliverable. Each bundle has a display name, an optional product link (scopes the bundle to one SKU), a status (draft or finalized), and zero or more bundle items — each item points at a document and pins a specific version of it. The Download ZIP action streams every pinned-version file plus a manifest into a single archive.",
+      },
+      {
+        heading: 'Why version pinning matters',
+        body:
+          "Documents in dox are versioned — every re-ingest of the same external_ref appends a new version on the existing record. That's great for the library (you always see the latest) but bad for compliance: an audit done on Tuesday must show the documents that were current on Tuesday, not whatever drifted in by Friday. " +
+          "When you add a document to a bundle, the bundle item records the document's current version. Finalizing the bundle locks every version pin in place. From then on, downloading the ZIP always returns those exact versions, regardless of how many revisions land later. The downstream auditor sees what you sent them.",
+      },
+      {
+        heading: 'Draft vs. finalized — the workflow',
+        body:
+          "New bundles start in Draft status. Add documents (via the Add Document button or the document picker), remove the wrong ones, rename, retarget to a different product. The version pin updates each time you swap a document — drafts are alive. " +
+          "When the bundle is right, click Finalize. The status flips to Finalized, the version pins lock, and the document list becomes read-only. You can still download or delete; you cannot add / remove items or change names. To start a new revision of the same package, create a new bundle (Draft) and copy items over — finalized bundles are intentionally one-way.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "Document was revised after I finalized — does the ZIP update? No. Finalized bundles are version-pinned. Re-create the bundle as a fresh Draft if you need the latest revisions. " +
+          "Can readers download bundles? Yes, if their role allows downloads on the underlying documents. The bundle ZIP respects per-document permissions; any doc the user can't see is omitted with a manifest note. " +
+          "Need to scope to multiple products? Leave the product link empty — bundles can carry docs across many products. The product link is purely informational; it doesn't restrict what you can add.",
+      },
+    ],
+  },
+};
+
+const reports: ModuleHelpExpanded = {
+  headline: 'Reports',
+  well:
+    "Reports turn document and audit data into CSV / JSON exports. Generated on demand against the current tenant scope; the audit log records every report.generate event so you can prove what was exported and when.",
+  list: {
+    headline: 'Reports',
+    well:
+      "There isn't a dedicated Reports page in dox today — exports are surfaced inline on the lists they apply to (Documents, Audit, Search). Each export hits the /api/reports/generate endpoint, which builds a CSV or JSON snapshot of the current filter set and writes a report.generate row to the audit log.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What reports do',
+        body:
+          "Reports in dox are inline CSV / JSON exports rather than a separate page. The Documents list, the Audit log, and the Search results page each expose an Export button that calls /api/reports/generate with the active filter set; the response is downloaded as a CSV or JSON file. Reports are tenant-scoped and respect the current user's role — readers see only docs they can download, org_admins see everything in their tenant, super_admins can scope to any tenant via the tenant switcher.",
+      },
+      {
+        heading: 'Report types',
+        body:
+          "Documents export — every document matching the current filters (status, doctype, supplier, date range). Columns: title, type, supplier, products, current version, file_name, file_size, created_at, updated_at. Use it for compliance attestations, customer ship-sets, or feeding downstream BI. " +
+          "Audit export — every audit_log row in the date range. Columns: timestamp, user, action, resource_type, resource_id, ip_address, details (JSON). Use it for regulator-facing audits or internal review. " +
+          "Search export — same shape as the documents export but constrained by the search query. Only available in keyword mode (AI mode disables export because the LLM-emitted filters aren't repeatable on demand).",
+      },
+      {
+        heading: 'Snapshot vs. live',
+        body:
+          "Reports are a snapshot at the moment of generation. The CSV / JSON you download reflects the database state at that instant; it's not a live link, so refreshing it tomorrow won't add new rows. Re-export to refresh. " +
+          "The audit log records each report.generate event with the filter parameters used, the user, the IP, and a row count. If a regulator asks \"what did you export and when?\", the answer lives in the audit trail.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "Why doesn't AI search support export? AI mode lets an LLM produce the structured filters from natural language. Those filters aren't deterministic across calls (the LLM's parse can drift), so re-running the same query later might not produce the same result set. Keyword search uses literal SQLite filters that are stable, so we can persist them in the audit log and the export is repeatable. Switch to keyword mode if you need the export. " +
+          "Can I schedule recurring reports? Not built in. The /api/reports/generate endpoint is API-key authable, so a downstream cron / agent can call it on a schedule and shuttle the result wherever you want. " +
+          "Export is empty? Either no rows match the active filters, or the user's role doesn't see any of the matching rows. Check the filter chips before assuming a bug.",
+      },
+    ],
+  },
+};
+
+const activity: ModuleHelpExpanded = {
+  headline: 'Activity',
+  well:
+    "Activity is the unified timeline for ingest events — connector runs, document ingests, order creation, and audit entries — across the whole tenant. Filter by date, type, source door, status, or specific connector.",
+  list: {
+    headline: 'Activity',
+    well:
+      "One chronological view of everything the ingest pipeline has touched. Every connector run, every document that hit the queue, every order created, and every privileged audit event lives here as one row. Use the filter bar to narrow by time range, event type, source, status, or specific connector; expand a row for the full payload + cross-navigation links.",
+    emptyTitle: 'No activity in this window',
+    emptyDescription:
+      "Either nothing happened in the selected time range, or the filters are too narrow. Try widening the date range (7d / 30d) or clearing the source / status filters.",
+    columnTooltips: {
+      when: "When the event happened, shown as a relative time (\"5m ago\") with the absolute timestamp on hover. Sorted newest-first.",
+      type:
+        "Which kind of event. Connector Run = a parser ran against an inbound file. Document = a single file landed in the processing queue. Order = an order record was created (usually downstream of a connector run). Audit = a privileged action (user create, password reset, etc.) was logged.",
+      summary: 'One-line description of what happened — connector name, file name, order number, or actor + action depending on the event type. Click into the row to expand the full payload.',
+      status:
+        "Outcome of the event. Connector runs: success / partial / error / running. Documents: queued / processing / ready / error. Orders: pending / matched / fulfilled / etc. Audit entries don't carry a status — they always succeeded.",
+      connectorFilter:
+        "Restrict to one connector — useful when you're debugging why a specific vendor's feed is misbehaving. Pre-fills from a ?connector_id= URL param, so deep-linking from a connector detail page works.",
+      sourceFilter:
+        "Filter by which intake door brought the file in: manual upload, API drop, public link, email, S3 bucket, webhook, or the legacy import / file_watch sources. Helps answer \"is the email connector noisy today?\" without paging through everything.",
+      statusFilter:
+        "Filter by event outcome. Pair with the source filter to find, say, every email-source error in the last 24 hours.",
+      crossTenant:
+        "super_admin only — toggle between \"only my current tenant\" and \"every tenant the cross-tenant view exposes\". Default is current tenant, since cross-tenant is rarely what you want.",
+    },
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What Activity is',
+        body:
+          "Activity is the cross-cutting timeline for everything the ingest pipeline does. Four event types feed into it. " +
+          "Connector runs — every time a parser executes against an inbound file (regardless of which door). " +
+          "Document ingests — every file the AI processing queue saw, with its current processing status. " +
+          "Order creations — every order record, whether created automatically by a connector run or entered manually. " +
+          "Audit entries — every privileged action recorded in the audit log (user creation, password resets, doc deletions, etc.). " +
+          "The events are folded into one chronological feed, sorted newest-first, with an unbounded time-range filter so you can scope to the last hour, last day, last month, or a custom window.",
+      },
+      {
+        heading: 'When to use Activity',
+        body:
+          "Triage. Vendor reports a missing file? Filter to that connector + the suspected time range; you'll see the ingest land (or not), the parser status, the resulting orders, and any errors — all in one place. " +
+          "Auditing the unattended pipeline. Filter source = email, status = error to spot every email-ingest that bounced. Filter type = audit, action = user_deactivated to review user lifecycle events. " +
+          "Cross-checking. Activity is the source of truth when the per-module pages disagree — if Orders shows N orders for a connector but the connector runs page only shows M, expand both into Activity to find the missing rows.",
+      },
+      {
+        heading: 'Filter combinations that pay off',
+        body:
+          "type=connector_run + status=error — every parser that crashed in the window. Pair with a connector filter for one-vendor focus. " +
+          "type=document_ingest + processing=error — every file the AI pipeline failed on. Click in for the per-file error message. " +
+          "type=audit + a specific actor — every privileged action one user took (useful for offboarding reviews). " +
+          "source=email — everything the inbound email processor handled. Pair with status=error to find addresses that bounced. " +
+          "source=public_link — public-link uploads only. Useful for vendors with no automation; correlates with a single connector by definition.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "Activity is slow? The query window matters — 30d cross-tenant against a busy tenant returns thousands of events. Narrow to 24h or pick a specific event type. " +
+          "Same event shows up twice? Likely once as a connector_run and once as the order_created that followed. The pipeline emits separate events per stage; this is expected. " +
+          "Where's the file content? Activity stores event metadata, not the file. Click through to the document detail page for the file itself; the expanded row links you there.",
+      },
+    ],
+  },
+};
+
+const audit: ModuleHelpExpanded = {
+  headline: 'Audit Log',
+  well:
+    "The audit log is the immutable record of every privileged action in your tenant — user creation, password resets, document deletions, role changes, report exports. Read-only, append-only, and tenant-scoped. Use it for compliance attestations and security reviews.",
+  list: {
+    headline: 'Audit Log',
+    well:
+      "Every privileged action that happened in your tenant. Each row records the timestamp, the user (if known), the action, the affected resource, the IP address, and a JSON details blob with whatever context the action emitted. Filter by action type, user, or date range; expand a row to see the per-field before/after diff (when applicable).",
+    emptyTitle: 'No audit entries',
+    emptyDescription:
+      "Audit entries appear here as users perform privileged actions — creating accounts, deleting documents, rotating credentials. If your tenant is brand new and quiet, this view will stay empty until activity starts.",
+    columnTooltips: {
+      timestamp: 'When the action happened, in your local time zone. Sorted newest-first; the audit log is append-only so timestamps are stable.',
+      user: 'Which user performed the action. Hover the name for the email. \"System\" entries are background jobs (cron pollers, email ingesters) where no human user was involved.',
+      action:
+        "What kind of action was taken — login, document_created, document_deleted, user_updated, password_changed, report.generate, etc. The chip is colored by category (auth / document / user / tenant / report).",
+      resource:
+        "The object the action affected — a document, a user, a tenant, etc. The trailing (xxx...) is the first 8 chars of the resource id; clickable navigation isn't built in (the audit log is read-only by design).",
+      ipAddress:
+        "The originating IP address. Useful for security reviews — a privileged action from an unfamiliar IP is a red flag. Pulled from the request headers; may be empty for system events or behind a proxy with no X-Forwarded-For.",
+      details:
+        'Click the chevron to expand the per-field before/after diff (for update actions) or the raw JSON details blob. Most actions populate this with structured context — the values that changed, the parameters of the call, etc.',
+      actionFilter: "Narrow to a single action type — handy when you're auditing one specific thing (every document_deleted, every user_created).",
+      userSearch:
+        'Filter rows where the user name or email contains your search. Client-side filter — runs only over the current page of results, so paginate first if you need to find a specific user across the whole log.',
+      dateRange: "Restrict to a time window. Open-ended on either side — set just from to grab everything since a date, or just to to grab everything before.",
+    },
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What the audit log is',
+        body:
+          "The audit log is the immutable, append-only record of every privileged action in your tenant. Every login, every user lifecycle change, every document deletion, every credential rotation, every report export — they all write a row here. The log is read-only via the UI: there's no way to edit or delete entries from inside dox (and no admin role can do it either). The append-only property is what makes the log useful for compliance attestations.",
+      },
+      {
+        heading: 'What gets logged',
+        body:
+          "Auth events: login, logout, password_changed, password_reset_requested. " +
+          "User lifecycle: user_created, user_updated, user_deactivated, role changes. " +
+          "Document operations: document_created, document_updated, document_deleted, document_version_uploaded, document_downloaded (when configured). " +
+          "Tenant operations: tenant_updated, tenant_deactivated. " +
+          "Reports: report.generate (with the filter parameters used). " +
+          "Read-only operations like list / get aren't logged by default — too noisy. The principle is \"every state change, plus auth events.\"",
+      },
+      {
+        heading: 'Retention',
+        body:
+          "Audit entries are retained indefinitely in production. There's no automatic pruning, no rotation, no soft-delete. If you need to remove specific entries for legal reasons (PII deletion requests, etc.), that has to happen via a direct D1 mutation by a super_admin and should itself be documented out-of-band. " +
+          "The CLAUDE.md describes the audit table as \"immutable\"; the implementation enforces this only by convention — there is no DB-level trigger preventing deletes. Treat that as a known limitation if your compliance regime is strict.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "Where's the audit entry for X? Some actions don't generate audit rows by design (read-only operations, unprivileged endpoints). If a state-changing action is missing audit coverage, that's a bug — file it. " +
+          "Why is the User column \"System\"? The action was performed by a background job (cron poller, scheduled report, email ingester) that doesn't run as a real user. The IP address column will usually be blank for these too. " +
+          "Can I export the log? Yes — use the Reports section's audit export (CSV / JSON of the current filter set). The export itself generates a report.generate audit row, so the trail is self-documenting.",
+      },
+    ],
+  },
+};
+
+const apiKeys: ModuleHelpExpanded = {
+  headline: 'API Keys',
+  well:
+    "API keys are programmatic credentials that authenticate as the user who created them. Each key carries a dox_sk_ prefix, an optional expiration, an optional tenant scope, and a last-used timestamp so you can spot stale keys. Revoke at any time — revocation is immediate.",
+  list: {
+    headline: 'API Keys',
+    well:
+      "Every API key that's been issued under this admin's purview. Each key is a programmatic credential (X-API-Key header) that authenticates as the user who created it; the key's tenant scope, expiration, and last-used time are visible at a glance so you can identify stale or risky keys before they become a problem.",
+    emptyTitle: 'No API keys yet',
+    emptyDescription:
+      "API keys give external systems programmatic access to dox. Create one for each integration (one per agent / script / pipeline) — that way you can revoke the credential for one consumer without breaking the others.",
+    columnTooltips: {
+      id: 'The opaque internal identifier for the key — useful only for support. Click the copy icon to grab it.',
+      name: "Friendly label for the key, e.g. 'MindStudio Email Agent' or 'Make.com Order Sync'. Pick something specific enough to identify the consumer when you're triaging which key to revoke.",
+      key: "The dox_sk_ prefix and the first few chars of the key. The full key is shown only once — at creation time — and never recoverable. Lose it, rotate it.",
+      tenant:
+        'Which tenant the key authenticates against. super_admin keys can be tenant-less (Global) and operate cross-tenant; org_admin and below are scoped to one tenant. The key inherits the role of its creator.',
+      created: 'When the key was issued.',
+      lastUsed:
+        "When the key last authenticated a request. Empty means it's never been used (recently issued or forgotten). A last-used timestamp from months ago plus an active status is a strong signal the key is stale and ripe for revocation.",
+      status:
+        "Active = the key is live and accepting auth. Expired = the expires_at has passed; the key auto-rejects requests but stays in the list for audit. Revoked = a human revoked the key; permanent (cannot be unrevoked, just create a new one).",
+    },
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What an API key is',
+        body:
+          "An API key is a long-lived programmatic credential for the dox REST API. Each key has the format dox_sk_<32 random chars> and is presented to the API via the X-API-Key header (or the Authorization: Bearer header for backwards compatibility with some clients). The key authenticates as the user who created it — it inherits that user's role, tenant scope, and permissions. There is no separate role model for API keys; if you need a key with reduced scope, create a dedicated user, set its role appropriately, and issue the key as that user.",
+      },
+      {
+        heading: 'The dox_sk_ prefix',
+        body:
+          "Every key starts with dox_sk_ (sk = secret key). The prefix is fixed and useful for two things: (1) string-grepping logs / config files for accidental key leaks (\"any line containing dox_sk_ in our git history is bad\"), and (2) telling at a glance whether a string is a dox key or some other system's credential. " +
+          "The first 12 characters (dox_sk_ plus 5 random chars) are stored in the database as key_prefix and shown in the list / detail views; the full key is only visible at creation time and is never recoverable. If you lose the full key, revoke it and issue a new one.",
+      },
+      {
+        heading: 'Tenant scope and last-used',
+        body:
+          "Tenant scope. A key authenticates with the tenant of its creating user — so a user in Tenant A creating a key produces a Tenant-A-scoped key. super_admin keys can be tenant-less (Global) and operate against any tenant the API caller specifies; org_admin and below cannot create cross-tenant keys. " +
+          "Last-used timestamp. Every successful authentication updates the key's last_used_at. The list view surfaces this so you can spot keys that haven't been used in months — those are usually safe to revoke as cleanup. Revocation is immediate and one-way: a revoked key is permanently dead, even if the audit shows it was working yesterday. There is no \"unrevoke\" — issue a fresh one if you revoked in error.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "Key returns 401 unexpectedly? Check three things in order: (1) the key isn't expired, (2) the key isn't revoked, (3) you're sending it via the X-API-Key header (case-insensitive name) and not in a query param. The Authorization: Bearer dox_sk_xxx form also works for some legacy clients. " +
+          "Want to limit a key to a single endpoint? Not built in. The minimum unit of permission is the role of the creating user. Create a dedicated user with the role you want, then issue the key as that user. " +
+          "Where do I rotate a key? You don't — keys don't have a rotate endpoint. Issue a new one, deploy the new value to your consumer, then revoke the old one. The pattern is intentional: revocation is one-way, so the new+old overlap window is always under your control.",
+      },
+    ],
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Other modules — unchanged from D0 scaffold; later D-slices fill these in.
 // ---------------------------------------------------------------------------
 
@@ -850,36 +1252,12 @@ export const helpContent = {
   import: importHelp,
   review_queue: reviewQueue,
   ingest_history: ingestHistory,
-  document_types: {
-    headline: 'Document Types',
-    well:
-      'Document types (COA, Spec Sheet, SDS, etc.) are per-tenant. Each type can carry a naming format and extraction examples so the AI pipeline knows what to pull from a freshly ingested file.',
-  },
-  naming_templates: {
-    headline: 'Naming Templates',
-    well:
-      "Naming templates control how ingested files are renamed at rest. Use generic placeholders like {lot_number}, {supplier}, or {doc_type} — anything in a document's metadata is fair game.",
-  },
-  bundles: {
-    headline: 'Bundles',
-    well:
-      'Bundles are named compliance packages that pin specific document versions together. Build one for an audit, a customer ship-set, or a regulatory submission, then download as a single ZIP.',
-  },
-  reports: {
-    headline: 'Reports',
-    well:
-      'Reports turn document and audit data into CSV/JSON exports. Use them for compliance attestations, customer ship-sets, or feeding downstream systems.',
-  },
-  activity: {
-    headline: 'Activity',
-    well:
-      'Activity is a unified timeline of what has happened in your tenant — uploads, ingests, version bumps, role changes, and more. Filter by actor, type, or time range.',
-  },
-  audit: {
-    headline: 'Audit Log',
-    well:
-      'The audit log records every privileged action: user creation, password resets, document deletions, role changes. Read-only and immutable — useful for compliance attestations.',
-  },
+  document_types: documentTypes,
+  naming_templates: namingTemplates,
+  bundles,
+  reports,
+  activity,
+  audit,
   search,
   tenants: {
     headline: 'Tenants',
@@ -891,11 +1269,7 @@ export const helpContent = {
     well:
       "Users belong to a tenant and have one of four roles: super_admin (cross-tenant), org_admin (manage own tenant's users + audit), user (upload + edit), or reader (read-only).",
   },
-  api_keys: {
-    headline: 'API Keys',
-    well:
-      'API keys (prefix dox_sk_) provide programmatic access to the REST API via the X-API-Key header. Each key authenticates as the user who created it; revoke at any time.',
-  },
+  api_keys: apiKeys,
   settings: {
     headline: 'Settings',
     well:

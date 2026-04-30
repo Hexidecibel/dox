@@ -70,6 +70,10 @@ import type {
   ActivityEventType,
 } from '../lib/types';
 import { formatDateTime } from '../utils/format';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { EmptyState } from '../components/EmptyState';
+import { helpContent } from '../lib/helpContent';
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -460,6 +464,10 @@ export function Activity() {
         Ingest events, connector runs, and order creation — one timeline for the whole pipeline.
       </Typography>
 
+      <HelpWell id="activity.list" title={helpContent.activity.list?.headline ?? 'Activity'}>
+        {helpContent.activity.list?.well ?? helpContent.activity.well}
+      </HelpWell>
+
       {/* Filter bar */}
       <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
         <Grid container spacing={2}>
@@ -520,67 +528,79 @@ export function Activity() {
           </Grid>
 
           <Grid item xs={12} md={4}>
-            <FormControl size="small" fullWidth>
-              <InputLabel>Connector</InputLabel>
-              <Select
-                label="Connector"
-                value={connectorId}
-                onChange={(e) => setConnectorId(e.target.value)}
-              >
-                <MenuItem value="">All connectors</MenuItem>
-                {connectors.map((c) => (
-                  <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <FormControl size="small" fullWidth>
+                <InputLabel>Connector</InputLabel>
+                <Select
+                  label="Connector"
+                  value={connectorId}
+                  onChange={(e) => setConnectorId(e.target.value)}
+                >
+                  <MenuItem value="">All connectors</MenuItem>
+                  {connectors.map((c) => (
+                    <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <InfoTooltip text={helpContent.activity.list?.columnTooltips?.connectorFilter} />
+            </Box>
           </Grid>
           <Grid item xs={12} md={4}>
-            <FormControl size="small" fullWidth>
-              <InputLabel>Source</InputLabel>
-              <Select
-                label="Source"
-                value={source}
-                onChange={(e) => setSource(e.target.value as ActivitySourceFilter)}
-              >
-                <MenuItem value="all">All</MenuItem>
-                <MenuItem value="manual">Manual upload</MenuItem>
-                <MenuItem value="api">API drop</MenuItem>
-                <MenuItem value="public_link">Public link</MenuItem>
-                <MenuItem value="email">Email</MenuItem>
-                <MenuItem value="s3">S3 bucket</MenuItem>
-                <MenuItem value="webhook">Webhook</MenuItem>
-                <MenuItem value="import">Import (legacy)</MenuItem>
-                <MenuItem value="file_watch">File watch (legacy)</MenuItem>
-              </Select>
-            </FormControl>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <FormControl size="small" fullWidth>
+                <InputLabel>Source</InputLabel>
+                <Select
+                  label="Source"
+                  value={source}
+                  onChange={(e) => setSource(e.target.value as ActivitySourceFilter)}
+                >
+                  <MenuItem value="all">All</MenuItem>
+                  <MenuItem value="manual">Manual upload</MenuItem>
+                  <MenuItem value="api">API drop</MenuItem>
+                  <MenuItem value="public_link">Public link</MenuItem>
+                  <MenuItem value="email">Email</MenuItem>
+                  <MenuItem value="s3">S3 bucket</MenuItem>
+                  <MenuItem value="webhook">Webhook</MenuItem>
+                  <MenuItem value="import">Import (legacy)</MenuItem>
+                  <MenuItem value="file_watch">File watch (legacy)</MenuItem>
+                </Select>
+              </FormControl>
+              <InfoTooltip text={helpContent.activity.list?.columnTooltips?.sourceFilter} />
+            </Box>
           </Grid>
           <Grid item xs={12} md={4}>
-            <FormControl size="small" fullWidth>
-              <InputLabel>Status</InputLabel>
-              <Select
-                label="Status"
-                value={status}
-                onChange={(e) => setStatus(e.target.value as ActivityStatusFilter)}
-              >
-                <MenuItem value="all">All</MenuItem>
-                <MenuItem value="success">Success</MenuItem>
-                <MenuItem value="error">Error</MenuItem>
-                <MenuItem value="partial">Partial</MenuItem>
-                <MenuItem value="running">Running</MenuItem>
-                <MenuItem value="queued">Queued</MenuItem>
-              </Select>
-            </FormControl>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <FormControl size="small" fullWidth>
+                <InputLabel>Status</InputLabel>
+                <Select
+                  label="Status"
+                  value={status}
+                  onChange={(e) => setStatus(e.target.value as ActivityStatusFilter)}
+                >
+                  <MenuItem value="all">All</MenuItem>
+                  <MenuItem value="success">Success</MenuItem>
+                  <MenuItem value="error">Error</MenuItem>
+                  <MenuItem value="partial">Partial</MenuItem>
+                  <MenuItem value="running">Running</MenuItem>
+                  <MenuItem value="queued">Queued</MenuItem>
+                </Select>
+              </FormControl>
+              <InfoTooltip text={helpContent.activity.list?.columnTooltips?.statusFilter} />
+            </Box>
           </Grid>
 
           {isSuperAdmin && (
             <Grid item xs={12}>
-              <Button
-                size="small"
-                variant={crossTenant ? 'contained' : 'outlined'}
-                onClick={() => setCrossTenant((v) => !v)}
-              >
-                {crossTenant ? 'Viewing all tenants' : 'Only my tenant'}
-              </Button>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <Button
+                  size="small"
+                  variant={crossTenant ? 'contained' : 'outlined'}
+                  onClick={() => setCrossTenant((v) => !v)}
+                >
+                  {crossTenant ? 'Viewing all tenants' : 'Only my tenant'}
+                </Button>
+                <InfoTooltip text={helpContent.activity.list?.columnTooltips?.crossTenant} />
+              </Box>
             </Grid>
           )}
         </Grid>
@@ -606,19 +626,40 @@ export function Activity() {
             <TableHead>
               <TableRow>
                 <TableCell padding="checkbox" />
-                <TableCell>When</TableCell>
-                <TableCell>Type</TableCell>
-                <TableCell>Summary</TableCell>
-                <TableCell>Status</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    When
+                    <InfoTooltip text={helpContent.activity.list?.columnTooltips?.when} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Type
+                    <InfoTooltip text={helpContent.activity.list?.columnTooltips?.type} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Summary
+                    <InfoTooltip text={helpContent.activity.list?.columnTooltips?.summary} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.activity.list?.columnTooltips?.status} />
+                  </Box>
+                </TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               {events.length === 0 && !loading ? (
                 <TableRow>
-                  <TableCell colSpan={5} align="center" sx={{ py: 6 }}>
-                    <Typography color="text.secondary">
-                      No activity in this window.
-                    </Typography>
+                  <TableCell colSpan={5} sx={{ p: 0, border: 0 }}>
+                    <EmptyState
+                      title={helpContent.activity.list?.emptyTitle ?? 'No activity in this window'}
+                      description={helpContent.activity.list?.emptyDescription}
+                    />
                   </TableCell>
                 </TableRow>
               ) : (

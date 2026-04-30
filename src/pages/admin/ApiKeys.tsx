@@ -40,6 +40,10 @@ import { api } from '../../lib/api';
 import type { ApiKey, Tenant } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { CopyId } from '../../components/CopyId';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 export function ApiKeys() {
   const { user } = useAuth();
@@ -183,6 +187,10 @@ export function ApiKeys() {
         Create and manage API keys for service integrations
       </Typography>
 
+      <HelpWell id="api_keys.list" title={helpContent.api_keys.list?.headline ?? 'API Keys'}>
+        {helpContent.api_keys.list?.well ?? helpContent.api_keys.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -192,11 +200,12 @@ export function ApiKeys() {
       {isMobile ? (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           {keys.length === 0 ? (
-            <Card variant="outlined">
-              <CardContent sx={{ textAlign: 'center', py: 4 }}>
-                <Typography color="text.secondary">No API keys found</Typography>
-              </CardContent>
-            </Card>
+            <EmptyState
+              title={helpContent.api_keys.list?.emptyTitle ?? 'No API keys yet'}
+              description={helpContent.api_keys.list?.emptyDescription}
+              actionLabel="Create key"
+              onAction={openCreate}
+            />
           ) : (
             keys.map((key) => {
               const status = getStatus(key);
@@ -234,30 +243,65 @@ export function ApiKeys() {
             })
           )}
         </Box>
+      ) : keys.length === 0 ? (
+        <EmptyState
+          title={helpContent.api_keys.list?.emptyTitle ?? 'No API keys yet'}
+          description={helpContent.api_keys.list?.emptyDescription}
+          actionLabel="Create key"
+          onAction={openCreate}
+        />
       ) : (
         <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell>ID</TableCell>
-                <TableCell>Name</TableCell>
-                <TableCell>Key</TableCell>
-                <TableCell>Tenant</TableCell>
-                <TableCell>Created</TableCell>
-                <TableCell>Last Used</TableCell>
-                <TableCell>Status</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    ID
+                    <InfoTooltip text={helpContent.api_keys.list?.columnTooltips?.id} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Name
+                    <InfoTooltip text={helpContent.api_keys.list?.columnTooltips?.name} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Key
+                    <InfoTooltip text={helpContent.api_keys.list?.columnTooltips?.key} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Tenant
+                    <InfoTooltip text={helpContent.api_keys.list?.columnTooltips?.tenant} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Created
+                    <InfoTooltip text={helpContent.api_keys.list?.columnTooltips?.created} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Last Used
+                    <InfoTooltip text={helpContent.api_keys.list?.columnTooltips?.lastUsed} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.api_keys.list?.columnTooltips?.status} />
+                  </Box>
+                </TableCell>
                 <TableCell align="right">Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {keys.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={8} sx={{ textAlign: 'center', py: 4 }}>
-                    <Typography color="text.secondary">No API keys found</Typography>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                keys.map((key) => {
+              {keys.map((key) => {
                   const status = getStatus(key);
                   return (
                     <TableRow key={key.id} hover>
@@ -301,8 +345,7 @@ export function ApiKeys() {
                       </TableCell>
                     </TableRow>
                   );
-                })
-              )}
+                })}
             </TableBody>
           </Table>
         </TableContainer>

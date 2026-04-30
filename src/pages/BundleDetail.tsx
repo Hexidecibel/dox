@@ -42,6 +42,8 @@ import type { ApiBundle, ApiBundleItem, ApiProduct } from '../lib/types';
 import { DocumentPicker } from '../components/DocumentPicker';
 import { RoleGuard } from '../components/RoleGuard';
 import { useAuth } from '../contexts/AuthContext';
+import { HelpWell } from '../components/HelpWell';
+import { helpContent } from '../lib/helpContent';
 
 function formatFileSize(bytes?: number): string {
   if (!bytes) return '-';
@@ -227,6 +229,10 @@ export function BundleDetail() {
           </Typography>
         </Box>
       </Box>
+
+      <HelpWell id="bundles.detail" title={helpContent.bundles.detail?.headline ?? 'Bundle detail'}>
+        {helpContent.bundles.detail?.well ?? helpContent.bundles.well}
+      </HelpWell>
 
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>

@@ -29,6 +29,10 @@ import {
   KeyboardArrowUp as CollapseIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 interface AuditEntry {
   id: number;
@@ -281,44 +285,57 @@ export function AuditLog() {
         Track all actions performed in the system.
       </Typography>
 
+      <HelpWell id="audit.list" title={helpContent.audit.list?.headline ?? 'Audit Log'}>
+        {helpContent.audit.list?.well ?? helpContent.audit.well}
+      </HelpWell>
+
       {/* Filters */}
       <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
         <Grid container spacing={2} alignItems="center">
           <Grid item xs={12} sm={6} md={3}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Action Type</InputLabel>
-              <Select
-                value={action}
-                onChange={(e) => { setAction(e.target.value); setPage(0); }}
-                label="Action Type"
-              >
-                <MenuItem value="">All Actions</MenuItem>
-                {ALL_ACTIONS.map((a) => (
-                  <MenuItem key={a} value={a}>{a}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Action Type</InputLabel>
+                <Select
+                  value={action}
+                  onChange={(e) => { setAction(e.target.value); setPage(0); }}
+                  label="Action Type"
+                >
+                  <MenuItem value="">All Actions</MenuItem>
+                  {ALL_ACTIONS.map((a) => (
+                    <MenuItem key={a} value={a}>{a}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <InfoTooltip text={helpContent.audit.list?.columnTooltips?.actionFilter} />
+            </Box>
           </Grid>
           <Grid item xs={12} sm={6} md={3}>
-            <TextField
-              label="Search User"
-              fullWidth
-              size="small"
-              value={userSearch}
-              onChange={(e) => setUserSearch(e.target.value)}
-              placeholder="Name or email..."
-            />
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <TextField
+                label="Search User"
+                fullWidth
+                size="small"
+                value={userSearch}
+                onChange={(e) => setUserSearch(e.target.value)}
+                placeholder="Name or email..."
+              />
+              <InfoTooltip text={helpContent.audit.list?.columnTooltips?.userSearch} />
+            </Box>
           </Grid>
           <Grid item xs={6} sm={6} md={3}>
-            <TextField
-              label="Date From"
-              type="date"
-              fullWidth
-              size="small"
-              value={dateFrom}
-              onChange={(e) => { setDateFrom(e.target.value); setPage(0); }}
-              InputLabelProps={{ shrink: true }}
-            />
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <TextField
+                label="Date From"
+                type="date"
+                fullWidth
+                size="small"
+                value={dateFrom}
+                onChange={(e) => { setDateFrom(e.target.value); setPage(0); }}
+                InputLabelProps={{ shrink: true }}
+              />
+              <InfoTooltip text={helpContent.audit.list?.columnTooltips?.dateRange} />
+            </Box>
           </Grid>
           <Grid item xs={6} sm={6} md={3}>
             <TextField
@@ -350,19 +367,49 @@ export function AuditLog() {
             <Table size="small">
               <TableHead>
                 <TableRow>
-                  <TableCell padding="checkbox" />
-                  <TableCell>Timestamp</TableCell>
-                  <TableCell>User</TableCell>
-                  <TableCell>Action</TableCell>
-                  <TableCell>Resource</TableCell>
-                  <TableCell>IP Address</TableCell>
+                  <TableCell padding="checkbox">
+                    <InfoTooltip text={helpContent.audit.list?.columnTooltips?.details} />
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Timestamp
+                      <InfoTooltip text={helpContent.audit.list?.columnTooltips?.timestamp} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      User
+                      <InfoTooltip text={helpContent.audit.list?.columnTooltips?.user} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Action
+                      <InfoTooltip text={helpContent.audit.list?.columnTooltips?.action} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Resource
+                      <InfoTooltip text={helpContent.audit.list?.columnTooltips?.resource} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      IP Address
+                      <InfoTooltip text={helpContent.audit.list?.columnTooltips?.ipAddress} />
+                    </Box>
+                  </TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {filteredEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} align="center" sx={{ py: 4 }}>
-                      <Typography color="text.secondary">No audit entries found</Typography>
+                    <TableCell colSpan={6} sx={{ p: 0, border: 0 }}>
+                      <EmptyState
+                        title={helpContent.audit.list?.emptyTitle ?? 'No audit entries'}
+                        description={helpContent.audit.list?.emptyDescription}
+                      />
                     </TableCell>
                   </TableRow>
                 ) : (
