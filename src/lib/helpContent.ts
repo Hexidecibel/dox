@@ -1234,6 +1234,297 @@ const apiKeys: ModuleHelpExpanded = {
 };
 
 // ---------------------------------------------------------------------------
+// Super-admin + auth modules — Phase D4 expanded shape.
+// ---------------------------------------------------------------------------
+//
+// Tenants is super_admin-only. Users covers both super_admin (cross-tenant)
+// and org_admin (own tenant). Profile is the user's self-service page;
+// settings is the /help-only doc that pulls together the tenant-level
+// configuration surfaces that don't have a dedicated page (naming templates,
+// document types, email domain mappings — all of which already have their
+// own helpContent entries). Auth is the umbrella for login / register /
+// forgot / reset.
+
+const tenants: ModuleHelpExpanded = {
+  headline: 'Tenants',
+  well:
+    "Tenants are isolated organizations within dox. Each tenant has its own users, documents, suppliers, products, document types, and naming templates — data is scoped per tenant and never bleeds across boundaries. Visible only to super_admin.",
+  list: {
+    headline: 'Tenants',
+    well:
+      "Every organization on this dox installation. Each row is a self-contained workspace: its own user roster, document library, suppliers, products, and configuration. Use this list to onboard new customers, deactivate inactive ones, or pop into a tenant to investigate a support ticket.",
+    emptyTitle: 'No tenants yet',
+    emptyDescription:
+      "Add a tenant for each customer organization you onboard. Each tenant is a fully isolated workspace with its own users, documents, and configuration.",
+    columnTooltips: {
+      id: 'Internal identifier for the tenant. Used in API calls, audit log filters, and as a foreign key on every tenant-scoped record. Click the copy icon if you need to paste it into a config or a support ticket.',
+      name: "Display name shown to users in the navbar, on COA packages, and across reports. Pick whatever the customer prefers to be called.",
+      slug: "URL-friendly identifier — lowercase, kebab-case, alphanumeric. Used in tenant-scoped URLs and inbound email mappings. Auto-generated from the name on create; can be edited if the customer rebrands.",
+      description: 'Free-form notes — billing tier, account owner, onboarding date, anything that helps you orient when triaging.',
+      status:
+        "Active tenants accept logins and ingestion. Inactive tenants stay on file (data preserved) but reject logins and incoming connector traffic — useful for offboarding without nuking the data.",
+      created: 'When the tenant record was first created.',
+    },
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What a tenant is',
+        body:
+          "A tenant in dox is a fully isolated organizational workspace. Every row in every tenant-scoped table (documents, users, suppliers, products, document_types, audit_log, etc.) carries a tenant_id, and the API enforces that callers only see rows from the tenant they belong to. The only exception is super_admin users, who can see across tenants for support and operational purposes. " +
+          "Tenants are typically one-per-customer — if you're hosting dox for multiple manufacturer or distributor organizations, each one gets its own tenant. Inside a tenant the org_admin manages users and configuration; super_admins reach across tenants only when intervention is needed.",
+      },
+      {
+        heading: 'Creating and naming',
+        body:
+          "Each tenant has a name (display, shown in the navbar and on reports), a slug (URL-friendly identifier — lowercase, kebab-case, alphanumeric), and an optional description (free-form notes for your operational records). The slug is auto-generated from the name when you first create the tenant; you can override it before saving. " +
+          "Renaming the display name later is harmless — the slug is independent and stays put unless you explicitly change it. Slugs must be unique across the whole installation; the create form will reject duplicates.",
+      },
+      {
+        heading: 'Active vs inactive',
+        body:
+          "Toggling a tenant inactive is a soft delete — the data stays on disk and on D1, but the tenant's users can no longer log in and inbound connector traffic is rejected. This is the right move when offboarding a customer: you preserve the audit trail and document library in case you need to refer back to it, without keeping their accounts live. " +
+          "Reactivating restores access immediately. There is no hard-delete UI by design; if you actually need to purge a tenant, do it via the database (and only after exporting whatever records you need).",
+      },
+      {
+        heading: 'Common gotchas',
+        body:
+          "Why can't an org_admin see other tenants? By design — tenant isolation is enforced at the API layer. Only super_admin can see across. " +
+          "User in Tenant A creates a document, then is moved to Tenant B — does the doc come along? No. Documents are tenant-scoped via tenant_id; the user's old doc stays in Tenant A and they lose access to it on the move. " +
+          "Slug clash on create? Pick another. Slugs are globally unique, even across inactive tenants. " +
+          "Want a 'staging' copy of a tenant for testing? Easiest path is to create a separate tenant named '<Customer> Staging' — there's no built-in clone or fork.",
+      },
+    ],
+  },
+};
+
+const users: ModuleHelpExpanded = {
+  headline: 'Users',
+  well:
+    "Users belong to a tenant (or are tenant-less for super_admin) and have one of four roles: super_admin (cross-tenant), org_admin (manage own tenant's users + audit), user (upload + edit documents), or reader (read-only). Each user has an email + password, an optional last-login timestamp, and a force_password_change flag that fires on first login after admin reset.",
+  list: {
+    headline: 'Users',
+    well:
+      "Every user this admin can see — for super_admin that's everyone across all tenants, for org_admin it's only users in their own tenant. Each row shows the role, tenant assignment, and last-login timestamp; reset a password or toggle active from the row actions.",
+    emptyTitle: 'No users yet',
+    emptyDescription:
+      "Add users so your team can log in and work. Each user is assigned a role (which gates their permissions) and a tenant (which scopes the data they see).",
+    columnTooltips: {
+      id: 'Internal identifier for the user. Useful when grepping audit logs or API logs.',
+      name: 'Display name for the user — shown in the navbar, on uploaded documents, and in audit entries.',
+      email: 'Primary identifier and login. Also the destination for password-reset emails and (for org_admins) expiration alerts.',
+      role:
+        "super_admin = cross-tenant access, manage tenants and all users. org_admin = manage own tenant's users (user + reader only — cannot create org_admins or super_admins) and view audit. user = create / upload / edit / delete documents. reader = read-only, can download files but cannot modify anything.",
+      tenant:
+        "Which tenant the user belongs to. Tenant-scoped data (documents, suppliers, etc.) is invisible across tenant boundaries. super_admins can be tenant-less (Global) and operate across every tenant; everyone else must have a tenant.",
+      status:
+        "Active users can log in and use the API. Inactive users keep their record + audit history but can't authenticate — preferred over deletion for departing employees so the audit trail stays intact.",
+      lastLogin:
+        "When the user last successfully signed in. Empty means they've never logged in (newly invited or forgotten); timestamps from months ago plus active status often signal a stale account ripe for deactivation.",
+      created: 'When the user record was created.',
+      forcePasswordChange:
+        "When set, the user is redirected to the password-change form on next login and can't proceed until they pick a new one. Auto-set after admin password reset; cleared when the user successfully changes the password.",
+    },
+  },
+  help: {
+    sections: [
+      {
+        heading: 'The four roles',
+        body:
+          "dox has a flat four-role model — no per-resource permissions, no role inheritance, no custom roles. " +
+          "super_admin: cross-tenant operator. Can manage every tenant, every user (including other super_admins), and every piece of data. Typically only the platform owners. " +
+          "org_admin: per-tenant administrator. Can create / edit / delete users in their own tenant — but only at the user and reader role levels. They cannot create more org_admins or super_admins; that requires escalation to a super_admin. They can view audit, manage document types, naming templates, email domain mappings, and configure connectors. " +
+          "user: standard editor. Create, upload, edit, and delete documents in their tenant. Cannot manage other users or tenant configuration. " +
+          "reader: read-only. Can browse the document library, download files, search, and view orders / customers / suppliers — but cannot create, edit, or delete anything.",
+      },
+      {
+        heading: 'Tenant scope and the Global super_admin',
+        body:
+          "Every non-super_admin user has a tenant_id. They see only data inside that tenant. super_admins can either belong to a specific tenant (then they default to that tenant's data but can pivot to others) or be Global / tenant-less, in which case they have to specify a tenant context for tenant-scoped operations. " +
+          "Moving a user between tenants. There's no UI for it — edit the user, change the tenant_id, save. The user's documents, audit entries, etc. stay attached to their old tenant; the user just loses visibility on them. If you need data to migrate, export it from the source tenant and re-import into the destination.",
+      },
+      {
+        heading: 'Password lifecycle',
+        body:
+          "Three flavors of password change: " +
+          "(1) Self-service — the user signs in, hits Profile, enters their current password and a new one. Standard 8-128 char + mixed case + digit policy. " +
+          "(2) Forgot password — the user hits Forgot password on the login screen, enters their email, gets a one-time reset link via Resend. The link is good for 60 minutes. The reset form has the same password requirements as self-service. " +
+          "(3) Admin reset — an admin (org_admin in their own tenant, or super_admin anywhere) clicks Reset Password on a user row. dox generates a temporary password, optionally emails it to the user, and sets force_password_change. The user logs in with the temp password and is bounced to the change-password screen until they pick a new one. All existing sessions are revoked, so the user gets kicked out everywhere immediately. " +
+          "Where do I configure password policy? It's not configurable — the rules are baked into the validation layer (8 chars min, 128 chars max, must contain upper / lower / digit). If you need stricter, edit functions/lib/validation.ts.",
+      },
+      {
+        heading: 'Sessions and JWT',
+        body:
+          "Logged-in sessions use a 24-hour JWT. The token is issued on login, signed with HMAC-SHA256 using JWT_SECRET, and sent on every request via the Authorization: Bearer header. Tokens cannot be revoked individually — the only way to invalidate a session before its 24-hour expiry is via admin password reset (which kills all of the target user's sessions) or by changing JWT_SECRET (which kills every session for every user — nuclear option). " +
+          "API keys are the long-lived alternative. They authenticate as the creating user, inherit that user's role + tenant, and can be revoked individually — see /help/api_keys for the full lifecycle.",
+      },
+      {
+        heading: 'Common gotchas',
+        body:
+          "Org_admin can't create another org_admin? Correct — by design. Only super_admin can create org_admins or super_admins. " +
+          "User says login fails right after admin reset? Make sure they're entering the temp password (the one shown in the reset dialog or sent via email), not their old password. The old password is dead the moment the reset fires. " +
+          "User keeps getting bounced to the change-password screen? force_password_change is set. They have to actually pick a new password (meeting the policy) and submit; clearing the flag manually in the DB without changing the password is fragile and not recommended. " +
+          "Deactivated user still showing up in audit / on documents they uploaded? Right — deactivation is a soft delete. Their record stays so historical references still resolve. To actually purge, you'd have to scrub the DB by hand (and you shouldn't, because audit integrity).",
+      },
+    ],
+  },
+};
+
+const profile: ModuleHelpExpanded = {
+  headline: 'Profile',
+  well:
+    "Your account: who you are to dox, what tenant + role you carry, when you last logged in, and a self-service password change form. The role and tenant are locked here — only an admin can change them.",
+  detail: {
+    headline: 'Profile',
+    well:
+      "Read-only summary of your account information plus the password-change form. To update your name or email, ask an org_admin. To change your role or move between tenants, ask a super_admin.",
+  },
+  fields: {
+    name: 'Your display name as shown in the navbar, on documents you upload, and in audit entries. Edited by an admin if it ever needs to change.',
+    email: 'Your login email and the destination for password-reset notifications. Editable by an admin if you change addresses.',
+    role: "Your permission level. super_admin / org_admin / user / reader — see /help/users for what each one can do. Changing roles requires an admin.",
+    organization: "Which tenant you belong to. Determines which documents, suppliers, etc. you can see. Set by an admin; you cannot move yourself between tenants.",
+    memberSince: 'When your account was created.',
+    currentPassword: "Your existing password — confirms it's really you before we accept the change.",
+    newPassword: 'Your new password. Must be 8-128 characters, with at least one uppercase letter, one lowercase letter, and one digit.',
+    confirmPassword: 'Re-enter your new password to make sure you typed what you meant.',
+  },
+  help: {
+    sections: [
+      {
+        heading: "What's on this page",
+        body:
+          "Two cards: Account information (read-only summary of your name, email, role, organization, and member-since date) and Change password (self-service form). Anything you can't edit here — name, email, role, tenant — is admin-managed; ping your org_admin or super_admin if it needs to change.",
+      },
+      {
+        heading: 'Changing your password',
+        body:
+          "Enter your current password (to confirm identity), then a new one twice. The policy is 8-128 characters, with at least one uppercase letter, one lowercase letter, and one digit. The form previews each requirement live so you know what's still missing. " +
+          "After a successful change, your other sessions stay alive (only admin reset kills all sessions). If you want to log other browsers out — say, a shared computer — log in there once and explicitly log out. " +
+          "If you've forgotten your current password, log out and use the Forgot password link on the sign-in page; you don't need to know the current one to reset via email.",
+      },
+      {
+        heading: 'force_password_change',
+        body:
+          "If you logged in with a temporary password your admin issued, dox sets a force_password_change flag on your account. You'll see a yellow warning banner on the profile page and you won't be able to navigate elsewhere until you pick a new password. Once you submit a valid new password the flag clears and you're sent to the dashboard. " +
+          "Why this exists: it makes sure admin-issued temp passwords don't linger as long-term credentials. The temp password is meant to be a one-time bridge to your real password.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "How do I change my email? You can't here — ask an admin. " +
+          "How do I delete my account? Same — ask an admin. They'll deactivate it (soft delete) so the audit history stays intact. " +
+          "Where's two-factor auth? Not built in. SSO and 2FA are on the roadmap; for now password + JWT is the auth model. " +
+          "Why can't I see my API keys here? Visit /admin/api-keys (admin-only) — there's no per-user API key listing on the profile page by design.",
+      },
+    ],
+  },
+};
+
+const settings: ModuleHelpExpanded = {
+  headline: 'Settings',
+  well:
+    "Tenant-level configuration is split across several dedicated pages rather than a single settings dashboard. The pages below all live under the admin nav and tweak how your tenant ingests, names, and routes documents.",
+  help: {
+    sections: [
+      {
+        heading: 'Where settings live',
+        body:
+          "dox doesn't have a single Settings page; instead, each configuration surface gets its own page so the audit trail and permission gating are clean. The relevant ones, all admin-only: " +
+          "Document types (/admin/document-types) — define COA, Spec Sheet, SDS, etc. for your tenant; per-type extraction rules and naming format. " +
+          "Naming templates (/admin/naming-templates if surfaced, or via document_types) — file naming patterns applied at ingest. " +
+          "Email domain mappings — route inbound emails to the right tenant + connector by sender domain. " +
+          "Connectors (/admin/connectors) — ingestion channels per upstream system. " +
+          "Users (/admin/users) and API keys (/admin/api-keys) — auth surfaces.",
+      },
+      {
+        heading: 'Per-tenant vs platform-level',
+        body:
+          "Per-tenant settings (everything in this page) are owned by org_admins (and super_admins). Changes apply to every user in the tenant immediately and are recorded in the audit log. " +
+          "Platform-level settings — JWT_SECRET, RESEND_API_KEY, R2 bucket bindings, the Cloudflare D1 database — live in wrangler.toml + Cloudflare's project secrets, not the in-app UI. Only the platform operators (super_admins running the deployment) touch those.",
+      },
+      {
+        heading: 'Audit and rollback',
+        body:
+          "Most settings changes appear in the audit log: document_type_created, naming_template_updated, email_domain_mapping_deleted, etc. There is no built-in undo / version history for settings — the audit log tells you what changed, but reverting a bad change is a manual re-edit. " +
+          "Connectors are the exception: their wizard lets you re-test and remap before save, and the field-mappings card on the connector detail page is editable inline so most tweaks don't need a full revert.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "Where do I change branding (logo, colors)? Tenant-level branding for the in-app UI isn't editable yet — it's on the roadmap. Public-facing forms (records sheet forms, public-link drops) carry per-form branding (logo + accent color). " +
+          "Where do I configure expiration alert recipients? They go to all org_admins of the tenant by default. There's no per-user opt-in/out yet. " +
+          "Why can't I see other tenants' settings? Tenant isolation — even super_admin has to switch tenant context (via the tenant switcher in the navbar) to view another tenant's settings.",
+      },
+    ],
+  },
+};
+
+const auth: ModuleHelpExpanded & {
+  notes: Readonly<{
+    login: string;
+    forgot: string;
+    reset: string;
+    passwordPolicy: string;
+  }>;
+} = {
+  headline: 'Authentication',
+  well:
+    "dox uses email + password for human logins and API keys for programmatic access. JWT sessions last 24 hours, password resets go via Resend email, and admin-issued temp passwords force a change on next login.",
+  notes: {
+    login:
+      "Trouble signing in? Use 'Forgot password' below to reset, or contact your tenant admin if your account hasn't been created yet. Sessions last 24 hours before you need to sign in again.",
+    forgot:
+      "Enter the email tied to your account. If a matching account exists, we'll email a one-time reset link that's valid for 60 minutes. If you don't see the email after a couple of minutes, check spam or ask your admin to issue a temporary password instead.",
+    reset:
+      "Choose a password that's at least 8 characters, with at least one uppercase letter, one lowercase letter, and one digit. Once you submit, your old password is dead and you can sign in with the new one.",
+    passwordPolicy:
+      "Passwords must be 8-128 characters and include at least one uppercase letter, one lowercase letter, and one digit.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'Sign-in flow',
+        body:
+          "Hit /login, enter email + password, get back a JWT signed with HMAC-SHA256 (algorithm HS256, secret JWT_SECRET). The token is stashed in localStorage and sent on every subsequent request as Authorization: Bearer <token>. Tokens expire 24 hours after issue — no sliding refresh, just a hard expiry, so users re-authenticate once a day in active use. " +
+          "Failed logins return a generic 'Invalid credentials' message regardless of whether the email exists or the password was wrong; this is intentional to avoid email enumeration.",
+      },
+      {
+        heading: 'Forgot password',
+        body:
+          "On the /forgot-password page, enter your email. dox always returns the same success message ('if an account exists, we sent a link') regardless of whether the email matches a real user, again to avoid enumeration. If a real account exists, dox generates a one-time token, stores it in the password_resets table with a 60-minute expiry, and emails the user a /reset-password?token=<token> link via Resend. " +
+          "Clicking the link drops the user on the reset page; submitting a new password (meeting the 8-128 char + mixed-case + digit policy) clears the password_resets row and updates the user's password hash. The token is single-use — re-using it returns 'invalid or expired'.",
+      },
+      {
+        heading: 'Admin-issued temp passwords',
+        body:
+          "When an admin clicks Reset Password on a user row, dox generates a 12-character random password, hashes it as the user's new password, sets force_password_change = 1, and revokes all of that user's existing sessions. The temp password is shown to the admin once (and optionally emailed to the user) — it isn't stored in clear and can't be recovered. " +
+          "On the user's next login, the JWT is issued normally but the auth context flags force_password_change. Until they post a new password to /api/auth/change-password (which clears the flag), every protected route bounces them back to /profile.",
+      },
+      {
+        heading: 'Sessions and 24-hour expiry',
+        body:
+          "JWTs are stateless — there's no server-side session table. To 'log out' a single browser, the client just deletes the token from localStorage. To kill every session for a user (e.g. credential leak), an admin issues a password reset, which rotates the password hash; existing JWTs remain technically valid until their 24-hour expiry but the sessions table is also wiped, and follow-up logins require the new password. " +
+          "If you need to invalidate every session across the whole installation, change JWT_SECRET in wrangler.toml and redeploy — every existing token immediately fails verification.",
+      },
+      {
+        heading: 'API keys vs JWT',
+        body:
+          "JWTs are short-lived (24h) and tied to an interactive browser session. API keys (dox_sk_...) are long-lived programmatic credentials sent via the X-API-Key header; they authenticate as the user who created them and inherit that user's role + tenant scope. There is no role hierarchy for API keys — if you need a key with reduced scope, create a dedicated user and issue the key as that user. See /help/api_keys for the full lifecycle.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "Forgot password and the email never arrived? Most likely Resend isn't configured for this environment (RESEND_API_KEY missing) — dox will silently no-op the email. Have an admin issue a temp password instead. " +
+          "JWT expired mid-session? The next API call returns 401; the frontend catches that and bounces you to /login. Just sign in again. " +
+          "Where's SSO / 2FA? Not implemented yet. The auth model is intentionally simple for the current customer base; SSO is on the roadmap. " +
+          "Why does Login.tsx redirect immediately if I'm already signed in? Saves a click — if a valid JWT is in localStorage, dox skips the login form and routes you to /dashboard.",
+      },
+    ],
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Other modules — unchanged from D0 scaffold; later D-slices fill these in.
 // ---------------------------------------------------------------------------
 
@@ -1254,22 +1545,12 @@ export const helpContent = {
   activity,
   audit,
   search,
-  tenants: {
-    headline: 'Tenants',
-    well:
-      'Tenants are isolated organizations within dox. Each tenant has its own users, documents, suppliers, products, and document types. Visible to super_admin only.',
-  },
-  users: {
-    headline: 'Users',
-    well:
-      "Users belong to a tenant and have one of four roles: super_admin (cross-tenant), org_admin (manage own tenant's users + audit), user (upload + edit), or reader (read-only).",
-  },
+  tenants,
+  users,
   api_keys: apiKeys,
-  settings: {
-    headline: 'Settings',
-    well:
-      "Tenant-level settings: branding, default document types, email-to-tenant domain mappings, and naming templates. Changes here apply to every user in the tenant.",
-  },
+  settings,
+  profile,
+  auth,
   records: {
     headline: 'Records',
     well:

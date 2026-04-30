@@ -46,6 +46,8 @@ const MODULE_LABEL: Record<HelpModuleKey, string> = {
   users: 'Users',
   api_keys: 'API Keys',
   settings: 'Settings',
+  profile: 'Profile',
+  auth: 'Authentication',
   records: 'Records',
   approvals: 'Approvals',
 };
@@ -73,6 +75,8 @@ const MODULE_ORDER: HelpModuleKey[] = [
   'api_keys',
   'tenants',
   'settings',
+  'profile',
+  'auth',
 ];
 
 function isHelpModuleKey(value: string | undefined): value is HelpModuleKey {

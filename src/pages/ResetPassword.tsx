@@ -19,6 +19,7 @@ import { Lock as LockIcon } from '@mui/icons-material';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CancelIcon from '@mui/icons-material/Cancel';
 import { api } from '../lib/api';
+import { helpContent } from '../lib/helpContent';
 
 export function ResetPassword() {
   const [searchParams] = useSearchParams();
@@ -145,6 +146,9 @@ export function ResetPassword() {
             </Box>
           ) : (
             <Box component="form" onSubmit={handleSubmit}>
+              <Alert severity="info" variant="outlined" icon={false} sx={{ mb: 2, fontSize: '0.8125rem' }}>
+                {helpContent.auth.notes.reset}
+              </Alert>
               <TextField
                 label="New Password"
                 type="password"

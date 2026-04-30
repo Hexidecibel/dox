@@ -13,6 +13,7 @@ import {
 } from '@mui/material';
 import { Lock as LockIcon } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
+import { helpContent } from '../lib/helpContent';
 
 export function Login() {
   const [email, setEmail] = useState('');
@@ -88,6 +89,10 @@ export function Login() {
               {error}
             </Alert>
           )}
+
+          <Alert severity="info" variant="outlined" icon={false} sx={{ mb: 2, fontSize: '0.8125rem' }}>
+            {helpContent.auth.notes.login}
+          </Alert>
 
           <Box component="form" onSubmit={handleSubmit}>
             <TextField

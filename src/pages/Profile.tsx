@@ -20,6 +20,9 @@ import CancelIcon from '@mui/icons-material/Cancel';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { helpContent } from '../lib/helpContent';
 
 interface UserProfile {
   id: string;
@@ -132,6 +135,10 @@ export function Profile() {
         Profile
       </Typography>
 
+      <HelpWell id="profile.detail" title={helpContent.profile.detail?.headline ?? 'Profile'}>
+        {helpContent.profile.detail?.well ?? helpContent.profile.well}
+      </HelpWell>
+
       {forcePasswordChange && (
         <Alert severity="warning" sx={{ mb: 2 }} variant="filled">
           You must change your password to continue using the portal.
@@ -157,27 +164,36 @@ export function Profile() {
 
         <Box sx={{ display: 'grid', gap: 2 }}>
           <Box>
-            <Typography variant="caption" color="text.secondary">
-              Name
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="caption" color="text.secondary">
+                Name
+              </Typography>
+              <InfoTooltip text={helpContent.profile.fields?.name} />
+            </Box>
             <Typography variant="body1" fontWeight={500}>
               {displayProfile?.name}
             </Typography>
           </Box>
 
           <Box>
-            <Typography variant="caption" color="text.secondary">
-              Email
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="caption" color="text.secondary">
+                Email
+              </Typography>
+              <InfoTooltip text={helpContent.profile.fields?.email} />
+            </Box>
             <Typography variant="body1">
               {displayProfile?.email}
             </Typography>
           </Box>
 
           <Box>
-            <Typography variant="caption" color="text.secondary">
-              Role
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="caption" color="text.secondary">
+                Role
+              </Typography>
+              <InfoTooltip text={helpContent.profile.fields?.role} />
+            </Box>
             <Box sx={{ mt: 0.5 }}>
               <Chip
                 label={displayProfile?.role}
@@ -190,9 +206,12 @@ export function Profile() {
 
           {profile?.tenant_name && (
             <Box>
-              <Typography variant="caption" color="text.secondary">
-                Organization
-              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Organization
+                </Typography>
+                <InfoTooltip text={helpContent.profile.fields?.organization} />
+              </Box>
               <Typography variant="body1">
                 {profile.tenant_name}
               </Typography>
@@ -201,9 +220,12 @@ export function Profile() {
 
           {profile?.created_at && (
             <Box>
-              <Typography variant="caption" color="text.secondary">
-                Member Since
-              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Member Since
+                </Typography>
+                <InfoTooltip text={helpContent.profile.fields?.memberSince} />
+              </Box>
               <Typography variant="body1">
                 {formatDate(profile.created_at)}
               </Typography>

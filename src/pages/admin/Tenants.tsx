@@ -36,6 +36,10 @@ import {
 import { api } from '../../lib/api';
 import type { Tenant } from '../../lib/types';
 import { CopyId } from '../../components/CopyId';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 export function Tenants() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -152,6 +156,10 @@ export function Tenants() {
         </Button>
       </Box>
 
+      <HelpWell id="tenants.list" title={helpContent.tenants.list?.headline ?? 'Tenants'}>
+        {helpContent.tenants.list?.well ?? helpContent.tenants.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -162,11 +170,12 @@ export function Tenants() {
         // Mobile card layout
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           {tenants.length === 0 ? (
-            <Card variant="outlined">
-              <CardContent sx={{ textAlign: 'center', py: 4 }}>
-                <Typography color="text.secondary">No tenants found</Typography>
-              </CardContent>
-            </Card>
+            <EmptyState
+              title={helpContent.tenants.list?.emptyTitle ?? 'No tenants yet'}
+              description={helpContent.tenants.list?.emptyDescription}
+              actionLabel="Add tenant"
+              onAction={openCreate}
+            />
           ) : (
             tenants.map((tenant) => (
               <Card key={tenant.id} variant="outlined">
@@ -208,30 +217,60 @@ export function Tenants() {
             ))
           )}
         </Box>
+      ) : tenants.length === 0 ? (
+        <EmptyState
+          title={helpContent.tenants.list?.emptyTitle ?? 'No tenants yet'}
+          description={helpContent.tenants.list?.emptyDescription}
+          actionLabel="Add tenant"
+          onAction={openCreate}
+        />
       ) : (
         // Desktop table layout
         <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell>ID</TableCell>
-                <TableCell>Name</TableCell>
-                <TableCell>Slug</TableCell>
-                <TableCell>Description</TableCell>
-                <TableCell>Status</TableCell>
-                <TableCell>Created</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    ID
+                    <InfoTooltip text={helpContent.tenants.list?.columnTooltips?.id} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Name
+                    <InfoTooltip text={helpContent.tenants.list?.columnTooltips?.name} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Slug
+                    <InfoTooltip text={helpContent.tenants.list?.columnTooltips?.slug} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Description
+                    <InfoTooltip text={helpContent.tenants.list?.columnTooltips?.description} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.tenants.list?.columnTooltips?.status} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Created
+                    <InfoTooltip text={helpContent.tenants.list?.columnTooltips?.created} />
+                  </Box>
+                </TableCell>
                 <TableCell align="right">Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {tenants.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} sx={{ textAlign: 'center', py: 4 }}>
-                    <Typography color="text.secondary">No tenants found</Typography>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                tenants.map((tenant) => (
+              {tenants.map((tenant) => (
                   <TableRow key={tenant.id} hover>
                     <TableCell>
                       <CopyId id={tenant.id} />
@@ -286,8 +325,7 @@ export function Tenants() {
                       </Tooltip>
                     </TableCell>
                   </TableRow>
-                ))
-              )}
+                ))}
             </TableBody>
           </Table>
         </TableContainer>

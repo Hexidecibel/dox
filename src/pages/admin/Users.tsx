@@ -42,6 +42,10 @@ import {
 import { api } from '../../lib/api';
 import type { User, Tenant, Role } from '../../lib/types';
 import { CopyId } from '../../components/CopyId';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 const roleColors: Record<string, 'primary' | 'secondary' | 'default'> = {
   super_admin: 'primary',
@@ -219,6 +223,10 @@ export function Users() {
         </Button>
       </Box>
 
+      <HelpWell id="users.list" title={helpContent.users.list?.headline ?? 'Users'}>
+        {helpContent.users.list?.well ?? helpContent.users.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -229,11 +237,12 @@ export function Users() {
         // Mobile card layout
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           {users.length === 0 ? (
-            <Card variant="outlined">
-              <CardContent sx={{ textAlign: 'center', py: 4 }}>
-                <Typography color="text.secondary">No users found</Typography>
-              </CardContent>
-            </Card>
+            <EmptyState
+              title={helpContent.users.list?.emptyTitle ?? 'No users yet'}
+              description={helpContent.users.list?.emptyDescription}
+              actionLabel="Add user"
+              onAction={openCreate}
+            />
           ) : (
             users.map((user) => (
               <Card key={user.id} variant="outlined">
@@ -276,31 +285,66 @@ export function Users() {
             ))
           )}
         </Box>
+      ) : users.length === 0 ? (
+        <EmptyState
+          title={helpContent.users.list?.emptyTitle ?? 'No users yet'}
+          description={helpContent.users.list?.emptyDescription}
+          actionLabel="Add user"
+          onAction={openCreate}
+        />
       ) : (
         // Desktop table layout
         <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell>ID</TableCell>
-                <TableCell>Name</TableCell>
-                <TableCell>Email</TableCell>
-                <TableCell>Role</TableCell>
-                <TableCell>Tenant</TableCell>
-                <TableCell>Status</TableCell>
-                <TableCell>Last Login</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    ID
+                    <InfoTooltip text={helpContent.users.list?.columnTooltips?.id} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Name
+                    <InfoTooltip text={helpContent.users.list?.columnTooltips?.name} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Email
+                    <InfoTooltip text={helpContent.users.list?.columnTooltips?.email} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Role
+                    <InfoTooltip text={helpContent.users.list?.columnTooltips?.role} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Tenant
+                    <InfoTooltip text={helpContent.users.list?.columnTooltips?.tenant} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.users.list?.columnTooltips?.status} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Last Login
+                    <InfoTooltip text={helpContent.users.list?.columnTooltips?.lastLogin} />
+                  </Box>
+                </TableCell>
                 <TableCell align="right">Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {users.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={8} sx={{ textAlign: 'center', py: 4 }}>
-                    <Typography color="text.secondary">No users found</Typography>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                users.map((user) => (
+              {users.map((user) => (
                   <TableRow key={user.id} hover>
                     <TableCell>
                       <CopyId id={user.id} />
@@ -353,8 +397,7 @@ export function Users() {
                       </Tooltip>
                     </TableCell>
                   </TableRow>
-                ))
-              )}
+                ))}
             </TableBody>
           </Table>
         </TableContainer>
@@ -400,6 +443,10 @@ export function Users() {
               sx={{ mb: 2 }}
             />
           )}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+            <Typography variant="caption" color="text.secondary">Role</Typography>
+            <InfoTooltip text={helpContent.users.list?.columnTooltips?.role} />
+          </Box>
           <FormControl fullWidth sx={{ mb: 2 }}>
             <InputLabel>Role</InputLabel>
             <Select
@@ -414,6 +461,10 @@ export function Users() {
               <MenuItem value="reader">Reader</MenuItem>
             </Select>
           </FormControl>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+            <Typography variant="caption" color="text.secondary">Tenant</Typography>
+            <InfoTooltip text={helpContent.users.list?.columnTooltips?.tenant} />
+          </Box>
           <FormControl fullWidth>
             <InputLabel>Tenant</InputLabel>
             <Select
