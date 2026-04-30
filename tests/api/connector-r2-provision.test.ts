@@ -200,8 +200,10 @@ describe('POST /api/connectors/:id/r2/provision — happy path', () => {
       endpoint: string;
     };
     expect(body.bucket_name).toBe(`dox-drops-${slug}`);
-    expect(body.access_key_id).toMatch(/^[a-f0-9]{64}$/);
-    expect(body.secret_access_key).toMatch(/^secret-/);
+    // B3: access_key_id == token.id verbatim (mock returns "tok-<uuid>"),
+    // secret_access_key == sha256(token.value) hex (64 chars).
+    expect(body.access_key_id).toMatch(/^tok-/);
+    expect(body.secret_access_key).toMatch(/^[a-f0-9]{64}$/);
     expect(body.endpoint).toBe('https://testacct.r2.cloudflarestorage.com');
 
     const row = await db
