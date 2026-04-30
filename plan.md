@@ -737,7 +737,7 @@ deployable state.
 | B2 | HTTP POST API endpoint (#4) | ~1d |
 | B3 | S3 bucket auto-provisioning (#5) | ~1.5d |
 | B4 | Public drop link (#6) | ~0.5d |
-| B5 | Quality bar bring-up (audit, rate-limit, replay, observability, docs) | ~1.5d |
+| B5 | Quality bar bring-up (audit, rate-limit, replay, observability) | ~1d |
 
 **B1 — Schema + token plumbing.** Migration
 `0047_connector_intake_credentials.sql` adds to `connectors`:
@@ -832,15 +832,139 @@ email / #4 / #5 / #6 / poller:
 - **Observability.** Last-24h counts on `ConnectorDetail.tsx` by
   path, success/error, last error. New `GET
   /api/connectors/[id]/stats` reads `connector_runs` + `audit_log`.
-- **Vendor docs.** New `src/pages/docs/Connectors.tsx` at
-  `/docs/connectors` — one-pager per path with `curl` / `aws-cli` /
-  `rclone` examples + troubleshooting. Linked from each intake card.
+
+(Vendor-facing docs page moved to **Phase D — self-documenting system
+pass**, slice D5.)
 
 **Acceptance:** every path writes an audit row; rate limits enforce
-in vitest; replay re-runs a failed run; stats card renders; docs
-page renders with accurate examples.
+in vitest; replay re-runs a failed run; stats card renders.
+
+#### Phase D — Self-documenting system pass
+
+**Inserted between B5 and C.** Phase C ships *after* Phase D — the
+walkthrough partners run for sign-off should land on pages that explain
+themselves.
+
+#### Why
+
+Phase A surfaced how often the user — and a fresh partner — bounces off
+unfamiliar pages because nothing on the page says what it's for or what
+to do next. The connector intake-doors cards are now self-explanatory;
+nothing else in the app is. Before declaring "done," every core module
+gets the same treatment so the product stops requiring tribal knowledge
+to operate. The 2026-04-30 self-doc audit
+(`docs/self-doc-audit-2026-04-30.md`) found 14 of 18 modules at the
+"none" tier — bare h4 header, no tooltips, `No X found` empty state.
+
+#### Goals (the four self-doc layers)
+
+1. **Header info well** at the top of every page — one paragraph: what
+   the page is for + the typical flow. Dismissible, remembered per-user
+   per-page.
+2. **Field tooltips** on non-obvious form/table fields (system_type,
+   coa_delivery_method, role chips, naming format, extraction fields,
+   etc.). `(?)` icon next to the label, hover for the explanation.
+3. **Helpful empty states** — title + body + optional CTA. Never bare
+   "No X found." Tell the user what to do next.
+4. **Actionable error messages** — sweep the existing `Alert
+   severity="error"` blocks for "Failed to fetch" garbage and replace
+   with operator-style guidance ("Couldn't load connectors. Check your
+   network, refresh, or contact your admin.").
+
+In addition, a top-level **`/help`** route hosts longer-form admin
+docs, and a public **`/docs/connectors`** route hosts vendor-facing
+intake docs (moved out of B5).
+
+#### Architectural approach
+
+Five shared primitives, all introduced in D0, used everywhere thereafter:
+
+a. **`<HelpWell id title>`** (`src/components/HelpWell.tsx`) — MUI
+   `Alert severity="info"` with a Collapse + close button.
+   `id` keys dismissal in localStorage so users see it once. Children
+   are MDX-style copy from `helpContent`.
+
+b. **`<InfoTooltip>`** (`src/components/InfoTooltip.tsx`) — `(?)` icon
+   wrapping MUI `Tooltip` + `IconButton` + `InfoOutlinedIcon`. Mirrors
+   `CopyId.tsx` shape.
+
+c. **`<EmptyState title description actionLabel onAction>`**
+   (`src/components/EmptyState.tsx`) — generalized from the
+   one-off helpers in `src/components/records/{Calendar,Timeline,
+   Kanban,Gallery}View.tsx`, `WorkflowsTab.tsx`, `FormsTab.tsx`, and
+   `src/pages/records/Sheets.tsx`. Migrate those callsites in the same
+   slice — net six fewer copies.
+
+d. **`src/lib/helpContent.ts`** — typed module: `helpContent.connectors.
+   list.headline`, `helpContent.connectors.detail.intakeDoors.body`,
+   etc. Single source of truth for copy. Misspelled keys fail at
+   typecheck. Easy to grep, easy to edit.
+
+e. **`/help` route** — `src/pages/Help.tsx`, admin-auth, simple table
+   of contents → section layout. Reads from `helpContent` so admin
+   docs and inline help share copy. One route, scroll-anchored
+   sections — simpler than a nested router.
+
+f. **`/docs/connectors` route** — `src/pages/docs/Connectors.tsx`,
+   public (mounted outside `ProtectedRoute` like `/drop`). One-pager
+   with curl / aws-cli / rclone / email examples + troubleshooting.
+   Linked from each intake card on `ConnectorDetail.tsx`.
+
+#### Slices
+
+| # | Slice | Estimate |
+|---|-------|----------|
+| D0 | Shared infra: `<HelpWell>`, `<InfoTooltip>`, `<EmptyState>`, `helpContent.ts`, `/help` shell | ~0.5d |
+| D1 | Connectors module (list, detail runs table, wizard + step components) | ~1d |
+| D2 | Daily-driver modules: Documents, Import, ReviewQueue, Orders, Customers, Suppliers, Products, Search | ~1.5d |
+| D3 | Admin/config modules: Document Types, Bundles, IngestHistory, Activity, AuditLog, ApiKeys, naming-templates surfaces | ~1d |
+| D4 | Super-admin + auth: Tenants, Users, Profile, Login/Forgot/Reset header polish | ~0.5d |
+| D5 | Vendor docs page `/docs/connectors` (moved out of B5) — curl / aws-cli / rclone / email + troubleshooting; intake-card link-throughs | ~0.5d |
+| D6 | Coverage check — re-walk all 18 audited modules, confirm all four layers present, polish any gaps | ~0.5d |
+
+**Total:** ~5–6 days. Each slice is independently shippable; mid-slice
+reverts are safe (a half-migrated module is no worse than the current
+state).
+
+#### Acceptance
+
+Per-slice: every page in the slice has all four layers (info well,
+tooltips on at least the non-obvious fields, helpful empty state,
+clear errors). The audit doc is updated module-by-module from "none/
+partial" → "good" as slices land. D6 ships when all 18 modules are
+"good."
+
+#### Out of scope
+
+- **Full feature tutorials / video walkthroughs.** This is help-on-the-
+  page, not training material.
+- **AI-driven docs search.** Static `/help` only — no embeddings, no
+  RAG.
+- **Per-user help personalization** (e.g. "hide help for power users
+  globally"). The per-`HelpWell` localStorage dismissal is enough.
+- **i18n / translation.** Copy is English-only for now.
+- **Marketing copy / landing-page material.** Internal/vendor docs
+  only.
+
+#### Risk
+
+- **Audit understated the gap.** D2 modules look uniform from the
+  outside but each has its own quirks (Import has rich error UX
+  already, Search has the AI/keyword toggle, Orders crosses into
+  connectors). Slice durations could slip 0.5d if the per-page work
+  isn't as mechanical as the audit suggests.
+- **Copy drift.** With help in `helpContent.ts` and inline labels
+  hardcoded, the two can diverge. Mitigation: the audit doc gets
+  updated each slice and serves as the canonical "what does this
+  module say about itself" reference.
+- **`<EmptyState>` migration risk.** Hoisting six existing one-offs
+  could regress the records views if their props don't translate
+  cleanly. Mitigation: keep existing local helpers as thin adapters
+  during D0; collapse them in D6 as part of the polish round.
 
 #### Phase C — Coverage + sign-off
+
+(Ships AFTER Phase D so the walkthrough lands on self-explanatory pages.)
 
 | Step | Action |
 |------|--------|
