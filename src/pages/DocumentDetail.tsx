@@ -31,6 +31,7 @@ import {
   Select,
   InputLabel,
   FormControl,
+  Tooltip,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -53,6 +54,9 @@ import { DocumentPreview } from '../components/DocumentPreview';
 import { CopyId } from '../components/CopyId';
 import { ProductLinker } from '../components/ProductLinker';
 import { useAuth } from '../contexts/AuthContext';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { helpContent } from '../lib/helpContent';
 
 const statusColors: Record<string, 'success' | 'warning' | 'error'> = {
   active: 'success',
@@ -273,19 +277,23 @@ export function DocumentDetail() {
             <Typography variant={isMobile ? 'h5' : 'h4'} fontWeight={700} sx={{ wordBreak: 'break-word' }}>
               {doc.title}
             </Typography>
-            <Chip
-              label={`v${doc.current_version}`}
-              size="small"
-              color="primary"
-              variant="outlined"
-            />
-            <Chip
-              label={doc.status}
-              size="small"
-              color={statusColors[doc.status] || 'default'}
-              variant="filled"
-              sx={{ textTransform: 'capitalize' }}
-            />
+            <Tooltip title={helpContent.documents.list?.columnTooltips?.version ?? ''}>
+              <Chip
+                label={`v${doc.current_version}`}
+                size="small"
+                color="primary"
+                variant="outlined"
+              />
+            </Tooltip>
+            <Tooltip title={helpContent.documents.list?.columnTooltips?.status ?? ''}>
+              <Chip
+                label={doc.status}
+                size="small"
+                color={statusColors[doc.status] || 'default'}
+                variant="filled"
+                sx={{ textTransform: 'capitalize' }}
+              />
+            </Tooltip>
           </Box>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, flexWrap: 'wrap' }}>
             <Typography variant="body2" color="text.secondary">
@@ -304,6 +312,10 @@ export function DocumentDetail() {
           {error}
         </Alert>
       )}
+
+      <HelpWell id="documents.detail" title={helpContent.documents.detail?.headline ?? 'Document detail'}>
+        {helpContent.documents.detail?.well ?? helpContent.documents.well}
+      </HelpWell>
 
       {/* Actions */}
       {isMobile ? (
@@ -419,9 +431,12 @@ export function DocumentDetail() {
 
         {doc.documentTypeName && (
           <Box sx={{ mb: 2 }}>
-            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-              Document Type
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                Document Type
+              </Typography>
+              <InfoTooltip text={helpContent.documents.list?.columnTooltips?.type} />
+            </Box>
             <Chip label={doc.documentTypeName} color="info" variant="outlined" size="small" />
           </Box>
         )}
@@ -429,9 +444,12 @@ export function DocumentDetail() {
         {/* Supplier */}
         {doc.supplierName && (
           <Box sx={{ mb: 2 }}>
-            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-              Supplier
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                Supplier
+              </Typography>
+              <InfoTooltip text={helpContent.documents.list?.columnTooltips?.supplier} />
+            </Box>
             <Chip label={doc.supplierName} color="default" variant="outlined" size="small" />
           </Box>
         )}

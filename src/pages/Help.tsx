@@ -227,8 +227,9 @@ export function Help() {
                     color="text.secondary"
                     sx={{ mt: 4, display: 'block' }}
                   >
-                    Deep dives, screenshots, and field reference are added per
-                    module slice (D1-D5).
+                    More detail will land here as this surface evolves. The
+                    summary above and the in-page help wells cover the basics
+                    today.
                   </Typography>
                 );
               })()}

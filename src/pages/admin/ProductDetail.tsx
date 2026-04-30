@@ -21,6 +21,9 @@ import {
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { ApiProduct } from '../../lib/types';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { helpContent } from '../../lib/helpContent';
 
 /**
  * ProductDetail — minimal info page for a single product. Mirrors the
@@ -128,6 +131,10 @@ export function ProductDetail() {
         </Alert>
       )}
 
+      <HelpWell id="products.detail" title={helpContent.products.detail?.headline ?? 'Product detail'}>
+        {helpContent.products.detail?.well ?? helpContent.products.well}
+      </HelpWell>
+
       {/* Header */}
       <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
         {editing ? (
@@ -180,16 +187,21 @@ export function ProductDetail() {
                 <Typography variant="h4" fontWeight={700}>
                   {product.name}
                 </Typography>
-                <Chip
-                  label={product.active ? 'Active' : 'Inactive'}
-                  size="small"
-                  color={product.active ? 'success' : 'default'}
-                  variant="outlined"
-                />
+                <Tooltip title={helpContent.products.list?.columnTooltips?.status ?? ''}>
+                  <Chip
+                    label={product.active ? 'Active' : 'Inactive'}
+                    size="small"
+                    color={product.active ? 'success' : 'default'}
+                    variant="outlined"
+                  />
+                </Tooltip>
               </Box>
-              <Typography variant="body2" color="text.secondary">
-                Slug: <Box component="span" sx={{ fontFamily: 'monospace' }}>{product.slug}</Box>
-              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <Typography variant="body2" color="text.secondary">
+                  Slug: <Box component="span" sx={{ fontFamily: 'monospace' }}>{product.slug}</Box>
+                </Typography>
+                <InfoTooltip text={helpContent.products.list?.columnTooltips?.slug} />
+              </Box>
               <Typography variant="body2" color="text.secondary">
                 Created {formatDate(product.created_at)}
               </Typography>

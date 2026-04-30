@@ -44,6 +44,10 @@ import {
 } from '@mui/icons-material';
 import { api } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { EmptyState } from '../components/EmptyState';
+import { helpContent } from '../lib/helpContent';
 
 const ORDER_STATUSES = ['pending', 'enriched', 'matched', 'fulfilled', 'delivered', 'error'] as const;
 
@@ -230,19 +234,29 @@ export function OrderDetail() {
         </Alert>
       )}
 
+      <HelpWell id="orders.detail" title={helpContent.orders.detail?.headline ?? 'Order detail'}>
+        {helpContent.orders.detail?.well ?? helpContent.orders.well}
+      </HelpWell>
+
       {/* Order Info */}
       <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, mb: 3 }}>
         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
           <Box sx={{ flex: '1 1 200px' }}>
-            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-              PO Number
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                PO Number
+              </Typography>
+              <InfoTooltip text={helpContent.orders.list?.columnTooltips?.poNumber} />
+            </Box>
             <Typography variant="body1">{order.po_number || '-'}</Typography>
           </Box>
           <Box sx={{ flex: '1 1 200px' }}>
-            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-              Customer
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                Customer
+              </Typography>
+              <InfoTooltip text={helpContent.orders.list?.columnTooltips?.customer} />
+            </Box>
             {order.customer_id ? (
               <Link component={RouterLink} to={`/customers/${order.customer_id}`} underline="hover">
                 {order.customer_name || order.customer_number || order.customer_id}
@@ -262,9 +276,12 @@ export function OrderDetail() {
             </Box>
           )}
           <Box sx={{ flex: '1 1 200px' }}>
-            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-              Source
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                Source
+              </Typography>
+              <InfoTooltip text={helpContent.orders.list?.columnTooltips?.source} />
+            </Box>
             <Typography variant="body1">{order.connector_name || 'Manual'}</Typography>
           </Box>
         </Box>
@@ -369,9 +386,12 @@ export function OrderDetail() {
       </Typography>
 
       {items.length === 0 ? (
-        <Paper variant="outlined" sx={{ p: 3, textAlign: 'center', mb: 3 }}>
-          <Typography color="text.secondary">No items in this order.</Typography>
-        </Paper>
+        <Box sx={{ mb: 3 }}>
+          <EmptyState
+            title="No items on this order"
+            description="The connector ingested the order header but no line items came through. Check the source data below for the raw payload, or open the connector run to see how the parser handled this file."
+          />
+        </Box>
       ) : isMobile ? (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mb: 3 }}>
           {items.map((item) => (
@@ -423,9 +443,24 @@ export function OrderDetail() {
                 <TableCell>Product</TableCell>
                 <TableCell>Code</TableCell>
                 <TableCell align="right">Quantity</TableCell>
-                <TableCell>Lot #</TableCell>
-                <TableCell align="center">Matched</TableCell>
-                <TableCell>COA Document</TableCell>
+                <TableCell>
+                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
+                    Lot #
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.lot} />
+                  </Box>
+                </TableCell>
+                <TableCell align="center">
+                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
+                    Matched
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.matched} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
+                    COA Document
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.coa} />
+                  </Box>
+                </TableCell>
               </TableRow>
             </TableHead>
             <TableBody>

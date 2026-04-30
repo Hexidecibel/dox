@@ -373,6 +373,8 @@ const orders: ModuleHelpExpanded = {
       matched: 'Line items that have a matched lot + COA. Counts against `items` for the matched / total ratio.',
       source: 'Which connector this order came from. Click the chip to filter the list to one connector.',
       created: 'When the order was first ingested or created.',
+      lot: 'Lot / batch number for this line. Drives COA matching: ingested COAs that carry the same lot number get auto-attached to lines.',
+      coa: 'The matched COA for this line. Click through for the file, version history, and metadata. Empty means no COA matched yet.',
     },
   },
   detail: {
@@ -1554,12 +1556,57 @@ export const helpContent = {
   records: {
     headline: 'Records',
     well:
-      "Records sheets are flexible tables for anything that doesn't fit the document library — quality issues, approval workflows, item requests. Each sheet can drive forms, kanbans, calendars, and workflows.",
+      "Records sheets are flexible tables for anything that doesn't fit the document library — quality issues, approval workflows, item requests. Each sheet defines its own columns and can drive forms, kanbans, calendars, and workflows.",
+    help: {
+      sections: [
+        {
+          heading: 'What records sheets are',
+          body:
+            "A records sheet is a tenant-scoped, schema-on-the-fly table for anything that needs structured tracking but doesn't belong in the document library. Examples: a quality-incident log, a supplier-approval pipeline, an item-request queue. Each sheet defines its own columns (text, number, date, single-select, multi-select, person, doc-link), and rows can carry attachments, comments, and audit trails.",
+        },
+        {
+          heading: 'Forms, kanbans, calendars, workflows',
+          body:
+            "Each sheet can layer extra surfaces on top of the same data. " +
+            "Forms — a public or authenticated URL that drops a new row. Per-form branding (logo + accent), required-field validation, and Turnstile gating for public forms. " +
+            "Kanban — group rows by a single-select column and drag between columns to update status. " +
+            "Calendar — pin rows to a date column and view them month / week. " +
+            "Workflows — multi-step automation that fires on row create / update; steps can send email, set fields, or pause for human approval (see /help/approvals).",
+        },
+        {
+          heading: 'Where records lives',
+          body:
+            "The Records nav group exposes per-sheet pages: list, detail, sheet builder, form builder, and per-sheet workflow editor. Tenant admins create sheets; users with the right per-sheet role can edit rows. The full feature set still has rough edges in places — surface bugs to the team rather than working around them.",
+        },
+      ],
+    },
   },
   approvals: {
     headline: 'Approvals',
     well:
-      'Approvals are workflow steps that pause on a human decision. The decision page is a magic-link URL — recipients can approve, reject, or comment without logging in.',
+      'Approvals are workflow steps that pause on a human decision. The decision page is a magic-link URL, so recipients can approve, reject, or comment without logging in.',
+    help: {
+      sections: [
+        {
+          heading: 'What an approval is',
+          body:
+            "An approval is a workflow step that pauses execution and waits on a human's decision before continuing. Approvals are created by a workflow run (Records sheet workflows can include an approval step) and routed to one or more recipients identified by email. Each recipient gets a magic-link URL — the URL itself is the credential, so they can approve, reject, or comment without logging in.",
+        },
+        {
+          heading: 'The decision page',
+          body:
+            "The magic link drops the recipient on a no-login decision page that shows the row context, the approval question, and three actions: Approve, Reject, Comment. Comments don't resolve the approval; they're optional notes that surface on the workflow run for the next decider. Once approved or rejected, the link is single-use — re-visiting shows the resolved state. " +
+            "Tokens are scoped to the specific approval step; revoking a recipient's access means cancelling the approval (and the workflow run with it).",
+        },
+        {
+          heading: 'Common questions',
+          body:
+            "Magic link expired? Approvals don't have a hard expiry, but cancelling the approval invalidates them. Re-trigger the workflow run to issue fresh links. " +
+            "Need everyone's approval (not first-to-decide)? Configure the approval step as 'all' rather than 'any' in the workflow builder. " +
+            "Want to track approvals in a sheet? Create a Records sheet with status / decided-by / decided-at columns and configure the workflow to write the resolution back. The plumbing is sheet-driven; approvals don't carry their own list page.",
+        },
+      ],
+    },
   },
 } as const;
 

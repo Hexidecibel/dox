@@ -32,6 +32,10 @@ import {
   Delete as DeleteIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 const DELIVERY_METHODS = ['email', 'portal', 'none'] as const;
 type DeliveryMethod = typeof DELIVERY_METHODS[number];
@@ -232,6 +236,10 @@ export function CustomerDetail() {
         </Alert>
       )}
 
+      <HelpWell id="customers.detail" title={helpContent.customers.detail?.headline ?? 'Customer detail'}>
+        {helpContent.customers.detail?.well ?? helpContent.customers.well}
+      </HelpWell>
+
       {/* Header */}
       <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
         <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 2 }}>
@@ -240,23 +248,30 @@ export function CustomerDetail() {
               <Typography variant="h4" fontWeight={700}>
                 {customer.name}
               </Typography>
-              <Chip
-                label={customer.coa_delivery_method}
-                size="small"
-                color={deliveryMethodColor(customer.coa_delivery_method)}
-                variant="outlined"
-              />
-              <Chip
-                label={customer.active ? 'Active' : 'Inactive'}
-                size="small"
-                color={customer.active ? 'success' : 'default'}
-                variant="outlined"
-              />
+              <Tooltip title={helpContent.customers.list?.columnTooltips?.coaDelivery ?? ''}>
+                <Chip
+                  label={customer.coa_delivery_method}
+                  size="small"
+                  color={deliveryMethodColor(customer.coa_delivery_method)}
+                  variant="outlined"
+                />
+              </Tooltip>
+              <Tooltip title={helpContent.customers.list?.columnTooltips?.status ?? ''}>
+                <Chip
+                  label={customer.active ? 'Active' : 'Inactive'}
+                  size="small"
+                  color={customer.active ? 'success' : 'default'}
+                  variant="outlined"
+                />
+              </Tooltip>
             </Box>
-            <Typography variant="body2" color="text.secondary">
-              Customer #{customer.customer_number}
-              {customer.email && <> &middot; {customer.email}</>}
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
+              <Typography variant="body2" color="text.secondary">
+                Customer #{customer.customer_number}
+                {customer.email && <> &middot; {customer.email}</>}
+              </Typography>
+              <InfoTooltip text={helpContent.customers.list?.columnTooltips?.customerNumber} />
+            </Box>
           </Box>
           <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
             <Tooltip title="Edit">
@@ -436,9 +451,10 @@ export function CustomerDetail() {
             <CircularProgress size={24} />
           </Box>
         ) : orders.length === 0 ? (
-          <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}>
-            <Typography color="text.secondary">No orders found for this customer</Typography>
-          </Paper>
+          <EmptyState
+            title="No orders for this customer"
+            description="Orders show up here once a connector ingests one for this customer or one is entered manually. Customer matching is by customer_number first, then customer_name as a fallback."
+          />
         ) : (
           <>
             <TableContainer component={Paper} variant="outlined">
