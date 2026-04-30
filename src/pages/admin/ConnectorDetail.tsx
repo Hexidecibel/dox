@@ -103,6 +103,21 @@ interface Connector {
    * legacy connectors created before the auto-generate flow shipped;
    * those need a rotation to bootstrap. */
   api_token: string | null;
+  /** Phase B3 — per-connector S3 drop bucket. NULL until the owner
+   * provisions it via the "Set up S3 drop" affordance. Auto-set on
+   * fresh connector create when the env has the CF API token. */
+  r2_bucket_name: string | null;
+  /** Phase B3 — vendor-facing R2 access key id. Plaintext at rest is
+   * fine — paired with a per-bucket-scoped secret that's rotatable. */
+  r2_access_key_id: string | null;
+  /** Phase B3 — server-side flag indicating the encrypted secret
+   * exists in the DB. The plaintext secret is NOT recoverable from
+   * the row; we only show it ONCE on provision/rotate. */
+  has_r2_secret: boolean;
+  /** Phase B3 — R2 S3-compatible endpoint URL. Comes from the GET
+   * response when the env has CLOUDFLARE_ACCOUNT_ID configured.
+   * Blank in local dev / dev shells without that secret. */
+  r2_endpoint: string | null;
 }
 
 interface ConnectorRun {
@@ -180,6 +195,10 @@ function normalizeConnector(raw: unknown): Connector {
     tenant_id: String(r.tenant_id ?? ''),
     sample_r2_key: (r.sample_r2_key as string | null) ?? null,
     api_token: (r.api_token as string | null) ?? null,
+    r2_bucket_name: (r.r2_bucket_name as string | null) ?? null,
+    r2_access_key_id: (r.r2_access_key_id as string | null) ?? null,
+    has_r2_secret: !!r.has_r2_secret,
+    r2_endpoint: (r.r2_endpoint as string | null) ?? null,
   };
 }
 
@@ -830,6 +849,40 @@ export function ConnectorDetail() {
         onTokenRotated={(newToken) => {
           setConnector({ ...connector, api_token: newToken });
           setSaveSnack('API token rotated. Old token has stopped working.');
+        }}
+        onError={(msg) => setError(msg)}
+      />
+
+      {/* ------------------------------------------------------------ */}
+      {/* S3 drop card — Phase B3 auto-provisioned per-connector       */}
+      {/* bucket. Vendors point any S3-compatible tool (aws cli, rclone,*/}
+      {/* boto3) at the bucket using the access key + secret. Lazy      */}
+      {/* bring-up affordance for connectors without a bucket yet.      */}
+      {/* ------------------------------------------------------------ */}
+      <S3DropCard
+        connector={connector}
+        onProvisioned={(creds) => {
+          setConnector({
+            ...connector,
+            r2_bucket_name: creds.bucket_name,
+            r2_access_key_id: creds.access_key_id,
+            has_r2_secret: true,
+            r2_endpoint: creds.endpoint,
+          });
+          setSaveSnack(
+            'S3 drop provisioned. Copy the secret access key now — it is shown only once.',
+          );
+        }}
+        onRotated={(creds) => {
+          setConnector({
+            ...connector,
+            r2_access_key_id: creds.access_key_id,
+            has_r2_secret: true,
+            r2_endpoint: creds.endpoint,
+          });
+          setSaveSnack(
+            'R2 token rotated. Copy the new secret now — the old token has stopped working.',
+          );
         }}
         onError={(msg) => setError(msg)}
       />
@@ -1699,6 +1752,376 @@ function ApiDropCard({
             color="warning"
             variant="contained"
             onClick={() => performRotate(false)}
+            disabled={rotating}
+          >
+            {rotating ? 'Rotating…' : 'Rotate now'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Paper>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// S3DropCard — Phase B3 per-connector S3 drop bucket surface.
+// ---------------------------------------------------------------------------
+
+/**
+ * Renders the per-connector S3 drop card. Two states:
+ *
+ *   1. Not provisioned (`r2_bucket_name === null`): single
+ *      "Set up S3 drop" button + brief explanation. Click hits
+ *      `POST /api/connectors/:id/r2/provision` and transitions the
+ *      card to the populated state with the plaintext secret visible.
+ *
+ *   2. Provisioned: shows endpoint, bucket, access key id, masked
+ *      secret with "rotate to view" link, and a copy-pasteable
+ *      `aws s3 cp` example. The secret is only visible immediately
+ *      after provision/rotate — once the user navigates away or
+ *      re-loads the page we can't recover it (we don't keep a
+ *      decryptable copy of the plaintext).
+ *
+ * Rotation hard-cuts: a confirm dialog warns "old token will stop
+ * working immediately" before issuing the rotate.
+ */
+function S3DropCard({
+  connector,
+  onProvisioned,
+  onRotated,
+  onError,
+}: {
+  connector: Connector;
+  onProvisioned: (creds: {
+    bucket_name: string;
+    access_key_id: string;
+    secret_access_key: string;
+    endpoint: string;
+  }) => void;
+  onRotated: (creds: {
+    bucket_name: string;
+    access_key_id: string;
+    secret_access_key: string;
+    endpoint: string;
+  }) => void;
+  onError: (message: string) => void;
+}) {
+  const [provisioning, setProvisioning] = useState(false);
+  const [rotating, setRotating] = useState(false);
+  const [confirmRotateOpen, setConfirmRotateOpen] = useState(false);
+  // Only populated immediately after a successful provision/rotate.
+  // Cleared on next page navigation; we deliberately do NOT cache it
+  // in localStorage because it's a vendor-facing secret.
+  const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
+  const [showSecret, setShowSecret] = useState(false);
+
+  const isProvisioned = !!connector.r2_bucket_name;
+  // Endpoint is always derivable on the server; in local dev / unit
+  // tests where the GET response doesn't include it we fall back to
+  // a placeholder so the UI doesn't render "null" verbatim.
+  const endpoint = connector.r2_endpoint || '<endpoint-from-server>';
+
+  const copyToClipboard = (text: string) => {
+    try {
+      navigator.clipboard?.writeText(text);
+    } catch {
+      /* no-op */
+    }
+  };
+
+  const performProvision = async () => {
+    setProvisioning(true);
+    try {
+      const creds = await api.connectors.provisionR2(connector.id);
+      setRevealedSecret(creds.secret_access_key);
+      setShowSecret(true);
+      onProvisioned(creds);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to provision S3 drop');
+    } finally {
+      setProvisioning(false);
+    }
+  };
+
+  const performRotate = async () => {
+    setRotating(true);
+    try {
+      const creds = await api.connectors.rotateR2(connector.id);
+      setRevealedSecret(creds.secret_access_key);
+      setShowSecret(true);
+      setConfirmRotateOpen(false);
+      onRotated(creds);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to rotate R2 token');
+    } finally {
+      setRotating(false);
+    }
+  };
+
+  const secretDisplay = (() => {
+    if (!isProvisioned) return '';
+    if (revealedSecret && showSecret) return revealedSecret;
+    if (revealedSecret && !showSecret) {
+      return `${'•'.repeat(Math.max(0, revealedSecret.length - 4))}${revealedSecret.slice(-4)}`;
+    }
+    // No revealed secret — DB has it encrypted but we don't keep a
+    // decryptable copy. User has to rotate to see a fresh value.
+    return '(rotate to view)';
+  })();
+
+  // aws-cli example using real values when we have them and clear
+  // placeholders when we don't.
+  const awsCliExample = (() => {
+    if (!isProvisioned) return '';
+    const bucket = connector.r2_bucket_name!;
+    const keyId = connector.r2_access_key_id ?? '<access-key-id>';
+    const secret = revealedSecret && showSecret ? revealedSecret : '<secret-access-key>';
+    return [
+      '# Configure once (writes to ~/.aws/credentials):',
+      `aws configure set aws_access_key_id ${keyId} --profile dox-${connector.slug ?? connector.id}`,
+      `aws configure set aws_secret_access_key ${secret} --profile dox-${connector.slug ?? connector.id}`,
+      '',
+      '# Then upload files:',
+      'aws s3 cp /path/to/file.csv \\',
+      `  s3://${bucket}/ \\`,
+      `  --endpoint-url ${endpoint} \\`,
+      `  --profile dox-${connector.slug ?? connector.id}`,
+    ].join('\n');
+  })();
+
+  return (
+    <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+        <UploadIcon fontSize="small" color="action" />
+        <Typography variant="h6" fontWeight={600}>
+          S3 drop
+        </Typography>
+      </Stack>
+      <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
+        Vendor-facing S3 drop bucket. Anyone with the access key + secret
+        below can upload via aws-cli, rclone, boto3, or any other
+        S3-compatible tool. New files are ingested within 5 minutes.
+      </Typography>
+
+      {!isProvisioned ? (
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Alert severity="info" sx={{ flex: 1 }}>
+            No bucket yet — provision one to enable the S3 drop door.
+            Provisioning creates a dedicated bucket and a vendor-scoped
+            R2 access token.
+          </Alert>
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<KeyIcon fontSize="small" />}
+            onClick={performProvision}
+            disabled={provisioning}
+          >
+            {provisioning ? 'Provisioning…' : 'Set up S3 drop'}
+          </Button>
+        </Stack>
+      ) : (
+        <>
+          {/* Endpoint */}
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Endpoint
+            </Typography>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <TextField
+                size="small"
+                fullWidth
+                value={endpoint}
+                InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
+                inputProps={{ 'aria-label': 'R2 S3-compatible endpoint URL' }}
+              />
+              <Tooltip title="Copy endpoint URL">
+                <Button size="small" onClick={() => copyToClipboard(endpoint)}>
+                  <CopyIcon fontSize="small" />
+                </Button>
+              </Tooltip>
+            </Stack>
+          </Box>
+
+          {/* Bucket */}
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Bucket
+            </Typography>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <TextField
+                size="small"
+                fullWidth
+                value={connector.r2_bucket_name ?? ''}
+                InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
+                inputProps={{ 'aria-label': 'R2 bucket name' }}
+              />
+              <Tooltip title="Copy bucket name">
+                <Button
+                  size="small"
+                  onClick={() =>
+                    connector.r2_bucket_name && copyToClipboard(connector.r2_bucket_name)
+                  }
+                >
+                  <CopyIcon fontSize="small" />
+                </Button>
+              </Tooltip>
+            </Stack>
+          </Box>
+
+          {/* Access key id */}
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Access key ID
+            </Typography>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <TextField
+                size="small"
+                fullWidth
+                value={connector.r2_access_key_id ?? ''}
+                InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
+                inputProps={{ 'aria-label': 'R2 access key ID' }}
+              />
+              <Tooltip title="Copy access key ID">
+                <Button
+                  size="small"
+                  onClick={() =>
+                    connector.r2_access_key_id &&
+                    copyToClipboard(connector.r2_access_key_id)
+                  }
+                >
+                  <CopyIcon fontSize="small" />
+                </Button>
+              </Tooltip>
+            </Stack>
+          </Box>
+
+          {/* Secret */}
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Secret access key
+            </Typography>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <TextField
+                size="small"
+                fullWidth
+                value={secretDisplay}
+                InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
+                inputProps={{ 'aria-label': 'R2 secret access key' }}
+              />
+              {revealedSecret && (
+                <Tooltip title={showSecret ? 'Hide secret' : 'Show secret'}>
+                  <Button
+                    size="small"
+                    onClick={() => setShowSecret((s) => !s)}
+                    aria-label={showSecret ? 'Hide secret' : 'Show secret'}
+                  >
+                    {showSecret ? <HideIcon fontSize="small" /> : <ShowIcon fontSize="small" />}
+                  </Button>
+                </Tooltip>
+              )}
+              {revealedSecret && (
+                <Tooltip title="Copy secret">
+                  <Button size="small" onClick={() => copyToClipboard(revealedSecret)}>
+                    <CopyIcon fontSize="small" />
+                  </Button>
+                </Tooltip>
+              )}
+              <Tooltip title="Rotate token (old credentials stop working immediately)">
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="warning"
+                  startIcon={<RotateIcon fontSize="small" />}
+                  onClick={() => setConfirmRotateOpen(true)}
+                  disabled={rotating}
+                >
+                  Rotate
+                </Button>
+              </Tooltip>
+            </Stack>
+            {!revealedSecret && (
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                The secret is only visible immediately after provisioning or
+                rotation. We do not keep a recoverable copy — rotate to issue
+                a fresh secret.
+              </Typography>
+            )}
+            {revealedSecret && (
+              <Typography variant="caption" color="warning.main" display="block" sx={{ mt: 0.5 }}>
+                Copy this secret now. It will not be visible again after you
+                leave this page.
+              </Typography>
+            )}
+          </Box>
+
+          {/* Vendor instructions */}
+          <Box>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Vendor instructions
+            </Typography>
+            <Box
+              sx={{
+                position: 'relative',
+                p: 1.5,
+                pr: 5,
+                bgcolor: 'grey.900',
+                color: 'grey.50',
+                borderRadius: 1,
+                fontFamily: 'monospace',
+                fontSize: '0.8rem',
+                whiteSpace: 'pre',
+                overflowX: 'auto',
+              }}
+            >
+              <Tooltip title="Copy aws-cli example">
+                <Button
+                  size="small"
+                  onClick={() => copyToClipboard(awsCliExample)}
+                  sx={{
+                    position: 'absolute',
+                    top: 4,
+                    right: 4,
+                    minWidth: 0,
+                    color: 'grey.50',
+                    '&:hover': { bgcolor: 'rgba(255,255,255,0.1)' },
+                  }}
+                >
+                  <CopyIcon fontSize="small" />
+                </Button>
+              </Tooltip>
+              {awsCliExample}
+            </Box>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+              Works with any S3-compatible client (aws-cli, rclone, boto3,
+              etc.). Files dropped into this bucket are ingested by the
+              5-minute poller and surface in the runs panel below.
+            </Typography>
+          </Box>
+        </>
+      )}
+
+      {/* Rotate confirmation */}
+      <Dialog
+        open={confirmRotateOpen}
+        onClose={() => !rotating && setConfirmRotateOpen(false)}
+      >
+        <DialogTitle>Rotate R2 token?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Anyone using the current access key + secret will be locked out
+            immediately. The bucket itself is preserved — only the credentials
+            change. Make sure you have a way to deliver the new secret to the
+            vendor before you rotate.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmRotateOpen(false)} disabled={rotating}>
+            Cancel
+          </Button>
+          <Button
+            color="warning"
+            variant="contained"
+            onClick={performRotate}
             disabled={rotating}
           >
             {rotating ? 'Rotating…' : 'Rotate now'}

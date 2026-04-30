@@ -17,7 +17,7 @@ const VERSION = 'v1';
 const IV_BYTES = 12;
 const KEY_HEX_LEN = 64; // 32 raw bytes
 
-type IntakeEnv = { INTAKE_ENCRYPTION_KEY: string };
+type IntakeEnv = { INTAKE_ENCRYPTION_KEY?: string };
 
 /**
  * Module-scope cache of imported CryptoKeys, keyed by the raw secret

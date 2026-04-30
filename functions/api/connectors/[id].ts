@@ -21,7 +21,15 @@ const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
  * next successful PUT.
  */
 function transformConnector(row: Record<string, unknown>): Record<string, unknown> {
-  const { credentials_encrypted, credentials_iv, field_mappings, ...rest } = row;
+  const {
+    credentials_encrypted,
+    credentials_iv,
+    field_mappings,
+    // Phase B3: never echo the encrypted R2 vendor secret. See the
+    // matching strip in functions/api/connectors/index.ts for rationale.
+    r2_secret_access_key_encrypted,
+    ...rest
+  } = row;
   let parsedMappings: unknown = field_mappings;
   if (typeof field_mappings === 'string') {
     try {
@@ -34,6 +42,7 @@ function transformConnector(row: Record<string, unknown>): Record<string, unknow
     ...rest,
     field_mappings: normalizeFieldMappings(parsedMappings),
     has_credentials: !!(credentials_encrypted && credentials_iv),
+    has_r2_secret: !!r2_secret_access_key_encrypted,
   };
 }
 
@@ -63,8 +72,16 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       throw new NotFoundError('Connector not found');
     }
 
+    const transformed = transformConnector(connector);
+    // Phase B3: include the R2 S3-compat endpoint in the GET response
+    // when an account id is configured. The UI's S3-drop card needs
+    // it to render the vendor instructions, and exposing it here
+    // keeps the frontend from needing a separate /api/config call.
+    if (context.env.CLOUDFLARE_ACCOUNT_ID) {
+      transformed.r2_endpoint = `https://${context.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+    }
     return new Response(
-      JSON.stringify({ connector: transformConnector(connector) }),
+      JSON.stringify({ connector: transformed }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (err) {

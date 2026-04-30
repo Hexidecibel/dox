@@ -27,6 +27,22 @@ export interface Env {
    * Phase B3 S3-drop). Set per-environment as a Pages secret.
    */
   INTAKE_ENCRYPTION_KEY?: string;
+  /**
+   * Cloudflare account ID (32-char hex). Used by the Phase B3 R2
+   * provisioning helper to address the account in `POST
+   * /accounts/<id>/r2/buckets` and `POST /accounts/<id>/tokens`. Also
+   * surfaced to the UI so the S3-drop card can render the
+   * `https://<account>.r2.cloudflarestorage.com` endpoint vendors plug
+   * into their tools.
+   */
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  /**
+   * Cloudflare API token with permissions to manage R2 buckets and
+   * mint per-bucket-scoped R2 access tokens. Used SERVER-SIDE ONLY by
+   * `functions/lib/connectors/provisionR2.ts` — never echoed to the
+   * client.
+   */
+  CLOUDFLARE_API_TOKEN?: string;
 }
 
 export interface User {

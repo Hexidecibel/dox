@@ -50,6 +50,7 @@ export type ConnectorRunSource =
   | 'email'
   | 'webhook'
   | 'r2_poll'
+  | 's3'
   | 'public_link'
   | 'api_poll';
 

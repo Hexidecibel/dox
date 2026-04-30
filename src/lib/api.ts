@@ -1170,6 +1170,40 @@ export const api = {
         { method: 'POST' },
       );
     },
+    /**
+     * POST /api/connectors/:id/r2/provision
+     *
+     * Phase B3 — lazy bring-up of the per-connector S3 drop bucket.
+     * Returns the vendor-facing creds; the secret is plaintext ONCE
+     * and must be displayed immediately to the user. Subsequent reads
+     * of the connector return the secret as redacted.
+     */
+    provisionR2(id: string) {
+      return fetchApi<{
+        bucket_name: string;
+        access_key_id: string;
+        secret_access_key: string;
+        endpoint: string;
+        provisioned_at: string;
+      }>(`/connectors/${id}/r2/provision`, { method: 'POST' });
+    },
+    /**
+     * POST /api/connectors/:id/r2/rotate
+     *
+     * Phase B3 — rotate the vendor R2 token. Revokes the existing CF
+     * token and mints a fresh one against the same bucket. The new
+     * secret is plaintext ONCE; the old token stops working
+     * immediately.
+     */
+    rotateR2(id: string) {
+      return fetchApi<{
+        bucket_name: string;
+        access_key_id: string;
+        secret_access_key: string;
+        endpoint: string;
+        rotated_at: string;
+      }>(`/connectors/${id}/r2/rotate`, { method: 'POST' });
+    },
   },
 
   orders: {

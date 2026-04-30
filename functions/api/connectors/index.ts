@@ -7,6 +7,8 @@ import {
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import { encryptCredentials } from '../../lib/connectors/crypto';
+import { provisionConnectorBucket } from '../../lib/connectors/provisionR2';
+import { encryptIntakeSecret } from '../../lib/intakeEncryption';
 import type { Env, User } from '../../lib/types';
 import { normalizeFieldMappings, validateFieldMappings } from '../../../shared/fieldMappings';
 import {
@@ -41,7 +43,17 @@ function generateApiTokenForConnector(): string {
  * in the DB on GET — that happens on the next PUT.
  */
 function transformConnector(row: Record<string, unknown>): Record<string, unknown> {
-  const { credentials_encrypted, credentials_iv, field_mappings, ...rest } = row;
+  const {
+    credentials_encrypted,
+    credentials_iv,
+    field_mappings,
+    // Phase B3: never echo the encrypted R2 vendor secret on read.
+    // The plaintext is shown ONCE at provision/rotation time and then
+    // stays server-side. The UI surfaces a "Rotate to view" affordance
+    // since we don't keep a recoverable copy.
+    r2_secret_access_key_encrypted,
+    ...rest
+  } = row;
   let parsedMappings: unknown = field_mappings;
   if (typeof field_mappings === 'string') {
     try {
@@ -54,6 +66,8 @@ function transformConnector(row: Record<string, unknown>): Record<string, unknow
     ...rest,
     field_mappings: normalizeFieldMappings(parsedMappings),
     has_credentials: !!(credentials_encrypted && credentials_iv),
+    // Sentinel flag the UI uses to render the "rotate to view" surface.
+    has_r2_secret: !!r2_secret_access_key_encrypted,
   };
 }
 
@@ -329,6 +343,54 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       JSON.stringify({ name, slug: requestedSlug, system_type: systemType }),
       getClientIp(context.request)
     );
+
+    // Phase B3: best-effort R2 bucket provisioning on create. Failure
+    // is NON-fatal — the row already exists, columns stay NULL, and the
+    // ConnectorDetail "Set up S3 drop" affordance lets the owner retry.
+    // Skip silently if the CF env vars aren't configured (local dev).
+    if (
+      context.env.CLOUDFLARE_ACCOUNT_ID &&
+      context.env.CLOUDFLARE_API_TOKEN &&
+      context.env.INTAKE_ENCRYPTION_KEY
+    ) {
+      try {
+        const creds = await provisionConnectorBucket(context.env, {
+          id,
+          slug: requestedSlug,
+        });
+        const encryptedSecret = await encryptIntakeSecret(
+          creds.secret_access_key,
+          context.env,
+        );
+        await context.env.DB.prepare(
+          `UPDATE connectors
+              SET r2_bucket_name = ?,
+                  r2_access_key_id = ?,
+                  r2_secret_access_key_encrypted = ?,
+                  r2_cf_token_id = ?,
+                  updated_at = datetime('now')
+            WHERE id = ?`,
+        )
+          .bind(
+            creds.bucket_name,
+            creds.access_key_id,
+            encryptedSecret,
+            creds.cf_token_id,
+            id,
+          )
+          .run();
+      } catch (provisionErr) {
+        // Don't block connector creation on a CF API hiccup — surface
+        // it in the logs and leave the columns NULL. The UI's "Set up
+        // S3 drop" button calls POST /api/connectors/<id>/r2/provision
+        // for retry.
+        console.warn(
+          `R2 provisioning failed for connector ${id} (${requestedSlug}): ${
+            provisionErr instanceof Error ? provisionErr.message : String(provisionErr)
+          }`,
+        );
+      }
+    }
 
     const connector = await context.env.DB.prepare(
       `SELECT c.*, u.name as created_by_name, t.name as tenant_name

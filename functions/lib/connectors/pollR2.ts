@@ -1,40 +1,44 @@
 /**
- * Scheduled R2-prefix poller (Phase B0 universal-doors model).
+ * Scheduled S3-bucket poller — Phase B3 universal-doors model.
  *
- * Companion to `executeConnectorRun` — does NOT reimplement run/dedup
- * logic locally. The poller is responsible for:
+ * Each connector that has been provisioned with an R2 bucket
+ * (`connectors.r2_bucket_name IS NOT NULL`) opts into the 5-minute
+ * cron poll. The poller:
  *
- *   1. Discovering active connectors with a non-empty `config.r2_prefix`
- *      value (any connector can opt into the R2-poll door).
- *   2. Listing R2 objects under each prefix (bounded).
- *   3. Filtering out keys we've already dispatched (via the
- *      `connector_processed_keys` table — migration 0046).
- *   4. Calling `executeConnectorRun` for each new key.
- *   5. On non-throwing run completion, recording the `(connector_id,
- *      r2_key)` pair so the next tick skips it.
+ *   1. Discovers active, non-deleted connectors with a non-NULL
+ *      bucket name.
+ *   2. Decrypts the connector's R2 secret access key.
+ *   3. Issues a SigV4-signed `ListObjectsV2` against the bucket via
+ *      R2's S3-compatible endpoint
+ *      (https://<account>.r2.cloudflarestorage.com/<bucket>).
+ *   4. Filters out keys already present in `connector_processed_keys`
+ *      (migration 0046).
+ *   5. SigV4-signs a GET for each new key, pulls the bytes inline,
+ *      and dispatches via `executeConnectorRun({ source: 's3', ... })`.
+ *   6. Records the `(connector_id, r2_key)` dedup row on success.
  *
- * On run failure (executor throws), we deliberately do NOT mark the key
- * as processed — `connector_runs` already captured the error, and the
- * next tick will retry. Status="error" runs (errors collected on the
- * output) DO get the dedup row written: they completed without
- * throwing, just had per-record problems. Reprocessing them would
- * stamp another `connector_runs` row with the same errors.
+ * Per-tick caps: 100 keys listed per connector, 25 dispatched
+ * globally. Identical numbers to the legacy `r2_prefix` poller — same
+ * cron budget.
  *
- * This file MUST stay pure backend — no React, no MUI, no DOM types.
- * It's invoked from `functions/api/connectors/poll.ts` (driven by the
- * companion Worker `workers/connector-poller/`).
+ * Failure handling matches the previous incarnation: per-record errors
+ * captured in the run row but the dedup row IS written (re-running
+ * won't fix a malformed CSV); throwing errors leave the dedup row
+ * unwritten so the next tick retries.
+ *
+ * Legacy `config.r2_prefix` mode is removed — every R2 drop now lives
+ * in its own per-connector bucket.
  */
 
+import { AwsClient } from 'aws4fetch';
 import type { Env } from '../types';
 import { generateId } from '../db';
 import { decryptCredentials } from './crypto';
+import { decryptIntakeSecret } from '../intakeEncryption';
 import { executeConnectorRun } from './orchestrator';
 import { normalizeFieldMappings } from '../../../shared/fieldMappings';
 
-/**
- * Per-tick budget. A burst of new files across many connectors must not
- * blow the cron budget — we cap dispatch volume globally and per-list.
- */
+/** Per-tick budgets. */
 export const MAX_FILES_PER_TICK = 25;
 export const MAX_KEYS_PER_CONNECTOR = 100;
 
@@ -45,11 +49,14 @@ interface ConnectorRow {
   field_mappings: string | null;
   credentials_encrypted: string | null;
   credentials_iv: string | null;
+  r2_bucket_name: string;
+  r2_access_key_id: string | null;
+  r2_secret_access_key_encrypted: string | null;
 }
 
 export interface PollConnectorSummary {
   connector_id: string;
-  prefix: string;
+  bucket: string;
   listed: number;
   dispatched: number;
   skipped_already_processed: number;
@@ -64,37 +71,9 @@ export interface PollSummary {
   truncated: boolean;
 }
 
-/**
- * Resolve the basename of an R2 key — strip directory components.
- *
- * The fileWatch executor uses `fileName` for content-type inference and
- * for writing into the orchestrator's `info` channel. Keeping it as the
- * basename matches manual-upload semantics (where the user drops
- * `coa-2026-04-29.pdf`, not `imports/test/coa-2026-04-29.pdf`).
- */
 function basename(key: string): string {
   const idx = key.lastIndexOf('/');
   return idx >= 0 ? key.slice(idx + 1) : key;
-}
-
-/**
- * Pluck `config.r2_prefix` from a stored JSON blob safely.
- * Returns `null` for missing/empty/non-string values.
- */
-function readPrefix(rawConfig: string | null): string | null {
-  if (!rawConfig) return null;
-  try {
-    const parsed = JSON.parse(rawConfig);
-    if (parsed && typeof parsed === 'object') {
-      const v = (parsed as Record<string, unknown>).r2_prefix;
-      if (typeof v === 'string' && v.trim().length > 0) {
-        return v;
-      }
-    }
-  } catch {
-    /* fallthrough */
-  }
-  return null;
 }
 
 function parseConfig(rawConfig: string | null): Record<string, unknown> {
@@ -120,12 +99,99 @@ function parseFieldMappings(raw: string | null): unknown {
 }
 
 /**
- * Poll all active file_watch connectors that have a non-empty
- * `config.r2_prefix` and dispatch a run for each new R2 object found.
+ * Extract `<Key>...</Key>` values from an S3 ListObjectsV2 XML
+ * response. R2 returns a standard S3-compatible XML envelope; we
+ * extract the keys via a tight regex rather than pulling in a full
+ * XML parser. This is deliberate — the LIST response shape is stable
+ * and we only need the key strings.
  *
- * Returns a summary describing what was checked / dispatched. Never
- * throws under normal operation: per-connector failures are captured
- * in the summary's `errors` array.
+ * Exported for unit testing.
+ */
+export function parseListKeys(xml: string): string[] {
+  const out: string[] = [];
+  const re = /<Key>([^<]+)<\/Key>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    // Decode the handful of XML entities S3 emits in keys.
+    const decoded = m[1]
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
+    out.push(decoded);
+  }
+  return out;
+}
+
+/**
+ * Build an S3-compat AwsClient bound to a single connector's
+ * credentials. Region is always `auto` for R2.
+ */
+function makeAwsClient(accessKeyId: string, secretAccessKey: string): AwsClient {
+  return new AwsClient({
+    accessKeyId,
+    secretAccessKey,
+    service: 's3',
+    region: 'auto',
+  });
+}
+
+/**
+ * SigV4-signed ListObjectsV2 request to R2's S3-compat endpoint.
+ * Returns the raw key list capped to MAX_KEYS_PER_CONNECTOR by the
+ * `max-keys` query param.
+ */
+async function listBucketKeys(
+  aws: AwsClient,
+  endpoint: string,
+  bucket: string,
+): Promise<string[]> {
+  const url =
+    `${endpoint}/${bucket}/?list-type=2&max-keys=${MAX_KEYS_PER_CONNECTOR}`;
+  const res = await aws.fetch(url, { method: 'GET' });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`S3 LIST failed: ${res.status} ${body.slice(0, 200)}`);
+  }
+  const xml = await res.text();
+  return parseListKeys(xml);
+}
+
+/**
+ * SigV4-signed GET against R2 for a single object. Returns the file
+ * bytes + content type header as reported by R2 (which we forward
+ * into the orchestrator so the parser routes correctly).
+ */
+async function getBucketObject(
+  aws: AwsClient,
+  endpoint: string,
+  bucket: string,
+  key: string,
+): Promise<{ buffer: ArrayBuffer; contentType: string }> {
+  // S3 path-style: /<bucket>/<key>. Encode each path segment so keys
+  // with spaces or `+` round-trip correctly.
+  const encodedKey = key
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  const url = `${endpoint}/${bucket}/${encodedKey}`;
+  const res = await aws.fetch(url, { method: 'GET' });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`S3 GET failed: ${res.status} ${body.slice(0, 200)}`);
+  }
+  const contentType =
+    res.headers.get('content-type') || 'application/octet-stream';
+  const buffer = await res.arrayBuffer();
+  return { buffer, contentType };
+}
+
+/**
+ * Poll all active connectors that have an R2 bucket provisioned and
+ * dispatch a run for each new object. Never throws under normal
+ * operation — per-connector failures land in the summary's `errors`
+ * array.
  */
 export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
   const result: PollSummary = {
@@ -136,21 +202,25 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
     truncated: false,
   };
 
-  // Phase B0 universal model: any active, non-deleted connector with a
-  // configured r2_prefix is a poller candidate. JSON_EXTRACT works on D1
-  // (SQLite) for our simple top-level key — null/missing values won't
-  // satisfy the LIKE so empty configs are filtered server-side. We still
-  // re-validate prefix in JS because JSON_EXTRACT on a string config that
-  // happens to be invalid JSON would silently return NULL.
+  if (!env.CLOUDFLARE_ACCOUNT_ID) {
+    // Fail closed: without an account id we can't address R2's S3 endpoint.
+    // Tick returns an empty summary so the cron worker doesn't blow up.
+    return result;
+  }
+  const endpoint = `https://${env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+
   const rows = await env.DB
     .prepare(
       `SELECT id, tenant_id, config, field_mappings,
-              credentials_encrypted, credentials_iv
+              credentials_encrypted, credentials_iv,
+              r2_bucket_name, r2_access_key_id,
+              r2_secret_access_key_encrypted
          FROM connectors
         WHERE active = 1
           AND deleted_at IS NULL
-          AND JSON_EXTRACT(config, '$.r2_prefix') IS NOT NULL
-          AND TRIM(JSON_EXTRACT(config, '$.r2_prefix')) <> ''`
+          AND r2_bucket_name IS NOT NULL
+          AND r2_access_key_id IS NOT NULL
+          AND r2_secret_access_key_encrypted IS NOT NULL`,
     )
     .all<ConnectorRow>();
 
@@ -162,14 +232,11 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
       break;
     }
 
-    const prefix = readPrefix(row.config);
-    if (!prefix) continue; // shouldn't happen given the SQL filter
-
     result.connectors_checked++;
 
     const summary: PollConnectorSummary = {
       connector_id: row.id,
-      prefix,
+      bucket: row.r2_bucket_name,
       listed: 0,
       dispatched: 0,
       skipped_already_processed: 0,
@@ -177,14 +244,30 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
     };
 
     try {
-      const listed = await env.FILES.list({
-        prefix,
-        limit: MAX_KEYS_PER_CONNECTOR,
-      });
+      // Decrypt the per-connector vendor secret. If decryption fails
+      // (e.g. INTAKE_ENCRYPTION_KEY rotated without re-provisioning),
+      // skip this connector — we can't sign requests without the
+      // secret, and surfacing the error in the summary is more useful
+      // than silently 0-listing.
+      let secret: string;
+      try {
+        secret = await decryptIntakeSecret(
+          row.r2_secret_access_key_encrypted as string,
+          env as Env & { INTAKE_ENCRYPTION_KEY: string },
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        summary.errors.push(`decrypt secret failed: ${msg}`);
+        result.total_errors++;
+        result.per_connector.push(summary);
+        continue;
+      }
 
-      summary.listed = listed.objects.length;
+      const aws = makeAwsClient(row.r2_access_key_id as string, secret);
 
-      // Pre-decode config / mappings / credentials once per connector.
+      const keys = await listBucketKeys(aws, endpoint, row.r2_bucket_name);
+      summary.listed = keys.length;
+
       const config = parseConfig(row.config);
       const fieldMappings = normalizeFieldMappings(
         parseFieldMappings(row.field_mappings),
@@ -209,16 +292,14 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
         }
       }
 
-      for (const obj of listed.objects) {
+      for (const key of keys) {
         if (result.total_dispatched >= MAX_FILES_PER_TICK) {
           result.truncated = true;
           break;
         }
 
-        const key = obj.key;
-
         // Dedup: skip if we've already dispatched a run for this
-        // (connector, r2_key) pair.
+        // (connector, bucket-key) pair.
         const existing = await env.DB
           .prepare(
             `SELECT 1 FROM connector_processed_keys
@@ -234,6 +315,17 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
         }
 
         try {
+          // Pull the file bytes via SigV4 — the per-connector bucket
+          // isn't bound to the Worker, so the orchestrator can't
+          // resolve the key from `ctx.r2`. We pass `content` inline
+          // and a synthetic R2 key for the run row.
+          const { buffer, contentType } = await getBucketObject(
+            aws,
+            endpoint,
+            row.r2_bucket_name,
+            key,
+          );
+
           const runResult = await executeConnectorRun({
             db: env.DB,
             r2: env.FILES,
@@ -245,24 +337,20 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
             input: {
               type: 'file_watch',
               fileName: basename(key),
-              r2Key: key,
+              contentType,
+              // Synthetic R2 reference — the actual bytes ride the
+              // `content` channel since the per-connector bucket
+              // isn't bound to the Worker.
+              r2Key: `s3://${row.r2_bucket_name}/${key}`,
+              content: buffer,
             },
-            // Tag the run row so the activity feed can distinguish
-            // scheduled R2 polls from manual uploads even though both
-            // ride the file_watch executor.
-            source: 'r2_poll',
-            // userId omitted — scheduled runs aren't user-attributed.
-            // The orchestrator's audit-log call is gated on userId, so
-            // this just skips the audit row (run row is still written).
+            // 's3' tags this run so the activity feed can distinguish
+            // S3-bucket polls from manual / API drops / email runs.
+            source: 's3',
             qwenUrl: env.QWEN_URL,
             qwenSecret: env.QWEN_SECRET,
           });
 
-          // Record dedup AFTER the run completes without throwing.
-          // status='error' (per-record errors but the executor didn't
-          // throw) still gets a dedup row — reprocessing wouldn't fix
-          // the underlying file format issue, and the run row already
-          // captures the error for the user.
           await env.DB
             .prepare(
               `INSERT OR IGNORE INTO connector_processed_keys
@@ -275,9 +363,6 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
           summary.dispatched++;
           result.total_dispatched++;
         } catch (err) {
-          // Executor threw — DO NOT mark as processed. The next tick
-          // will retry. Capture the error for the response so the
-          // operator can see what happened without tailing logs.
           const msg = err instanceof Error ? err.message : String(err);
           summary.errors.push(`${key}: ${msg}`);
           result.total_errors++;
