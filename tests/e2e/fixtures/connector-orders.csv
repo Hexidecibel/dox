@@ -1,0 +1,9 @@
+order_number,po_number,customer_name,customer_number,product_code,product_name,lot_number,quantity
+ORD-DOOR-001,PO-77001,Doorway Foods,K-DOOR-01,PRD-APL-01,Apples,LOT-A101,24
+ORD-DOOR-002,PO-77002,Doorway Foods,K-DOOR-01,PRD-BER-02,Berries,LOT-B202,12
+ORD-DOOR-003,PO-77003,Threshold Dairy,K-DOOR-02,PRD-MLK-01,Whole Milk,LOT-M303,48
+ORD-DOOR-004,PO-77004,Threshold Dairy,K-DOOR-02,PRD-CHZ-01,Cheddar,LOT-C404,6
+ORD-DOOR-005,PO-77005,Hinge Bakery,K-DOOR-03,PRD-FLR-00,Flour,LOT-F505,30
+ORD-DOOR-006,PO-77006,Hinge Bakery,K-DOOR-03,PRD-SUG-00,Sugar,LOT-S606,18
+ORD-DOOR-007,PO-77007,Lintel Beverages,K-DOOR-04,PRD-JCE-01,Apple Juice,LOT-J707,9
+ORD-DOOR-008,PO-77008,Sill Snacks,K-DOOR-05,PRD-CHP-01,Chips,LOT-P808,15
