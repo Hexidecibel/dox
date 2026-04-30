@@ -76,6 +76,10 @@ import {
 } from '../../components/connectors/doxFields';
 import { FieldMappingEditor } from '../../components/connectors/FieldMappingEditor';
 import { ACCEPTED_CONNECTOR_FILE_EXTENSIONS } from '../../../shared/connectorFileTypes';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 // ---------------------------------------------------------------------------
 // Local types
@@ -679,6 +683,10 @@ export function ConnectorDetail() {
         All Connectors
       </Button>
 
+      <HelpWell id="connectors.detail" title={helpContent.connectors.detail.headline}>
+        {helpContent.connectors.detail.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -737,17 +745,21 @@ export function ConnectorDetail() {
                 size="small"
                 color={connector.active ? 'success' : 'default'}
               />
-              {/* Phase B0.5 slug pill — vendor-facing handle. We mirror
-                  it as the title attr so admins can hover-confirm before
-                  copying it into a vendor email. */}
+              {/* Phase B0.5 slug pill — vendor-facing handle. The
+                  InfoTooltip explains *what* the slug is for; the title
+                  attr remains for admins who want a quick hover-copy
+                  confirmation. */}
               {connector.slug && (
-                <Chip
-                  label={connector.slug}
-                  size="small"
-                  variant="outlined"
-                  title={`URL slug: ${connector.slug}`}
-                  sx={{ fontFamily: 'monospace' }}
-                />
+                <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
+                  <Chip
+                    label={connector.slug}
+                    size="small"
+                    variant="outlined"
+                    title={`URL slug: ${connector.slug}`}
+                    sx={{ fontFamily: 'monospace' }}
+                  />
+                  <InfoTooltip text={helpContent.connectors.detail.slugTooltip} />
+                </Box>
               )}
             </Stack>
             <Typography variant="body2" color="text.secondary">
@@ -837,23 +849,29 @@ export function ConnectorDetail() {
                 </Typography>
               ) : (
                 <Stack direction="row" spacing={2} alignItems="baseline" flexWrap="wrap" useFlexGap>
-                  <Typography variant="h6" fontWeight={600}>
-                    {health.last_24h.dispatched} dispatched
-                  </Typography>
-                  {health.last_24h.success_rate !== null && (
-                    <Typography
-                      variant="body2"
-                      color={
-                        health.last_24h.success_rate >= 90
-                          ? 'success.main'
-                          : health.last_24h.success_rate >= 70
-                            ? 'warning.main'
-                            : 'error.main'
-                      }
-                      fontWeight={600}
-                    >
-                      {health.last_24h.success_rate}% success
+                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
+                    <Typography variant="h6" fontWeight={600}>
+                      {health.last_24h.dispatched} dispatched
                     </Typography>
+                    <InfoTooltip text={helpContent.connectors.detail.healthCard.dispatched24h} />
+                  </Box>
+                  {health.last_24h.success_rate !== null && (
+                    <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
+                      <Typography
+                        variant="body2"
+                        color={
+                          health.last_24h.success_rate >= 90
+                            ? 'success.main'
+                            : health.last_24h.success_rate >= 70
+                              ? 'warning.main'
+                              : 'error.main'
+                        }
+                        fontWeight={600}
+                      >
+                        {health.last_24h.success_rate}% success
+                      </Typography>
+                      <InfoTooltip text={helpContent.connectors.detail.healthCard.successRate} />
+                    </Box>
                   )}
                   {health.last_24h.error > 0 && (
                     <Typography variant="body2" color="error">
@@ -870,7 +888,7 @@ export function ConnectorDetail() {
             </Box>
             {/* Per-source pills — only show non-zero buckets so the row
                 doesn't degenerate into noise on quiet connectors. */}
-            <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+            <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap alignItems="center">
               {Object.entries(health.by_source)
                 .filter(([, count]) => count > 0)
                 .map(([source, count]) => (
@@ -882,6 +900,9 @@ export function ConnectorDetail() {
                     sx={{ fontFamily: 'monospace', fontSize: '0.7rem' }}
                   />
                 ))}
+              {Object.values(health.by_source).some((c) => c > 0) && (
+                <InfoTooltip text={helpContent.connectors.detail.healthCard.perSourceBreakdown} />
+              )}
             </Stack>
           </Stack>
           {health.last_error && (
@@ -900,9 +921,12 @@ export function ConnectorDetail() {
                 </Button>
               }
             >
-              <Typography variant="caption" color="text.secondary">
-                Last error · {formatRelativeTime(health.last_error.started_at)}
-              </Typography>
+              <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Last error · {formatRelativeTime(health.last_error.started_at)}
+                </Typography>
+                <InfoTooltip text={helpContent.connectors.detail.healthCard.lastError} />
+              </Box>
               <Typography
                 variant="body2"
                 sx={{
@@ -940,9 +964,12 @@ export function ConnectorDetail() {
       {/* dropping a file is the most direct way to test a connector.  */}
       {/* ------------------------------------------------------------ */}
       <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
-        <Typography variant="h6" fontWeight={600} sx={{ mb: 0.5 }}>
-          Manual upload
-        </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+          <Typography variant="h6" fontWeight={600}>
+            Manual upload
+          </Typography>
+          <InfoTooltip text={helpContent.connectors.detail.intakeDoorTooltips.manual} />
+        </Box>
           <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
             Drop a file to run this connector against it now. Uses the field
             mappings configured below; results appear in the runs panel below.
@@ -1120,9 +1147,12 @@ export function ConnectorDetail() {
       {/* r2_prefix below.                                              */}
       {/* ------------------------------------------------------------ */}
       <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
-          <Typography variant="h6" fontWeight={600} sx={{ mb: 0.5 }}>
-            Remote drop
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+            <Typography variant="h6" fontWeight={600}>
+              Remote drop
+            </Typography>
+            <InfoTooltip text={helpContent.connectors.detail.intakeDoorTooltips.remote} />
+          </Box>
           <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
             For unattended ingestion. A scheduled poller checks the prefix
             below every 5 minutes and runs this connector against any new
@@ -1184,9 +1214,12 @@ export function ConnectorDetail() {
       <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
           <Box>
-            <Typography variant="h6" fontWeight={600}>
-              Field mappings
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="h6" fontWeight={600}>
+                Field mappings
+              </Typography>
+              <InfoTooltip text={helpContent.connectors.detail.fieldMappingsTooltip} />
+            </Box>
             <Typography variant="caption" color="text.secondary">
               Which source columns map onto canonical dox fields. Changes auto-save on blur.
             </Typography>
@@ -1213,9 +1246,12 @@ export function ConnectorDetail() {
       {/* 5. Sample + Actions card                                      */}
       {/* ------------------------------------------------------------ */}
       <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
-        <Typography variant="h6" fontWeight={600} sx={{ mb: 1 }}>
-          Stored sample
-        </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+          <Typography variant="h6" fontWeight={600}>
+            Stored sample
+          </Typography>
+          <InfoTooltip text={helpContent.connectors.detail.sampleTooltip} />
+        </Box>
         {hasStoredSample ? (
           <>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2, wordBreak: 'break-all' }}>
@@ -1282,20 +1318,48 @@ export function ConnectorDetail() {
             <CircularProgress size={24} />
           </Box>
         ) : runs.length === 0 ? (
-          <Typography color="text.secondary">No runs yet</Typography>
+          <EmptyState
+            title={helpContent.connectors.detail.runsEmptyTitle}
+            description={helpContent.connectors.detail.runsEmptyDescription}
+          />
         ) : (
           <>
             <TableContainer component={Paper} variant="outlined">
               <Table size="small">
                 <TableHead>
                   <TableRow>
-                    <TableCell>Status</TableCell>
-                    <TableCell>Source</TableCell>
+                    <TableCell>
+                      <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                        Status
+                        <InfoTooltip text={helpContent.connectors.detail.runColumnTooltips.status} />
+                      </Box>
+                    </TableCell>
+                    <TableCell>
+                      <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                        Source
+                        <InfoTooltip text={helpContent.connectors.detail.runColumnTooltips.source} />
+                      </Box>
+                    </TableCell>
                     <TableCell>Started</TableCell>
                     <TableCell>Completed</TableCell>
-                    <TableCell align="right">Found</TableCell>
-                    <TableCell align="right">Created</TableCell>
-                    <TableCell align="right">Errors</TableCell>
+                    <TableCell align="right">
+                      <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                        Found
+                        <InfoTooltip text={helpContent.connectors.detail.runColumnTooltips.found} />
+                      </Box>
+                    </TableCell>
+                    <TableCell align="right">
+                      <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                        Created
+                        <InfoTooltip text={helpContent.connectors.detail.runColumnTooltips.created} />
+                      </Box>
+                    </TableCell>
+                    <TableCell align="right">
+                      <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                        Errors
+                        <InfoTooltip text={helpContent.connectors.detail.runColumnTooltips.errors} />
+                      </Box>
+                    </TableCell>
                     <TableCell align="right">Actions</TableCell>
                   </TableRow>
                 </TableHead>
@@ -1593,9 +1657,12 @@ function ReceiveInfoCard({
 
   return (
     <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
-      <Typography variant="h6" fontWeight={600} sx={{ mb: 2 }}>
-        Receive info
-      </Typography>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 2 }}>
+        <Typography variant="h6" fontWeight={600}>
+          Receive info
+        </Typography>
+        <InfoTooltip text={helpContent.connectors.detail.intakeDoorTooltips.email} />
+      </Box>
 
       {isStaging && (
         <Alert severity="warning" sx={{ mb: 2 }}>
@@ -1861,6 +1928,7 @@ function ApiDropCard({
         <Typography variant="h6" fontWeight={600}>
           API drop
         </Typography>
+        <InfoTooltip text={helpContent.connectors.detail.intakeDoorTooltips.api} />
       </Stack>
       <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
         Programmatic intake door. Vendors POST a multipart file body with
@@ -2170,6 +2238,7 @@ function S3DropCard({
         <Typography variant="h6" fontWeight={600}>
           S3 drop
         </Typography>
+        <InfoTooltip text={helpContent.connectors.detail.intakeDoorTooltips.s3} />
       </Stack>
       <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
         Vendor-facing S3 drop bucket. Anyone with the access key + secret
@@ -2532,6 +2601,7 @@ function PublicLinkCard({
         <Typography variant="h6" fontWeight={600}>
           Public drop link
         </Typography>
+        <InfoTooltip text={helpContent.connectors.detail.intakeDoorTooltips.public} />
       </Stack>
       <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
         Tenant-shareable URL. Anyone with the link can upload a file via a

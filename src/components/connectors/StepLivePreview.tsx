@@ -27,6 +27,8 @@ import type {
   PreviewRow,
 } from '../../types/connectorSchema';
 import type { ConnectorFieldMappings } from './doxFields';
+import { HelpWell } from '../HelpWell';
+import { helpContent } from '../../lib/helpContent';
 
 interface StepLivePreviewProps {
   sample: DiscoverSchemaResponse | null;
@@ -110,6 +112,13 @@ export function StepLivePreview({ sample, fieldMappings, onPreviewLoaded }: Step
 
   return (
     <Box>
+      <HelpWell
+        id="connectors.wizard.step.preview"
+        title={helpContent.connectors.wizard.steps.livePreview.headline}
+      >
+        {helpContent.connectors.wizard.steps.livePreview.well}
+      </HelpWell>
+
       <Typography variant="h6" fontWeight={600} sx={{ mb: 1 }}>
         Live preview
       </Typography>

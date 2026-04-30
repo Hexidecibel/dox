@@ -15,6 +15,9 @@ import {
 import type { ConnectorFieldMappings } from './doxFields';
 import type { DiscoverSchemaResponse } from '../../types/connectorSchema';
 import { CORE_FIELD_DEFINITIONS } from './doxFields';
+import { HelpWell } from '../HelpWell';
+import { InfoTooltip } from '../InfoTooltip';
+import { helpContent } from '../../lib/helpContent';
 
 interface WizardState {
   name: string;
@@ -113,6 +116,13 @@ function SummarySection({ state }: { state: WizardState }) {
 export function StepTestAndActivate({ state, onChange }: StepProps) {
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <HelpWell
+        id="connectors.wizard.step.save"
+        title={helpContent.connectors.wizard.steps.save.headline}
+      >
+        {helpContent.connectors.wizard.steps.save.well}
+      </HelpWell>
+
       <Typography variant="h6" fontWeight={600}>
         Review & Activate
       </Typography>
@@ -131,15 +141,18 @@ export function StepTestAndActivate({ state, onChange }: StepProps) {
 
       {/* Activate toggle */}
       <Box>
-        <FormControlLabel
-          control={
-            <Switch
-              checked={state.active}
-              onChange={(e) => onChange({ active: e.target.checked })}
-            />
-          }
-          label="Activate this connector"
-        />
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={state.active}
+                onChange={(e) => onChange({ active: e.target.checked })}
+              />
+            }
+            label="Activate this connector"
+          />
+          <InfoTooltip text={helpContent.connectors.wizard.steps.save.tooltips.activate} />
+        </Box>
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', ml: 7 }}>
           When active, this connector will automatically process incoming data.
         </Typography>

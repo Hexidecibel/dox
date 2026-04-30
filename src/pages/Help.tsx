@@ -141,14 +141,35 @@ export function Help() {
                     {entry.list.well}
                   </Typography>
                 )}
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ mt: 4, display: 'block' }}
-              >
-                Deep dives, screenshots, and field reference are added per
-                module slice (D1-D5).
-              </Typography>
+              {/* Long-form sections from the module-specific `help` block.
+                  D1 fills these in for connectors; later D-slices fill in
+                  their own modules. Modules without a `help` block fall
+                  back to the placeholder caption below. */}
+              {selected === 'connectors' &&
+                helpContent.connectors.help.sections.map((section) => (
+                  <Box key={section.heading} sx={{ mt: 3 }}>
+                    <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
+                      {section.heading}
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      sx={{ whiteSpace: 'pre-line' }}
+                      color="text.primary"
+                    >
+                      {section.body}
+                    </Typography>
+                  </Box>
+                ))}
+              {selected !== 'connectors' && (
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ mt: 4, display: 'block' }}
+                >
+                  Deep dives, screenshots, and field reference are added per
+                  module slice (D1-D5).
+                </Typography>
+              )}
             </>
           ) : (
             <Typography variant="body1" color="text.secondary">

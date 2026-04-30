@@ -44,6 +44,9 @@ import {
   applyTargetToMappings,
   currentTargetFor,
 } from './fieldMappingActions';
+import { HelpWell } from '../HelpWell';
+import { InfoTooltip } from '../InfoTooltip';
+import { helpContent } from '../../lib/helpContent';
 
 interface StepSchemaReviewProps {
   sample: DiscoverSchemaResponse | null;
@@ -141,11 +144,16 @@ function DetectedFieldRow({
               </Typography>
               <Chip label={field.inferred_type} size="small" variant="outlined" />
               {field.confidence !== undefined && (
-                <Chip
-                  label={`${Math.round(field.confidence * 100)}% match`}
-                  size="small"
-                  color={confidenceColor(field.confidence)}
-                />
+                <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
+                  <Chip
+                    label={`${Math.round(field.confidence * 100)}% match`}
+                    size="small"
+                    color={confidenceColor(field.confidence)}
+                  />
+                  <InfoTooltip
+                    text={helpContent.connectors.wizard.steps.reviewSchema.tooltips.confidence}
+                  />
+                </Box>
               )}
             </Stack>
             {field.sample_values.length > 0 && (
@@ -161,6 +169,12 @@ function DetectedFieldRow({
             )}
           </Box>
           <Box sx={{ minWidth: { md: 260 }, flex: { xs: '1 1 auto', md: '0 0 auto' } }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.25 }}>
+              <Typography variant="caption" color="text.secondary">Map to</Typography>
+              <InfoTooltip
+                text={helpContent.connectors.wizard.steps.reviewSchema.tooltips.mapTo}
+              />
+            </Box>
             <FormControl fullWidth size="small">
               <InputLabel id={`target-${field.name}`}>Map to</InputLabel>
               <Select
@@ -183,24 +197,40 @@ function DetectedFieldRow({
         {(showExtendedKey || showFormatHint) && (
           <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{ mt: 1.5 }}>
             {showExtendedKey && (
-              <TextField
-                size="small"
-                label="Metadata key"
-                helperText="snake_case; used in extended_metadata JSON"
-                value={extendedKey}
-                onChange={(e) => handleExtendedKeyChange(e.target.value)}
-                sx={{ flex: 1 }}
-              />
+              <Box sx={{ flex: 1 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.25 }}>
+                  <Typography variant="caption" color="text.secondary">Metadata key</Typography>
+                  <InfoTooltip
+                    text={helpContent.connectors.wizard.steps.reviewSchema.tooltips.extendedKey}
+                  />
+                </Box>
+                <TextField
+                  size="small"
+                  label="Metadata key"
+                  helperText="snake_case; used in extended_metadata JSON"
+                  value={extendedKey}
+                  onChange={(e) => handleExtendedKeyChange(e.target.value)}
+                  fullWidth
+                />
+              </Box>
             )}
             {(showExtendedKey || showFormatHint) && (
-              <TextField
-                size="small"
-                label="Format hint"
-                placeholder="e.g. YYYY-MM-DD"
-                value={currentFormatHint}
-                onChange={(e) => handleFormatHintChange(e.target.value)}
-                sx={{ flex: 1 }}
-              />
+              <Box sx={{ flex: 1 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.25 }}>
+                  <Typography variant="caption" color="text.secondary">Format hint</Typography>
+                  <InfoTooltip
+                    text={helpContent.connectors.wizard.steps.reviewSchema.tooltips.formatHint}
+                  />
+                </Box>
+                <TextField
+                  size="small"
+                  label="Format hint"
+                  placeholder="e.g. YYYY-MM-DD"
+                  value={currentFormatHint}
+                  onChange={(e) => handleFormatHintChange(e.target.value)}
+                  fullWidth
+                />
+              </Box>
             )}
           </Stack>
         )}
@@ -285,6 +315,13 @@ export function StepSchemaReview({
 
   return (
     <Box>
+      <HelpWell
+        id="connectors.wizard.step.review"
+        title={helpContent.connectors.wizard.steps.reviewSchema.headline}
+      >
+        {helpContent.connectors.wizard.steps.reviewSchema.well}
+      </HelpWell>
+
       <Typography variant="h6" fontWeight={600} sx={{ mb: 1 }}>
         Review detected fields
       </Typography>
@@ -310,6 +347,9 @@ export function StepSchemaReview({
         >
           Accept all AI suggestions
         </Button>
+        <InfoTooltip
+          text={helpContent.connectors.wizard.steps.reviewSchema.tooltips.acceptAll}
+        />
         <Typography variant="caption" color="text.secondary">
           Applies suggestions with ≥ {Math.round(ACCEPT_AI_THRESHOLD * 100)}% confidence.
         </Typography>
@@ -317,6 +357,12 @@ export function StepSchemaReview({
 
       {hasMultipleSheets && (
         <FormControl size="small" sx={{ mb: 2, minWidth: 240 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.25 }}>
+            <Typography variant="caption" color="text.secondary">Sheet</Typography>
+            <InfoTooltip
+              text={helpContent.connectors.wizard.steps.reviewSchema.tooltips.sheetPicker}
+            />
+          </Box>
           <InputLabel id="sheet-picker-label">Sheet</InputLabel>
           <Select
             labelId="sheet-picker-label"

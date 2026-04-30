@@ -43,6 +43,10 @@ import {
 import { api } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 const ITEMS_PER_PAGE = 20;
 
@@ -233,6 +237,10 @@ export function Connectors() {
         </Button>
       </Box>
 
+      <HelpWell id="connectors.list" title={helpContent.connectors.list.headline}>
+        {helpContent.connectors.list.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -258,11 +266,12 @@ export function Connectors() {
       {isMobile ? (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           {connectors.length === 0 ? (
-            <Card variant="outlined">
-              <CardContent sx={{ textAlign: 'center', py: 4 }}>
-                <Typography color="text.secondary">No connectors found</Typography>
-              </CardContent>
-            </Card>
+            <EmptyState
+              title={helpContent.connectors.list.emptyTitle ?? 'No connectors yet'}
+              description={helpContent.connectors.list.emptyDescription}
+              actionLabel="New connector"
+              onAction={() => navigate('/admin/connectors/new')}
+            />
           ) : (
             connectors.map((connector) => (
               <Card
@@ -325,28 +334,48 @@ export function Connectors() {
             ))
           )}
         </Box>
+      ) : connectors.length === 0 ? (
+        <EmptyState
+          title={helpContent.connectors.list.emptyTitle ?? 'No connectors yet'}
+          description={helpContent.connectors.list.emptyDescription}
+          actionLabel="New connector"
+          onAction={() => navigate('/admin/connectors/new')}
+        />
       ) : (
         <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
           <Table>
             <TableHead>
               <TableRow>
                 <TableCell>Name</TableCell>
-                <TableCell>Slug</TableCell>
-                <TableCell>System</TableCell>
-                <TableCell>Last Run</TableCell>
-                <TableCell>Status</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Slug
+                    <InfoTooltip text={helpContent.connectors.list.columnTooltips.slug} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    System
+                    <InfoTooltip text={helpContent.connectors.list.columnTooltips.system} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Last Run
+                    <InfoTooltip text={helpContent.connectors.list.columnTooltips.lastRun} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.connectors.list.columnTooltips.status} />
+                  </Box>
+                </TableCell>
                 <TableCell align="right">Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {connectors.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={6} sx={{ textAlign: 'center', py: 4 }}>
-                    <Typography color="text.secondary">No connectors found</Typography>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                connectors.map((connector) => (
+              {connectors.map((connector) => (
                   <TableRow
                     key={connector.id}
                     hover
@@ -405,8 +434,7 @@ export function Connectors() {
                       </Tooltip>
                     </TableCell>
                   </TableRow>
-                ))
-              )}
+                ))}
             </TableBody>
           </Table>
         </TableContainer>

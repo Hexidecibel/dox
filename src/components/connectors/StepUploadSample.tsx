@@ -31,6 +31,9 @@ import {
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { DiscoverSchemaResponse } from '../../types/connectorSchema';
+import { HelpWell } from '../HelpWell';
+import { InfoTooltip } from '../InfoTooltip';
+import { helpContent } from '../../lib/helpContent';
 
 /** File size caps. Binary formats (PDF/XLSX) get a higher cap than text. */
 const MAX_TEXT_BYTES = 5 * 1024 * 1024;   // 5MB for CSV/TSV/TXT/EML
@@ -263,6 +266,13 @@ export function StepUploadSample({ sample, onSample, currentTenantId }: StepUplo
 
   return (
     <Box>
+      <HelpWell
+        id="connectors.wizard.step.upload"
+        title={helpContent.connectors.wizard.steps.uploadSample.headline}
+      >
+        {helpContent.connectors.wizard.steps.uploadSample.well}
+      </HelpWell>
+
       <Typography variant="h6" fontWeight={600} sx={{ mb: 1 }}>
         Upload a sample
       </Typography>
@@ -277,7 +287,16 @@ export function StepUploadSample({ sample, onSample, currentTenantId }: StepUplo
         sx={{ mb: 2, minHeight: 36 }}
       >
         <Tab value="file" label="Upload file" sx={{ minHeight: 36 }} />
-        <Tab value="paste" label="Paste text" sx={{ minHeight: 36 }} />
+        <Tab
+          value="paste"
+          label={
+            <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+              Paste text
+              <InfoTooltip text={helpContent.connectors.wizard.steps.uploadSample.tooltips.paste} />
+            </Box>
+          }
+          sx={{ minHeight: 36 }}
+        />
       </Tabs>
 
       {error && (
@@ -442,9 +461,12 @@ export function StepUploadSample({ sample, onSample, currentTenantId }: StepUplo
       )}
 
       <Box>
-        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
-          Supported formats:
-        </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+          <Typography variant="caption" color="text.secondary">
+            Supported formats:
+          </Typography>
+          <InfoTooltip text={helpContent.connectors.wizard.steps.uploadSample.tooltips.fileFormats} />
+        </Box>
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
           {ACCEPTED_FORMATS.map((f) => (
             <Chip

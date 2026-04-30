@@ -53,6 +53,9 @@ import { StepUploadSample } from '../../components/connectors/StepUploadSample';
 import { StepSchemaReview } from '../../components/connectors/StepSchemaReview';
 import { StepLivePreview } from '../../components/connectors/StepLivePreview';
 import { StepTestAndActivate } from '../../components/connectors/StepTestAndActivate';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { helpContent } from '../../lib/helpContent';
 import {
   defaultFieldMappings,
   normalizeFieldMappings,
@@ -432,6 +435,12 @@ export function ConnectorWizard() {
         {isEditMode ? (locationState.remapMode ? 'Remap Connector' : 'Edit Connector') : 'New Connector'}
       </Typography>
 
+      {!isEditMode && (
+        <HelpWell id="connectors.wizard" title={helpContent.connectors.wizard.headline}>
+          {helpContent.connectors.wizard.well}
+        </HelpWell>
+      )}
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -565,13 +574,14 @@ function StepName({
 
   return (
     <Box>
-      <Alert severity="info" sx={{ mb: 3 }}>
-        Connectors feed the order pipeline — they turn inbound files / emails
-        into orders and customers. Once saved you can drop files manually,
-        wire up an inbound email address, or hook in any of the other intake
-        doors from the connector detail page.
-      </Alert>
+      <HelpWell id="connectors.wizard.step.name" title={helpContent.connectors.wizard.steps.name.headline}>
+        {helpContent.connectors.wizard.steps.name.well}
+      </HelpWell>
 
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+        <Typography variant="caption" color="text.secondary">Connector name</Typography>
+        <InfoTooltip text={helpContent.connectors.wizard.steps.name.tooltips.name} />
+      </Box>
       <TextField
         label="Connector name"
         fullWidth
@@ -583,6 +593,10 @@ function StepName({
         error={state.name.length > 0 && state.name.trim().length < 3}
       />
 
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+        <Typography variant="caption" color="text.secondary">URL slug</Typography>
+        <InfoTooltip text={helpContent.connectors.wizard.steps.name.tooltips.slug} />
+      </Box>
       <TextField
         label="URL slug"
         fullWidth
@@ -618,7 +632,10 @@ function StepName({
       />
 
       <FormControl sx={{ mb: 3 }}>
-        <FormLabel>System type</FormLabel>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <FormLabel>System type</FormLabel>
+          <InfoTooltip text={helpContent.connectors.wizard.steps.name.tooltips.systemType} />
+        </Box>
         <RadioGroup
           row
           value={state.systemType}
