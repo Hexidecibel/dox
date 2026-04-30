@@ -62,6 +62,8 @@ import {
   VisibilityOff as HideIcon,
   Autorenew as RotateIcon,
   Key as KeyIcon,
+  Link as LinkIcon,
+  OpenInNew as OpenInNewIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { Tenant } from '../../lib/types';
@@ -118,6 +120,13 @@ interface Connector {
    * response when the env has CLOUDFLARE_ACCOUNT_ID configured.
    * Blank in local dev / dev shells without that secret. */
   r2_endpoint: string | null;
+  /** Phase B4 — per-connector public drop link token. NULL means no
+   * link is active; vendors hitting `/drop/<slug>/<token>` get the
+   * "not active" page until the owner generates one here. */
+  public_link_token: string | null;
+  /** Phase B4 — unix-seconds expiry for the public link. NULL means
+   * no expiry (link is active until the token is revoked or rotated). */
+  public_link_expires_at: number | null;
 }
 
 interface ConnectorRun {
@@ -199,6 +208,11 @@ function normalizeConnector(raw: unknown): Connector {
     r2_access_key_id: (r.r2_access_key_id as string | null) ?? null,
     has_r2_secret: !!r.has_r2_secret,
     r2_endpoint: (r.r2_endpoint as string | null) ?? null,
+    public_link_token: (r.public_link_token as string | null) ?? null,
+    public_link_expires_at:
+      typeof r.public_link_expires_at === 'number'
+        ? r.public_link_expires_at
+        : null,
   };
 }
 
@@ -883,6 +897,37 @@ export function ConnectorDetail() {
           setSaveSnack(
             'R2 token rotated. Copy the new secret now — the old token has stopped working.',
           );
+        }}
+        onError={(msg) => setError(msg)}
+      />
+
+      {/* ------------------------------------------------------------ */}
+      {/* Public drop link card — Phase B4 tenant-shareable URL. The   */}
+      {/* owner generates a link, hands it to a vendor (email, Slack,  */}
+      {/* embedded portal — wherever), and the vendor uploads via a    */}
+      {/* browser form at /drop/<slug>/<token> with no login.          */}
+      {/* ------------------------------------------------------------ */}
+      <PublicLinkCard
+        connector={connector}
+        onGenerated={(payload) => {
+          setConnector({
+            ...connector,
+            public_link_token: payload.public_link_token,
+            public_link_expires_at: payload.public_link_expires_at,
+          });
+          setSaveSnack(
+            payload.rotated
+              ? 'Public link rotated. Old URL has stopped working.'
+              : 'Public link generated. Copy the URL now — it is also visible on the page until you navigate away.',
+          );
+        }}
+        onRevoked={() => {
+          setConnector({
+            ...connector,
+            public_link_token: null,
+            public_link_expires_at: null,
+          });
+          setSaveSnack('Public link revoked. Vendors hitting the URL now see "not active".');
         }}
         onError={(msg) => setError(msg)}
       />
@@ -2125,6 +2170,323 @@ function S3DropCard({
             disabled={rotating}
           >
             {rotating ? 'Rotating…' : 'Rotate now'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Paper>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PublicLinkCard — Phase B4 tenant-shareable upload form URL.
+// ---------------------------------------------------------------------------
+
+/**
+ * Renders the per-connector public drop-link card. Three states:
+ *
+ *   1. Not generated (`public_link_token === null`): single
+ *      "Generate link" button + brief explanation. Click hits
+ *      `POST /api/connectors/:id/public-link/generate` with the
+ *      30-day default expiry and transitions the card to the
+ *      populated state with the URL revealed.
+ *
+ *   2. Active: shows the full URL (read-only, copy + open-in-new),
+ *      expiry status (human-readable), and three action buttons —
+ *      Rotate, Revoke, and a toggle for setting / removing expiry
+ *      via re-generation. Rotation hard-cuts the previous link with
+ *      a confirm dialog. Revoke also confirms.
+ *
+ * The link is plaintext at rest on the server, so we display it
+ * verbatim — there's no "show / hide" toggle. This is by design: the
+ * URL IS the credential and the owner needs to be able to copy it
+ * any time without having to rotate.
+ */
+function PublicLinkCard({
+  connector,
+  onGenerated,
+  onRevoked,
+  onError,
+}: {
+  connector: Connector;
+  onGenerated: (payload: {
+    public_link_token: string;
+    public_link_expires_at: number | null;
+    rotated: boolean;
+  }) => void;
+  onRevoked: () => void;
+  onError: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [confirmRotateOpen, setConfirmRotateOpen] = useState(false);
+  const [confirmRevokeOpen, setConfirmRevokeOpen] = useState(false);
+
+  const isActive = !!connector.public_link_token;
+  const handle = connector.slug || connector.id;
+
+  const url = useMemo(() => {
+    if (!isActive) return '';
+    const origin =
+      typeof window !== 'undefined' && window.location?.origin
+        ? window.location.origin
+        : '';
+    return `${origin}/drop/${handle}/${connector.public_link_token}`;
+  }, [isActive, handle, connector.public_link_token]);
+
+  const expiryDescription = useMemo(() => {
+    if (!isActive) return '';
+    if (connector.public_link_expires_at === null) return 'No expiry';
+    const expiresAt = new Date(connector.public_link_expires_at * 1000);
+    const now = Date.now();
+    const diffMs = expiresAt.getTime() - now;
+    if (diffMs <= 0) return `Expired ${expiresAt.toLocaleDateString()}`;
+    const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    if (days === 0) {
+      const hours = Math.floor(diffMs / (1000 * 60 * 60));
+      return `Expires in ${hours}h (${expiresAt.toLocaleString()})`;
+    }
+    return `Expires in ${days} day${days === 1 ? '' : 's'} (${expiresAt.toLocaleDateString()})`;
+  }, [isActive, connector.public_link_expires_at]);
+
+  const copyToClipboard = (text: string) => {
+    try {
+      navigator.clipboard?.writeText(text);
+    } catch {
+      /* no-op */
+    }
+  };
+
+  // Single workhorse for generate / rotate / change-expiry. The
+  // server-side endpoint is idempotent — passing `expires_in_days`
+  // re-issues a new token regardless of whether one existed.
+  const performGenerate = async (
+    expiresInDays: number | null,
+    rotating: boolean,
+  ) => {
+    setBusy(true);
+    try {
+      const result = await api.connectors.generatePublicLink(connector.id, {
+        expires_in_days: expiresInDays,
+      });
+      onGenerated({
+        public_link_token: result.public_link_token,
+        public_link_expires_at: result.public_link_expires_at,
+        rotated: rotating,
+      });
+      setConfirmRotateOpen(false);
+    } catch (err) {
+      onError(
+        err instanceof Error ? err.message : 'Failed to generate public link',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const performRevoke = async () => {
+    setBusy(true);
+    try {
+      await api.connectors.revokePublicLink(connector.id);
+      onRevoked();
+      setConfirmRevokeOpen(false);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to revoke public link');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+        <LinkIcon fontSize="small" color="action" />
+        <Typography variant="h6" fontWeight={600}>
+          Public drop link
+        </Typography>
+      </Stack>
+      <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
+        Tenant-shareable URL. Anyone with the link can upload a file via a
+        web form — no login required. The link itself is the auth, so treat
+        it like a password and rotate or revoke if it leaks.
+      </Typography>
+
+      {!isActive ? (
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Alert severity="info" sx={{ flex: 1 }}>
+            No link yet — generate one to enable the public drop door.
+            Default expiry is 30 days.
+          </Alert>
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<LinkIcon fontSize="small" />}
+            onClick={() => performGenerate(30, false)}
+            disabled={busy}
+          >
+            {busy ? 'Generating…' : 'Generate link'}
+          </Button>
+        </Stack>
+      ) : (
+        <>
+          {/* URL */}
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              URL
+            </Typography>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <TextField
+                size="small"
+                fullWidth
+                value={url}
+                InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
+                inputProps={{ 'aria-label': 'Public drop link URL' }}
+              />
+              <Tooltip title="Copy URL">
+                <Button size="small" onClick={() => copyToClipboard(url)}>
+                  <CopyIcon fontSize="small" />
+                </Button>
+              </Tooltip>
+              <Tooltip title="Open in new tab">
+                <Button
+                  size="small"
+                  component="a"
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="Open public drop link in new tab"
+                >
+                  <OpenInNewIcon fontSize="small" />
+                </Button>
+              </Tooltip>
+            </Stack>
+          </Box>
+
+          {/* Expiry status + controls */}
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Expiry
+            </Typography>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+              <Typography variant="body2" sx={{ flex: 1, minWidth: 0 }}>
+                {expiryDescription}
+              </Typography>
+              {connector.public_link_expires_at !== null ? (
+                <Tooltip title="Re-issue the link with no expiry. Old link stops working.">
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={() => performGenerate(null, true)}
+                    disabled={busy}
+                  >
+                    Remove expiry
+                  </Button>
+                </Tooltip>
+              ) : (
+                <Tooltip title="Re-issue the link with a 30-day expiry. Old link stops working.">
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={() => performGenerate(30, true)}
+                    disabled={busy}
+                  >
+                    Set 30-day expiry
+                  </Button>
+                </Tooltip>
+              )}
+            </Stack>
+          </Box>
+
+          {/* Rotate / Revoke */}
+          <Stack direction="row" spacing={1}>
+            <Tooltip title="Rotate token (old URL stops working immediately)">
+              <Button
+                size="small"
+                variant="outlined"
+                color="warning"
+                startIcon={<RotateIcon fontSize="small" />}
+                onClick={() => setConfirmRotateOpen(true)}
+                disabled={busy}
+              >
+                Rotate link
+              </Button>
+            </Tooltip>
+            <Tooltip title="Revoke link (no token until you generate a new one)">
+              <Button
+                size="small"
+                variant="outlined"
+                color="error"
+                startIcon={<DeleteIcon fontSize="small" />}
+                onClick={() => setConfirmRevokeOpen(true)}
+                disabled={busy}
+              >
+                Revoke link
+              </Button>
+            </Tooltip>
+          </Stack>
+
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1.5 }}>
+            Submissions land in the runs panel below tagged
+            {' '}<Box component="code" sx={{ fontFamily: 'monospace' }}>source=public_link</Box>.
+          </Typography>
+        </>
+      )}
+
+      {/* Rotate confirmation */}
+      <Dialog
+        open={confirmRotateOpen}
+        onClose={() => !busy && setConfirmRotateOpen(false)}
+      >
+        <DialogTitle>Rotate public link?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            The current URL will stop working immediately. Make sure you have
+            a way to deliver the new URL to whoever was using the old one
+            before you rotate.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmRotateOpen(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            color="warning"
+            variant="contained"
+            onClick={() =>
+              performGenerate(
+                connector.public_link_expires_at === null ? null : 30,
+                true,
+              )
+            }
+            disabled={busy}
+          >
+            {busy ? 'Rotating…' : 'Rotate now'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Revoke confirmation */}
+      <Dialog
+        open={confirmRevokeOpen}
+        onClose={() => !busy && setConfirmRevokeOpen(false)}
+      >
+        <DialogTitle>Revoke public link?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            The URL will stop working immediately. Anyone who tries to upload
+            via the link will see a "not active" message. You can generate a
+            new link any time.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmRevokeOpen(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={performRevoke}
+            disabled={busy}
+          >
+            {busy ? 'Revoking…' : 'Revoke now'}
           </Button>
         </DialogActions>
       </Dialog>

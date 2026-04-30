@@ -44,6 +44,12 @@ const PUBLIC_ROUTES = [
   // public: token in URL is the gate, narrow prefix protects future
   // admin endpoints under /api/workflow-approvals/.
   '/api/workflow-approvals/public',
+  // Phase B4 — public connector info endpoint serves the bare
+  // minimum the public drop form needs to render. The handler at
+  // /api/public/connectors/<slug> requires a `?token=` query param
+  // matched against connectors.public_link_token. Narrow prefix so
+  // future /api/public/* siblings still get this same allowlist.
+  '/api/public',
 ];
 
 /**

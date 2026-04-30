@@ -46,6 +46,7 @@ import { WorkflowBuilder } from './pages/records/WorkflowBuilder';
 import { PublicForm } from './pages/forms/PublicForm';
 import { UpdateRequestForm } from './pages/forms/UpdateRequestForm';
 import { PublicApprovalPage } from './pages/forms/PublicApprovalPage';
+import { PublicDrop } from './pages/PublicDrop';
 import { Approvals } from './pages/Approvals';
 
 function App() {
@@ -68,6 +69,13 @@ function App() {
 
           {/* Public workflow approval route — magic-link decision page. */}
           <Route path="/a/:token" element={<PublicApprovalPage />} />
+
+          {/* Phase B4 — public drop link. Vendors land here from a
+              tenant-shared URL; the link token is the auth, the
+              page renders an upload form, and submissions POST to
+              the existing /api/connectors/:slug/drop endpoint with
+              the token as the bearer. No app shell, no login. */}
+          <Route path="/drop/:slug/:token" element={<PublicDrop />} />
 
           {/* Protected routes with layout */}
           <Route element={<ProtectedRoute />}>

@@ -110,10 +110,52 @@ interface ConnectorRow {
   active: number;
   deleted_at: string | null;
   api_token: string | null;
+  // Phase B4 — public drop link auth. The drop endpoint accepts a
+  // bearer that matches EITHER `api_token` (vendor-facing API door,
+  // long-lived) OR `public_link_token` (public form, optionally
+  // expiring). Both are checked in constant time; the public-link
+  // token is rejected if `public_link_expires_at` is in the past.
+  public_link_token: string | null;
+  public_link_expires_at: number | null;
   config: string | null;
   field_mappings: string | null;
   credentials_encrypted: string | null;
   credentials_iv: string | null;
+}
+
+/**
+ * Result of the dual-auth gate. `'api'` means the bearer matched
+ * `api_token`; `'public_link'` means it matched `public_link_token`
+ * and the link wasn't expired. `null` means no match — caller returns
+ * 401.
+ */
+type AuthMatch = 'api' | 'public_link' | null;
+
+function checkAuth(connector: ConnectorRow, provided: string): AuthMatch {
+  // API token path: long-lived, never expires.
+  if (
+    connector.api_token &&
+    constantTimeEquals(provided, connector.api_token)
+  ) {
+    return 'api';
+  }
+  // Public-link token path: optional expiry. We do the constant-time
+  // compare BEFORE the expiry check so the expiry branch is only
+  // visited when the token actually matches — keeps the timing
+  // shape independent of the expiry state.
+  if (
+    connector.public_link_token &&
+    constantTimeEquals(provided, connector.public_link_token)
+  ) {
+    if (
+      connector.public_link_expires_at !== null &&
+      connector.public_link_expires_at < Math.floor(Date.now() / 1000)
+    ) {
+      return null;
+    }
+    return 'public_link';
+  }
+  return null;
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -142,6 +184,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     {
       columns:
         'id, tenant_id, active, deleted_at, api_token, ' +
+        'public_link_token, public_link_expires_at, ' +
         'config, field_mappings, credentials_encrypted, credentials_iv',
     },
   );
@@ -151,16 +194,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return unauthorized();
   }
 
-  if (!connector.api_token) {
-    // Connector exists but has no token configured — treat as missing
-    // for partner-facing purposes. The owner needs to generate one in
-    // the UI before this door is usable.
-    console.warn(`drop: connector ${connector.id} has no api_token configured`);
+  if (!connector.api_token && !connector.public_link_token) {
+    // Connector exists but has neither auth path enabled — treat as
+    // missing for partner-facing purposes. The owner needs to either
+    // generate an api_token or a public_link before this door works.
+    console.warn(
+      `drop: connector ${connector.id} has neither api_token nor public_link_token`,
+    );
     return unauthorized();
   }
 
-  if (!constantTimeEquals(provided, connector.api_token)) {
-    console.warn(`drop: bearer mismatch on connector ${connector.id}`);
+  const authMatch = checkAuth(connector, provided);
+  if (authMatch === null) {
+    console.warn(`drop: bearer mismatch / expired on connector ${connector.id}`);
     return unauthorized();
   }
 
@@ -221,7 +267,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       customMetadata: {
         connector_id: connector.id,
         tenant_id: connector.tenant_id,
-        source: 'api',
+        source: authMatch === 'public_link' ? 'public_link' : 'api',
         original_name: uploaded.name,
       },
     });
@@ -287,7 +333,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         r2Key,
         content: buffer,
       },
-      source: 'api',
+      // Tag the run with the actual door used. `'api'` means a
+      // vendor with the bearer api_token; `'public_link'` means the
+      // public form route. The orchestrator's source taxonomy
+      // already includes both — see ConnectorRunSource.
+      source: authMatch === 'public_link' ? 'public_link' : 'api',
       // userId omitted — vendor-driven, not user-attributed. Audit log
       // for the run dispatch lives on the run row's `details` blob.
       qwenUrl: context.env.QWEN_URL,

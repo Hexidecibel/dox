@@ -1204,6 +1204,45 @@ export const api = {
         rotated_at: string;
       }>(`/connectors/${id}/r2/rotate`, { method: 'POST' });
     },
+    /**
+     * POST /api/connectors/:id/public-link/generate
+     *
+     * Phase B4 — generate (or rotate) the public drop link. The
+     * endpoint is idempotent on rotation: if the connector already
+     * has a `public_link_token`, the previous URL stops working
+     * immediately and the response carries `rotated: true`. The
+     * caller surfaces the new URL in a one-time copy modal. Pass
+     * `expires_in_days: null` for a no-expiry link; default is 30.
+     */
+    generatePublicLink(
+      id: string,
+      payload: { expires_in_days?: number | null } = {},
+    ) {
+      return fetchApi<{
+        public_link_token: string;
+        public_link_expires_at: number | null;
+        url: string;
+        generated_at: string;
+        rotated: boolean;
+      }>(`/connectors/${id}/public-link/generate`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    },
+    /**
+     * DELETE /api/connectors/:id/public-link
+     *
+     * Phase B4 — revoke the public drop link. Idempotent — calling
+     * on a connector with no link returns `{ revoked: false }`.
+     * After revoke, the public form route returns "not active" and
+     * the drop endpoint rejects the old token with 401.
+     */
+    revokePublicLink(id: string) {
+      return fetchApi<{ revoked: boolean }>(
+        `/connectors/${id}/public-link`,
+        { method: 'DELETE' },
+      );
+    },
   },
 
   orders: {
