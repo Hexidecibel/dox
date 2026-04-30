@@ -663,3 +663,234 @@ Calling these out explicitly so v1 stays shippable.
 - **Versioning of rows.** Activity feed shows what changed; you
   cannot "restore row to last week's state." If we need that we
   add it later by replaying activity.
+
+### Connector intake button-up (Phases A/B/C)
+
+**Status:** planned (drafted 2026-04-29)
+**Scope:** end-to-end functional + production-quality coverage of connector intake
+
+#### Why
+
+The owner thought connectors were done. The partner tried the system
+end-to-end and hit two UX gaps (not breakage): (1) `file_watch`
+connectors had no UI to drop a file into — the manual drag-drop zone
+on `ConnectorDetail.tsx` was only added in this same session; (2) the
+email path works but isn't discoverable — there's no surfacing of the
+connector's inbound email address on the detail page. Committing now:
+verify what exists, close the discoverability gaps, fill in missing
+paths, *prove* it works. Connectors ingest **orders + customers**
+(`orders` / `customers` / `order_items` tables — migration `0030`);
+they are NOT the smart-upload COA pipeline. Success: the partner runs
+five intake scenarios on staging cold, no help, all five land
+orders/customers in the UI without us touching a thing.
+
+#### Scope
+
+**In:**
+- Phase A — audit + fix existing intake paths (manual upload, email).
+- Phase B — three new intake paths to production-ready quality:
+  - **#4 HTTP POST API** — stable per-connector endpoint with bearer
+    auth, e.g. `POST https://supdox.com/api/connectors/<id>/drop`.
+  - **#5 S3-compatible bucket drop** — per-connector R2 bucket
+    auto-provisioned via the CF API, stable creds, no temp-cred
+    refresh dance.
+  - **#6 Public drop link** — tenant-generated shareable URL that
+    opens an upload form. Form POSTs to the same `/drop` endpoint as
+    #4 with the token embedded in the link.
+- Phase C — Playwright per intake path through to orders showing up
+  in the UI; staging walkthrough doc the partner runs.
+
+**Out (no data-model hooks at all):**
+- SFTP delivery
+- Outbound pull (connector polls vendor's API)
+- Direct app integrations (QuickBooks, Salesforce, NetSuite, etc.)
+
+#### Phase A — Discoverability bring-up
+
+| Step | Action |
+|------|--------|
+| A1 | Fresh-eyes walkthrough on staging with a realistic vendor data file. Verify manual upload (drag-drop on `ConnectorDetail.tsx`) and email (`/api/webhooks/email-ingest`, `/api/webhooks/connector-email-ingest`) both work end-to-end. Punch list any rough edges; the partner's two issues were UX-not-broken, so this should be short. |
+| A2 | "Email drop" callout card on `src/pages/admin/ConnectorDetail.tsx`, rendered when the connector has an email mapping configured. Shows `Send emails with attachments to: {slug}@supdox.com` with a copy button, a 1–2 sentence "how to use" blurb, and a "test by emailing yourself" hint. |
+| A3 | Wizard end-state hint. After Save/Finish on the connector creation wizard, surface a panel listing each available intake path for that connector type with a "send a file →" link/button per path. Day-one: manual upload + (where configured) email. Phase B adds API + S3 + public link automatically as those paths gain support. |
+
+**Estimate:** ~1 day.
+
+**Ships when:** punch list empty, email-drop card renders correctly,
+wizard end-state lists every applicable intake path with working
+"send a file" affordances.
+
+#### Phase B — Build intake paths
+
+Five sliceable, independently shippable slices. Each ends at a
+deployable state.
+
+| # | Slice | Estimate |
+|---|-------|----------|
+| B1 | Schema + token plumbing | ~0.5d |
+| B2 | HTTP POST API endpoint (#4) | ~1d |
+| B3 | S3 bucket auto-provisioning (#5) | ~1.5d |
+| B4 | Public drop link (#6) | ~0.5d |
+| B5 | Quality bar bring-up (audit, rate-limit, replay, observability, docs) | ~1.5d |
+
+**B1 — Schema + token plumbing.** Migration
+`0047_connector_intake_credentials.sql` adds to `connectors`:
+`api_token_hash` + `api_token_last4` (#4); `r2_bucket_name`,
+`r2_access_key_id`, `r2_secret_access_key_encrypted`, `r2_secret_iv`
+(#5); `public_link_token_hash`, `public_link_expires_at` (#6).
+Reuse the HKDF wrapper in `functions/lib/connectors/crypto.ts`
+(already used for `credentials_encrypted`). Plaintext tokens are
+returned exactly once on create/rotate, never persisted — we store
+only the hash. **Acceptance:** migration applied locally + staging;
+`shared/types.ts` updated; existing CRUD round-trips with new columns
+NULL.
+
+**B2 — HTTP POST API endpoint (#4).** New
+`functions/api/connectors/[id]/drop.ts`, allowlisted in
+`_middleware.ts` (bypasses JWT — bearer is the gate, mirroring
+`connectors/poll.ts`). Constant-time hash check against
+`api_token_hash`. Body: raw bytes + `X-Filename`. Flow: lookup
+(404/403 on missing/inactive) → stream body to R2 (auto-provisioned
+bucket from B3, or transitional `FILES` at
+`intake/<connectorId>/<isoDate>/<filename>`) → synchronously call
+`executeConnectorRun` (`functions/lib/connectors/orchestrator.ts`)
+with `input.type = 'file_watch'` → insert `connector_processed_keys`
+→ return `{ run_id, status, orders_created, customers_created }`.
+
+UI on `ConnectorDetail.tsx`: "HTTP POST endpoint" card with URL,
+masked token, **Generate / Rotate** (one-time plaintext modal),
+**Vendor instructions** with copy-paste `curl`.
+
+**Acceptance:** vitest covers missing/wrong/correct bearer, inactive
+→ 403, successful drop creates run + orders + processed_keys,
+rotation invalidates the old token. Staging `curl` smoke lands an
+order in the UI.
+
+**B3 — S3 bucket auto-provisioning (#5).** New
+`functions/lib/connectors/provisionBucket.ts` exporting
+`provisionConnectorBucket(env, connector)`. Uses the account-level
+CF API token to: create bucket
+`dox-drops-<tenant-slug>-<connector-slug>` (idempotent) → create an
+R2 access token scoped to that bucket (read+write) → persist creds
+on the connector row → return `{ endpoint, bucket, access_key,
+secret }` for one-time UI display. Wired into the create flow in
+`functions/api/connectors/index.ts`; existing connectors get a
+**Provision bucket** button. Pivot `pollAllR2Connectors` in
+`pollR2.ts` to list each connector's bucket via S3-API (per-connector
+keys, least-privilege) instead of `config.r2_prefix` on shared
+`FILES`.
+
+UI: "S3 bucket drop" card with endpoint/bucket/keys (one-time reveal
+on rotate), **Rotate access key**, **Vendor instructions** with
+`aws-cli` and `rclone` examples.
+
+**Acceptance:** create flow provisions bucket + key pair; vitest
+mocks the CF API and asserts the calls; vendor `aws s3 cp` smoke on
+staging; next poll tick processes the file.
+
+**B4 — Public drop link (#6).** Public route
+`/drop/:tenantSlug/:connectorSlug/:publicToken` (in `src/pages/`,
+not `admin/`, wired into `src/App.tsx`). Minimal upload form
+(file picker, drag-drop, optional sender email). POSTs to the same
+`/api/connectors/:id/drop` as B2; server tries `api_token_hash`
+first, falls back to `public_link_token_hash` if present and
+unexpired. Cloudflare Turnstile gates submission (reuse the binding
+the Records plan brings in). UI: "Public drop link" card with
+**Generate link** (optional expiry), **Copy URL**, **Revoke**,
+last-used timestamp.
+
+**Acceptance:** vitest covers the public-token path; Playwright
+drives the form against staging; revoke → 403.
+
+**B5 — Quality bar bring-up.** Applied uniformly across manual /
+email / #4 / #5 / #6 / poller:
+
+- **Audit log.** Every dispatch calls `logAudit` (`functions/lib/db.ts`)
+  with action `connector.intake` + details `{path, file_name,
+  file_size, run_id, result}`.
+- **Rate limiting.** Reuse `functions/lib/ratelimit.ts`. Start at
+  60/min/connector + 600/min/tenant (both apply).
+- **Replay on failure.** Failed runs leave the file in place and skip
+  writing `connector_processed_keys`, so the next poll tick retries.
+  Add a **Replay** button on failed `connector_runs` rows.
+- **Observability.** Last-24h counts on `ConnectorDetail.tsx` by
+  path, success/error, last error. New `GET
+  /api/connectors/[id]/stats` reads `connector_runs` + `audit_log`.
+- **Vendor docs.** New `src/pages/docs/Connectors.tsx` at
+  `/docs/connectors` — one-pager per path with `curl` / `aws-cli` /
+  `rclone` examples + troubleshooting. Linked from each intake card.
+
+**Acceptance:** every path writes an audit row; rate limits enforce
+in vitest; replay re-runs a failed run; stats card renders; docs
+page renders with accurate examples.
+
+#### Phase C — Coverage + sign-off
+
+| Step | Action |
+|------|--------|
+| C1 | Five Playwright specs in `tests/e2e/connector-intake-{manual,email,api,s3,public-link}.spec.ts`. Each: login → create connector → fire intake via that path → assert orders + customers rows appear in the UI. Wire into `bin/e2e`. |
+| C2 | `docs/connectors-walkthrough.md` — five numbered scenarios, one per path, written for the partner to run cold (prerequisite, exact clicks/commands, expected end state). |
+| C3 | Sign-off gate: not done until both owner and partner complete all five scenarios on staging cold, no help. Any trip becomes a Phase A-style punch list item, fix and retry. |
+
+**Estimate:** 1–2 days. Existing `connector-wizard.spec.ts` provides
+scaffolding to copy.
+
+#### Architectural decisions (locked in)
+
+1. **Bucket-per-connector, NOT bucket-per-tenant.** R2 permanent API
+   tokens can't do prefix scoping or write-only — only TTL-bounded
+   temp creds can. Bucket-per-connector is the only path to permanent
+   set-and-forget vendor creds with proper isolation. R2 supports 1M
+   buckets/account. Naming: `dox-drops-<tenant-slug>-<connector-slug>`.
+2. **One account-level CF API token** lives as a Pages secret. Scopes:
+   **R2 Storage Write** + **API Tokens Edit**. Used for bucket + key
+   auto-provisioning.
+3. **Tokens stored on the `connectors` row, encrypted/hashed.** API
+   bearer (#4), R2 secret (#5), public-link token (#6) — all hashed
+   or encrypted at rest, never returned after the one-time modal.
+   Encryption reuses `functions/lib/connectors/crypto.ts`.
+4. **The R2 prefix poller stays.** Pivots in B3 to scan each
+   connector's auto-provisioned bucket. Synchronous dispatch on
+   #4 / #5 / #6 writes `connector_processed_keys` so the next tick
+   skips. The poller becomes the universal safety net.
+5. **Quality bar applies everywhere.** No half-baked paths. Every
+   path has auth + rotation UI, rate limiting, audit log, replay,
+   observability, vendor docs, e2e coverage. Enforced in B5.
+
+#### Open questions
+
+1. **Encryption master key for R2 secrets.** Lean toward a dedicated
+   `INTAKE_ENCRYPTION_KEY` Pages secret, separate from `JWT_SECRET`.
+   Decide before B1.
+2. **Public-link expiry default.** Lean configurable with 30-day UI
+   default. Decide before B4.
+3. **API token rotation grace period.** Lean hard cutover — no zombie
+   tokens. Decide before B2.
+4. **Rate limit shape.** Tentative per-connector + per-tenant; per-IP
+   only matters for #6 where Turnstile already gates. Decide in B5.
+
+#### Risks
+
+- **CF API token blast radius if leaked.** Mitigation: tight scopes
+  (R2 Storage Write + API Tokens Edit, not Account Admin), rotate via
+  CF dashboard if exposed, never log.
+- **`config.r2_prefix` becomes vestigial after B3.** Keep as a
+  transition column; delete in a follow-up migration after B3 runs a
+  week in staging without fallback.
+- **B3 SigV4 signing in the Worker.** The poller pivot in B3 needs to
+  call R2's S3 API (ListObjects / GetObject) with per-connector keys,
+  which means SigV4. There is no AWS SDK in `package.json` today.
+  Mitigation: evaluate `aws4fetch` first (lightweight SigV4 lib that
+  runs in Workers — likely fits); fall back to hand-rolled SigV4 if
+  it doesn't. B3 estimate may slip ~0.5d if the fallback is needed.
+- **Per-connector R2 keys accumulate** if rotations don't prune. B5
+  includes a sweep that revokes superseded keys after a grace period.
+
+#### Out of scope
+
+- **SFTP delivery** — vendors who want SFTP use a third-party gateway
+  that drops to S3.
+- **Outbound pull** — we don't poll vendor APIs.
+- **Direct app integrations** (QuickBooks, Salesforce, NetSuite) —
+  vendors hit our HTTP POST or S3 from their own middleware.
+- **No data-model hooks for any of these.** No `connector_type =
+  'sftp'`, no `pull_endpoint`, nothing speculative.
