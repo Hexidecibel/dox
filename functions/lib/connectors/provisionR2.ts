@@ -122,11 +122,15 @@ async function resolvePermissionGroupId(
  * so tests can target it directly.
  */
 export async function lookupR2PermissionGroupId(
-  accountId: string,
+  _accountId: string,
   apiToken: string,
   fetcher: FetchLike,
 ): Promise<string> {
-  const url = `${CF_API_BASE}/accounts/${accountId}/tokens/permission_groups`;
+  // Permission groups live under /user/tokens since CF API tokens are
+  // user-owned. Permission group IDs themselves are global, so the
+  // account ID isn't part of the path. The first arg is kept on the
+  // signature so callers don't have to change shape.
+  const url = `${CF_API_BASE}/user/tokens/permission_groups`;
   const res = await fetcher(url, {
     method: 'GET',
     headers: { Authorization: `Bearer ${apiToken}` },
@@ -257,15 +261,19 @@ async function createBucket(
 
 /**
  * Mint a CF-managed R2 API token scoped to a single bucket. Returns
- * the token id (for revoke), value (the secret access key), and the
- * derived access_key_id (CF returns this on the response too — we
- * pull it from `result.value` shape: the v4 token endpoint returns
- * `{ id, value }` where `value` is the secret. The access_key_id is
- * derivable from `id` in CF's S3-compatible model — it IS the id).
+ * the token id (for revoke), the S3 access_key_id, and the S3
+ * secret_access_key.
  *
- * Per the documented R2 S3-compatibility flow, the access_key_id used
- * with `aws s3` is the SHA-256 of the token id (lowercase hex). The
- * matching secret_access_key is the token's `value` field.
+ * Per the Cloudflare R2 docs at
+ * https://developers.cloudflare.com/r2/api/s3/tokens/ the S3-compat
+ * mapping is:
+ *   - access_key_id     = token.id (32-char hex, used as-is)
+ *   - secret_access_key = sha256(token.value) lowercase hex (64 chars)
+ *
+ * The `value` field returned by `POST /user/tokens` is the API-token
+ * bearer secret used for authenticating against the CF API; for S3
+ * usage R2 expects its SHA-256 digest as the secret. Using `value`
+ * directly causes R2 SigV4 signature mismatches.
  */
 async function createBucketScopedToken(
   accountId: string,
@@ -275,7 +283,12 @@ async function createBucketScopedToken(
   tokenName: string,
   fetcher: FetchLike,
 ): Promise<{ token_id: string; access_key_id: string; secret: string }> {
-  const url = `${CF_API_BASE}/accounts/${accountId}/tokens`;
+  // CF API tokens are user-owned resources, so creation goes through
+  // /user/tokens. The policy below still scopes the resulting token to
+  // a single account-level R2 bucket via the resource ARN — token
+  // policies can target account/zone resources regardless of where the
+  // token "lives" (user vs account).
+  const url = `${CF_API_BASE}/user/tokens`;
   const body = {
     name: tokenName,
     policies: [
@@ -305,13 +318,12 @@ async function createBucketScopedToken(
     'tokens.create',
   );
   const token_id = result.result.id;
-  const secret = result.result.value;
-  // R2 S3-compat: access_key_id = sha256(token_id) hex. We compute it
-  // server-side rather than asking CF for a separate field, because
-  // CF's token endpoint doesn't return it directly — the relationship
-  // is documented in the R2 docs at
-  // https://developers.cloudflare.com/r2/api/s3/tokens/.
-  const access_key_id = await sha256Hex(token_id);
+  const tokenValue = result.result.value;
+  // R2 S3-compat per https://developers.cloudflare.com/r2/api/s3/tokens/:
+  //   access_key_id     = token.id (32-char hex, used as-is)
+  //   secret_access_key = sha256(token.value) lowercase hex (64 chars)
+  const access_key_id = token_id;
+  const secret = await sha256Hex(tokenValue);
   return { token_id, access_key_id, secret };
 }
 
@@ -320,12 +332,15 @@ async function createBucketScopedToken(
  * vendor creds stop working immediately.
  */
 async function revokeToken(
-  accountId: string,
+  _accountId: string,
   apiToken: string,
   tokenId: string,
   fetcher: FetchLike,
 ): Promise<void> {
-  const url = `${CF_API_BASE}/accounts/${accountId}/tokens/${tokenId}`;
+  // Token revocation, like creation, targets the user-tokens API.
+  // accountId is retained on the signature for symmetry with the rest
+  // of the helpers; CF's /user/tokens/<id> path is account-agnostic.
+  const url = `${CF_API_BASE}/user/tokens/${tokenId}`;
   const res = await fetcher(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiToken}` },
@@ -340,8 +355,8 @@ async function revokeToken(
 }
 
 /**
- * SHA-256 hex of a UTF-8 string. R2 derives the S3 access_key_id from
- * the CF token id this way.
+ * SHA-256 hex of a UTF-8 string. R2 derives the S3 secret_access_key
+ * from the CF token's `value` field this way.
  */
 async function sha256Hex(input: string): Promise<string> {
   const buf = await crypto.subtle.digest(

@@ -26,6 +26,23 @@ import {
 } from '../../functions/lib/connectors/provisionR2';
 import type { Env } from '../../functions/lib/types';
 
+/**
+ * Local SHA-256 hex helper for asserting the derived secret_access_key
+ * shape. Mirrors what `provisionR2.ts` does internally.
+ */
+async function sha256HexForTest(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(input),
+  );
+  const bytes = new Uint8Array(buf);
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    out += bytes[i].toString(16).padStart(2, '0');
+  }
+  return out;
+}
+
 interface FetchCall {
   url: string;
   method: string;
@@ -133,15 +150,23 @@ describe('provisionConnectorBucket — happy path', () => {
 
     expect(creds.bucket_name).toBe('dox-drops-acme');
     expect(creds.cf_token_id).toBe('tok-id-abc');
-    expect(creds.secret_access_key).toBe('secret-shhh');
-    expect(creds.access_key_id).toMatch(/^[a-f0-9]{64}$/);
+    // Per https://developers.cloudflare.com/r2/api/s3/tokens/ :
+    //   access_key_id     = token.id          (32-char hex from CF — here
+    //                                          our mock returns 'tok-id-abc'
+    //                                          so we match it literally)
+    //   secret_access_key = sha256(token.value) lowercase hex (64 chars).
+    expect(creds.access_key_id).toBe('tok-id-abc');
+    expect(creds.secret_access_key).toMatch(/^[a-f0-9]{64}$/);
+    // sha256('secret-shhh') precomputed.
+    const expectedSecret = await sha256HexForTest('secret-shhh');
+    expect(creds.secret_access_key).toBe(expectedSecret);
     expect(creds.endpoint).toBe('https://acct123.r2.cloudflarestorage.com');
 
     // Two CF calls, both authenticated.
     expect(calls).toHaveLength(2);
     expect(calls[0].url).toContain('/accounts/acct123/r2/buckets');
     expect(calls[0].headers['authorization']).toBe('Bearer cf-pat-token');
-    expect(calls[1].url).toContain('/accounts/acct123/tokens');
+    expect(calls[1].url).toContain('/user/tokens');
 
     // Token policy scoped to the right bucket resource.
     const tokenBody = JSON.parse(calls[1].body!) as {
@@ -308,7 +333,9 @@ describe('rotateConnectorR2Token', () => {
     );
 
     expect(creds.cf_token_id).toBe('new-token-id');
-    expect(creds.secret_access_key).toBe('new-secret');
+    expect(creds.access_key_id).toBe('new-token-id');
+    // secret_access_key = sha256(token.value)
+    expect(creds.secret_access_key).toBe(await sha256HexForTest('new-secret'));
     // DELETE happened before POST.
     const deleteIdx = calls.findIndex((c) => c.method === 'DELETE');
     const postIdx = calls.findIndex((c) => c.method === 'POST');
