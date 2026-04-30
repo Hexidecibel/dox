@@ -41,6 +41,10 @@ import { api } from '../../lib/api';
 import type { ApiSupplier } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 const ITEMS_PER_PAGE = 20;
 
@@ -190,6 +194,10 @@ export function Suppliers() {
         </Button>
       </Box>
 
+      <HelpWell id="suppliers.list" title={helpContent.suppliers.list?.headline ?? 'Suppliers'}>
+        {helpContent.suppliers.list?.well ?? helpContent.suppliers.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -215,11 +223,14 @@ export function Suppliers() {
       {isMobile ? (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           {suppliers.length === 0 ? (
-            <Card variant="outlined">
-              <CardContent sx={{ textAlign: 'center', py: 4 }}>
-                <Typography color="text.secondary">No suppliers found</Typography>
-              </CardContent>
-            </Card>
+            <EmptyState
+              title={search ? 'No suppliers match your search' : helpContent.suppliers.list?.emptyTitle ?? 'No suppliers yet'}
+              description={search
+                ? 'Clear the search box to see every supplier in your tenant.'
+                : helpContent.suppliers.list?.emptyDescription}
+              actionLabel={search ? undefined : 'Add supplier'}
+              onAction={search ? undefined : openCreate}
+            />
           ) : (
             suppliers.map((supplier) => (
               <Card
@@ -266,27 +277,49 @@ export function Suppliers() {
             ))
           )}
         </Box>
+      ) : suppliers.length === 0 ? (
+        <EmptyState
+          title={search ? 'No suppliers match your search' : helpContent.suppliers.list?.emptyTitle ?? 'No suppliers yet'}
+          description={search
+            ? 'Clear the search box to see every supplier in your tenant.'
+            : helpContent.suppliers.list?.emptyDescription}
+          actionLabel={search ? undefined : 'Add supplier'}
+          onAction={search ? undefined : openCreate}
+        />
       ) : (
         <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell>Name</TableCell>
-                <TableCell>Aliases</TableCell>
-                <TableCell>Status</TableCell>
-                <TableCell>Created</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Name
+                    <InfoTooltip text={helpContent.suppliers.list?.columnTooltips?.name} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Aliases
+                    <InfoTooltip text={helpContent.suppliers.list?.columnTooltips?.aliases} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.suppliers.list?.columnTooltips?.status} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Created
+                    <InfoTooltip text={helpContent.suppliers.list?.columnTooltips?.created} />
+                  </Box>
+                </TableCell>
                 <TableCell align="right">Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {suppliers.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={5} sx={{ textAlign: 'center', py: 4 }}>
-                    <Typography color="text.secondary">No suppliers found</Typography>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                suppliers.map((supplier) => (
+              {suppliers.map((supplier) => (
                   <TableRow
                     key={supplier.id}
                     hover
@@ -334,8 +367,7 @@ export function Suppliers() {
                       </Tooltip>
                     </TableCell>
                   </TableRow>
-                ))
-              )}
+                ))}
             </TableBody>
           </Table>
         </TableContainer>

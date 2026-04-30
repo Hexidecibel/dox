@@ -37,6 +37,10 @@ import type { Document, OrderNaturalSearchResponse } from '../lib/types';
 import { DocumentCard } from '../components/DocumentCard';
 import { useTenant } from '../contexts/TenantContext';
 import { formatDate } from '../utils/format';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { EmptyState } from '../components/EmptyState';
+import { helpContent } from '../lib/helpContent';
 
 type SearchTab = 'documents' | 'orders';
 
@@ -293,6 +297,10 @@ export function Search() {
           : 'Search orders by order number, customer, PO number, and more.'}
       </Typography>
 
+      <HelpWell id="search.list" title={helpContent.search.list?.headline ?? 'Search'}>
+        {helpContent.search.list?.well ?? helpContent.search.well}
+      </HelpWell>
+
       {/* Tab Bar */}
       <Tabs
         value={activeTab}
@@ -348,6 +356,7 @@ export function Search() {
             >
               AI
             </Button>
+            <InfoTooltip text={helpContent.search.list?.columnTooltips?.aiToggle} />
           </Box>
 
           {/* Document-specific filters */}
@@ -495,14 +504,14 @@ export function Search() {
             {total} result{total !== 1 ? 's' : ''} found
           </Typography>
           {results.length === 0 ? (
-            <Box sx={{ textAlign: 'center', py: 8 }}>
-              <Typography variant="h6" color="text.secondary">
-                No {activeTab === 'documents' ? 'documents' : 'orders'} match your search
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Try different keywords or adjust your filters.
-              </Typography>
-            </Box>
+            <EmptyState
+              title={`No ${activeTab === 'documents' ? 'documents' : 'orders'} match your search`}
+              description={
+                aiSearchActive
+                  ? 'AI mode parses your wording into structured filters; if nothing matched, try simplifying the query or switching to keyword mode.'
+                  : 'Try different keywords or adjust the filters above. Toggle AI search if you have a natural-language query in mind.'
+              }
+            />
           ) : activeTab === 'documents' ? (
             <Grid container spacing={2}>
               {docResults.map((doc) => (
@@ -584,12 +593,15 @@ export function Search() {
           )}
         </>
       ) : (
-        <Box sx={{ textAlign: 'center', py: 8 }}>
-          <SearchIcon sx={{ fontSize: 64, color: 'text.secondary', mb: 1 }} />
-          <Typography variant="h6" color="text.secondary">
-            Enter a search query to find {activeTab === 'documents' ? 'documents' : 'orders'}
-          </Typography>
-        </Box>
+        <EmptyState
+          icon={<SearchIcon sx={{ fontSize: 32 }} />}
+          title={`Search across ${activeTab === 'documents' ? 'documents' : 'orders'}`}
+          description={
+            activeTab === 'documents'
+              ? 'Type a query above to search titles, tags, file names, and indexed file content. Toggle AI for natural-language search.'
+              : 'Type a query above to search by order number, customer, or PO. Toggle AI for natural-language search.'
+          }
+        />
       )}
     </Box>
   );

@@ -36,6 +36,10 @@ import {
 } from '@mui/icons-material';
 import { api } from '../lib/api';
 import type { ProcessingQueueItem } from '../../shared/types';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { EmptyState } from '../components/EmptyState';
+import { helpContent } from '../lib/helpContent';
 
 function processingChip(status: ProcessingQueueItem['processing_status']) {
   switch (status) {
@@ -332,13 +336,20 @@ export function IngestHistory() {
         Full pipeline view: source, processing, AI extraction, review, and ingest status.
       </Typography>
 
+      <HelpWell id="ingest_history.main" title={helpContent.ingest_history.main.headline}>
+        {helpContent.ingest_history.main.well}
+      </HelpWell>
+
       {/* Filters */}
       <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
         <Grid container spacing={2} alignItems="center">
           <Grid item xs={12} md={5}>
-            <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: 'block' }}>
-              Review Status
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                Review Status
+              </Typography>
+              <InfoTooltip text={helpContent.ingest_history.main.pipelineStageTooltips.reviewFilter} />
+            </Box>
             <ToggleButtonGroup
               value={reviewFilter}
               exclusive
@@ -353,9 +364,12 @@ export function IngestHistory() {
             </ToggleButtonGroup>
           </Grid>
           <Grid item xs={12} md={7}>
-            <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: 'block' }}>
-              Processing Status
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                Processing Status
+              </Typography>
+              <InfoTooltip text={helpContent.ingest_history.main.pipelineStageTooltips.processingFilter} />
+            </Box>
             <ToggleButtonGroup
               value={processingFilter}
               exclusive
@@ -390,22 +404,69 @@ export function IngestHistory() {
               <TableHead>
                 <TableRow>
                   <TableCell padding="checkbox" />
-                  <TableCell>Timestamp</TableCell>
-                  <TableCell>File Name</TableCell>
-                  <TableCell>Source</TableCell>
-                  <TableCell>Processing</TableCell>
-                  <TableCell>Status</TableCell>
-                  <TableCell>Confidence</TableCell>
-                  <TableCell>Supplier</TableCell>
-                  <TableCell>Doc Type</TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Timestamp
+                      <InfoTooltip text={helpContent.ingest_history.main.columnTooltips.timestamp} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      File Name
+                      <InfoTooltip text={helpContent.ingest_history.main.columnTooltips.fileName} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Source
+                      <InfoTooltip text={helpContent.ingest_history.main.columnTooltips.source} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Processing
+                      <InfoTooltip text={helpContent.ingest_history.main.columnTooltips.processing} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Status
+                      <InfoTooltip text={helpContent.ingest_history.main.columnTooltips.reviewStatus} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Confidence
+                      <InfoTooltip text={helpContent.ingest_history.main.columnTooltips.confidence} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Supplier
+                      <InfoTooltip text={helpContent.ingest_history.main.columnTooltips.supplier} />
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                      Doc Type
+                      <InfoTooltip text={helpContent.ingest_history.main.columnTooltips.docType} />
+                    </Box>
+                  </TableCell>
                   <TableCell padding="checkbox" />
                 </TableRow>
               </TableHead>
               <TableBody>
                 {items.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={10} align="center" sx={{ py: 4 }}>
-                      <Typography color="text.secondary">No queue items found</Typography>
+                    <TableCell colSpan={10} sx={{ py: 0, border: 'none' }}>
+                      <EmptyState
+                        title="No items match these filters"
+                        description={
+                          reviewFilter === 'all' && processingFilter === 'all'
+                            ? "Nothing has hit the ingest pipeline yet for this tenant. Files appear here as soon as they're uploaded via Import, sent to an email connector, or POSTed to /api/queue/upload."
+                            : "Try \"All\" on both filters to see every queue item, or check a different processing status (e.g. \"Error\" to find failed extractions)."
+                        }
+                      />
                     </TableCell>
                   </TableRow>
                 ) : (

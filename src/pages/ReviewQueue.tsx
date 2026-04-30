@@ -77,6 +77,10 @@ import { sortFieldsByUncertainty, bandFor } from './reviewFieldOrder';
 import type { LearnedFieldHint } from '../../shared/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { EmptyState } from '../components/EmptyState';
+import { helpContent } from '../lib/helpContent';
 
 function formatDate(dateStr: string): string {
   const d = new Date(dateStr);
@@ -1082,6 +1086,10 @@ export default function ReviewQueue() {
         </Typography>
       </Box>
 
+      <HelpWell id="review_queue.main" title={helpContent.review_queue.main.headline}>
+        {helpContent.review_queue.main.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -1108,52 +1116,61 @@ export default function ReviewQueue() {
         </Box>
 
         {documentTypes.length > 0 && (
-          <FormControl size="small" sx={{ minWidth: 160 }}>
-            <InputLabel>Document Type</InputLabel>
-            <Select
-              value={docTypeFilter}
-              onChange={(e) => setDocTypeFilter(e.target.value)}
-              label="Document Type"
-            >
-              <MenuItem value="">All Types</MenuItem>
-              {documentTypes.map((dt) => (
-                <MenuItem key={dt.id} value={dt.id}>
-                  {dt.name}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <FormControl size="small" sx={{ minWidth: 160 }}>
+              <InputLabel>Document Type</InputLabel>
+              <Select
+                value={docTypeFilter}
+                onChange={(e) => setDocTypeFilter(e.target.value)}
+                label="Document Type"
+              >
+                <MenuItem value="">All Types</MenuItem>
+                {documentTypes.map((dt) => (
+                  <MenuItem key={dt.id} value={dt.id}>
+                    {dt.name}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <InfoTooltip text={helpContent.review_queue.main.fieldTooltips.docTypeFilter} />
+          </Box>
         )}
 
         {isSuperAdmin && (
-          <FormControl size="small" sx={{ minWidth: 160 }}>
-            <InputLabel>Tenant</InputLabel>
-            <Select
-              value={tenantFilter}
-              onChange={(e) => setTenantFilter(e.target.value)}
-              label="Tenant"
-            >
-              <MenuItem value="">All Tenants</MenuItem>
-              {tenants.map((t) => (
-                <MenuItem key={t.id} value={t.id}>
-                  {t.name}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <FormControl size="small" sx={{ minWidth: 160 }}>
+              <InputLabel>Tenant</InputLabel>
+              <Select
+                value={tenantFilter}
+                onChange={(e) => setTenantFilter(e.target.value)}
+                label="Tenant"
+              >
+                <MenuItem value="">All Tenants</MenuItem>
+                {tenants.map((t) => (
+                  <MenuItem key={t.id} value={t.id}>
+                    {t.name}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <InfoTooltip text={helpContent.review_queue.main.fieldTooltips.tenantFilter} />
+          </Box>
         )}
 
-        <FormControlLabel
-          control={
-            <Switch
-              size="small"
-              checked={showAutoIngestedOnly}
-              onChange={(e) => setShowAutoIngestedOnly(e.target.checked)}
-            />
-          }
-          label="Auto-ingested only"
-          sx={{ ml: 0.5 }}
-        />
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={showAutoIngestedOnly}
+                onChange={(e) => setShowAutoIngestedOnly(e.target.checked)}
+              />
+            }
+            label="Auto-ingested only"
+            sx={{ ml: 0.5 }}
+          />
+          <InfoTooltip text={helpContent.review_queue.main.fieldTooltips.autoIngestedToggle} />
+        </Box>
       </Box>
 
       {loading ? (
@@ -1161,14 +1178,16 @@ export default function ReviewQueue() {
           <CircularProgress />
         </Box>
       ) : filteredItems.length === 0 ? (
-        <Box sx={{ textAlign: 'center', py: 8 }}>
-          <Typography variant="h6" color="text.secondary" gutterBottom>
-            No items in queue
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            {statusFilter === 'pending' ? 'All items have been reviewed.' : `No ${statusFilter} items found.`}
-          </Typography>
-        </Box>
+        <EmptyState
+          title={statusFilter === 'pending' ? 'Inbox zero' : `No ${statusFilter} items`}
+          description={
+            statusFilter === 'pending'
+              ? "Nothing is waiting on review right now. New items appear here when the AI pipeline finishes extraction on a doc that didn't auto-ingest."
+              : showAutoIngestedOnly
+                ? `No ${statusFilter} items were auto-ingested. Toggle off "Auto-ingested only" to see manually reviewed ones.`
+                : `Nothing matches the current filters. Try a different status (pending / approved / rejected) or clear the doc-type filter.`
+          }
+        />
       ) : (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           {filteredItems.map((item) => {
@@ -1196,25 +1215,33 @@ export default function ReviewQueue() {
                       {formatFileSize(item.file_size)}
                     </Typography>
                     {item.confidence_score != null && (
-                      <Chip
-                        label={`${Math.round(item.confidence_score * 100)}%`}
-                        size="small"
-                        color={confidenceColor(item.confidence_score)}
-                        variant="outlined"
-                      />
+                      <Tooltip title={helpContent.review_queue.main.fieldTooltips.confidence} arrow>
+                        <Chip
+                          label={`${Math.round(item.confidence_score * 100)}%`}
+                          size="small"
+                          color={confidenceColor(item.confidence_score)}
+                          variant="outlined"
+                        />
+                      </Tooltip>
                     )}
-                    <Chip
-                      label={item.status}
-                      size="small"
-                      color={item.status === 'approved' ? 'success' : item.status === 'rejected' ? 'error' : 'default'}
-                      variant="outlined"
-                      sx={{ textTransform: 'capitalize' }}
-                    />
+                    <Tooltip title={helpContent.review_queue.main.fieldTooltips.status} arrow>
+                      <Chip
+                        label={item.status}
+                        size="small"
+                        color={item.status === 'approved' ? 'success' : item.status === 'rejected' ? 'error' : 'default'}
+                        variant="outlined"
+                        sx={{ textTransform: 'capitalize' }}
+                      />
+                    </Tooltip>
                     {item.template_id && (
-                      <Chip label="Template matched" color="info" size="small" sx={{ ml: 0.5 }} />
+                      <Tooltip title={helpContent.review_queue.main.fieldTooltips.templateMatch} arrow>
+                        <Chip label="Template matched" color="info" size="small" sx={{ ml: 0.5 }} />
+                      </Tooltip>
                     )}
                     {item.auto_ingested === 1 && (
-                      <Chip label="Auto-ingested" color="success" size="small" sx={{ ml: 0.5 }} />
+                      <Tooltip title={helpContent.review_queue.main.fieldTooltips.autoIngested} arrow>
+                        <Chip label="Auto-ingested" color="success" size="small" sx={{ ml: 0.5 }} />
+                      </Tooltip>
                     )}
                     {isProcessing && (
                       <Chip

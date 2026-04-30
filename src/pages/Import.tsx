@@ -58,6 +58,9 @@ import type { ApiDocumentType, ProcessingQueueItem, ExtractedTable, ExtractionTe
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { helpContent } from '../lib/helpContent';
 
 type Stage = 'upload' | 'queued' | 'review';
 
@@ -853,6 +856,10 @@ export function Import() {
         )}
       </Box>
 
+      <HelpWell id="import.main" title={helpContent.import.main.headline}>
+        {helpContent.import.main.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -967,6 +974,9 @@ export function Import() {
           {documentTypes.length > 0 && (
             <FormControl fullWidth sx={{ mb: 3 }}>
               <InputLabel shrink>Pre-select document type (optional)</InputLabel>
+              <Box sx={{ position: 'absolute', right: 8, top: 8, zIndex: 1 }}>
+                <InfoTooltip text={helpContent.import.main.sectionTooltips.docTypePreselect} />
+              </Box>
               <Select
                 value={documentTypeId}
                 onChange={(e) => setDocumentTypeId(e.target.value)}
@@ -1140,6 +1150,10 @@ export function Import() {
                     <Typography variant="body2" fontWeight={600} color="text.secondary">
                       {Math.round(confidence * 100)}%
                     </Typography>
+                    <InfoTooltip text={helpContent.import.main.sectionTooltips.confidenceChip} />
+                    {item.queueItem.auto_ingested === 1 && (
+                      <InfoTooltip text={helpContent.import.main.sectionTooltips.autoIngestedChip} />
+                    )}
                     {/* Document type chip */}
                     {(() => {
                       const dtName = documentTypeId

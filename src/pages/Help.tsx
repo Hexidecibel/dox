@@ -32,6 +32,9 @@ const MODULE_LABEL: Record<HelpModuleKey, string> = {
   suppliers: 'Suppliers',
   products: 'Products',
   documents: 'Documents',
+  import: 'Import',
+  review_queue: 'Review Queue',
+  ingest_history: 'Ingest History',
   document_types: 'Document Types',
   naming_templates: 'Naming Templates',
   bundles: 'Bundles',
@@ -50,6 +53,9 @@ const MODULE_LABEL: Record<HelpModuleKey, string> = {
 const MODULE_ORDER: HelpModuleKey[] = [
   'documents',
   'search',
+  'import',
+  'review_queue',
+  'ingest_history',
   'bundles',
   'orders',
   'customers',
@@ -130,46 +136,61 @@ export function Help() {
               <Typography variant="body1" sx={{ mb: 2 }}>
                 {entry.well}
               </Typography>
-              {'list' in entry &&
-                entry.list &&
-                (entry.list.well as string) !== (entry.well as string) && (
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ mt: 2 }}
-                  >
-                    {entry.list.well}
-                  </Typography>
-                )}
-              {/* Long-form sections from the module-specific `help` block.
-                  D1 fills these in for connectors; later D-slices fill in
-                  their own modules. Modules without a `help` block fall
-                  back to the placeholder caption below. */}
-              {selected === 'connectors' &&
-                helpContent.connectors.help.sections.map((section) => (
-                  <Box key={section.heading} sx={{ mt: 3 }}>
-                    <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
-                      {section.heading}
-                    </Typography>
+              {(() => {
+                // Some modules expose extended copy on `list` (list pages),
+                // others on `main` (process pages like import / review_queue
+                // / ingest_history). Pick whichever is present and render its
+                // well if it adds detail beyond the top-level summary.
+                const surface =
+                  ('list' in entry && (entry as { list?: { well?: string } }).list) ||
+                  ('main' in entry && (entry as { main?: { well?: string } }).main) ||
+                  null;
+                if (surface && surface.well && surface.well !== (entry.well as string)) {
+                  return (
                     <Typography
                       variant="body2"
-                      sx={{ whiteSpace: 'pre-line' }}
-                      color="text.primary"
+                      color="text.secondary"
+                      sx={{ mt: 2 }}
                     >
-                      {section.body}
+                      {surface.well}
                     </Typography>
-                  </Box>
-                ))}
-              {selected !== 'connectors' && (
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ mt: 4, display: 'block' }}
-                >
-                  Deep dives, screenshots, and field reference are added per
-                  module slice (D1-D5).
-                </Typography>
-              )}
+                  );
+                }
+                return null;
+              })()}
+              {/* Long-form sections from the module-specific `help` block.
+                  Filled in incrementally per D-slice. Modules without a
+                  `help` block fall back to the placeholder caption below. */}
+              {(() => {
+                const helpBlock = (entry as { help?: { sections?: ReadonlyArray<{ heading: string; body: string }> } }).help;
+                const sections = helpBlock?.sections;
+                if (sections && sections.length > 0) {
+                  return sections.map((section) => (
+                    <Box key={section.heading} sx={{ mt: 3 }}>
+                      <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
+                        {section.heading}
+                      </Typography>
+                      <Typography
+                        variant="body2"
+                        sx={{ whiteSpace: 'pre-line' }}
+                        color="text.primary"
+                      >
+                        {section.body}
+                      </Typography>
+                    </Box>
+                  ));
+                }
+                return (
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ mt: 4, display: 'block' }}
+                  >
+                    Deep dives, screenshots, and field reference are added per
+                    module slice (D1-D5).
+                  </Typography>
+                );
+              })()}
             </>
           ) : (
             <Typography variant="body1" color="text.secondary">

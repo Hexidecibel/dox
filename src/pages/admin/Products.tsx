@@ -40,6 +40,10 @@ import { api } from '../../lib/api';
 import type { ApiProduct } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 const ITEMS_PER_PAGE = 20;
 
@@ -175,6 +179,10 @@ export function Products() {
         </Button>
       </Box>
 
+      <HelpWell id="products.list" title={helpContent.products.list?.headline ?? 'Products'}>
+        {helpContent.products.list?.well ?? helpContent.products.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -200,11 +208,14 @@ export function Products() {
       {isMobile ? (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           {products.length === 0 ? (
-            <Card variant="outlined">
-              <CardContent sx={{ textAlign: 'center', py: 4 }}>
-                <Typography color="text.secondary">No products found</Typography>
-              </CardContent>
-            </Card>
+            <EmptyState
+              title={search ? 'No products match your search' : helpContent.products.list?.emptyTitle ?? 'No products yet'}
+              description={search
+                ? 'Clear the search box to see every product in your tenant.'
+                : helpContent.products.list?.emptyDescription}
+              actionLabel={search ? undefined : 'Add product'}
+              onAction={search ? undefined : openCreate}
+            />
           ) : (
             products.map((product) => (
               <Card key={product.id} variant="outlined">
@@ -249,28 +260,50 @@ export function Products() {
             ))
           )}
         </Box>
+      ) : products.length === 0 ? (
+        <EmptyState
+          title={search ? 'No products match your search' : helpContent.products.list?.emptyTitle ?? 'No products yet'}
+          description={search
+            ? 'Clear the search box to see every product in your tenant.'
+            : helpContent.products.list?.emptyDescription}
+          actionLabel={search ? undefined : 'Add product'}
+          onAction={search ? undefined : openCreate}
+        />
       ) : (
         <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell>Name</TableCell>
-                <TableCell>Slug</TableCell>
-                <TableCell>Description</TableCell>
-                <TableCell>Status</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Name
+                    <InfoTooltip text={helpContent.products.list?.columnTooltips?.name} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Slug
+                    <InfoTooltip text={helpContent.products.list?.columnTooltips?.slug} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Description
+                    <InfoTooltip text={helpContent.products.list?.columnTooltips?.description} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.products.list?.columnTooltips?.status} />
+                  </Box>
+                </TableCell>
                 <TableCell>Created</TableCell>
                 <TableCell align="right">Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {products.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={6} sx={{ textAlign: 'center', py: 4 }}>
-                    <Typography color="text.secondary">No products found</Typography>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                products.map((product) => (
+              {products.map((product) => (
                   <TableRow key={product.id} hover>
                     <TableCell>
                       <Typography variant="body2" fontWeight={500}>
@@ -313,8 +346,7 @@ export function Products() {
                       </Tooltip>
                     </TableCell>
                   </TableRow>
-                ))
-              )}
+                ))}
             </TableBody>
           </Table>
         </TableContainer>

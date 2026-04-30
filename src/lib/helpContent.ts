@@ -344,36 +344,512 @@ const connectors: ConnectorsHelp = {
 };
 
 // ---------------------------------------------------------------------------
-// Other modules — unchanged from D0 scaffold; D2-D6 fill these in.
+// Daily-driver modules — Phase D2 expanded shape.
+// ---------------------------------------------------------------------------
+//
+// The list/detail surfaces below get full ListSurface / DetailSurface entries
+// plus per-module long-form `help.sections` arrays that drive /help/<module>.
+// Process pages (import, review_queue, ingest_history) deviate from the
+// list/detail split and use a `main` section instead — see the inline shapes
+// below.
+
+interface ModuleHelpExpanded extends ModuleHelp {
+  help?: { sections: ReadonlyArray<{ heading: string; body: string }> };
+}
+
+const orders: ModuleHelpExpanded = {
+  headline: 'Orders',
+  well:
+    'Orders represent inbound purchase orders parsed from emails, CSVs, or ERP feeds. Each order ties customer + line items together and feeds the COA workflow downstream.',
+  list: {
+    headline: 'Orders',
+    well:
+      "This is every order that has landed in your tenant — from connector ingestion, manual entry, or API. Each row is a purchase order with its line items, customer link, and current status in the COA workflow. Click into one to see line items, matched lots, and the documents attached.",
+    emptyTitle: 'No orders yet',
+    emptyDescription:
+      "Orders show up here when a connector ingests one or you create one manually. Set up a connector to point a vendor's order feed at dox, or hit New Order to enter one by hand.",
+    columnTooltips: {
+      orderNumber: 'The vendor / customer order number — usually the upstream system identifier (SO-12345, PO-9876, etc.). Matched against incoming COAs and documents.',
+      customer: 'Customer the order is for. Resolved from customer_number or customer_name during ingest; click into the order to see the canonical customer record.',
+      poNumber: "Purchase order number, when the upstream system separates that from the order number. Optional — many connectors only emit one of the two.",
+      status:
+        "Where this order is in the COA workflow. pending = just ingested, no enrichment yet. enriched = customer / products resolved. matched = COAs found for the lots on the order. fulfilled = all required docs attached. delivered = COA package sent to the customer. error = ingest or enrichment failed.",
+      items: 'Total line items on the order.',
+      matched: 'Line items that have a matched lot + COA. Counts against `items` for the matched / total ratio.',
+      source: 'Which connector this order came from. Click the chip to filter the list to one connector.',
+      created: 'When the order was first ingested or created.',
+    },
+  },
+  detail: {
+    headline: 'Order detail',
+    well:
+      "Everything dox knows about this order: line items, customer, source connector, attached documents, and the audit trail of how it moved through the COA workflow.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What an order is',
+        body:
+          'An order in dox is the inbound purchase-order record that drives the COA workflow. It carries an order number, an optional PO number, a customer reference, line items (each pointing at a product), and zero or more attached documents. Orders are typically created by connector ingestion (parsed from a vendor email, CSV, or API drop) but can also be created manually from the New Order button.',
+      },
+      {
+        heading: 'The order lifecycle',
+        body:
+          "Orders move through six statuses. pending — just ingested, customer / products not yet resolved. enriched — customer matched against the customer roster, line items resolved against the product catalog. matched — for each line, a lot has been picked and the COA for that lot is on file. fulfilled — every required document is attached. delivered — the COA package has been sent to the customer. error — something failed during ingest or enrichment; check the order detail for the specific error. " +
+          "The progression is mostly automatic — pipeline jobs (enrichment + matching) run on creation. You only need to step in for matched ones (pick lots) and to confirm delivery.",
+      },
+      {
+        heading: 'Filtering and search',
+        body:
+          "The search box matches against order number, PO number, customer name, and customer number. The status filter narrows to a single lifecycle stage. " +
+          "Deep-link filters: clicking a connector chip on a run row in the connector detail page navigates here with `?connector_id=...`, restricting the list to orders from that one connector. Clear via the chip in the filter bar.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          'Order is stuck in pending? Enrichment didn\'t fire — check the order detail for an error and re-run the pipeline. ' +
+          'Customer column is blank? The connector emitted a customer_number that doesn\'t match any record. Add the customer first, then re-run enrichment. ' +
+          'Items / Matched mismatch persisting? Some lots have no COA on file. Either upload the missing COAs (the AI pipeline will match them on lot number) or pick a substitute lot.',
+      },
+    ],
+  },
+};
+
+const customers: ModuleHelpExpanded = {
+  headline: 'Customers',
+  well:
+    "Customers are the buyers your tenant ships to. dox tracks each customer's identifiers (account numbers, ship-to codes) so inbound orders can be matched to the right downstream pipeline.",
+  list: {
+    headline: 'Customers',
+    well:
+      "Your tenant's customer roster. Each customer has an identifier (customer_number), a name, optional contact email, and a default COA delivery preference (email, portal, or none). Inbound orders are auto-matched against this list during enrichment.",
+    emptyTitle: 'No customers yet',
+    emptyDescription:
+      "Add the customers your tenant ships to and dox can auto-match inbound orders against them. You can also let the system create customers on the fly during connector ingest if your data already includes consistent customer numbers.",
+    columnTooltips: {
+      customerNumber: 'The upstream identifier for the customer — usually their account number or ship-to code in your ERP. Used to match inbound order rows to a customer record.',
+      name: "Display name for the customer. Shown on orders, COA packages, and audit reports.",
+      email: 'Default email address for COA delivery. Used when delivery method is set to "email"; can be overridden per order.',
+      coaDelivery:
+        "How COAs reach this customer once an order is fulfilled. email = automated send to the address on file. portal = customer logs into your dox tenant. none = no automatic delivery (you handle distribution out-of-band).",
+      status: 'Active customers receive deliveries. Inactive customers stay on file but are skipped by the delivery pipeline — useful for archived accounts.',
+    },
+  },
+  detail: {
+    headline: 'Customer detail',
+    well:
+      "All orders, contacts, and delivery preferences for one customer. Use this to spot-check the COA history for a single buyer, update their delivery method, or look up their account number.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What a customer is',
+        body:
+          "A customer in dox is one of the buyers your tenant ships to. Each record carries a customer_number (the upstream identifier from your ERP), a display name, an optional email, and a default COA delivery method. Customer records are tenant-scoped — a customer in one tenant is invisible to others.",
+      },
+      {
+        heading: 'How customers get matched',
+        body:
+          "When a connector ingests an order, the enrichment step looks up the customer using customer_number first, then customer_name as a fallback. If neither matches a record, the order lands in pending status with customer_id null until you either create the customer or correct the data. " +
+          "Some connectors (configured in their wizard) auto-create a customer record when a new customer_number arrives — saves you from babysitting the roster, at the cost of fuzzy duplicates if the upstream system isn't disciplined about identifiers.",
+      },
+      {
+        heading: 'COA delivery methods',
+        body:
+          "Each customer has a default delivery method that drives where COAs go when an order is fulfilled. email — automated send to the address on the customer record (or per-order overrides). portal — the customer logs into your dox tenant and downloads from there (useful for high-volume buyers). none — no automatic delivery; the COA package is generated and you handle distribution by hand. " +
+          "Per-order overrides are possible — open an order and use the Delivery section to send to a different address or method without changing the customer's default.",
+      },
+    ],
+  },
+};
+
+const suppliers: ModuleHelpExpanded = {
+  headline: 'Suppliers',
+  well:
+    'Suppliers are the vendors your tenant buys from. Each supplier is a first-class entity that documents (specs, COAs, SDS) link to via supplier_id.',
+  list: {
+    headline: 'Suppliers',
+    well:
+      "Your tenant's supplier roster. Each supplier has a name, a list of aliases (alternate names that may show up on inbound docs), an active flag, and a roll-up count of products and documents. Used to scope COAs, specs, and SDS sheets to a specific vendor.",
+    emptyTitle: 'No suppliers yet',
+    emptyDescription:
+      "Add the suppliers your tenant sources from and dox can attach inbound COAs to the right vendor. Aliases are useful when the same supplier ships docs under multiple legal names — list them all and the AI pipeline will treat them as one.",
+    columnTooltips: {
+      name: "Canonical name for the supplier. Used everywhere by default; aliases handle variant names that appear on inbound docs.",
+      aliases:
+        "Alternate names this supplier might appear as on inbound documents (legal name vs. brand name, abbreviations, regional subsidiaries). The AI pipeline matches incoming COAs against this list when picking the supplier_id.",
+      status: 'Active suppliers receive doc attachments. Inactive ones stay on file (with their existing docs) but new inbound docs skip them during matching.',
+      created: 'When the supplier record was first created.',
+    },
+  },
+  detail: {
+    headline: 'Supplier detail',
+    well:
+      "Everything tied to one supplier: products they ship, extraction templates that apply to their docs, and the document library scoped to their supplier_id. Use the tabs to switch between views.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What a supplier is',
+        body:
+          'A supplier in dox is one of the vendors your tenant buys from. Each record has a canonical name, an alias list (for variant names that appear on inbound documents), and an active flag. Suppliers are tenant-scoped — each tenant maintains its own roster.',
+      },
+      {
+        heading: 'Aliases and matching',
+        body:
+          "Aliases are the cleanup tool for when a supplier shows up under multiple names on inbound documents — legal name vs. brand name, regional subsidiaries, abbreviations. " +
+          "Add every variant you've seen to the aliases list (comma-separated when editing). When the AI pipeline parses a COA and tries to assign supplier_id, it checks the canonical name AND every alias across all tenant suppliers — so 'ACME Corp', 'ACME Industries Inc', and 'ACME' all land on the same record.",
+      },
+      {
+        heading: 'Products, templates, and documents',
+        body:
+          "Open a supplier to see three tabs. Products — the catalog items this supplier ships. Templates — extraction templates pinned to the supplier + document type pair (set up via the Import / Review Queue flow). Documents — every doc with a supplier_id pointing here, listed newest first. The Templates tab is where you tune auto-ingest thresholds for high-trust supplier+doctype pairs.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "Same supplier showing up twice? Likely a case mismatch or punctuation difference (\"ACME, Inc.\" vs \"ACME Inc\"). Pick the canonical record, add the duplicate's name as an alias, then deactivate or delete the duplicate. " +
+          "Inbound doc not getting tagged with the right supplier? Check the supplier's aliases — if the name on the doc isn't there, the AI can't match. Add it, then re-run the queue item.",
+      },
+    ],
+  },
+};
+
+const products: ModuleHelpExpanded = {
+  headline: 'Products',
+  well:
+    'Products are the items your tenant tracks documents for. Documents link to products many-to-many, with optional per-link expiration dates so you can flag stale paperwork.',
+  list: {
+    headline: 'Products',
+    well:
+      "Your tenant's product catalog — the items dox tracks documents for. Each product has a name, slug, optional description, and an active flag. Documents link to products many-to-many; an order line item points at a product so dox knows which COAs to pull.",
+    emptyTitle: 'No products yet',
+    emptyDescription:
+      "Add the products your tenant ships and dox can route incoming COAs to the right item. You can also let connectors create products on the fly during ingest if upstream order data is consistent enough.",
+    columnTooltips: {
+      name: 'Canonical product name. Shown on orders, line items, and COA packages.',
+      slug: 'URL-safe identifier auto-generated from the name. Used in API paths and as a stable key when product names change.',
+      description: 'Optional free-form notes about the product. Not used by any matching logic.',
+      status: 'Active products show up in the catalog and accept document links. Inactive ones are hidden from new doc + order flows but keep their existing links.',
+    },
+  },
+  detail: {
+    headline: 'Product detail',
+    well:
+      "All documents and orders tied to one product. Use this to audit the doc library for a single SKU or check which orders include the item.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What a product is',
+        body:
+          "A product in dox is a catalog item your tenant tracks paperwork for — typically a SKU or item code from your ERP. Products are tenant-scoped (since v0.1.17, see migration 0017). They link to documents many-to-many with optional per-link expiration dates and notes.",
+      },
+      {
+        heading: 'Linking documents to products',
+        body:
+          "Documents are tied to products via the document_products join table. Each link can carry an expiration_date and optional notes — useful when a single doc covers multiple products with staggered re-test cadences. " +
+          "Links are created during ingest (the AI pipeline pulls product references out of the doc and matches them against the catalog) or manually from the document detail page. The Expiration Dashboard surfaces products whose docs are about to go stale.",
+      },
+      {
+        heading: 'Auto-create on ingest',
+        body:
+          "If a connector emits a product reference (line item with a product_name) that doesn't match any catalog entry, the default behavior is to create the product on the fly. This keeps small / dynamic catalogs alive without manual upkeep — the cost is fuzzy duplicates if upstream data isn't consistent. " +
+          "If you'd rather have explicit control, set the connector's auto-create-product config to false and unmatched line items will surface as enrichment errors instead.",
+      },
+    ],
+  },
+};
+
+const documents: ModuleHelpExpanded = {
+  headline: 'Documents',
+  well:
+    'The document library — every spec, COA, SDS, and report your tenant has uploaded or ingested. Documents are versioned: each new upload to the same external_ref appends a version rather than replacing.',
+  list: {
+    headline: 'Documents',
+    well:
+      "Your tenant's document library. Each card shows a doc — title, type (COA, Spec, SDS), supplier, and the products it covers. Filter by status, document type, or use the AI search box to ask in natural language.",
+    emptyTitle: 'No documents yet',
+    emptyDescription:
+      "Documents land here once you import them (Import page), an email connector ingests one, or an API call posts one. Hit the AI search if you've imported some but they aren't turning up — natural-language queries like \"COAs for butter from March\" use a different path than the keyword filters.",
+    columnTooltips: {
+      title: 'The document title — extracted from the file or set during ingest. Used as the primary display name everywhere.',
+      type:
+        'The document type (COA, Spec Sheet, SDS, etc.) — per-tenant, configured under Document Types. Drives which extraction template runs on inbound files.',
+      supplier: 'Which supplier the doc is from. Pulled from the doc content during ingest and matched against your supplier roster.',
+      status:
+        "active = current and visible. archived = hidden from default views but still queryable. New uploads to the same external_ref bump the version on the active record rather than creating a new one.",
+      version: 'Current version number. Each ingest of a doc with the same external_ref appends a new version; older versions stay accessible via the version history.',
+    },
+  },
+  detail: {
+    headline: 'Document detail',
+    well:
+      "Everything dox knows about one document: file preview, metadata (lot, expiration, supplier, products), version history, and the audit trail of who uploaded what when. Use the actions in the header to download, archive, or delete.",
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What a document is',
+        body:
+          "A document in dox is a versioned file with structured metadata — a COA for a specific lot, a spec sheet for a product, an SDS for a supplier. Each document has a title, a document_type, an optional supplier_id, links to one or more products, and a primary_metadata JSON blob with the fields the AI pipeline extracted (lot_number, expiration_date, etc.). The actual file lives in R2 and is served via a signed URL.",
+      },
+      {
+        heading: 'Versioning',
+        body:
+          "Documents are versioned via external_ref. When a new file is ingested with the same external_ref + tenant_id as an existing doc, dox appends a new version to the existing record rather than creating a duplicate. The current_version field on the doc points at the latest. Older versions remain in document_versions and are accessible via the version history on the detail page. " +
+          "external_ref defaults to the doc's stable upstream ID (e.g. lot number for a COA) — the connector / ingest flow generates one if the source doesn't have one.",
+      },
+      {
+        heading: 'Search and filtering',
+        body:
+          "Two search modes. Keyword search (left of the AI toggle) — matches title, description, tags, file names, and metadata via SQLite full-text. Fast, exact match. AI search — natural language ('COAs for Butter from March'); the query is parsed by an LLM into structured filters (document_type, product, supplier, date range, expiration window) and then executed. Slower, more forgiving. " +
+          "Filter chips: status (active vs archived), category (legacy field — being phased out in favor of document_type), and document type (the per-tenant doctype dropdown).",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          'Imported a doc but it isn\'t showing up? Check the Review Queue — depending on its confidence score it may be waiting for human approval. Once approved it lands in the library. ' +
+          'Same doc keeps creating duplicates? The external_ref isn\'t stable — open one, copy its external_ref, compare it to what the upstream system is sending. The connector wizard lets you fix the field mapping that produces external_ref. ' +
+          'AI search returns nothing? The natural-language parser couldn\'t find structured filters in the query. Try keyword search or simplify the query (e.g. just the product name).',
+      },
+    ],
+  },
+};
+
+const importHelp = {
+  headline: 'Import',
+  well:
+    'Smart upload for documents. Drop a file, the AI pipeline extracts fields, and you confirm before it lands in the library. Higher-confidence + matched-template runs auto-ingest without review.',
+  main: {
+    headline: 'Import',
+    well:
+      "Upload one or more files and the smart-upload pipeline runs each through extraction (AI parses fields, detects type, finds product names + lot numbers) and queues them for review. High-confidence runs that match an extraction template can auto-ingest without ever stopping here. Files that need human review surface for editing in the Review Queue or the per-result cards below.",
+    sectionTooltips: {
+      dropZone:
+        'Drag files in or click to browse. PDF, image, CSV, and XLSX are all supported. Multiple files at once run in parallel through extraction.',
+      docTypePreselect:
+        "Pre-pick a document type to skip AI's type-detection step. Useful for batch uploads where you know everything in this drop is one type (e.g. all COAs). Leave on \"Let AI detect\" if files are mixed.",
+      tenantSelect: 'super_admin only — pick which tenant the import lands in. Defaults to the currently selected tenant.',
+      processButton: 'Kick off extraction. Files queue for AI processing in the background; you\'ll move to the queued screen and can come back to review when ready.',
+      confidenceChip:
+        "How sure the AI was about its overall extraction. >=80% high (green) — fields are likely right. 50-79% medium (yellow) — spot-check the fields. <50% low (red) — assume nothing is right and re-check every field.",
+      autoIngestedChip: "This doc skipped review entirely — a matched extraction template authorized the AI to ingest it directly because confidence cleared the template's threshold.",
+      templateChip: "An extraction template (saved supplier + doc-type field mapping) matched this doc. The AI used the template's field hints, which usually means tighter, more accurate extraction.",
+      duplicateBadge: "dox spotted an existing document with the same external_ref. Importing this would bump the version on the existing doc rather than create a new one — confirm that's what you want.",
+      summary: "AI-generated one-line summary of what the document is. Useful as a sanity check that the file is what you thought it was.",
+      ratingThumbs: "Tell the system whether the extraction was correct. Up = the fields are right. Down = significantly wrong. Ratings feed the learning loop that tunes future extractions.",
+    },
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What Import does',
+        body:
+          'Import is the manual entry point for documents — drag files in, the AI pipeline runs extraction, and you confirm before they land in the library. It coexists with email and API ingestion (those bypass this page entirely) but is the right place for one-off uploads or batches that came in via a non-automated channel.',
+      },
+      {
+        heading: 'The three stages',
+        body:
+          'Upload — pick files, optionally pre-select a document type, hit Process. Files are uploaded to R2 and a processing-queue row is created for each. ' +
+          'Queued — confirmation that the queue rows were created. The AI extraction runs asynchronously; you can navigate away and check back via the Review Queue. ' +
+          'Review — for each file, a card shows the file preview, the AI-extracted fields (editable), the confidence score, and a final Import button. High-confidence template-matched runs may have auto-imported and show an \"Imported\" badge directly. Edit any wrong fields and hit Import to commit.',
+      },
+      {
+        heading: 'Auto-ingest and templates',
+        body:
+          "An extraction template is a saved supplier + document-type pair with a field mapping and a confidence threshold. Templates are created from the Review Queue (after you correct an AI extraction, dox offers to save the corrections as a template for that supplier+doctype). Future docs from the same supplier+doctype that match the template skip review and auto-ingest if their confidence clears the threshold. Tune thresholds on the Supplier detail page → Templates tab.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "Doc shows duplicate detected? An existing doc has the same external_ref. Re-importing will bump the version. Confirm by checking the existing doc, then proceed if appropriate. " +
+          "Confidence is low? The AI couldn't extract cleanly. Edit the fields by hand on the result card, then import. Saving corrections feeds future template-matching. " +
+          "Files queued forever? The processing worker may be down. Check the Ingest History page — if items are stuck in 'queued' or 'processing' for >5 minutes, escalate to ops.",
+      },
+    ],
+  },
+} as const;
+
+const reviewQueue = {
+  headline: 'Review Queue',
+  well:
+    "AI extraction landing pad. Items here are documents the pipeline has parsed but isn't confident enough to ingest unattended. Review each, correct any wrong fields, then approve or reject.",
+  main: {
+    headline: 'Review Queue',
+    well:
+      "Every document the AI pipeline processed but didn't auto-ingest lives here. Review the extracted fields against the original file, fix anything wrong, then approve to push the doc into the library or reject to discard. Approving an item with corrections also feeds the learning loop — future docs from the same supplier+doctype get tighter extractions.",
+    fieldTooltips: {
+      confidence:
+        "Overall extraction confidence from the AI. >=80% high (likely right). 50-79% medium (spot-check). <50% low (re-check everything). Confidence factors in field-by-field certainty plus document-type detection accuracy.",
+      status:
+        "pending = waiting on you. approved = you confirmed and the doc is now in the library. rejected = you discarded; the file stays in R2 but never becomes a document. Use the filter chips at the top to switch views.",
+      autoIngested:
+        "Doc skipped this queue entirely — a matched extraction template let the AI commit it directly. These show up with status=approved and processing_status=ready. Use the \"Auto-ingested only\" toggle to audit recent unattended ingests.",
+      templateMatch:
+        "An extraction template (saved supplier + doc-type field mapping) matched this doc. Field assignments came from the template's hints, which usually tightens extraction.",
+      processingStatus:
+        "queued — file uploaded, AI hasn't started. processing — extraction in flight. ready — extraction finished, fields are populated and you can review. error — extraction failed; click into the item for the error message.",
+      docTypeFilter: 'Narrow the queue to a single document type. Useful when you want to plough through, say, all the pending COAs in one sitting.',
+      tenantFilter: 'super_admin only — filter to one tenant. Defaults to all tenants you have access to.',
+      autoIngestedToggle: "Show only docs that auto-ingested (skipped this queue). Lets you spot-check the unattended pipeline without paging through approved manual reviews.",
+    },
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What the Review Queue is',
+        body:
+          "The Review Queue is the human-in-the-loop checkpoint for the AI extraction pipeline. Every file that lands via Import, email, or API runs through extraction and gets a confidence score; if confidence is below the auto-ingest threshold (or no extraction template matched), the result lands here for a human to confirm. " +
+          "Approving an item with field corrections does two things: pushes the doc into the library and feeds the corrections back into the learning loop — the supplier + doctype pair will get a tighter extraction next time.",
+      },
+      {
+        heading: 'The review flow',
+        body:
+          "Click an item to expand. Two-column layout: file preview on the left, extracted fields on the right. Compare them. Edit any field that's wrong (the AI is fast but not infallible — dates and lot numbers are the usual offenders). " +
+          "Three actions. Approve — commits the doc to the library with whatever fields are currently filled. Reject — discards the queue item; the file stays in R2 but never becomes a document. Save Template — only shown after corrections, saves the corrected field mapping as an extraction template for this supplier+doctype so future docs auto-extract correctly.",
+      },
+      {
+        heading: 'Auto-ingested items',
+        body:
+          'Auto-ingested docs skip the queue entirely (they go straight from extraction to the library) but still show up here with status=approved and an "Auto-ingested" badge. Toggle "Auto-ingested only" at the top to audit recent unattended ingests — handy for spot-checking a high-volume connector. Confidence on these is always >= the matched template\'s threshold; if you see a wrong field, lower the threshold or update the template on the Supplier detail page.',
+      },
+      {
+        heading: 'Common questions',
+        body:
+          'Item stuck in processing? Extraction worker may be down. Check Ingest History; if the same item is in "processing" for >5 min, escalate. ' +
+          'Approving but the doc isn\'t showing in the library? Check the Documents page filters — by default only active docs show. Newly approved ones are active immediately. ' +
+          "AI keeps getting the same field wrong? After correcting, save the corrections as an extraction template (Save Template button on the expanded item). Future docs from the same supplier+doctype will use the corrected mapping.",
+      },
+    ],
+  },
+} as const;
+
+const ingestHistory = {
+  headline: 'Ingest History',
+  well:
+    'Full pipeline view across every queue item — source door, processing status, AI extraction, review outcome, and final ingest. Use it to audit the flow when something looks off.',
+  main: {
+    headline: 'Ingest History',
+    well:
+      "The complete audit trail for the AI ingest pipeline. Every file that hit the queue (regardless of source) is one row here, with its journey from upload through extraction, review, and final document creation. Use it to debug stuck items, audit auto-ingest rates, or trace how a specific doc ended up where it did.",
+    columnTooltips: {
+      timestamp: 'When the queue item was created — i.e. when the file landed in dox via Import, email, or API.',
+      fileName: 'Original file name as uploaded. Hover for the full name + size.',
+      source:
+        "Which intake door brought the file in. Import = manual upload via /import. Email = parsed from an inbound email connector. API = posted to /api/queue/upload. Source detail (sender, etc.) shown beneath when known.",
+      processing:
+        "Where the file is in the AI pipeline. queued = waiting for the worker. processing = extraction running. ready = extraction finished and fields are populated. error = extraction failed; expand for the error message.",
+      reviewStatus:
+        "Human-in-the-loop outcome. pending = sitting in the Review Queue. approved = a human (or auto-ingest) confirmed and the doc was created. rejected = a human discarded.",
+      confidence:
+        "Overall AI confidence in the extraction (0-100). Drives whether auto-ingest fires (template + threshold gates) and informs how carefully a human should review. Color-coded green/yellow/red.",
+      supplier: "Supplier the AI assigned (matched against your supplier roster + aliases). Empty when the AI couldn't pick one — usually because no record matched.",
+      docType: "Document type the AI assigned, or its raw guess if no per-tenant doctype matched. The doc-type-id column lights up when the guess matches a configured type; otherwise the guess shows as a label-only chip.",
+      templateMatch: "An extraction template matched — the AI used a saved supplier+doctype field mapping. Tighter extraction, often auto-ingestible.",
+      autoIngested: "This file went from queued straight to approved without a human review. Allowed because a template matched and confidence cleared its threshold.",
+    },
+    pipelineStageTooltips: {
+      reviewFilter: 'Slice the history by the human-review outcome — useful for finding everything you rejected last week, or auditing the auto-approved (ingested) bucket.',
+      processingFilter: 'Slice by where in the AI pipeline things landed. \"Error\" is the high-value filter when something\'s broken — surfaces every extraction that failed.',
+    },
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What Ingest History is',
+        body:
+          "Ingest History is the audit trail for the AI ingest pipeline. Every file that lands in the processing queue — regardless of source (Import, email, API) — appears here as one row. The row carries the file's journey: when it arrived, which door it came in through, the AI extraction outcome (status + confidence), whether a human approved or rejected it, and whether auto-ingest fired. " +
+          "Think of it as the join across Import + email-ingest + API + Review Queue: a single chronological view of everything the pipeline has touched.",
+      },
+      {
+        heading: 'Pipeline stages',
+        body:
+          "Each row reflects up to four stages. " +
+          "1. Source — which intake door (Import / email / API). " +
+          "2. Processing — the AI extraction (queued -> processing -> ready / error). " +
+          "3. Review — human-in-the-loop outcome (pending / approved / rejected; auto-ingest skips human review and lands at approved directly). " +
+          "4. Ingest — the actual document creation, only if review was approved. " +
+          "Filter chips at the top let you slice by review status and processing status independently — pair them to find, say, every error-state item that's still pending review.",
+      },
+      {
+        heading: 'Using it for debugging',
+        body:
+          "When a doc \"didn't show up\", this is where you start. Filter to the file name (via the source detail) or the time window. If processing = error, expand the row to see the message — usually a malformed file or an extraction template misconfigured. If processing = ready but review = pending, the item is sitting in the Review Queue waiting on a human. If review = approved but the doc isn't in the library, check the Documents page filters (active/archived). " +
+          "For stuck-pipeline triage, filter processing = queued or processing and check timestamps. Anything older than ~5 minutes in queued or processing means the worker is wedged.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          'Why is the same file in here twice? Re-uploads create new queue rows even if they\'re duplicates by external_ref. Approve one and reject the rest. ' +
+          'Confidence column is empty? The extraction errored before scoring (file unreadable, supplier extraction failed, etc.). Expand for the error. ' +
+          'Auto-ingested rate looks low? Means few extraction templates exist or thresholds are too high. Save more templates from the Review Queue.',
+      },
+    ],
+  },
+} as const;
+
+const search: ModuleHelpExpanded = {
+  headline: 'Search',
+  well:
+    'Full-text search across documents and orders. Toggle the AI button to use natural-language queries; the parser converts them into structured filters before running.',
+  list: {
+    headline: 'Search',
+    well:
+      "Cross-cutting search over your tenant's documents and orders. Two tabs: Documents (titles, tags, file content, metadata) and Orders (order #, customer, PO, line items). Each tab supports keyword search by default and an AI mode that takes natural language and converts it to structured filters.",
+    columnTooltips: {
+      aiToggle: "Switch between keyword search (exact match) and natural-language search (LLM parses your query into filters). Keyword is faster; AI is more forgiving when you don't know the exact words used.",
+      docCategory: 'Filter docs by the legacy category field — being phased out in favor of document_type. Most tenants leave this alone.',
+      docDateRange: "Restrict to docs created or updated within a window. Date-from inclusive, date-to inclusive — both optional.",
+      orderStatus: "Filter orders to a single lifecycle stage (pending, enriched, matched, fulfilled, delivered, error).",
+      exportFormat: "Pick the export format. CSV for spreadsheets and BI tools; JSON for piping into another system. Export only available on documents tab in keyword mode.",
+      relevanceScore: 'How closely the result matches the query (0-100). Computed by the search engine when AI mode is on; hidden in keyword mode where matches are binary.',
+    },
+  },
+  help: {
+    sections: [
+      {
+        heading: 'What Search does',
+        body:
+          'Search is the cross-cutting query surface for documents and orders. Two tabs (Documents, Orders), two modes per tab (keyword, AI). Use it when you don\'t want to navigate to the specific list page first — same data, just a query box up front.',
+      },
+      {
+        heading: 'Keyword vs. AI mode',
+        body:
+          "Keyword search is exact-match SQLite full-text against title, description, tags, file_name, and indexed file content (for docs); order_number, po_number, customer fields (for orders). Fast, predictable, but you have to know the right words. " +
+          "AI mode takes your natural-language query and runs it through an LLM that emits structured filters — \"COAs for Butter from March\" becomes {document_type: 'COA', product: 'Butter', date_from: '2025-03-01'}. The structured query then runs against the same data. Slower and pricier per query, but tolerant of fuzzy wording.",
+      },
+      {
+        heading: 'Filters and exports',
+        body:
+          "Document keyword search supports category + date-range filters, plus a CSV/JSON export of the result set (uses the same query the search ran). Order keyword search supports a status filter. AI mode disables the manual filters because the LLM produces its own. " +
+          "Tenant scoping always applies — super_admin sees only the tenant currently selected in the tenant switcher; others only their own tenant.",
+      },
+      {
+        heading: 'Common questions',
+        body:
+          "AI search returned nothing? The parser couldn\'t pull structured filters from your query. Try keyword mode or simplify the wording. " +
+          "Search returned more than expected? Keyword search ORs across fields by default — a query that matches a tag won\'t exclude docs that don\'t. Refine via the manual filters. " +
+          "Export is empty? You\'re in AI mode (export not supported there) or no docs matched — try export from keyword mode.",
+      },
+    ],
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Other modules — unchanged from D0 scaffold; later D-slices fill these in.
 // ---------------------------------------------------------------------------
 
 export const helpContent = {
   connectors,
-  orders: {
-    headline: 'Orders',
-    well:
-      'Orders represent inbound purchase orders parsed from emails, CSVs, or ERP feeds. Each order ties customer + line items together and feeds the COA workflow downstream.',
-  },
-  customers: {
-    headline: 'Customers',
-    well:
-      "Customers are the buyers your tenant ships to. dox tracks each customer's identifiers (account numbers, ship-to codes) so inbound orders can be matched to the right downstream pipeline.",
-  },
-  suppliers: {
-    headline: 'Suppliers',
-    well:
-      'Suppliers are the vendors your tenant buys from. Each supplier is a first-class entity that documents (specs, COAs, SDS) link to via supplier_id.',
-  },
-  products: {
-    headline: 'Products',
-    well:
-      'Products are the items your tenant tracks documents for. Documents link to products many-to-many, with optional per-link expiration dates so you can flag stale paperwork.',
-  },
-  documents: {
-    headline: 'Documents',
-    well:
-      'The document library — every spec, COA, SDS, and report your tenant has uploaded or ingested. Documents are versioned: each new upload to the same external_ref appends a version rather than replacing.',
-  },
+  orders,
+  customers,
+  suppliers,
+  products,
+  documents,
+  import: importHelp,
+  review_queue: reviewQueue,
+  ingest_history: ingestHistory,
   document_types: {
     headline: 'Document Types',
     well:
@@ -404,11 +880,7 @@ export const helpContent = {
     well:
       'The audit log records every privileged action: user creation, password resets, document deletions, role changes. Read-only and immutable — useful for compliance attestations.',
   },
-  search: {
-    headline: 'Search',
-    well:
-      'Full-text search across document titles, metadata, and file names. Use the filters on the left to narrow by tenant, supplier, product, or document type.',
-  },
+  search,
   tenants: {
     headline: 'Tenants',
     well:

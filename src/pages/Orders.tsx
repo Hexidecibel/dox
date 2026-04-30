@@ -35,6 +35,10 @@ import {
 import { Search as SearchIcon, Add as AddIcon } from '@mui/icons-material';
 import { api } from '../lib/api';
 import { useTenant } from '../contexts/TenantContext';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { EmptyState } from '../components/EmptyState';
+import { helpContent } from '../lib/helpContent';
 
 
 const ITEMS_PER_PAGE = 50;
@@ -194,6 +198,10 @@ export function Orders() {
         </Button>
       </Box>
 
+      <HelpWell id="orders.list" title={helpContent.orders.list?.headline ?? 'Orders'}>
+        {helpContent.orders.list?.well ?? helpContent.orders.well}
+      </HelpWell>
+
       {/* Filters */}
       <Box sx={{ mb: 3, display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
         <TextField
@@ -248,14 +256,19 @@ export function Orders() {
           <CircularProgress />
         </Box>
       ) : orders.length === 0 ? (
-        <Box sx={{ textAlign: 'center', py: 8 }}>
-          <Typography variant="h6" color="text.secondary" gutterBottom>
-            No orders found
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            {search || statusFilter ? 'Try adjusting your filters.' : 'Create your first order to get started.'}
-          </Typography>
-        </Box>
+        search || statusFilter || connectorIdFilter ? (
+          <EmptyState
+            title="No orders match your filters"
+            description="Clear the search box or status filter to see every order. Filters narrow to a single slice; remove them to widen the view."
+          />
+        ) : (
+          <EmptyState
+            title={helpContent.orders.list?.emptyTitle ?? 'No orders yet'}
+            description={helpContent.orders.list?.emptyDescription}
+            actionLabel="New order"
+            onAction={() => setCreateOpen(true)}
+          />
+        )
       ) : isMobile ? (
         /* Mobile: card view */
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
@@ -299,14 +312,54 @@ export function Orders() {
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell>Order #</TableCell>
-                <TableCell>Customer</TableCell>
-                <TableCell>PO #</TableCell>
-                <TableCell>Status</TableCell>
-                <TableCell align="center">Items</TableCell>
-                <TableCell align="center">Matched</TableCell>
-                <TableCell>Source</TableCell>
-                <TableCell>Created</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Order #
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.orderNumber} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Customer
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.customer} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    PO #
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.poNumber} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.status} />
+                  </Box>
+                </TableCell>
+                <TableCell align="center">
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Items
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.items} />
+                  </Box>
+                </TableCell>
+                <TableCell align="center">
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Matched
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.matched} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Source
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.source} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Created
+                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.created} />
+                  </Box>
+                </TableCell>
               </TableRow>
             </TableHead>
             <TableBody>

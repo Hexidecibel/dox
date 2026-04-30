@@ -44,6 +44,9 @@ import {
 import { api } from '../../lib/api';
 import type { ApiSupplier, ApiProduct, ExtractionTemplate, TemplateFieldMapping } from '../../lib/types';
 import type { Document } from '../../lib/types';
+import { HelpWell } from '../../components/HelpWell';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -331,6 +334,10 @@ export function SupplierDetail() {
         All Suppliers
       </Button>
 
+      <HelpWell id="suppliers.detail" title={helpContent.suppliers.detail?.headline ?? 'Supplier detail'}>
+        {helpContent.suppliers.detail?.well ?? helpContent.suppliers.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -456,9 +463,12 @@ export function SupplierDetail() {
             <CircularProgress size={24} />
           </Box>
         ) : products.length === 0 ? (
-          <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}>
-            <Typography color="text.secondary">No products found for this supplier</Typography>
-          </Paper>
+          <EmptyState
+            title="No products linked to this supplier"
+            description="Products show up here when they're created against this supplier from the Products page or via connector ingest. Add one to keep the catalog tied to the right vendor."
+            actionLabel="Add product"
+            onAction={() => setProductDialogOpen(true)}
+          />
         ) : (
           <TableContainer component={Paper} variant="outlined">
             <Table>
@@ -552,12 +562,10 @@ export function SupplierDetail() {
             <CircularProgress size={24} />
           </Box>
         ) : templates.length === 0 ? (
-          <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}>
-            <Typography color="text.secondary">No extraction templates for this supplier</Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-              Templates are created from the Import page when processing documents from this supplier.
-            </Typography>
-          </Paper>
+          <EmptyState
+            title="No extraction templates yet"
+            description="Templates are saved supplier+doc-type field mappings that the AI uses to auto-extract from future docs. They're created from the Review Queue after you correct an AI extraction. Process a doc from this supplier and the option to save a template will appear."
+          />
         ) : (
           <TableContainer component={Paper} variant="outlined">
             <Table>
@@ -799,9 +807,10 @@ export function SupplierDetail() {
             <CircularProgress size={24} />
           </Box>
         ) : documents.length === 0 ? (
-          <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}>
-            <Typography color="text.secondary">No documents found for this supplier</Typography>
-          </Paper>
+          <EmptyState
+            title="No documents from this supplier yet"
+            description="Documents land here once the AI pipeline tags them with this supplier_id (matched against the supplier name + aliases). Check that the supplier's aliases cover every variant name that appears on incoming COAs."
+          />
         ) : (
           <TableContainer component={Paper} variant="outlined">
             <Table>

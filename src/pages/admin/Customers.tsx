@@ -42,6 +42,10 @@ import {
 import { api } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
+import { HelpWell } from '../../components/HelpWell';
+import { InfoTooltip } from '../../components/InfoTooltip';
+import { EmptyState } from '../../components/EmptyState';
+import { helpContent } from '../../lib/helpContent';
 
 const ITEMS_PER_PAGE = 20;
 
@@ -208,6 +212,10 @@ export function Customers() {
         </Button>
       </Box>
 
+      <HelpWell id="customers.list" title={helpContent.customers.list?.headline ?? 'Customers'}>
+        {helpContent.customers.list?.well ?? helpContent.customers.well}
+      </HelpWell>
+
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -233,11 +241,14 @@ export function Customers() {
       {isMobile ? (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           {customers.length === 0 ? (
-            <Card variant="outlined">
-              <CardContent sx={{ textAlign: 'center', py: 4 }}>
-                <Typography color="text.secondary">No customers found</Typography>
-              </CardContent>
-            </Card>
+            <EmptyState
+              title={search ? 'No customers match your search' : helpContent.customers.list?.emptyTitle ?? 'No customers yet'}
+              description={search
+                ? 'Try clearing the search box to see every customer in your tenant.'
+                : helpContent.customers.list?.emptyDescription}
+              actionLabel={search ? undefined : 'Add customer'}
+              onAction={search ? undefined : openCreate}
+            />
           ) : (
             customers.map((customer) => (
               <Card
@@ -285,82 +296,110 @@ export function Customers() {
           )}
         </Box>
       ) : (
+        customers.length === 0 ? (
+          <EmptyState
+            title={search ? 'No customers match your search' : helpContent.customers.list?.emptyTitle ?? 'No customers yet'}
+            description={search
+              ? 'Try clearing the search box to see every customer in your tenant.'
+              : helpContent.customers.list?.emptyDescription}
+            actionLabel={search ? undefined : 'Add customer'}
+            onAction={search ? undefined : openCreate}
+          />
+        ) : (
         <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell>Customer #</TableCell>
-                <TableCell>Name</TableCell>
-                <TableCell>Email</TableCell>
-                <TableCell>COA Delivery</TableCell>
-                <TableCell>Status</TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Customer #
+                    <InfoTooltip text={helpContent.customers.list?.columnTooltips?.customerNumber} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Name
+                    <InfoTooltip text={helpContent.customers.list?.columnTooltips?.name} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Email
+                    <InfoTooltip text={helpContent.customers.list?.columnTooltips?.email} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    COA Delivery
+                    <InfoTooltip text={helpContent.customers.list?.columnTooltips?.coaDelivery} />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Status
+                    <InfoTooltip text={helpContent.customers.list?.columnTooltips?.status} />
+                  </Box>
+                </TableCell>
                 <TableCell align="right">Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {customers.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={6} sx={{ textAlign: 'center', py: 4 }}>
-                    <Typography color="text.secondary">No customers found</Typography>
+              {customers.map((customer) => (
+                <TableRow
+                  key={customer.id}
+                  hover
+                  sx={{ cursor: 'pointer' }}
+                  onClick={() => navigate(`/admin/customers/${customer.id}`)}
+                >
+                  <TableCell>
+                    <Typography variant="body2" fontWeight={500} sx={{ fontFamily: 'monospace' }}>
+                      {customer.customer_number}
+                    </Typography>
+                  </TableCell>
+                  <TableCell>
+                    <Typography variant="body2" fontWeight={500} color="primary">
+                      {customer.name}
+                    </Typography>
+                  </TableCell>
+                  <TableCell>
+                    <Typography variant="body2" color="text.secondary">
+                      {customer.email || '-'}
+                    </Typography>
+                  </TableCell>
+                  <TableCell>
+                    <Chip
+                      label={customer.coa_delivery_method}
+                      size="small"
+                      color={deliveryMethodColor(customer.coa_delivery_method)}
+                      variant="outlined"
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <Chip
+                      label={customer.active ? 'Active' : 'Inactive'}
+                      size="small"
+                      color={customer.active ? 'success' : 'default'}
+                      variant="outlined"
+                    />
+                  </TableCell>
+                  <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                    <Tooltip title="Edit">
+                      <IconButton size="small" onClick={() => openEdit(customer)}>
+                        <EditIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Delete">
+                      <IconButton size="small" color="error" onClick={() => handleDelete(customer)}>
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
                   </TableCell>
                 </TableRow>
-              ) : (
-                customers.map((customer) => (
-                  <TableRow
-                    key={customer.id}
-                    hover
-                    sx={{ cursor: 'pointer' }}
-                    onClick={() => navigate(`/admin/customers/${customer.id}`)}
-                  >
-                    <TableCell>
-                      <Typography variant="body2" fontWeight={500} sx={{ fontFamily: 'monospace' }}>
-                        {customer.customer_number}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Typography variant="body2" fontWeight={500} color="primary">
-                        {customer.name}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Typography variant="body2" color="text.secondary">
-                        {customer.email || '-'}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Chip
-                        label={customer.coa_delivery_method}
-                        size="small"
-                        color={deliveryMethodColor(customer.coa_delivery_method)}
-                        variant="outlined"
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Chip
-                        label={customer.active ? 'Active' : 'Inactive'}
-                        size="small"
-                        color={customer.active ? 'success' : 'default'}
-                        variant="outlined"
-                      />
-                    </TableCell>
-                    <TableCell align="right" onClick={(e) => e.stopPropagation()}>
-                      <Tooltip title="Edit">
-                        <IconButton size="small" onClick={() => openEdit(customer)}>
-                          <EditIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                      <Tooltip title="Delete">
-                        <IconButton size="small" color="error" onClick={() => handleDelete(customer)}>
-                          <DeleteIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
+              ))}
             </TableBody>
           </Table>
         </TableContainer>
+        )
       )}
 
       {totalPages > 1 && (

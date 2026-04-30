@@ -24,6 +24,10 @@ import { api } from '../lib/api';
 import type { Document, ApiDocumentType, ParsedQuery } from '../lib/types';
 import { DocumentCard } from '../components/DocumentCard';
 import { useTenant } from '../contexts/TenantContext';
+import { HelpWell } from '../components/HelpWell';
+import { InfoTooltip } from '../components/InfoTooltip';
+import { EmptyState } from '../components/EmptyState';
+import { helpContent } from '../lib/helpContent';
 
 const ITEMS_PER_PAGE = 12;
 
@@ -174,6 +178,10 @@ export function Documents() {
         </Typography>
       </Box>
 
+      <HelpWell id="documents.list" title={helpContent.documents.list?.headline ?? 'Documents'}>
+        {helpContent.documents.list?.well ?? helpContent.documents.well}
+      </HelpWell>
+
       {/* Search and Filters */}
       <Box sx={{ mb: 3 }}>
         <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
@@ -219,6 +227,7 @@ export function Documents() {
           >
             AI
           </Button>
+          <InfoTooltip text="Toggle natural-language search. Keyword mode does exact-match across title / tags / content; AI mode parses your query into structured filters first." />
         </Box>
 
         {/* AI search error */}
@@ -343,14 +352,17 @@ export function Documents() {
           <CircularProgress />
         </Box>
       ) : filteredDocs.length === 0 ? (
-        <Box sx={{ textAlign: 'center', py: 8 }}>
-          <Typography variant="h6" color="text.secondary" gutterBottom>
-            No documents found
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            {search ? 'Try a different search term.' : 'Import your first document to get started.'}
-          </Typography>
-        </Box>
+        search || statusFilter || categoryFilter || docTypeFilter ? (
+          <EmptyState
+            title="No documents match your filters"
+            description="Clear filters or try a different search term. Toggle AI search if your query is more natural-language than keyword."
+          />
+        ) : (
+          <EmptyState
+            title={helpContent.documents.list?.emptyTitle ?? 'No documents yet'}
+            description={helpContent.documents.list?.emptyDescription}
+          />
+        )
       ) : (
         <>
           <Grid container spacing={2}>
