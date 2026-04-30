@@ -35,10 +35,15 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       );
     }
 
-    // Find active email-type connectors for this tenant
+    // Phase B0 universal model: any active connector can route inbound
+    // email if it has email-scoping config (subject_patterns or
+    // sender_filter). The match loop below already filters out connectors
+    // that don't actually carry that config, so a `WHERE` filter on a
+    // connector_type column would be redundant — and the column is gone
+    // post-migration 0048 anyway.
     const connectors = await context.env.DB.prepare(
       `SELECT id, name, config FROM connectors
-       WHERE tenant_id = ? AND connector_type = 'email' AND active = 1`
+       WHERE tenant_id = ? AND active = 1 AND deleted_at IS NULL`
     )
       .bind(tenant.id)
       .all();
@@ -51,20 +56,35 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         continue;
       }
 
+      // Phase B0 universal model: a connector is only an email-routing
+      // candidate if it has at least one email-scoping field set. Skipping
+      // unconfigured connectors here replaces the historical
+      // `connector_type = 'email'` SQL filter — same effect, but driven
+      // off the actual scoping config rather than a per-row tag.
+      const senderFilterRaw = typeof config.sender_filter === 'string'
+        ? (config.sender_filter as string).trim()
+        : '';
+      const subjectPatterns = Array.isArray(config.subject_patterns)
+        ? (config.subject_patterns as unknown[]).filter(
+            (p): p is string => typeof p === 'string' && p.trim().length > 0,
+          )
+        : [];
+      if (senderFilterRaw.length === 0 && subjectPatterns.length === 0) {
+        // No email scoping configured — connector hasn't opted into the
+        // email door. Skip.
+        continue;
+      }
+
       // Check sender filter (case-insensitive, via shared helper).
       // Preserve historical behavior: a set filter with no sender = skip.
-      const senderFilter = config.sender_filter as string | undefined;
-      if (senderFilter) {
+      if (senderFilterRaw.length > 0) {
         if (!sender) continue;
-        if (!senderMatches(sender, senderFilter)) continue;
+        if (!senderMatches(sender, senderFilterRaw)) continue;
       }
 
       // Check subject patterns (case-insensitive, via shared helper).
       // Preserve historical behavior: configured patterns with no subject = skip.
-      const subjectPatterns = Array.isArray(config.subject_patterns)
-        ? (config.subject_patterns as string[])
-        : undefined;
-      if (subjectPatterns && subjectPatterns.length > 0) {
+      if (subjectPatterns.length > 0) {
         if (!subject) continue;
         if (!subjectMatches(subject, subjectPatterns)) continue;
       }

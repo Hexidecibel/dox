@@ -1,9 +1,10 @@
 /**
- * API tests for POST /api/connectors/:id/run — file_watch manual-run path.
+ * API tests for POST /api/connectors/:id/run — universal manual-upload door.
  *
- * The run endpoint accepts a multipart upload of a CSV / TSV / XLSX / PDF
- * file, parses it using the connector's saved field_mappings, and persists
- * orders + customers + a connector_runs row via the shared orchestrator.
+ * Phase B0: the run endpoint is the universal manual-upload door — any
+ * active connector accepts a multipart `file` upload and dispatches it
+ * through the file_watch executor, which persists orders + customers +
+ * a connector_runs row via the shared orchestrator.
  *
  * Coverage:
  *  - Happy path: CSV upload -> orders + customer rows land in D1, a run
@@ -14,9 +15,8 @@
  *  - Oversized files are rejected with 400 (file too large).
  *  - Unsupported extensions are rejected with 400.
  *  - Inactive connectors reject with 400.
- *  - Email connectors reject with 400 "triggered by incoming emails".
- *  - api_poll / webhook connectors return 501 not_implemented.
  *  - Readers / non-admin roles get a 403-ish.
+ *  - Cross-tenant access is rejected.
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
@@ -67,21 +67,19 @@ function defaultMappings() {
 
 async function insertConnector(opts: {
   tenantId: string;
-  connectorType?: 'email' | 'api_poll' | 'webhook' | 'file_watch';
   active?: number;
   mappings?: unknown;
 }): Promise<string> {
   const id = generateTestId();
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'erp', '{}', ?, ?, datetime('now'), datetime('now'))`,
+      `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_at, updated_at)
+       VALUES (?, ?, ?, 'erp', '{}', ?, ?, datetime('now'), datetime('now'))`,
     )
     .bind(
       id,
       opts.tenantId,
       `run-test-${id}`,
-      opts.connectorType ?? 'file_watch',
       JSON.stringify(opts.mappings ?? defaultMappings()),
       opts.active ?? 1,
     )
@@ -115,7 +113,7 @@ function multipartRequest(id: string, file: File | null): Request {
   });
 }
 
-describe('POST /api/connectors/:id/run — file_watch happy path', () => {
+describe('POST /api/connectors/:id/run — manual-upload happy path', () => {
   it('parses a CSV, inserts orders + customer, writes a connector_runs row', async () => {
     const connectorId = await insertConnector({ tenantId: seed.tenantId });
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
@@ -206,7 +204,7 @@ SO-PARTIAL-3,K-P003,Gamma LLC,PO-P-3`;
   });
 });
 
-describe('POST /api/connectors/:id/run — file_watch validation', () => {
+describe('POST /api/connectors/:id/run — file validation', () => {
   it('rejects when no file is attached', async () => {
     const connectorId = await insertConnector({ tenantId: seed.tenantId });
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
@@ -257,7 +255,7 @@ describe('POST /api/connectors/:id/run — file_watch validation', () => {
   });
 });
 
-describe('POST /api/connectors/:id/run — type + state gating', () => {
+describe('POST /api/connectors/:id/run — state + role gating (universal-doors model)', () => {
   it('rejects runs on inactive connectors', async () => {
     const connectorId = await insertConnector({ tenantId: seed.tenantId, active: 0 });
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
@@ -269,33 +267,10 @@ describe('POST /api/connectors/:id/run — type + state gating', () => {
     expect(body.error).toMatch(/inactive/i);
   });
 
-  it('rejects runs on email connectors', async () => {
-    const connectorId = await insertConnector({
-      tenantId: seed.tenantId,
-      connectorType: 'email',
-    });
-    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
-
-    const file = new File(['Order #\nSO-1'], 'orders.csv', { type: 'text/csv' });
-    const response = await runConnector(makeContext(connectorId, multipartRequest(connectorId, file), user));
-    expect(response.status).toBe(400);
-    const body = (await response.json()) as { error: string };
-    expect(body.error).toMatch(/incoming emails/i);
-  });
-
-  it('returns 501 for webhook connectors (not implemented)', async () => {
-    const connectorId = await insertConnector({
-      tenantId: seed.tenantId,
-      connectorType: 'webhook',
-    });
-    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
-
-    const file = new File(['x'], 'x.csv', { type: 'text/csv' });
-    const response = await runConnector(makeContext(connectorId, multipartRequest(connectorId, file), user));
-    expect(response.status).toBe(501);
-    const body = (await response.json()) as { code: string };
-    expect(body.code).toBe('not_implemented');
-  });
+  // Phase B0: the historical "rejects email connectors / 501 for
+  // webhook connectors" tests are gone. Manual upload is the universal
+  // door — ANY active connector accepts it. Email-specific routing
+  // happens via the inbound-email webhook, not this endpoint.
 
   it('rejects readers', async () => {
     const connectorId = await insertConnector({ tenantId: seed.tenantId });

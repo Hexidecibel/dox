@@ -727,12 +727,13 @@ applicable intake path with working "send a file" affordances.
 
 #### Phase B — Build intake paths
 
-Five sliceable, independently shippable slices. Each ends at a
+Six sliceable, independently shippable slices. Each ends at a
 deployable state.
 
 | # | Slice | Estimate |
 |---|-------|----------|
 | B1 | Schema + token plumbing | ~0.5d |
+| B0 | Collapse connector types | ~1d |
 | B2 | HTTP POST API endpoint (#4) | ~1d |
 | B3 | S3 bucket auto-provisioning (#5) | ~1.5d |
 | B4 | Public drop link (#6) | ~0.5d |
@@ -749,6 +750,16 @@ returned exactly once on create/rotate, never persisted — we store
 only the hash. **Acceptance:** migration applied locally + staging;
 `shared/types.ts` updated; existing CRUD round-trips with new columns
 NULL.
+
+**B0 — Collapse connector types.** Drop the `connectors.type` column
+distinction. Universal model: every connector exposes every intake door
+(manual, email, API, S3, public link). No per-door enable flags for now
+— granularity can come later. Universal cards on `ConnectorDetail.tsx`,
+unified orchestrator (`executeConnectorRun(connector, { source, input })`
+replacing the type-specific executors), wizard simplified to remove the
+type-selection step, tests updated. Migration drops `connectors.type` —
+staging + prod each have a small handful of rows; no behavioral effect
+since routing pivots to per-source rather than per-type. (~1 day)
 
 **B2 — HTTP POST API endpoint (#4).** New
 `functions/api/connectors/[id]/drop.ts`, allowlisted in
@@ -861,6 +872,11 @@ scaffolding to copy.
 5. **Quality bar applies everywhere.** No half-baked paths. Every
    path has auth + rotation UI, rate limiting, audit log, replay,
    observability, vendor docs, e2e coverage. Enforced in B5.
+6. **Universal intake doors.** Connectors are typeless; every connector
+   exposes every intake door. The previous `connectors.type` column is
+   dropped in B0. Vendors pick whichever door fits their tooling.
+   Per-door enable/disable flags can be added later if granularity is
+   needed.
 
 #### Open questions
 

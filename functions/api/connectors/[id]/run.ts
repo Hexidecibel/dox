@@ -17,12 +17,13 @@ import { executeConnectorRun } from '../../../lib/connectors/orchestrator';
 /**
  * POST /api/connectors/:id/run
  *
- * Manual run trigger. Behaviour depends on the connector type:
- *  - email      -> rejected (emails trigger runs via inbound webhook)
- *  - file_watch -> consumes a multipart `file` upload, parses it using the
- *                  connector's saved field_mappings, and persists orders /
- *                  customers / the run record via executeConnectorRun.
- *  - api_poll / webhook -> not yet implemented (returns 501).
+ * Manual run trigger (universal-doors model, Phase B0). Always consumes a
+ * multipart `file` upload and dispatches it through the file_watch intake
+ * path of the orchestrator. The connector itself is typeless — any active
+ * connector can be the target. Email/webhook/api_poll-specific intake
+ * happens via their own endpoints (`webhooks/connector-email-ingest`,
+ * `webhooks/connectors/:id`, future `connectors/:id/drop`); this route is
+ * the manual-upload door.
  */
 
 const TEXT_SIZE_LIMIT = 5 * 1024 * 1024; // 5MB for CSV / TSV / TXT
@@ -67,32 +68,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw new BadRequestError('Cannot run an inactive connector');
     }
 
-    const connectorType = connector.connector_type as string;
-
-    if (connectorType === 'email') {
-      throw new BadRequestError(
-        'Email connectors are triggered by incoming emails, not manual runs'
-      );
-    }
-
-    if (connectorType !== 'file_watch') {
-      // api_poll / webhook — not implemented yet. Explicit 501 so the UI
-      // can render a friendly message instead of a generic error.
-      return new Response(
-        JSON.stringify({
-          error: `Manual runs for ${connectorType} connectors are not yet implemented`,
-          code: 'not_implemented',
-        }),
-        { status: 501, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // -- file_watch manual-run path ----------------------------------------
-    // Expect a multipart form with a single `file` field.
+    // Manual upload door — always uses the file_watch intake path. The
+    // body is multipart with a single `file` field.
     const contentType = context.request.headers.get('content-type') || '';
     if (!contentType.toLowerCase().includes('multipart/form-data')) {
       throw new BadRequestError(
-        'file_watch run requires multipart/form-data with a `file` field',
+        'Manual run requires multipart/form-data with a `file` field',
       );
     }
 
@@ -106,7 +87,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { kind, limit } = classifyFile(file.name, file.type);
     if (kind === 'unknown') {
       throw new BadRequestError(
-        `Unsupported file type for file_watch: ${file.name}. Accepted: ${ACCEPTED_CONNECTOR_FILE_EXTENSIONS.join(', ')}`,
+        `Unsupported file type: ${file.name}. Accepted: ${ACCEPTED_CONNECTOR_FILE_EXTENSIONS.join(', ')}`,
       );
     }
     if (file.size > limit) {
@@ -160,7 +141,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       r2: context.env.FILES,
       tenantId: connector.tenant_id as string,
       connectorId: connector.id as string,
-      connectorType: 'file_watch',
       config,
       fieldMappings,
       credentials,

@@ -1,19 +1,20 @@
 /**
- * Regression test for the public webhook endpoint's SELECT column.
+ * Regression tests for the public webhook endpoint (universal-doors model).
  *
- * Earlier the handler queried `SELECT ... type ...` from the connectors
- * table and compared `connector.type !== 'webhook'`. The real DB column
- * (per migration 0030) is `connector_type`, so the value came back as
- * undefined and every request was rejected as "not a webhook type" — even
- * for a correctly-configured webhook connector. This test exercises the
- * same path and proves the SELECT now uses the real column name.
+ * Phase B0 (migration 0048): the `connector_type` column was dropped, so
+ * the webhook endpoint can no longer gate on connector type — instead it
+ * gates on the actual webhook config (signature_method + signature_header,
+ * OR ip_allowlist). Connectors without webhook config fall through to the
+ * "no webhook authentication configured" 403, regardless of what other
+ * door config they carry.
  *
  * Coverage:
- *  - 400 "No webhook authentication configured" on a real webhook connector
- *    (not the old "Connector is not a webhook type" error)
- *  - 404 for a non-existent connector
- *  - 400 "not a webhook type" for an email connector (sanity check)
- *  - 400 "not active" for a deactivated webhook connector
+ *  - 403 "No webhook authentication configured" on a connector with no
+ *    webhook config (sane default).
+ *  - 404 for a non-existent connector.
+ *  - 400 "not active" for a deactivated connector.
+ *  - 403 (NOT 400 type-mismatch) on a connector with email-style config —
+ *    the type-mismatch gate is gone in B0.
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
@@ -30,21 +31,19 @@ beforeAll(async () => {
 
 async function insertConnector(opts: {
   tenantId: string;
-  connectorType: 'email' | 'webhook' | 'file_watch';
   config?: Record<string, unknown>;
   active?: number;
 }): Promise<string> {
   const id = generateTestId();
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'erp', ?, ?, ?, datetime('now'), datetime('now'))`,
+      `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_at, updated_at)
+       VALUES (?, ?, ?, 'erp', ?, ?, ?, datetime('now'), datetime('now'))`,
     )
     .bind(
       id,
       opts.tenantId,
       `webhook-test-${id}`,
-      opts.connectorType,
       JSON.stringify(opts.config || {}),
       JSON.stringify({ version: 2, core: {}, extended: [] }),
       opts.active ?? 1,
@@ -71,27 +70,23 @@ function makeContext(id: string, body: unknown) {
   } as any;
 }
 
-describe('POST /api/webhooks/connectors/:connectorId — column name bug fix', () => {
-  it('does NOT reject a real webhook connector with "not a webhook type"', async () => {
-    // Webhook connector with no signature method and no IP allowlist. The
-    // handler should progress past the type check and land on the
-    // "No webhook authentication configured" branch (403). Before the fix
-    // it would stop at `connector.type !== 'webhook'` -> 400 because `type`
-    // came back undefined.
+describe('POST /api/webhooks/connectors/:connectorId — universal-doors model', () => {
+  it('returns 403 "no webhook auth configured" on a connector with no webhook config', async () => {
+    // Phase B0: every connector exposes the webhook door, so the type
+    // gate is gone. A connector with no signature_method + no
+    // ip_allowlist falls through to the auth gate (403).
     const id = await insertConnector({
       tenantId: seed.tenantId,
-      connectorType: 'webhook',
       config: {},
     });
 
     const response = await webhookPost(makeContext(id, { hello: 'world' }));
     const body = (await response.json()) as { error: string };
 
-    // The key assertion: we must NOT get the "is not a webhook type" error.
-    expect(body.error).not.toMatch(/not a webhook type/i);
-    // And the downstream auth gate should have run, producing 403.
     expect(response.status).toBe(403);
     expect(body.error).toMatch(/No webhook authentication configured/i);
+    // The pre-B0 "not a webhook type" error is gone.
+    expect(body.error).not.toMatch(/not a webhook type/i);
   });
 
   it('returns 404 for a non-existent connector id', async () => {
@@ -100,22 +95,25 @@ describe('POST /api/webhooks/connectors/:connectorId — column name bug fix', (
     expect(response.status).toBe(404);
   });
 
-  it('returns 400 "not a webhook type" for a real email connector', async () => {
+  it('falls through to the auth gate (NOT a type-mismatch 400) for a connector with email-style config', async () => {
+    // Phase B0: the type-mismatch 400 is gone. A connector with email
+    // scoping but no webhook auth lands on the same 403 as any other
+    // connector without webhook auth — the gate is the actual webhook
+    // config, not a per-row type tag.
     const id = await insertConnector({
       tenantId: seed.tenantId,
-      connectorType: 'email',
       config: { subject_patterns: ['foo'] },
     });
     const response = await webhookPost(makeContext(id, {}));
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(403);
     const body = (await response.json()) as { error: string };
-    expect(body.error).toMatch(/not a webhook type/i);
+    expect(body.error).toMatch(/No webhook authentication configured/i);
+    expect(body.error).not.toMatch(/not a webhook type/i);
   });
 
-  it('returns 400 "not active" when the webhook connector is inactive', async () => {
+  it('returns 400 "not active" when the connector is inactive', async () => {
     const id = await insertConnector({
       tenantId: seed.tenantId,
-      connectorType: 'webhook',
       config: {},
       active: 0,
     });

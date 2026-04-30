@@ -14,50 +14,34 @@ describe('Connectors - Create', () => {
     const id = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
       )
-      .bind(id, seed.tenantId, 'Test Email Connector', 'email', 'erp', seed.orgAdminId)
+      .bind(id, seed.tenantId, 'Test Connector', 'erp', seed.orgAdminId)
       .run();
 
     const c = await db.prepare('SELECT * FROM connectors WHERE id = ?').bind(id).first();
     expect(c).not.toBeNull();
-    expect(c!.name).toBe('Test Email Connector');
-    expect(c!.connector_type).toBe('email');
+    expect(c!.name).toBe('Test Connector');
     expect(c!.system_type).toBe('erp');
     expect(c!.active).toBe(1);
   });
 
-  it('should create each valid connector type', async () => {
-    const types = ['email', 'api_poll', 'webhook', 'file_watch'];
-    for (const type of types) {
-      const id = generateTestId();
-      await db
-        .prepare(
-          `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'other', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
-        )
-        .bind(id, seed.tenantId, `${type} Connector`, type, seed.orgAdminId)
-        .run();
-
-      const c = await db.prepare('SELECT connector_type FROM connectors WHERE id = ?').bind(id).first();
-      expect(c!.connector_type).toBe(type);
-    }
-  });
-
-  it('should reject invalid connector_type via CHECK constraint', async () => {
+  // Phase B0: connector_type column was dropped (migration 0048). The
+  // historical "create each valid connector type" / "reject invalid
+  // connector_type" / CHECK-constraint tests no longer apply — rephrased
+  // as "the column does not exist" sanity guard so a future regression
+  // (someone adding the column back) surfaces here.
+  it('connector_type column has been dropped', async () => {
+    let threw = false;
     try {
-      await db
-        .prepare(
-          `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'other', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
-        )
-        .bind(generateTestId(), seed.tenantId, 'Bad Type', 'invalid_type', seed.orgAdminId)
-        .run();
-      // Some D1 may not enforce CHECK — that's ok
-    } catch (err: any) {
-      expect(err.message).toContain('CHECK');
+      await db.prepare('SELECT connector_type FROM connectors LIMIT 1').first();
+    } catch (err) {
+      threw = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      expect(msg.toLowerCase()).toMatch(/no such column/);
     }
+    expect(threw).toBe(true);
   });
 
   it('should store config and field_mappings as JSON', async () => {
@@ -67,10 +51,10 @@ describe('Connectors - Create', () => {
 
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'erp', ?, ?, 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'erp', ?, ?, 1, ?, datetime('now'), datetime('now'))`
       )
-      .bind(id, seed.tenantId, 'Config Connector', 'api_poll', config, fieldMappings, seed.orgAdminId)
+      .bind(id, seed.tenantId, 'Config Connector', config, fieldMappings, seed.orgAdminId)
       .run();
 
     const c = await db.prepare('SELECT config, field_mappings FROM connectors WHERE id = ?').bind(id).first();
@@ -82,10 +66,10 @@ describe('Connectors - Create', () => {
     const id = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, credentials_encrypted, credentials_iv, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'erp', '{}', '{}', ?, ?, 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, credentials_encrypted, credentials_iv, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'erp', '{}', '{}', ?, ?, 1, ?, datetime('now'), datetime('now'))`
       )
-      .bind(id, seed.tenantId, 'Cred Connector', 'api_poll', 'encrypted_data_here', 'iv_here', seed.orgAdminId)
+      .bind(id, seed.tenantId, 'Cred Connector', 'encrypted_data_here', 'iv_here', seed.orgAdminId)
       .run();
 
     const c = await db.prepare('SELECT credentials_encrypted, credentials_iv FROM connectors WHERE id = ?').bind(id).first();
@@ -111,10 +95,10 @@ describe('Connectors - List', () => {
     const id = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'other', '{}', '{}', 0, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'other', '{}', '{}', 0, ?, datetime('now'), datetime('now'))`
       )
-      .bind(id, seed.tenantId, 'Inactive Connector', 'email', seed.orgAdminId)
+      .bind(id, seed.tenantId, 'Inactive Connector', seed.orgAdminId)
       .run();
 
     const result = await db
@@ -126,16 +110,11 @@ describe('Connectors - List', () => {
     expect(found).toBeUndefined();
   });
 
-  it('should filter by connector_type', async () => {
-    const result = await db
-      .prepare("SELECT * FROM connectors WHERE tenant_id = ? AND connector_type = 'email' AND active = 1")
-      .bind(seed.tenantId)
-      .all();
-
-    for (const c of result.results) {
-      expect(c.connector_type).toBe('email');
-    }
-  });
+  // Phase B0: connector_type column was dropped — the historical
+  // "filter by connector_type" test no longer has a column to filter on.
+  // The new universal-doors model filters email-routing candidates at
+  // run time via the match-email handler (presence of subject_patterns
+  // / sender_filter on the row), not via a per-row type tag.
 });
 
 describe('Connectors - Get by ID', () => {
@@ -143,10 +122,10 @@ describe('Connectors - Get by ID', () => {
     const id = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, credentials_encrypted, credentials_iv, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'erp', '{}', '{}', 'secret', 'iv', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, credentials_encrypted, credentials_iv, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'erp', '{}', '{}', 'secret', 'iv', 1, ?, datetime('now'), datetime('now'))`
       )
-      .bind(id, seed.tenantId, 'Get Test', 'api_poll', seed.orgAdminId)
+      .bind(id, seed.tenantId, 'Get Test', seed.orgAdminId)
       .run();
 
     const c = await db.prepare('SELECT * FROM connectors WHERE id = ?').bind(id).first();
@@ -175,10 +154,10 @@ describe('Connectors - Update', () => {
     connId = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
       )
-      .bind(connId, seed.tenantId, 'Update Connector', 'email', seed.orgAdminId)
+      .bind(connId, seed.tenantId, 'Update Connector', seed.orgAdminId)
       .run();
   });
 
@@ -207,10 +186,10 @@ describe('Connectors - Soft Delete', () => {
     const id = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'other', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'other', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
       )
-      .bind(id, seed.tenantId, 'Delete Connector', 'webhook', seed.orgAdminId)
+      .bind(id, seed.tenantId, 'Delete Connector', seed.orgAdminId)
       .run();
 
     await db.prepare("UPDATE connectors SET active = 0, updated_at = datetime('now') WHERE id = ?").bind(id).run();
@@ -224,10 +203,10 @@ describe('Connectors - Runs', () => {
     const connId = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
       )
-      .bind(connId, seed.tenantId, 'Run Connector', 'api_poll', seed.orgAdminId)
+      .bind(connId, seed.tenantId, 'Run Connector', seed.orgAdminId)
       .run();
 
     const runId = generateTestId();

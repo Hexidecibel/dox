@@ -100,8 +100,8 @@ describe('Webhooks - Connector Webhook', () => {
     const connId = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'webhook', 'other', ?, '{}', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'other', ?, '{}', 1, ?, datetime('now'), datetime('now'))`
       )
       .bind(connId, seed.tenantId, 'Webhook Connector', JSON.stringify({ signature_method: 'hmac_sha256', signature_header: 'X-Signature' }), seed.orgAdminId)
       .run();
@@ -112,7 +112,6 @@ describe('Webhooks - Connector Webhook', () => {
       .first();
 
     expect(connector).not.toBeNull();
-    expect(connector!.connector_type).toBe('webhook');
     expect(connector!.active).toBe(1);
 
     const config = JSON.parse(connector!.config as string);
@@ -123,8 +122,8 @@ describe('Webhooks - Connector Webhook', () => {
     const connId = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'webhook', 'other', '{}', '{}', 0, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'other', '{}', '{}', 0, ?, datetime('now'), datetime('now'))`
       )
       .bind(connId, seed.tenantId, 'Inactive Webhook', seed.orgAdminId)
       .run();
@@ -137,24 +136,12 @@ describe('Webhooks - Connector Webhook', () => {
     expect(connector!.active).toBe(0);
   });
 
-  it('should reject non-webhook connector type', async () => {
-    const connId = generateTestId();
-    await db
-      .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'email', 'other', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
-      )
-      .bind(connId, seed.tenantId, 'Email Not Webhook', seed.orgAdminId)
-      .run();
-
-    const connector = await db
-      .prepare('SELECT connector_type FROM connectors WHERE id = ?')
-      .bind(connId)
-      .first();
-
-    expect(connector!.connector_type).toBe('email');
-    expect(connector!.connector_type).not.toBe('webhook');
-  });
+  // Phase B0: connector_type column dropped — the historical "should
+  // reject non-webhook connector type" path is gone. Webhook routing is
+  // gated on the connector's actual webhook config (signature_method +
+  // signature_header, OR ip_allowlist), not a per-row type tag. The
+  // dedicated coverage for the new auth-gate behavior lives in
+  // `connector-webhook-column-fix.test.ts`.
 
   it('should verify HMAC-SHA256 signature', async () => {
     const secret = 'test-webhook-secret';

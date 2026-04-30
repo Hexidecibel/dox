@@ -1,0 +1,21 @@
+-- Migration 0048: drop connectors.connector_type
+--
+-- Phase B0 of the universal-doors connector model. Every connector now
+-- exposes every intake door (manual upload, email, plus B2/B3/B4 paths
+-- as those slices land) regardless of type. The historical
+-- `connector_type` column was a routing-metadata field that's now
+-- obsolete — dispatch keys off `ConnectorInput.type` (the path-of-entry
+-- discriminant carried with each invocation) rather than a per-row
+-- type tag.
+--
+-- Cloudflare D1 runs SQLite >= 3.45 which supports `ALTER TABLE
+-- ... DROP COLUMN` directly (3.35+). The column carries a NOT NULL +
+-- CHECK constraint on a finite enum; both go away cleanly with the
+-- column itself, no constraint cleanup needed. FK references from
+-- orders / connector_runs / connector_processed_keys to connectors are
+-- preserved because we're modifying the table in place — no rename, no
+-- new table.
+--
+-- No row data is lost — only the column.
+
+ALTER TABLE connectors DROP COLUMN connector_type;

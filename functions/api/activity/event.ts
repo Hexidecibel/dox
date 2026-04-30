@@ -80,7 +80,7 @@ function parseJson(raw: unknown): unknown {
 async function fetchConnectorRun(db: D1Database, id: string, user: User) {
   const row = await db
     .prepare(
-      `SELECT cr.*, c.name as connector_name, c.connector_type
+      `SELECT cr.*, c.name as connector_name
        FROM connector_runs cr
        LEFT JOIN connectors c ON c.id = cr.connector_id
        WHERE cr.id = ?`,
@@ -137,7 +137,7 @@ async function fetchDocumentIngest(db: D1Database, id: string, user: User) {
 async function fetchOrder(db: D1Database, id: string, user: User) {
   const row = await db
     .prepare(
-      `SELECT o.*, c.name as connector_name, c.connector_type
+      `SELECT o.*, c.name as connector_name
        FROM orders o
        LEFT JOIN connectors c ON c.id = o.connector_id
        WHERE o.id = ?`,

@@ -8,27 +8,6 @@ import {
 import type { Env, User } from '../../../lib/types';
 
 /**
- * Hard requirements per connector type — config keys that MUST be present
- * for the connector to have any chance of working. Keep this list
- * conservative: anything optional belongs in the "warnings" list below, not
- * here.
- *
- * Email connectors are validated separately via {@link validateEmailConfig}
- * below — they must have at least one `subject_patterns` entry OR a non-empty
- * `sender_filter`. An email connector with neither is greedy (matches every
- * inbound email for its tenant) which is almost always a misconfiguration.
- *
- * file_watch no longer requires r2_prefix since the manual-run path uploads
- * a file inline — the prefix is only used by the (future) R2 bucket watcher.
- */
-const REQUIRED_CONFIG_FIELDS: Record<string, string[]> = {
-  email: [],
-  api_poll: ['endpoint_url'],
-  webhook: [],
-  file_watch: [],
-};
-
-/**
  * Shared validation for email-connector config. Exported so the create/update
  * handlers enforce the exact same rule — "must have patterns OR a sender
  * filter, otherwise it's greedy" — without drift.
@@ -56,21 +35,7 @@ export function validateEmailConfig(
 }
 
 /**
- * Build the public origin for the app. Derived from the request URL so the
- * response stays correct on staging vs prod. For local dev the helper just
- * strips the protocol+host off the current request.
- */
-function publicOrigin(request: Request): string {
-  try {
-    const url = new URL(request.url);
-    return `${url.protocol}//${url.host}`;
-  } catch {
-    return 'https://supdox.com';
-  }
-}
-
-/**
- * Live probe for a file_watch connector. Verifies the stored sample is
+ * Live probe for the manual-upload door — verifies the stored sample is
  * reachable in R2 and returns the file's metadata + a rough row count if
  * the source_type is plain text. On failure the probe returns an error
  * payload without throwing — tests prefer soft feedback over 500s.
@@ -260,51 +225,10 @@ async function probeEmail(
   };
 }
 
-/**
- * Live probe for a webhook connector. Returns the public webhook URL and
- * a sample curl command the user can paste into their integration. No
- * external call is made — this is informational.
- */
-function probeWebhook(
-  request: Request,
-  connector: { id: string; config: string },
-): {
-  probe: string;
-  ok: boolean;
-  message: string;
-  details: Record<string, unknown>;
-} {
-  const origin = publicOrigin(request);
-  const webhookUrl = `${origin}/api/webhooks/connectors/${connector.id}`;
-
-  let config: Record<string, unknown> = {};
-  try {
-    config = JSON.parse(connector.config || '{}');
-  } catch {
-    /* ignore */
-  }
-
-  const hasAuth =
-    !!config.signature_method || (Array.isArray(config.ip_allowlist) && (config.ip_allowlist as unknown[]).length > 0);
-
-  const curl = `curl -X POST ${webhookUrl} \\
-  -H "Content-Type: application/json" \\
-  ${hasAuth ? '-H "X-Signature: <your-hmac-here>" \\' : '#  (no auth configured yet — see config above)\\'}
-  -d '{"order_number": "SO-1", "customer_number": "K-1"}'`;
-
-  return {
-    probe: 'webhook',
-    ok: true,
-    message: hasAuth
-      ? 'Webhook endpoint ready. Test with the sample curl below.'
-      : 'Webhook URL generated. WARNING: no signature method or IP allowlist configured — the endpoint will reject requests until you add one.',
-    details: {
-      url: webhookUrl,
-      sample_curl: curl,
-      auth_configured: hasAuth,
-    },
-  };
-}
+// probeWebhook + publicOrigin were dropped in Phase B0. The universal-doors
+// model runs a fixed set of probes (file_watch + email) for every connector;
+// webhook-specific probing will return when B2's HTTP POST drop endpoint
+// lands and warrants a per-connector token-status check.
 
 /**
  * POST /api/connectors/:id/test
@@ -329,7 +253,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       .first<{
         id: string;
         tenant_id: string;
-        connector_type: string;
         config: string;
         field_mappings: string;
         sample_r2_key: string | null;
@@ -349,19 +272,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw new BadRequestError('Connector config is not valid JSON');
     }
 
-    // Validate required fields per connector type
-    const connectorType = connector.connector_type;
-    const requiredFields = REQUIRED_CONFIG_FIELDS[connectorType] || [];
-    const missingFields = requiredFields.filter(
-      (field) => config[field] === undefined || config[field] === null || config[field] === ''
-    );
-
-    if (missingFields.length > 0) {
-      throw new BadRequestError(
-        `Missing required config fields for ${connectorType}: ${missingFields.join(', ')}`
-      );
-    }
-
     // Validate field_mappings is parseable
     try {
       JSON.parse(connector.field_mappings || '{}');
@@ -369,10 +279,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw new BadRequestError('Connector field_mappings is not valid JSON');
     }
 
-    // Email connectors must be scoped — no subject patterns AND no sender
-    // filter means "match every inbound email for this tenant" which is
-    // almost always a mistake. Upgraded from a soft warning to a hard error.
-    if (connectorType === 'email') {
+    // Phase B0 universal model: when the user has explicitly set up email
+    // scoping (subject_patterns or sender_filter), enforce coherence —
+    // wiping both to empty values yields a connector that hoovers up every
+    // inbound email for the tenant, which is almost always a mistake.
+    // Connectors with no email scoping at all are FINE; the email door
+    // simply isn't wired for this connector yet.
+    const wantsEmailScoping =
+      Array.isArray(config.subject_patterns) ||
+      typeof config.sender_filter === 'string';
+    if (wantsEmailScoping) {
       const emailErr = validateEmailConfig(config);
       if (emailErr) {
         return new Response(
@@ -382,39 +298,35 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       }
     }
 
-    // Per-type live probe.
-    let probe: Awaited<ReturnType<typeof probeFileWatch>>;
-    switch (connectorType) {
-      case 'file_watch':
-        probe = await probeFileWatch(context.env, connector);
-        break;
-      case 'email':
-        probe = await probeEmail(context.env, context.request, connector);
-        break;
-      case 'webhook':
-        probe = probeWebhook(context.request, connector);
-        break;
-      case 'api_poll':
-      default:
-        probe = {
-          probe: connectorType,
-          ok: false,
-          message: `Live probe for ${connectorType} connectors is not implemented yet.`,
-          details: {},
-        };
-        break;
-    }
+    // Universal probe: walk every intake door this connector exposes.
+    // For B0 we run the manual-upload (sample) probe + the email probe
+    // unconditionally. B2/B3/B4 doors will append their probes here as
+    // those slices land. The aggregate result rolls up to the legacy
+    // `probe` field (using the first non-OK probe so the UI surfaces the
+    // most actionable message) and a new `probes` array carries the full
+    // per-door breakdown.
+    const probes = [
+      await probeFileWatch(context.env, connector),
+      await probeEmail(context.env, context.request, connector),
+    ];
+    // Pick the first non-OK probe to surface as the legacy `probe` field;
+    // otherwise the manual-upload probe (most likely to be configured) wins.
+    const probe = probes.find((p) => !p.ok) ?? probes[0];
 
     // Keep `success` tied to config-shape validity (preserving the legacy
     // 200/success=true contract that existing tests and clients rely on).
-    // The probe is additive — callers that want to surface "not ready yet"
-    // states should consult `probe.ok` and `probe.message` in the payload.
+    // Phase B0 universal model: `probes` carries the full per-door
+    // breakdown; the singular `probe` field is the first non-OK door
+    // (most actionable for the UI) — preserved for backwards compatibility
+    // with the single-Alert rendering on ConnectorDetail.
+    const warnings = probes.filter((p) => !p.ok).map((p) => p.message);
     return new Response(
       JSON.stringify({
         success: true,
         message: probe.message,
-        warnings: probe.ok ? [] : [probe.message],
+        warnings,
         probe,
+        probes,
       }),
       { headers: { 'Content-Type': 'application/json' } }
     );

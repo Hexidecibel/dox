@@ -29,13 +29,12 @@ async function seedConnectorWithSample(tenantId: string, csv: string): Promise<{
 
   const connectorId = generateTestId();
   await db.prepare(
-    `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_at, updated_at, sample_r2_key)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'), ?)`
+    `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_at, updated_at, sample_r2_key)
+     VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'), ?)`
   ).bind(
     connectorId,
     tenantId,
     'Test connector',
-    'email',
     'erp',
     '{}',
     JSON.stringify({ version: 2, core: {}, extended: [] }),
@@ -87,13 +86,12 @@ SO-1002,K00124,Beta Inc`;
   it('returns 404 for a connector without a stored sample', async () => {
     const connectorId = generateTestId();
     await db.prepare(
-      `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`
+      `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`
     ).bind(
       connectorId,
       seed.tenantId,
       'No sample connector',
-      'email',
       'erp',
       '{}',
       JSON.stringify({ version: 2, core: {}, extended: [] }),

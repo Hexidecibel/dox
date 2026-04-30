@@ -33,13 +33,15 @@ const db = env.DB;
 beforeAll(async () => {
   seed = await seedTestData(db);
 
-  // Seed an active email connector for the test tenant.
+  // Seed an active connector for the test tenant. Phase B0: connectors
+  // are typeless — the `email` discriminator now lives on the
+  // ConnectorInput passed to executeConnectorRun, not on the row.
   connectorId = generateTestId();
   await db
     .prepare(
       `INSERT INTO connectors
-         (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, 'email', 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`,
+         (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`,
     )
     .bind(connectorId, seed.tenantId, 'Test Ingest Connector', seed.orgAdminId)
     .run();
@@ -69,7 +71,6 @@ describe('connector email ingest — orchestrator end-to-end', () => {
         db,
         tenantId: seed.tenantId,
         connectorId,
-        connectorType: 'email',
         config: {},
         fieldMappings: {},
         input,
@@ -136,7 +137,6 @@ describe('connector email ingest — orchestrator end-to-end', () => {
         db,
         tenantId: seed.tenantId,
         connectorId,
-        connectorType: 'email',
         config: {},
         fieldMappings: {},
         input: {
@@ -187,7 +187,6 @@ describe('connector email ingest — orchestrator records_updated clamp', () => 
       db,
       tenantId: seed.tenantId,
       connectorId,
-      connectorType: 'email',
       config: {},
       fieldMappings: {},
       input: {
@@ -226,40 +225,40 @@ describe('connector email ingest — orchestrator records_updated clamp', () => 
   });
 });
 
-describe('connector email ingest — webhook SQL column regression', () => {
-  it('webhook SELECT uses `connector_type` (regression guard for bug #1)', async () => {
-    // Bug #1 fix: the webhook previously SELECTed `type`, which does not
-    // exist on the `connectors` table (migration 0030 uses `connector_type`).
-    // This test replays the exact SELECT shape now used in
-    // functions/api/webhooks/connector-email-ingest.ts and asserts it
-    // succeeds against the test DB.
+describe('connector email ingest — webhook SQL column regression (Phase B0)', () => {
+  it('webhook SELECT runs against the universal-doors schema (no connector_type column)', async () => {
+    // Phase B0 (migration 0048) dropped the `connector_type` column.
+    // The webhook SELECT was rewritten to omit it. Replay the new
+    // shape and assert it succeeds — if someone re-adds the column or
+    // reverts the SELECT, this test surfaces the regression.
     const row = await db
       .prepare(
-        `SELECT id, tenant_id, connector_type, config, field_mappings, credentials_encrypted, credentials_iv, active
+        `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active
          FROM connectors WHERE id = ?`,
       )
       .bind(connectorId)
-      .first<{ connector_type: string }>();
+      .first<{ id: string }>();
     expect(row).not.toBeNull();
-    expect(row!.connector_type).toBe('email');
+    expect(row!.id).toBe(connectorId);
   });
 
-  it('documents that the legacy `type` column does NOT exist (schema sanity)', async () => {
-    // Sanity snapshot — if someone ever adds a `type` column back, this
-    // surfaces so the webhook fix can be reconsidered.
-    let threw = false;
-    try {
-      await db
-        .prepare(
-          `SELECT id, type FROM connectors WHERE id = ?`,
-        )
-        .bind(connectorId)
-        .first();
-    } catch (err) {
-      threw = true;
-      const msg = err instanceof Error ? err.message : String(err);
-      expect(msg.toLowerCase()).toMatch(/no such column|type/);
+  it('documents that neither `type` NOR `connector_type` exists on connectors (schema sanity)', async () => {
+    // If someone ever adds either column back, this surfaces so the
+    // dispatch logic can be reconsidered. Phase B0 model: dispatch is
+    // keyed off ConnectorInput.type at runtime, not a per-row column.
+    for (const col of ['type', 'connector_type']) {
+      let threw = false;
+      try {
+        await db
+          .prepare(`SELECT id, ${col} FROM connectors WHERE id = ?`)
+          .bind(connectorId)
+          .first();
+      } catch (err) {
+        threw = true;
+        const msg = err instanceof Error ? err.message : String(err);
+        expect(msg.toLowerCase()).toMatch(/no such column/);
+      }
+      expect(threw).toBe(true);
     }
-    expect(threw).toBe(true);
   });
 });

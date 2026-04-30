@@ -1,17 +1,21 @@
 /**
- * Connector Wizard — file-first flow (Wave 2).
+ * Connector Wizard — universal-doors model (Phase B0).
+ *
+ * Connectors no longer have a per-row type. Every connector exposes every
+ * intake door (manual upload, email, plus B2/B3/B4 paths as they land);
+ * the wizard scaffolds a typeless connector and the detail page is where
+ * partners configure each door.
  *
  * Step order (MVP):
- *   0. Name & Type         — pick connector type + name + system type on one card
- *   1. Upload Sample       — drop a CSV/TSV/TXT file (5MB max) to seed discovery
- *   2. Review Schema       — confirm how each detected column maps to dox fields
- *   3. Live Preview        — call preview-extraction and see what the parser would emit
- *  [3.5]. Connection Config — subject filters / base URL / webhook secret (email/api_poll/webhook only)
- *   4. Review & Save       — final summary + activate toggle
+ *   0. Name        — connector name + system type (ERP/WMS/Other)
+ *   1. Upload Sample — drop a CSV/TSV/XLSX/PDF to seed schema discovery
+ *   2. Review Schema — confirm how each detected column maps to dox fields
+ *   3. Live Preview  — call preview-extraction to see what the parser emits
+ *   4. Review & Save — final summary + activate toggle
  *
- * The Connection Config step is conditionally inserted when the connector
- * type needs it. For file_watch (and future formats that use the upload
- * flow), we skip straight from Live Preview to Review & Save.
+ * The historical type-selection step + the per-type Connection Config
+ * step were removed in B0. Per-door config (email scoping, R2 watch
+ * prefix, etc.) is set on the connector detail page after creation.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -24,11 +28,6 @@ import {
   Step,
   StepLabel,
   TextField,
-  Card,
-  CardActionArea,
-  CardContent,
-  Grid,
-  Chip,
   Alert,
   CircularProgress,
   Radio,
@@ -40,14 +39,11 @@ import {
   useTheme,
 } from '@mui/material';
 import {
-  Email as EmailIcon,
-  InsertDriveFile as FileIcon,
   ArrowBack as BackIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
-import { StepConnectionConfig } from '../../components/connectors/StepConnectionConfig';
 import { StepUploadSample } from '../../components/connectors/StepUploadSample';
 import { StepSchemaReview } from '../../components/connectors/StepSchemaReview';
 import { StepLivePreview } from '../../components/connectors/StepLivePreview';
@@ -61,11 +57,9 @@ import {
 import { acceptAllHighConfidenceSuggestions } from '../../components/connectors/fieldMappingActions';
 import type { DiscoverSchemaResponse } from '../../types/connectorSchema';
 
-type ConnectorType = 'email' | 'api_poll' | 'webhook' | 'file_watch';
 type SystemType = 'erp' | 'wms' | 'other';
 
 interface WizardState {
-  connectorType: ConnectorType | null;
   name: string;
   systemType: SystemType;
   config: Record<string, unknown>;
@@ -87,45 +81,15 @@ interface WizardLocationState {
   remapMode?: boolean;
 }
 
-const CONNECTOR_TYPE_OPTIONS: {
-  type: ConnectorType;
-  label: string;
-  description: string;
-  icon: React.ReactNode;
-  recommended?: boolean;
-  disabled?: boolean;
-  badge?: string;
-}[] = [
-  {
-    type: 'file_watch',
-    label: 'File Upload / Watch',
-    description: 'Upload files directly or watch an R2 bucket for new files',
-    icon: <FileIcon sx={{ fontSize: 40 }} />,
-    recommended: true,
-  },
-  {
-    type: 'email',
-    label: 'Email Parser',
-    description: 'Receive documents via email (attachments + body parsing)',
-    icon: <EmailIcon sx={{ fontSize: 40 }} />,
-  },
-];
-
-function connectorNeedsConnectionConfig(type: ConnectorType | null): boolean {
-  return type === 'email' || type === 'api_poll' || type === 'webhook';
-}
-
-function buildStepLabels(state: WizardState): string[] {
-  const base = ['Name & Type', 'Upload Sample', 'Review Schema', 'Live Preview'];
-  if (connectorNeedsConnectionConfig(state.connectorType)) {
-    base.push('Connection');
-  }
-  base.push('Review & Save');
-  return base;
-}
+const STEP_LABELS = [
+  'Name',
+  'Upload Sample',
+  'Review Schema',
+  'Live Preview',
+  'Review & Save',
+] as const;
 
 const initialState: WizardState = {
-  connectorType: null,
   name: '',
   systemType: 'erp',
   config: {},
@@ -160,7 +124,7 @@ export function ConnectorWizard() {
   // from stomping on the user's manual edits if they go back and forth.
   const appliedSuggestionsForSampleRef = useRef<string | null>(null);
 
-  const stepLabels = useMemo(() => buildStepLabels(state), [state]);
+  const stepLabels = useMemo(() => [...STEP_LABELS], []);
   const totalSteps = stepLabels.length;
   const lastStepIndex = totalSteps - 1;
 
@@ -215,7 +179,6 @@ export function ConnectorWizard() {
         }
 
         setState({
-          connectorType: c.connector_type as ConnectorType,
           name: c.name as string,
           systemType: (c.system_type as SystemType) || 'erp',
           config: config as Record<string, unknown>,
@@ -250,19 +213,18 @@ export function ConnectorWizard() {
   };
 
   /**
-   * Resolve the "role" of the current active step — the base-step set can
-   * include an optional Connection Config slot so integer indices shift
-   * depending on connector type. Centralizing the lookup keeps validation /
-   * rendering in sync.
+   * Resolve the "role" of the current active step. Phase B0: type and
+   * connection steps are gone, so the role mapping is now a 1:1 index
+   * lookup. We keep the role enum so the per-step rendering switch stays
+   * compact and self-documenting.
    */
-  function stepRoleAt(index: number): 'type' | 'upload' | 'review' | 'preview' | 'connection' | 'save' {
+  function stepRoleAt(index: number): 'name' | 'upload' | 'review' | 'preview' | 'save' {
     const label = stepLabels[index];
     switch (label) {
-      case 'Name & Type': return 'type';
+      case 'Name': return 'name';
       case 'Upload Sample': return 'upload';
       case 'Review Schema': return 'review';
       case 'Live Preview': return 'preview';
-      case 'Connection': return 'connection';
       case 'Review & Save': return 'save';
       default: return 'save';
     }
@@ -271,8 +233,7 @@ export function ConnectorWizard() {
   const validateStep = (): string | null => {
     const role = stepRoleAt(activeStep);
     switch (role) {
-      case 'type':
-        if (!state.connectorType) return 'Please select a connector type';
+      case 'name':
         if (!state.name.trim() || state.name.trim().length < 3) return 'Name must be at least 3 characters';
         return null;
       case 'upload':
@@ -285,40 +246,7 @@ export function ConnectorWizard() {
       }
       case 'preview':
         return null;
-      case 'connection':
-        // Email connectors must be scoped — block the Next button when
-        // neither a subject pattern nor a sender filter is set. Matches the
-        // backend rule in POST /api/connectors + POST/:id/test.
-        if (state.connectorType === 'email') {
-          const cfg = state.config || {};
-          const patterns = Array.isArray(cfg.subject_patterns)
-            ? (cfg.subject_patterns as unknown[]).filter(
-                (p): p is string => typeof p === 'string' && p.trim().length > 0,
-              )
-            : [];
-          const senderFilter =
-            typeof cfg.sender_filter === 'string' ? (cfg.sender_filter as string).trim() : '';
-          if (patterns.length === 0 && senderFilter.length === 0) {
-            return "Email connectors need at least one subject pattern or a sender filter — otherwise they'll match every inbound email.";
-          }
-        }
-        return null;
       case 'save':
-        // Same rule enforced one last time before save so users can't fall
-        // through the cracks by skipping validateStep checks via Back/Save.
-        if (state.connectorType === 'email') {
-          const cfg = state.config || {};
-          const patterns = Array.isArray(cfg.subject_patterns)
-            ? (cfg.subject_patterns as unknown[]).filter(
-                (p): p is string => typeof p === 'string' && p.trim().length > 0,
-              )
-            : [];
-          const senderFilter =
-            typeof cfg.sender_filter === 'string' ? (cfg.sender_filter as string).trim() : '';
-          if (patterns.length === 0 && senderFilter.length === 0) {
-            return "Email connectors need at least one subject pattern or a sender filter — otherwise they'll match every inbound email.";
-          }
-        }
         return null;
     }
   };
@@ -391,7 +319,6 @@ export function ConnectorWizard() {
     try {
       const data: Record<string, unknown> = {
         name: state.name.trim(),
-        connector_type: state.connectorType,
         system_type: state.systemType,
         config: state.config,
         field_mappings: state.fieldMappings,
@@ -413,7 +340,6 @@ export function ConnectorWizard() {
         }
         const result = await api.connectors.create({
           name: data.name as string,
-          connector_type: data.connector_type as string,
           system_type: data.system_type as string,
           config: data.config as Record<string, unknown>,
           field_mappings: data.field_mappings,
@@ -425,19 +351,12 @@ export function ConnectorWizard() {
         justCreated = true;
       }
       // Phase A2.3: when a connector is freshly created, the detail page
-      // hosts the "what now?" affordances (manual upload zone for
-      // file_watch, receive-address card for email). Pass a one-time
-      // hint via location state so the destination can render a
-      // contextual success toast pointing the partner at the right
-      // intake path. Edits don't get the hint — the user already knows
-      // where they are.
+      // hosts the "what now?" affordances (manual upload zone, receive
+      // address). Pass a one-time hint via location state so the
+      // destination can render a contextual success toast pointing the
+      // partner at the right intake path. Edits don't get the hint.
       navigate(`/admin/connectors/${resultId}`, {
-        state: justCreated
-          ? {
-              justCreated: true,
-              connectorType: state.connectorType,
-            }
-          : undefined,
+        state: justCreated ? { justCreated: true } : undefined,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save connector');
@@ -492,12 +411,8 @@ export function ConnectorWizard() {
 
       {/* Step content */}
       <Box sx={{ minHeight: 300, mb: 4 }}>
-        {role === 'type' && (
-          <StepNameAndType
-            state={state}
-            onChange={updateState}
-            isEditMode={isEditMode}
-          />
+        {role === 'name' && (
+          <StepName state={state} onChange={updateState} />
         )}
         {role === 'upload' && (
           <StepUploadSample
@@ -518,9 +433,6 @@ export function ConnectorWizard() {
             sample={state.sample}
             fieldMappings={state.fieldMappings}
           />
-        )}
-        {role === 'connection' && (
-          <StepConnectionConfig state={state} onChange={updateState} />
         )}
         {role === 'save' && (
           <StepTestAndActivate state={state} onChange={updateState} />
@@ -582,23 +494,23 @@ export function ConnectorWizard() {
 }
 
 // =============================================================================
-// StepNameAndType — merged "Choose Type" + "Basic Info"
+// StepName — name + system type. Phase B0: connector type removed entirely.
 // =============================================================================
 
-function StepNameAndType({
+function StepName({
   state,
   onChange,
-  isEditMode,
 }: {
   state: WizardState;
   onChange: (patch: Partial<WizardState>) => void;
-  isEditMode: boolean;
 }) {
   return (
     <Box>
       <Alert severity="info" sx={{ mb: 3 }}>
-        Connectors feed the order pipeline — they create orders and customers from your
-        external systems.
+        Connectors feed the order pipeline — they turn inbound files / emails
+        into orders and customers. Once saved you can drop files manually,
+        wire up an inbound email address, or hook in any of the other intake
+        doors from the connector detail page.
       </Alert>
 
       <TextField
@@ -624,69 +536,6 @@ function StepNameAndType({
           <FormControlLabel value="other" control={<Radio />} label="Other" />
         </RadioGroup>
       </FormControl>
-
-      {isEditMode && state.connectorType ? (
-        <Alert severity="info">
-          Connector type: <strong>{state.connectorType}</strong> (cannot be changed after creation)
-        </Alert>
-      ) : (
-        <Box>
-          <Typography variant="subtitle2" sx={{ mb: 1 }}>
-            Connector type
-          </Typography>
-          <Grid container spacing={2}>
-            {CONNECTOR_TYPE_OPTIONS.map((option) => {
-              const isSelected = state.connectorType === option.type;
-              return (
-                <Grid item xs={12} sm={6} key={option.type}>
-                  <Card
-                    variant="outlined"
-                    sx={{
-                      border: isSelected ? 2 : 1,
-                      borderColor: isSelected ? 'primary.main' : 'divider',
-                      bgcolor: isSelected ? 'primary.50' : 'background.paper',
-                      transition: 'all 0.15s',
-                      height: '100%',
-                      opacity: option.disabled ? 0.5 : 1,
-                    }}
-                  >
-                    <CardActionArea
-                      disabled={option.disabled}
-                      onClick={() => onChange({ connectorType: option.type })}
-                      sx={{ height: '100%', p: 2 }}
-                    >
-                      <CardContent sx={{ textAlign: 'center', p: 0 }}>
-                        <Box
-                          sx={{
-                            color: isSelected ? 'primary.main' : 'text.secondary',
-                            mb: 1.5,
-                          }}
-                        >
-                          {option.icon}
-                        </Box>
-                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
-                          <Typography variant="h6" fontWeight={600}>
-                            {option.label}
-                          </Typography>
-                          {option.recommended && (
-                            <Chip label="Recommended" size="small" color="primary" variant="outlined" />
-                          )}
-                          {option.badge && (
-                            <Chip label={option.badge} size="small" variant="outlined" />
-                          )}
-                        </Box>
-                        <Typography variant="body2" color="text.secondary">
-                          {option.description}
-                        </Typography>
-                      </CardContent>
-                    </CardActionArea>
-                  </Card>
-                </Grid>
-              );
-            })}
-          </Grid>
-        </Box>
-      )}
     </Box>
   );
 }

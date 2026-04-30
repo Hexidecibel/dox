@@ -766,7 +766,15 @@ export type {
 } from './fieldMappings';
 
 // === Connector, Order & Customer Enums ===
-export type ConnectorType = 'email' | 'api_poll' | 'webhook' | 'file_watch';
+/**
+ * Universal-doors model (Phase B0): the per-row `connector_type` column
+ * is gone. Dispatch is keyed off the runtime ConnectorInput.type — the
+ * path-of-entry discriminant carried with each invocation. We retain
+ * `ConnectorInputType` here as the union of intake paths so frontend
+ * filters (Activity page source filter, etc.) and orchestrator dispatch
+ * stay typed.
+ */
+export type ConnectorInputType = 'email' | 'api_poll' | 'webhook' | 'file_watch';
 export type SystemType = 'erp' | 'wms' | 'other';
 export type ConnectorRunStatus = 'running' | 'success' | 'partial' | 'error';
 export type OrderStatus = 'pending' | 'enriched' | 'matched' | 'fulfilled' | 'delivered' | 'error';
@@ -777,7 +785,6 @@ export interface ConnectorRow {
   id: string;
   tenant_id: string;
   name: string;
-  connector_type: ConnectorType;
   system_type: SystemType;
   config: string; // JSON
   field_mappings: string; // JSON — v2 ConnectorFieldMappings shape (see shared/fieldMappings.ts)

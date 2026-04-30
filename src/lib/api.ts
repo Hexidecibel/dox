@@ -1011,10 +1011,9 @@ export const api = {
     }),
 
   connectors: {
-    list(params?: { tenant_id?: string; connector_type?: string; system_type?: string; search?: string; active?: string; limit?: number; offset?: number }) {
+    list(params?: { tenant_id?: string; system_type?: string; search?: string; active?: string; limit?: number; offset?: number }) {
       const query = new URLSearchParams();
       if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
-      if (params?.connector_type) query.set('connector_type', params.connector_type);
       if (params?.system_type) query.set('system_type', params.system_type);
       if (params?.search) query.set('search', params.search);
       if (params?.active) query.set('active', params.active);
@@ -1025,7 +1024,6 @@ export const api = {
     get(id: string) { return fetchApi(`/connectors/${id}`); },
     create(data: {
       name: string;
-      connector_type: string;
       system_type?: string;
       config?: Record<string, unknown>;
       field_mappings?: unknown;
@@ -1053,15 +1051,12 @@ export const api = {
     /**
      * POST /api/connectors/:id/run
      *
-     * Triggers a manual connector run. For `file_watch` connectors the backend
-     * requires a multipart payload with a `file` field — without it the run
-     * endpoint rejects the request with a 400. Pass the user-selected file as
-     * the second arg; we wrap it in a FormData and let the browser set the
-     * multipart boundary (the shared `fetchApi` helper already skips the
-     * default JSON Content-Type when the body is a FormData instance).
-     *
-     * Future connector types that support manual runs without a payload can
-     * make `file` optional here; today the endpoint only accepts file_watch.
+     * Triggers a manual connector run. Phase B0 universal-doors model: every
+     * connector exposes the manual-upload door, and this endpoint is that
+     * door. The backend requires a multipart payload with a `file` field;
+     * we wrap it in FormData and let the browser set the multipart boundary
+     * (the shared `fetchApi` helper already skips the default JSON
+     * Content-Type when the body is a FormData instance).
      */
     run(id: string, file: File) {
       const form = new FormData();

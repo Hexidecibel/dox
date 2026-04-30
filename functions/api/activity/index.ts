@@ -139,11 +139,11 @@ async function queryConnectorRuns(
   filters: ActivityFilters,
 ): Promise<ActivityEvent[]> {
   if (filters.eventType !== 'all' && filters.eventType !== 'connector_run') return [];
-  // connector_runs doesn't have a "source" concept beyond the connector type,
-  // so if the caller is filtering by source we only return rows for connectors
-  // that match. To keep things simple we skip connector_runs when a non-'all'
-  // source filter other than the connector's own type is applied. We do this
-  // by joining connectors.connector_type and matching it.
+  // Phase B0 universal model: connectors no longer carry a per-row type, so
+  // a `source` filter (email / file_watch) cannot be expressed at the
+  // connector_runs level until we record input.type on the runs row
+  // (planned for B5 observability). For now we just return all runs that
+  // match the other filters.
   const conds: string[] = ['cr.started_at >= ?', 'cr.started_at <= ?'];
   const params: (string | number)[] = [filters.from, filters.to];
 
@@ -169,10 +169,8 @@ async function queryConnectorRuns(
     }
   }
 
-  if (filters.source !== 'all') {
-    conds.push('c.connector_type = ?');
-    params.push(filters.source);
-  }
+  // Phase B0: source filter is no-op at the connector_runs level — see
+  // comment at the top of this function.
 
   const sql = `
     SELECT cr.id, cr.connector_id, cr.tenant_id, cr.status, cr.started_at,
@@ -262,16 +260,15 @@ async function queryOrdersCreated(
     params.push(filters.connectorId);
   }
 
-  // For order_created, map 'source' filter onto "orders that came from a
-  // connector of this type". 'api' / 'import' fall back to "no connector".
-  if (filters.source !== 'all') {
-    if (filters.source === 'email' || filters.source === 'file_watch') {
-      conds.push('c.connector_type = ?');
-      params.push(filters.source);
-    } else if (filters.source === 'api' || filters.source === 'import') {
-      // manual/API-created orders have no connector_id
-      conds.push('o.connector_id IS NULL');
-    }
+  // Phase B0 universal model: connectors no longer carry a per-row type,
+  // so the historical "show only orders from email/file_watch connectors"
+  // filter has no row-level discriminator to key off. We keep the
+  // 'api'/'import' path (orders with no connector_id) but the
+  // 'email'/'file_watch' branches become no-ops until we record
+  // input.type on connector_runs (planned for B5 observability).
+  if (filters.source === 'api' || filters.source === 'import') {
+    // manual/API-created orders have no connector_id
+    conds.push('o.connector_id IS NULL');
   }
 
   if (filters.status !== 'all') {

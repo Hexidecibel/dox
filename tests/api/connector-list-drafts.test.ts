@@ -33,8 +33,8 @@ async function insertConnector(opts: {
   const id = generateTestId();
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_at, updated_at)
-       VALUES (?, ?, ?, 'file_watch', 'erp', '{}', ?, ?, datetime('now'), datetime('now'))`,
+      `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_at, updated_at)
+       VALUES (?, ?, ?, 'erp', '{}', ?, ?, datetime('now'), datetime('now'))`,
     )
     .bind(
       id,

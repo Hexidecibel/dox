@@ -1,4 +1,4 @@
-import { generateId, logAudit, getClientIp } from '../../lib/db';
+import { logAudit, getClientIp } from '../../lib/db';
 import { BadRequestError, errorToResponse } from '../../lib/permissions';
 import { executeConnectorRun } from '../../lib/connectors/orchestrator';
 import { decryptCredentials } from '../../lib/connectors/crypto';
@@ -38,14 +38,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return errorToResponse(new BadRequestError('Missing required fields: connector_id, tenant_id, sender'));
     }
 
-    // 1. Fetch the connector
+    // 1. Fetch the connector. Phase B0 universal model: any active
+    //    connector can be the target of an email ingest — no per-type
+    //    gate. The dispatch path discriminator is `input.type = 'email'`
+    //    on the orchestrator call below.
     const connector = await context.env.DB.prepare(
-      `SELECT id, tenant_id, connector_type, config, field_mappings, credentials_encrypted, credentials_iv, active
+      `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active
        FROM connectors WHERE id = ?`
     ).bind(payload.connector_id).first<{
       id: string;
       tenant_id: string;
-      connector_type: string;
       config: string;
       field_mappings: string;
       credentials_encrypted: string | null;
@@ -59,10 +61,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (!connector.active) {
       return jsonResponse({ error: 'Connector is not active' }, 400);
-    }
-
-    if (connector.connector_type !== 'email') {
-      return jsonResponse({ error: 'Connector is not an email type' }, 400);
     }
 
     // 2. Verify tenant access
@@ -112,7 +110,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       r2: context.env.FILES,
       tenantId: connector.tenant_id,
       connectorId: connector.id,
-      connectorType: connector.connector_type as 'email',
       config,
       fieldMappings,
       credentials,

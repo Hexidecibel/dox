@@ -52,7 +52,6 @@ import {
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
-  PlayArrow as RunIcon,
   Science as TestIcon,
   FileUpload as UploadIcon,
   Refresh as RefreshIcon,
@@ -82,7 +81,6 @@ type SystemType = typeof SYSTEM_TYPES[number];
 interface Connector {
   id: string;
   name: string;
-  connector_type: 'email' | 'api_poll' | 'webhook' | 'file_watch';
   system_type: SystemType;
   config: Record<string, unknown>;
   field_mappings: ConnectorFieldMappings;
@@ -158,7 +156,6 @@ function normalizeConnector(raw: unknown): Connector {
   return {
     id: String(r.id),
     name: String(r.name ?? ''),
-    connector_type: (r.connector_type as Connector['connector_type']) || 'email',
     system_type: (r.system_type as SystemType) || 'other',
     config: asRecord(r.config),
     field_mappings: normalizeFieldMappings(r.field_mappings),
@@ -180,13 +177,13 @@ const RUNS_PER_PAGE = 20;
 
 /**
  * Location state shape used by the wizard to flag a freshly-created
- * connector. When present, the detail page renders a one-time success
- * toast pointing the partner at the right intake path (drop zone for
- * file_watch, receive address for email). See `ConnectorWizard.handleSave`.
+ * connector. Phase B0 universal model: connectors no longer carry a
+ * per-row type, so the toast message is generic — partners are pointed
+ * at the universal manual upload zone above and the receive address
+ * card; they can pick whichever intake path matches their setup.
  */
 interface ConnectorDetailLocationState {
   justCreated?: boolean;
-  connectorType?: Connector['connector_type'] | null;
 }
 
 export function ConnectorDetail() {
@@ -297,32 +294,21 @@ export function ConnectorDetail() {
 
     // `loadConnector` resolves both the connector AND tenant fetches
     // before flipping `loading` to false, so by this point `tenant` is
-    // either populated or known-null (fetch failed). No additional wait
-    // needed; if tenant is null for an email connector we fall back to
-    // a generic message.
-    const isEmail = connector.connector_type === 'email';
+    // either populated or known-null (fetch failed). Phase B0 universal
+    // model: every connector exposes every intake door, so the toast
+    // points the partner at the manual upload zone (the most direct
+    // path) and the receive-address card below.
     const tenantSlug = tenant?.slug ?? null;
-
-    let message: string;
-    if (connector.connector_type === 'file_watch') {
-      message =
-        'Connector created. Drop a file into the upload zone above to test, or share the address with your vendor.';
-    } else if (isEmail) {
-      // Mirror ReceiveInfoCard's domain logic so the hint and the card
-      // below stay consistent.
-      const isStaging =
-        typeof window !== 'undefined' &&
-        !!window.location?.host &&
-        (window.location.host.toLowerCase().includes('staging') ||
-          window.location.host.toLowerCase().endsWith('.pages.dev'));
-      const emailDomain = isStaging ? 'supdox-staging.com' : 'supdox.com';
-      const address = tenantSlug ? `${tenantSlug}@${emailDomain}` : null;
-      message = address
-        ? `Connector created. Send emails with attachments to ${address} to test.`
-        : 'Connector created. See the receive address card below to start sending email.';
-    } else {
-      message = 'Connector created.';
-    }
+    const isStaging =
+      typeof window !== 'undefined' &&
+      !!window.location?.host &&
+      (window.location.host.toLowerCase().includes('staging') ||
+        window.location.host.toLowerCase().endsWith('.pages.dev'));
+    const emailDomain = isStaging ? 'supdox-staging.com' : 'supdox.com';
+    const address = tenantSlug ? `${tenantSlug}@${emailDomain}` : null;
+    const message = address
+      ? `Connector created. Drop a file in the upload zone above to test, or send email to ${address}.`
+      : 'Connector created. Drop a file in the upload zone above, or use the receive address card below.';
 
     setSaveSnack(message);
     justCreatedHintShownRef.current = true;
@@ -537,8 +523,6 @@ export function ConnectorDetail() {
   }
 
   const runsTotalPages = Math.max(1, Math.ceil(runsTotal / RUNS_PER_PAGE));
-  const isEmail = connector.connector_type === 'email';
-  const isFileWatch = connector.connector_type === 'file_watch';
   const hasStoredSample = !!connector.sample_r2_key;
   const r2Prefix =
     typeof connector.config.r2_prefix === 'string' ? connector.config.r2_prefix.trim() : '';
@@ -621,12 +605,6 @@ export function ConnectorDetail() {
             )}
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
               <Chip
-                label={connector.connector_type.replace('_', ' ')}
-                size="small"
-                color="primary"
-                variant="outlined"
-              />
-              <Chip
                 label={connector.system_type.toUpperCase()}
                 size="small"
                 color={connector.system_type === 'erp' ? 'info' : connector.system_type === 'wms' ? 'success' : 'default'}
@@ -683,29 +661,11 @@ export function ConnectorDetail() {
               {testing ? 'Testing…' : 'Test'}
             </Button>
             {/*
-              File-watch connectors trigger runs from the drop zone below
-              (the backend requires a multipart `file` payload — an empty
-              POST always 400s). Email connectors run from inbound webhooks.
-              The header Run button is therefore only meaningful for
-              api_poll / webhook types, which the backend currently 501s
-              anyway, but we leave it visible so its eventual implementation
-              has an entry point.
+              Phase B0 universal model: manual runs go through the drop
+              zone below (multipart upload). Email runs go through the
+              inbound email webhook. The header Run button is no longer
+              needed — every door has its own card with the right CTA.
             */}
-            {!isEmail && !isFileWatch && (
-              <Tooltip title="Trigger a run now">
-                <span>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<RunIcon />}
-                    onClick={() => setError('Manual runs for this connector type are not yet implemented')}
-                    disabled={running}
-                  >
-                    {running ? 'Running…' : 'Run'}
-                  </Button>
-                </span>
-              </Tooltip>
-            )}
             <Button
               variant="outlined"
               size="small"
@@ -734,15 +694,14 @@ export function ConnectorDetail() {
       )}
 
       {/* ------------------------------------------------------------ */}
-      {/* Manual upload drop zone (file_watch only) — surfaced at the   */}
-      {/* top because dropping a file is the primary action on this     */}
-      {/* page for file_watch connectors.                               */}
+      {/* Manual upload drop zone — Phase B0 universal-doors model.    */}
+      {/* Every connector has this door; surface it first because       */}
+      {/* dropping a file is the most direct way to test a connector.  */}
       {/* ------------------------------------------------------------ */}
-      {isFileWatch && (
-        <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
-          <Typography variant="h6" fontWeight={600} sx={{ mb: 0.5 }}>
-            Manual upload
-          </Typography>
+      <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" fontWeight={600} sx={{ mb: 0.5 }}>
+          Manual upload
+        </Typography>
           <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
             Drop a file to run this connector against it now. Uses the field
             mappings configured below; results appear in the runs panel below.
@@ -825,25 +784,23 @@ export function ConnectorDetail() {
               </Box>
             )}
           </Box>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={ACCEPTED_CONNECTOR_FILE_EXTENSIONS.join(',')}
-            onChange={handleFileInputChange}
-            style={{ display: 'none' }}
-            aria-hidden="true"
-            tabIndex={-1}
-          />
-        </Paper>
-      )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={ACCEPTED_CONNECTOR_FILE_EXTENSIONS.join(',')}
+          onChange={handleFileInputChange}
+          style={{ display: 'none' }}
+          aria-hidden="true"
+          tabIndex={-1}
+        />
+      </Paper>
 
       {/* ------------------------------------------------------------ */}
-      {/* Remote drop (R2 prefix) card — file_watch only. Paired with   */}
-      {/* the manual upload zone above as the "ways to send files"      */}
-      {/* group.                                                        */}
+      {/* Remote drop (R2 prefix) card — Phase B0 universal-doors. Any  */}
+      {/* connector can opt into the scheduled R2 poller by setting an */}
+      {/* r2_prefix below.                                              */}
       {/* ------------------------------------------------------------ */}
-      {isFileWatch && (
-        <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+      <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
           <Typography variant="h6" fontWeight={600} sx={{ mb: 0.5 }}>
             Remote drop
           </Typography>
@@ -853,7 +810,15 @@ export function ConnectorDetail() {
             files it finds.
           </Typography>
 
-          {r2Prefix ? (
+        <Stack spacing={2}>
+          <ConfigTextField
+            label="R2 prefix"
+            configKey="r2_prefix"
+            connector={connector}
+            onConfigChange={updateConfigKey}
+            helperText="Watches new objects landing under this R2 prefix. Leave blank to disable."
+          />
+          {r2Prefix && (
             <Box>
               <Typography variant="caption" color="text.secondary" fontWeight={600}>
                 Watching prefix
@@ -879,32 +844,20 @@ export function ConnectorDetail() {
                 file with the same key has no effect.
               </Typography>
             </Box>
-          ) : (
-            <Alert severity="info" variant="outlined">
-              Configure an R2 prefix in connection config below to enable
-              scheduled ingestion.
-            </Alert>
           )}
-        </Paper>
-      )}
+        </Stack>
+      </Paper>
 
       {/* ------------------------------------------------------------ */}
-      {/* 2. Receive Info card (email only)                             */}
+      {/* Receive Info card — Phase B0 universal model: email scoping   */}
+      {/* renders for every connector. Any connector can opt into the   */}
+      {/* email door by setting subject patterns or a sender filter.   */}
       {/* ------------------------------------------------------------ */}
-      {isEmail && (
-        <ReceiveInfoCard
-          connector={connector}
-          tenantSlug={tenant?.slug ?? null}
-          onConfigChange={updateConfigKey}
-        />
-      )}
-
-      {/* ------------------------------------------------------------ */}
-      {/* 3. Connection Config card (non-email)                         */}
-      {/* ------------------------------------------------------------ */}
-      {!isEmail && (
-        <ConnectionConfigCard connector={connector} onConfigChange={updateConfigKey} />
-      )}
+      <ReceiveInfoCard
+        connector={connector}
+        tenantSlug={tenant?.slug ?? null}
+        onConfigChange={updateConfigKey}
+      />
 
       {/* ------------------------------------------------------------ */}
       {/* 4. Field Mappings card                                        */}
@@ -1427,83 +1380,8 @@ function ReceiveInfoCard({
 }
 
 // ---------------------------------------------------------------------------
-// Connection Config card (non-email connectors)
+// ConfigTextField — small inline-edit text field for connector config keys.
 // ---------------------------------------------------------------------------
-
-function ConnectionConfigCard({
-  connector,
-  onConfigChange,
-}: {
-  connector: Connector;
-  onConfigChange: (key: string, value: unknown) => void;
-}) {
-  const type = connector.connector_type;
-  return (
-    <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
-      <Typography variant="h6" fontWeight={600} sx={{ mb: 2 }}>
-        Connection config
-      </Typography>
-      {type === 'api_poll' && (
-        <Stack spacing={2}>
-          <ConfigTextField
-            label="Endpoint URL"
-            configKey="endpoint_url"
-            connector={connector}
-            onConfigChange={onConfigChange}
-            helperText="Full URL the connector polls for new records"
-          />
-          <ConfigTextField
-            label="Auth header"
-            configKey="auth_header"
-            connector={connector}
-            onConfigChange={onConfigChange}
-            helperText="e.g. Bearer xxx (stored in config — use credentials for secrets)"
-          />
-          <ConfigTextField
-            label="Schedule (cron)"
-            configKey="schedule"
-            connector={connector}
-            onConfigChange={onConfigChange}
-            helperText="Cron expression controlling poll frequency"
-          />
-        </Stack>
-      )}
-      {type === 'webhook' && (
-        <Stack spacing={2}>
-          <ConfigTextField
-            label="Signing secret"
-            configKey="signing_secret"
-            connector={connector}
-            onConfigChange={onConfigChange}
-            helperText="HMAC secret used to verify inbound payloads"
-          />
-          <Box>
-            <Typography variant="subtitle2" color="text.secondary">
-              Webhook URL
-            </Typography>
-            <TextField
-              size="small"
-              fullWidth
-              value={`https://dox.supdox.com/api/webhooks/connector/${connector.id}`}
-              InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
-            />
-          </Box>
-        </Stack>
-      )}
-      {type === 'file_watch' && (
-        <Stack spacing={2}>
-          <ConfigTextField
-            label="R2 prefix"
-            configKey="r2_prefix"
-            connector={connector}
-            onConfigChange={onConfigChange}
-            helperText="Watches new objects landing under this R2 prefix"
-          />
-        </Stack>
-      )}
-    </Paper>
-  );
-}
 
 function ConfigTextField({
   label,

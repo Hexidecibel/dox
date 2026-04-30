@@ -12,7 +12,6 @@ import type { Env, User } from '../../lib/types';
 import { normalizeFieldMappings, validateFieldMappings } from '../../../shared/fieldMappings';
 import { validateEmailConfig } from './[id]/test';
 
-const VALID_CONNECTOR_TYPES = ['email', 'api_poll', 'webhook', 'file_watch'];
 const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
 
 /**
@@ -105,7 +104,6 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
     const body = (await context.request.json()) as {
       name?: string;
-      connector_type?: string;
       system_type?: string;
       config?: Record<string, unknown>;
       field_mappings?: unknown;
@@ -127,16 +125,6 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       params.push(name);
     }
 
-    if (body.connector_type !== undefined) {
-      if (!VALID_CONNECTOR_TYPES.includes(body.connector_type)) {
-        throw new BadRequestError(
-          `connector_type must be one of: ${VALID_CONNECTOR_TYPES.join(', ')}`
-        );
-      }
-      updates.push('connector_type = ?');
-      params.push(body.connector_type);
-    }
-
     if (body.system_type !== undefined) {
       if (!VALID_SYSTEM_TYPES.includes(body.system_type)) {
         throw new BadRequestError(
@@ -152,29 +140,26 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       params.push(JSON.stringify(body.config));
     }
 
-    // Email connectors must stay scoped — if this PATCH targets (or leaves
-    // unchanged) an email connector, enforce the "patterns OR sender_filter"
-    // rule against the effective config the row will end up with. This
-    // catches both "create an email connector with nothing" AND "wipe the
-    // patterns off an already-configured one" on the same code path.
-    const effectiveType = (body.connector_type as string | undefined) ?? (connector.connector_type as string);
-    if (effectiveType === 'email') {
-      let effectiveConfig: Record<string, unknown>;
-      if (body.config !== undefined) {
-        effectiveConfig = (body.config as Record<string, unknown>) || {};
-      } else {
-        try {
-          effectiveConfig = JSON.parse((connector.config as string) || '{}');
-        } catch {
-          effectiveConfig = {};
+    // Phase B0 universal model: connectors no longer have a per-row type,
+    // so email-scoping validation runs only when the caller is actually
+    // touching the email-scoping fields. We treat the row as having opted
+    // into email scoping if the EFFECTIVE config (after applying this PATCH)
+    // carries a `subject_patterns` array OR a `sender_filter` string. If
+    // the user wipes both to empty, that's the same incoherent state we
+    // rejected pre-B0 — keep the gate.
+    if (body.config !== undefined) {
+      const effectiveConfig = (body.config as Record<string, unknown>) || {};
+      const wantsEmailScoping =
+        Array.isArray(effectiveConfig.subject_patterns) ||
+        typeof effectiveConfig.sender_filter === 'string';
+      if (wantsEmailScoping) {
+        const emailErr = validateEmailConfig(effectiveConfig);
+        if (emailErr) {
+          return new Response(
+            JSON.stringify({ error: emailErr.error, code: emailErr.code }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } },
+          );
         }
-      }
-      const emailErr = validateEmailConfig(effectiveConfig);
-      if (emailErr) {
-        return new Response(
-          JSON.stringify({ error: emailErr.error, code: emailErr.code }),
-          { status: 400, headers: { 'Content-Type': 'application/json' } },
-        );
       }
     }
 

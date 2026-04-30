@@ -1,20 +1,14 @@
-import { useState } from 'react';
 import {
   Box,
   Typography,
-  TextField,
-  Button,
   Paper,
   Chip,
   Alert,
   Switch,
   FormControlLabel,
-  Collapse,
   Divider,
-  IconButton,
 } from '@mui/material';
 import {
-  ContentCopy as ContentCopyIcon,
   CheckCircle as CheckIcon,
 } from '@mui/icons-material';
 
@@ -23,7 +17,6 @@ import type { DiscoverSchemaResponse } from '../../types/connectorSchema';
 import { CORE_FIELD_DEFINITIONS } from './doxFields';
 
 interface WizardState {
-  connectorType: 'email' | 'api_poll' | 'webhook' | 'file_watch' | null;
   name: string;
   systemType: 'erp' | 'wms' | 'other';
   config: Record<string, unknown>;
@@ -39,13 +32,6 @@ interface StepProps {
   onChange: (updates: Partial<WizardState>) => void;
 }
 
-const TYPE_LABELS: Record<string, string> = {
-  email: 'Email',
-  api_poll: 'API Poll',
-  webhook: 'Webhook',
-  file_watch: 'File Watch',
-};
-
 const SYSTEM_LABELS: Record<string, string> = {
   erp: 'ERP',
   wms: 'WMS',
@@ -56,33 +42,6 @@ function SummarySection({ state }: { state: WizardState }) {
   const hasCredentials = state.credentials && Object.keys(state.credentials).some(
     (k) => k !== 'auth_method' && (state.credentials as Record<string, unknown>)[k]
   );
-
-  const connectionDetails = () => {
-    switch (state.connectorType) {
-      case 'email': {
-        const patterns = (state.config.subject_patterns as string[]) || [];
-        return patterns.length > 0
-          ? `Subject keywords: ${patterns.join(', ')}`
-          : 'No subject filters configured';
-      }
-      case 'api_poll':
-        return (state.config.base_url as string)
-          ? `Base URL: ${state.config.base_url}${state.config.endpoint_path || ''}`
-          : 'No URL configured';
-      case 'webhook': {
-        const id = state.config.id as string;
-        return id
-          ? `Webhook URL: https://supdox.com/api/webhooks/connectors/${id}`
-          : 'Webhook URL will be generated after saving';
-      }
-      case 'file_watch':
-        return (state.config.r2_prefix as string)
-          ? `Watch path: ${state.config.r2_prefix}`
-          : 'No watch path configured';
-      default:
-        return '';
-    }
-  };
 
   // Collect all canonical field keys + extended keys that have at least one
   // source label bound. These drive the "Mapped fields" chip list below.
@@ -108,15 +67,8 @@ function SummarySection({ state }: { state: WizardState }) {
           <Typography variant="body2" fontWeight={600}>
             {state.name || 'Unnamed connector'}
           </Typography>
-          {state.connectorType && (
-            <Chip label={TYPE_LABELS[state.connectorType]} size="small" color="primary" variant="outlined" />
-          )}
           <Chip label={SYSTEM_LABELS[state.systemType]} size="small" color="secondary" variant="outlined" />
         </Box>
-
-        <Typography variant="body2" color="text.secondary">
-          {connectionDetails()}
-        </Typography>
 
         {state.sample && (
           <Typography variant="body2" color="text.secondary">
@@ -158,127 +110,6 @@ function SummarySection({ state }: { state: WizardState }) {
   );
 }
 
-function EmailTestSection({ state }: { state: WizardState }) {
-  const patterns = (state.config.subject_patterns as string[]) || [];
-  const senderFilter = (state.config.sender_filter as string) || '';
-  const hasScoping = patterns.length > 0 || senderFilter.trim().length > 0;
-  return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <Typography variant="subtitle2">Email ingest</Typography>
-      {hasScoping ? (
-        <Alert severity="info">
-          Once saved, emails sent to your tenant's inbound address with a subject matching
-          your pattern(s) — or from a sender matching your filter — will route through this
-          connector. Use the "Test" button on the connector detail page after saving for a
-          live probe of the inbound address and sender-domain mappings.
-        </Alert>
-      ) : (
-        <Alert severity="warning">
-          No subject patterns or sender filter set yet. Add at least one in the Connection
-          step so this connector doesn't match every inbound email.
-        </Alert>
-      )}
-    </Box>
-  );
-}
-
-function ApiPollTestSection() {
-  return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <Typography variant="subtitle2">API poll</Typography>
-      <Alert severity="info">
-        API poll connectors aren't fully wired for live testing yet. Save the connector and
-        monitor the run history on the detail page once scheduled polling comes online.
-      </Alert>
-    </Box>
-  );
-}
-
-function WebhookTestSection({ state }: { state: WizardState }) {
-  const [showCurl, setShowCurl] = useState(false);
-  const connectorId = state.config.id as string | undefined;
-  const webhookUrl = connectorId
-    ? `https://supdox.com/api/webhooks/connectors/${connectorId}`
-    : null;
-
-  const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
-  };
-
-  const sampleCurl = webhookUrl
-    ? `curl -X POST ${webhookUrl} \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "order_number": "SO-12345",
-    "customer_number": "K00123",
-    "customer_name": "Acme Corp",
-    "items": [
-      { "product_code": "SKU-001", "quantity": 10, "lot_number": "LOT-2026-04" }
-    ]
-  }'`
-    : '';
-
-  return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <Typography variant="subtitle2">Webhook Details</Typography>
-
-      {webhookUrl ? (
-        <>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <TextField
-              fullWidth
-              size="small"
-              value={webhookUrl}
-              slotProps={{ input: { readOnly: true } }}
-              sx={{ '& .MuiInputBase-input': { fontFamily: 'monospace', fontSize: '0.85rem' } }}
-            />
-            <IconButton size="small" onClick={() => handleCopy(webhookUrl)}>
-              <ContentCopyIcon fontSize="small" />
-            </IconButton>
-          </Box>
-
-          <Box>
-            <Button size="small" onClick={() => setShowCurl(!showCurl)}>
-              {showCurl ? 'Hide' : 'Show'} sample cURL
-            </Button>
-            <Collapse in={showCurl}>
-              <Paper variant="outlined" sx={{ p: 2, mt: 1, bgcolor: 'grey.50', overflow: 'auto' }}>
-                <Typography
-                  variant="body2"
-                  component="pre"
-                  sx={{ fontFamily: 'monospace', fontSize: '0.8rem', whiteSpace: 'pre-wrap', m: 0 }}
-                >
-                  {sampleCurl}
-                </Typography>
-              </Paper>
-            </Collapse>
-          </Box>
-        </>
-      ) : (
-        <Typography variant="body2" color="text.secondary">
-          Webhook URL will be generated after saving the connector.
-        </Typography>
-      )}
-    </Box>
-  );
-}
-
-function FileWatchTestSection({ state }: { state: WizardState }) {
-  const sampleName = state.sample?.file_name;
-  return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <Typography variant="subtitle2">File upload</Typography>
-      <Alert severity="info">
-        {sampleName
-          ? `Your sample "${sampleName}" is saved. After this connector is active you can
-             run POST /api/connectors/:id/run (or use the Run button on the detail page)
-             to push a fresh file through the same field-mapping pipeline.`
-          : 'Upload a sample file in the earlier step so the wizard can seed field mappings.'}
-      </Alert>
-    </Box>
-  );
-}
-
 export function StepTestAndActivate({ state, onChange }: StepProps) {
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
@@ -290,11 +121,11 @@ export function StepTestAndActivate({ state, onChange }: StepProps) {
 
       <Divider />
 
-      {/* Test section varies by type */}
-      {state.connectorType === 'email' && <EmailTestSection state={state} />}
-      {state.connectorType === 'api_poll' && <ApiPollTestSection />}
-      {state.connectorType === 'webhook' && <WebhookTestSection state={state} />}
-      {state.connectorType === 'file_watch' && <FileWatchTestSection state={state} />}
+      <Alert severity="info">
+        After saving, configure intake doors on the connector detail page —
+        manual upload (drop a file), email (send to your tenant inbox), and
+        the rest of the doors as those slices come online.
+      </Alert>
 
       <Divider />
 

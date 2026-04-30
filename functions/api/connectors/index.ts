@@ -11,7 +11,6 @@ import type { Env, User } from '../../lib/types';
 import { normalizeFieldMappings, validateFieldMappings } from '../../../shared/fieldMappings';
 import { validateEmailConfig } from './[id]/test';
 
-const VALID_CONNECTOR_TYPES = ['email', 'api_poll', 'webhook', 'file_watch'];
 const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
 
 /**
@@ -47,7 +46,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const url = new URL(context.request.url);
 
     let tenantId = url.searchParams.get('tenant_id');
-    const connectorType = url.searchParams.get('connector_type');
     const systemType = url.searchParams.get('system_type');
     const active = url.searchParams.get('active');
     const search = url.searchParams.get('search');
@@ -76,11 +74,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (active !== null && active !== undefined && active !== '') {
       conditions.push('c.active = ?');
       params.push(parseInt(active, 10));
-    }
-
-    if (connectorType) {
-      conditions.push('c.connector_type = ?');
-      params.push(connectorType);
     }
 
     if (systemType) {
@@ -144,7 +137,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const body = (await context.request.json()) as {
       name?: string;
-      connector_type?: string;
       system_type?: string;
       config?: Record<string, unknown>;
       field_mappings?: unknown;
@@ -158,26 +150,23 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       throw new BadRequestError('name is required');
     }
 
-    if (!body.connector_type) {
-      throw new BadRequestError('connector_type is required');
-    }
-
-    if (!VALID_CONNECTOR_TYPES.includes(body.connector_type)) {
-      throw new BadRequestError(
-        `connector_type must be one of: ${VALID_CONNECTOR_TYPES.join(', ')}`
-      );
-    }
-
     if (body.system_type && !VALID_SYSTEM_TYPES.includes(body.system_type)) {
       throw new BadRequestError(
         `system_type must be one of: ${VALID_SYSTEM_TYPES.join(', ')}`
       );
     }
 
-    // Email connectors must be scoped — subject patterns or a sender filter
-    // required. Matches the rule enforced by POST /api/connectors/:id/test.
-    if (body.connector_type === 'email') {
-      const emailErr = validateEmailConfig((body.config as Record<string, unknown>) || {});
+    // If the caller has populated email-scoping config (subject patterns
+    // or sender filter), validate it. Phase B0: connectors are universal,
+    // so empty email-config is now FINE — it just means this connector
+    // hasn't opted into the email door yet. validateEmailConfig only fires
+    // when the caller asked us to scope email but did so incoherently.
+    const incomingConfig = (body.config as Record<string, unknown>) || {};
+    const wantsEmailScoping =
+      Array.isArray(incomingConfig.subject_patterns) ||
+      typeof incomingConfig.sender_filter === 'string';
+    if (wantsEmailScoping) {
+      const emailErr = validateEmailConfig(incomingConfig);
       if (emailErr) {
         return new Response(
           JSON.stringify({ error: emailErr.error, code: emailErr.code }),
@@ -199,7 +188,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const id = generateId();
     const name = sanitizeString(body.name.trim());
-    const connectorType = body.connector_type;
     const systemType = body.system_type || 'other';
     const config = body.config ? JSON.stringify(body.config) : '{}';
 
@@ -235,13 +223,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     await context.env.DB.prepare(
       `INSERT INTO connectors (
-        id, tenant_id, name, connector_type, system_type,
+        id, tenant_id, name, system_type,
         config, field_mappings, credentials_encrypted, credentials_iv,
         schedule, sample_r2_key, active, created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'))`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'))`
     )
       .bind(
-        id, tenantId, name, connectorType, systemType,
+        id, tenantId, name, systemType,
         config, fieldMappings, credentialsEncrypted, credentialsIv,
         schedule, sampleR2Key, user.id
       )
@@ -254,7 +242,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'connector.created',
       'connector',
       id,
-      JSON.stringify({ name, connector_type: connectorType, system_type: systemType }),
+      JSON.stringify({ name, system_type: systemType }),
       getClientIp(context.request)
     );
 

@@ -46,16 +46,13 @@ import { useTenant } from '../../contexts/TenantContext';
 
 const ITEMS_PER_PAGE = 20;
 
-const CONNECTOR_TYPES = ['email', 'api_poll', 'webhook', 'file_watch'] as const;
 const SYSTEM_TYPES = ['erp', 'wms', 'other'] as const;
 
-type ConnectorType = typeof CONNECTOR_TYPES[number];
 type SystemType = typeof SYSTEM_TYPES[number];
 
 interface Connector {
   id: string;
   name: string;
-  connector_type: ConnectorType;
   system_type: SystemType;
   config: string | Record<string, unknown>;
   schedule: string | null;
@@ -64,15 +61,6 @@ interface Connector {
   created_at: string;
   updated_at: string;
   tenant_id: string;
-}
-
-function connectorTypeColor(type: ConnectorType): 'primary' | 'secondary' | 'info' | 'warning' {
-  switch (type) {
-    case 'email': return 'primary';
-    case 'api_poll': return 'secondary';
-    case 'webhook': return 'info';
-    case 'file_watch': return 'warning';
-  }
 }
 
 function systemTypeColor(type: SystemType): 'info' | 'success' | 'default' {
@@ -117,7 +105,6 @@ export function Connectors() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null);
   const [formName, setFormName] = useState('');
-  const [formConnectorType, setFormConnectorType] = useState<ConnectorType>('email');
   const [formSystemType, setFormSystemType] = useState<SystemType>('erp');
   const [formConfig, setFormConfig] = useState('{}');
   const [formSchedule, setFormSchedule] = useState('');
@@ -162,7 +149,6 @@ export function Connectors() {
   const openEdit = (connector: Connector) => {
     setEditingConnector(connector);
     setFormName(connector.name);
-    setFormConnectorType(connector.connector_type);
     setFormSystemType(connector.system_type);
     setFormConfig(
       typeof connector.config === 'string'
@@ -187,7 +173,6 @@ export function Connectors() {
     try {
       const data = {
         name: formName.trim(),
-        connector_type: formConnectorType,
         system_type: formSystemType,
         config: JSON.parse(formConfig),
         schedule: formSchedule.trim() || undefined,
@@ -307,12 +292,6 @@ export function Connectors() {
                   </Box>
                   <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
                     <Chip
-                      label={connector.connector_type.replace('_', ' ')}
-                      size="small"
-                      color={connectorTypeColor(connector.connector_type)}
-                      variant="outlined"
-                    />
-                    <Chip
                       label={connector.system_type.toUpperCase()}
                       size="small"
                       color={systemTypeColor(connector.system_type)}
@@ -336,7 +315,6 @@ export function Connectors() {
             <TableHead>
               <TableRow>
                 <TableCell>Name</TableCell>
-                <TableCell>Type</TableCell>
                 <TableCell>System</TableCell>
                 <TableCell>Last Run</TableCell>
                 <TableCell>Status</TableCell>
@@ -346,7 +324,7 @@ export function Connectors() {
             <TableBody>
               {connectors.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} sx={{ textAlign: 'center', py: 4 }}>
+                  <TableCell colSpan={5} sx={{ textAlign: 'center', py: 4 }}>
                     <Typography color="text.secondary">No connectors found</Typography>
                   </TableCell>
                 </TableRow>
@@ -362,14 +340,6 @@ export function Connectors() {
                       <Typography variant="body2" fontWeight={500} color="primary">
                         {connector.name}
                       </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Chip
-                        label={connector.connector_type.replace('_', ' ')}
-                        size="small"
-                        color={connectorTypeColor(connector.connector_type)}
-                        variant="outlined"
-                      />
                     </TableCell>
                     <TableCell>
                       <Chip
@@ -446,21 +416,6 @@ export function Connectors() {
             autoFocus
             sx={{ mt: 1, mb: 2 }}
           />
-          <FormControl fullWidth sx={{ mb: 2 }}>
-            <InputLabel>Connector Type</InputLabel>
-            <Select
-              value={formConnectorType}
-              label="Connector Type"
-              onChange={(e) => setFormConnectorType(e.target.value as ConnectorType)}
-              disabled={saving || !!editingConnector}
-            >
-              {CONNECTOR_TYPES.map((type) => (
-                <MenuItem key={type} value={type}>
-                  {type.replace('_', ' ')}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
           <FormControl fullWidth sx={{ mb: 2 }}>
             <InputLabel>System Type</InputLabel>
             <Select

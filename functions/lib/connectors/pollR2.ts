@@ -1,11 +1,11 @@
 /**
- * Scheduled R2-prefix poller for `file_watch` connectors.
+ * Scheduled R2-prefix poller (Phase B0 universal-doors model).
  *
  * Companion to `executeConnectorRun` — does NOT reimplement run/dedup
  * logic locally. The poller is responsible for:
  *
- *   1. Discovering active `file_watch` connectors with a non-empty
- *      `config.r2_prefix` value.
+ *   1. Discovering active connectors with a non-empty `config.r2_prefix`
+ *      value (any connector can opt into the R2-poll door).
  *   2. Listing R2 objects under each prefix (bounded).
  *   3. Filtering out keys we've already dispatched (via the
  *      `connector_processed_keys` table — migration 0046).
@@ -136,19 +136,18 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
     truncated: false,
   };
 
-  // Find active, non-deleted file_watch connectors with a configured
-  // r2_prefix. JSON_EXTRACT works on D1 (SQLite) for our simple top-level
-  // key — null/missing values won't satisfy the LIKE so empty configs are
-  // filtered server-side. We still re-validate prefix in JS because
-  // JSON_EXTRACT on a string config that happens to be invalid JSON would
-  // silently return NULL and we'd want to log it.
+  // Phase B0 universal model: any active, non-deleted connector with a
+  // configured r2_prefix is a poller candidate. JSON_EXTRACT works on D1
+  // (SQLite) for our simple top-level key — null/missing values won't
+  // satisfy the LIKE so empty configs are filtered server-side. We still
+  // re-validate prefix in JS because JSON_EXTRACT on a string config that
+  // happens to be invalid JSON would silently return NULL.
   const rows = await env.DB
     .prepare(
       `SELECT id, tenant_id, config, field_mappings,
               credentials_encrypted, credentials_iv
          FROM connectors
-        WHERE connector_type = 'file_watch'
-          AND active = 1
+        WHERE active = 1
           AND deleted_at IS NULL
           AND JSON_EXTRACT(config, '$.r2_prefix') IS NOT NULL
           AND TRIM(JSON_EXTRACT(config, '$.r2_prefix')) <> ''`
@@ -240,7 +239,6 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
             r2: env.FILES,
             tenantId: row.tenant_id,
             connectorId: row.id,
-            connectorType: 'file_watch',
             config,
             fieldMappings,
             credentials,

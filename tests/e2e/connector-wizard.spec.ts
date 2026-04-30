@@ -135,7 +135,7 @@ test.describe('connector wizard', () => {
       headers: { ...auth, 'Content-Type': 'application/json' },
       data: {
         name: connectorName,
-        connector_type: 'file_watch',
+        // Phase B0: no connector_type — the universal-doors model.
         system_type: 'erp',
         config: {},
         field_mappings: fieldMappings,

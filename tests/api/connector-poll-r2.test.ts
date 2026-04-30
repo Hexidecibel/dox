@@ -1,6 +1,12 @@
 /**
  * Tests for `pollAllR2Connectors` — the scheduled R2-prefix poller.
  *
+ * Phase B0 universal-doors model: any active connector with a non-empty
+ * `config.r2_prefix` opts into the R2 poller — there's no per-row type
+ * gate. The poller still dispatches via `executeConnectorRun` with
+ * `input.type = 'file_watch'`, which is the correct intake-path
+ * discriminator regardless of the connector's other doors.
+ *
  * Coverage:
  *  - Lists R2 objects under the connector's `config.r2_prefix` and
  *    dispatches a run for each new key.
@@ -8,17 +14,6 @@
  *  - Skips connectors where `active = 0`.
  *  - Skips connectors with an empty / missing `r2_prefix`.
  *  - Per-tick budget: caps total dispatched files across all connectors.
- *
- * Uses real D1 + R2 bindings provided by `cloudflare:test`. We seed a
- * file_watch connector, drop a few CSV objects under its prefix, then
- * call `pollAllR2Connectors` directly and assert that:
- *   - A `connector_runs` row was created per new key.
- *   - A `connector_processed_keys` row was created per new key.
- *   - Re-running the poll dispatches no further runs.
- *
- * We deliberately use small CSVs that the file_watch executor can
- * parse via the existing `parseCSVAttachment` path so the orchestrator
- * actually completes a run (not just throw on missing config).
  */
 
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
@@ -61,7 +56,7 @@ function defaultMappings() {
   };
 }
 
-async function insertFileWatchConnector(opts: {
+async function insertPollableConnector(opts: {
   tenantId: string;
   prefix: string | null;
   active?: number;
@@ -71,10 +66,10 @@ async function insertFileWatchConnector(opts: {
   if (opts.prefix !== null) config.r2_prefix = opts.prefix;
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type,
+      `INSERT INTO connectors (id, tenant_id, name, system_type,
                                config, field_mappings, active,
                                created_at, updated_at)
-       VALUES (?, ?, ?, 'file_watch', 'erp', ?, ?, ?,
+       VALUES (?, ?, ?, 'erp', ?, ?, ?,
                datetime('now'), datetime('now'))`,
     )
     .bind(
@@ -120,7 +115,7 @@ describe('pollAllR2Connectors', () => {
   it('dispatches runs for new keys, skips already-processed keys', async () => {
     const prefix = `imports/poll-dedup-${generateTestId()}/`;
     await clearR2Prefix(prefix);
-    const connectorId = await insertFileWatchConnector({
+    const connectorId = await insertPollableConnector({
       tenantId: seed.tenantId,
       prefix,
     });
@@ -179,7 +174,7 @@ describe('pollAllR2Connectors', () => {
   it('ignores inactive connectors', async () => {
     const prefix = `imports/poll-inactive-${generateTestId()}/`;
     await clearR2Prefix(prefix);
-    const connectorId = await insertFileWatchConnector({
+    const connectorId = await insertPollableConnector({
       tenantId: seed.tenantId,
       prefix,
       active: 0,
@@ -192,7 +187,7 @@ describe('pollAllR2Connectors', () => {
   });
 
   it('ignores connectors with no r2_prefix configured', async () => {
-    const connectorId = await insertFileWatchConnector({
+    const connectorId = await insertPollableConnector({
       tenantId: seed.tenantId,
       prefix: null,
     });
@@ -206,7 +201,7 @@ describe('pollAllR2Connectors', () => {
 
     const prefix = `imports/poll-cap-${generateTestId()}/`;
     await clearR2Prefix(prefix);
-    const connectorId = await insertFileWatchConnector({
+    const connectorId = await insertPollableConnector({
       tenantId: seed.tenantId,
       prefix,
     });

@@ -1,15 +1,20 @@
 import { generateId, logAudit } from '../db';
 import type { ConnectorContext, ConnectorOutput, ConnectorInput, ParsedContact, ParsedCustomer } from './types';
 import { getConnectorExecutor } from './index';
-import type { ConnectorType } from '../../../shared/types';
 import { normalizeFieldMappings } from '../../../shared/fieldMappings';
 
+/**
+ * Universal-doors orchestrator (Phase B0). The connector row no longer
+ * carries a per-type tag — every connector exposes every intake door.
+ * Dispatch is keyed off `input.type` (the path-of-entry discriminant on
+ * `ConnectorInput`). Once a file/payload is in hand, the parse →
+ * orders/customers → audit tail is identical for every door.
+ */
 interface OrchestratorParams {
   db: D1Database;
   r2?: R2Bucket;
   tenantId: string;
   connectorId: string;
-  connectorType: ConnectorType;
   config: Record<string, unknown>;
   /**
    * Raw field_mappings blob read from the connectors table. Accepted in any
@@ -61,7 +66,7 @@ function resolveContacts(customer: ParsedCustomer): ParsedContact[] {
 
 export async function executeConnectorRun(params: OrchestratorParams): Promise<OrchestratorResult> {
   const {
-    db, r2, tenantId, connectorId, connectorType,
+    db, r2, tenantId, connectorId,
     config, fieldMappings, credentials, input, userId,
     qwenUrl, qwenSecret,
   } = params;
@@ -77,7 +82,10 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
   let output: ConnectorOutput;
 
   try {
-    const executor = getConnectorExecutor(connectorType);
+    // Dispatch by the runtime intake path. The same connector row can be
+    // driven from any door — so the executor lookup uses input.type, not
+    // a per-row tag.
+    const executor = getConnectorExecutor(input.type);
     // Normalize the stored field_mappings blob into the v2 shape once per
     // run. The email executor, parseCSVAttachment, and parseWithAI all rely
     // on ctx.fieldMappings being v2.

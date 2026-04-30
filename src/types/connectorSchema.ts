@@ -105,7 +105,8 @@ export interface PreviewExtractionResponse {
 // =============================================================================
 
 export interface ConnectorTestProbe {
-  /** Which branch ran: 'file_watch' | 'email' | 'webhook' | 'api_poll'. */
+  /** Which intake door this probe covers: 'file_watch' | 'email'
+   * (B2/B3/B4 doors append entries here as their slices land). */
   probe: string;
   /** True when the probe passed (file reachable, mapping exists, URL
    * derivable) — false when the probe surfaced an actionable issue. */
@@ -121,5 +122,12 @@ export interface ConnectorTestResponse {
   success: boolean;
   message: string;
   warnings: string[];
+  /**
+   * Legacy single-probe field — points at the first non-OK probe (most
+   * actionable for the UI), falling back to the first probe. Phase B0+:
+   * prefer `probes[]` for per-door breakdown.
+   */
   probe?: ConnectorTestProbe;
+  /** Per-door probe breakdown. Universal-doors model. */
+  probes?: ConnectorTestProbe[];
 }

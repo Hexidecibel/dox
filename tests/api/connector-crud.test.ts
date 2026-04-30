@@ -96,25 +96,28 @@ async function insertEmailConnector(config: Record<string, unknown>): Promise<st
   const id = generateTestId();
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, 'email', 'erp', ?, '{}', 1, ?, datetime('now'), datetime('now'))`,
+      `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, 'erp', ?, '{}', 1, ?, datetime('now'), datetime('now'))`,
     )
     .bind(id, seed.tenantId, `crud-test-${id}`, JSON.stringify(config), seed.orgAdminId)
     .run();
   return id;
 }
 
-describe('POST /api/connectors — email validation', () => {
-  it('rejects an email connector with neither patterns nor a sender filter', async () => {
+describe('POST /api/connectors — email-scoping validation (universal-doors model)', () => {
+  // Phase B0: connectors no longer have a per-row type. The historical
+  // "email connector with empty config -> 400" rule is rephrased as
+  // "any connector that explicitly opts into email-scoping but provides
+  // empty values for both subject_patterns AND sender_filter -> 400".
+  it('rejects a connector that opts into email scoping with empty patterns AND empty sender_filter', async () => {
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
     const response = await createConnector(
       makePostContext(
         {
-          name: 'Empty Email Connector',
-          connector_type: 'email',
+          name: 'Empty Email-Scoped Connector',
           system_type: 'erp',
           tenant_id: seed.tenantId,
-          config: {},
+          config: { subject_patterns: [], sender_filter: '' },
         },
         user,
       ),
@@ -125,13 +128,32 @@ describe('POST /api/connectors — email validation', () => {
     expect(body.error).toMatch(/subject pattern|sender filter/i);
   });
 
-  it('accepts an email connector with subject patterns', async () => {
+  it('accepts a connector with no email scoping at all', async () => {
+    // Phase B0: a brand-new connector with no email-scoping config is
+    // valid — the email door simply isn't wired for this connector yet.
+    // This was REJECTED pre-B0 (when connector_type='email' implied
+    // mandatory scoping); now it's the universal default.
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
     const response = await createConnector(
       makePostContext(
         {
-          name: 'Patterned Email Connector',
-          connector_type: 'email',
+          name: 'No-Email-Scoping Connector',
+          system_type: 'erp',
+          tenant_id: seed.tenantId,
+          config: {},
+        },
+        user,
+      ),
+    );
+    expect(response.status).toBe(201);
+  });
+
+  it('accepts a connector with subject patterns', async () => {
+    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
+    const response = await createConnector(
+      makePostContext(
+        {
+          name: 'Patterned Connector',
           system_type: 'erp',
           tenant_id: seed.tenantId,
           config: { subject_patterns: ['Daily COA Report'] },
@@ -151,13 +173,12 @@ describe('POST /api/connectors — email validation', () => {
     expect(cfg.subject_patterns).toEqual(['Daily COA Report']);
   });
 
-  it('accepts an email connector with only a sender filter', async () => {
+  it('accepts a connector with only a sender filter', async () => {
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
     const response = await createConnector(
       makePostContext(
         {
-          name: 'Sender-Only Email Connector',
-          connector_type: 'email',
+          name: 'Sender-Only Connector',
           system_type: 'erp',
           tenant_id: seed.tenantId,
           config: { sender_filter: '@trusted.example.com' },

@@ -1,22 +1,21 @@
 /**
  * Regression tests for POST /api/connectors/:id/test.
  *
- * History:
- *  1. Originally required `config.subject_patterns` as a hard field, breaking
- *     the Test button for fresh connectors.
- *  2. Downgraded to a soft warning — "no patterns + no sender filter" merely
- *     flagged the config as greedy.
- *  3. Upgraded BACK to a hard 400 (code: `empty_email_config`) after live
- *     testing showed users missing the warning and ending up with connectors
- *     that silently hoovered up every inbound email. The rule is now:
- *     `subject_patterns.length >= 1 || sender_filter.trim().length > 0`.
+ * Phase B0 universal-doors model: connectors no longer carry a per-row
+ * type. Email-scoping validation runs only when the row's config has
+ * explicitly opted into the email door (subject_patterns or
+ * sender_filter present). The probe response now carries `probes[]` with
+ * one entry per door — the legacy single `probe` field points at the
+ * first non-OK door for back-compat with the single-Alert UI.
  *
  * Coverage:
- *  - email connector with empty config is REJECTED with empty_email_config
- *  - email connector with only patterns passes
- *  - email connector with only a sender filter passes
- *  - api_poll connector still requires endpoint_url (400 when missing)
- *  - 403 when a user's tenant doesn't match the connector's tenant
+ *  - connector with subject_patterns: [] AND sender_filter: '' is REJECTED
+ *    (incoherent — opted into the door but provided no scoping).
+ *  - connector with only patterns passes; probes[] surfaces email + manual.
+ *  - connector with only a sender filter passes.
+ *  - connector with no email scoping at all is VALID (empty config — the
+ *    email door simply isn't wired for this connector yet).
+ *  - 403 when a user's tenant doesn't match the connector's tenant.
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
@@ -33,20 +32,18 @@ beforeAll(async () => {
 
 async function insertConnector(
   tenantId: string,
-  connectorType: 'email' | 'api_poll' | 'webhook' | 'file_watch',
   config: Record<string, unknown>,
 ): Promise<string> {
   const id = generateTestId();
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, connector_type, system_type, config, field_mappings, active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'erp', ?, ?, 1, datetime('now'), datetime('now'))`,
+      `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_at, updated_at)
+       VALUES (?, ?, ?, 'erp', ?, ?, 1, datetime('now'), datetime('now'))`,
     )
     .bind(
       id,
       tenantId,
-      `test-${connectorType}`,
-      connectorType,
+      `test-${id}`,
       JSON.stringify(config),
       JSON.stringify({ version: 2, core: {}, extended: [] }),
     )
@@ -72,19 +69,10 @@ function makeContext(
 }
 
 describe('POST /api/connectors/:id/test', () => {
-  it('rejects an email connector with no patterns AND no sender filter', async () => {
-    const connectorId = await insertConnector(seed.tenantId, 'email', {});
-    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
-
-    const response = await testConnector(makeContext(connectorId, user));
-    expect(response.status).toBe(400);
-    const body = (await response.json()) as { error: string; code: string };
-    expect(body.code).toBe('empty_email_config');
-    expect(body.error).toMatch(/subject pattern|sender filter/i);
-  });
-
-  it('rejects an email connector whose patterns array is empty AND sender filter is blank', async () => {
-    const connectorId = await insertConnector(seed.tenantId, 'email', {
+  it('rejects a connector that opted into email scoping with empty patterns AND blank sender filter', async () => {
+    // Phase B0: opting in (passing the keys) but with empty values is
+    // the same incoherent state we rejected pre-B0.
+    const connectorId = await insertConnector(seed.tenantId, {
       subject_patterns: [],
       sender_filter: '   ',
     });
@@ -96,8 +84,8 @@ describe('POST /api/connectors/:id/test', () => {
     expect(body.code).toBe('empty_email_config');
   });
 
-  it('accepts an email connector with subject_patterns set', async () => {
-    const connectorId = await insertConnector(seed.tenantId, 'email', {
+  it('accepts a connector with subject_patterns set', async () => {
+    const connectorId = await insertConnector(seed.tenantId, {
       subject_patterns: ['Order Status', 'COA'],
     });
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
@@ -108,14 +96,17 @@ describe('POST /api/connectors/:id/test', () => {
       success: boolean;
       warnings: string[];
       probe?: { probe: string; ok: boolean };
+      probes?: Array<{ probe: string; ok: boolean }>;
     };
     expect(body.success).toBe(true);
-    // probe is present and identifies itself as email.
-    expect(body.probe?.probe).toBe('email');
+    // probes[] carries one entry per door; email and file_watch should both run.
+    const probeNames = (body.probes || []).map((p) => p.probe);
+    expect(probeNames).toContain('email');
+    expect(probeNames).toContain('file_watch');
   });
 
-  it('accepts an email connector with only a sender filter', async () => {
-    const connectorId = await insertConnector(seed.tenantId, 'email', {
+  it('accepts a connector with only a sender filter', async () => {
+    const connectorId = await insertConnector(seed.tenantId, {
       sender_filter: '@trusted.example.com',
     });
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
@@ -126,23 +117,33 @@ describe('POST /api/connectors/:id/test', () => {
       success: boolean;
       warnings: string[];
       probe?: { probe: string; ok: boolean };
+      probes?: Array<{ probe: string; ok: boolean }>;
     };
     expect(body.success).toBe(true);
-    expect(body.probe?.probe).toBe('email');
+    const probeNames = (body.probes || []).map((p) => p.probe);
+    expect(probeNames).toContain('email');
   });
 
-  it('still rejects api_poll connectors missing endpoint_url', async () => {
-    const connectorId = await insertConnector(seed.tenantId, 'api_poll', {});
+  it('accepts a connector with no email-scoping config at all', async () => {
+    // Phase B0: brand-new connectors have no email scoping by default —
+    // the email door simply isn't wired yet. The endpoint should still
+    // return 200 with the manual-upload probe (and an email probe in a
+    // not-OK state since there's no scoping).
+    const connectorId = await insertConnector(seed.tenantId, {});
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
 
     const response = await testConnector(makeContext(connectorId, user));
-    expect(response.status).toBe(400);
-    const body = (await response.json()) as { error: string };
-    expect(body.error).toMatch(/endpoint_url/);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      success: boolean;
+      probes?: Array<{ probe: string; ok: boolean }>;
+    };
+    expect(body.success).toBe(true);
+    expect(body.probes).toBeDefined();
   });
 
   it('rejects when the user is from a different tenant', async () => {
-    const connectorId = await insertConnector(seed.tenantId, 'email', {
+    const connectorId = await insertConnector(seed.tenantId, {
       subject_patterns: ['Whatever'],
     });
     const user = { id: 'other-user', role: 'org_admin', tenant_id: 'some-other-tenant-id' };

@@ -1,4 +1,4 @@
-import { generateId, logAudit, getClientIp } from '../../../lib/db';
+import { logAudit, getClientIp } from '../../../lib/db';
 import { decryptCredentials } from '../../../lib/connectors/crypto';
 import type { Env } from '../../../lib/types';
 
@@ -12,17 +12,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   const connectorId = context.params.connectorId as string;
 
   try {
-    // 1. Fetch connector. NOTE: the DB column is `connector_type`, NOT
-    //    `type` — the latter was an early naming pre-migration 0030. Using
-    //    the wrong column silently produced `undefined` and every lookup
-    //    failed the "is this a webhook?" gate with a 400.
+    // 1. Fetch connector. Phase B0 universal model: any active connector
+    //    can receive a webhook payload — there's no per-row "type" gate.
+    //    Authorization is gated on the connector's actual webhook config
+    //    (signature_method + signature_header, OR ip_allowlist) below.
+    //    Connectors without webhook config are rejected at the auth gate
+    //    with a 403, NOT a "wrong type" 400.
     const connector = await context.env.DB.prepare(
-      `SELECT id, tenant_id, connector_type, config, field_mappings, credentials_encrypted, credentials_iv, active
+      `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active
        FROM connectors WHERE id = ?`
     ).bind(connectorId).first<{
       id: string;
       tenant_id: string;
-      connector_type: string;
       config: string;
       field_mappings: string;
       credentials_encrypted: string | null;
@@ -36,10 +37,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (!connector.active) {
       return jsonResponse({ error: 'Connector is not active' }, 400);
-    }
-
-    if (connector.connector_type !== 'webhook') {
-      return jsonResponse({ error: 'Connector is not a webhook type' }, 400);
     }
 
     const config = JSON.parse(connector.config || '{}');
