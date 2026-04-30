@@ -775,7 +775,6 @@ export type {
  * stay typed.
  */
 export type ConnectorInputType = 'email' | 'api_poll' | 'webhook' | 'file_watch';
-export type SystemType = 'erp' | 'wms' | 'other';
 export type ConnectorRunStatus = 'running' | 'success' | 'partial' | 'error';
 export type OrderStatus = 'pending' | 'enriched' | 'matched' | 'fulfilled' | 'delivered' | 'error';
 export type COADeliveryMethod = 'email' | 'portal' | 'none';
@@ -785,7 +784,6 @@ export interface ConnectorRow {
   id: string;
   tenant_id: string;
   name: string;
-  system_type: SystemType;
   config: string; // JSON
   field_mappings: string; // JSON — v2 ConnectorFieldMappings shape (see shared/fieldMappings.ts)
   credentials_encrypted: string | null;

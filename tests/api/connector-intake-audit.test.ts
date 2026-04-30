@@ -23,10 +23,10 @@ async function createConnector(): Promise<string> {
   const id = generateTestId();
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, slug, system_type,
+      `INSERT INTO connectors (id, tenant_id, name, slug,
                                config, field_mappings, active,
                                created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'erp', '{}', ?, 1,
+       VALUES (?, ?, ?, ?, '{}', ?, 1,
                datetime('now'), datetime('now'))`,
     )
     .bind(

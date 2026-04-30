@@ -21,7 +21,6 @@ import { helpContent } from '../../lib/helpContent';
 
 interface WizardState {
   name: string;
-  systemType: 'erp' | 'wms' | 'other';
   config: Record<string, unknown>;
   fieldMappings: ConnectorFieldMappings;
   credentials: Record<string, unknown> | null;
@@ -34,12 +33,6 @@ interface StepProps {
   state: WizardState;
   onChange: (updates: Partial<WizardState>) => void;
 }
-
-const SYSTEM_LABELS: Record<string, string> = {
-  erp: 'ERP',
-  wms: 'WMS',
-  other: 'Other',
-};
 
 function SummarySection({ state }: { state: WizardState }) {
   const hasCredentials = state.credentials && Object.keys(state.credentials).some(
@@ -70,7 +63,6 @@ function SummarySection({ state }: { state: WizardState }) {
           <Typography variant="body2" fontWeight={600}>
             {state.name || 'Unnamed connector'}
           </Typography>
-          <Chip label={SYSTEM_LABELS[state.systemType]} size="small" color="secondary" variant="outlined" />
         </Box>
 
         {state.sample && (

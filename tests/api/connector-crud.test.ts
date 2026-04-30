@@ -96,8 +96,8 @@ async function insertEmailConnector(config: Record<string, unknown>): Promise<st
   const id = generateTestId();
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, 'erp', ?, '{}', 1, ?, datetime('now'), datetime('now'))`,
+      `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, '{}', 1, ?, datetime('now'), datetime('now'))`,
     )
     .bind(id, seed.tenantId, `crud-test-${id}`, JSON.stringify(config), seed.orgAdminId)
     .run();
@@ -115,7 +115,6 @@ describe('POST /api/connectors — email-scoping validation (universal-doors mod
       makePostContext(
         {
           name: 'Empty Email-Scoped Connector',
-          system_type: 'erp',
           tenant_id: seed.tenantId,
           config: { subject_patterns: [], sender_filter: '' },
         },
@@ -138,7 +137,6 @@ describe('POST /api/connectors — email-scoping validation (universal-doors mod
       makePostContext(
         {
           name: 'No-Email-Scoping Connector',
-          system_type: 'erp',
           tenant_id: seed.tenantId,
           config: {},
         },
@@ -154,7 +152,6 @@ describe('POST /api/connectors — email-scoping validation (universal-doors mod
       makePostContext(
         {
           name: 'Patterned Connector',
-          system_type: 'erp',
           tenant_id: seed.tenantId,
           config: { subject_patterns: ['Daily COA Report'] },
         },
@@ -179,7 +176,6 @@ describe('POST /api/connectors — email-scoping validation (universal-doors mod
       makePostContext(
         {
           name: 'Sender-Only Connector',
-          system_type: 'erp',
           tenant_id: seed.tenantId,
           config: { sender_filter: '@trusted.example.com' },
         },

@@ -14,16 +14,15 @@ describe('Connectors - Create', () => {
     const id = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
       )
-      .bind(id, seed.tenantId, 'Test Connector', 'erp', seed.orgAdminId)
+      .bind(id, seed.tenantId, 'Test Connector', seed.orgAdminId)
       .run();
 
     const c = await db.prepare('SELECT * FROM connectors WHERE id = ?').bind(id).first();
     expect(c).not.toBeNull();
     expect(c!.name).toBe('Test Connector');
-    expect(c!.system_type).toBe('erp');
     expect(c!.active).toBe(1);
   });
 
@@ -44,6 +43,21 @@ describe('Connectors - Create', () => {
     expect(threw).toBe(true);
   });
 
+  // Same drill for system_type (migration 0053). The column was metadata-
+  // only — no business logic ever branched on it — so it was dropped
+  // alongside connector_type once the universal-doors model settled.
+  it('system_type column has been dropped', async () => {
+    let threw = false;
+    try {
+      await db.prepare('SELECT system_type FROM connectors LIMIT 1').first();
+    } catch (err) {
+      threw = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      expect(msg.toLowerCase()).toMatch(/no such column/);
+    }
+    expect(threw).toBe(true);
+  });
+
   it('should store config and field_mappings as JSON', async () => {
     const id = generateTestId();
     const config = JSON.stringify({ host: 'erp.example.com', port: 443 });
@@ -51,8 +65,8 @@ describe('Connectors - Create', () => {
 
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'erp', ?, ?, 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'))`
       )
       .bind(id, seed.tenantId, 'Config Connector', config, fieldMappings, seed.orgAdminId)
       .run();
@@ -66,8 +80,8 @@ describe('Connectors - Create', () => {
     const id = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, credentials_encrypted, credentials_iv, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'erp', '{}', '{}', ?, ?, 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, credentials_encrypted, credentials_iv, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, '{}', '{}', ?, ?, 1, ?, datetime('now'), datetime('now'))`
       )
       .bind(id, seed.tenantId, 'Cred Connector', 'encrypted_data_here', 'iv_here', seed.orgAdminId)
       .run();
@@ -95,8 +109,8 @@ describe('Connectors - List', () => {
     const id = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'other', '{}', '{}', 0, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, '{}', '{}', 0, ?, datetime('now'), datetime('now'))`
       )
       .bind(id, seed.tenantId, 'Inactive Connector', seed.orgAdminId)
       .run();
@@ -122,8 +136,8 @@ describe('Connectors - Get by ID', () => {
     const id = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, credentials_encrypted, credentials_iv, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'erp', '{}', '{}', 'secret', 'iv', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, credentials_encrypted, credentials_iv, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, '{}', '{}', 'secret', 'iv', 1, ?, datetime('now'), datetime('now'))`
       )
       .bind(id, seed.tenantId, 'Get Test', seed.orgAdminId)
       .run();
@@ -154,8 +168,8 @@ describe('Connectors - Update', () => {
     connId = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
       )
       .bind(connId, seed.tenantId, 'Update Connector', seed.orgAdminId)
       .run();
@@ -186,8 +200,8 @@ describe('Connectors - Soft Delete', () => {
     const id = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'other', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
       )
       .bind(id, seed.tenantId, 'Delete Connector', seed.orgAdminId)
       .run();
@@ -203,8 +217,8 @@ describe('Connectors - Runs', () => {
     const connId = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, '{}', '{}', 1, ?, datetime('now'), datetime('now'))`
       )
       .bind(connId, seed.tenantId, 'Run Connector', seed.orgAdminId)
       .run();

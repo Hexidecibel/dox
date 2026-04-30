@@ -17,8 +17,6 @@ import {
 } from '../../../shared/connectorSlug';
 import { validateEmailConfig } from './[id]/test';
 
-const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
-
 /**
  * Generate a 32-byte random hex token for the connector's HTTP POST drop
  * door. Same shape as `openssl rand -hex 32` (64 hex chars) so the value
@@ -81,7 +79,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const url = new URL(context.request.url);
 
     let tenantId = url.searchParams.get('tenant_id');
-    const systemType = url.searchParams.get('system_type');
     const active = url.searchParams.get('active');
     const search = url.searchParams.get('search');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10), 500);
@@ -109,11 +106,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (active !== null && active !== undefined && active !== '') {
       conditions.push('c.active = ?');
       params.push(parseInt(active, 10));
-    }
-
-    if (systemType) {
-      conditions.push('c.system_type = ?');
-      params.push(systemType);
     }
 
     if (search) {
@@ -173,7 +165,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = (await context.request.json()) as {
       name?: string;
       slug?: string;
-      system_type?: string;
       config?: Record<string, unknown>;
       field_mappings?: unknown;
       credentials?: Record<string, unknown>;
@@ -184,12 +175,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (!body.name?.trim()) {
       throw new BadRequestError('name is required');
-    }
-
-    if (body.system_type && !VALID_SYSTEM_TYPES.includes(body.system_type)) {
-      throw new BadRequestError(
-        `system_type must be one of: ${VALID_SYSTEM_TYPES.join(', ')}`
-      );
     }
 
     // If the caller has populated email-scoping config (subject patterns
@@ -224,7 +209,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const id = generateId();
     const name = sanitizeString(body.name.trim());
-    const systemType = body.system_type || 'other';
     const config = body.config ? JSON.stringify(body.config) : '{}';
 
     // ---- Slug validation + uniqueness ----
@@ -320,14 +304,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     await context.env.DB.prepare(
       `INSERT INTO connectors (
-        id, tenant_id, name, slug, system_type,
+        id, tenant_id, name, slug,
         config, field_mappings, credentials_encrypted, credentials_iv,
         schedule, sample_r2_key, active, api_token,
         created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'), datetime('now'))`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'), datetime('now'))`
     )
       .bind(
-        id, tenantId, name, requestedSlug, systemType,
+        id, tenantId, name, requestedSlug,
         config, fieldMappings, credentialsEncrypted, credentialsIv,
         schedule, sampleR2Key, apiToken, user.id
       )
@@ -340,7 +324,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'connector.created',
       'connector',
       id,
-      JSON.stringify({ name, slug: requestedSlug, system_type: systemType }),
+      JSON.stringify({ name, slug: requestedSlug }),
       getClientIp(context.request)
     );
 

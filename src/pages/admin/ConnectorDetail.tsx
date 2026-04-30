@@ -30,13 +30,9 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
-  FormControl,
   FormHelperText,
-  InputLabel,
-  MenuItem,
   Pagination,
   Paper,
-  Select,
   Snackbar,
   Stack,
   Switch,
@@ -85,9 +81,6 @@ import { helpContent } from '../../lib/helpContent';
 // Local types
 // ---------------------------------------------------------------------------
 
-const SYSTEM_TYPES = ['erp', 'wms', 'other'] as const;
-type SystemType = typeof SYSTEM_TYPES[number];
-
 interface Connector {
   id: string;
   name: string;
@@ -95,7 +88,6 @@ interface Connector {
    * vendors see the connector (API endpoint, email address, S3 bucket,
    * public link). NULL only on legacy rows that pre-date the backfill. */
   slug: string | null;
-  system_type: SystemType;
   config: Record<string, unknown>;
   field_mappings: ConnectorFieldMappings;
   schedule: string | null;
@@ -222,7 +214,6 @@ function normalizeConnector(raw: unknown): Connector {
     id: String(r.id),
     name: String(r.name ?? ''),
     slug: (r.slug as string | null) ?? null,
-    system_type: (r.system_type as SystemType) || 'other',
     config: asRecord(r.config),
     field_mappings: normalizeFieldMappings(r.field_mappings),
     schedule: (r.schedule as string | null) ?? null,
@@ -735,12 +726,6 @@ export function ConnectorDetail() {
             )}
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
               <Chip
-                label={connector.system_type.toUpperCase()}
-                size="small"
-                color={connector.system_type === 'erp' ? 'info' : connector.system_type === 'wms' ? 'success' : 'default'}
-                variant="outlined"
-              />
-              <Chip
                 label={connector.active ? 'Active' : 'Inactive'}
                 size="small"
                 color={connector.active ? 'success' : 'default'}
@@ -780,23 +765,6 @@ export function ConnectorDetail() {
                 size="small"
               />
             </Stack>
-            <FormControl size="small" sx={{ minWidth: 110 }}>
-              <InputLabel>System</InputLabel>
-              <Select
-                value={connector.system_type}
-                label="System"
-                onChange={(e) => {
-                  const next = e.target.value as SystemType;
-                  patchConnector({ system_type: next }, { system_type: next });
-                }}
-              >
-                {SYSTEM_TYPES.map((t) => (
-                  <MenuItem key={t} value={t}>
-                    {t.toUpperCase()}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
             <Button
               variant="outlined"
               size="small"

@@ -12,8 +12,6 @@ import type { Env, User } from '../../lib/types';
 import { normalizeFieldMappings, validateFieldMappings } from '../../../shared/fieldMappings';
 import { validateEmailConfig } from './[id]/test';
 
-const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
-
 /**
  * Transform a DB row into the API-facing shape. Parses field_mappings JSON
  * through normalizeFieldMappings so legacy v1 configs load transparently.
@@ -121,7 +119,6 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
     const body = (await context.request.json()) as {
       name?: string;
-      system_type?: string;
       config?: Record<string, unknown>;
       field_mappings?: unknown;
       credentials?: Record<string, unknown>;
@@ -140,16 +137,6 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }
       updates.push('name = ?');
       params.push(name);
-    }
-
-    if (body.system_type !== undefined) {
-      if (!VALID_SYSTEM_TYPES.includes(body.system_type)) {
-        throw new BadRequestError(
-          `system_type must be one of: ${VALID_SYSTEM_TYPES.join(', ')}`
-        );
-      }
-      updates.push('system_type = ?');
-      params.push(body.system_type);
     }
 
     if (body.config !== undefined) {

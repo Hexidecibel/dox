@@ -65,8 +65,8 @@ beforeAll(async () => {
   tenantConnectorId = generateTestId();
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`,
+      `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, '{}', '{}', 1, ?, datetime('now'), datetime('now'))`,
     )
     .bind(tenantConnectorId, seed.tenantId, 'Test Activity Connector', seed.orgAdminId)
     .run();
@@ -134,8 +134,8 @@ beforeAll(async () => {
   otherConnectorId = generateTestId();
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`,
+      `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, '{}', '{}', 1, ?, datetime('now'), datetime('now'))`,
     )
     .bind(otherConnectorId, seed.tenantId2, 'Other Tenant Connector', seed.orgAdmin2Id)
     .run();

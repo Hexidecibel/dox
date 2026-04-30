@@ -49,13 +49,14 @@ import m0049 from '../../migrations/0049_connector_runs_source.sql?raw';
 import m0050 from '../../migrations/0050_connector_slug.sql?raw';
 import m0051 from '../../migrations/0051_connector_r2_cf_token_id.sql?raw';
 import m0052 from '../../migrations/0052_connector_run_retry_link.sql?raw';
+import m0053 from '../../migrations/0053_drop_connector_system_type.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
   m0011, m0012, m0013, m0014, m0015, m0016, m0017, m0018, m0019, m0020,
   m0021, m0022, m0023a, m0023b, m0024, m0025, m0026, m0027, m0028, m0029,
   m0030, m0031, m0032, m0033, m0034, m0035, m0036, m0037, m0038, m0039,
-  m0046, m0047, m0048, m0049, m0050, m0051, m0052,
+  m0046, m0047, m0048, m0049, m0050, m0051, m0052, m0053,
 ];
 
 /**

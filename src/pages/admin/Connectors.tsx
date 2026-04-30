@@ -28,10 +28,6 @@ import {
   Card,
   CardContent,
   InputAdornment,
-  Select,
-  MenuItem,
-  FormControl,
-  InputLabel,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -50,10 +46,6 @@ import { helpContent } from '../../lib/helpContent';
 
 const ITEMS_PER_PAGE = 20;
 
-const SYSTEM_TYPES = ['erp', 'wms', 'other'] as const;
-
-type SystemType = typeof SYSTEM_TYPES[number];
-
 interface Connector {
   id: string;
   name: string;
@@ -61,7 +53,6 @@ interface Connector {
    * rows that pre-date the backfill; the list rows fall back to id
    * gracefully in that case. */
   slug: string | null;
-  system_type: SystemType;
   config: string | Record<string, unknown>;
   schedule: string | null;
   active: boolean;
@@ -69,14 +60,6 @@ interface Connector {
   created_at: string;
   updated_at: string;
   tenant_id: string;
-}
-
-function systemTypeColor(type: SystemType): 'info' | 'success' | 'default' {
-  switch (type) {
-    case 'erp': return 'info';
-    case 'wms': return 'success';
-    case 'other': return 'default';
-  }
 }
 
 function formatRelativeTime(dateStr: string | null): string {
@@ -113,7 +96,6 @@ export function Connectors() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null);
   const [formName, setFormName] = useState('');
-  const [formSystemType, setFormSystemType] = useState<SystemType>('erp');
   const [formConfig, setFormConfig] = useState('{}');
   const [formSchedule, setFormSchedule] = useState('');
   const [saving, setSaving] = useState(false);
@@ -157,7 +139,6 @@ export function Connectors() {
   const openEdit = (connector: Connector) => {
     setEditingConnector(connector);
     setFormName(connector.name);
-    setFormSystemType(connector.system_type);
     setFormConfig(
       typeof connector.config === 'string'
         ? connector.config
@@ -181,7 +162,6 @@ export function Connectors() {
     try {
       const data = {
         name: formName.trim(),
-        system_type: formSystemType,
         config: JSON.parse(formConfig),
         schedule: formSchedule.trim() || undefined,
       };
@@ -317,12 +297,6 @@ export function Connectors() {
                   </Box>
                   <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
                     <Chip
-                      label={connector.system_type.toUpperCase()}
-                      size="small"
-                      color={systemTypeColor(connector.system_type)}
-                      variant="outlined"
-                    />
-                    <Chip
                       label={connector.active ? 'Active' : 'Draft'}
                       size="small"
                       color={connector.active ? 'success' : 'warning'}
@@ -351,12 +325,6 @@ export function Connectors() {
                   <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
                     Slug
                     <InfoTooltip text={helpContent.connectors.list.columnTooltips.slug} />
-                  </Box>
-                </TableCell>
-                <TableCell>
-                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
-                    System
-                    <InfoTooltip text={helpContent.connectors.list.columnTooltips.system} />
                   </Box>
                 </TableCell>
                 <TableCell>
@@ -395,14 +363,6 @@ export function Connectors() {
                       >
                         {connector.slug || '—'}
                       </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Chip
-                        label={connector.system_type.toUpperCase()}
-                        size="small"
-                        color={systemTypeColor(connector.system_type)}
-                        variant="outlined"
-                      />
                     </TableCell>
                     <TableCell>
                       <Typography variant="body2" color="text.secondary">
@@ -470,21 +430,6 @@ export function Connectors() {
             autoFocus
             sx={{ mt: 1, mb: 2 }}
           />
-          <FormControl fullWidth sx={{ mb: 2 }}>
-            <InputLabel>System Type</InputLabel>
-            <Select
-              value={formSystemType}
-              label="System Type"
-              onChange={(e) => setFormSystemType(e.target.value as SystemType)}
-              disabled={saving}
-            >
-              {SYSTEM_TYPES.map((type) => (
-                <MenuItem key={type} value={type}>
-                  {type.toUpperCase()}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
           <TextField
             label="Config (JSON)"
             fullWidth

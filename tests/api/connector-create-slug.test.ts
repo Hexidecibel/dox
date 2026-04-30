@@ -51,7 +51,6 @@ describe('POST /api/connectors — slug handling', () => {
         {
           name: 'Slug Explicit Test',
           slug: 'slug-explicit-test',
-          system_type: 'erp',
           tenant_id: seed.tenantId,
         },
         user,
@@ -75,7 +74,6 @@ describe('POST /api/connectors — slug handling', () => {
       makePostContext(
         {
           name: 'Auto Derived Connector',
-          system_type: 'erp',
           tenant_id: seed.tenantId,
         },
         user,
@@ -93,7 +91,6 @@ describe('POST /api/connectors — slug handling', () => {
         {
           name: 'Bad Slug Test',
           slug: 'Has Caps and spaces',
-          system_type: 'erp',
           tenant_id: seed.tenantId,
         },
         user,
@@ -113,7 +110,6 @@ describe('POST /api/connectors — slug handling', () => {
         {
           name: 'Conflict Original',
           slug: 'conflict-original',
-          system_type: 'erp',
           tenant_id: seed.tenantId,
         },
         user,
@@ -127,7 +123,6 @@ describe('POST /api/connectors — slug handling', () => {
         {
           name: 'Conflict Duplicate',
           slug: 'conflict-original',
-          system_type: 'erp',
           tenant_id: seed.tenantId,
         },
         user,

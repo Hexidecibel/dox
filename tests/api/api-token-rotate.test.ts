@@ -50,10 +50,10 @@ async function insertConnector(opts: {
   const id = generateTestId();
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, system_type,
+      `INSERT INTO connectors (id, tenant_id, name,
                                config, field_mappings, active, api_token,
                                created_at, updated_at)
-       VALUES (?, ?, ?, 'erp', '{}', ?, 1, ?,
+       VALUES (?, ?, ?, '{}', ?, 1, ?,
                datetime('now'), datetime('now'))`,
     )
     .bind(

@@ -71,13 +71,13 @@ async function insertProvisionedConnector(opts: {
   }
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, slug, system_type,
+      `INSERT INTO connectors (id, tenant_id, name, slug,
                                config, field_mappings, active,
                                r2_bucket_name, r2_access_key_id,
                                r2_secret_access_key_encrypted,
                                r2_cf_token_id,
                                created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'erp', '{}', ?, ?,
+       VALUES (?, ?, ?, ?, '{}', ?, ?,
                ?, ?, ?, ?,
                datetime('now'), datetime('now'))`,
     )

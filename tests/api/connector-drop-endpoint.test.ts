@@ -66,11 +66,11 @@ async function insertConnector(opts: {
   const slug = opts.slug === undefined ? `drop-test-${id.slice(0, 8)}` : opts.slug;
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, slug, system_type,
+      `INSERT INTO connectors (id, tenant_id, name, slug,
                                config, field_mappings, active,
                                api_token, deleted_at,
                                created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'erp', '{}', ?, ?, ?, ?,
+       VALUES (?, ?, ?, ?, '{}', ?, ?, ?, ?,
                datetime('now'), datetime('now'))`,
     )
     .bind(

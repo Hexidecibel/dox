@@ -7,7 +7,7 @@
  * partners configure each door.
  *
  * Step order (MVP):
- *   0. Name        — connector name + system type (ERP/WMS/Other)
+ *   0. Name        — connector name + URL slug
  *   1. Upload Sample — drop a CSV/TSV/XLSX/PDF to seed schema discovery
  *   2. Review Schema — confirm how each detected column maps to dox fields
  *   3. Live Preview  — call preview-extraction to see what the parser emits
@@ -30,11 +30,6 @@ import {
   TextField,
   Alert,
   CircularProgress,
-  Radio,
-  RadioGroup,
-  FormControl,
-  FormControlLabel,
-  FormLabel,
   useMediaQuery,
   useTheme,
 } from '@mui/material';
@@ -65,8 +60,6 @@ import {
 import { acceptAllHighConfidenceSuggestions } from '../../components/connectors/fieldMappingActions';
 import type { DiscoverSchemaResponse } from '../../types/connectorSchema';
 
-type SystemType = 'erp' | 'wms' | 'other';
-
 interface WizardState {
   name: string;
   /**
@@ -76,7 +69,6 @@ interface WizardState {
    */
   slug: string;
   slugTouched: boolean;
-  systemType: SystemType;
   config: Record<string, unknown>;
   fieldMappings: ConnectorFieldMappings;
   credentials: Record<string, unknown> | null;
@@ -108,7 +100,6 @@ const initialState: WizardState = {
   name: '',
   slug: '',
   slugTouched: false,
-  systemType: 'erp',
   config: {},
   fieldMappings: defaultFieldMappings(),
   credentials: null,
@@ -201,7 +192,6 @@ export function ConnectorWizard() {
           // future name edits in this session don't overwrite it.
           slug: (c.slug as string | undefined) || '',
           slugTouched: true,
-          systemType: (c.system_type as SystemType) || 'erp',
           config: config as Record<string, unknown>,
           fieldMappings: mappings,
           credentials: null,
@@ -347,7 +337,6 @@ export function ConnectorWizard() {
     try {
       const data: Record<string, unknown> = {
         name: state.name.trim(),
-        system_type: state.systemType,
         config: state.config,
         field_mappings: state.fieldMappings,
         schedule: state.schedule || undefined,
@@ -373,7 +362,6 @@ export function ConnectorWizard() {
         const result = await api.connectors.createOrConflict({
           name: data.name as string,
           slug: state.slug.trim(),
-          system_type: data.system_type as string,
           config: data.config as Record<string, unknown>,
           field_mappings: data.field_mappings,
           schedule: data.schedule as string | undefined,
@@ -545,7 +533,9 @@ export function ConnectorWizard() {
 }
 
 // =============================================================================
-// StepName — name + system type. Phase B0: connector type removed entirely.
+// StepName — name + URL slug. Phase B0: connector type removed entirely;
+// the residual `system_type` metadata field was dropped post-B0 once we
+// confirmed nothing branches on it.
 // =============================================================================
 
 function StepName({
@@ -630,22 +620,6 @@ function StepName({
         sx={{ mb: 3, fontFamily: 'monospace' }}
         InputProps={{ sx: { fontFamily: 'monospace' } }}
       />
-
-      <FormControl sx={{ mb: 3 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-          <FormLabel>System type</FormLabel>
-          <InfoTooltip text={helpContent.connectors.wizard.steps.name.tooltips.systemType} />
-        </Box>
-        <RadioGroup
-          row
-          value={state.systemType}
-          onChange={(e) => onChange({ systemType: e.target.value as SystemType })}
-        >
-          <FormControlLabel value="erp" control={<Radio />} label="ERP" />
-          <FormControlLabel value="wms" control={<Radio />} label="WMS" />
-          <FormControlLabel value="other" control={<Radio />} label="Other" />
-        </RadioGroup>
-      </FormControl>
     </Box>
   );
 }

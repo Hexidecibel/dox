@@ -100,8 +100,8 @@ describe('Webhooks - Connector Webhook', () => {
     const connId = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'other', ?, '{}', 1, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, '{}', 1, ?, datetime('now'), datetime('now'))`
       )
       .bind(connId, seed.tenantId, 'Webhook Connector', JSON.stringify({ signature_method: 'hmac_sha256', signature_header: 'X-Signature' }), seed.orgAdminId)
       .run();
@@ -122,8 +122,8 @@ describe('Webhooks - Connector Webhook', () => {
     const connId = generateTestId();
     await db
       .prepare(
-        `INSERT INTO connectors (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'other', '{}', '{}', 0, ?, datetime('now'), datetime('now'))`
+        `INSERT INTO connectors (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, '{}', '{}', 0, ?, datetime('now'), datetime('now'))`
       )
       .bind(connId, seed.tenantId, 'Inactive Webhook', seed.orgAdminId)
       .run();

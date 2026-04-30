@@ -42,11 +42,11 @@ async function insertConnector(opts: {
     opts.slug === undefined ? `plm-test-${id.slice(0, 8)}` : opts.slug;
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, slug, system_type,
+      `INSERT INTO connectors (id, tenant_id, name, slug,
                                config, field_mappings, active,
                                public_link_token, public_link_expires_at,
                                created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'erp', '{}', ?, 1, ?, ?,
+       VALUES (?, ?, ?, ?, '{}', ?, 1, ?, ?,
                datetime('now'), datetime('now'))`,
     )
     .bind(

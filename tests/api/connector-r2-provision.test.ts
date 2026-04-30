@@ -45,11 +45,11 @@ async function insertConnector(opts: {
   const slug = opts.slug ?? `r2-test-${id.slice(0, 8)}`;
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, slug, system_type,
+      `INSERT INTO connectors (id, tenant_id, name, slug,
                                config, field_mappings, active,
                                r2_bucket_name, r2_cf_token_id,
                                created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'erp', '{}', ?, 1, ?, ?,
+       VALUES (?, ?, ?, ?, '{}', ?, 1, ?, ?,
                datetime('now'), datetime('now'))`,
     )
     .bind(

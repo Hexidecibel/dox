@@ -1011,10 +1011,9 @@ export const api = {
     }),
 
   connectors: {
-    list(params?: { tenant_id?: string; system_type?: string; search?: string; active?: string; limit?: number; offset?: number }) {
+    list(params?: { tenant_id?: string; search?: string; active?: string; limit?: number; offset?: number }) {
       const query = new URLSearchParams();
       if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
-      if (params?.system_type) query.set('system_type', params.system_type);
       if (params?.search) query.set('search', params.search);
       if (params?.active) query.set('active', params.active);
       if (params?.limit) query.set('limit', String(params.limit));
@@ -1028,7 +1027,6 @@ export const api = {
        * server on create; the wizard always sends one (auto-derived from
        * `name` unless the user has typed a different value). */
       slug?: string;
-      system_type?: string;
       config?: Record<string, unknown>;
       field_mappings?: unknown;
       credentials?: Record<string, unknown>;
@@ -1051,7 +1049,6 @@ export const api = {
     async createOrConflict(data: {
       name: string;
       slug?: string;
-      system_type?: string;
       config?: Record<string, unknown>;
       field_mappings?: unknown;
       credentials?: Record<string, unknown>;

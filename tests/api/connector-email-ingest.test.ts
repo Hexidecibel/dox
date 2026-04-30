@@ -40,8 +40,8 @@ beforeAll(async () => {
   await db
     .prepare(
       `INSERT INTO connectors
-         (id, tenant_id, name, system_type, config, field_mappings, active, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, 'erp', '{}', '{}', 1, ?, datetime('now'), datetime('now'))`,
+         (id, tenant_id, name, config, field_mappings, active, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, '{}', '{}', 1, ?, datetime('now'), datetime('now'))`,
     )
     .bind(connectorId, seed.tenantId, 'Test Ingest Connector', seed.orgAdminId)
     .run();

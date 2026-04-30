@@ -1,0 +1,23 @@
+-- Migration 0053: drop connectors.system_type
+--
+-- The `system_type` column was a metadata categorization (ERP / WMS /
+-- Other) used purely for orientation in the connector list UI. With
+-- the universal-doors model (Phase B0+), connectors are typeless —
+-- every connector exposes every intake door regardless of its old
+-- "system type" tag. No business logic ever branched on this column,
+-- so the field is purely residual.
+--
+-- Cloudflare D1 runs SQLite >= 3.45 which supports `ALTER TABLE
+-- ... DROP COLUMN` directly (3.35+). The column carries a NOT NULL +
+-- DEFAULT + CHECK constraint on a finite enum; all three go away
+-- cleanly with the column itself, no constraint cleanup needed. FK
+-- references from orders / connector_runs / connector_processed_keys
+-- to connectors are preserved because we're modifying the table in
+-- place — no rename, no new table.
+--
+-- Mirrors migration 0048 (which dropped connector_type) in shape and
+-- intent.
+--
+-- No row data is lost — only the column.
+
+ALTER TABLE connectors DROP COLUMN system_type;

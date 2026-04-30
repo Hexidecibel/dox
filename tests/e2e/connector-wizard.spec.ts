@@ -136,7 +136,8 @@ test.describe('connector wizard', () => {
       data: {
         name: connectorName,
         // Phase B0: no connector_type — the universal-doors model.
-        system_type: 'erp',
+        // system_type was likewise dropped post-B0 (migration 0053);
+        // connectors carry no per-row type metadata at all now.
         config: {},
         field_mappings: fieldMappings,
         tenant_id: tenantId,

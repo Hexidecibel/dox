@@ -69,7 +69,6 @@ interface ConnectorsHelp extends ModuleHelp {
   list: ListSurface & {
     columnTooltips: Readonly<{
       slug: string;
-      system: string;
       lastRun: string;
       status: string;
     }>;
@@ -122,7 +121,6 @@ interface ConnectorsHelp extends ModuleHelp {
         tooltips: Readonly<{
           name: string;
           slug: string;
-          systemType: string;
         }>;
       };
       uploadSample: {
@@ -177,7 +175,6 @@ const connectors: ConnectorsHelp = {
       "Connectors are how you ingest orders and customer data from external systems. Set one up and you'll get five intake doors ready for vendors to use.",
     columnTooltips: {
       slug: 'URL-safe identifier used in vendor-facing addresses (email, API path, S3 bucket name, public link). Auto-generated from the connector name; rename via the wizard.',
-      system: 'Loose grouping — ERP, WMS, or Other. Affects nothing functional; only shown in the list for orientation.',
       lastRun: 'Most recent successful or failed run, regardless of which intake door it came in through.',
       status: 'Active connectors process inbound files immediately. Drafts hold mappings + config but ignore inbound traffic until activated.',
     },
@@ -239,12 +236,10 @@ const connectors: ConnectorsHelp = {
       name: {
         headline: 'Name your connector',
         well:
-          "Give the connector a recognizable name and pick a system type. The slug derived from the name becomes the vendor-facing handle — it's used in the email address, API URL, S3 bucket name, and public link.",
+          "Give the connector a recognizable name. The slug derived from the name becomes the vendor-facing handle — it's used in the email address, API URL, S3 bucket name, and public link.",
         tooltips: {
           name: "A friendly label for admins. Pick something you'll recognize at a glance, like 'Daily ERP Report' or 'ACME Vendor Feed'.",
           slug: 'URL-safe handle baked into vendor-facing addresses. Lowercase, kebab-case, alphanumeric only (1-64 chars). Auto-generated from the name; type to override.',
-          systemType:
-            "Loose grouping — ERP, WMS, or Other. Doesn't change behavior; just helps you organize the list when you have many connectors.",
         },
       },
       uploadSample: {
