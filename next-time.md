@@ -4,11 +4,16 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-## 2026-04-29 file_watch connector — Phases 1 + 2 SHIPPED (unstaged)
+## 2026-04-29 Connector intake button-up — PLANNED
 
-Both phases of the file_watch connector finish-up landed in the working
-tree but are NOT yet committed/deployed. The user will commit + deploy
-themselves.
+Plan entered in `plan.md` at lines 667–890 covering Phases A/B/C: discoverability bring-up, three new intake paths (HTTP POST API, S3 bucket drop with auto-provisioned per-connector buckets, public drop link), and end-to-end coverage gate. SFTP and outbound pull explicitly out of scope. Estimated ~7-9 days focused work. Awaiting user redline pass before cutting Phase A's first slice.
+
+---
+
+## 2026-04-29 file_watch connector poller — DEPLOYED TO PROD
+
+Both phases of the file_watch connector finish-up are committed and live
+on supdox.com.
 
 ### Phase 1 (already in the tree at session start)
 - Drag-and-drop manual upload zone on `ConnectorDetail.tsx` for
@@ -99,6 +104,21 @@ curl -X POST http://localhost:8788/api/connectors/poll \
    `bin/deploy-connector-poller` (Worker).
 5. Tail `npx wrangler tail dox-connector-poller` to confirm the cron
    is firing.
+
+### Deploy outcome
+- Migration 0046 applied to prod D1 directly via `wrangler d1 execute`
+  (skipping `bin/migrate`'s non-idempotent path).
+- `CONNECTOR_POLL_TOKEN` set on prod Pages and prod Worker, ref'd from
+  `op://cush/doc-upload-site-prod/connector_poll_token`.
+- Pages prod deployed; smoke-tested (200 valid token, 401 wrong token,
+  405 GET).
+- Worker `dox-connector-poller` deployed with cron `*/5 * * * *`;
+  observed firing in `wrangler tail` (`connectors_checked: 0` because
+  no connector has `r2_prefix` set yet).
+- Manifest `op` ref pattern matches existing prod convention
+  (`doc-upload-site-prod` item, lowercase field name).
+- Two follow-up commits: `60527a6` (the bundled Phase 1+2 work),
+  `03e5602` (releaseNotes test fix that unblocked the deploy).
 
 ### Still pending — for the next conversation
 - **Email connector polish.** That's the topic for the follow-up
