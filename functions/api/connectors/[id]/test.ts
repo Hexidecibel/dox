@@ -5,6 +5,7 @@ import {
   BadRequestError,
   errorToResponse,
 } from '../../../lib/permissions';
+import { resolveConnectorHandle } from '../../../lib/connectors/resolveHandle';
 import type { Env, User } from '../../../lib/types';
 
 /**
@@ -242,21 +243,18 @@ async function probeEmail(
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const user = context.data.user as User;
-    const connectorId = context.params.id as string;
+    // Phase B0.5: accept slug or id in the path.
+    const connectorHandle = context.params.id as string;
 
     requireRole(user, 'super_admin', 'org_admin');
 
-    const connector = await context.env.DB.prepare(
-      'SELECT * FROM connectors WHERE id = ?'
-    )
-      .bind(connectorId)
-      .first<{
-        id: string;
-        tenant_id: string;
-        config: string;
-        field_mappings: string;
-        sample_r2_key: string | null;
-      }>();
+    const connector = await resolveConnectorHandle<{
+      id: string;
+      tenant_id: string;
+      config: string;
+      field_mappings: string;
+      sample_r2_key: string | null;
+    }>(context.env.DB, connectorHandle);
 
     if (!connector) {
       throw new NotFoundError('Connector not found');

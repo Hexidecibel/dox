@@ -13,6 +13,7 @@ import {
 } from '../../../../shared/connectorFileTypes';
 import { decryptCredentials } from '../../../lib/connectors/crypto';
 import { executeConnectorRun } from '../../../lib/connectors/orchestrator';
+import { resolveConnectorHandle } from '../../../lib/connectors/resolveHandle';
 
 /**
  * POST /api/connectors/:id/run
@@ -48,15 +49,17 @@ function classifyFile(fileName: string, contentType: string): {
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const user = context.data.user as User;
-    const connectorId = context.params.id as string;
+    // Phase B0.5: accept slug or id in the path. The resolver tries
+    // slug first, then id — admin tooling that already passes the id
+    // keeps working unchanged.
+    const connectorHandle = context.params.id as string;
 
     requireRole(user, 'super_admin', 'org_admin');
 
-    const connector = await context.env.DB.prepare(
-      'SELECT * FROM connectors WHERE id = ?'
-    )
-      .bind(connectorId)
-      .first();
+    const connector = await resolveConnectorHandle(
+      context.env.DB,
+      connectorHandle,
+    );
 
     if (!connector) {
       throw new NotFoundError('Connector not found');

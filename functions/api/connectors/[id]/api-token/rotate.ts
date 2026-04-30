@@ -33,6 +33,7 @@ import {
   NotFoundError,
   errorToResponse,
 } from '../../../../lib/permissions';
+import { resolveConnectorHandle } from '../../../../lib/connectors/resolveHandle';
 import type { Env, User } from '../../../../lib/types';
 
 /**
@@ -51,17 +52,22 @@ function generateApiToken(): string {
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const user = context.data.user as User;
-    const connectorId = context.params.id as string;
+    // Phase B0.5: accept slug or id in the path.
+    const connectorHandle = context.params.id as string;
 
     requireRole(user, 'super_admin', 'org_admin');
 
-    const connector = await context.env.DB.prepare(
-      `SELECT id, tenant_id FROM connectors WHERE id = ? AND deleted_at IS NULL`,
-    )
-      .bind(connectorId)
-      .first<{ id: string; tenant_id: string }>();
+    const connector = await resolveConnectorHandle<{
+      id: string;
+      tenant_id: string;
+      deleted_at: string | null;
+    }>(
+      context.env.DB,
+      connectorHandle,
+      { columns: 'id, tenant_id, deleted_at' },
+    );
 
-    if (!connector) {
+    if (!connector || connector.deleted_at !== null) {
       throw new NotFoundError('Connector not found');
     }
 

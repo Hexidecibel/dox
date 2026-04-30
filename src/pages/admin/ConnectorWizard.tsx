@@ -42,6 +42,11 @@ import {
   ArrowBack as BackIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
+import {
+  CONNECTOR_SLUG_REGEX,
+  isValidConnectorSlug,
+  slugifyConnectorName,
+} from '../../../shared/connectorSlug';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
 import { StepUploadSample } from '../../components/connectors/StepUploadSample';
@@ -61,6 +66,13 @@ type SystemType = 'erp' | 'wms' | 'other';
 
 interface WizardState {
   name: string;
+  /**
+   * Phase B0.5: globally-unique URL-safe handle. Auto-derived from the
+   * name (debounced) until the user types in the slug field; from then
+   * on `slugTouched` keeps the slug sticky regardless of name edits.
+   */
+  slug: string;
+  slugTouched: boolean;
   systemType: SystemType;
   config: Record<string, unknown>;
   fieldMappings: ConnectorFieldMappings;
@@ -91,6 +103,8 @@ const STEP_LABELS = [
 
 const initialState: WizardState = {
   name: '',
+  slug: '',
+  slugTouched: false,
   systemType: 'erp',
   config: {},
   fieldMappings: defaultFieldMappings(),
@@ -180,6 +194,10 @@ export function ConnectorWizard() {
 
         setState({
           name: c.name as string,
+          // Edit mode: trust the persisted slug. Mark touched so any
+          // future name edits in this session don't overwrite it.
+          slug: (c.slug as string | undefined) || '',
+          slugTouched: true,
           systemType: (c.system_type as SystemType) || 'erp',
           config: config as Record<string, unknown>,
           fieldMappings: mappings,
@@ -235,6 +253,13 @@ export function ConnectorWizard() {
     switch (role) {
       case 'name':
         if (!state.name.trim() || state.name.trim().length < 3) return 'Name must be at least 3 characters';
+        // Phase B0.5: slug is required + must match the canonical
+        // shape. The auto-fill normally guarantees this but a user
+        // who clears the field manually needs a clear inline error.
+        if (!state.slug.trim()) return 'Slug is required';
+        if (!isValidConnectorSlug(state.slug.trim())) {
+          return 'Slug must be lowercase, kebab-case, alphanumeric (1-64 chars)';
+        }
         return null;
       case 'upload':
         if (!state.sample) return 'Upload a sample file to continue';
@@ -338,16 +363,33 @@ export function ConnectorWizard() {
           setSaving(false);
           return;
         }
-        const result = await api.connectors.create({
+        // Phase B0.5: use the slug-aware variant so a 409 surfaces as a
+        // structured `{ ok: false, conflict.suggested }` payload that we
+        // can route into an inline Step-Name error with the suggested
+        // alternative pre-filled into the slug field.
+        const result = await api.connectors.createOrConflict({
           name: data.name as string,
+          slug: state.slug.trim(),
           system_type: data.system_type as string,
           config: data.config as Record<string, unknown>,
           field_mappings: data.field_mappings,
           schedule: data.schedule as string | undefined,
           tenant_id: currentTenantId,
           sample_r2_key: state.sample?.sample_id,
-        }) as { connector?: { id?: string }; id?: string };
-        resultId = result.connector?.id || result.id || '';
+        });
+        if (!result.ok) {
+          // Bounce back to the Name step (index 0) with the suggestion
+          // pre-loaded into the slug field. The user can accept or
+          // tweak before re-saving.
+          updateState({ slug: result.conflict.suggested, slugTouched: true });
+          setActiveStep(0);
+          setError(
+            `Slug "${state.slug.trim()}" is already taken — try "${result.conflict.suggested}" or pick another.`,
+          );
+          setSaving(false);
+          return;
+        }
+        resultId = result.connector.id;
         justCreated = true;
       }
       // Phase A2.3: when a connector is freshly created, the detail page
@@ -504,6 +546,23 @@ function StepName({
   state: WizardState;
   onChange: (patch: Partial<WizardState>) => void;
 }) {
+  // Phase B0.5: auto-populate the slug from the name UNTIL the user
+  // touches the slug field. Once `slugTouched` is true, name edits no
+  // longer overwrite the slug — this matches the "edit-as-you-go but
+  // step out of the way once the user takes over" pattern from the
+  // bundle / report naming UIs elsewhere in dox.
+  useEffect(() => {
+    if (state.slugTouched) return;
+    const auto = slugifyConnectorName(state.name);
+    if (auto !== state.slug) onChange({ slug: auto });
+    // We deliberately depend only on name + slugTouched so re-renders
+    // triggered by other state changes don't churn the slug.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.name, state.slugTouched]);
+
+  const slugInvalid =
+    state.slug.length > 0 && !CONNECTOR_SLUG_REGEX.test(state.slug);
+
   return (
     <Box>
       <Alert severity="info" sx={{ mb: 3 }}>
@@ -522,6 +581,40 @@ function StepName({
         helperText="A name you'll recognize, like 'Daily ERP Report'"
         sx={{ mb: 3 }}
         error={state.name.length > 0 && state.name.trim().length < 3}
+      />
+
+      <TextField
+        label="URL slug"
+        fullWidth
+        required
+        value={state.slug}
+        onChange={(e) =>
+          onChange({
+            // Lowercase as the user types — saves an extra round-trip
+            // through the validator and matches what the server
+            // normalizes to anyway.
+            slug: e.target.value.toLowerCase(),
+            slugTouched: true,
+          })
+        }
+        onBlur={() => {
+          // If the user blurs an empty field after touching it, fall
+          // back to the auto-generated value rather than leave it
+          // empty — empty is a hard validation error and the user
+          // probably didn't mean it.
+          if (!state.slug.trim()) {
+            const auto = slugifyConnectorName(state.name);
+            if (auto) onChange({ slug: auto, slugTouched: false });
+          }
+        }}
+        error={slugInvalid}
+        helperText={
+          slugInvalid
+            ? 'Lowercase, kebab-case, alphanumeric only (1-64 chars). Used in vendor URLs.'
+            : 'Used in the API endpoint, email address, and public link. Auto-generated from name.'
+        }
+        sx={{ mb: 3, fontFamily: 'monospace' }}
+        InputProps={{ sx: { fontFamily: 'monospace' } }}
       />
 
       <FormControl sx={{ mb: 3 }}>

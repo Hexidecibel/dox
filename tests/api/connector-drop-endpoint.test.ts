@@ -58,28 +58,33 @@ async function insertConnector(opts: {
   apiToken?: string | null;
   active?: number;
   deletedAt?: string | null;
-}): Promise<string> {
+  slug?: string | null;
+}): Promise<{ id: string; slug: string | null }> {
   const id = generateTestId();
+  // Phase B0.5: tests now also persist a slug. Default to a unique
+  // shape so unrelated tests don't collide on the unique index.
+  const slug = opts.slug === undefined ? `drop-test-${id.slice(0, 8)}` : opts.slug;
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, system_type,
+      `INSERT INTO connectors (id, tenant_id, name, slug, system_type,
                                config, field_mappings, active,
                                api_token, deleted_at,
                                created_at, updated_at)
-       VALUES (?, ?, ?, 'erp', '{}', ?, ?, ?, ?,
+       VALUES (?, ?, ?, ?, 'erp', '{}', ?, ?, ?, ?,
                datetime('now'), datetime('now'))`,
     )
     .bind(
       id,
       opts.tenantId,
       `drop-test-${id}`,
+      slug,
       JSON.stringify(defaultMappings()),
       opts.active ?? 1,
       opts.apiToken === undefined ? `tok-${id}` : opts.apiToken,
       opts.deletedAt ?? null,
     )
     .run();
-  return id;
+  return { id, slug };
 }
 
 function makeContext(connectorId: string, request: Request) {
@@ -119,14 +124,14 @@ function csvFile(content: string, name = 'orders.csv'): File {
 
 describe('POST /api/connectors/:id/drop — auth gate', () => {
   it('returns 401 when the Authorization header is missing', async () => {
-    const id = await insertConnector({ tenantId: seed.tenantId });
+    const { id } = await insertConnector({ tenantId: seed.tenantId });
     const req = multipartRequest(id, csvFile('Order #\nSO-1'));
     const resp = await dropPost(makeContext(id, req));
     expect(resp.status).toBe(401);
   });
 
   it('returns 401 when the bearer value is wrong', async () => {
-    const id = await insertConnector({ tenantId: seed.tenantId, apiToken: 'right-token' });
+    const { id } = await insertConnector({ tenantId: seed.tenantId, apiToken: 'right-token' });
     const req = multipartRequest(id, csvFile('Order #\nSO-1'), {
       authorization: 'Bearer wrong-token',
     });
@@ -147,7 +152,7 @@ describe('POST /api/connectors/:id/drop — auth gate', () => {
   });
 
   it('returns 401 when the connector is inactive', async () => {
-    const id = await insertConnector({
+    const { id } = await insertConnector({
       tenantId: seed.tenantId,
       apiToken: 'good-token',
       active: 0,
@@ -160,7 +165,7 @@ describe('POST /api/connectors/:id/drop — auth gate', () => {
   });
 
   it('returns 401 when the connector is soft-deleted', async () => {
-    const id = await insertConnector({
+    const { id } = await insertConnector({
       tenantId: seed.tenantId,
       apiToken: 'good-token',
       deletedAt: new Date().toISOString(),
@@ -173,7 +178,7 @@ describe('POST /api/connectors/:id/drop — auth gate', () => {
   });
 
   it('returns 401 when the connector has no api_token set', async () => {
-    const id = await insertConnector({
+    const { id } = await insertConnector({
       tenantId: seed.tenantId,
       apiToken: null,
     });
@@ -187,14 +192,14 @@ describe('POST /api/connectors/:id/drop — auth gate', () => {
 
 describe('POST /api/connectors/:id/drop — body validation', () => {
   it('returns 400 when the file field is missing', async () => {
-    const id = await insertConnector({ tenantId: seed.tenantId, apiToken: 't1' });
+    const { id } = await insertConnector({ tenantId: seed.tenantId, apiToken: 't1' });
     const req = multipartRequest(id, null, { authorization: 'Bearer t1' });
     const resp = await dropPost(makeContext(id, req));
     expect(resp.status).toBe(400);
   });
 
   it('returns 415 for an unsupported extension', async () => {
-    const id = await insertConnector({ tenantId: seed.tenantId, apiToken: 't2' });
+    const { id } = await insertConnector({ tenantId: seed.tenantId, apiToken: 't2' });
     const file = new File(['hello'], 'evil.exe', { type: 'application/octet-stream' });
     const req = multipartRequest(id, file, { authorization: 'Bearer t2' });
     const resp = await dropPost(makeContext(id, req));
@@ -202,7 +207,7 @@ describe('POST /api/connectors/:id/drop — body validation', () => {
   });
 
   it('returns 413 when the file exceeds the per-kind size cap', async () => {
-    const id = await insertConnector({ tenantId: seed.tenantId, apiToken: 't3' });
+    const { id } = await insertConnector({ tenantId: seed.tenantId, apiToken: 't3' });
     // 6 MB of CSV — over the 5 MB text cap.
     const big = 'a,'.repeat(3 * 1024 * 1024);
     const file = csvFile(big, 'big.csv');
@@ -214,7 +219,7 @@ describe('POST /api/connectors/:id/drop — body validation', () => {
 
 describe('POST /api/connectors/:id/drop — happy path', () => {
   it('accepts a CSV, writes R2, dispatches a run with source=api, and dedupes', async () => {
-    const id = await insertConnector({
+    const { id } = await insertConnector({
       tenantId: seed.tenantId,
       apiToken: 'happy-token',
     });
@@ -268,7 +273,7 @@ describe('POST /api/connectors/:id/drop — happy path', () => {
   });
 
   it('produces a unique R2 key per drop so re-uploading the same filename does not collide', async () => {
-    const id = await insertConnector({
+    const { id } = await insertConnector({
       tenantId: seed.tenantId,
       apiToken: 'dup-token',
     });
@@ -304,5 +309,31 @@ describe('POST /api/connectors/:id/drop — happy path', () => {
       .bind(id)
       .first<{ count: number }>();
     expect(count?.count).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// Phase B0.5 — slug-based lookup. Vendors hit the slug URL; the
+// resolver should find the connector and produce a 200 with the
+// random-hex id baked into file_key (slug is the address; id remains
+// the internal primary key).
+describe('POST /api/connectors/:id/drop — slug-based lookup', () => {
+  it('accepts a drop addressed by slug instead of id', async () => {
+    const slug = `slug-drop-${generateTestId().slice(0, 8)}`;
+    const { id } = await insertConnector({
+      tenantId: seed.tenantId,
+      apiToken: 'slug-token',
+      slug,
+    });
+    const req = multipartRequest(slug, csvFile('Order #\nSO-SLUG-1', 'orders.csv'), {
+      authorization: 'Bearer slug-token',
+    });
+    // makeContext takes the path-param value; for a slug-routed drop
+    // the param resolves to the slug itself.
+    const resp = await dropPost(makeContext(slug, req));
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as { run_id: string; file_key: string };
+    // file_key uses the canonical id, not the slug, since the R2
+    // prefix is keyed by the connector's stable primary key.
+    expect(body.file_key.startsWith(`connector-drops/${id}/`)).toBe(true);
   });
 });

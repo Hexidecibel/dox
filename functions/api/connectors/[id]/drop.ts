@@ -51,6 +51,7 @@ import {
 } from '../../../../shared/connectorFileTypes';
 import { decryptCredentials } from '../../../lib/connectors/crypto';
 import { executeConnectorRun } from '../../../lib/connectors/orchestrator';
+import { resolveConnectorHandle } from '../../../lib/connectors/resolveHandle';
 import { normalizeFieldMappings } from '../../../../shared/fieldMappings';
 import type { Env } from '../../../lib/types';
 
@@ -116,12 +117,15 @@ interface ConnectorRow {
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
-  const connectorId = context.params.id as string;
+  // Phase B0.5: the path param is named `id` in the route file but
+  // accepts either the connector's slug or its random-hex id. We log
+  // it as `handle` to keep the breadcrumb honest.
+  const connectorHandle = context.params.id as string;
 
   // ----- Auth gate -----
   const authHeader = context.request.headers.get('Authorization') || '';
   if (!authHeader.toLowerCase().startsWith('bearer ')) {
-    console.warn(`drop: missing bearer for connector ${connectorId}`);
+    console.warn(`drop: missing bearer for connector ${connectorHandle}`);
     return unauthorized();
   }
   const provided = authHeader.slice('bearer '.length).trim();
@@ -131,18 +135,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   // Look up the connector (active, non-deleted). We deliberately do NOT
   // 404 on missing — collapse all auth failure modes into a single 401
-  // so an attacker can't enumerate connector ids by probing this URL.
-  const connector = await context.env.DB.prepare(
-    `SELECT id, tenant_id, active, deleted_at, api_token,
-            config, field_mappings, credentials_encrypted, credentials_iv
-     FROM connectors
-     WHERE id = ?`,
-  )
-    .bind(connectorId)
-    .first<ConnectorRow>();
+  // so an attacker can't enumerate connector handles by probing this URL.
+  const connector = await resolveConnectorHandle<ConnectorRow>(
+    context.env.DB,
+    connectorHandle,
+    {
+      columns:
+        'id, tenant_id, active, deleted_at, api_token, ' +
+        'config, field_mappings, credentials_encrypted, credentials_iv',
+    },
+  );
 
   if (!connector || connector.deleted_at !== null || !connector.active) {
-    console.warn(`drop: connector ${connectorId} not found / inactive / deleted`);
+    console.warn(`drop: connector ${connectorHandle} not found / inactive / deleted`);
     return unauthorized();
   }
 
@@ -150,12 +155,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // Connector exists but has no token configured — treat as missing
     // for partner-facing purposes. The owner needs to generate one in
     // the UI before this door is usable.
-    console.warn(`drop: connector ${connectorId} has no api_token configured`);
+    console.warn(`drop: connector ${connector.id} has no api_token configured`);
     return unauthorized();
   }
 
   if (!constantTimeEquals(provided, connector.api_token)) {
-    console.warn(`drop: bearer mismatch on connector ${connectorId}`);
+    console.warn(`drop: bearer mismatch on connector ${connector.id}`);
     return unauthorized();
   }
 

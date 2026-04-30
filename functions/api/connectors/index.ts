@@ -9,6 +9,10 @@ import { sanitizeString } from '../../lib/validation';
 import { encryptCredentials } from '../../lib/connectors/crypto';
 import type { Env, User } from '../../lib/types';
 import { normalizeFieldMappings, validateFieldMappings } from '../../../shared/fieldMappings';
+import {
+  isValidConnectorSlug,
+  slugifyConnectorName,
+} from '../../../shared/connectorSlug';
 import { validateEmailConfig } from './[id]/test';
 
 const VALID_SYSTEM_TYPES = ['erp', 'wms', 'other'];
@@ -154,6 +158,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const body = (await context.request.json()) as {
       name?: string;
+      slug?: string;
       system_type?: string;
       config?: Record<string, unknown>;
       field_mappings?: unknown;
@@ -208,6 +213,60 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const systemType = body.system_type || 'other';
     const config = body.config ? JSON.stringify(body.config) : '{}';
 
+    // ---- Slug validation + uniqueness ----
+    // Phase B0.5: connectors carry a globally-unique URL-safe slug used
+    // in vendor-facing addresses (email, HTTP API, S3, public link).
+    // The wizard normally sends an explicit slug; if one is missing we
+    // fall back to slugifying the name. Either way we validate the
+    // shape and check the unique index. On collision we return 409
+    // with a suggested alternative so the wizard can prompt without a
+    // round-trip per char.
+    const requestedSlug = (typeof body.slug === 'string' && body.slug.trim().length > 0)
+      ? body.slug.trim().toLowerCase()
+      : slugifyConnectorName(body.name);
+
+    if (!requestedSlug || !isValidConnectorSlug(requestedSlug)) {
+      throw new BadRequestError(
+        'slug is required and must match /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/',
+      );
+    }
+
+    const existingSlug = await context.env.DB.prepare(
+      `SELECT id FROM connectors WHERE slug = ?`,
+    )
+      .bind(requestedSlug)
+      .first<{ id: string }>();
+
+    if (existingSlug) {
+      // Suggest the next available `<slug>-N` so the wizard can offer a
+      // one-click fix. Probe up to 50 suffixes; in the (very unlikely)
+      // case that all are taken, return the base + a random 4-char hex
+      // suffix as a last-resort suggestion.
+      let suggested = '';
+      for (let i = 2; i <= 50; i++) {
+        const candidate = `${requestedSlug}-${i}`.slice(0, 64);
+        const taken = await context.env.DB.prepare(
+          `SELECT id FROM connectors WHERE slug = ?`,
+        )
+          .bind(candidate)
+          .first<{ id: string }>();
+        if (!taken) {
+          suggested = candidate;
+          break;
+        }
+      }
+      if (!suggested) {
+        const rand = Array.from(crypto.getRandomValues(new Uint8Array(2)))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
+        suggested = `${requestedSlug}-${rand}`.slice(0, 64);
+      }
+      return new Response(
+        JSON.stringify({ error: 'slug_taken', suggested }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
     // Normalize + validate the open-ended field-mapping config. Legacy v1
     // shapes are transparently upgraded; invalid shapes produce a structured
     // 400 with a list of errors the wizard can surface inline.
@@ -247,14 +306,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     await context.env.DB.prepare(
       `INSERT INTO connectors (
-        id, tenant_id, name, system_type,
+        id, tenant_id, name, slug, system_type,
         config, field_mappings, credentials_encrypted, credentials_iv,
         schedule, sample_r2_key, active, api_token,
         created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'), datetime('now'))`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'), datetime('now'))`
     )
       .bind(
-        id, tenantId, name, systemType,
+        id, tenantId, name, requestedSlug, systemType,
         config, fieldMappings, credentialsEncrypted, credentialsIv,
         schedule, sampleR2Key, apiToken, user.id
       )
@@ -267,7 +326,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'connector.created',
       'connector',
       id,
-      JSON.stringify({ name, system_type: systemType }),
+      JSON.stringify({ name, slug: requestedSlug, system_type: systemType }),
       getClientIp(context.request)
     );
 

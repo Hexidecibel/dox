@@ -85,6 +85,10 @@ type SystemType = typeof SYSTEM_TYPES[number];
 interface Connector {
   id: string;
   name: string;
+  /** Phase B0.5 — globally-unique URL-safe handle. Used everywhere
+   * vendors see the connector (API endpoint, email address, S3 bucket,
+   * public link). NULL only on legacy rows that pre-date the backfill. */
+  slug: string | null;
   system_type: SystemType;
   config: Record<string, unknown>;
   field_mappings: ConnectorFieldMappings;
@@ -164,6 +168,7 @@ function normalizeConnector(raw: unknown): Connector {
   return {
     id: String(r.id),
     name: String(r.name ?? ''),
+    slug: (r.slug as string | null) ?? null,
     system_type: (r.system_type as SystemType) || 'other',
     config: asRecord(r.config),
     field_mappings: normalizeFieldMappings(r.field_mappings),
@@ -624,6 +629,18 @@ export function ConnectorDetail() {
                 size="small"
                 color={connector.active ? 'success' : 'default'}
               />
+              {/* Phase B0.5 slug pill — vendor-facing handle. We mirror
+                  it as the title attr so admins can hover-confirm before
+                  copying it into a vendor email. */}
+              {connector.slug && (
+                <Chip
+                  label={connector.slug}
+                  size="small"
+                  variant="outlined"
+                  title={`URL slug: ${connector.slug}`}
+                  sx={{ fontFamily: 'monospace' }}
+                />
+              )}
             </Stack>
             <Typography variant="body2" color="text.secondary">
               Last run: {formatRelativeTime(connector.last_run_at)}
@@ -1228,8 +1245,16 @@ function ReceiveInfoCard({
   // DNS / Email Routing is wired (see `email-worker/wrangler.staging.toml`),
   // so we still render an address for completeness — the staging Alert
   // below tells the user it's not actually receiving mail yet.
+  //
+  // Phase B0.5: the local-part is the CONNECTOR slug, not the tenant
+  // slug. Per-connector addressing means each connector gets its own
+  // mailbox and the routing layer doesn't need a separate
+  // tenant->connector lookup at the email-worker. Legacy connectors
+  // without a slug fall back to the tenant slug for graceful
+  // degradation until the backfill picks them up.
   const emailDomain = isStaging ? 'supdox-staging.com' : 'supdox.com';
-  const receiveAddress = tenantSlug ? `${tenantSlug}@${emailDomain}` : null;
+  const receiveLocal = connector.slug || tenantSlug;
+  const receiveAddress = receiveLocal ? `${receiveLocal}@${emailDomain}` : null;
   const hasNoFilter = subjectPatterns.length === 0 && !senderFilterLocal.trim();
 
   const copyToClipboard = (text: string) => {
@@ -1442,8 +1467,12 @@ function ApiDropCard({
       typeof window !== 'undefined' && window.location?.origin
         ? window.location.origin
         : '';
-    return `${origin}/api/connectors/${connector.id}/drop`;
-  }, [connector.id]);
+    // Phase B0.5: prefer the slug-based URL when available — that's
+    // the address vendors should bookmark. Fall back to the random-hex
+    // id only on legacy rows that pre-date the slug backfill.
+    const handle = connector.slug || connector.id;
+    return `${origin}/api/connectors/${handle}/drop`;
+  }, [connector.id, connector.slug]);
 
   const hasToken = !!connector.api_token;
   const tokenDisplay = useMemo(() => {

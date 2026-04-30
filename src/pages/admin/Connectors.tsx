@@ -53,6 +53,10 @@ type SystemType = typeof SYSTEM_TYPES[number];
 interface Connector {
   id: string;
   name: string;
+  /** Phase B0.5 — globally-unique URL-safe handle. NULL only on legacy
+   * rows that pre-date the backfill; the list rows fall back to id
+   * gracefully in that case. */
+  slug: string | null;
   system_type: SystemType;
   config: string | Record<string, unknown>;
   schedule: string | null;
@@ -273,6 +277,18 @@ export function Connectors() {
                       <Typography variant="body2" fontWeight={600}>
                         {connector.name}
                       </Typography>
+                      {/* Phase B0.5 slug — shown as a monospace
+                          micro-line so admins can spot-check the
+                          vendor-facing handle without opening detail. */}
+                      {connector.slug && (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ fontFamily: 'monospace', display: 'block' }}
+                        >
+                          {connector.slug}
+                        </Typography>
+                      )}
                       <Typography variant="caption" color="text.secondary">
                         Last run: {formatRelativeTime(connector.last_run_at)}
                       </Typography>
@@ -315,6 +331,7 @@ export function Connectors() {
             <TableHead>
               <TableRow>
                 <TableCell>Name</TableCell>
+                <TableCell>Slug</TableCell>
                 <TableCell>System</TableCell>
                 <TableCell>Last Run</TableCell>
                 <TableCell>Status</TableCell>
@@ -324,7 +341,7 @@ export function Connectors() {
             <TableBody>
               {connectors.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={5} sx={{ textAlign: 'center', py: 4 }}>
+                  <TableCell colSpan={6} sx={{ textAlign: 'center', py: 4 }}>
                     <Typography color="text.secondary">No connectors found</Typography>
                   </TableCell>
                 </TableRow>
@@ -339,6 +356,15 @@ export function Connectors() {
                     <TableCell>
                       <Typography variant="body2" fontWeight={500} color="primary">
                         {connector.name}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Typography
+                        variant="body2"
+                        sx={{ fontFamily: 'monospace' }}
+                        color="text.secondary"
+                      >
+                        {connector.slug || '—'}
                       </Typography>
                     </TableCell>
                     <TableCell>

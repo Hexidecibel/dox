@@ -1024,6 +1024,10 @@ export const api = {
     get(id: string) { return fetchApi(`/connectors/${id}`); },
     create(data: {
       name: string;
+      /** Phase B0.5 — globally-unique URL-safe handle. Required by the
+       * server on create; the wizard always sends one (auto-derived from
+       * `name` unless the user has typed a different value). */
+      slug?: string;
       system_type?: string;
       config?: Record<string, unknown>;
       field_mappings?: unknown;
@@ -1033,6 +1037,56 @@ export const api = {
       sample_r2_key?: string;
     }) {
       return fetchApi('/connectors', { method: 'POST', body: JSON.stringify(data) });
+    },
+    /**
+     * Variant of `create` that surfaces the structured 409 slug-taken
+     * payload (`{ error: 'slug_taken', suggested: '<base>-2' }`) so the
+     * wizard can show an inline conflict + a one-click fix without
+     * re-parsing the generic `Error.message` produced by fetchApi.
+     *
+     * Returns either `{ ok: true, connector }` or `{ ok: false,
+     * conflict: { suggested } }`. Other errors propagate as thrown
+     * Errors so the caller can surface them as red alerts.
+     */
+    async createOrConflict(data: {
+      name: string;
+      slug?: string;
+      system_type?: string;
+      config?: Record<string, unknown>;
+      field_mappings?: unknown;
+      credentials?: Record<string, unknown>;
+      schedule?: string;
+      tenant_id?: string;
+      sample_r2_key?: string;
+    }): Promise<
+      | { ok: true; connector: { id: string; slug?: string } & Record<string, unknown> }
+      | { ok: false; conflict: { suggested: string } }
+    > {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const res = await fetch(`${API_BASE}/connectors`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(data),
+      });
+      if (res.status === 409) {
+        const body = await res.json().catch(() => ({})) as { suggested?: string };
+        return { ok: false, conflict: { suggested: body.suggested || '' } };
+      }
+      if (!res.ok) {
+        let message: string;
+        try {
+          const body = await res.json();
+          message = body.error || body.message || res.statusText;
+        } catch {
+          message = await res.text() || res.statusText;
+        }
+        throw new Error(message);
+      }
+      const body = await res.json() as { connector: { id: string } & Record<string, unknown> };
+      return { ok: true, connector: body.connector };
     },
     update(id: string, data: Record<string, unknown> & { sample_r2_key?: string }) {
       return fetchApi(`/connectors/${id}`, { method: 'PUT', body: JSON.stringify(data) });
