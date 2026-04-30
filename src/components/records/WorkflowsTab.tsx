@@ -32,6 +32,7 @@ import {
   Archive as ArchivedIcon,
 } from '@mui/icons-material';
 import { recordsApi } from '../../lib/recordsApi';
+import { EmptyState } from '../EmptyState';
 import type { RecordWorkflow } from '../../../shared/types';
 
 interface Props {
@@ -100,7 +101,13 @@ export function WorkflowsTab({ sheetId, canMutate }: Props) {
       </Box>
 
       {workflows.length === 0 ? (
-        <EmptyState onCreate={canMutate ? () => setCreateOpen(true) : undefined} />
+        <EmptyState
+          icon={<WorkflowIcon sx={{ fontSize: 32 }} />}
+          title="No workflows yet"
+          description="Workflows chain approvals, update requests, and cell writes into a repeatable process you can trigger on any row."
+          actionLabel={canMutate ? 'Create a workflow' : undefined}
+          onAction={canMutate ? () => setCreateOpen(true) : undefined}
+        />
       ) : (
         <Stack spacing={1.5}>
           {workflows.map((wf) => (
@@ -199,35 +206,6 @@ function StatusChip({ status }: { status: RecordWorkflow['status'] }) {
       label="Draft"
       variant="outlined"
     />
-  );
-}
-
-function EmptyState({ onCreate }: { onCreate?: () => void }) {
-  return (
-    <Box
-      sx={{
-        py: 6,
-        textAlign: 'center',
-        border: 1,
-        borderStyle: 'dashed',
-        borderColor: 'divider',
-        borderRadius: 2,
-      }}
-    >
-      <WorkflowIcon sx={{ fontSize: 40, color: 'text.disabled', mb: 1 }} />
-      <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-        No workflows yet
-      </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 360, mx: 'auto', mb: 2 }}>
-        Workflows chain approvals, update requests, and cell writes into a
-        repeatable process you can trigger on any row.
-      </Typography>
-      {onCreate && (
-        <Button startIcon={<AddIcon />} variant="contained" disableElevation onClick={onCreate}>
-          Create a workflow
-        </Button>
-      )}
-    </Box>
   );
 }
 

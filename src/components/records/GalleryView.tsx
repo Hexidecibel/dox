@@ -70,6 +70,7 @@ import type {
   ApiRecordRowAttachment,
   RecordRowData,
 } from '../../../shared/types';
+import { EmptyState } from '../EmptyState';
 
 // Concurrency cap on lazy attachment fetches. Each call hits the row's
 // attachments endpoint; we don't want a 200-row sheet to fan out 200
@@ -199,7 +200,7 @@ export function GalleryView({
     return (
       <EmptyState
         title="No records yet"
-        body="Add some via Grid view or the form, then come back to see them as a gallery."
+        description="Add some via Grid view or the form, then come back to see them as a gallery."
       />
     );
   }
@@ -568,28 +569,5 @@ function compareCellValues(a: unknown, b: unknown): number {
 
 function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
-}
-
-function EmptyState({ title, body }: { title: string; body: string }) {
-  return (
-    <Box
-      sx={{
-        py: 10,
-        textAlign: 'center',
-        border: '1px dashed',
-        borderColor: 'divider',
-        borderRadius: 1,
-        bgcolor: 'background.default',
-        px: 4,
-      }}
-    >
-      <Typography variant="h6" sx={{ mb: 1, fontWeight: 600 }}>
-        {title}
-      </Typography>
-      <Typography variant="body2" color="text.secondary">
-        {body}
-      </Typography>
-    </Box>
-  );
 }
 

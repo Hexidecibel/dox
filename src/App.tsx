@@ -48,6 +48,7 @@ import { UpdateRequestForm } from './pages/forms/UpdateRequestForm';
 import { PublicApprovalPage } from './pages/forms/PublicApprovalPage';
 import { PublicDrop } from './pages/PublicDrop';
 import { Approvals } from './pages/Approvals';
+import { Help } from './pages/Help';
 
 function App() {
   return (
@@ -100,6 +101,8 @@ function App() {
               <Route path="/records/:sheetId/forms/:formId" element={<FormBuilder />} />
               <Route path="/records/:sheetId/workflows/:workflowId" element={<WorkflowBuilder />} />
               <Route path="/approvals" element={<Approvals />} />
+              <Route path="/help" element={<Help />} />
+              <Route path="/help/:module" element={<Help />} />
 
               {/* Admin routes - users management and audit for super_admin and org_admin */}
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>

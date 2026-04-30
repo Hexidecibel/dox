@@ -66,6 +66,7 @@ import type {
   RecordColumnDropdownOption,
   RecordRowData,
 } from '../../../shared/types';
+import { EmptyState } from '../EmptyState';
 
 const EMPTY_COLUMN_VALUE = '__empty__';
 
@@ -133,7 +134,7 @@ export function KanbanView({
     return (
       <EmptyState
         title="Add a dropdown column to enable Kanban"
-        body="Kanban groups rows by a dropdown column's options. Add a column with type 'Single-select dropdown' from the Grid view, then come back."
+        description="Kanban groups rows by a dropdown column's options. Add a column with type 'Single-select dropdown' from the Grid view, then come back."
       />
     );
   }
@@ -622,29 +623,6 @@ function buildGroups(
     result.push(emptyGroup);
   }
   return result;
-}
-
-function EmptyState({ title, body }: { title: string; body: string }) {
-  return (
-    <Box
-      sx={{
-        py: 10,
-        textAlign: 'center',
-        border: '1px dashed',
-        borderColor: 'divider',
-        borderRadius: 1,
-        bgcolor: 'background.default',
-        px: 4,
-      }}
-    >
-      <Typography variant="h6" sx={{ mb: 1, fontWeight: 600 }}>
-        {title}
-      </Typography>
-      <Typography variant="body2" color="text.secondary">
-        {body}
-      </Typography>
-    </Box>
-  );
 }
 
 /** Optional helper: kept around so SheetDetail can render an "add card" FAB on mobile without re-deriving the active column. */

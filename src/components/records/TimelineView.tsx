@@ -70,6 +70,7 @@ import type {
   RecordRowData,
   TimelineScale,
 } from '../../../shared/types';
+import { EmptyState } from '../EmptyState';
 
 interface TimelineViewProps {
   columns: ApiRecordColumn[];
@@ -182,7 +183,7 @@ export function TimelineView({
     return (
       <EmptyState
         title="Add a date column to enable Timeline"
-        body="Timeline lays records out by a date column. Add a Date column from the Grid view, then come back."
+        description="Timeline lays records out by a date column. Add a Date column from the Grid view, then come back."
       />
     );
   }
@@ -1050,29 +1051,6 @@ function formatShortDay(d: Date): string {
   } catch {
     return isoLocalDay(d);
   }
-}
-
-function EmptyState({ title, body }: { title: string; body: string }) {
-  return (
-    <Box
-      sx={{
-        py: 10,
-        textAlign: 'center',
-        border: '1px dashed',
-        borderColor: 'divider',
-        borderRadius: 1,
-        bgcolor: 'background.default',
-        px: 4,
-      }}
-    >
-      <Typography variant="h6" sx={{ mb: 1, fontWeight: 600 }}>
-        {title}
-      </Typography>
-      <Typography variant="body2" color="text.secondary">
-        {body}
-      </Typography>
-    </Box>
-  );
 }
 
 export function isTimelineCapable(columns: ApiRecordColumn[]): boolean {

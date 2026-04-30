@@ -4,8 +4,6 @@ import {
   Alert,
   Box,
   Button,
-  Card,
-  CardContent,
   Dialog,
   DialogActions,
   DialogContent,
@@ -28,6 +26,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
 import { recordsApi } from '../../lib/recordsApi';
 import { SheetCard } from '../../components/SheetCard';
+import { EmptyState } from '../../components/EmptyState';
 import type { ApiRecordSheet } from '../../../shared/types';
 
 /**
@@ -257,7 +256,17 @@ export function Sheets() {
           ))}
         </Box>
       ) : visibleSheets.length === 0 ? (
-        <EmptyState canMutate={canMutate} onCreate={openCreate} />
+        <EmptyState
+          icon={<TableIcon sx={{ fontSize: 36 }} />}
+          title="Track anything that doesn't fit a document"
+          description={
+            canMutate
+              ? "Quality issues. Approval workflows. New item requests. Build a sheet for any process your team manages outside the document library."
+              : 'Ask an admin or teammate to create the first sheet.'
+          }
+          actionLabel={canMutate ? 'Create your first sheet' : undefined}
+          onAction={canMutate ? openCreate : undefined}
+        />
       ) : (
         <>
           <Box sx={gridSx}>
@@ -441,48 +450,3 @@ export function Sheets() {
   );
 }
 
-interface EmptyStateProps {
-  canMutate: boolean;
-  onCreate: () => void;
-}
-
-function EmptyState({ canMutate, onCreate }: EmptyStateProps) {
-  return (
-    <Card variant="outlined" sx={{ borderStyle: 'dashed', borderColor: 'divider', bgcolor: 'transparent' }}>
-      <CardContent sx={{ textAlign: 'center', py: { xs: 6, sm: 10 }, px: 3 }}>
-        <Box
-          sx={{
-            width: 72,
-            height: 72,
-            borderRadius: 2,
-            mx: 'auto',
-            mb: 3,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            bgcolor: 'rgba(26, 54, 93, 0.05)',
-            color: 'primary.main',
-          }}
-        >
-          <TableIcon sx={{ fontSize: 36 }} />
-        </Box>
-        <Typography variant="h5" sx={{ mb: 1, fontWeight: 600 }}>
-          Track anything that doesn't fit a document
-        </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 460, mx: 'auto', mb: 4 }}>
-          Quality issues. Approval workflows. New item requests. Build a sheet for any process your
-          team manages outside the document library.
-        </Typography>
-        {canMutate ? (
-          <Button variant="contained" size="large" startIcon={<AddIcon />} onClick={onCreate}>
-            Create your first sheet
-          </Button>
-        ) : (
-          <Typography variant="body2" color="text.secondary">
-            Ask an admin or teammate to create the first sheet.
-          </Typography>
-        )}
-      </CardContent>
-    </Card>
-  );
-}

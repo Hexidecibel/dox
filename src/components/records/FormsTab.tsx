@@ -34,6 +34,7 @@ import {
   OpenInNew as OpenIcon,
 } from '@mui/icons-material';
 import { recordsApi } from '../../lib/recordsApi';
+import { EmptyState } from '../EmptyState';
 import type { RecordForm } from '../../../shared/types';
 
 interface FormsTabProps {
@@ -102,7 +103,12 @@ export function FormsTab({ sheetId, canMutate }: FormsTabProps) {
       </Box>
 
       {forms.length === 0 ? (
-        <EmptyState onCreate={canMutate ? () => setCreateOpen(true) : undefined} />
+        <EmptyState
+          title="No forms yet"
+          description="Forms are derived from this sheet's columns. Build one and share a public link to collect submissions."
+          actionLabel={canMutate ? 'Create your first form' : undefined}
+          onAction={canMutate ? () => setCreateOpen(true) : undefined}
+        />
       ) : (
         <Stack spacing={1.5}>
           {forms.map((form) => (
@@ -199,33 +205,6 @@ function StatusChip({ status }: { status: RecordForm['status'] }) {
   if (status === 'live') return <Chip size="small" label="Live" color="success" />;
   if (status === 'archived') return <Chip size="small" label="Archived" />;
   return <Chip size="small" label="Draft" variant="outlined" />;
-}
-
-function EmptyState({ onCreate }: { onCreate?: () => void }) {
-  return (
-    <Box
-      sx={{
-        py: 8,
-        textAlign: 'center',
-        border: 1,
-        borderColor: 'divider',
-        borderRadius: 1,
-        borderStyle: 'dashed',
-      }}
-    >
-      <Typography variant="h6" sx={{ mb: 1 }}>
-        No forms yet
-      </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3, px: 4 }}>
-        Forms are derived from this sheet's columns. Build one and share a public link to collect submissions.
-      </Typography>
-      {onCreate && (
-        <Button variant="contained" startIcon={<AddIcon />} onClick={onCreate} disableElevation>
-          Create your first form
-        </Button>
-      )}
-    </Box>
-  );
 }
 
 function CreateFormDialog({

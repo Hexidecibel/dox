@@ -54,6 +54,7 @@ import type {
   ApiRecordRow,
   RecordRowData,
 } from '../../../shared/types';
+import { EmptyState } from '../EmptyState';
 
 interface CalendarViewProps {
   columns: ApiRecordColumn[];
@@ -154,7 +155,7 @@ export function CalendarView({
     return (
       <EmptyState
         title="Add a date column to enable Calendar"
-        body="Calendar lays records out by a date column. Add a Date column from the Grid view, then come back."
+        description="Calendar lays records out by a date column. Add a Date column from the Grid view, then come back."
       />
     );
   }
@@ -742,29 +743,6 @@ function formatShortDay(d: Date): string {
   } catch {
     return isoLocalDay(d);
   }
-}
-
-function EmptyState({ title, body }: { title: string; body: string }) {
-  return (
-    <Box
-      sx={{
-        py: 10,
-        textAlign: 'center',
-        border: '1px dashed',
-        borderColor: 'divider',
-        borderRadius: 1,
-        bgcolor: 'background.default',
-        px: 4,
-      }}
-    >
-      <Typography variant="h6" sx={{ mb: 1, fontWeight: 600 }}>
-        {title}
-      </Typography>
-      <Typography variant="body2" color="text.secondary">
-        {body}
-      </Typography>
-    </Box>
-  );
 }
 
 export function isCalendarCapable(columns: ApiRecordColumn[]): boolean {
