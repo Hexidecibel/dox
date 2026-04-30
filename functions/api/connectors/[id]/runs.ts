@@ -41,14 +41,36 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(connectorId)
       .first<{ total: number }>();
 
-    const results = await context.env.DB.prepare(
-      `SELECT * FROM connector_runs
-       WHERE connector_id = ?
-       ORDER BY started_at DESC
-       LIMIT ? OFFSET ?`
-    )
-      .bind(connectorId, limit, offset)
-      .all();
+    // Phase B5: pull `source` + `retry_of_run_id` so the UI can render
+    // the per-source pill and the Retry button. Old DBs predating
+    // migrations 0049 / 0052 throw "no such column" on the explicit
+    // SELECT — fall back to a minimal projection that still works.
+    let results;
+    try {
+      results = await context.env.DB.prepare(
+        `SELECT id, connector_id, tenant_id, status, source,
+                started_at, completed_at,
+                records_found, records_created, records_updated, records_errored,
+                error_message, details, retry_of_run_id
+           FROM connector_runs
+          WHERE connector_id = ?
+          ORDER BY started_at DESC
+          LIMIT ? OFFSET ?`,
+      )
+        .bind(connectorId, limit, offset)
+        .all();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('no such column')) throw err;
+      results = await context.env.DB.prepare(
+        `SELECT * FROM connector_runs
+          WHERE connector_id = ?
+          ORDER BY started_at DESC
+          LIMIT ? OFFSET ?`,
+      )
+        .bind(connectorId, limit, offset)
+        .all();
+    }
 
     return new Response(
       JSON.stringify({

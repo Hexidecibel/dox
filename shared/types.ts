@@ -958,11 +958,21 @@ export type ActivityEventType =
   | 'order_created'
   | 'audit';
 
+// Phase B5: expanded to mirror connector_runs.source (migration 0049)
+// + the legacy processing_queue values. Backend chooses where each
+// value can match. UI exposes the connector-runs values as their own
+// menu options so the activity feed filter is finally non-trivial.
 export type ActivitySourceFilter =
   | 'email'
   | 'api'
   | 'import'
   | 'file_watch'
+  | 'manual'
+  | 's3'
+  | 'public_link'
+  | 'webhook'
+  | 'api_poll'
+  | 'r2_poll'
   | 'all';
 
 export type ActivityStatusFilter =

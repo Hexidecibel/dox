@@ -139,6 +139,31 @@ interface ConnectorRun {
   records_created: number;
   records_errored: number;
   error_message: string | null;
+  /** Phase B5: which intake door this run came in through. NULL on
+   *  pre-0049 historical rows. */
+  source: string | null;
+  /** Phase B5: when set, this run is a retry of an earlier failed run.
+   *  Surfaces a "retry of …" pill in the runs table. */
+  retry_of_run_id: string | null;
+}
+
+/** Phase B5 — observability snapshot from GET /api/connectors/:id/health. */
+interface ConnectorHealth {
+  last_24h: {
+    dispatched: number;
+    success: number;
+    partial: number;
+    error: number;
+    running: number;
+    success_rate: number | null;
+  };
+  last_error: {
+    run_id: string;
+    started_at: string;
+    error_message: string | null;
+  } | null;
+  by_source: Record<string, number>;
+  window_hours: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +282,15 @@ export function ConnectorDetail() {
   const [runsTotal, setRunsTotal] = useState(0);
   const [runsPage, setRunsPage] = useState(1);
   const [runsLoading, setRunsLoading] = useState(false);
+  // Phase B5: in-flight retry indicator keyed by the failed run id.
+  // Multiple retries can run in parallel without state contention.
+  const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
+
+  // Phase B5: observability snapshot (24h dispatched, success rate,
+  // last error, per-source pills). Refreshed alongside the runs list
+  // so a freshly-dispatched run reflects in the card without a hard
+  // page reload.
+  const [health, setHealth] = useState<ConnectorHealth | null>(null);
 
   // Action state
   const [testing, setTesting] = useState(false);
@@ -318,8 +352,23 @@ export function ConnectorDetail() {
     }
   }, [id, runsPage]);
 
+  // Phase B5 — pull the health snapshot. Best-effort: a 4xx/5xx leaves
+  // `health` null and the card silently hides rather than blocking the
+  // page render. Refreshes on the same trigger as the runs list so a
+  // dispatched-then-completed run is reflected without manual reload.
+  const loadHealth = useCallback(async () => {
+    if (!id) return;
+    try {
+      const result = await api.connectors.health(id);
+      setHealth(result);
+    } catch {
+      setHealth(null);
+    }
+  }, [id]);
+
   useEffect(() => { loadConnector(); }, [loadConnector]);
   useEffect(() => { loadRuns(); }, [loadRuns]);
+  useEffect(() => { loadHealth(); }, [loadHealth]);
 
   // ---------------------------------------------------------------------
   // Wizard end-state hint (Phase A2.3) — fires once per navigation when
@@ -523,6 +572,32 @@ export function ConnectorDetail() {
       setDeleteOpen(false);
     }
   };
+
+  /**
+   * Phase B5 — retry a failed run. The backend refetches the original
+   * file and dispatches a new run linked via `retry_of_run_id`. We
+   * surface the standard 422 ("source no longer retrievable") and 400
+   * ("not in error state") errors as inline alerts; success refreshes
+   * the runs panel so the new row appears at the top.
+   */
+  const handleRetryRun = useCallback(
+    async (runId: string) => {
+      if (!id) return;
+      setRetryingRunId(runId);
+      setError('');
+      try {
+        const result = await api.connectors.retryRun(id, runId);
+        setSaveSnack(`Retry dispatched (run ${result.run_id.slice(0, 8)}…)`);
+        await Promise.all([loadRuns(), loadHealth()]);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to retry run';
+        setError(msg);
+      } finally {
+        setRetryingRunId(null);
+      }
+    },
+    [id, loadRuns, loadHealth],
+  );
 
   const commitName = () => {
     if (!connector) return;
@@ -737,6 +812,113 @@ export function ConnectorDetail() {
           </Stack>
         </Stack>
       </Paper>
+
+      {/* ------------------------------------------------------------ */}
+      {/* Phase B5 — Health card. Sits below the header so the very     */}
+      {/* first thing an admin sees on a connector page is "is it       */}
+      {/* dispatching, and is it succeeding?". Hidden on first load     */}
+      {/* until the snapshot resolves so the layout doesn't pop.        */}
+      {/* ------------------------------------------------------------ */}
+      {health && (
+        <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+          <Stack
+            direction={{ xs: 'column', md: 'row' }}
+            spacing={2}
+            alignItems={{ xs: 'flex-start', md: 'center' }}
+            justifyContent="space-between"
+          >
+            <Box>
+              <Typography variant="overline" color="text.secondary">
+                Health (last {health.window_hours}h)
+              </Typography>
+              {health.last_24h.dispatched === 0 ? (
+                <Typography variant="body2" color="text.secondary">
+                  No activity in the last {health.window_hours} hours.
+                </Typography>
+              ) : (
+                <Stack direction="row" spacing={2} alignItems="baseline" flexWrap="wrap" useFlexGap>
+                  <Typography variant="h6" fontWeight={600}>
+                    {health.last_24h.dispatched} dispatched
+                  </Typography>
+                  {health.last_24h.success_rate !== null && (
+                    <Typography
+                      variant="body2"
+                      color={
+                        health.last_24h.success_rate >= 90
+                          ? 'success.main'
+                          : health.last_24h.success_rate >= 70
+                            ? 'warning.main'
+                            : 'error.main'
+                      }
+                      fontWeight={600}
+                    >
+                      {health.last_24h.success_rate}% success
+                    </Typography>
+                  )}
+                  {health.last_24h.error > 0 && (
+                    <Typography variant="body2" color="error">
+                      {health.last_24h.error} error{health.last_24h.error === 1 ? '' : 's'}
+                    </Typography>
+                  )}
+                  {health.last_24h.partial > 0 && (
+                    <Typography variant="body2" color="warning.main">
+                      {health.last_24h.partial} partial
+                    </Typography>
+                  )}
+                </Stack>
+              )}
+            </Box>
+            {/* Per-source pills — only show non-zero buckets so the row
+                doesn't degenerate into noise on quiet connectors. */}
+            <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+              {Object.entries(health.by_source)
+                .filter(([, count]) => count > 0)
+                .map(([source, count]) => (
+                  <Chip
+                    key={source}
+                    label={`${source}: ${count}`}
+                    size="small"
+                    variant="outlined"
+                    sx={{ fontFamily: 'monospace', fontSize: '0.7rem' }}
+                  />
+                ))}
+            </Stack>
+          </Stack>
+          {health.last_error && (
+            <Alert
+              severity="error"
+              variant="outlined"
+              sx={{ mt: 2 }}
+              action={
+                <Button
+                  size="small"
+                  onClick={() => {
+                    runsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }}
+                >
+                  View
+                </Button>
+              }
+            >
+              <Typography variant="caption" color="text.secondary">
+                Last error · {formatRelativeTime(health.last_error.started_at)}
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {health.last_error.error_message || '(no message)'}
+              </Typography>
+            </Alert>
+          )}
+        </Paper>
+      )}
 
       {/* Live probe result — surfaces after the user clicks Test */}
       {probeResult && (
@@ -1108,11 +1290,13 @@ export function ConnectorDetail() {
                 <TableHead>
                   <TableRow>
                     <TableCell>Status</TableCell>
+                    <TableCell>Source</TableCell>
                     <TableCell>Started</TableCell>
                     <TableCell>Completed</TableCell>
                     <TableCell align="right">Found</TableCell>
                     <TableCell align="right">Created</TableCell>
                     <TableCell align="right">Errors</TableCell>
+                    <TableCell align="right">Actions</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -1149,6 +1333,31 @@ export function ConnectorDetail() {
                           )}
                         </Stack>
                       </TableCell>
+                      <TableCell>
+                        <Stack direction="column" spacing={0.25} alignItems="flex-start">
+                          {run.source ? (
+                            <Chip
+                              label={run.source}
+                              size="small"
+                              variant="outlined"
+                              sx={{ fontFamily: 'monospace', fontSize: '0.65rem', height: 20 }}
+                            />
+                          ) : (
+                            <Typography variant="caption" color="text.secondary">-</Typography>
+                          )}
+                          {run.retry_of_run_id && (
+                            <Tooltip title={`Retry of run ${run.retry_of_run_id}`} arrow>
+                              <Chip
+                                label="retry"
+                                size="small"
+                                color="info"
+                                variant="outlined"
+                                sx={{ fontSize: '0.65rem', height: 18 }}
+                              />
+                            </Tooltip>
+                          )}
+                        </Stack>
+                      </TableCell>
                       <TableCell>{formatDate(run.started_at)}</TableCell>
                       <TableCell>{run.completed_at ? formatDate(run.completed_at) : '-'}</TableCell>
                       <TableCell align="right">{run.records_found}</TableCell>
@@ -1178,6 +1387,27 @@ export function ConnectorDetail() {
                         <Typography variant="body2" color={run.records_errored > 0 ? 'error' : 'text.primary'}>
                           {run.records_errored}
                         </Typography>
+                      </TableCell>
+                      <TableCell align="right">
+                        {run.status === 'error' ? (
+                          <Tooltip
+                            title="Refetch the original file and re-dispatch the run"
+                            arrow
+                          >
+                            <span>
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                startIcon={<RefreshIcon fontSize="small" />}
+                                onClick={() => handleRetryRun(run.id)}
+                                disabled={retryingRunId === run.id}
+                                sx={{ minWidth: 0, py: 0.25, px: 1, fontSize: '0.7rem' }}
+                              >
+                                {retryingRunId === run.id ? '…' : 'Retry'}
+                              </Button>
+                            </span>
+                          </Tooltip>
+                        ) : null}
                       </TableCell>
                     </TableRow>
                   ))}

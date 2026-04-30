@@ -1,4 +1,4 @@
-import { generateId, logAudit } from '../db';
+import { generateId, logAudit, logIntakeEvent } from '../db';
 import type { ConnectorContext, ConnectorOutput, ConnectorInput, ParsedContact, ParsedCustomer } from './types';
 import { getConnectorExecutor } from './index';
 import { normalizeFieldMappings } from '../../../shared/fieldMappings';
@@ -62,6 +62,45 @@ function deriveSource(input: ConnectorInput, override?: ConnectorRunSource): Con
     case 'api_poll': return 'api_poll';
     case 'file_watch': return 'manual';
     default: return 'manual';
+  }
+}
+
+/**
+ * Pull the best-effort file_name + file_size pair out of a ConnectorInput
+ * for the audit row. The orchestrator handles every door; what counts as
+ * "the file" varies by input type:
+ *   - file_watch  : the inline filename + content byteLength (or r2Key
+ *                   basename when bytes ride out-of-band)
+ *   - email       : "<subject>" + total attachment byte count (sender
+ *                   goes in the `extra` blob upstream)
+ *   - webhook     : null / null — payload is structured, not a file
+ *   - api_poll    : null / null — pull-based, no inbound payload
+ */
+function describeIntakePayload(
+  input: ConnectorInput,
+): { fileName: string | null; fileSize: number | null } {
+  switch (input.type) {
+    case 'file_watch': {
+      const fileName =
+        input.fileName ||
+        (input.r2Key ? input.r2Key.split('/').pop() ?? null : null);
+      const fileSize = input.content ? input.content.byteLength : null;
+      return { fileName, fileSize };
+    }
+    case 'email': {
+      const totalSize = (input.attachments || []).reduce(
+        (acc, att) => acc + (att.size ?? 0),
+        0,
+      );
+      return {
+        fileName: input.subject || null,
+        fileSize: totalSize > 0 ? totalSize : null,
+      };
+    }
+    case 'webhook':
+    case 'api_poll':
+    default:
+      return { fileName: null, fileSize: null };
   }
 }
 
@@ -162,6 +201,26 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
       `UPDATE connectors SET last_run_at = datetime('now'), last_error = ?, updated_at = datetime('now')
        WHERE id = ?`
     ).bind(errorMsg, connectorId).run();
+
+    // Phase B5 — emit an intake audit row even on the early-error path so
+    // every dispatch (whether the executor blew up or the run completed
+    // cleanly) leaves a uniform breadcrumb. Best-effort: helper swallows
+    // its own failures.
+    {
+      const { fileName, fileSize } = describeIntakePayload(input);
+      await logIntakeEvent({
+        db,
+        tenantId,
+        connectorId,
+        runId,
+        source: runSource,
+        actorUserId: userId ?? null,
+        fileName,
+        fileSize,
+        runStatus: 'error',
+        errorMessage: errorMsg,
+      });
+    }
 
     return { runId, status: 'error', ordersCreated: 0, customersCreated: 0, errors: [errorMsg] };
   }
@@ -354,7 +413,8 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
     connectorId
   ).run();
 
-  // Audit log
+  // Audit log — preserve the legacy `connector.run` row on user-initiated
+  // runs so downstream consumers that key off that action keep working.
   if (userId) {
     await logAudit(db, userId, tenantId, 'connector.run', 'connector', connectorId,
       JSON.stringify({
@@ -364,6 +424,37 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
         orders_created: ordersCreated,
         customers_created: customersCreated,
       }), null);
+  }
+
+  // Phase B5 — uniform intake row for every door. Vendor-driven runs
+  // (api / s3 / public_link / email) carry actorUserId=null; the
+  // manual door is the only path that has a real admin id.
+  {
+    const { fileName, fileSize } = describeIntakePayload(input);
+    const extra: Record<string, unknown> = {
+      orders_created: ordersCreated,
+      customers_created: customersCreated,
+    };
+    if (input.type === 'email') {
+      extra.sender = input.sender;
+      extra.subject = input.subject;
+    }
+    await logIntakeEvent({
+      db,
+      tenantId,
+      connectorId,
+      runId,
+      source: runSource,
+      actorUserId: userId ?? null,
+      fileName,
+      fileSize,
+      runStatus: status,
+      errorMessage:
+        status === 'success'
+          ? null
+          : output.errors.map((e) => e.message).join('; ') || null,
+      extra,
+    });
   }
 
   return {

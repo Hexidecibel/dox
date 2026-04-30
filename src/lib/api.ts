@@ -1124,6 +1124,52 @@ export const api = {
       return fetchApi(`/connectors/${id}/runs?${query}`);
     },
     /**
+     * POST /api/connectors/:id/runs/:runId/retry
+     *
+     * Phase B5 — replay a failed run. The backend refetches the
+     * original file from R2 (or the per-connector S3 bucket for
+     * `source='s3'` runs) and dispatches a fresh run linked back to
+     * the original via `retry_of_run_id`. Surfaces 422 when the source
+     * file is no longer retrievable, 400 when the run isn't in the
+     * `error` state.
+     */
+    retryRun(id: string, runId: string) {
+      return fetchApi<{
+        run_id: string;
+        retry_of_run_id: string;
+        status: 'success' | 'partial' | 'error';
+        orders_created: number;
+        customers_created: number;
+        errors: string[];
+      }>(`/connectors/${id}/runs/${runId}/retry`, { method: 'POST' });
+    },
+    /**
+     * GET /api/connectors/:id/health
+     *
+     * Phase B5 — observability snapshot for the connector detail
+     * page's Health card: 24h dispatched/success counts, last error
+     * (7-day lookback), per-source pills.
+     */
+    health(id: string) {
+      return fetchApi<{
+        last_24h: {
+          dispatched: number;
+          success: number;
+          partial: number;
+          error: number;
+          running: number;
+          success_rate: number | null;
+        };
+        last_error: {
+          run_id: string;
+          started_at: string;
+          error_message: string | null;
+        } | null;
+        by_source: Record<string, number>;
+        window_hours: number;
+      }>(`/connectors/${id}/health`);
+    },
+    /**
      * POST /api/connectors/discover-schema
      * Multipart upload: drop a sample file and get back detected fields +
      * suggested v2 field_mappings. Used by StepUploadSample in the wizard.

@@ -23,7 +23,23 @@ const DEFAULT_WINDOW_HOURS = 24;
 const MAX_LIMIT = 200;
 const DEFAULT_LIMIT = 50;
 
-type SourceFilter = 'email' | 'api' | 'import' | 'file_watch' | 'all';
+// Phase B5: source filter taxonomy expanded to match
+// `connector_runs.source` (migration 0049) so the UI can drill in on a
+// specific door (manual / api / s3 / public_link / email / webhook /
+// api_poll / r2_poll) on top of the legacy ingest-side values
+// (`import` for processing_queue, `file_watch` for legacy queue rows).
+type SourceFilter =
+  | 'email'
+  | 'api'
+  | 'import'
+  | 'file_watch'
+  | 'manual'
+  | 's3'
+  | 'public_link'
+  | 'webhook'
+  | 'api_poll'
+  | 'r2_poll'
+  | 'all';
 type StatusFilter = 'success' | 'error' | 'partial' | 'running' | 'queued' | 'all';
 type EventTypeFilter = ActivityEventType | 'all';
 
@@ -169,11 +185,34 @@ async function queryConnectorRuns(
     }
   }
 
-  // Phase B0: source filter is no-op at the connector_runs level — see
-  // comment at the top of this function.
+  // Phase B5: source filter is now wired against `connector_runs.source`
+  // (migration 0049). The classic processing_queue values ('email',
+  // 'api', 'import', 'file_watch') still flow through their own
+  // queryDocumentIngests path; filters that only make sense at the
+  // queue level ('import') don't return any connector_runs rows so we
+  // short-circuit. The connector-run-only values ('s3', 'public_link',
+  // 'manual', 'webhook', 'api_poll', 'r2_poll') get pushed into a
+  // direct equality on cr.source.
+  if (filters.source !== 'all') {
+    const RUN_ONLY: SourceFilter[] = [
+      'manual', 's3', 'public_link', 'webhook', 'api_poll', 'r2_poll', 'api',
+    ];
+    const QUEUE_ONLY: SourceFilter[] = ['import', 'file_watch'];
+    if (QUEUE_ONLY.includes(filters.source)) {
+      // Source is queue-only — connector_runs has nothing to contribute.
+      return [];
+    }
+    if (RUN_ONLY.includes(filters.source) || filters.source === 'email') {
+      conds.push('cr.source = ?');
+      params.push(filters.source);
+    }
+  }
 
+  // Old DBs missing migration 0049 throw on `cr.source = ?` — wrap the
+  // SELECT in a try/catch so a half-migrated env still returns rows
+  // (sans source filter) rather than 500ing the whole feed.
   const sql = `
-    SELECT cr.id, cr.connector_id, cr.tenant_id, cr.status, cr.started_at,
+    SELECT cr.id, cr.connector_id, cr.tenant_id, cr.status, cr.source, cr.started_at,
            cr.completed_at, cr.records_found, cr.records_created,
            cr.records_updated, cr.records_errored, cr.error_message,
            c.name as connector_name
@@ -183,7 +222,35 @@ async function queryConnectorRuns(
     ORDER BY cr.started_at DESC
     LIMIT 500
   `;
-  const result = await db.prepare(sql).bind(...params).all<ConnectorRunRowShape>();
+  let result;
+  try {
+    result = await db.prepare(sql).bind(...params).all<ConnectorRunRowShape>();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes('no such column')) throw err;
+    // Strip the cr.source projection AND filter, then retry. Drop any
+    // params we appended for the source clause too.
+    const fallbackConds = conds.filter((c) => !c.startsWith('cr.source'));
+    const fallbackParams: (string | number)[] = [filters.from, filters.to];
+    const tcRetry = tenantClause(filters.tenantId, 'cr.tenant_id');
+    if (tcRetry.clause) fallbackParams.push(...tcRetry.params);
+    if (filters.connectorId) fallbackParams.push(filters.connectorId);
+    if (filters.status !== 'all' && ['success', 'error', 'partial', 'running'].includes(filters.status)) {
+      fallbackParams.push(filters.status);
+    }
+    const fallbackSql = `
+      SELECT cr.id, cr.connector_id, cr.tenant_id, cr.status, cr.started_at,
+             cr.completed_at, cr.records_found, cr.records_created,
+             cr.records_updated, cr.records_errored, cr.error_message,
+             c.name as connector_name
+      FROM connector_runs cr
+      LEFT JOIN connectors c ON c.id = cr.connector_id
+      WHERE ${fallbackConds.join(' AND ')}
+      ORDER BY cr.started_at DESC
+      LIMIT 500
+    `;
+    result = await db.prepare(fallbackSql).bind(...fallbackParams).all<ConnectorRunRowShape>();
+  }
   return (result.results || []).map(connectorRunRowToEvent);
 }
 

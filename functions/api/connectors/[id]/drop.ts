@@ -53,7 +53,17 @@ import { decryptCredentials } from '../../../lib/connectors/crypto';
 import { executeConnectorRun } from '../../../lib/connectors/orchestrator';
 import { resolveConnectorHandle } from '../../../lib/connectors/resolveHandle';
 import { normalizeFieldMappings } from '../../../../shared/fieldMappings';
+import { checkRateLimit, recordAttempt } from '../../../lib/ratelimit';
 import type { Env } from '../../../lib/types';
+
+// Phase B5 — per-connector drop rate limit. The vendor-facing API drop
+// + public-link doors share a single 60-requests-per-60-second sliding
+// window keyed by `connector:drop:<connector_id>`. S3 drops, manual
+// uploads and email ingest are not rate-limited here (S3 has its own
+// metering, manual is admin-authenticated, email comes through the
+// email-worker bridge already debounced).
+const DROP_RATE_LIMIT_MAX = 60;
+const DROP_RATE_LIMIT_WINDOW_SEC = 60;
 
 const TEXT_SIZE_LIMIT = 5 * 1024 * 1024; // 5 MB for CSV / TSV / TXT
 const BINARY_SIZE_LIMIT = 10 * 1024 * 1024; // 10 MB for XLSX / PDF
@@ -101,6 +111,26 @@ function unsupportedMedia(message: string): Response {
   return new Response(
     JSON.stringify({ error: message }),
     { status: 415, headers: { 'Content-Type': 'application/json' } },
+  );
+}
+
+/**
+ * Build the 429 response on rate-limit hit. We surface a `Retry-After`
+ * seconds header so vendor automation that respects RFC 7231 backs off
+ * cleanly without polling-storming us. The body mirrors the public
+ * shape: `{ error, retry_after }`.
+ */
+function rateLimited(retryAfterSec: number): Response {
+  const seconds = Math.max(1, Math.ceil(retryAfterSec));
+  return new Response(
+    JSON.stringify({ error: 'rate_limited', retry_after: seconds }),
+    {
+      status: 429,
+      headers: {
+        'Content-Type': 'application/json',
+        'Retry-After': String(seconds),
+      },
+    },
   );
 }
 
@@ -209,6 +239,37 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     console.warn(`drop: bearer mismatch / expired on connector ${connector.id}`);
     return unauthorized();
   }
+
+  // ----- Rate limit (per connector) -----
+  // Bearer-token and link-token paths share the same bucket so a
+  // misbehaving public link can't dodge the limit by also rotating the
+  // api_token, and vice versa. Keyed by connector_id alone — the only
+  // gate we care about is "this connector is being hammered".
+  const rateLimitKey = `connector:drop:${connector.id}`;
+  const rateCheck = await checkRateLimit(
+    context.env.DB,
+    rateLimitKey,
+    DROP_RATE_LIMIT_MAX,
+    DROP_RATE_LIMIT_WINDOW_SEC,
+  );
+  if (!rateCheck.allowed) {
+    const retryAfterSec = rateCheck.resetAt
+      ? Math.ceil((new Date(rateCheck.resetAt).getTime() - Date.now()) / 1000)
+      : DROP_RATE_LIMIT_WINDOW_SEC;
+    console.warn(
+      `drop: rate limit hit for connector ${connector.id} (key=${rateLimitKey})`,
+    );
+    return rateLimited(retryAfterSec);
+  }
+  // Record the attempt up front. We deliberately count failed-validation
+  // attempts (bad MIME / oversize body) so a vendor spamming garbage
+  // still trips the limit — otherwise abuse vectors that never reach
+  // the dispatch step would slip past.
+  await recordAttempt(
+    context.env.DB,
+    rateLimitKey,
+    DROP_RATE_LIMIT_WINDOW_SEC,
+  );
 
   // ----- Parse multipart body -----
   const contentType = context.request.headers.get('content-type') || '';

@@ -543,10 +543,14 @@ export function Activity() {
                 onChange={(e) => setSource(e.target.value as ActivitySourceFilter)}
               >
                 <MenuItem value="all">All</MenuItem>
+                <MenuItem value="manual">Manual upload</MenuItem>
+                <MenuItem value="api">API drop</MenuItem>
+                <MenuItem value="public_link">Public link</MenuItem>
                 <MenuItem value="email">Email</MenuItem>
-                <MenuItem value="api">API</MenuItem>
-                <MenuItem value="import">Import</MenuItem>
-                <MenuItem value="file_watch">File watch</MenuItem>
+                <MenuItem value="s3">S3 bucket</MenuItem>
+                <MenuItem value="webhook">Webhook</MenuItem>
+                <MenuItem value="import">Import (legacy)</MenuItem>
+                <MenuItem value="file_watch">File watch (legacy)</MenuItem>
               </Select>
             </FormControl>
           </Grid>
