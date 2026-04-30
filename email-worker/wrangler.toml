@@ -6,6 +6,14 @@ compatibility_date = "2024-12-01"
 DOX_API_BASE = "https://supdox.com"
 EMAIL_DOMAIN = "supdox.com"
 
+# D1 binding for the connector-slug routing path (Phase B0.6). The
+# worker queries `connectors.slug` to pick the right connector for an
+# inbound vendor email. Same database as the Pages project.
+[[d1_databases]]
+binding = "DB"
+database_name = "doc-upload-db"
+database_id = "a89907f9-5f15-4cdb-9a7a-bd273feaf159"
+
 # Secrets (set via wrangler secret put):
 # EMAIL_INGEST_API_KEY - dox API key for posting to /api/documents/process
 # RESEND_API_KEY - for sending summary emails back to sender

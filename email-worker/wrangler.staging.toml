@@ -26,6 +26,14 @@ DOX_API_BASE = "https://doc-upload-site-staging.pages.dev"
 # detail page (Receive Info card) which surfaces this to users.
 EMAIL_DOMAIN = "supdox-staging.com"
 
+# D1 binding for the connector-slug routing path (Phase B0.6). Bound
+# to the staging database so a misrouted slug can never reach prod
+# data. Mirror prod IDs here is FORBIDDEN — see comment block above.
+[[d1_databases]]
+binding = "DB"
+database_name = "doc-upload-db-staging"
+database_id = "c6a4c856-0f13-4f29-8e34-f4a2c80060f0"
+
 # Secrets (set via `npx wrangler secret put --config wrangler.staging.toml`):
 #   EMAIL_INGEST_API_KEY - dox API key for posting to the staging Pages
 #                          project's /api/documents/process etc.

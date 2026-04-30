@@ -5,6 +5,10 @@ interface Env {
   EMAIL_DOMAIN: string;
   EMAIL_INGEST_API_KEY: string;
   RESEND_API_KEY: string;
+  // D1 binding for connector slug lookup (Phase B0.6). Optional so the
+  // worker can still boot in environments where the binding hasn't been
+  // wired yet — code that uses `env.DB` is guarded.
+  DB?: D1Database;
 }
 
 // Allowed MIME types for document attachments
@@ -50,13 +54,121 @@ export default {
 
     console.log(`Email received: from=${senderEmail} to=${recipientEmail}`);
 
-    // 1. Extract tenant slug from recipient
+    // 1. Extract local part of recipient address. This is the slug used
+    //    for both the new connector-slug routing path (Phase B0.6) and
+    //    the legacy tenant-slug fallback below.
     const slug = extractSlug(recipientEmail, env.EMAIL_DOMAIN);
     if (!slug) {
-      console.error(`Could not extract tenant slug from: ${recipientEmail}`);
+      console.error(`Could not extract slug from: ${recipientEmail}`);
       await sendReply(env, senderEmail, 'Delivery Failed',
         `The address ${recipientEmail} is not a valid document inbox. Expected format: {organization}@${env.EMAIL_DOMAIN}`);
       return;
+    }
+
+    // 1b. Connector slug routing (Phase B0.6). The connectors table now
+    //     carries its own slug column (migration 0050). If the local
+    //     part matches an active connector slug, route directly to the
+    //     connector-email-ingest webhook. This is the new primary path
+    //     for vendor-facing addresses (e.g. `acme-orders@supdox.com`).
+    //
+    //     If the lookup misses or the D1 binding isn't configured, we
+    //     fall through to the legacy tenant-slug + match-email path
+    //     below — preserving COA smart-upload and pre-B0.6 connector
+    //     setups that relied on subject/sender filters.
+    if (env.DB) {
+      try {
+        const connectorRow = await env.DB.prepare(
+          `SELECT id, tenant_id, active, deleted_at FROM connectors WHERE slug = ?`
+        ).bind(slug).first<{
+          id: string;
+          tenant_id: string;
+          active: number;
+          deleted_at: string | null;
+        }>();
+
+        if (connectorRow && connectorRow.active && !connectorRow.deleted_at) {
+          console.log(`route=connector-slug:${slug} connector_id=${connectorRow.id}`);
+
+          // Parse the email up front — we need attachments + subject/body.
+          const rawEmail = await streamToArrayBuffer(message.raw);
+          const parser = new PostalMime();
+          const parsed = await parser.parse(rawEmail);
+          const subject = parsed.subject || '(no subject)';
+          const senderName = parsed.from?.name || senderEmail;
+
+          const attachmentPayloads = (parsed.attachments || [])
+            .filter(att => {
+              if (att.disposition === 'inline') return false;
+              const content = att.content;
+              const size = typeof content === 'string' ? content.length : content.byteLength;
+              return size >= 1024;
+            })
+            .map(att => {
+              const content = att.content;
+              const bytes = content instanceof ArrayBuffer
+                ? new Uint8Array(content)
+                : typeof content === 'string'
+                  ? new TextEncoder().encode(content)
+                  : new Uint8Array(content);
+              return {
+                filename: att.filename || 'attachment',
+                content_base64: btoa(String.fromCharCode(...bytes)),
+                content_type: att.mimeType || 'application/octet-stream',
+                size: bytes.byteLength,
+              };
+            });
+
+          const ingestRes = await fetch(
+            `${env.DOX_API_BASE}/api/webhooks/connector-email-ingest`,
+            {
+              method: 'POST',
+              headers: {
+                'X-API-Key': env.EMAIL_INGEST_API_KEY,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                connector_id: connectorRow.id,
+                connector_slug: slug,
+                tenant_id: connectorRow.tenant_id,
+                subject,
+                sender: senderEmail,
+                body: parsed.text || '',
+                html: parsed.html || '',
+                attachments: attachmentPayloads,
+              }),
+            }
+          );
+
+          if (ingestRes.ok) {
+            const result = await ingestRes.json() as {
+              run_id: string; status: string;
+              orders_created: number; customers_created: number;
+            };
+            console.log(`Connector slug ingest complete: run=${result.run_id} status=${result.status} orders=${result.orders_created}`);
+            await sendReply(env, senderEmail, `Report Processed`,
+              `Hi ${senderName},\n\n` +
+              `Your email "${subject}" was processed by the ${slug} connector.\n\n` +
+              `Results: ${result.orders_created} order(s) created, ${result.customers_created} customer(s) created.\n\n` +
+              `— SupDox`);
+          } else {
+            const errText = await ingestRes.text().catch(() => 'Unknown error');
+            console.error(`Connector slug ingest failed: ${ingestRes.status} ${errText}`);
+            await sendReply(env, senderEmail, `Processing Error`,
+              `Hi ${senderName},\n\n` +
+              `Your email "${subject}" was received but processing failed. Our team has been notified.\n\n` +
+              `— SupDox`);
+          }
+          return; // Connector slug path is terminal — do NOT fall through.
+        }
+
+        console.log(`route=legacy:no-connector-slug-match slug=${slug}`);
+      } catch (err) {
+        // Lookup error — log and fall through. We never want a D1 hiccup
+        // to break inbound mail handling.
+        console.error(`route=legacy:connector-slug-lookup-error slug=${slug}:`, err);
+      }
+    } else {
+      console.log(`route=legacy:no-db-binding slug=${slug}`);
     }
 
     // 2. Validate tenant exists

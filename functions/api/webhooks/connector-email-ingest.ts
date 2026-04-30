@@ -13,7 +13,11 @@ interface EmailAttachmentPayload {
 }
 
 interface ConnectorEmailIngestBody {
-  connector_id: string;
+  // Primary connector identifier. Either `connector_id` (UUID) or
+  // `connector_slug` (vendor-friendly handle from migration 0050) MUST
+  // be provided. The email-worker (Phase B0.6) sends both for safety.
+  connector_id?: string;
+  connector_slug?: string;
   tenant_id: string;
   subject: string;
   sender: string;
@@ -33,27 +37,42 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const user = context.data.user as User;
     const payload: ConnectorEmailIngestBody = await context.request.json();
 
-    // Validate required fields
-    if (!payload.connector_id || !payload.tenant_id || !payload.sender) {
-      return errorToResponse(new BadRequestError('Missing required fields: connector_id, tenant_id, sender'));
+    // Validate required fields. Either connector_id or connector_slug
+    // must identify the target connector.
+    if ((!payload.connector_id && !payload.connector_slug) || !payload.tenant_id || !payload.sender) {
+      return errorToResponse(new BadRequestError('Missing required fields: connector_id|connector_slug, tenant_id, sender'));
     }
 
     // 1. Fetch the connector. Phase B0 universal model: any active
     //    connector can be the target of an email ingest — no per-type
     //    gate. The dispatch path discriminator is `input.type = 'email'`
-    //    on the orchestrator call below.
-    const connector = await context.env.DB.prepare(
-      `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active
-       FROM connectors WHERE id = ?`
-    ).bind(payload.connector_id).first<{
-      id: string;
-      tenant_id: string;
-      config: string;
-      field_mappings: string;
-      credentials_encrypted: string | null;
-      credentials_iv: string | null;
-      active: number;
-    }>();
+    //    on the orchestrator call below. Phase B0.6 added the slug
+    //    fallback so the email-worker can resolve by either identifier.
+    const connector = payload.connector_id
+      ? await context.env.DB.prepare(
+          `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active
+           FROM connectors WHERE id = ?`
+        ).bind(payload.connector_id).first<{
+          id: string;
+          tenant_id: string;
+          config: string;
+          field_mappings: string;
+          credentials_encrypted: string | null;
+          credentials_iv: string | null;
+          active: number;
+        }>()
+      : await context.env.DB.prepare(
+          `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active
+           FROM connectors WHERE slug = ?`
+        ).bind(payload.connector_slug!).first<{
+          id: string;
+          tenant_id: string;
+          config: string;
+          field_mappings: string;
+          credentials_encrypted: string | null;
+          credentials_iv: string | null;
+          active: number;
+        }>();
 
     if (!connector) {
       return jsonResponse({ error: 'Connector not found' }, 404);
