@@ -47,6 +47,7 @@ import { PublicForm } from './pages/forms/PublicForm';
 import { UpdateRequestForm } from './pages/forms/UpdateRequestForm';
 import { PublicApprovalPage } from './pages/forms/PublicApprovalPage';
 import { PublicDrop } from './pages/PublicDrop';
+import { PublicDocsConnectors } from './pages/PublicDocsConnectors';
 import { Approvals } from './pages/Approvals';
 import { Help } from './pages/Help';
 
@@ -77,6 +78,13 @@ function App() {
               the existing /api/connectors/:slug/drop endpoint with
               the token as the bearer. No app shell, no login. */}
           <Route path="/drop/:slug/:token" element={<PublicDrop />} />
+
+          {/* Phase D5 — vendor-facing public docs. Tenant admins
+              share this URL with their vendors so they have a
+              single canonical reference for every connector
+              delivery door (email, API, S3, public link, manual).
+              No auth, no app shell — pure documentation. */}
+          <Route path="/docs/connectors" element={<PublicDocsConnectors />} />
 
           {/* Protected routes with layout */}
           <Route element={<ProtectedRoute />}>

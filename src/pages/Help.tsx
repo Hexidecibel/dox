@@ -13,7 +13,9 @@
 import { useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
+  Alert,
   Box,
+  Button,
   Card,
   Divider,
   List,
@@ -22,6 +24,7 @@ import {
   ListItemText,
   Typography,
 } from '@mui/material';
+import { OpenInNew as OpenInNewIcon } from '@mui/icons-material';
 import { helpContent, type HelpModuleKey } from '../lib/helpContent';
 import { HelpWell } from '../components/HelpWell';
 
@@ -137,6 +140,40 @@ export function Help() {
                 {entry.headline}
               </Typography>
               <Divider sx={{ mb: 2 }} />
+              {/* Phase D5 — cross-link from the admin-facing connectors
+                  docs over to the vendor-facing public docs. Lets
+                  tenant admins discover the URL they should share with
+                  vendors without having to remember the path. Only
+                  shown on the connectors module since that's the only
+                  module with a paired public docs page (today). */}
+              {selected === 'connectors' && (
+                <Alert
+                  severity="info"
+                  variant="outlined"
+                  sx={{ mb: 2 }}
+                  action={
+                    <Button
+                      color="inherit"
+                      size="small"
+                      endIcon={<OpenInNewIcon fontSize="small" />}
+                      href="/docs/connectors"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Open
+                    </Button>
+                  }
+                >
+                  Share with your vendors:{' '}
+                  <Box component="code" sx={{ fontFamily: 'monospace' }}>
+                    /docs/connectors
+                  </Box>{' '}
+                  is a public, no-login page that walks anyone through
+                  every connector delivery door (email, API, S3, public
+                  link). Send it to anyone who needs to deliver files
+                  to one of your connectors.
+                </Alert>
+              )}
               <Typography variant="body1" sx={{ mb: 2 }}>
                 {entry.well}
               </Typography>
