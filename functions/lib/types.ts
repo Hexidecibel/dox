@@ -20,6 +20,13 @@ export interface Env {
    * disables the endpoint (fails closed with 401).
    */
   CONNECTOR_POLL_TOKEN?: string;
+  /**
+   * AES-GCM-256 key (64-char hex / 32 raw bytes) used by
+   * `functions/lib/intakeEncryption.ts` to encrypt connector intake
+   * credentials at rest (currently the R2 secret access key for
+   * Phase B3 S3-drop). Set per-environment as a Pages secret.
+   */
+  INTAKE_ENCRYPTION_KEY?: string;
 }
 
 export interface User {

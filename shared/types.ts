@@ -789,12 +789,25 @@ export interface ConnectorRow {
   last_error: string | null;
   /** R2 key of the sample file uploaded during the wizard discover-schema step. */
   sample_r2_key: string | null;
+  // === Phase B intake credentials (migration 0047) ===
+  /** B2 — Bearer token for the per-connector HTTP POST drop endpoint. */
+  api_token?: string | null;
+  /** B3 — Auto-provisioned R2 bucket name for vendor S3 drops. */
+  r2_bucket_name?: string | null;
+  /** B3 — Vendor-facing R2 access key ID (plaintext; rotatable). */
+  r2_access_key_id?: string | null;
+  /** B3 — Vendor-facing R2 secret access key, encrypted via INTAKE_ENCRYPTION_KEY. */
+  r2_secret_access_key_encrypted?: string | null;
+  /** B4 — Token embedded in the public drop link URL. */
+  public_link_token?: string | null;
+  /** B4 — Optional public-link expiry (unix seconds). NULL = no expiry. */
+  public_link_expires_at?: number | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface ApiConnector extends Omit<ConnectorRow, 'credentials_encrypted' | 'credentials_iv'> {
+export interface ApiConnector extends Omit<ConnectorRow, 'credentials_encrypted' | 'credentials_iv' | 'r2_secret_access_key_encrypted'> {
   has_credentials: boolean;
   tenant_name?: string;
   created_by_name?: string;
