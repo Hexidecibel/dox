@@ -162,10 +162,12 @@ describe('POST /api/connectors/:id/test — file_watch probe', () => {
 });
 
 describe('POST /api/connectors/:id/test — email probe', () => {
-  it('returns probe.ok=false when no email_domain_mappings rows exist for the tenant', async () => {
-    // Clean the table so the probe sees zero mappings.
-    await db.prepare('DELETE FROM email_domain_mappings WHERE tenant_id = ?').bind(seed.tenantId).run();
+  // The probe no longer consults `email_domain_mappings` — see
+  // `probeEmail` in `functions/api/connectors/[id]/test.ts`. The connector
+  // dispatch path is sender-agnostic; the receive address itself is the
+  // routing key, so the probe only needs a valid config + a tenant slug.
 
+  it('returns probe.ok=true with the inbound receive address on prod hosts', async () => {
     const id = await insertConnector({
       tenantId: seed.tenantId,
       connectorType: 'email',
@@ -178,22 +180,15 @@ describe('POST /api/connectors/:id/test — email probe', () => {
     const body = (await response.json()) as {
       probe: { ok: boolean; message: string; details: Record<string, unknown> };
     };
-    expect(body.probe.ok).toBe(false);
-    expect(body.probe.message).toMatch(/No email_domain_mappings/i);
+    expect(body.probe.ok).toBe(true);
     expect(body.probe.details.inbound_address).toBe('test-corp@supdox.com');
+    expect(body.probe.details.environment).toBe('production');
+    // Probe message must NOT reference the dropped email_domain_mappings table.
+    expect(body.probe.message).not.toMatch(/email_domain_mappings/i);
+    expect(body.probe.message).toMatch(/test-corp@supdox\.com/);
   });
 
-  it('returns probe.ok=true with sender_domains when a mapping row exists', async () => {
-    await db.prepare('DELETE FROM email_domain_mappings WHERE tenant_id = ?').bind(seed.tenantId).run();
-    const mappingId = generateTestId();
-    await db
-      .prepare(
-        `INSERT INTO email_domain_mappings (id, tenant_id, domain, default_user_id, active)
-         VALUES (?, ?, ?, ?, 1)`,
-      )
-      .bind(mappingId, seed.tenantId, 'probe-sender.example.com', seed.userId)
-      .run();
-
+  it('returns probe.ok=false with a staging-not-wired message on staging hosts', async () => {
     const id = await insertConnector({
       tenantId: seed.tenantId,
       connectorType: 'email',
@@ -201,15 +196,33 @@ describe('POST /api/connectors/:id/test — email probe', () => {
     });
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
 
-    const response = await testConnector(makeContext(id, user));
+    // Hand-roll a context with a staging URL so isStagingHost() returns true.
+    const stagingRequest = new Request(
+      `https://doc-upload-site-staging.pages.dev/api/connectors/${id}/test`,
+      { method: 'POST' },
+    );
+    const ctx = {
+      request: stagingRequest,
+      env,
+      data: { user },
+      params: { id },
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+      next: async () => new Response(null),
+      functionPath: `/api/connectors/${id}/test`,
+    } as any;
+
+    const response = await testConnector(ctx);
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
-      probe: { ok: boolean; details: Record<string, unknown> };
+      probe: { ok: boolean; message: string; details: Record<string, unknown> };
     };
-    expect(body.probe.ok).toBe(true);
-    expect(body.probe.details.inbound_address).toBe('test-corp@supdox.com');
-    const domains = body.probe.details.sender_domains as string[];
-    expect(domains).toContain('probe-sender.example.com');
+    expect(body.probe.ok).toBe(false);
+    expect(body.probe.message).toMatch(/staging/i);
+    expect(body.probe.message).not.toMatch(/email_domain_mappings/i);
+    expect(body.probe.details.environment).toBe('staging');
+    // Address still derived (so the UI can show it), just with the staging domain.
+    expect(body.probe.details.inbound_address).toBe('test-corp@supdox-staging.com');
   });
 });
 

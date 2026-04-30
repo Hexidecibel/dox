@@ -17,12 +17,9 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef, type DragEvent } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { formatDate } from '../../utils/format';
 import {
-  Accordion,
-  AccordionDetails,
-  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -61,7 +58,6 @@ import {
   Refresh as RefreshIcon,
   Delete as DeleteIcon,
   Edit as EditIcon,
-  ExpandMore as ExpandMoreIcon,
   ContentCopy as CopyIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
@@ -74,6 +70,7 @@ import {
   type CoreFieldKey,
 } from '../../components/connectors/doxFields';
 import { FieldMappingEditor } from '../../components/connectors/FieldMappingEditor';
+import { ACCEPTED_CONNECTOR_FILE_EXTENSIONS } from '../../../shared/connectorFileTypes';
 
 // ---------------------------------------------------------------------------
 // Local types
@@ -181,15 +178,31 @@ const RUNS_PER_PAGE = 20;
 // Main component
 // ---------------------------------------------------------------------------
 
+/**
+ * Location state shape used by the wizard to flag a freshly-created
+ * connector. When present, the detail page renders a one-time success
+ * toast pointing the partner at the right intake path (drop zone for
+ * file_watch, receive address for email). See `ConnectorWizard.handleSave`.
+ */
+interface ConnectorDetailLocationState {
+  justCreated?: boolean;
+  connectorType?: Connector['connector_type'] | null;
+}
+
 export function ConnectorDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [connector, setConnector] = useState<Connector | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [saveSnack, setSaveSnack] = useState('');
+  // Tracks whether the wizard's "just created" hint has already been
+  // surfaced for this navigation, so we don't re-trigger the toast on
+  // every state change once the connector / tenant load resolves.
+  const justCreatedHintShownRef = useRef(false);
 
   // Inline edit state — name is the only field with a "click to edit" cycle.
   const [editingName, setEditingName] = useState(false);
@@ -265,6 +278,61 @@ export function ConnectorDetail() {
   useEffect(() => { loadRuns(); }, [loadRuns]);
 
   // ---------------------------------------------------------------------
+  // Wizard end-state hint (Phase A2.3) — fires once per navigation when
+  // the wizard hands off a freshly-created connector via location state.
+  // Email connectors get the receive address inlined; file_watch points
+  // at the drop zone above. Edits don't carry the flag, so this is silent
+  // for the inline-edit / remap flows.
+  //
+  // Waits for the connector AND (for email) the tenant to finish loading
+  // so the toast can show the actual `slug@domain` address. The `ref`
+  // guard prevents re-firing if either record refreshes after the first
+  // successful render.
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    if (justCreatedHintShownRef.current) return;
+    if (loading || !connector) return;
+    const state = (location.state || null) as ConnectorDetailLocationState | null;
+    if (!state?.justCreated) return;
+
+    // `loadConnector` resolves both the connector AND tenant fetches
+    // before flipping `loading` to false, so by this point `tenant` is
+    // either populated or known-null (fetch failed). No additional wait
+    // needed; if tenant is null for an email connector we fall back to
+    // a generic message.
+    const isEmail = connector.connector_type === 'email';
+    const tenantSlug = tenant?.slug ?? null;
+
+    let message: string;
+    if (connector.connector_type === 'file_watch') {
+      message =
+        'Connector created. Drop a file into the upload zone above to test, or share the address with your vendor.';
+    } else if (isEmail) {
+      // Mirror ReceiveInfoCard's domain logic so the hint and the card
+      // below stay consistent.
+      const isStaging =
+        typeof window !== 'undefined' &&
+        !!window.location?.host &&
+        (window.location.host.toLowerCase().includes('staging') ||
+          window.location.host.toLowerCase().endsWith('.pages.dev'));
+      const emailDomain = isStaging ? 'supdox-staging.com' : 'supdox.com';
+      const address = tenantSlug ? `${tenantSlug}@${emailDomain}` : null;
+      message = address
+        ? `Connector created. Send emails with attachments to ${address} to test.`
+        : 'Connector created. See the receive address card below to start sending email.';
+    } else {
+      message = 'Connector created.';
+    }
+
+    setSaveSnack(message);
+    justCreatedHintShownRef.current = true;
+    // Clear the marker so a manual refresh of the detail page doesn't
+    // re-trigger the hint. `replace: true` swaps the current history
+    // entry rather than pushing a new one.
+    navigate(location.pathname, { replace: true, state: null });
+  }, [loading, connector, tenant, location.state, location.pathname, navigate]);
+
+  // ---------------------------------------------------------------------
   // Patch helper — optimistic update with rollback on error.
   // ---------------------------------------------------------------------
 
@@ -336,17 +404,16 @@ export function ConnectorDetail() {
     }
   };
 
-  // Mirror of the backend's classifyFile() in functions/api/connectors/[id]/run.ts.
-  // Keep this list in sync with the server-side accept set so users get a
-  // friendly inline error instead of a 400 round-trip.
-  const ACCEPTED_EXTENSIONS = ['.csv', '.tsv', '.txt', '.xlsx', '.xls', '.pdf'];
+  // Accepted-extension list lives in shared/connectorFileTypes.ts so this
+  // drop zone and the server-side classifier in
+  // functions/api/connectors/[id]/run.ts cannot drift apart.
   const MAX_FILE_BYTES = 50 * 1024 * 1024; // 50 MB — safety cap; the backend
                                             // enforces tighter per-kind limits.
 
   const validateRunFile = useCallback((file: File): string | null => {
     const name = file.name.toLowerCase();
-    if (!ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext))) {
-      return `Unsupported file type. Accepted: ${ACCEPTED_EXTENSIONS.join(', ')}`;
+    if (!ACCEPTED_CONNECTOR_FILE_EXTENSIONS.some((ext) => name.endsWith(ext))) {
+      return `Unsupported file type. Accepted: ${ACCEPTED_CONNECTOR_FILE_EXTENSIONS.join(', ')}`;
     }
     if (file.size > MAX_FILE_BYTES) {
       return `File too large (${Math.round(file.size / 1024 / 1024)}MB). Limit is ${Math.round(MAX_FILE_BYTES / 1024 / 1024)}MB.`;
@@ -750,7 +817,7 @@ export function ConnectorDetail() {
                   : 'Drop a CSV, TSV, XLSX, or PDF here, or click to pick a file'}
             </Typography>
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-              Accepted: .csv, .tsv, .txt, .xlsx, .xls, .pdf · max 50 MB
+              Accepted: {ACCEPTED_CONNECTOR_FILE_EXTENSIONS.join(', ')} · max 50 MB
             </Typography>
             {running && (
               <Box sx={{ display: 'flex', justifyContent: 'center', mt: 1.5 }}>
@@ -761,7 +828,7 @@ export function ConnectorDetail() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".csv,.tsv,.txt,.xlsx,.xls,.pdf"
+            accept={ACCEPTED_CONNECTOR_FILE_EXTENSIONS.join(',')}
             onChange={handleFileInputChange}
             style={{ display: 'none' }}
             aria-hidden="true"
@@ -962,12 +1029,61 @@ export function ConnectorDetail() {
                   {runs.map((run) => (
                     <TableRow key={run.id} hover>
                       <TableCell>
-                        <Chip label={run.status} size="small" color={runStatusColor(run.status)} />
+                        <Stack spacing={0.25}>
+                          <Chip
+                            label={run.status}
+                            size="small"
+                            color={runStatusColor(run.status)}
+                            sx={{ alignSelf: 'flex-start' }}
+                          />
+                          {run.error_message && (run.status === 'error' || run.status === 'partial') && (
+                            // Truncated error preview — full text lives in the tooltip so partners
+                            // don't have to crack open DevTools to see why a run failed.
+                            <Tooltip title={run.error_message} arrow placement="top">
+                              <Typography
+                                variant="caption"
+                                color="error"
+                                sx={{
+                                  display: '-webkit-box',
+                                  WebkitLineClamp: 2,
+                                  WebkitBoxOrient: 'vertical',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  maxWidth: 280,
+                                  cursor: 'help',
+                                }}
+                              >
+                                {run.error_message}
+                              </Typography>
+                            </Tooltip>
+                          )}
+                        </Stack>
                       </TableCell>
                       <TableCell>{formatDate(run.started_at)}</TableCell>
                       <TableCell>{run.completed_at ? formatDate(run.completed_at) : '-'}</TableCell>
                       <TableCell align="right">{run.records_found}</TableCell>
-                      <TableCell align="right">{run.records_created}</TableCell>
+                      <TableCell align="right">
+                        {run.records_created > 0 ? (
+                          // The /orders endpoint accepts ?connector_id=...; we use that as the
+                          // smallest viable filter. Per-run filtering would require a
+                          // connector_run_id query param on the orders page (not added in this
+                          // slice — flagged for future work).
+                          <Tooltip title={`View orders from ${connector.name}`} arrow>
+                            <Button
+                              size="small"
+                              variant="text"
+                              onClick={() =>
+                                navigate(`/orders?connector_id=${encodeURIComponent(connector.id)}`)
+                              }
+                              sx={{ minWidth: 0, p: 0.25, textTransform: 'none' }}
+                            >
+                              {run.records_created} →
+                            </Button>
+                          </Tooltip>
+                        ) : (
+                          run.records_created
+                        )}
+                      </TableCell>
                       <TableCell align="right">
                         <Typography variant="body2" color={run.records_errored > 0 ? 'error' : 'text.primary'}>
                           {run.records_errored}
@@ -1013,7 +1129,11 @@ export function ConnectorDetail() {
 
       <Snackbar
         open={!!saveSnack}
-        autoHideDuration={3500}
+        // Slightly longer than the previous 3500ms — the wizard
+        // end-state hint (Phase A2.3) includes a full email address
+        // partners need to read; routine "Changes saved" toasts can
+        // afford to linger a moment longer too.
+        autoHideDuration={6000}
         onClose={() => setSaveSnack('')}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
         message={saveSnack}
@@ -1120,7 +1240,21 @@ function ReceiveInfoCard({
     return { matched: false, reason: 'No pattern matches this subject' };
   }, [testSubject, subjectPatterns]);
 
-  const receiveAddress = tenantSlug ? `${tenantSlug}@supdox.com` : null;
+  // Detect staging by hostname. Mirrors the server-side `isStagingHost`
+  // helper in `functions/api/connectors/[id]/test.ts` so the in-page
+  // notice and the test/probe message stay consistent.
+  const isStaging = useMemo(() => {
+    if (typeof window === 'undefined' || !window.location?.host) return false;
+    const host = window.location.host.toLowerCase();
+    return host.includes('staging') || host.endsWith('.pages.dev');
+  }, []);
+
+  // Email domain is environment-specific. Staging is a placeholder until
+  // DNS / Email Routing is wired (see `email-worker/wrangler.staging.toml`),
+  // so we still render an address for completeness — the staging Alert
+  // below tells the user it's not actually receiving mail yet.
+  const emailDomain = isStaging ? 'supdox-staging.com' : 'supdox.com';
+  const receiveAddress = tenantSlug ? `${tenantSlug}@${emailDomain}` : null;
   const hasNoFilter = subjectPatterns.length === 0 && !senderFilterLocal.trim();
 
   const copyToClipboard = (text: string) => {
@@ -1129,27 +1263,19 @@ function ReceiveInfoCard({
     } catch { /* no-op */ }
   };
 
-  const curlExample = useMemo(() => {
-    return [
-      `curl -X POST https://dox.supdox.com/api/webhooks/connector-email-ingest \\`,
-      `  -H "Content-Type: application/json" \\`,
-      `  -H "X-API-Key: $EMAIL_INGEST_API_KEY" \\`,
-      `  -d '{`,
-      `    "connector_id": "${connector.id}",`,
-      `    "tenant_id": "${connector.tenant_id}",`,
-      `    "subject": "Test order email",`,
-      `    "sender": "sender@example.com",`,
-      `    "body": "plain text body",`,
-      `    "attachments": []`,
-      `  }'`,
-    ].join('\n');
-  }, [connector.id, connector.tenant_id]);
-
   return (
     <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
       <Typography variant="h6" fontWeight={600} sx={{ mb: 2 }}>
         Receive info
       </Typography>
+
+      {isStaging && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Email ingestion isn't wired up on staging — emails sent to a staging
+          connector address won't be received. Test the email path on prod or
+          use the manual upload zone above.
+        </Alert>
+      )}
 
       {hasNoFilter && (
         <Alert severity="error" sx={{ mb: 2 }}>
@@ -1178,8 +1304,11 @@ function ReceiveInfoCard({
           </Typography>
         )}
         <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-          Emails sent to this address with subject matching the patterns below route to this connector.
-          If no patterns are set, this connector matches any email for its tenant.
+          Send emails with attachments (PDF, CSV, XLSX) to this address. The connector
+          will process the attachments and create orders/customers. Plain-text emails
+          without attachments are ignored. Subject patterns below further scope which
+          emails match this connector — if no patterns are set, this connector matches
+          any email for its tenant.
         </Typography>
       </Box>
 
@@ -1283,41 +1412,16 @@ function ReceiveInfoCard({
         />
       </Box>
 
-      <Accordion variant="outlined" disableGutters sx={{ mt: 2 }}>
-        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-          <Typography variant="subtitle2">How to send a test email via webhook</Typography>
-        </AccordionSummary>
-        <AccordionDetails>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            Send email-shaped payloads directly to the webhook endpoint (bypasses SMTP). The
-            <code> X-API-Key</code> value is the <code>EMAIL_INGEST_API_KEY</code> secret from your deployment
-            environment.
-          </Typography>
-          <Box
-            component="pre"
-            sx={{
-              fontFamily: 'monospace',
-              fontSize: '0.8rem',
-              bgcolor: 'grey.50',
-              p: 1.5,
-              borderRadius: 1,
-              m: 0,
-              overflow: 'auto',
-              whiteSpace: 'pre-wrap',
-            }}
-          >
-            {curlExample}
-          </Box>
-          <Button
-            size="small"
-            startIcon={<CopyIcon />}
-            onClick={() => copyToClipboard(curlExample)}
-            sx={{ mt: 1 }}
-          >
-            Copy curl
-          </Button>
-        </AccordionDetails>
-      </Accordion>
+      {/*
+        Note: an earlier version of this card had an Accordion with a sample
+        `curl` POST against /api/webhooks/connector-email-ingest using the
+        EMAIL_INGEST_API_KEY service secret. That was misleading partner-facing
+        UI — the secret is owned by the email-worker for machine-to-machine
+        calls and partners can't (and shouldn't) have it. The webhook path
+        still exists for internal testing; reach for it from a dev shell with
+        the secret pulled from 1Password rather than asking the user to
+        construct the call from a UI hint.
+      */}
     </Paper>
   );
 }

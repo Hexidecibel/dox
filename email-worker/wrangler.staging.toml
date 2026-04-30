@@ -1,0 +1,32 @@
+name = "dox-email-worker-staging"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Staging twin of dox-email-worker. Mirrors the connector-poller split:
+# this worker exists in two flavors so staging can have its own deploy
+# artifact pointing at the staging Pages project. Keep this file in sync
+# with `wrangler.toml` whenever new vars/secrets are added — the only
+# values that should differ between prod and staging are env-specific
+# URLs/domains.
+#
+# Manual deploy:
+#   cd email-worker && npx wrangler deploy --config wrangler.staging.toml
+# Or via the deploy script:
+#   ./bin/deploy-email-worker --staging
+
+[vars]
+# Staging Pages project URL — MUST stay distinct from prod (`supdox.com`)
+# so a misconfigured key cannot reach prod data.
+DOX_API_BASE = "https://doc-upload-site-staging.pages.dev"
+
+# Staging email isn't wired to a real domain yet — outbound mail to a
+# staging connector address is a no-op until DNS is configured. The
+# value below is a placeholder so the worker code doesn't crash on
+# slug extraction; see the in-app staging notice on the connector
+# detail page (Receive Info card) which surfaces this to users.
+EMAIL_DOMAIN = "supdox-staging.com"
+
+# Secrets (set via `npx wrangler secret put --config wrangler.staging.toml`):
+#   EMAIL_INGEST_API_KEY - dox API key for posting to the staging Pages
+#                          project's /api/documents/process etc.
+#   RESEND_API_KEY       - for sending summary emails back to sender.

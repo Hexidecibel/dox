@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+#
+# Deploy the `dox-email-worker` Cloudflare Worker.
+#
+# This is a SEPARATE deploy artifact from the main Pages project — the
+# Worker accepts inbound email via Cloudflare Email Routing and forwards
+# attachments to the dox API as document ingest payloads. It cannot live
+# inside the Pages project because Pages Functions don't accept the
+# `email` runtime trigger.
+#
+# Secrets (per-environment, set via `wrangler secret put`):
+#   EMAIL_INGEST_API_KEY - dox API key for machine-to-machine ingest calls.
+#   RESEND_API_KEY       - for sending summary/error replies to the sender.
+#
+#     # one-time, from this script's directory:
+#     cd email-worker
+#     npx wrangler secret put EMAIL_INGEST_API_KEY                              # prod
+#     npx wrangler secret put EMAIL_INGEST_API_KEY --config wrangler.staging.toml  # staging
+#     # repeat for RESEND_API_KEY
+#
+# Usage:
+#   ./bin/deploy-email-worker            # prod deploy (dox-email-worker)
+#   ./bin/deploy-email-worker --staging  # staging deploy (dox-email-worker-staging)
+#   ./bin/deploy-email-worker --dry-run  # validate config only (combine with --staging)
+#
+# Note on staging: as of this writing, staging EMAIL_DOMAIN is a
+# placeholder (`supdox-staging.com`) and is NOT wired to real DNS /
+# Email Routing. Deploying the staging worker is harmless but inbound
+# mail will not reach it until DNS is configured. The connector detail
+# page surfaces this caveat to users on the Receive Info card.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DRY_RUN=0
+STAGING=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --staging) STAGING=1 ;;
+    -h|--help)
+      grep '^#' "$0" | sed 's/^#//'
+      exit 0
+      ;;
+  esac
+done
+
+if [[ "$STAGING" == "1" ]]; then
+  CONFIG_ARGS=(--config wrangler.staging.toml)
+  LABEL="dox-email-worker-staging (STAGING)"
+else
+  CONFIG_ARGS=()
+  LABEL="dox-email-worker (PROD)"
+fi
+
+echo "==> Deploying $LABEL"
+cd email-worker
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  npx wrangler deploy "${CONFIG_ARGS[@]}" --dry-run
+  echo "==> Dry run complete (no upload)"
+else
+  npx wrangler deploy "${CONFIG_ARGS[@]}"
+  echo
+  echo "==> Reminder: ensure EMAIL_INGEST_API_KEY and RESEND_API_KEY are"
+  echo "    set on this worker via 'wrangler secret put' (and that the"
+  echo "    API key value is a valid dox API key on the corresponding"
+  echo "    Pages project)."
+  if [[ "$STAGING" == "1" ]]; then
+    echo "==> Staging note: EMAIL_DOMAIN is a placeholder. Inbound mail"
+    echo "    will not reach the worker until DNS / Email Routing is wired."
+  fi
+fi

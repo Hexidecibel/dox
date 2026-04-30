@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { formatDate } from '../utils/format';
 import {
   Box,
@@ -72,6 +72,11 @@ export function Orders() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const { selectedTenantId } = useTenant();
+  const [searchParams, setSearchParams] = useSearchParams();
+  // URL-driven filter — set by deep links from the connector detail page so
+  // a partner can jump from a successful run row to "the orders this run
+  // created" without learning the orders search box.
+  const connectorIdFilter = searchParams.get('connector_id') || '';
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -95,6 +100,7 @@ export function Orders() {
       const result = await api.orders.list({
         tenant_id: selectedTenantId || undefined,
         status: statusFilter || undefined,
+        connector_id: connectorIdFilter || undefined,
         search: search.trim() || undefined,
         limit: ITEMS_PER_PAGE,
         offset: (page - 1) * ITEMS_PER_PAGE,
@@ -106,7 +112,14 @@ export function Orders() {
     } finally {
       setLoading(false);
     }
-  }, [selectedTenantId, statusFilter, search, page]);
+  }, [selectedTenantId, statusFilter, connectorIdFilter, search, page]);
+
+  const clearConnectorFilter = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('connector_id');
+    setSearchParams(next);
+    setPage(1);
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     loadOrders();
@@ -182,7 +195,7 @@ export function Orders() {
       </Box>
 
       {/* Filters */}
-      <Box sx={{ mb: 3, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+      <Box sx={{ mb: 3, display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
         <TextField
           placeholder="Search order #, customer, PO..."
           size="small"
@@ -213,6 +226,15 @@ export function Orders() {
             ))}
           </Select>
         </FormControl>
+        {connectorIdFilter && (
+          <Chip
+            label="Filtered by connector"
+            size="small"
+            color="primary"
+            variant="outlined"
+            onDelete={clearConnectorFilter}
+          />
+        )}
       </Box>
 
       {error && (

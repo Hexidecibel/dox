@@ -709,15 +709,21 @@ orders/customers in the UI without us touching a thing.
 
 | Step | Action |
 |------|--------|
-| A1 | Fresh-eyes walkthrough on staging with a realistic vendor data file. Verify manual upload (drag-drop on `ConnectorDetail.tsx`) and email (`/api/webhooks/email-ingest`, `/api/webhooks/connector-email-ingest`) both work end-to-end. Punch list any rough edges; the partner's two issues were UX-not-broken, so this should be short. |
-| A2 | "Email drop" callout card on `src/pages/admin/ConnectorDetail.tsx`, rendered when the connector has an email mapping configured. Shows `Send emails with attachments to: {slug}@supdox.com` with a copy button, a 1–2 sentence "how to use" blurb, and a "test by emailing yourself" hint. |
-| A3 | Wizard end-state hint. After Save/Finish on the connector creation wizard, surface a panel listing each available intake path for that connector type with a "send a file →" link/button per path. Day-one: manual upload + (where configured) email. Phase B adds API + S3 + public link automatically as those paths gain support. |
+| A1 ✓ | Fresh-eyes walkthrough on staging with a realistic vendor data file. Verify manual upload (drag-drop on `ConnectorDetail.tsx`) and email (`/api/webhooks/email-ingest`, `/api/webhooks/connector-email-ingest`) both work end-to-end. **Done 2026-04-29; punch list at `docs/connectors-A1-walkthrough-2026-04-29.md` (9 high / 18 medium / 13 low).** |
+| A2 | Fold all 9 high-severity audit items in, three batches: |
+| A2.1 | **Batch 1 — quick UI fixes (no design calls).** (a) Drop zone hardcoded extension list duplicates server-side `classifyFile()` — single source of truth (`src/pages/admin/ConnectorDetail.tsx`, `functions/api/connectors/[id]/run.ts`). (b) Run rows hide `error_message` on failure — surface in the runs table or detail panel (`src/pages/admin/ConnectorDetail.tsx`). (c) Runs don't link to created orders/customers — add "View N orders" link (`src/pages/admin/ConnectorDetail.tsx`). (d) Webhook `curl` example hardcodes `dox.supdox.com` — use `window.location.origin` / env (`src/pages/admin/ConnectorDetail.tsx`). (e) Legacy `Connectors.tsx` JSON dialog bypasses wizard validation — gate to super_admin only with a warning (`src/pages/admin/Connectors.tsx`). |
+| A2.2 | **Batch 2 — email card overhaul.** (a) `email-worker/wrangler.toml` is hardcoded to prod (`supdox.com`); add `email-worker/wrangler.staging.toml` so staging email-worker exists or is explicitly absent (and staging UI labels reflect that). (b) **Decision:** rewrite the email probe to NOT mention `email_domain_mappings` — connector address itself is the routing key, sender-domain restriction is deferred (`functions/api/connectors/[id]/test.ts`, `src/pages/admin/ConnectorDetail.tsx`). Probe focuses on "your address is `slug@supdox.com`, send emails with attachments here" + copy button. (c) **Decision:** remove the webhook `curl` example (with `X-API-Key: $EMAIL_INGEST_API_KEY`) from the partner-facing card — service-only secret, not partner-producible. Move to internal docs or delete (`src/pages/admin/ConnectorDetail.tsx`). |
+| A2.3 | **Batch 3 — wizard end-state hint** (was A3). After Save/Finish on the connector creation wizard, surface a panel listing each available intake path for that connector type with a "send a file →" link/button per path. Day-one: manual upload + (where configured) email. Phase B adds API + S3 + public link automatically as those paths gain support. |
 
-**Estimate:** ~1 day.
+**Out of scope (audit item #6):** UI to manage `email_domain_mappings`
+— connector email is sender-agnostic for now.
 
-**Ships when:** punch list empty, email-drop card renders correctly,
-wizard end-state lists every applicable intake path with working
-"send a file" affordances.
+**Estimate:** ~2–3 days. Batch 1 ~1d, Batch 2 ~0.5–1d, Batch 3 ~0.25d.
+
+**Ships when:** all 9 high-severity audit items closed, email card
+renders the rewritten probe (no `email_domain_mappings` mention, no
+partner-facing webhook `curl`), wizard end-state lists every
+applicable intake path with working "send a file" affordances.
 
 #### Phase B — Build intake paths
 

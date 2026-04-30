@@ -145,13 +145,46 @@ async function probeFileWatch(
 }
 
 /**
- * Live probe for an email connector. Verifies an email_domain_mappings row
- * exists for the tenant and reports the inbound address. Missing mapping
- * is a warning, not a hard failure — the connector can still work if
- * subject patterns match.
+ * Detect whether the request is hitting a staging deployment. Staging
+ * doesn't have inbound email wired (see `email-worker/wrangler.staging.toml`)
+ * so the probe surfaces a different message there. Defaults to "prod" on
+ * unparseable URLs — better to underclaim "staging" than to mislabel a
+ * real prod connector as staging.
+ */
+function isStagingHost(request: Request): boolean {
+  try {
+    const host = new URL(request.url).host.toLowerCase();
+    return host.includes('staging') || host.endsWith('.pages.dev');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the receive address for an email connector. Mirrors the format
+ * baked into `email-worker` (`<slug>@<EMAIL_DOMAIN>`). The domain is
+ * inferred from the request host on staging vs prod — keeping this in
+ * one place avoids hardcoding `supdox.com` everywhere.
+ */
+function emailDomainForRequest(request: Request): string {
+  return isStagingHost(request) ? 'supdox-staging.com' : 'supdox.com';
+}
+
+/**
+ * Live probe for an email connector. Validates the config shape (subject
+ * patterns or sender filter) and reports the inbound receive address.
+ *
+ * Note: this probe deliberately does NOT consult `email_domain_mappings`.
+ * The connector dispatch path (`functions/api/webhooks/connector-email-ingest.ts`)
+ * is sender-agnostic — the receive address itself is the routing key, and
+ * any sender can email it. A per-connector sender allowlist may be added
+ * later if spam becomes a real problem; for now keeping the probe honest
+ * matters more than preserving a misleading "configure mappings first"
+ * message that sent users on a wild goose chase.
  */
 async function probeEmail(
   env: Env,
+  request: Request,
   connector: { id: string; tenant_id: string; config: string },
 ): Promise<{
   probe: string;
@@ -183,36 +216,33 @@ async function probeEmail(
     .bind(connector.tenant_id)
     .first<{ slug: string; name: string }>();
 
-  const inboundAddress = tenant?.slug ? `${tenant.slug}@supdox.com` : null;
+  const domain = emailDomainForRequest(request);
+  const inboundAddress = tenant?.slug ? `${tenant.slug}@${domain}` : null;
+  const staging = isStagingHost(request);
 
-  // Look up email_domain_mappings rows for this tenant — each row enables
-  // ingest from a specific sender domain. Migration 0017 drops this table
-  // (its data lives elsewhere in prod); the probe tolerates a missing
-  // table as "no mappings configured" rather than 500ing.
-  let domains: string[] = [];
-  try {
-    const mappingRows = await env.DB.prepare(
-      `SELECT domain FROM email_domain_mappings WHERE tenant_id = ? AND active = 1`,
-    )
-      .bind(connector.tenant_id)
-      .all<{ domain: string }>();
-    domains = (mappingRows.results || []).map((r) => r.domain);
-  } catch {
-    domains = [];
-  }
-
-  if (domains.length === 0) {
+  if (staging) {
     return {
       probe: 'email',
       ok: false,
       message:
-        inboundAddress
-          ? `No email_domain_mappings configured for this tenant. Emails to ${inboundAddress} will be rejected until a sender-domain row is added.`
-          : 'No email_domain_mappings configured and tenant slug is unavailable.',
+        "Email ingestion isn't wired on staging yet. Use the manual upload zone above, or test the email path on prod.",
       details: {
         inbound_address: inboundAddress,
         tenant_name: tenant?.name ?? null,
-        sender_domains: [],
+        environment: 'staging',
+      },
+    };
+  }
+
+  if (!inboundAddress) {
+    return {
+      probe: 'email',
+      ok: false,
+      message: 'Tenant slug is unavailable — cannot derive a receive address.',
+      details: {
+        inbound_address: null,
+        tenant_name: tenant?.name ?? null,
+        environment: 'production',
       },
     };
   }
@@ -220,13 +250,12 @@ async function probeEmail(
   return {
     probe: 'email',
     ok: true,
-    message: inboundAddress
-      ? `Ready: inbound at ${inboundAddress} (accepts ${domains.length} sender domain${domains.length === 1 ? '' : 's'})`
-      : `Ready: ${domains.length} sender domain mapping(s) configured`,
+    message:
+      `Send emails with attachments to ${inboundAddress}. The connector will process the attachments. Note: any sender domain is currently accepted.`,
     details: {
       inbound_address: inboundAddress,
       tenant_name: tenant?.name ?? null,
-      sender_domains: domains,
+      environment: 'production',
     },
   };
 }
@@ -360,7 +389,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         probe = await probeFileWatch(context.env, connector);
         break;
       case 'email':
-        probe = await probeEmail(context.env, connector);
+        probe = await probeEmail(context.env, context.request, connector);
         break;
       case 'webhook':
         probe = probeWebhook(context.request, connector);

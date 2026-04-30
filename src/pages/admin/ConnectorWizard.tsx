@@ -401,6 +401,7 @@ export function ConnectorWizard() {
       };
 
       let resultId: string;
+      let justCreated = false;
       if (isEditMode && connectorId) {
         const result = await api.connectors.update(connectorId, data) as { connector?: { id?: string } };
         resultId = result.connector?.id || connectorId;
@@ -421,8 +422,23 @@ export function ConnectorWizard() {
           sample_r2_key: state.sample?.sample_id,
         }) as { connector?: { id?: string }; id?: string };
         resultId = result.connector?.id || result.id || '';
+        justCreated = true;
       }
-      navigate(`/admin/connectors/${resultId}`);
+      // Phase A2.3: when a connector is freshly created, the detail page
+      // hosts the "what now?" affordances (manual upload zone for
+      // file_watch, receive-address card for email). Pass a one-time
+      // hint via location state so the destination can render a
+      // contextual success toast pointing the partner at the right
+      // intake path. Edits don't get the hint — the user already knows
+      // where they are.
+      navigate(`/admin/connectors/${resultId}`, {
+        state: justCreated
+          ? {
+              justCreated: true,
+              connectorType: state.connectorType,
+            }
+          : undefined,
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save connector');
     } finally {

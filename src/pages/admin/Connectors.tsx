@@ -293,9 +293,13 @@ export function Connectors() {
                       </Typography>
                     </Box>
                     <Box sx={{ display: 'flex', gap: 0.5 }} onClick={(e) => e.stopPropagation()}>
-                      <IconButton size="small" onClick={() => openEdit(connector)}>
-                        <EditIcon fontSize="small" />
-                      </IconButton>
+                      {/* Engineering escape hatch — raw JSON edit bypasses wizard validations
+                          (email scoping, field-mapping shape, type coercion). super_admin only. */}
+                      {isSuperAdmin && (
+                        <IconButton size="small" onClick={() => openEdit(connector)}>
+                          <EditIcon fontSize="small" />
+                        </IconButton>
+                      )}
                       <IconButton size="small" color="error" onClick={() => handleDelete(connector)}>
                         <DeleteIcon fontSize="small" />
                       </IconButton>
@@ -389,11 +393,15 @@ export function Connectors() {
                       />
                     </TableCell>
                     <TableCell align="right" onClick={(e) => e.stopPropagation()}>
-                      <Tooltip title="Edit">
-                        <IconButton size="small" onClick={() => openEdit(connector)}>
-                          <EditIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
+                      {/* Engineering escape hatch — raw JSON edit bypasses wizard validations
+                          (email scoping, field-mapping shape, type coercion). super_admin only. */}
+                      {isSuperAdmin && (
+                        <Tooltip title="Edit (raw JSON)">
+                          <IconButton size="small" onClick={() => openEdit(connector)}>
+                            <EditIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      )}
                       <Tooltip title="Delete">
                         <IconButton size="small" color="error" onClick={() => handleDelete(connector)}>
                           <DeleteIcon fontSize="small" />

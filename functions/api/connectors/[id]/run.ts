@@ -7,6 +7,10 @@ import {
 } from '../../../lib/permissions';
 import type { Env, User } from '../../../lib/types';
 import { normalizeFieldMappings } from '../../../../shared/fieldMappings';
+import {
+  ACCEPTED_CONNECTOR_FILE_EXTENSIONS,
+  classifyConnectorFile,
+} from '../../../../shared/connectorFileTypes';
 import { decryptCredentials } from '../../../lib/connectors/crypto';
 import { executeConnectorRun } from '../../../lib/connectors/orchestrator';
 
@@ -24,32 +28,19 @@ import { executeConnectorRun } from '../../../lib/connectors/orchestrator';
 const TEXT_SIZE_LIMIT = 5 * 1024 * 1024; // 5MB for CSV / TSV / TXT
 const BINARY_SIZE_LIMIT = 10 * 1024 * 1024; // 10MB for XLSX / PDF
 
+/**
+ * Wrap the shared classifier with the per-kind size limits the server
+ * enforces. The accepted-extension list itself lives in
+ * shared/connectorFileTypes.ts so the drop zone and this endpoint can't
+ * drift apart.
+ */
 function classifyFile(fileName: string, contentType: string): {
   kind: 'text' | 'binary' | 'unknown';
   limit: number;
 } {
-  const ct = (contentType || '').toLowerCase();
-  const name = (fileName || '').toLowerCase();
-  if (
-    ct === 'text/csv' ||
-    ct === 'text/tsv' ||
-    ct === 'text/plain' ||
-    name.endsWith('.csv') ||
-    name.endsWith('.tsv') ||
-    name.endsWith('.txt')
-  ) {
-    return { kind: 'text', limit: TEXT_SIZE_LIMIT };
-  }
-  if (
-    ct === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-    ct === 'application/vnd.ms-excel' ||
-    ct === 'application/pdf' ||
-    name.endsWith('.xlsx') ||
-    name.endsWith('.xls') ||
-    name.endsWith('.pdf')
-  ) {
-    return { kind: 'binary', limit: BINARY_SIZE_LIMIT };
-  }
+  const { kind } = classifyConnectorFile(fileName, contentType);
+  if (kind === 'text') return { kind, limit: TEXT_SIZE_LIMIT };
+  if (kind === 'binary') return { kind, limit: BINARY_SIZE_LIMIT };
   return { kind: 'unknown', limit: TEXT_SIZE_LIMIT };
 }
 
@@ -115,7 +106,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { kind, limit } = classifyFile(file.name, file.type);
     if (kind === 'unknown') {
       throw new BadRequestError(
-        `Unsupported file type for file_watch: ${file.name}. Accepted: csv, tsv, txt, xlsx, pdf`,
+        `Unsupported file type for file_watch: ${file.name}. Accepted: ${ACCEPTED_CONNECTOR_FILE_EXTENSIONS.join(', ')}`,
       );
     }
     if (file.size > limit) {
