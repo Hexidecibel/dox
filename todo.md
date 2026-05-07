@@ -9,6 +9,8 @@
 - Bundle size guard — pre-generate large bundles (>50MB) to R2 instead of in-memory ZIP
 - Order-to-COA auto-matching (Phase 3) — automatically match order items to existing COA documents by product + lot
 - Document Search v2 — universal, faceted, FTS5-backed (moved to plan.md — see "Document Search v2")
+- Rejection notes → extraction learning — reviewer rejection feedback never reaches the LLM. Rejection handler at functions/api/queue/[id].ts:314-352 only sets status / deletes R2 / logs audit; no notes field on processing_queue. Two options: (a) add a notes column to processing_queue and plumb into the extraction few-shot prompt, or (b) wire rejection notes into the existing `supplier_extraction_instructions` table (mig 0035) so they apply per-supplier going forward. Decide in /plan.
+- Multi-page PDF preprocessing for extraction — LLM extraction gets confused by multi-page PDFs in the webhook ingest + queue extract paths. functions/lib/extract.ts uses `mergePages: true` (single concatenated blob), while functions/lib/connectors/email.ts:204+ already chunks PDFs page-by-page (working pattern). Extend the connector's per-page chunking to extract.ts, or add a page-split preprocessing step in the queue worker before the LLM call.
 
 ## Documents list maturity
 
