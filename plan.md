@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### Document Search v2 — universal, faceted, FTS5-backed
 
-**Status:** planned
+**Status:** in-progress (Phase 1 done; Phases 2–8 planned)
 
 **Full plan:** `/home/hexi/.claude/plans/peppy-coalescing-platypus.md`
 
@@ -98,7 +98,10 @@ bundle), and unify Documents and Search behind one shared
 
 1. **FTS5 backbone** — migration `0054_fts_search.sql`: map tables,
    `documents_fts` + per-entity FTS tables, source views, triggers,
-   chunked-per-tenant initial backfill.
+   chunked-per-tenant initial backfill. **Done** — landed on
+   `search-v2` branch (commit `search v2 phase 1: FTS5 backbone
+   (migration 0054)`); regular FTS5 tables used in place of contentless
+   for trigger-friendly DELETE/INSERT semantics (see commit message).
 2. **Async reindex queue** — reuse `processing_queue` (preferred) or new
    `search_reindex_jobs` table; supplier/product/doc_type renames enqueue
    jobs; process-worker drains in batches of 500. Admin endpoint
