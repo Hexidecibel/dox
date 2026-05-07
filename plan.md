@@ -46,6 +46,117 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Document Search v2 — universal, faceted, FTS5-backed
+
+**Status:** planned
+
+**Full plan:** `/home/hexi/.claude/plans/peppy-coalescing-platypus.md`
+
+**Context / why:** The current Documents page search is broken — typing
+"darigold" returns nothing because the page calls `/api/documents` (a list
+endpoint with no text search). The Search tab uses
+`/api/documents/search` with `LIKE '%term%'` which (a) duplicates code with
+`Documents.tsx`, (b) doesn't search supplier / product / doc-type names,
+and (c) won't scale past ~10k docs/tenant. User target is 10k–50k
+docs/tenant; we need to move off `LIKE` to SQLite FTS5, search across all
+the entity text (title, description, tags, file_name, extracted_text,
+metadata, supplier name + aliases, document_type, products, customer,
+bundle), and unify Documents and Search behind one shared
+`<DocumentSearchPanel>` component plus a new universal `/search` endpoint.
+
+**Key architectural decisions:**
+
+- **Per-entity FTS5 virtual tables.** `documents_fts` is the heavy hitter,
+  denormalized with supplier / doc-type / product text concatenated in.
+  Smaller per-entity FTS tables (`suppliers_fts`, `products_fts`,
+  `document_types_fts`, `orders_fts`, `customers_fts`, `bundles_fts`) drive
+  universal search.
+- **Tenant ID UNINDEXED on every FTS row** so isolation lives inside the
+  MATCH query, not as a post-filter.
+- **TEXT-id → INTEGER rowid map tables** (`documents_fts_map`,
+  `orders_fts_map`) since FTS5 rowids must be integers but our IDs are hex.
+- **Triggers keep documents_fts in sync** with `documents`,
+  `document_versions`, and `document_products`. Cross-cutting renames
+  (supplier / product / doc_type name) **enqueue an async reindex job**
+  rather than fan out in-trigger — protects API latency on big tenants.
+- **200KB cap on extracted_text** in the source view to keep us inside the
+  D1 10GB cap; monitored, with token-count cap as follow-up if needed.
+- **Hard cutover** after staging soak — no feature flag. Legacy LIKE
+  branches deleted in the next release once 48h prod soak passes.
+- **AI mode stays as a toggle** — `POST /api/documents/search/natural`
+  keeps its LLM parser but builds an FTS5 MATCH expression internally.
+- **URL is source of truth** for all search state (`q`, facets, sort,
+  page). One shared `<DocumentSearchPanel>` for `/documents` and inside
+  `<UniversalSearchPanel>` on `/search`.
+- **Multi-token AND** is the only query syntax — FTS5's default. User
+  input sanitized (strip `-*:()"`, NEAR), each token quoted, last token
+  gets `*` for prefix matching as users type.
+- **Saved searches server-backed** (`saved_searches` table); recent
+  searches localStorage-only (key `dox.search.recent`, capped at 20).
+
+**Phases at a glance:**
+
+1. **FTS5 backbone** — migration `0054_fts_search.sql`: map tables,
+   `documents_fts` + per-entity FTS tables, source views, triggers,
+   chunked-per-tenant initial backfill.
+2. **Async reindex queue** — reuse `processing_queue` (preferred) or new
+   `search_reindex_jobs` table; supplier/product/doc_type renames enqueue
+   jobs; process-worker drains in batches of 500. Admin endpoint
+   `POST /api/admin/search/reindex` for full rebuilds.
+3. **Saved searches** — `0055_saved_searches.sql` with
+   `UNIQUE(user_id, name)`; recent searches in localStorage.
+4. **Backend endpoints** — replace internals of `/api/documents/search`
+   and `/api/orders?search=` with FTS5; add `GET /api/search` (universal,
+   fans out via `db.batch()`); faceted counts as one query per active
+   facet against the same `matches` CTE with sticky-filter exclusion;
+   FTS5 `snippet()` replaces hand-rolled `generateSnippets()`.
+5. **Shared frontend primitives** — `src/hooks/{useSearchParamsState,
+   useDebouncedValue, useRecentSearches, useSavedSearches,
+   useEntityAutocomplete}.ts`, `src/lib/{searchUrl,sanitizeSnippet}.ts`,
+   `src/components/search/*` (SearchBar, FacetSidebar, ResultCards,
+   Snippet, DocumentSearchPanel, UniversalSearchPanel, …).
+6. **Page rewrites** — `Documents.tsx` becomes a thin
+   `<DocumentSearchPanel syncToUrl />` wrapper; `Search.tsx` becomes
+   `<UniversalSearchPanel>` with All / Documents / Orders / Customers /
+   Bundles tabs.
+7. **Tests** — new `tests/unit/search-fts-{documents,snippets,facets}.test.ts`,
+   `search-saved.test.ts`, `search-reindex-queue.test.ts`, plus
+   `tests/e2e/document-search.spec.ts`.
+8. **Rollout** — staging migrations + backfill + smoke + suites; deploy
+   to prod (chunked backfill if rows > 5k); 48h p95 monitoring; delete
+   legacy LIKE branches in follow-up release.
+
+**Critical files (new):** `migrations/0054_fts_search.sql`,
+`migrations/0055_saved_searches.sql`, `functions/api/search/index.ts`,
+`functions/api/search/saved/{index,[id]}.ts`,
+`functions/api/admin/search/reindex.ts`, `src/components/search/*` (full
+directory), `src/hooks/useSearchParamsState.ts` (+ siblings), `src/lib/
+searchUrl.ts`, `src/lib/sanitizeSnippet.ts`, the new test files.
+
+**Critical files (modified):** `functions/api/documents/search/index.ts`,
+`functions/api/documents/search/natural.ts` (FTS internals, keep LLM
+parser), `functions/api/orders/index.ts` (`?search=` branch), `src/lib/
+api.ts` (`api.search.*`), `shared/types.ts` (`SearchState`,
+`UniversalSearchResponse`, `SavedSearch`, `FacetCount`), `src/pages/
+Documents.tsx`, `src/pages/Search.tsx`. (CLAUDE.md migration table is
+stale — actual latest applied is 0053, new files start at 0054.)
+
+**Risks:**
+
+- **D1 10GB cap** — 50k docs × 200KB × ~4x FTS overhead ≈ 40GB worst
+  case. 200KB cap mitigates; token-count cap is the follow-up if
+  needed.
+- **Wrangler timeout on initial backfill** — chunk per-tenant; provide
+  `bin/backfill-fts` script as fallback if migration runner can't carry
+  the full inserts on big tenants.
+- **Supplier rename of huge tenant** — async reindex queue (non-trigger).
+- **FTS5 operator injection / snippet XSS** — sanitizer + `<mark>`-split
+  React renderer (no `dangerouslySetInnerHTML`).
+- **Tenant leakage** — `tenant_id UNINDEXED` on every FTS row; unit test
+  asserts cross-tenant MATCH returns nothing.
+- **Hard-cutover rollback** — keep legacy LIKE branches commented in
+  code until 48h prod soak completes, then delete in follow-up.
+
 ### Records — Collaborative sheets, forms, and workflows
 
 **Status:** planned
