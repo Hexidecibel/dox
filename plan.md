@@ -114,8 +114,11 @@ bundle), and unify Documents and Search behind one shared
    `POST /api/admin/search/reindex` (super_admin) supports
    enqueue / drain / enqueue_and_drain. **Done** — landed on
    `search-v2` branch.
-3. **Saved searches** — `0056_saved_searches.sql` with
+3. **Saved searches** — `0057_saved_searches.sql` with
    `UNIQUE(user_id, name)`; recent searches in localStorage.
+   (Bumped from `0056` because `0056_fix_fts_view_nulls.sql`
+   landed first to harden NULL propagation in
+   `documents_fts_source`.)
 4. **Backend endpoints** — replace internals of `/api/documents/search`
    and `/api/orders?search=` with FTS5; add `GET /api/search` (universal,
    fans out via `db.batch()`); faceted counts as one query per active
@@ -138,7 +141,9 @@ bundle), and unify Documents and Search behind one shared
    legacy LIKE branches in follow-up release.
 
 **Critical files (new):** `migrations/0054_fts_search.sql`,
-`migrations/0055_saved_searches.sql`, `functions/api/search/index.ts`,
+`migrations/0055_search_reindex_queue.sql`,
+`migrations/0056_fix_fts_view_nulls.sql`,
+`migrations/0057_saved_searches.sql`, `functions/api/search/index.ts`,
 `functions/api/search/saved/{index,[id]}.ts`,
 `functions/api/admin/search/reindex.ts`, `src/components/search/*` (full
 directory), `src/hooks/useSearchParamsState.ts` (+ siblings), `src/lib/
