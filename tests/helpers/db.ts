@@ -50,13 +50,19 @@ import m0050 from '../../migrations/0050_connector_slug.sql?raw';
 import m0051 from '../../migrations/0051_connector_r2_cf_token_id.sql?raw';
 import m0052 from '../../migrations/0052_connector_run_retry_link.sql?raw';
 import m0053 from '../../migrations/0053_drop_connector_system_type.sql?raw';
+import m0054 from '../../migrations/0054_fts_search.sql?raw';
+import m0055 from '../../migrations/0055_search_reindex_queue.sql?raw';
+import m0056 from '../../migrations/0056_fix_fts_view_nulls.sql?raw';
+import m0057 from '../../migrations/0057_saved_searches.sql?raw';
+import m0058 from '../../migrations/0058_drop_extraction_evaluations.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
   m0011, m0012, m0013, m0014, m0015, m0016, m0017, m0018, m0019, m0020,
   m0021, m0022, m0023a, m0023b, m0024, m0025, m0026, m0027, m0028, m0029,
   m0030, m0031, m0032, m0033, m0034, m0035, m0036, m0037, m0038, m0039,
-  m0046, m0047, m0048, m0049, m0050, m0051, m0052, m0053,
+  m0046, m0047, m0048, m0049, m0050, m0051, m0052, m0053, m0054, m0055,
+  m0056, m0057, m0058,
 ];
 
 /**
@@ -85,6 +91,18 @@ function splitStatements(sql: string): string[] {
   const statements: string[] = [];
   let current = '';
   let inString = false;
+  // Track BEGIN/END nesting depth so trigger bodies (which contain
+  // statement-terminating semicolons of their own) are not split apart.
+  let blockDepth = 0;
+  const isWordChar = (c: string) => /[A-Za-z0-9_]/.test(c);
+  const matchKeywordAt = (pos: number, kw: string): boolean => {
+    if (pos > 0 && isWordChar(cleaned[pos - 1])) return false;
+    const end = pos + kw.length;
+    if (end > cleaned.length) return false;
+    if (cleaned.substring(pos, end).toUpperCase() !== kw) return false;
+    if (end < cleaned.length && isWordChar(cleaned[end])) return false;
+    return true;
+  };
 
   for (let i = 0; i < cleaned.length; i++) {
     const ch = cleaned[i];
@@ -99,7 +117,15 @@ function splitStatements(sql: string): string[] {
         inString = false;
         current += ch;
       }
-    } else if (ch === ';' && !inString) {
+    } else if (!inString && (ch === 'B' || ch === 'b') && matchKeywordAt(i, 'BEGIN')) {
+      blockDepth++;
+      current += cleaned.substring(i, i + 5);
+      i += 4;
+    } else if (!inString && (ch === 'E' || ch === 'e') && matchKeywordAt(i, 'END')) {
+      if (blockDepth > 0) blockDepth--;
+      current += cleaned.substring(i, i + 3);
+      i += 2;
+    } else if (ch === ';' && !inString && blockDepth === 0) {
       const trimmed = current.trim();
       if (trimmed.length > 0) {
         statements.push(trimmed);
@@ -120,9 +146,33 @@ function splitStatements(sql: string): string[] {
 
 /**
  * Run all migrations in order against the provided D1 database.
+ *
+ * Tracks applied migrations in a `_test_migrations` table so a second
+ * call to this function (e.g. from a per-test-file `beforeAll`) is a
+ * no-op — re-running CREATE-then-RENAME-style migrations on a populated
+ * DB can desynchronize the schema, especially once views (added in
+ * migration 0054) reference tables that those migrations recreate.
  */
 export async function runMigrations(db: D1Database): Promise<void> {
+  // Ensure the tracking table exists. Use an integer index (matches the
+  // migrations[] array position) since these are anonymous SQL strings.
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS _test_migrations (
+        idx INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    )
+    .run();
+
+  const appliedRows = await db
+    .prepare('SELECT idx FROM _test_migrations')
+    .all<{ idx: number }>();
+  const applied = new Set((appliedRows.results ?? []).map((r) => r.idx));
+
   for (let i = 0; i < migrations.length; i++) {
+    if (applied.has(i)) continue;
+
     const statements = splitStatements(migrations[i]);
     for (const stmt of statements) {
       try {
@@ -143,6 +193,11 @@ export async function runMigrations(db: D1Database): Promise<void> {
         throw err;
       }
     }
+
+    await db
+      .prepare('INSERT OR IGNORE INTO _test_migrations (idx) VALUES (?)')
+      .bind(i)
+      .run();
   }
 }
 

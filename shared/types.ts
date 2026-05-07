@@ -1082,99 +1082,6 @@ export interface ActivityEventDetailResponse {
   event: Record<string, unknown>;
 }
 
-// === Extraction A/B Evaluations (Tinder-style text-vs-VLM comparison) ===
-
-export type ExtractionEvalWinner = 'a' | 'b' | 'tie';
-export type ExtractionEvalSide = 'text' | 'vlm';
-
-/**
- * One row per (queue_item, evaluator). The `a_side` column stores which real
- * extraction method was presented to the reviewer as "Method A" — the UI
- * randomizes it per doc so the reviewer is blind to text-vs-VLM identity,
- * and we unblind at report time using this mapping.
- */
-export interface ExtractionEvaluation {
-  id: string;
-  queue_item_id: string;
-  evaluator_user_id: string;
-  winner: ExtractionEvalWinner;
-  a_side: ExtractionEvalSide;
-  comment: string | null;
-  evaluated_at: number;
-}
-
-export interface EvalNextResponse {
-  /** null when nothing left to evaluate (the UI shows the completion screen). */
-  item: ProcessingQueueItem | null;
-  /** Which real method is presented as "Method A" for this doc. Client echoes this back on POST. */
-  a_side: ExtractionEvalSide | null;
-  /** Docs still unevaluated (including the current one). 0 means done. */
-  remaining: number;
-  /** Total eligible docs (both extractions present). */
-  total: number;
-}
-
-export interface EvalSubmitRequest {
-  winner: ExtractionEvalWinner;
-  a_side: ExtractionEvalSide;
-  comment?: string;
-}
-
-export interface EvalSubmitResponse {
-  evaluation: ExtractionEvaluation;
-  remaining: number;
-  total: number;
-}
-
-export interface EvalReportTotals {
-  evaluated: number;
-  text_wins: number;
-  vlm_wins: number;
-  ties: number;
-  remaining: number;
-  total: number;
-}
-
-export interface EvalReportBreakdownRow {
-  /** Display key: supplier name or document-type name. Empty string means "unknown". */
-  key: string;
-  text_wins: number;
-  vlm_wins: number;
-  ties: number;
-}
-
-export interface EvalReportCommentRow {
-  queue_item_id: string;
-  file_name: string;
-  winner: ExtractionEvalWinner;
-  /** Which side actually won (text or vlm), unblinded. null for ties. */
-  winning_side: ExtractionEvalSide | null;
-  comment: string;
-  evaluated_at: number;
-  evaluator_name: string | null;
-}
-
-export interface EvalReportEvaluationRow {
-  queue_item_id: string;
-  file_name: string;
-  supplier: string | null;
-  document_type_name: string | null;
-  winner: ExtractionEvalWinner;
-  a_side: ExtractionEvalSide;
-  winning_side: ExtractionEvalSide | null;
-  comment: string | null;
-  evaluated_at: number;
-  evaluator_name: string | null;
-}
-
-export interface EvalReportResponse {
-  totals: EvalReportTotals;
-  by_supplier: EvalReportBreakdownRow[];
-  by_doctype: EvalReportBreakdownRow[];
-  comments: EvalReportCommentRow[];
-  evaluations: EvalReportEvaluationRow[];
-}
-
 // =====================================================================
 // === Records Module ===================================================
 // =====================================================================
@@ -2415,6 +2322,197 @@ export interface PublicApprovalSubmitRequest {
 export interface PublicApprovalSubmitResponse {
   success: true;
   decision: 'approve' | 'reject';
+}
+
+// === Search v2 — Saved Searches (Phase 3) ===
+//
+// The full search-state shape (filters, sort, page, etc.) lives in a
+// later phase; for now `query` is intentionally `Record<string, any>`
+// so the column can store whatever the frontend sends without a type
+// migration. The DB stores it as TEXT in `query_json` and the endpoint
+// parses it on read.
+export interface SavedSearch {
+  id: string;
+  user_id: string;
+  tenant_id: string;
+  name: string;
+  query: Record<string, any>;
+  scope: 'personal' | 'shared';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateSavedSearchRequest {
+  name: string;
+  query: Record<string, any>;
+  /** Reserved for v2 — current API only accepts 'personal'. */
+  scope?: 'personal' | 'shared';
+}
+
+export interface UpdateSavedSearchRequest {
+  name?: string;
+  query?: Record<string, any>;
+}
+
+export interface SavedSearchListResponse {
+  saved_searches: SavedSearch[];
+}
+
+export interface SavedSearchResponse {
+  saved_search: SavedSearch;
+}
+
+// === Search v2 — Universal search (Phase 4d) ===
+//
+// `GET /api/search` returns one block per entity type. Each block has a
+// `total` (the full FTS-match count for the tenant) and `results` (the
+// top-N projection — N=20 for documents, 5 for the other entities).
+// The `documents` block also carries snippet fields and the structured
+// joins (creator/supplier/doc_type names) so the frontend can render a
+// rich card without a follow-up fetch.
+
+export interface UniversalSearchEntityBase {
+  id: string;
+  name?: string;
+  snippet?: string;
+}
+
+export interface UniversalSearchSupplier extends UniversalSearchEntityBase {
+  name: string;
+}
+
+export interface UniversalSearchProduct extends UniversalSearchEntityBase {
+  name: string;
+}
+
+export interface UniversalSearchDocType extends UniversalSearchEntityBase {
+  name: string;
+  slug?: string;
+}
+
+export interface UniversalSearchCustomer extends UniversalSearchEntityBase {
+  name: string;
+  customer_number?: string | null;
+}
+
+export interface UniversalSearchBundle extends UniversalSearchEntityBase {
+  name: string;
+}
+
+export interface UniversalSearchOrder extends UniversalSearchEntityBase {
+  order_number?: string;
+  po_number?: string | null;
+  customer_name?: string | null;
+}
+
+// Documents are projected with the full row plus the FTS snippet trio.
+// Kept loose (Record<string, unknown>) here so future projection tweaks
+// don't force a type migration; the frontend cards already accept the
+// loose Document shape from the list endpoint.
+export interface UniversalSearchDocument {
+  id: string;
+  title?: string;
+  description?: string | null;
+  tenant_id?: string;
+  supplier_id?: string | null;
+  document_type_id?: string | null;
+  document_type_name?: string | null;
+  document_type_slug?: string | null;
+  supplier_name?: string | null;
+  creator_name?: string | null;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  rank?: number;
+  snippet?: string;
+  snippet_extracted?: string;
+  snippet_supplier?: string;
+  // Allow extra fields from `d.*` projection.
+  [k: string]: unknown;
+}
+
+export interface UniversalSearchBlock<T> {
+  total: number;
+  results: T[];
+}
+
+export interface UniversalSearchResponse {
+  documents: UniversalSearchBlock<UniversalSearchDocument>;
+  suppliers: UniversalSearchBlock<UniversalSearchSupplier>;
+  products: UniversalSearchBlock<UniversalSearchProduct>;
+  doc_types: UniversalSearchBlock<UniversalSearchDocType>;
+  orders: UniversalSearchBlock<UniversalSearchOrder>;
+  customers: UniversalSearchBlock<UniversalSearchCustomer>;
+  bundles: UniversalSearchBlock<UniversalSearchBundle>;
+}
+
+export interface UniversalSearchParams {
+  q: string;
+  tenant_id?: string;
+  /** Top-N for the `documents` block (default 20, max 200). */
+  limit?: number;
+  /** Page offset for the `documents` block (default 0). */
+  offset?: number;
+  /** Top-N for non-document entities (default 5, max 25). */
+  limit_per_type?: number;
+}
+
+// === Search v2 — Frontend search state (Phase 5) ===
+//
+// `SearchState` is the URL-bound shape carried by both
+// `<DocumentSearchPanel>` and `<UniversalSearchPanel>`. Encoding /
+// decoding lives in `src/lib/searchUrl.ts` so the hook (`useSearchParamsState`)
+// and the saved-search payload share one canonical form. We keep multi-
+// value facets as `string[]` here and let the encoder collapse them to
+// comma-separated tokens in the URL — that matches the deep-link spec
+// (`doc_type=coa,sds`) and round-trips losslessly.
+export type SearchSort = 'relevance' | 'newest' | 'oldest' | 'name';
+export type SearchDateBucket =
+  | 'any'
+  | 'last_7d'
+  | 'last_30d'
+  | 'last_90d'
+  | 'last_365d';
+
+export type UniversalSearchType =
+  | 'all'
+  | 'documents'
+  | 'orders'
+  | 'customers'
+  | 'bundles';
+
+export interface SearchState {
+  q: string;
+  /** Universal-search tab; ignored by the documents-only panel. */
+  type?: UniversalSearchType;
+  supplier?: string[];
+  doc_type?: string[];
+  product?: string[];
+  status?: string[];
+  /** Cross-entity filter for the orders tab. */
+  customer?: string[];
+  date?: SearchDateBucket;
+  sort?: SearchSort;
+  page?: number;
+}
+
+/** Facet kinds the UI knows how to render. */
+export type FacetKind =
+  | 'supplier'
+  | 'doc_type'
+  | 'product'
+  | 'status'
+  | 'date';
+
+export interface FacetCount {
+  /** Stable id for the option (e.g. supplier_id). For `date` facets the
+   * value is one of the `SearchDateBucket` strings. */
+  value: string;
+  /** Human-readable label. */
+  label: string;
+  /** Number of matches with this option *without* the option's own filter
+   * applied (sticky-filter semantics — see Phase 1.7 in the plan). */
+  count: number;
 }
 
 // === Auth Token Storage Key (single constant) ===

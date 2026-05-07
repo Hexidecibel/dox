@@ -45,10 +45,12 @@ import type {
   ActivityListResponse,
   ActivityEventType,
   ActivityEventDetailResponse,
-  EvalNextResponse,
-  EvalSubmitRequest,
-  EvalSubmitResponse,
-  EvalReportResponse,
+  CreateSavedSearchRequest,
+  UpdateSavedSearchRequest,
+  SavedSearchListResponse,
+  SavedSearchResponse,
+  UniversalSearchParams,
+  UniversalSearchResponse,
 } from './types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -381,6 +383,49 @@ export const api = {
         documents: (data.documents || []).map(parseDocument),
         total: data.total || 0,
       };
+    },
+
+    /**
+     * GET /api/documents/search — Phase 4 surface (FTS5).
+     *
+     * Distinct from `search()` because the panel needs facets, sort,
+     * supplier_id / document_type_id, and the loose snippet projection
+     * the FTS endpoint returns. Returns the raw server payload — the
+     * panel handles `parseDocument` itself for the rows it actually
+     * intends to render.
+     */
+    searchV2: async (params: {
+      q: string;
+      tenant_id?: string;
+      supplier_id?: string;
+      document_type_id?: string;
+      category?: string;
+      date_from?: string;
+      date_to?: string;
+      sort?: 'relevance' | 'newest' | 'oldest' | 'name';
+      limit?: number;
+      offset?: number;
+      facets?: boolean;
+    }): Promise<{
+      documents: Array<Record<string, unknown>>;
+      total: number;
+      limit: number;
+      offset: number;
+      facets?: Partial<Record<'supplier' | 'doc_type' | 'product' | 'date_bucket' | 'status', Array<{ value: string; label: string; count: number }>>>;
+    }> => {
+      const qs = new URLSearchParams();
+      qs.set('q', params.q);
+      if (params.tenant_id) qs.set('tenant_id', params.tenant_id);
+      if (params.supplier_id) qs.set('supplier_id', params.supplier_id);
+      if (params.document_type_id) qs.set('document_type_id', params.document_type_id);
+      if (params.category) qs.set('category', params.category);
+      if (params.date_from) qs.set('date_from', params.date_from);
+      if (params.date_to) qs.set('date_to', params.date_to);
+      if (params.sort && params.sort !== 'relevance') qs.set('sort', params.sort);
+      if (params.limit !== undefined) qs.set('limit', String(params.limit));
+      if (params.offset !== undefined) qs.set('offset', String(params.offset));
+      if (params.facets) qs.set('facets', '1');
+      return fetchApi(`/documents/search?${qs.toString()}`);
     },
   },
 
@@ -912,21 +957,6 @@ export const api = {
       fetchApi<{ success: boolean }>(`/queue/${id}/results`, { method: 'PUT', body: JSON.stringify(data) }),
   },
 
-  /**
-   * A/B evaluation flow for text vs VLM extraction. Blind-labeled as
-   * "Method A" / "Method B" in the UI — the backend keeps the text/vlm
-   * mapping so the aggregate report can unblind it.
-   */
-  eval: {
-    next: () => fetchApi<EvalNextResponse>('/eval/next'),
-    submit: (queueItemId: string, data: EvalSubmitRequest) =>
-      fetchApi<EvalSubmitResponse>(`/eval/${queueItemId}`, {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    report: () => fetchApi<EvalReportResponse>('/eval/report'),
-  },
-
   extractionExamples: {
     list: (documentTypeId: string, tenantId?: string) =>
       fetchApi<{ examples: any[]; total: number }>(`/extraction-examples?document_type_id=${documentTypeId}${tenantId ? `&tenant_id=${tenantId}` : ''}`),
@@ -1368,6 +1398,81 @@ export const api = {
     getEvent(type: ActivityEventType, id: string): Promise<ActivityEventDetailResponse> {
       const query = new URLSearchParams({ type, id });
       return fetchApi<ActivityEventDetailResponse>(`/activity/event?${query.toString()}`);
+    },
+  },
+
+  search: {
+    /**
+     * GET /api/search — universal grouped search (Phase 4d).
+     *
+     * Returns top-N results per entity type (documents / suppliers /
+     * products / doc_types / orders / customers / bundles). The
+     * `documents` block also carries snippets and joined display
+     * fields (supplier_name, document_type_name, creator_name).
+     *
+     * Tenant scoping mirrors the rest of the search surface — non-
+     * super_admin callers are pinned to their own tenant; the
+     * `tenant_id` param is only honored for super_admin.
+     */
+    universal: (params: UniversalSearchParams): Promise<UniversalSearchResponse> => {
+      const query = new URLSearchParams();
+      query.set('q', params.q);
+      if (params.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params.limit !== undefined) query.set('limit', String(params.limit));
+      if (params.offset !== undefined) query.set('offset', String(params.offset));
+      if (params.limit_per_type !== undefined) query.set('limit_per_type', String(params.limit_per_type));
+      return fetchApi<UniversalSearchResponse>(`/search?${query.toString()}`);
+    },
+
+    /**
+     * Document Search v2 — saved-searches CRUD (Phase 3).
+     *
+     * Recent searches stay client-side (localStorage). These are the
+     * server-backed NAMED bookmarks the user explicitly chooses to keep.
+     */
+    saved: {
+      /**
+       * GET /api/search/saved
+       * Returns: { saved_searches: SavedSearch[] } — the calling user's
+       * saved searches only (per-user surface; super_admin sees only
+       * their own).
+       */
+      list: () => fetchApi<SavedSearchListResponse>('/search/saved'),
+
+      /**
+       * POST /api/search/saved
+       * Body: { name, query, scope? } — `scope` reserved for v2;
+       * server rejects 'shared' for now.
+       * Returns: { saved_search: SavedSearch }
+       */
+      create: (data: CreateSavedSearchRequest) =>
+        fetchApi<SavedSearchResponse>('/search/saved', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+
+      /**
+       * GET /api/search/saved/:id — owner only.
+       */
+      get: (id: string) =>
+        fetchApi<SavedSearchResponse>(`/search/saved/${id}`),
+
+      /**
+       * PUT /api/search/saved/:id — owner only.
+       * Returns: { saved_search: SavedSearch }
+       */
+      update: (id: string, data: UpdateSavedSearchRequest) =>
+        fetchApi<SavedSearchResponse>(`/search/saved/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify(data),
+        }),
+
+      /**
+       * DELETE /api/search/saved/:id — owner only.
+       * Returns: { success: true }
+       */
+      delete: (id: string) =>
+        fetchApi<{ success: boolean }>(`/search/saved/${id}`, { method: 'DELETE' }),
     },
   },
 };
