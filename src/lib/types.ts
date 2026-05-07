@@ -78,6 +78,11 @@ export type {
   EvalReportCommentRow,
   EvalReportEvaluationRow,
   EvalReportResponse,
+  SavedSearch,
+  CreateSavedSearchRequest,
+  UpdateSavedSearchRequest,
+  SavedSearchListResponse,
+  SavedSearchResponse,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';
 

@@ -2417,6 +2417,44 @@ export interface PublicApprovalSubmitResponse {
   decision: 'approve' | 'reject';
 }
 
+// === Search v2 — Saved Searches (Phase 3) ===
+//
+// The full search-state shape (filters, sort, page, etc.) lives in a
+// later phase; for now `query` is intentionally `Record<string, any>`
+// so the column can store whatever the frontend sends without a type
+// migration. The DB stores it as TEXT in `query_json` and the endpoint
+// parses it on read.
+export interface SavedSearch {
+  id: string;
+  user_id: string;
+  tenant_id: string;
+  name: string;
+  query: Record<string, any>;
+  scope: 'personal' | 'shared';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateSavedSearchRequest {
+  name: string;
+  query: Record<string, any>;
+  /** Reserved for v2 — current API only accepts 'personal'. */
+  scope?: 'personal' | 'shared';
+}
+
+export interface UpdateSavedSearchRequest {
+  name?: string;
+  query?: Record<string, any>;
+}
+
+export interface SavedSearchListResponse {
+  saved_searches: SavedSearch[];
+}
+
+export interface SavedSearchResponse {
+  saved_search: SavedSearch;
+}
+
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'auth_user';

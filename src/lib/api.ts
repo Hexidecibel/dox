@@ -49,6 +49,10 @@ import type {
   EvalSubmitRequest,
   EvalSubmitResponse,
   EvalReportResponse,
+  CreateSavedSearchRequest,
+  UpdateSavedSearchRequest,
+  SavedSearchListResponse,
+  SavedSearchResponse,
 } from './types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -1368,6 +1372,59 @@ export const api = {
     getEvent(type: ActivityEventType, id: string): Promise<ActivityEventDetailResponse> {
       const query = new URLSearchParams({ type, id });
       return fetchApi<ActivityEventDetailResponse>(`/activity/event?${query.toString()}`);
+    },
+  },
+
+  search: {
+    /**
+     * Document Search v2 — saved-searches CRUD (Phase 3).
+     *
+     * Recent searches stay client-side (localStorage). These are the
+     * server-backed NAMED bookmarks the user explicitly chooses to keep.
+     */
+    saved: {
+      /**
+       * GET /api/search/saved
+       * Returns: { saved_searches: SavedSearch[] } — the calling user's
+       * saved searches only (per-user surface; super_admin sees only
+       * their own).
+       */
+      list: () => fetchApi<SavedSearchListResponse>('/search/saved'),
+
+      /**
+       * POST /api/search/saved
+       * Body: { name, query, scope? } — `scope` reserved for v2;
+       * server rejects 'shared' for now.
+       * Returns: { saved_search: SavedSearch }
+       */
+      create: (data: CreateSavedSearchRequest) =>
+        fetchApi<SavedSearchResponse>('/search/saved', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+
+      /**
+       * GET /api/search/saved/:id — owner only.
+       */
+      get: (id: string) =>
+        fetchApi<SavedSearchResponse>(`/search/saved/${id}`),
+
+      /**
+       * PUT /api/search/saved/:id — owner only.
+       * Returns: { saved_search: SavedSearch }
+       */
+      update: (id: string, data: UpdateSavedSearchRequest) =>
+        fetchApi<SavedSearchResponse>(`/search/saved/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify(data),
+        }),
+
+      /**
+       * DELETE /api/search/saved/:id — owner only.
+       * Returns: { success: true }
+       */
+      delete: (id: string) =>
+        fetchApi<{ success: boolean }>(`/search/saved/${id}`, { method: 'DELETE' }),
     },
   },
 };
