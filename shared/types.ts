@@ -2550,6 +2550,64 @@ export interface UniversalSearchParams {
   limit_per_type?: number;
 }
 
+// === Search v2 — Frontend search state (Phase 5) ===
+//
+// `SearchState` is the URL-bound shape carried by both
+// `<DocumentSearchPanel>` and `<UniversalSearchPanel>`. Encoding /
+// decoding lives in `src/lib/searchUrl.ts` so the hook (`useSearchParamsState`)
+// and the saved-search payload share one canonical form. We keep multi-
+// value facets as `string[]` here and let the encoder collapse them to
+// comma-separated tokens in the URL — that matches the deep-link spec
+// (`doc_type=coa,sds`) and round-trips losslessly.
+export type SearchSort = 'relevance' | 'newest' | 'oldest' | 'name';
+export type SearchDateBucket =
+  | 'any'
+  | 'last_7d'
+  | 'last_30d'
+  | 'last_90d'
+  | 'last_365d';
+
+export type UniversalSearchType =
+  | 'all'
+  | 'documents'
+  | 'orders'
+  | 'customers'
+  | 'bundles';
+
+export interface SearchState {
+  q: string;
+  /** Universal-search tab; ignored by the documents-only panel. */
+  type?: UniversalSearchType;
+  supplier?: string[];
+  doc_type?: string[];
+  product?: string[];
+  status?: string[];
+  /** Cross-entity filter for the orders tab. */
+  customer?: string[];
+  date?: SearchDateBucket;
+  sort?: SearchSort;
+  page?: number;
+}
+
+/** Facet kinds the UI knows how to render. */
+export type FacetKind =
+  | 'supplier'
+  | 'doc_type'
+  | 'product'
+  | 'status'
+  | 'date';
+
+export interface FacetCount {
+  /** Stable id for the option (e.g. supplier_id). For `date` facets the
+   * value is one of the `SearchDateBucket` strings. */
+  value: string;
+  /** Human-readable label. */
+  label: string;
+  /** Number of matches with this option *without* the option's own filter
+   * applied (sticky-filter semantics — see Phase 1.7 in the plan). */
+  count: number;
+}
+
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'auth_user';
