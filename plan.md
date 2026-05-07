@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### Document Search v2 — universal, faceted, FTS5-backed
 
-**Status:** in-progress (Phases 1–4 done; Phases 5–8 planned)
+**Status:** in-progress (Phases 1–5 done; Phases 6–8 planned)
 
 **Full plan:** `/home/hexi/.claude/plans/peppy-coalescing-platypus.md`
 
@@ -150,7 +150,21 @@ bundle), and unify Documents and Search behind one shared
    useDebouncedValue, useRecentSearches, useSavedSearches,
    useEntityAutocomplete}.ts`, `src/lib/{searchUrl,sanitizeSnippet}.ts`,
    `src/components/search/*` (SearchBar, FacetSidebar, ResultCards,
-   Snippet, DocumentSearchPanel, UniversalSearchPanel, …).
+   Snippet, DocumentSearchPanel, UniversalSearchPanel, …). **Done**
+   — landed on `search-v2` as four sub-commits:
+   `phase 5` (frontend test infra: vitest projects split — workers
+   pool stays for backend tests, new happy-dom + RTL project for
+   `src/**/*.test.{ts,tsx}`),
+   `phase 5a` (hooks + URL/snippet utilities — 58 tests),
+   `phase 5b` (atomic search components: SearchBar, FacetSidebar +
+   FacetGroup + FacetOption, ActiveFilterChips, SortMenu, ResultsList,
+   Snippet, RecentSearchesList, SavedSearchesDialog, ResultCard{Document,
+   Order,Customer,Bundle} — 64 tests),
+   `phase 5c` (composed panels DocumentSearchPanel + UniversalSearchPanel
+   wired to api.documents.searchV2 and api.search.universal — 10 tests).
+   shared/types.ts gains SearchState, FacetCount, FacetKind, SearchSort,
+   SearchDateBucket, UniversalSearchType. Frontend project totals 132
+   tests; workers project still 1064; combined `npm test` 1196 green.
 6. **Page rewrites** — `Documents.tsx` becomes a thin
    `<DocumentSearchPanel syncToUrl />` wrapper; `Search.tsx` becomes
    `<UniversalSearchPanel>` with All / Documents / Orders / Customers /
