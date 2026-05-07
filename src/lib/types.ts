@@ -83,6 +83,16 @@ export type {
   UpdateSavedSearchRequest,
   SavedSearchListResponse,
   SavedSearchResponse,
+  UniversalSearchParams,
+  UniversalSearchResponse,
+  UniversalSearchBlock,
+  UniversalSearchDocument,
+  UniversalSearchSupplier,
+  UniversalSearchProduct,
+  UniversalSearchDocType,
+  UniversalSearchOrder,
+  UniversalSearchCustomer,
+  UniversalSearchBundle,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';
 

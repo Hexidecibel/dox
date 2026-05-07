@@ -2455,6 +2455,101 @@ export interface SavedSearchResponse {
   saved_search: SavedSearch;
 }
 
+// === Search v2 — Universal search (Phase 4d) ===
+//
+// `GET /api/search` returns one block per entity type. Each block has a
+// `total` (the full FTS-match count for the tenant) and `results` (the
+// top-N projection — N=20 for documents, 5 for the other entities).
+// The `documents` block also carries snippet fields and the structured
+// joins (creator/supplier/doc_type names) so the frontend can render a
+// rich card without a follow-up fetch.
+
+export interface UniversalSearchEntityBase {
+  id: string;
+  name?: string;
+  snippet?: string;
+}
+
+export interface UniversalSearchSupplier extends UniversalSearchEntityBase {
+  name: string;
+}
+
+export interface UniversalSearchProduct extends UniversalSearchEntityBase {
+  name: string;
+}
+
+export interface UniversalSearchDocType extends UniversalSearchEntityBase {
+  name: string;
+  slug?: string;
+}
+
+export interface UniversalSearchCustomer extends UniversalSearchEntityBase {
+  name: string;
+  customer_number?: string | null;
+}
+
+export interface UniversalSearchBundle extends UniversalSearchEntityBase {
+  name: string;
+}
+
+export interface UniversalSearchOrder extends UniversalSearchEntityBase {
+  order_number?: string;
+  po_number?: string | null;
+  customer_name?: string | null;
+}
+
+// Documents are projected with the full row plus the FTS snippet trio.
+// Kept loose (Record<string, unknown>) here so future projection tweaks
+// don't force a type migration; the frontend cards already accept the
+// loose Document shape from the list endpoint.
+export interface UniversalSearchDocument {
+  id: string;
+  title?: string;
+  description?: string | null;
+  tenant_id?: string;
+  supplier_id?: string | null;
+  document_type_id?: string | null;
+  document_type_name?: string | null;
+  document_type_slug?: string | null;
+  supplier_name?: string | null;
+  creator_name?: string | null;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  rank?: number;
+  snippet?: string;
+  snippet_extracted?: string;
+  snippet_supplier?: string;
+  // Allow extra fields from `d.*` projection.
+  [k: string]: unknown;
+}
+
+export interface UniversalSearchBlock<T> {
+  total: number;
+  results: T[];
+}
+
+export interface UniversalSearchResponse {
+  documents: UniversalSearchBlock<UniversalSearchDocument>;
+  suppliers: UniversalSearchBlock<UniversalSearchSupplier>;
+  products: UniversalSearchBlock<UniversalSearchProduct>;
+  doc_types: UniversalSearchBlock<UniversalSearchDocType>;
+  orders: UniversalSearchBlock<UniversalSearchOrder>;
+  customers: UniversalSearchBlock<UniversalSearchCustomer>;
+  bundles: UniversalSearchBlock<UniversalSearchBundle>;
+}
+
+export interface UniversalSearchParams {
+  q: string;
+  tenant_id?: string;
+  /** Top-N for the `documents` block (default 20, max 200). */
+  limit?: number;
+  /** Page offset for the `documents` block (default 0). */
+  offset?: number;
+  /** Top-N for non-document entities (default 5, max 25). */
+  limit_per_type?: number;
+}
+
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'auth_user';

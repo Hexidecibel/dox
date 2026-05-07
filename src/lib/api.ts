@@ -53,6 +53,8 @@ import type {
   UpdateSavedSearchRequest,
   SavedSearchListResponse,
   SavedSearchResponse,
+  UniversalSearchParams,
+  UniversalSearchResponse,
 } from './types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -1376,6 +1378,28 @@ export const api = {
   },
 
   search: {
+    /**
+     * GET /api/search — universal grouped search (Phase 4d).
+     *
+     * Returns top-N results per entity type (documents / suppliers /
+     * products / doc_types / orders / customers / bundles). The
+     * `documents` block also carries snippets and joined display
+     * fields (supplier_name, document_type_name, creator_name).
+     *
+     * Tenant scoping mirrors the rest of the search surface — non-
+     * super_admin callers are pinned to their own tenant; the
+     * `tenant_id` param is only honored for super_admin.
+     */
+    universal: (params: UniversalSearchParams): Promise<UniversalSearchResponse> => {
+      const query = new URLSearchParams();
+      query.set('q', params.q);
+      if (params.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params.limit !== undefined) query.set('limit', String(params.limit));
+      if (params.offset !== undefined) query.set('offset', String(params.offset));
+      if (params.limit_per_type !== undefined) query.set('limit_per_type', String(params.limit_per_type));
+      return fetchApi<UniversalSearchResponse>(`/search?${query.toString()}`);
+    },
+
     /**
      * Document Search v2 — saved-searches CRUD (Phase 3).
      *
