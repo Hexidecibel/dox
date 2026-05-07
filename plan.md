@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### Document Search v2 — universal, faceted, FTS5-backed
 
-**Status:** in-progress (Phases 1–2 done; Phases 3–8 planned)
+**Status:** in-progress (Phases 1–4 done; Phases 5–8 planned)
 
 **Full plan:** `/home/hexi/.claude/plans/peppy-coalescing-platypus.md`
 
@@ -131,7 +131,21 @@ bundle), and unify Documents and Search behind one shared
    and `/api/orders?search=` with FTS5; add `GET /api/search` (universal,
    fans out via `db.batch()`); faceted counts as one query per active
    facet against the same `matches` CTE with sticky-filter exclusion;
-   FTS5 `snippet()` replaces hand-rolled `generateSnippets()`.
+   FTS5 `snippet()` replaces hand-rolled `generateSnippets()`. **Done**
+   — landed on `search-v2` branch as four sub-commits:
+   `phase 4a` (`/api/documents/search` FTS5 + sort/facets),
+   `phase 4b` (`/api/documents/search/natural` FTS5; LLM parser
+   preserved), `phase 4c` (`/api/orders ?search=` FTS5),
+   `phase 4d` (NEW `GET /api/search` universal endpoint with
+   D1 batch fan-out per entity). Shared sanitizer at
+   `functions/lib/search-fts.ts`; types added to `shared/types.ts`
+   (`UniversalSearchResponse` + per-entity blocks); API client
+   method `api.search.universal()` in `src/lib/api.ts`.
+   Implementation deviation: per-entity universal blocks split
+   count + page into two D1 statements (still inside one
+   `batch()`) because FTS5 `snippet()` cannot coexist with a
+   `COUNT(*) OVER ()` window in the same SELECT. Documents block
+   stays a single CTE-based query.
 5. **Shared frontend primitives** — `src/hooks/{useSearchParamsState,
    useDebouncedValue, useRecentSearches, useSavedSearches,
    useEntityAutocomplete}.ts`, `src/lib/{searchUrl,sanitizeSnippet}.ts`,
