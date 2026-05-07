@@ -388,6 +388,49 @@ export const api = {
         total: data.total || 0,
       };
     },
+
+    /**
+     * GET /api/documents/search — Phase 4 surface (FTS5).
+     *
+     * Distinct from `search()` because the panel needs facets, sort,
+     * supplier_id / document_type_id, and the loose snippet projection
+     * the FTS endpoint returns. Returns the raw server payload — the
+     * panel handles `parseDocument` itself for the rows it actually
+     * intends to render.
+     */
+    searchV2: async (params: {
+      q: string;
+      tenant_id?: string;
+      supplier_id?: string;
+      document_type_id?: string;
+      category?: string;
+      date_from?: string;
+      date_to?: string;
+      sort?: 'relevance' | 'newest' | 'oldest' | 'name';
+      limit?: number;
+      offset?: number;
+      facets?: boolean;
+    }): Promise<{
+      documents: Array<Record<string, unknown>>;
+      total: number;
+      limit: number;
+      offset: number;
+      facets?: Partial<Record<'supplier' | 'doc_type' | 'product' | 'date_bucket' | 'status', Array<{ value: string; label: string; count: number }>>>;
+    }> => {
+      const qs = new URLSearchParams();
+      qs.set('q', params.q);
+      if (params.tenant_id) qs.set('tenant_id', params.tenant_id);
+      if (params.supplier_id) qs.set('supplier_id', params.supplier_id);
+      if (params.document_type_id) qs.set('document_type_id', params.document_type_id);
+      if (params.category) qs.set('category', params.category);
+      if (params.date_from) qs.set('date_from', params.date_from);
+      if (params.date_to) qs.set('date_to', params.date_to);
+      if (params.sort && params.sort !== 'relevance') qs.set('sort', params.sort);
+      if (params.limit !== undefined) qs.set('limit', String(params.limit));
+      if (params.offset !== undefined) qs.set('offset', String(params.offset));
+      if (params.facets) qs.set('facets', '1');
+      return fetchApi(`/documents/search?${qs.toString()}`);
+    },
   },
 
   users: {
