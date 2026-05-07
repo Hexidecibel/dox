@@ -118,7 +118,15 @@ bundle), and unify Documents and Search behind one shared
    `UNIQUE(user_id, name)`; recent searches in localStorage.
    (Bumped from `0056` because `0056_fix_fts_view_nulls.sql`
    landed first to harden NULL propagation in
-   `documents_fts_source`.)
+   `documents_fts_source`.) **Done** — landed on `search-v2`
+   branch. CRUD endpoints under `/api/search/saved` (list +
+   create) and `/api/search/saved/:id` (get + put + delete);
+   per-user isolation is the only access rule (super_admins
+   only see their own). `scope='shared'` is rejected with 400
+   so callers get an explicit signal rather than a silent
+   downgrade. 404 (not 403) is returned for non-owner reads /
+   writes / deletes — saved searches are a personal surface
+   and existence-leakage doesn't help anyone here.
 4. **Backend endpoints** — replace internals of `/api/documents/search`
    and `/api/orders?search=` with FTS5; add `GET /api/search` (universal,
    fans out via `db.batch()`); faceted counts as one query per active
