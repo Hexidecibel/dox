@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
-  Badge,
   Box,
   CircularProgress,
   Stack,
@@ -148,6 +147,9 @@ export function UniversalSearchPanel({
       <Tabs
         value={tab}
         onChange={(_, next: UniversalSearchType) => setStatePatch({ type: next })}
+        variant="scrollable"
+        scrollButtons="auto"
+        allowScrollButtonsMobile
         sx={{ mb: 2, borderBottom: '1px solid', borderColor: 'divider' }}
       >
         {TAB_ORDER.map((t) => (
@@ -155,17 +157,33 @@ export function UniversalSearchPanel({
             key={t}
             value={t}
             label={
-              <Badge
-                badgeContent={totals[t]}
-                color="primary"
-                max={999}
-                showZero={false}
-                sx={{ '& .MuiBadge-badge': { right: -16, top: 4 } }}
+              <Box
+                component="span"
+                sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.75 }}
               >
                 {TAB_LABEL[t]}
-              </Badge>
+                {totals[t] > 0 && (
+                  <Box
+                    component="span"
+                    sx={{
+                      bgcolor: 'primary.main',
+                      color: 'primary.contrastText',
+                      borderRadius: 999,
+                      fontSize: '0.6875rem',
+                      fontWeight: 600,
+                      lineHeight: 1,
+                      px: 0.75,
+                      py: 0.25,
+                      minWidth: 18,
+                      textAlign: 'center',
+                    }}
+                  >
+                    {totals[t] > 999 ? '999+' : totals[t]}
+                  </Box>
+                )}
+              </Box>
             }
-            sx={{ textTransform: 'none', minHeight: 40, mr: 2 }}
+            sx={{ textTransform: 'none', minHeight: 40, minWidth: 'auto', px: 2 }}
           />
         ))}
       </Tabs>
