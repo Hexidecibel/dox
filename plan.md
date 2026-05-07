@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### Document Search v2 — universal, faceted, FTS5-backed
 
-**Status:** in-progress (Phases 1–5 done; Phases 6–8 planned)
+**Status:** in-progress (Phases 1–6 done; Phases 7–8 planned)
 
 **Full plan:** `/home/hexi/.claude/plans/peppy-coalescing-platypus.md`
 
@@ -168,7 +168,17 @@ bundle), and unify Documents and Search behind one shared
 6. **Page rewrites** — `Documents.tsx` becomes a thin
    `<DocumentSearchPanel syncToUrl />` wrapper; `Search.tsx` becomes
    `<UniversalSearchPanel>` with All / Documents / Orders / Customers /
-   Bundles tabs.
+   Bundles tabs. **Done** — landed on `search-v2` as two sub-commits:
+   `phase 6a` (`Documents.tsx` reduced from 399 lines to a 49-line
+   shell over `<DocumentSearchPanel syncToUrl />`; legacy client-side
+   substring filter and `api.documents.list()` call removed),
+   `phase 6b` (`Search.tsx` reduced from 608 lines to a 55-line shell
+   over `<UniversalSearchPanel syncToUrl />`; legacy
+   Documents/Orders tabs, manual category + date-range filters,
+   CSV/JSON export controls, and direct `api.documents.search()` /
+   `api.orders.list()` / `api.orders.naturalSearch()` calls removed).
+   `api.documents.search()` (legacy) is now orphaned; deletion is a
+   follow-up. `npm test` 1196 green throughout.
 7. **Tests** — new `tests/unit/search-fts-{documents,snippets,facets}.test.ts`,
    `search-saved.test.ts`, `search-reindex-queue.test.ts`, plus
    `tests/e2e/document-search.spec.ts`.
