@@ -6,6 +6,7 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
+import { buildMatchExpr } from '../../lib/search-fts';
 import type { Env, User } from '../../lib/types';
 
 /**
@@ -53,25 +54,28 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       params.push(connectorId);
     }
 
-    let needItemJoin = false;
-
-    if (search) {
-      conditions.push(
-        '(o.order_number LIKE ? OR o.po_number LIKE ? OR o.customer_name LIKE ? OR o.customer_number LIKE ? OR oi.product_name LIKE ? OR oi.product_code LIKE ? OR oi.lot_number LIKE ?)'
-      );
-      const term = `%${search}%`;
-      params.push(term, term, term, term, term, term, term);
-      needItemJoin = true;
+    // FTS5 swap (Phase 4c). When `search` is non-empty and parses to at
+    // least one token, we narrow `orders` via `orders_fts MATCH` against
+    // the same denormalized view that backs the universal /api/search
+    // endpoint. Customer name + order_number + po_number + items are all
+    // indexed, so no extra `LEFT JOIN order_items` is needed for the
+    // search predicate. We still join `order_items` for the item_count /
+    // matched_count projections, but those are scalar subqueries below.
+    let ftsClause = '';
+    const matchExpr = search ? buildMatchExpr(search) : null;
+    if (matchExpr) {
+      ftsClause = `AND o.id IN (
+        SELECT f.order_id
+        FROM orders_fts f
+        WHERE f.tenant_id = ? AND orders_fts MATCH ?
+      )`;
+      params.push(tenantId, matchExpr);
     }
 
-    const itemJoin = needItemJoin
-      ? 'LEFT JOIN order_items oi ON oi.order_id = o.id'
-      : '';
-
-    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+    const whereClause = `WHERE ${conditions.join(' AND ')} ${ftsClause}`;
 
     const countResult = await context.env.DB.prepare(
-      `SELECT COUNT(DISTINCT o.id) as total FROM orders o ${itemJoin} ${whereClause}`
+      `SELECT COUNT(DISTINCT o.id) as total FROM orders o ${whereClause}`,
     )
       .bind(...params)
       .first<{ total: number }>();
@@ -83,13 +87,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         c.name as connector_name,
         cust.name as customer_name_resolved
       FROM orders o
-      ${itemJoin}
       LEFT JOIN connectors c ON c.id = o.connector_id
       LEFT JOIN customers cust ON cust.id = o.customer_id
       ${whereClause}
       GROUP BY o.id
       ORDER BY o.created_at DESC
-      LIMIT ? OFFSET ?`
+      LIMIT ? OFFSET ?`,
     )
       .bind(...params, limit, offset)
       .all();
