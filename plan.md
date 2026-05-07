@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### Document Search v2 — universal, faceted, FTS5-backed
 
-**Status:** in-progress (Phase 1 done; Phases 2–8 planned)
+**Status:** in-progress (Phases 1–2 done; Phases 3–8 planned)
 
 **Full plan:** `/home/hexi/.claude/plans/peppy-coalescing-platypus.md`
 
@@ -102,11 +102,19 @@ bundle), and unify Documents and Search behind one shared
    `search-v2` branch (commit `search v2 phase 1: FTS5 backbone
    (migration 0054)`); regular FTS5 tables used in place of contentless
    for trigger-friendly DELETE/INSERT semantics (see commit message).
-2. **Async reindex queue** — reuse `processing_queue` (preferred) or new
-   `search_reindex_jobs` table; supplier/product/doc_type renames enqueue
-   jobs; process-worker drains in batches of 500. Admin endpoint
-   `POST /api/admin/search/reindex` for full rebuilds.
-3. **Saved searches** — `0055_saved_searches.sql` with
+2. **Async reindex queue** — migration `0055_search_reindex_queue.sql`:
+   new `search_reindex_jobs` table (chose this over reusing
+   `processing_queue` to avoid coupling AI extraction lifecycle with
+   pure-SQL reindex jobs). Triggers on suppliers / products /
+   document_types enqueue on rename; partial unique index on
+   `(entity_kind, entity_id) WHERE status='pending'` makes enqueue
+   idempotent. Drainer at `functions/lib/search-reindex.ts` processes
+   jobs in 500-row batches via the documents_fts_source view; retries
+   up to 3 attempts before flipping to `failed`. Admin endpoint
+   `POST /api/admin/search/reindex` (super_admin) supports
+   enqueue / drain / enqueue_and_drain. **Done** — landed on
+   `search-v2` branch.
+3. **Saved searches** — `0056_saved_searches.sql` with
    `UNIQUE(user_id, name)`; recent searches in localStorage.
 4. **Backend endpoints** — replace internals of `/api/documents/search`
    and `/api/orders?search=` with FTS5; add `GET /api/search` (universal,
