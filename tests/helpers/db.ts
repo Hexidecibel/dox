@@ -54,6 +54,7 @@ import m0054 from '../../migrations/0054_fts_search.sql?raw';
 import m0055 from '../../migrations/0055_search_reindex_queue.sql?raw';
 import m0056 from '../../migrations/0056_fix_fts_view_nulls.sql?raw';
 import m0057 from '../../migrations/0057_saved_searches.sql?raw';
+import m0058 from '../../migrations/0058_drop_extraction_evaluations.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -61,7 +62,7 @@ const migrations: string[] = [
   m0021, m0022, m0023a, m0023b, m0024, m0025, m0026, m0027, m0028, m0029,
   m0030, m0031, m0032, m0033, m0034, m0035, m0036, m0037, m0038, m0039,
   m0046, m0047, m0048, m0049, m0050, m0051, m0052, m0053, m0054, m0055,
-  m0056, m0057,
+  m0056, m0057, m0058,
 ];
 
 /**
