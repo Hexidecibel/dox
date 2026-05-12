@@ -84,6 +84,14 @@ export interface CoreFieldDefinition {
   /** Default format hint used to seed the AI prompt if the user hasn't entered one. */
   default_format_hint: string;
   description: string;
+  /**
+   * `true` when the value lives on a line item (`orders[].items[]`) rather
+   * than directly on the order. Drives the JSON shape we ask the LLM to emit
+   * — line-item fields land inside `items[]` so multi-row sources (audit
+   * trails, shipping detail exports) get grouped into one order per
+   * `order_number` instead of duplicate orders.
+   */
+  is_item_level?: boolean;
 }
 
 export const CORE_FIELD_DEFINITIONS: readonly CoreFieldDefinition[] = [
@@ -126,6 +134,7 @@ export const CORE_FIELD_DEFINITIONS: readonly CoreFieldDefinition[] = [
     default_source_labels: ['product_name', 'product', 'description', 'item', 'item description'],
     default_format_hint: 'Product description',
     description: 'Product description or line item name.',
+    is_item_level: true,
   },
   {
     key: 'product_code',
@@ -134,6 +143,7 @@ export const CORE_FIELD_DEFINITIONS: readonly CoreFieldDefinition[] = [
     default_source_labels: ['product_code', 'sku', 'item code', 'part number', 'product id'],
     default_format_hint: 'SKU or item code',
     description: 'Product SKU / item code.',
+    is_item_level: true,
   },
   {
     key: 'quantity',
@@ -142,6 +152,7 @@ export const CORE_FIELD_DEFINITIONS: readonly CoreFieldDefinition[] = [
     default_source_labels: ['quantity', 'qty', 'amount', 'units'],
     default_format_hint: 'Numeric quantity',
     description: 'Line item quantity.',
+    is_item_level: true,
   },
   {
     key: 'lot_number',
@@ -150,6 +161,7 @@ export const CORE_FIELD_DEFINITIONS: readonly CoreFieldDefinition[] = [
     default_source_labels: ['lot_number', 'lot', 'lot #', 'batch', 'batch number'],
     default_format_hint: 'e.g. LOT-456',
     description: 'Lot / batch identifier on the line item.',
+    is_item_level: true,
   },
 ];
 
@@ -375,15 +387,31 @@ export function validateFieldMappings(m: ConnectorFieldMappings): ValidationResu
  * format hint so the model knows what to look for.
  */
 export function buildAiFieldsSection(m: ConnectorFieldMappings): string {
-  const lines: string[] = ['Fields to extract:'];
+  const lines: string[] = ['Order-level fields to extract:'];
 
-  for (const def of CORE_FIELD_DEFINITIONS) {
+  const orderLevel = CORE_FIELD_DEFINITIONS.filter(d => !d.is_item_level);
+  const itemLevel = CORE_FIELD_DEFINITIONS.filter(d => d.is_item_level);
+
+  for (const def of orderLevel) {
     const c = m.core[def.key];
     if (!c || !c.enabled) continue;
     const aliasList = c.source_labels.length > 0 ? c.source_labels.join(', ') : '(no aliases — infer from context)';
     const hint = c.format_hint || def.default_format_hint;
     const reqTag = def.required ? ' [REQUIRED]' : '';
     lines.push(`- ${def.key}${reqTag}: ${def.description} Source labels: ${aliasList}. Format: ${hint}`);
+  }
+
+  const enabledItemFields = itemLevel.filter(d => m.core[d.key]?.enabled);
+  if (enabledItemFields.length > 0) {
+    lines.push('');
+    lines.push('Per-line-item fields (return nested inside each order\'s "items" array — see Rules below for grouping):');
+    for (const def of enabledItemFields) {
+      const c = m.core[def.key];
+      if (!c) continue;
+      const aliasList = c.source_labels.length > 0 ? c.source_labels.join(', ') : '(no aliases — infer from context)';
+      const hint = c.format_hint || def.default_format_hint;
+      lines.push(`- ${def.key}: ${def.description} Source labels: ${aliasList}. Format: ${hint}`);
+    }
   }
 
   if (m.extended.length > 0) {
@@ -405,27 +433,40 @@ export function buildAiFieldsSection(m: ConnectorFieldMappings): string {
  * order, preserving the v2 shape on the wire.
  */
 export function buildJsonShapeForPrompt(m: ConnectorFieldMappings): string {
-  const corePairs: string[] = [];
-  for (const def of CORE_FIELD_DEFINITIONS) {
+  const orderLevel = CORE_FIELD_DEFINITIONS.filter(d => !d.is_item_level);
+  const itemLevel = CORE_FIELD_DEFINITIONS.filter(d => d.is_item_level);
+
+  const orderPairs: string[] = [];
+  for (const def of orderLevel) {
     const c = m.core[def.key];
     if (!c || !c.enabled) continue;
-    const isRequired = def.required;
+    const type = 'string or null';
+    orderPairs.push(`      "${def.key}": "${type}${def.required ? ' (required)' : ''}"`);
+  }
+
+  const itemPairs: string[] = [];
+  for (const def of itemLevel) {
+    const c = m.core[def.key];
+    if (!c || !c.enabled) continue;
     const type = def.key === 'quantity' ? 'number or null' : 'string or null';
-    corePairs.push(`      "${def.key}": "${type}${isRequired ? ' (required)' : ''}"`);
+    itemPairs.push(`          "${def.key}": "${type}"`);
+  }
+  if (itemPairs.length > 0) {
+    orderPairs.push(`      "items": [\n        {\n${itemPairs.join(',\n')}\n        }\n      ]`);
   }
 
   if (m.extended.length > 0) {
     const extPairs = m.extended
       .map(e => `        "${e.key}": "string or null"`)
       .join(',\n');
-    corePairs.push(`      "extended_metadata": {\n${extPairs}\n      }`);
+    orderPairs.push(`      "extended_metadata": {\n${extPairs}\n      }`);
   }
 
   return `Return JSON in this exact format:
 {
   "orders": [
     {
-${corePairs.join(',\n')}
+${orderPairs.join(',\n')}
     }
   ],
   "customers": [

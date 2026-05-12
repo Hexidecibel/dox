@@ -827,6 +827,12 @@ const STATIC_PROMPT_BODY = `Rules:
   like commas, ampersands, or apostrophes.
 - Extract ALL orders from the input. If there are no orders (e.g. a customer
   registry), return an empty "orders" array.
+- GROUP rows that share an order_number into ONE order with multiple items[].
+  Audit-trail and shipping-detail exports list one row per product line, all
+  referencing the same order_number — those are line items of a single order,
+  NOT separate orders. Emit one order object with that order_number and put
+  each product/qty/lot row under "items". Do NOT emit duplicate order objects
+  with the same order_number.
 - An order_number is a multi-digit invoice/order/sale identifier (e.g. 1784767),
   DISTINCT from the K#####/P###### customer_number. If you cannot find a clear
   order_number column or value in the source, return an empty "orders" array.
@@ -930,6 +936,30 @@ Output:
       "contacts": [{"email": "alice@chuckanut.com"}]
     }
   ]
+}
+
+Example D — Audit-trail-style export (multiple rows per order).
+Three source rows ALL reference order_number 1790512 but list different
+products / quantities / lot codes. These are line items of ONE order, not
+three separate orders. Merge them into a single order with three items[].
+Input:
+Date     | Product | Description           | Qty | Lot       | Order No.
+5/4/2026 | 0406    | WHOLE MILK GAL        | -30 | 052126    | 1790512
+5/4/2026 | 10012   | CAGE FREE LIQUID EGGS | -14 | 051926    | 1790512
+5/4/2026 | 2235    | DG BTR BULK U/S       |  -2 | 103261021 | 1790512
+Output:
+{
+  "orders": [
+    {
+      "order_number": "1790512",
+      "items": [
+        {"product_code": "0406",  "product_name": "WHOLE MILK GAL",        "quantity": -30, "lot_number": "052126"},
+        {"product_code": "10012", "product_name": "CAGE FREE LIQUID EGGS", "quantity": -14, "lot_number": "051926"},
+        {"product_code": "2235",  "product_name": "DG BTR BULK U/S",       "quantity": -2,  "lot_number": "103261021"}
+      ]
+    }
+  ],
+  "customers": []
 }`;
 
 /**
