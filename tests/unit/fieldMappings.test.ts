@@ -175,7 +175,10 @@ describe('buildAiFieldsSection', () => {
   it('lists every enabled core field with aliases + format hint', () => {
     const m = defaultFieldMappings();
     const section = buildAiFieldsSection(m);
-    expect(section).toMatch(/Fields to extract:/);
+    // Header reflects the order-level / per-line-item split introduced
+    // when the prompt builder learned to nest item fields under items[].
+    expect(section).toMatch(/Order-level fields to extract:/);
+    expect(section).toMatch(/Per-line-item fields/);
     // Every enabled core key appears on a line.
     for (const key of CORE_FIELD_KEYS) {
       expect(section).toContain(`- ${key}`);
