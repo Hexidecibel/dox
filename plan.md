@@ -46,6 +46,27 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Connector extraction repair surface (3-stage, sequenced)
+
+**Status:** planned (2026-05-12). Motivation: extraction occasionally
+gets specific docs wrong (Anderson Dairy, Darigold flagged as
+particularly bad) and the user has no way to fix the output without
+re-running with new mappings. Need an escape hatch from "the LLM
+got it wrong" all the way through to "the system learned and got
+it right next time".
+
+| # | Slice | Why | Rough effort |
+|---|-------|-----|--------------|
+| R1 | **Per-run manual edit table.** After a connector run, surface the extracted orders/customers/items in an editable table. User can fix incorrect values, mark wrong rows, click Save — changes write back to the DB. No new schema; no learning. Just a fix-and-move-on workflow when the LLM is wrong. | Immediate relief. Today there's no path from "ingest broke" to "fixed data" without re-running with different mappings. | ~1d |
+| R2 | **Per-supplier extraction instructions.** Add a notes/instructions field on suppliers (or reuse `supplier_extraction_instructions` from migration 0035) that gets concatenated into the extraction prompt when a doc is ingested from that supplier. Examples: "Anderson Dairy uses Product Code in column 3", "Darigold puts lot numbers in the Description column with prefix LOT-". Per-vendor tuning without code changes. | Closes the loop on R1 — corrections become reusable. Vendor-specific quirks stop costing us a re-run each time. Memory hint: see `supplier_extraction_instructions` table (mig 0035). | ~2-3d |
+| R3 | **Visual annotation + chat mode.** PDF/XLSX/image viewer with bbox draw + caption layer. User outlines regions and types instructions ("this column is product code + name combined, split on the dash"; "treat this group of rows as a table"). Annotations get bundled as JSON and fed to the extraction LLM as extra context. Optionally use `qwen2.5-vl-7b` (already in `modelFor('vision')`) so the model literally sees the overlays. Optional chat loop refines output ("the qty on row 3 is 23 not 2"). | The strongest version. Unlocks weird docs that can't be solved by mappings or per-supplier instructions. Captures the user's "click + drag + note" idea from 2026-05-12. | ~2-3w |
+
+**Sequencing rationale:** R1 alone is more valuable than waiting on R3; ship it first. R2 builds on R1 by turning manual edits into persistent vendor tuning. R3 is the long-term answer but the bigger build — gate on whether R1+R2 catch enough cases first.
+
+**Out of scope (for now):**
+- Warm-up ping to mask cold-load latency on the schema-discovery / extraction LLM calls. Frontend-prefetch pattern (fire a no-op ping on wizard mount so the model is loaded by the time the user clicks Next). ~30 min change. Defer until users complain about latency vs correctness.
+- Multi-page PDF preprocessing — already on `todo.md`; `tests/unit/extraction-pdf.test.ts` uses `mergePages: true` and the LLM confuses multi-page docs. Anderson Dairy / Darigold may be multi-page; check before doing R-anything.
+
 ### Document Search v2 — universal, faceted, FTS5-backed
 
 **Status:** in-progress (Phases 1–6 done; Phases 7–8 planned)
