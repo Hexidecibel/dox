@@ -889,6 +889,11 @@ async function processItem(item) {
       ai_fields: JSON.stringify(parsed.fields || {}),
       ai_confidence: parsed.confidence || 'low',
       confidence_score: confidenceScore,
+      // Doc-R1: LLM self-rated numeric confidence (0..1, null if absent).
+      // Distinct from confidence_score (the deterministic heuristic). This
+      // is the signal the auto-approve gate compares against the tenant
+      // threshold. See migration 0062 + functions/api/queue/[id]/results.ts.
+      confidence: parsed.confidenceNum,
       product_names: JSON.stringify(parsed.products || []),
       tables: JSON.stringify(parsed.tables || []),
       summary: parsed.summary || '',
@@ -1118,9 +1123,24 @@ TABLE EXTRACTION RULES:
 7. Keep row order as it appears in the document.
 
 OCR / SCANNED DOCUMENT HANDLING:
-- If text appears garbled, do your best but set _confidence to "low"
-- Common OCR errors: l↔1, O↔0, rn↔m. Infer correct values from context.
-- Partially readable values: include what you can and append "(?)".
+- If text appears garbled, do your best but set _confidence appropriately low
+  (e.g. 0.3-0.5). Common OCR errors: l↔1, O↔0, rn↔m. Infer correct values from
+  context. Partially readable values: include what you can and append "(?)".
+
+CONFIDENCE CALIBRATION:
+- ALWAYS emit \`_confidence\` at the top level — a single number between 0.0
+  and 1.0 reflecting how sure you are about the extraction as a whole.
+  Calibration:
+    1.0  — every required field was unambiguously present in the source.
+    0.9  — minor uncertainty (one optional field guessed).
+    0.7  — the threshold below which a human will review. Use this when a
+           required field was inferred rather than read directly (e.g. you
+           split a composite cell), a label was non-standard, the source
+           format was unusual, or OCR garbled the text in spots.
+    0.5  — a required field was guessed from limited context.
+    0.0  — you fabricated a value; the source did not actually contain this.
+  Be honest. A low confidence flag a human can investigate is FAR better
+  than fabricating a high-confidence record.
 
 Return JSON with:
 {
@@ -1128,7 +1148,7 @@ Return JSON with:
   "tables": [{ "name": "string", "headers": [...], "rows": [[...]] }],
   "products": ["product name 1", ...],
   "summary": "one-sentence description",
-  "_confidence": "high" | "medium" | "low",
+  "_confidence": 0.0-1.0,
   "document_type": "Certificate of Analysis" | "Bill of Lading" | etc.
 }`;
 
@@ -1168,7 +1188,7 @@ Output:
   }],
   "products": ["Grade AA Butter 68#"],
   "summary": "COA for Darigold Grade AA Butter lot L26-0842, all tests pass.",
-  "_confidence": "high",
+  "_confidence": 0.95,
   "document_type": "Certificate of Analysis"
 }`;
 
@@ -1312,13 +1332,28 @@ TABLE EXTRACTION RULES:
 6. Multiple distinct tables in the image → separate entries for each.
 7. Keep row order as it appears visually.
 
+CONFIDENCE CALIBRATION:
+- ALWAYS emit \`_confidence\` at the top level — a single number between 0.0
+  and 1.0 reflecting how sure you are about the extraction as a whole.
+  Calibration:
+    1.0  — every required field was unambiguously present in the image.
+    0.9  — minor uncertainty (one optional field guessed).
+    0.7  — the threshold below which a human will review. Use this when a
+           required field was inferred rather than read directly (e.g. you
+           split a composite cell), the label was non-standard, the layout
+           was unusual, or the image was hard to read in places.
+    0.5  — a required field was guessed from limited context.
+    0.0  — you fabricated a value; the image did not actually contain this.
+  Be honest. A low confidence flag a human can investigate is FAR better
+  than fabricating a high-confidence record.
+
 Return JSON with:
 {
   "fields": { ... },
   "tables": [{ "name": "string", "headers": [...], "rows": [[...]] }],
   "products": ["product name 1", ...],
   "summary": "one-sentence description",
-  "_confidence": "high" | "medium" | "low",
+  "_confidence": 0.0-1.0,
   "document_type": "Certificate of Analysis" | "Bill of Lading" | etc.
 }`;
 
@@ -1442,7 +1477,27 @@ function parseExtraction(content) {
   }
 
   const products = Array.isArray(parsed.products) ? parsed.products : [];
-  const confidence = ['high', 'medium', 'low'].includes(parsed._confidence) ? parsed._confidence : 'low';
+  // _confidence may be either:
+  //   - a number in [0, 1] (new Doc-R1 calibration) — preferred
+  //   - one of 'high' / 'medium' / 'low' (legacy)
+  // We always derive both a numeric value (confidenceNum, may be null) and
+  // a legacy bucket string (confidence) so the existing downstream code
+  // (ai_confidence column, confidence-bucket heuristic) keeps working
+  // unchanged. The numeric value is what flows to the auto-approve gate.
+  let confidenceNum = null;
+  let confidence = 'low';
+  if (typeof parsed._confidence === 'number' && isFinite(parsed._confidence)) {
+    confidenceNum = Math.max(0, Math.min(1, parsed._confidence));
+    confidence = confidenceNum >= 0.8 ? 'high' : confidenceNum >= 0.5 ? 'medium' : 'low';
+  } else if (typeof parsed._confidence === 'string') {
+    const v = parsed._confidence.toLowerCase();
+    if (v === 'high' || v === 'medium' || v === 'low') {
+      confidence = v;
+      // Coarse mapping so the auto-approve gate still has SOMETHING usable
+      // when an older model output the legacy string form.
+      confidenceNum = v === 'high' ? 0.9 : v === 'medium' ? 0.6 : 0.3;
+    }
+  }
   const tables = Array.isArray(parsed.tables) ? parsed.tables : [];
   const summary = typeof parsed.summary === 'string' ? parsed.summary : '';
   const documentType = typeof parsed.document_type === 'string' ? parsed.document_type : null;
@@ -1461,7 +1516,7 @@ function parseExtraction(content) {
     }
   }
 
-  return { fields: flattenFields(fields), tables, products, summary, confidence, documentType };
+  return { fields: flattenFields(fields), tables, products, summary, confidence, confidenceNum, documentType };
 }
 
 // === Flatten nested objects/arrays in extracted fields ===

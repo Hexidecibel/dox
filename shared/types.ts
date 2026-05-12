@@ -14,6 +14,8 @@ export interface TenantRow {
   active: number;
   created_at: string;
   updated_at: string;
+  /** Doc-R1: see Tenant.auto_approve_threshold. */
+  auto_approve_threshold?: number | null;
 }
 
 export interface UserRow {
@@ -488,6 +490,13 @@ export interface Tenant {
   active: number;
   created_at: string;
   updated_at: string;
+  /**
+   * Doc-R1: when set (0.0–1.0), processing-queue items whose LLM self-rated
+   * confidence meets or exceeds this value are auto-approved by
+   * /api/queue/:id/results without a human review click. NULL = disabled
+   * (default), every item still routes to the review queue.
+   */
+  auto_approve_threshold?: number | null;
 }
 
 export interface AuthPayload {
@@ -640,6 +649,12 @@ export interface ProcessingQueueItem {
   ai_fields: string | null;
   ai_confidence: string | null;
   confidence_score: number | null;
+  /**
+   * Doc-R1: LLM self-rated confidence in [0, 1] as parsed from the model's
+   * `_confidence` field. NULL when the model didn't emit one. Distinct from
+   * confidence_score (the deterministic post-hoc heuristic).
+   */
+  confidence: number | null;
   product_names: string | null;
   supplier: string | null;
   document_type_guess: string | null;

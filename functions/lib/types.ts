@@ -62,6 +62,12 @@ export interface Tenant {
   active: number;
   created_at: string;
   updated_at: string;
+  /**
+   * Doc-R1: when set (0.0–1.0), processing-queue items whose LLM self-rated
+   * confidence meets or exceeds this value are auto-approved by
+   * /api/queue/:id/results without a human review click. NULL = disabled.
+   */
+  auto_approve_threshold?: number | null;
 }
 
 export interface Document {

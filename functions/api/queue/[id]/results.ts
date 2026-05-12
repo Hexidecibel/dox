@@ -26,6 +26,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       ai_fields?: string;
       ai_confidence?: string;
       confidence_score?: number;
+      // Doc-R1: LLM self-rated numeric confidence (0..1). Null/undefined when
+      // the model didn't emit one. Distinct from confidence_score (heuristic).
+      confidence?: number | null;
       product_names?: string;
       tables?: string;
       summary?: string;
@@ -52,10 +55,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
     // Verify queue item exists
     const item = await context.env.DB.prepare(
-      'SELECT id, tenant_id, document_type_id, processing_status, source, source_detail, file_name FROM processing_queue WHERE id = ?'
+      'SELECT id, tenant_id, document_type_id, processing_status, source, source_detail, file_name, status FROM processing_queue WHERE id = ?'
     )
       .bind(queueId)
-      .first<{ id: string; tenant_id: string; document_type_id: string | null; processing_status: string; source: string | null; source_detail: string | null; file_name: string }>();
+      .first<{ id: string; tenant_id: string; document_type_id: string | null; processing_status: string; source: string | null; source_detail: string | null; file_name: string; status: string }>();
 
     if (!item) {
       throw new NotFoundError('Queue item not found');
@@ -83,6 +86,17 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.confidence_score !== undefined) {
       updates.push('confidence_score = ?');
       params.push(body.confidence_score);
+    }
+
+    // Doc-R1: LLM self-rated numeric confidence. Clamp to [0, 1]; preserve
+    // null (which means "no signal available" — auto-approve will NOT fire).
+    if (body.confidence !== undefined) {
+      let conf: number | null = null;
+      if (body.confidence !== null && typeof body.confidence === 'number' && isFinite(body.confidence)) {
+        conf = Math.max(0, Math.min(1, body.confidence));
+      }
+      updates.push('confidence = ?');
+      params.push(conf);
     }
 
     if (body.product_names !== undefined) {
@@ -375,6 +389,112 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       } catch (autoIngestErr) {
         // Non-fatal — log but don't fail the results update
         console.error('Auto-ingest check failed:', autoIngestErr);
+      }
+
+      // --- Doc-R1: per-tenant confidence-threshold auto-approve ---
+      // Independent of the template path above. Fires when:
+      //   - the worker posted a non-null numeric confidence on this update
+      //   - the tenant has auto_approve_threshold set (NULL = disabled)
+      //   - confidence >= threshold
+      //   - the item is still pending (not already approved by the template
+      //     path or a previous run) and has no error
+      // This is the "trust the LLM's own number for low-risk vendors" hatch.
+      // Errors are non-fatal (mirrors the template path) so a bad approve
+      // never blocks the worker from advancing the queue.
+      if (
+        !wasAutoIngested &&
+        body.confidence !== undefined &&
+        body.confidence !== null &&
+        typeof body.confidence === 'number' &&
+        isFinite(body.confidence) &&
+        item.status === 'pending' &&
+        !body.error_message
+      ) {
+        try {
+          const tenantRow = await context.env.DB.prepare(
+            'SELECT auto_approve_threshold FROM tenants WHERE id = ?'
+          )
+            .bind(item.tenant_id)
+            .first<{ auto_approve_threshold: number | null }>();
+          const threshold = tenantRow?.auto_approve_threshold ?? null;
+          const conf = Math.max(0, Math.min(1, body.confidence));
+
+          if (threshold !== null && typeof threshold === 'number' && conf >= threshold) {
+            const { approveQueueItem } = await import('../../../lib/queue-approve');
+
+            // Re-fetch full queue item (with tenant_slug) for the approve helper.
+            const fullItem = await context.env.DB.prepare(
+              `SELECT pq.*, t.slug as tenant_slug
+               FROM processing_queue pq
+               LEFT JOIN tenants t ON pq.tenant_id = t.id
+               WHERE pq.id = ?`
+            )
+              .bind(queueId)
+              .first<Record<string, unknown>>();
+
+            if (fullItem) {
+              const aiFieldsObj = body.ai_fields ? JSON.parse(body.ai_fields) : {};
+              const approvedFields: Record<string, string> = {};
+              for (const [k, v] of Object.entries(aiFieldsObj)) {
+                if (v != null && String(v).trim() !== '') {
+                  approvedFields[k] = String(v);
+                }
+              }
+
+              // Pick product name from a few common AI keys, if any.
+              const productName =
+                approvedFields.product_name ||
+                approvedFields.product ||
+                undefined;
+
+              await approveQueueItem(
+                context.env.DB,
+                context.env.FILES,
+                fullItem as never,
+                {
+                  fields: approvedFields,
+                  productName,
+                  userId: user.id,
+                  autoIngested: true,
+                }
+              );
+
+              await context.env.DB.prepare(
+                'UPDATE processing_queue SET auto_ingested = 1 WHERE id = ?'
+              ).bind(queueId).run();
+
+              // Audit-log the threshold-driven auto-approve so it shows up in
+              // Activity with a clear non-user actor. Uses action
+              // 'queue_item.auto_approve_threshold' so we can grep these
+              // separately from human approvals and template-driven ones.
+              try {
+                await logAudit(
+                  context.env.DB,
+                  user.id,
+                  item.tenant_id,
+                  'queue_item.auto_approve_threshold',
+                  'processing_queue',
+                  queueId,
+                  JSON.stringify({
+                    confidence: conf,
+                    threshold,
+                    file_name: item.file_name,
+                    actor: 'auto',
+                  }),
+                  getClientIp(context.request)
+                );
+              } catch {
+                // Non-fatal — audit failure shouldn't break auto-approve.
+              }
+
+              wasAutoIngested = true;
+            }
+          }
+        } catch (autoApproveErr) {
+          // Non-fatal — leave the item in pending so the human reviewer can
+          // still handle it. Log so we can debug.
+          console.error('Doc-R1 auto-approve failed:', autoApproveErr);
+        }
       }
 
       // --- Send result email for email-sourced documents ---

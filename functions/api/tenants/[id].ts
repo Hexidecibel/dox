@@ -72,11 +72,19 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       slug?: string;
       description?: string;
       active?: number;
+      // Doc-R1: numeric in [0, 1] enables auto-approve when LLM confidence
+      // meets the threshold; null disables (every item still routes to the
+      // review queue). super_admin only.
+      auto_approve_threshold?: number | null;
     };
 
     // org_admin can only update name and description
     if (currentUser.role === 'org_admin') {
-      if (body.slug !== undefined || body.active !== undefined) {
+      if (
+        body.slug !== undefined ||
+        body.active !== undefined ||
+        body.auto_approve_threshold !== undefined
+      ) {
         throw new ForbiddenError('Org admins can only update name and description');
       }
     }
@@ -111,6 +119,24 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.active !== undefined && currentUser.role === 'super_admin') {
       updates.push('active = ?');
       values.push(body.active);
+    }
+    if (body.auto_approve_threshold !== undefined && currentUser.role === 'super_admin') {
+      // Validate: null clears it; otherwise must be a finite number in [0, 1].
+      if (body.auto_approve_threshold !== null) {
+        if (
+          typeof body.auto_approve_threshold !== 'number' ||
+          !isFinite(body.auto_approve_threshold) ||
+          body.auto_approve_threshold < 0 ||
+          body.auto_approve_threshold > 1
+        ) {
+          return new Response(
+            JSON.stringify({ error: 'auto_approve_threshold must be a number between 0 and 1, or null to disable' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+      updates.push('auto_approve_threshold = ?');
+      values.push(body.auto_approve_threshold);
     }
 
     if (updates.length === 0) {

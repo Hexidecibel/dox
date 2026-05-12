@@ -55,6 +55,10 @@ export function Tenants() {
   const [formName, setFormName] = useState('');
   const [formSlug, setFormSlug] = useState('');
   const [formDescription, setFormDescription] = useState('');
+  // Doc-R1: per-tenant auto-approve threshold. Stored as a string in the
+  // form so users can clear it (empty = disabled = null on PUT). When
+  // non-empty it must parse as a number in [0, 1].
+  const [formAutoApproveThreshold, setFormAutoApproveThreshold] = useState('');
   const [saving, setSaving] = useState(false);
 
   const loadTenants = async () => {
@@ -78,6 +82,7 @@ export function Tenants() {
     setFormName('');
     setFormSlug('');
     setFormDescription('');
+    setFormAutoApproveThreshold('');
     setDialogOpen(true);
   };
 
@@ -86,6 +91,11 @@ export function Tenants() {
     setFormName(tenant.name);
     setFormSlug(tenant.slug);
     setFormDescription(tenant.description || '');
+    setFormAutoApproveThreshold(
+      tenant.auto_approve_threshold != null
+        ? String(tenant.auto_approve_threshold)
+        : ''
+    );
     setDialogOpen(true);
   };
 
@@ -101,8 +111,24 @@ export function Tenants() {
     }
   };
 
+  // Doc-R1: parse the threshold form field. Empty string => null (disabled);
+  // anything else must be a finite number in [0, 1]. Returns `undefined` to
+  // signal a validation error so the caller can surface it.
+  const parseThreshold = (raw: string): number | null | undefined => {
+    const trimmed = raw.trim();
+    if (trimmed === '') return null;
+    const n = Number(trimmed);
+    if (!isFinite(n) || n < 0 || n > 1) return undefined;
+    return n;
+  };
+
   const handleSave = async () => {
     if (!formName.trim() || !formSlug.trim()) return;
+    const parsedThreshold = parseThreshold(formAutoApproveThreshold);
+    if (parsedThreshold === undefined) {
+      setError('Auto-approve threshold must be a number between 0 and 1, or empty to disable.');
+      return;
+    }
     setSaving(true);
     setError('');
     try {
@@ -111,6 +137,7 @@ export function Tenants() {
           name: formName.trim(),
           slug: formSlug.trim(),
           description: formDescription.trim() || undefined,
+          auto_approve_threshold: parsedThreshold,
         });
       } else {
         await api.tenants.create({
@@ -367,7 +394,26 @@ export function Tenants() {
             value={formDescription}
             onChange={(e) => setFormDescription(e.target.value)}
             disabled={saving}
+            sx={{ mb: 2 }}
           />
+          {/* Doc-R1: per-tenant auto-approve threshold. Empty/blank disables
+              the feature (every queue item still routes to human review).
+              When set (0.0–1.0), processing-queue items whose LLM self-rated
+              confidence meets the threshold are auto-approved by the worker
+              callback without a manual click. Only meaningful when editing
+              an existing tenant — super_admin-only on the backend. */}
+          {editingTenant && (
+            <TextField
+              label="Auto-approve threshold"
+              type="number"
+              fullWidth
+              inputProps={{ min: 0, max: 1, step: 0.05 }}
+              value={formAutoApproveThreshold}
+              onChange={(e) => setFormAutoApproveThreshold(e.target.value)}
+              disabled={saving}
+              helperText="0.0–1.0. Leave blank to disable (every doc routes to review). Example: 0.9 auto-approves only very high-confidence extractions."
+            />
+          )}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={() => setDialogOpen(false)} disabled={saving}>

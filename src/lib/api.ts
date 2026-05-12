@@ -582,7 +582,18 @@ export const api = {
      * PUT /api/tenants/:id
      * Returns: Tenant (flat object after update)
      */
-    update: (id: string, data: Partial<{ name: string; slug: string; description: string; active: number }>) =>
+    update: (
+      id: string,
+      data: Partial<{
+        name: string;
+        slug: string;
+        description: string;
+        active: number;
+        // Doc-R1: numeric 0–1 enables LLM-confidence-driven auto-approve for
+        // this tenant; null disables. super_admin only on the backend.
+        auto_approve_threshold: number | null;
+      }>
+    ) =>
       fetchApi<Tenant>(`/tenants/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),

@@ -241,6 +241,14 @@ export default function ReviewQueue() {
   const [activeProductTab, setActiveProductTab] = useState<Record<string, number>>({});
 
   const [showAutoIngestedOnly, setShowAutoIngestedOnly] = useState(false);
+  // Doc-R1: sort mode for the queue list.
+  //   'recent'        — default, newest first (matches API ORDER BY created_at DESC)
+  //   'low_confidence' — items with the lowest LLM self-rated confidence float
+  //                     to the top. NULL-confidence items come AFTER the
+  //                     lowest scored ones (they are "no signal", not
+  //                     "definitely bad"), but before the high-confidence
+  //                     ones, so reviewers triage them next.
+  const [queueSort, setQueueSort] = useState<'recent' | 'low_confidence'>('recent');
   const [reExtractText, setReExtractText] = useState<Record<string, string>>({});
   const [reExtractLoading, setReExtractLoading] = useState<Record<string, boolean>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -1074,9 +1082,40 @@ export default function ReviewQueue() {
     return 'error';
   };
 
-  const filteredItems = showAutoIngestedOnly
-    ? items.filter(i => i.auto_ingested === 1)
-    : items;
+  const filteredItems = (() => {
+    const base = showAutoIngestedOnly
+      ? items.filter(i => i.auto_ingested === 1)
+      : items;
+    if (queueSort !== 'low_confidence') return base;
+    // Sort by LLM self-rated confidence ascending. Items with non-null
+    // confidence come first, ordered by smallest score; null-confidence
+    // items follow (no signal != bad signal); ties break on created_at DESC.
+    return [...base].sort((a, b) => {
+      const ac = (a as ProcessingQueueItem & { confidence: number | null }).confidence;
+      const bc = (b as ProcessingQueueItem & { confidence: number | null }).confidence;
+      const aHas = ac !== null && ac !== undefined;
+      const bHas = bc !== null && bc !== undefined;
+      if (aHas && bHas) {
+        if (ac !== bc) return (ac as number) - (bc as number);
+      } else if (aHas !== bHas) {
+        return aHas ? -1 : 1;
+      }
+      // Tie-break: newer first
+      return (b.created_at || '').localeCompare(a.created_at || '');
+    });
+  })();
+
+  // Doc-R1: bucket color for the LLM self-rated confidence chip on each item.
+  // Distinct from confidenceColor() above which buckets the deterministic
+  // confidence_score heuristic — same thresholds, different signal source.
+  const llmConfidenceColor = (
+    conf: number | null | undefined
+  ): 'success' | 'warning' | 'error' | 'default' => {
+    if (conf == null) return 'default';
+    if (conf >= 0.7) return 'success';
+    if (conf >= 0.5) return 'warning';
+    return 'error';
+  };
 
   return (
     <Box>
@@ -1158,6 +1197,20 @@ export default function ReviewQueue() {
         )}
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <FormControl size="small" sx={{ minWidth: 160 }}>
+            <InputLabel>Sort</InputLabel>
+            <Select
+              value={queueSort}
+              onChange={(e) => setQueueSort(e.target.value as 'recent' | 'low_confidence')}
+              label="Sort"
+            >
+              <MenuItem value="recent">Most recent</MenuItem>
+              <MenuItem value="low_confidence">Low confidence first</MenuItem>
+            </Select>
+          </FormControl>
+        </Box>
+
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
           <FormControlLabel
             control={
               <Switch
@@ -1224,6 +1277,27 @@ export default function ReviewQueue() {
                         />
                       </Tooltip>
                     )}
+                    {/* Doc-R1: LLM self-rated confidence chip. Distinct from
+                        confidence_score above (which is the deterministic
+                        post-hoc heuristic). Color buckets: green >=0.7,
+                        yellow 0.5–0.7, red <0.5, gray when null. */}
+                    {(() => {
+                      const llmConf = (item as ProcessingQueueItem & { confidence: number | null }).confidence;
+                      const label = llmConf == null
+                        ? 'AI: —'
+                        : `AI: ${Math.round(llmConf * 100)}%`;
+                      const color = llmConfidenceColor(llmConf);
+                      return (
+                        <Tooltip title="LLM self-rated extraction confidence (0-1)." arrow>
+                          <Chip
+                            label={label}
+                            size="small"
+                            color={color}
+                            variant="outlined"
+                          />
+                        </Tooltip>
+                      );
+                    })()}
                     <Tooltip title={helpContent.review_queue.main.fieldTooltips.status} arrow>
                       <Chip
                         label={item.status}
