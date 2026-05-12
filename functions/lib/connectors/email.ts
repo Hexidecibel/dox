@@ -8,6 +8,7 @@ import {
   defaultFieldMappings,
   normalizeFieldMappings,
 } from '../../../shared/fieldMappings';
+import { modelFor } from '../models';
 
 /**
  * Email connector: parses inbound emails into orders and customers.
@@ -647,7 +648,7 @@ async function parseWithAI(
       body: JSON.stringify({
         // Must match a model the llama-swap gateway knows about. `'qwen'`
         // is NOT a real model id and silently 404s.
-        model: 'Qwen3-8B',
+        model: modelFor('best'),
         messages,
         temperature: 0.1,
         // llama-swap defaults to ~2048 output tokens. Long XLSX outputs

@@ -52,8 +52,12 @@ test.describe('connector wizard', () => {
     await expect(
       page.getByRole('heading', { name: /new connector/i }),
     ).toBeVisible({ timeout: 15_000 });
-    // The Name & Type step should render the File Upload / Watch card.
-    await expect(page.getByText(/file upload \/ watch/i).first()).toBeVisible();
+    // Phase B0 collapsed connector types into a universal-doors model, so
+    // the wizard's first step is now just Name + slug — no type picker, no
+    // "File Upload / Watch" card. Smoke-check the Name step via the
+    // stepper's "Upload Sample" label (next-step), which is always
+    // rendered and unique to this wizard.
+    await expect(page.getByText('Upload Sample').first()).toBeVisible();
 
     // --- 2. Discover schema (simulates StepUploadSample). ---
     const form = new FormData();
@@ -197,12 +201,21 @@ test.describe('connector wizard', () => {
     const testBody = (await testRes.json()) as {
       success?: boolean;
       probe?: { ok?: boolean; message?: string };
+      probes?: Array<{ probe: string; ok: boolean; message?: string }>;
     };
     // The test endpoint always returns success=true when config validates.
-    // probe.ok tells us whether the live probe actually reached the target
-    // (e.g. R2 bucket for file_watch). For file_watch we expect ok=true.
+    // Phase B0 universal-doors: every connector runs every probe and
+    // returns them in `probes[]`. The legacy `probe` field is the first
+    // NON-OK probe (so the UI surfaces the most actionable warning) —
+    // which on staging is always the email probe ("email ingestion isn't
+    // wired on staging yet"). Pull the file_watch probe out of `probes[]`
+    // explicitly to assert the manual-upload door is healthy.
     expect(testBody.success).toBe(true);
-    expect(testBody.probe?.ok).toBe(true);
+    const fileWatchProbe = (testBody.probes || []).find(
+      (p) => p.probe === 'file_watch',
+    );
+    expect(fileWatchProbe, JSON.stringify(testBody)).toBeDefined();
+    expect(fileWatchProbe?.ok).toBe(true);
 
     // --- 7. Delete. ---
     const delRes = await api.delete(`/api/connectors/${connectorId}`, {

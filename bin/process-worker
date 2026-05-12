@@ -20,6 +20,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { Agent } = require('undici');
+const { modelFor } = require('./lib/models');
 
 // Increase headers timeout for slow LLM inference (default is 300s, we need 15min)
 const llmDispatcher = new Agent({
@@ -75,7 +76,7 @@ async function poll() {
     // Reset stale "processing" items (stuck for >10 min)
     try {
       const staleRes = await fetch(
-        `${DOX_API_URL}/api/queue?processing_status=processing&limit=10`,
+        `${DOX_API_URL}/api/queue?processing_status=processing&limit=10&status=all`,
         { headers }
       );
       if (staleRes.ok) {
@@ -93,7 +94,7 @@ async function poll() {
     }
 
     const res = await fetch(
-      `${DOX_API_URL}/api/queue?processing_status=queued&limit=1`,
+      `${DOX_API_URL}/api/queue?processing_status=queued&limit=1&status=all`,
       { headers }
     );
 
@@ -720,7 +721,7 @@ async function processItem(item) {
             signal: controller.signal,
             dispatcher: llmDispatcher,
             body: JSON.stringify({
-              model: 'Qwen3-8B',
+              model: modelFor('best', process.env),
               temperature: 0,
               max_tokens: 4096,
               messages: [

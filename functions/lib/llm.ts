@@ -1,4 +1,5 @@
 import type { ParsedQuery } from '../../shared/types';
+import { modelFor } from './models';
 
 export interface ExtractionResult {
   fields: Record<string, string | null>;    // ALL key-value pairs found
@@ -202,7 +203,7 @@ export async function extractFields(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: 'Qwen3-8B',
+        model: modelFor('best', env),
         temperature: 0,
         max_tokens: 2048,
         messages: [
@@ -388,7 +389,7 @@ export async function parseNaturalQuery(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: 'Qwen3-8B',
+        model: modelFor('best', env),
         temperature: 0,
         max_tokens: 1024,
         messages: [

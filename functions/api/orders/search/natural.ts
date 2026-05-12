@@ -4,6 +4,7 @@ import {
   BadRequestError,
   errorToResponse,
 } from '../../../lib/permissions';
+import { modelFor } from '../../../lib/models';
 import type { Env, User } from '../../../lib/types';
 
 interface ParsedOrderQuery {
@@ -90,7 +91,7 @@ async function parseOrderQuery(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: 'Qwen3-8B',
+        model: modelFor('best', env),
         temperature: 0,
         max_tokens: 500,
         messages: [

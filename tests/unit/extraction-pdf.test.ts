@@ -143,14 +143,16 @@ describe('email connector — PDF extraction (COA Orders)', () => {
     expect(summaries[0]).toContain('1 chunk');
   });
 
-  it('sends model "Qwen3-8B" in the request body (not the bogus "qwen" id)', async () => {
+  it('sends model "Qwen3-6-35B-A3B-turbo" in the request body (not the bogus "qwen" id)', async () => {
     // Bug #2 fix: the model field was `qwen` which the llama-swap gateway
-    // does not recognize. It must be `Qwen3-8B`.
+    // does not recognize. It must be a real router-known model id —
+    // doc-upload-site uses the `'best'` tag from functions/lib/models.ts,
+    // which currently resolves to `Qwen3-6-35B-A3B-turbo` (AJ's RTX 4090).
     await execute(makeContext(), makeEmailInput(makePdfAttachment()));
     const calls = getQwenCallLog();
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls) {
-      expect(call.model).toBe('Qwen3-8B');
+      expect(call.model).toBe('Qwen3-6-35B-A3B-turbo');
     }
   });
 

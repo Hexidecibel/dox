@@ -32,6 +32,7 @@ import {
   defaultFieldMappings,
 } from '../../../shared/fieldMappings';
 import { parseCSVText } from './email';
+import { modelFor } from '../models';
 
 export type DetectedFieldType = 'string' | 'number' | 'date' | 'id' | 'email' | 'phone';
 
@@ -424,6 +425,22 @@ export function autoSuggestTarget(
 }
 
 /**
+ * Detect a column whose values pack both customer_number and customer_name in
+ * one cell — e.g. "P2264 - GRAND CENTRAL FREMONT PRODUCTION" or
+ * "K00166: CHUCKANUT BAY FOODS". Common in "Ship to" columns on ERP order
+ * summaries. The extraction prompt already knows how to split these (see
+ * email.ts STATIC_PROMPT_BODY Example B), so we just need the wizard to route
+ * the column to BOTH customer_number and customer_name in the mapping config.
+ */
+const COMPOSITE_CUST_RE = /^\s*[KP]\d{3,}\s*[-:]\s+\S/;
+function hasCompositeCustomerCode(samples: string[]): boolean {
+  const nonEmpty = samples.map(s => (s ?? '').trim()).filter(s => s.length > 0);
+  if (nonEmpty.length === 0) return false;
+  const matches = nonEmpty.filter(s => COMPOSITE_CUST_RE.test(s)).length;
+  return matches / nonEmpty.length >= 0.5;
+}
+
+/**
  * Last-ditch sample-shape heuristics. Used only when the column name gave us
  * zero signal. Deliberately conservative — we only match patterns that are
  * very distinctive (K##### / P##### customer codes, LOT-prefixed lot codes,
@@ -528,6 +545,58 @@ interface DetectedBlockCustomer {
   customer_number: string;
   customer_name: string;
   emails: string[];
+}
+
+/**
+ * Score a single CSV row by counting cells that look like column labels.
+ *
+ * A "label-like" cell is short (2-40 chars), contains at least 2 letters,
+ * is letter-heavy (>= 40% alpha), and isn't an obvious date, time, number,
+ * currency, or pure ID. The score is the count of such cells in the row.
+ *
+ * Used by `findCsvHeaderRowIndex` to skip preamble rows (report titles,
+ * date ranges, section dividers) that show up before the real header in
+ * audit-trail / report exports. Designed to leave well-formed sheets
+ * untouched — row 0 of a normal CSV scores high enough to win on its own.
+ */
+function labelLikeCellCount(cells: string[]): number {
+  let count = 0;
+  for (const raw of cells) {
+    const v = (raw ?? '').toString().trim();
+    if (v.length < 2 || v.length > 40) continue;
+    if (/^-?\$?[\d,.]+\s*[A-Z]{0,3}$/.test(v)) continue;           // numeric / currency / unit-suffixed
+    if (/^\d{1,2}[\/.-]\d{1,2}([\/.-]\d{2,4})?$/.test(v)) continue; // dates like 5/4/2026
+    if (/^\d{1,2}:\d{2}(:\d{2})?\s*[APMapm]{0,2}$/.test(v)) continue; // times like 10:47PM
+    if (!/[A-Za-z]/.test(v)) continue;
+    const alpha = (v.match(/[A-Za-z]/g) || []).length;
+    if (alpha < 2) continue;
+    if (alpha / v.length < 0.4) continue;
+    count++;
+  }
+  return count;
+}
+
+/**
+ * Find the index of the row that most likely contains the real column header.
+ *
+ * Scans the first 20 rows of `rawRows` (each row is a trimmed CSV line),
+ * scores each via `labelLikeCellCount`, and returns the row with the highest
+ * score. Returns 0 (no skip) if no row scores >= 3, preserving the original
+ * "row 0 is the header" behavior for well-formed sheets.
+ */
+function findCsvHeaderRowIndex(rawRows: string[]): number {
+  const scanLimit = Math.min(rawRows.length, 20);
+  let bestIdx = 0;
+  let bestScore = -1;
+  for (let i = 0; i < scanLimit; i++) {
+    const cells = rawRows[i].split(',');
+    const score = labelLikeCellCount(cells);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+  return bestScore >= 3 ? bestIdx : 0;
 }
 
 function detectCustomerBlocks(rows: string[]): DetectedBlockCustomer[] {
@@ -678,8 +747,19 @@ export async function discoverFromXLSX(buffer: ArrayBuffer): Promise<DiscoveryRe
 
     // Either way, also run CSV discovery — even block-layout sheets usually
     // have a tabular region underneath (PO #, SKU, LOT CODE, etc.) we want
-    // to surface.
-    const csvResult = discoverFromCSV(csv);
+    // to surface. Before handing the CSV to discovery, find the real header
+    // row so report titles / date-range preamble (common in audit-trail
+    // exports) don't get treated as the column header.
+    const headerSliceIdx = findCsvHeaderRowIndex(rawRows);
+    let discoveryCsv = csv;
+    if (headerSliceIdx > 0) {
+      const lines = csv.split('\n');
+      discoveryCsv = lines.slice(headerSliceIdx).join('\n');
+      warnings.push(
+        `Sheet "${sheetName}": skipped ${headerSliceIdx} preamble row${headerSliceIdx === 1 ? '' : 's'} (column header detected at row ${headerSliceIdx + 1})`,
+      );
+    }
+    const csvResult = discoverFromCSV(discoveryCsv);
     for (const f of csvResult.detected_fields) {
       const key = `${f.name}::${sheetName}`;
       if (seen.has(key)) continue;
@@ -753,16 +833,16 @@ export async function discoverFromPDF(
   }
 
   const trimmed = text.slice(0, 4000);
-  const result = await callQwenForDiscovery(qwenConfig, trimmed, 'pdf');
-  if (!result) {
+  const outcome = await callQwenForDiscovery(qwenConfig, trimmed, 'pdf');
+  if (!outcome.ok) {
     return {
       detected_fields: [],
       sample_rows: [],
       layout_hint: 'PDF schema discovery unavailable',
-      warnings: ['Schema discovery AI is not configured or unreachable — please map the fields manually.'],
+      warnings: [`${outcome.reason} — please map the fields manually.`],
     };
   }
-  return result;
+  return outcome.result;
 }
 
 // =============================================================================
@@ -888,16 +968,16 @@ export async function discoverFromEmail(
     };
   }
   const trimmed = body.slice(0, 4000);
-  const result = await callQwenForDiscovery(qwenConfig, trimmed, 'email');
-  if (!result) {
+  const outcome = await callQwenForDiscovery(qwenConfig, trimmed, 'email');
+  if (!outcome.ok) {
     return {
       detected_fields: [],
       sample_rows: [],
       layout_hint: 'Email schema discovery unavailable',
-      warnings: ['Schema discovery AI is not configured or unreachable — please map the fields manually.'],
+      warnings: [`${outcome.reason} — please map the fields manually.`],
     };
   }
-  return result;
+  return outcome.result;
 }
 
 // =============================================================================
@@ -938,32 +1018,47 @@ Rules:
 - Return valid JSON only.`;
 }
 
+type DiscoveryOutcome =
+  | { ok: true; result: DiscoveryResult }
+  | { ok: false; reason: string };
+
+const DISCOVERY_TIMEOUT_MS = 60_000;
+
 /**
  * Call Qwen with the schema-discovery prompt against a chunk of source text.
- * Returns a DiscoveryResult, or `null` when Qwen is unconfigured / errored.
  *
- * Max tokens is capped at 2000 because the schema output is small (field
- * list, not extracted rows). Single-shot — no chunking; callers pre-trim.
+ * Uses the `fast` model — schema sniffing is small (no row extraction) and the
+ * warm 8B is plenty. Reserving `best` here would tie us to a model that may
+ * cold-start or be unavailable (the schema step is interactive; users wait).
+ *
+ * Returns a tagged outcome so callers can surface the actual failure reason
+ * into a warning instead of a generic "AI unreachable" string.
  */
 async function callQwenForDiscovery(
   qwenConfig: QwenConfig,
   text: string,
   kind: 'pdf' | 'email',
-): Promise<DiscoveryResult | null> {
-  if (!qwenConfig.url) return null;
+): Promise<DiscoveryOutcome> {
+  if (!qwenConfig.url) {
+    return { ok: false, reason: 'Schema discovery AI is not configured (QWEN_URL is unset)' };
+  }
 
   const systemPrompt = getSchemaDiscoveryPrompt();
   const userMessage = `Source kind: ${kind}\n\n${text}`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (qwenConfig.secret) headers['Authorization'] = `Bearer ${qwenConfig.secret}`;
 
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DISCOVERY_TIMEOUT_MS);
+
+  let response: Response;
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (qwenConfig.secret) headers['Authorization'] = `Bearer ${qwenConfig.secret}`;
-
-    const response = await fetch(`${qwenConfig.url}/v1/chat/completions`, {
+    response = await fetch(`${qwenConfig.url}/v1/chat/completions`, {
       method: 'POST',
       headers,
+      signal: controller.signal,
       body: JSON.stringify({
-        model: 'Qwen3-8B',
+        model: modelFor('fast'),
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMessage },
@@ -973,35 +1068,61 @@ async function callQwenForDiscovery(
         response_format: { type: 'json_object' },
       }),
     });
-    if (!response.ok) return null;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === 'AbortError') {
+      return { ok: false, reason: `Schema discovery AI timed out after ${DISCOVERY_TIMEOUT_MS / 1000}s` };
+    }
+    const detail = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: `Schema discovery AI unreachable (${detail})` };
+  } finally {
+    clearTimeout(timer);
+  }
 
-    const result = await response.json() as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const content = result.choices?.[0]?.message?.content;
-    if (!content) return null;
+  if (!response.ok) {
+    let body = '';
+    try { body = (await response.text()).slice(0, 200); } catch { /* ignore */ }
+    return { ok: false, reason: `Schema discovery AI returned HTTP ${response.status}${body ? `: ${body}` : ''}` };
+  }
 
-    const parsed = JSON.parse(content) as {
-      detected_fields?: Array<Record<string, unknown>>;
-      layout_hint?: string;
-      warnings?: string[];
-    };
+  let result: { choices?: Array<{ message?: { content?: string } }> };
+  try {
+    result = await response.json();
+  } catch {
+    return { ok: false, reason: 'Schema discovery AI returned a non-JSON response' };
+  }
 
-    const detectedFields: DetectedField[] = Array.isArray(parsed.detected_fields)
-      ? parsed.detected_fields
-        .map(raw => normalizeQwenDetectedField(raw))
-        .filter((f): f is DetectedField => f !== null)
-      : [];
+  const content = result.choices?.[0]?.message?.content;
+  if (!content) {
+    return { ok: false, reason: 'Schema discovery AI returned an empty response' };
+  }
 
-    return {
+  let parsed: {
+    detected_fields?: Array<Record<string, unknown>>;
+    layout_hint?: string;
+    warnings?: string[];
+  };
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return { ok: false, reason: 'Schema discovery AI returned content that was not valid JSON' };
+  }
+
+  const detectedFields: DetectedField[] = Array.isArray(parsed.detected_fields)
+    ? parsed.detected_fields
+      .map(raw => normalizeQwenDetectedField(raw))
+      .filter((f): f is DetectedField => f !== null)
+    : [];
+
+  return {
+    ok: true,
+    result: {
       detected_fields: detectedFields,
       sample_rows: [],
       layout_hint: typeof parsed.layout_hint === 'string' ? parsed.layout_hint : 'unknown',
       warnings: Array.isArray(parsed.warnings) ? parsed.warnings.filter(w => typeof w === 'string') : [],
-    };
-  } catch {
-    return null;
-  }
+    },
+  };
 }
 
 function normalizeQwenDetectedField(raw: Record<string, unknown>): DetectedField | null {
@@ -1071,6 +1192,23 @@ export function buildFieldMappingsFromDetection(detection: DiscoveryResult): Con
   const coreFieldKeys = new Set<string>(CORE_FIELD_DEFINITIONS.map(d => d.key));
 
   for (const field of detection.detected_fields) {
+    // Composite-cell short-circuit. A column whose values are like
+    // "P2264 - GRAND CENTRAL FREMONT PRODUCTION" carries customer_number +
+    // customer_name together. Route it to BOTH fields so the extraction
+    // prompt's K#####/P###### split rule (email.ts Example B) fires —
+    // mapping it to only one would force the LLM to silently drop the other
+    // half of the cell. This overrides whatever single candidate_target the
+    // discovery suggested.
+    if (hasCompositeCustomerCode(field.sample_values)) {
+      for (const key of ['customer_number', 'customer_name'] as const) {
+        if (!out.core[key].source_labels.includes(field.name)) {
+          out.core[key].source_labels.push(field.name);
+        }
+        out.core[key].enabled = true;
+      }
+      continue;
+    }
+
     const target = field.candidate_target;
     if (target && coreFieldKeys.has(target)) {
       const coreKey = target as CoreFieldKey;
