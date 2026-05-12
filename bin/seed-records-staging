@@ -103,6 +103,9 @@ VALUES
    NULL, NULL, NULL, 0),
   ('sheet-audit', 'default', 'Supplier Audit Schedule', 'supplier-audit-schedule',
    'Quarterly supplier audit calendar and outcomes.',
+   NULL, NULL, NULL, 0),
+  ('sheet-orders', 'default', 'Incoming Orders', 'incoming-orders',
+   'Inbound customer orders and their COA-readiness status. Ties the connector ingest pipeline to the records board so blocked orders surface against their source quality incident.',
    NULL, NULL, NULL, 0)
 ON CONFLICT(id) DO UPDATE SET
   name=excluded.name, slug=excluded.slug, description=excluded.description, archived=0, updated_at=datetime('now');
@@ -149,6 +152,27 @@ VALUES
   ('col-au-lead',     'sheet-audit', 'default', 'lead_auditor', 'Lead Auditor',  'text',            NULL,                                                                                                                                                                                                                                                                                                                                                                  0, 0, 3),
   ('col-au-type',     'sheet-audit', 'default', 'audit_type',   'Audit Type',    'dropdown_single', '{"options":[{"value":"Initial"},{"value":"Annual"},{"value":"Follow-up"},{"value":"For-cause"}]}',                                                                                                                                                                                                                                                                  0, 0, 4),
   ('col-au-outcome',  'sheet-audit', 'default', 'outcome',      'Outcome',       'dropdown_single', '{"options":[{"value":"Scheduled"},{"value":"In progress"},{"value":"Pass"},{"value":"Pass with findings"},{"value":"Fail"},{"value":"Cancelled"}]}',                                                                                                                                                                                                                  0, 0, 5)
+ON CONFLICT(id) DO UPDATE SET
+  key=excluded.key, label=excluded.label, type=excluded.type, config=excluded.config,
+  is_title=excluded.is_title, display_order=excluded.display_order, archived=0, updated_at=datetime('now');
+
+-- =========================================================
+-- COLUMNS — Sheet 4: Incoming Orders
+-- order_id is the title column. coa_status drives the Kanban view.
+-- source_incident is a record_ref back into Quality Intake so a Blocked
+-- order surfaces the underlying incident (the demo highlight).
+-- =========================================================
+INSERT INTO records_columns (id, sheet_id, tenant_id, key, label, type, config, required, is_title, display_order)
+VALUES
+  ('col-or-order',    'sheet-orders', 'default', 'order_id',        'Order ID',         'text',            NULL,                                                                                                                                                                       0, 1, 1),
+  ('col-or-customer', 'sheet-orders', 'default', 'customer',        'Customer',         'customer_ref',    NULL,                                                                                                                                                                       0, 0, 2),
+  ('col-or-product',  'sheet-orders', 'default', 'product',         'Product',          'product_ref',     NULL,                                                                                                                                                                       0, 0, 3),
+  ('col-or-qty',      'sheet-orders', 'default', 'qty',             'Qty',              'number',          '{"format":"integer","precision":0}',                                                                                                                                       0, 0, 4),
+  ('col-or-due',      'sheet-orders', 'default', 'due_date',        'Due Date',         'date',            NULL,                                                                                                                                                                       0, 0, 5),
+  ('col-or-coa',      'sheet-orders', 'default', 'coa_status',      'COA Status',       'dropdown_single', '{"options":[{"value":"Pending"},{"value":"Matched"},{"value":"Blocked"},{"value":"Shipped"}]}',                                                                              0, 0, 6),
+  ('col-or-assigned', 'sheet-orders', 'default', 'assigned_to',     'Assigned To',      'text',            NULL,                                                                                                                                                                       0, 0, 7),
+  ('col-or-source',   'sheet-orders', 'default', 'source_incident', 'Source Incident',  'record_ref',      '{"target_sheet_id":"sheet-quality"}',                                                                                                                                      0, 0, 8),
+  ('col-or-notes',    'sheet-orders', 'default', 'notes',           'Notes',            'long_text',       NULL,                                                                                                                                                                       0, 0, 9)
 ON CONFLICT(id) DO UPDATE SET
   key=excluded.key, label=excluded.label, type=excluded.type, config=excluded.config,
   is_title=excluded.is_title, display_order=excluded.display_order, archived=0, updated_at=datetime('now');
@@ -228,6 +252,33 @@ ON CONFLICT(id) DO UPDATE SET
   position=excluded.position, archived=0, updated_at=excluded.updated_at;
 
 -- =========================================================
+-- ROWS — Sheet 4: Incoming Orders
+-- ORD-0430 (Met Market) is Blocked, with source_incident -> row-qi-5
+-- (the Critical mold incident at Met Market in Quality Intake). This is
+-- the cross-sheet link the demo leans on.
+-- =========================================================
+INSERT INTO records_rows (id, sheet_id, tenant_id, display_title, data, position, created_at, updated_at)
+VALUES
+  ('row-or-1', 'sheet-orders', 'default', 'ORD-0427',
+   '{"order_id":"ORD-0427","customer":{"id":"cust-wf-bellevue","name":"Whole Foods Bellevue"},"product":{"id":"prod-yogurt-32oz","name":"Yogurt 32oz"},"qty":500,"due_date":"2026-04-29","coa_status":"Pending","assigned_to":"Sarah","notes":"Awaiting COA from Auburn Dairy lot DA-0411"}',
+   1, '2026-04-26 08:30:00', '2026-04-26 08:30:00'),
+  ('row-or-2', 'sheet-orders', 'default', 'ORD-0428',
+   '{"order_id":"ORD-0428","customer":{"id":"cust-costco-kirk","name":"Costco Kirkland"},"product":{"id":"prod-yogurt-32oz","name":"Yogurt 32oz"},"qty":2000,"due_date":"2026-04-30","coa_status":"Matched","assigned_to":"Carlos","notes":"Linked to Auburn Dairy COA lot DA-0410"}',
+   2, '2026-04-26 09:15:00', '2026-04-27 10:05:00'),
+  ('row-or-3', 'sheet-orders', 'default', 'ORD-0429',
+   '{"order_id":"ORD-0429","customer":{"id":"cust-pcc-edmonds","name":"PCC Edmonds"},"product":{"id":"prod-cheese-block","name":"Cheese Block 5lb"},"qty":300,"due_date":"2026-05-02","coa_status":"Matched","assigned_to":"Sarah","notes":"All docs ready for shipment"}',
+   3, '2026-04-27 11:00:00', '2026-04-27 14:20:00'),
+  ('row-or-4', 'sheet-orders', 'default', 'ORD-0430',
+   '{"order_id":"ORD-0430","customer":{"id":"cust-met-market","name":"Met Market"},"product":{"id":"prod-yogurt-32oz","name":"Yogurt 32oz"},"qty":100,"due_date":"2026-05-01","coa_status":"Blocked","assigned_to":"Sarah","source_incident":{"id":"row-qi-5","name":"Met Market"},"notes":"Held — mold incident unresolved"}',
+   4, '2026-04-27 13:40:00', '2026-04-28 09:10:00'),
+  ('row-or-5', 'sheet-orders', 'default', 'ORD-0431',
+   '{"order_id":"ORD-0431","customer":{"id":"cust-wf-roosevelt","name":"Whole Foods Roosevelt"},"product":{"id":"prod-kraft-roll","name":"Kraft Paper Roll"},"qty":5000,"due_date":"2026-05-05","coa_status":"Pending","assigned_to":"Carlos","notes":"Waiting for supplier audit outcome"}',
+   5, '2026-04-28 10:25:00', '2026-04-28 10:25:00')
+ON CONFLICT(id) DO UPDATE SET
+  display_title=excluded.display_title, data=excluded.data,
+  position=excluded.position, archived=0, updated_at=excluded.updated_at;
+
+-- =========================================================
 -- ROW REFS — mirror entity-typed cell values into records_row_refs
 -- so the reverse-lookup index works without scanning JSON.
 -- ref_type is one of: supplier, product, document, record, contact.
@@ -277,6 +328,22 @@ INSERT INTO records_row_refs (id, tenant_id, sheet_id, row_id, column_key, ref_t
   ('ref-row-au-5-supplier','default','sheet-audit','row-au-5','supplier','supplier','sup-auburn')
 ON CONFLICT(id) DO UPDATE SET ref_type=excluded.ref_type, ref_id=excluded.ref_id;
 
+-- Sheet 4: customer_ref + product_ref + source_incident (record_ref)
+-- Only ORD-0430 has a source_incident (the Blocked Met Market order).
+INSERT INTO records_row_refs (id, tenant_id, sheet_id, row_id, column_key, ref_type, ref_id) VALUES
+  ('ref-row-or-1-customer','default','sheet-orders','row-or-1','customer','customer','cust-wf-bellevue'),
+  ('ref-row-or-1-product', 'default','sheet-orders','row-or-1','product', 'product', 'prod-yogurt-32oz'),
+  ('ref-row-or-2-customer','default','sheet-orders','row-or-2','customer','customer','cust-costco-kirk'),
+  ('ref-row-or-2-product', 'default','sheet-orders','row-or-2','product', 'product', 'prod-yogurt-32oz'),
+  ('ref-row-or-3-customer','default','sheet-orders','row-or-3','customer','customer','cust-pcc-edmonds'),
+  ('ref-row-or-3-product', 'default','sheet-orders','row-or-3','product', 'product', 'prod-cheese-block'),
+  ('ref-row-or-4-customer','default','sheet-orders','row-or-4','customer','customer','cust-met-market'),
+  ('ref-row-or-4-product', 'default','sheet-orders','row-or-4','product', 'product', 'prod-yogurt-32oz'),
+  ('ref-row-or-4-source',  'default','sheet-orders','row-or-4','source_incident','record','row-qi-5'),
+  ('ref-row-or-5-customer','default','sheet-orders','row-or-5','customer','customer','cust-wf-roosevelt'),
+  ('ref-row-or-5-product', 'default','sheet-orders','row-or-5','product', 'product', 'prod-kraft-roll')
+ON CONFLICT(id) DO UPDATE SET ref_type=excluded.ref_type, ref_id=excluded.ref_id;
+
 -- =========================================================
 -- DEFAULT GRID VIEWS (one per sheet, shared, default)
 -- config: sort by display_order=1 column ascending, all columns visible
@@ -289,10 +356,25 @@ VALUES
   ('view-credits-grid', 'sheet-credits', 'default', 'Grid', 'grid',
    '{"filters":[],"sorts":[{"column_key":"request_date","direction":"asc"}],"row_height":"medium"}', 1, 1),
   ('view-audit-grid',   'sheet-audit',   'default', 'Grid', 'grid',
-   '{"filters":[],"sorts":[{"column_key":"audit_date","direction":"asc"}],"row_height":"medium"}',   1, 1)
+   '{"filters":[],"sorts":[{"column_key":"audit_date","direction":"asc"}],"row_height":"medium"}',   1, 1),
+  -- Sheet 4 (Incoming Orders): Grid as default.
+  ('view-orders-grid',   'sheet-orders', 'default', 'Grid',   'grid',
+   '{"filters":[],"sorts":[{"column_key":"due_date","direction":"asc"}],"row_height":"medium"}', 1, 1)
 ON CONFLICT(id) DO UPDATE SET
   name=excluded.name, view_type=excluded.view_type, config=excluded.config,
   is_default=1, shared=1, updated_at=datetime('now');
+
+-- Kanban view on Incoming Orders, grouped by coa_status with explicit
+-- column order Pending -> Matched -> Blocked -> Shipped (the demo
+-- flow). Separate INSERT so the ON CONFLICT above doesn't promote it
+-- to default.
+INSERT INTO records_views (id, sheet_id, tenant_id, name, view_type, config, is_default, shared)
+VALUES
+  ('view-orders-kanban', 'sheet-orders', 'default', 'COA Status (Kanban)', 'kanban',
+   '{"filters":[],"sorts":[{"column_key":"due_date","direction":"asc"}],"group_by":{"column_key":"coa_status","column_order":["Pending","Matched","Blocked","Shipped"]}}', 0, 1)
+ON CONFLICT(id) DO UPDATE SET
+  name=excluded.name, view_type=excluded.view_type, config=excluded.config,
+  is_default=0, shared=1, updated_at=datetime('now');
 
 -- =========================================================
 -- ACTIVITY — one "created" entry per row + "updated" entries for rows
@@ -334,7 +416,18 @@ INSERT INTO records_activity (id, tenant_id, sheet_id, row_id, actor_id, kind, d
   ('act-row-au-5-created','default','sheet-audit','row-au-5','partner','created',NULL,'2026-04-12 11:00:00'),
   -- Sheet 3: outcome transitions for completed audits
   ('act-row-au-1-updated','default','sheet-audit','row-au-1','partner','updated','{"column":"outcome","from":"In progress","to":"Pass with findings"}','2026-03-16 17:00:00'),
-  ('act-row-au-2-updated','default','sheet-audit','row-au-2','partner','updated','{"column":"outcome","from":"Scheduled","to":"Pass"}','2026-04-02 18:00:00')
+  ('act-row-au-2-updated','default','sheet-audit','row-au-2','partner','updated','{"column":"outcome","from":"Scheduled","to":"Pass"}','2026-04-02 18:00:00'),
+
+  -- Sheet 4: created
+  ('act-row-or-1-created','default','sheet-orders','row-or-1','partner','created',NULL,'2026-04-26 08:30:00'),
+  ('act-row-or-2-created','default','sheet-orders','row-or-2','partner','created',NULL,'2026-04-26 09:15:00'),
+  ('act-row-or-3-created','default','sheet-orders','row-or-3','partner','created',NULL,'2026-04-27 11:00:00'),
+  ('act-row-or-4-created','default','sheet-orders','row-or-4','partner','created',NULL,'2026-04-27 13:40:00'),
+  ('act-row-or-5-created','default','sheet-orders','row-or-5','partner','created',NULL,'2026-04-28 10:25:00'),
+  -- Sheet 4: status transitions
+  ('act-row-or-2-updated','default','sheet-orders','row-or-2','partner','updated','{"column":"coa_status","from":"Pending","to":"Matched"}','2026-04-27 10:05:00'),
+  ('act-row-or-3-updated','default','sheet-orders','row-or-3','partner','updated','{"column":"coa_status","from":"Pending","to":"Matched"}','2026-04-27 14:20:00'),
+  ('act-row-or-4-updated','default','sheet-orders','row-or-4','partner','updated','{"column":"coa_status","from":"Pending","to":"Blocked"}','2026-04-28 09:10:00')
 ON CONFLICT(id) DO UPDATE SET
   kind=excluded.kind, details=excluded.details, created_at=excluded.created_at,
   actor_id=excluded.actor_id;
