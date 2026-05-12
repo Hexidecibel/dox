@@ -52,6 +52,8 @@ interface ConnectorRow {
   r2_bucket_name: string;
   r2_access_key_id: string | null;
   r2_secret_access_key_encrypted: string | null;
+  /** R2.b — reviewer-authored guidance forwarded to the parsing prompt. */
+  extraction_instructions: string | null;
 }
 
 export interface PollConnectorSummary {
@@ -214,7 +216,8 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
       `SELECT id, tenant_id, config, field_mappings,
               credentials_encrypted, credentials_iv,
               r2_bucket_name, r2_access_key_id,
-              r2_secret_access_key_encrypted
+              r2_secret_access_key_encrypted,
+              extraction_instructions
          FROM connectors
         WHERE active = 1
           AND deleted_at IS NULL
@@ -349,6 +352,8 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
             source: 's3',
             qwenUrl: env.QWEN_URL,
             qwenSecret: env.QWEN_SECRET,
+            // R2.b: forward reviewer-authored guidance to the parsing prompt.
+            extractionInstructions: row.extraction_instructions ?? undefined,
           });
 
           await env.DB

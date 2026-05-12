@@ -50,7 +50,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     //    fallback so the email-worker can resolve by either identifier.
     const connector = payload.connector_id
       ? await context.env.DB.prepare(
-          `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active
+          `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active, extraction_instructions
            FROM connectors WHERE id = ?`
         ).bind(payload.connector_id).first<{
           id: string;
@@ -60,9 +60,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           credentials_encrypted: string | null;
           credentials_iv: string | null;
           active: number;
+          extraction_instructions: string | null;
         }>()
       : await context.env.DB.prepare(
-          `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active
+          `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active, extraction_instructions
            FROM connectors WHERE slug = ?`
         ).bind(payload.connector_slug!).first<{
           id: string;
@@ -72,6 +73,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           credentials_encrypted: string | null;
           credentials_iv: string | null;
           active: number;
+          extraction_instructions: string | null;
         }>();
 
     if (!connector) {
@@ -143,6 +145,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       userId: user.id,
       qwenUrl: context.env.QWEN_URL,
       qwenSecret: context.env.QWEN_SECRET,
+      // R2.b: forward reviewer-authored guidance to the parsing prompt.
+      extractionInstructions: connector.extraction_instructions ?? undefined,
     });
 
     // 6. Audit log

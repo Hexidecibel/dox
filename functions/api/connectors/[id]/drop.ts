@@ -151,6 +151,9 @@ interface ConnectorRow {
   field_mappings: string | null;
   credentials_encrypted: string | null;
   credentials_iv: string | null;
+  /** R2.b — reviewer-authored extraction guidance prepended to the
+   *  Qwen prompt for every parse on this connector. */
+  extraction_instructions: string | null;
 }
 
 /**
@@ -215,7 +218,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       columns:
         'id, tenant_id, active, deleted_at, api_token, ' +
         'public_link_token, public_link_expires_at, ' +
-        'config, field_mappings, credentials_encrypted, credentials_iv',
+        'config, field_mappings, credentials_encrypted, credentials_iv, ' +
+        'extraction_instructions',
     },
   );
 
@@ -403,6 +407,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       // for the run dispatch lives on the run row's `details` blob.
       qwenUrl: context.env.QWEN_URL,
       qwenSecret: context.env.QWEN_SECRET,
+      // R2.b: forward reviewer-authored guidance to the parsing prompt.
+      extractionInstructions: (connector.extraction_instructions as string | null) ?? undefined,
     });
   } catch (err) {
     console.error(`drop: orchestrator threw for connector ${connector.id}:`, err);

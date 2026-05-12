@@ -95,6 +95,15 @@ export interface ConnectorContext {
   credentials?: Record<string, unknown>;
   qwenUrl?: string;
   qwenSecret?: string;
+  /**
+   * Reviewer-authored natural-language guidance from the connector row
+   * (migration 0061). The email/file_watch parser prepends this to the Qwen
+   * system prompt for every order/customer extraction so connector-specific
+   * quirks ("CODE DATE column is expiration_date", "ignore lines starting
+   * with X") can be taught without redeploying. Empty/undefined means no
+   * extra guidance; the parser falls back to the static prompt.
+   */
+  extractionInstructions?: string;
 }
 
 export interface EmailAttachment {

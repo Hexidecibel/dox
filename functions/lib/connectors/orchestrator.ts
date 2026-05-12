@@ -28,6 +28,13 @@ interface OrchestratorParams {
   qwenUrl?: string;
   qwenSecret?: string;
   /**
+   * R2.b: connector-level reviewer guidance loaded from the connector row's
+   * `extraction_instructions` column. Forwarded into the ConnectorContext so
+   * the parsing executor can prepend it to the Qwen prompt. Undefined or
+   * empty means no guidance — parser uses the static prompt unchanged.
+   */
+  extractionInstructions?: string;
+  /**
    * Intake door this run came in through. Stored on `connector_runs.source`
    * (migration 0049) so the activity feed + audit surfaces can group runs
    * by their entry point. When omitted we fall back to deriving from
@@ -143,7 +150,7 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
   const {
     db, r2, tenantId, connectorId,
     config, fieldMappings, credentials, input, userId,
-    qwenUrl, qwenSecret, source,
+    qwenUrl, qwenSecret, source, extractionInstructions,
   } = params;
 
   const runId = generateId();
@@ -187,6 +194,7 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
       fieldMappings: normalizedMappings,
       credentials,
       qwenUrl, qwenSecret,
+      extractionInstructions,
     };
 
     output = await executor(ctx, input);

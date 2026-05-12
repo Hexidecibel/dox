@@ -56,6 +56,8 @@ export type {
   SupplierExtractionInstructions,
   SupplierExtractionInstructionsGetResponse,
   SupplierExtractionInstructionsPutResponse,
+  SupplierExtractionInstructionsListRow,
+  SupplierExtractionInstructionsListResponse,
   ActivityEvent,
   ActivityEventType,
   ActivitySourceFilter,

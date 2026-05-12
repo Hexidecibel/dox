@@ -41,6 +41,7 @@ import type {
   TemplateFieldMapping,
   SupplierExtractionInstructionsGetResponse,
   SupplierExtractionInstructionsPutResponse,
+  SupplierExtractionInstructionsListResponse,
   ActivityFilters,
   ActivityListResponse,
   ActivityEventType,
@@ -1095,6 +1096,19 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
+    /**
+     * List every (document_type, instructions) pair authored for a supplier.
+     * One row per active doctype in the tenant — `instructions` is null where
+     * the reviewer hasn't written guidance yet. Used by the SupplierDetail
+     * "Extraction Instructions" tab so the page doesn't fan out N GETs.
+     */
+    listBySupplier: (params: { supplier_id: string; tenant_id?: string }) => {
+      const qs = new URLSearchParams({ supplier_id: params.supplier_id });
+      if (params.tenant_id) qs.set('tenant_id', params.tenant_id);
+      return fetchApi<SupplierExtractionInstructionsListResponse>(
+        `/extraction-instructions/by-supplier?${qs.toString()}`,
+      );
+    },
   },
 
   naturalSearch: (query: string, tenantId?: string) =>

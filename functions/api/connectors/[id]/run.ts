@@ -160,6 +160,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       userId: user.id,
       qwenUrl: context.env.QWEN_URL,
       qwenSecret: context.env.QWEN_SECRET,
+      // R2.b: forward reviewer-authored guidance to the parsing prompt.
+      // `resolveConnectorHandle` selects `*` by default, so the column is
+      // already on the row.
+      extractionInstructions: (connector.extraction_instructions as string | null) ?? undefined,
     });
 
     // Fetch the persisted run row so we can return the counts straight from

@@ -634,9 +634,15 @@ async function parseWithAI(
   // fields, source-label aliases, format hints, and extended fields all make
   // it into the Qwen system message. Fall back to a hand-written prompt if
   // the config provides `parsing_prompt` verbatim (rare; escape hatch).
-  const parsingPrompt = typeof config.parsing_prompt === 'string' && config.parsing_prompt.length > 0
+  const basePrompt = typeof config.parsing_prompt === 'string' && config.parsing_prompt.length > 0
     ? (config.parsing_prompt as string)
     : buildParsingPrompt(ctx.fieldMappings);
+  // R2.b: connector-level reviewer guidance is prepended verbatim so any
+  // quirks the model misses ("CODE DATE = expiration_date", "ignore footer
+  // lines starting with X") teach across every future run for THIS connector.
+  // Header matches bin/process-worker:485 (DOCUMENT path) so future tweaks
+  // live in exactly one shape.
+  const parsingPrompt = prependConnectorInstructions(basePrompt, ctx.extractionInstructions);
 
   if (!ctx.qwenUrl) {
     return { orders: [], customers: [], errors: [{ message: 'AI extraction not configured (QWEN_URL missing)' }] };
@@ -1018,6 +1024,32 @@ You are an ERP report parser. Extract order AND customer data from the input.
 The input may be an order email, a PDF order confirmation, or a customer-registry
 spreadsheet (one customer per block, followed by that customer's expected products).
 `;
+
+/**
+ * Prepend reviewer-authored connector-level guidance to a Qwen system prompt.
+ * No-op when `instructions` is empty/whitespace. Header format mirrors the
+ * DOCUMENT-path prepend in `bin/process-worker:482` (`prependReviewerInstructions`)
+ * so the two surfaces stay shape-symmetric — important since reviewers see
+ * the same "## Reviewer instructions" cue in both review queues.
+ *
+ * Exported for unit tests on the prompt-construction path.
+ */
+export function prependConnectorInstructions(
+  prompt: string,
+  instructions: string | undefined,
+): string {
+  if (!instructions || !instructions.trim()) return prompt;
+  const header = [
+    '## Reviewer instructions',
+    'The following guidance comes from human reviewers of past runs of this connector. Follow it carefully:',
+    '',
+    instructions.trim(),
+    '',
+    '---',
+    '',
+  ].join('\n');
+  return header + prompt;
+}
 
 /**
  * Compose a full Qwen system prompt from a v2 field-mappings config.

@@ -59,6 +59,9 @@ interface ConnectorRow {
   r2_bucket_name: string | null;
   r2_access_key_id: string | null;
   r2_secret_access_key_encrypted: string | null;
+  /** R2.b — reviewer-authored extraction guidance prepended to the
+   *  Qwen prompt for every parse on this connector. */
+  extraction_instructions: string | null;
 }
 
 function unprocessable(message: string): Response {
@@ -170,7 +173,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         columns:
           'id, tenant_id, active, deleted_at, config, field_mappings, ' +
           'credentials_encrypted, credentials_iv, r2_bucket_name, ' +
-          'r2_access_key_id, r2_secret_access_key_encrypted',
+          'r2_access_key_id, r2_secret_access_key_encrypted, ' +
+          'extraction_instructions',
       },
     );
     if (!connector) {
@@ -278,6 +282,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       userId: user.id,
       qwenUrl: context.env.QWEN_URL,
       qwenSecret: context.env.QWEN_SECRET,
+      // R2.b: forward reviewer-authored guidance to the parsing prompt.
+      // Reload-on-retry semantics — if the reviewer updated instructions
+      // since the original failed run, the retry picks up the latest.
+      extractionInstructions: connector.extraction_instructions ?? undefined,
     });
 
     // Patch the new row's retry_of_run_id. The orchestrator doesn't

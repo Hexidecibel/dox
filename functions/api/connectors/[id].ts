@@ -125,7 +125,19 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       schedule?: string | null;
       active?: number | boolean;
       sample_r2_key?: string | null;
+      /** R2.b — reviewer-authored extraction guidance prepended to the
+       *  Qwen prompt for every parse on this connector. Hard-capped to
+       *  stop a runaway textarea from blowing up the model context.
+       *  Empty string clears the row's existing guidance (treated the
+       *  same as null on the read side). */
+      extraction_instructions?: string | null;
     };
+
+    /** Hard cap on stored instructions length. Mirrors the
+     *  MAX_INSTRUCTIONS_LENGTH ceiling in the per-(supplier, doctype)
+     *  endpoint (functions/api/extraction-instructions/index.ts) so
+     *  both surfaces have the same upper bound. */
+    const MAX_INSTRUCTIONS_LENGTH = 8000;
 
     const updates: string[] = [];
     const params: (string | number | null)[] = [];
@@ -224,6 +236,28 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }
       updates.push('active = ?');
       params.push(activeVal);
+    }
+
+    if (body.extraction_instructions !== undefined) {
+      // null / empty -> clear the row. Otherwise validate type + length and
+      // store the trimmed text. We don't sanitize beyond trim — the body is
+      // displayed back verbatim to the next reviewer and routed verbatim
+      // into the Qwen prompt, so HTML-style escaping would be lossy.
+      if (body.extraction_instructions === null) {
+        updates.push('extraction_instructions = ?');
+        params.push(null);
+      } else if (typeof body.extraction_instructions !== 'string') {
+        throw new BadRequestError('extraction_instructions must be a string or null');
+      } else {
+        const trimmed = body.extraction_instructions.trim();
+        if (trimmed.length > MAX_INSTRUCTIONS_LENGTH) {
+          throw new BadRequestError(
+            `extraction_instructions too long (max ${MAX_INSTRUCTIONS_LENGTH} chars)`,
+          );
+        }
+        updates.push('extraction_instructions = ?');
+        params.push(trimmed.length === 0 ? null : trimmed);
+      }
     }
 
     if (updates.length === 0) {

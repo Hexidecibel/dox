@@ -43,10 +43,11 @@ import {
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { ApiSupplier, ApiProduct, ExtractionTemplate, TemplateFieldMapping } from '../../lib/types';
-import type { Document } from '../../lib/types';
+import type { Document, SupplierExtractionInstructionsListRow } from '../../lib/types';
 import { HelpWell } from '../../components/HelpWell';
 import { EmptyState } from '../../components/EmptyState';
 import { helpContent } from '../../lib/helpContent';
+import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -98,6 +99,15 @@ export function SupplierDetail() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [documentsTotal, setDocumentsTotal] = useState(0);
+
+  // Extraction Instructions state (R2.a — proactive editor surface).
+  // The list endpoint returns one row per active doc type in the tenant,
+  // with `instructions` left null where the reviewer hasn't authored
+  // guidance yet. We render every row so the user can pre-write guidance
+  // before the first bad parse, not after.
+  const [instructionsRows, setInstructionsRows] = useState<SupplierExtractionInstructionsListRow[]>([]);
+  const [instructionsLoading, setInstructionsLoading] = useState(false);
+  const [instructionsError, setInstructionsError] = useState('');
 
   const parseAliases = (aliases: string | string[] | null): string[] => {
     if (!aliases) return [];
@@ -167,6 +177,26 @@ export function SupplierDetail() {
     }
   }, [id]);
 
+  const loadInstructions = useCallback(async () => {
+    if (!id || !supplier) return;
+    setInstructionsLoading(true);
+    setInstructionsError('');
+    try {
+      // super_admin needs an explicit tenant_id (matches the single-pair
+      // endpoint). Non-admin paths inherit tenant from the JWT.
+      const result = await api.extractionInstructions.listBySupplier({
+        supplier_id: id,
+        tenant_id: supplier.tenant_id,
+      });
+      setInstructionsRows(result.document_types);
+    } catch (err) {
+      setInstructionsRows([]);
+      setInstructionsError(err instanceof Error ? err.message : 'Failed to load extraction instructions');
+    } finally {
+      setInstructionsLoading(false);
+    }
+  }, [id, supplier]);
+
   useEffect(() => {
     loadSupplier();
   }, [loadSupplier]);
@@ -175,7 +205,8 @@ export function SupplierDetail() {
     if (tab === 0) loadProducts();
     else if (tab === 1) loadTemplates();
     else if (tab === 2) loadDocuments();
-  }, [tab, loadProducts, loadTemplates, loadDocuments]);
+    else if (tab === 3) loadInstructions();
+  }, [tab, loadProducts, loadTemplates, loadDocuments, loadInstructions]);
 
   const handleSaveHeader = async () => {
     if (!id || !supplier) return;
@@ -446,6 +477,7 @@ export function SupplierDetail() {
           <Tab label="Products" />
           <Tab label="Templates" />
           <Tab label={`Documents${documentsTotal ? ` (${documentsTotal})` : ''}`} />
+          <Tab label="Extraction Instructions" />
         </Tabs>
       </Box>
 
@@ -858,6 +890,60 @@ export function SupplierDetail() {
               </TableBody>
             </Table>
           </TableContainer>
+        )}
+      </TabPanel>
+
+      {/* Extraction Instructions Tab (R2.a) */}
+      {/* Proactive editor — lets an org_admin write reviewer guidance for any */}
+      {/* (supplier, doc_type) pair BEFORE the first bad parse, instead of    */}
+      {/* reactively from the Review Queue post-error. One section per active */}
+      {/* doc type in the tenant; rendered with ExtractionInstructionsBox, the */}
+      {/* same component the Review Queue uses so the save/load contract is   */}
+      {/* identical.                                                          */}
+      <TabPanel value={tab} index={3}>
+        <Box sx={{ mb: 2 }}>
+          <Typography variant="h6" fontWeight={600}>
+            Extraction Instructions
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Natural-language guidance the AI uses when extracting fields from this supplier's
+            documents. Set this once per document type and it applies to every future
+            extraction — no need to wait for a bad parse in the Review Queue.
+          </Typography>
+        </Box>
+
+        {instructionsError && (
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setInstructionsError('')}>
+            {instructionsError}
+          </Alert>
+        )}
+
+        {instructionsLoading ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+            <CircularProgress size={24} />
+          </Box>
+        ) : instructionsRows.length === 0 ? (
+          <EmptyState
+            title="No document types defined"
+            description="Extraction instructions are scoped to a (supplier, document type) pair. Add document types to this tenant first — once you have at least one, this tab will let you write reviewer guidance per type."
+          />
+        ) : (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            {instructionsRows.map((row) => (
+              <Paper key={row.document_type_id} variant="outlined" sx={{ p: 2 }}>
+                <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 0.5 }}>
+                  {row.document_type_name}
+                </Typography>
+                <ExtractionInstructionsBox
+                  supplierId={supplier.id}
+                  supplierName={supplier.name}
+                  docTypeId={row.document_type_id}
+                  docTypeName={row.document_type_name}
+                  tenantId={supplier.tenant_id}
+                />
+              </Paper>
+            ))}
+          </Box>
         )}
       </TabPanel>
     </Box>

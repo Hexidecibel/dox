@@ -116,6 +116,30 @@ export interface SupplierExtractionInstructionsPutResponse {
   instructions: SupplierExtractionInstructions;
 }
 
+/**
+ * Row shape returned by the by-supplier list endpoint. Every active document
+ * type in the tenant appears once, with `instructions` left null when the
+ * reviewer hasn't authored guidance for that pair yet.
+ */
+export interface SupplierExtractionInstructionsListRow {
+  document_type_id: string;
+  document_type_name: string;
+  instructions: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+/**
+ * Response from GET /api/extraction-instructions/by-supplier — used by the
+ * SupplierDetail "Extraction Instructions" tab so the UI can render the full
+ * doctype list in one round trip instead of fanning out N single-pair GETs.
+ */
+export interface SupplierExtractionInstructionsListResponse {
+  supplier_id: string;
+  tenant_id: string;
+  document_types: SupplierExtractionInstructionsListRow[];
+}
+
 export interface DocumentTypeRow {
   id: string;
   tenant_id: string;

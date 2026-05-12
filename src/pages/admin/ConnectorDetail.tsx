@@ -123,6 +123,10 @@ interface Connector {
   /** Phase B4 — unix-seconds expiry for the public link. NULL means
    * no expiry (link is active until the token is revoked or rotated). */
   public_link_expires_at: number | null;
+  /** R2.b — reviewer-authored natural-language guidance prepended to the
+   * Qwen parsing prompt on every run of this connector. NULL when no
+   * guidance has been authored. */
+  extraction_instructions: string | null;
 }
 
 interface ConnectorRun {
@@ -236,10 +240,127 @@ function normalizeConnector(raw: unknown): Connector {
       typeof r.public_link_expires_at === 'number'
         ? r.public_link_expires_at
         : null,
+    extraction_instructions: (r.extraction_instructions as string | null) ?? null,
   };
 }
 
 const RUNS_PER_PAGE = 20;
+
+/**
+ * R2.b — inline editor for the connector's reviewer-authored extraction
+ * instructions. Mirrors the debounce + "Saving…/Saved" pattern from
+ * `src/pages/ExtractionInstructionsBox.tsx` (DOCUMENT path), but doesn't
+ * fork that component since its types are supplier-specific. Saves are
+ * fired through `api.connectors.patch` with `extraction_instructions`.
+ *
+ * The parent owns the canonical value — we read it via `initialValue` and
+ * notify on a successful save via `onSaved` so a sibling card reading the
+ * connector row stays consistent. Local state covers in-flight edits.
+ */
+const CONNECTOR_INSTR_AUTOSAVE_MS = 500;
+const CONNECTOR_INSTR_MAX_LENGTH = 8000;
+
+function ConnectorExtractionInstructionsEditor({
+  connectorId,
+  initialValue,
+  onSaved,
+}: {
+  connectorId: string;
+  initialValue: string;
+  onSaved: (saved: string) => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+  // Snapshot of what's persisted on the server — used so a no-op blur
+  // doesn't trigger a redundant PATCH.
+  const [persisted, setPersisted] = useState(initialValue);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Keep local state in sync with the parent's canonical value — e.g. when
+  // the connector row is reloaded after another save fires.
+  useEffect(() => {
+    setValue(initialValue);
+    setPersisted(initialValue);
+  }, [initialValue]);
+
+  const save = async (text: string) => {
+    if (text === persisted) return;
+    if (text.length > CONNECTOR_INSTR_MAX_LENGTH) {
+      setSaveState('error');
+      setErrorMessage(`Too long (max ${CONNECTOR_INSTR_MAX_LENGTH} chars)`);
+      return;
+    }
+    setSaveState('saving');
+    setErrorMessage(null);
+    try {
+      await api.connectors.patch(connectorId, { extraction_instructions: text });
+      setPersisted(text);
+      setSaveState('saved');
+      onSaved(text);
+      setTimeout(() => {
+        setSaveState((prev) => (prev === 'saved' ? 'idle' : prev));
+      }, 1500);
+    } catch (err) {
+      setSaveState('error');
+      setErrorMessage(err instanceof Error ? err.message : 'Save failed');
+    }
+  };
+
+  const scheduleSave = (text: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      void save(text);
+    }, CONNECTOR_INSTR_AUTOSAVE_MS);
+  };
+
+  const handleChange = (next: string) => {
+    setValue(next);
+    scheduleSave(next);
+  };
+
+  const handleBlur = () => {
+    // Flush pending debounced save immediately so the reviewer doesn't lose
+    // guidance by navigating away mid-debounce.
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    void save(value);
+  };
+
+  const statusLabel = (() => {
+    if (saveState === 'saving') return 'Saving...';
+    if (saveState === 'saved') return 'Saved';
+    if (saveState === 'error') return errorMessage || 'Save failed';
+    return '';
+  })();
+
+  return (
+    <Box>
+      {statusLabel && (
+        <Typography
+          variant="caption"
+          color={saveState === 'error' ? 'error' : 'text.secondary'}
+          sx={{ fontStyle: 'italic', display: 'block', mb: 0.5 }}
+        >
+          {statusLabel}
+        </Typography>
+      )}
+      <TextField
+        multiline
+        rows={4}
+        fullWidth
+        size="small"
+        value={value}
+        onChange={(e) => handleChange(e.target.value)}
+        onBlur={handleBlur}
+        placeholder={'e.g., "CODE DATE column is expiration_date. Ignore footer total rows."'}
+        helperText="Prepended to the AI parsing prompt on every run of this connector."
+      />
+    </Box>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -1210,6 +1331,36 @@ export function ConnectorDetail() {
         <FieldMappingEditor
           mappings={connector.field_mappings || defaultFieldMappings()}
           onCommit={commitFieldMappings}
+        />
+      </Paper>
+
+      {/* ------------------------------------------------------------ */}
+      {/* 4b. Extraction Instructions card (R2.b)                       */}
+      {/* ------------------------------------------------------------ */}
+      {/* Connectors don't carry a supplier_id — order/customer extraction */}
+      {/* is whole-stream, not per-vendor — so the per-(supplier, doctype) */}
+      {/* surface in SupplierDetail doesn't apply here. Instead a single   */}
+      {/* connector-level textarea: text is prepended to the Qwen parsing  */}
+      {/* prompt on every run. See migration 0061 + parseWithAI in         */}
+      {/* functions/lib/connectors/email.ts.                               */}
+      <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+        <Box sx={{ mb: 2 }}>
+          <Typography variant="h6" fontWeight={600}>
+            Extraction Instructions
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            Natural-language guidance prepended to the AI parsing prompt on every run
+            of this connector. Auto-saves on blur.
+          </Typography>
+        </Box>
+        <ConnectorExtractionInstructionsEditor
+          connectorId={connector.id}
+          initialValue={connector.extraction_instructions || ''}
+          onSaved={(next) =>
+            setConnector((prev) =>
+              prev ? { ...prev, extraction_instructions: next.length === 0 ? null : next } : prev,
+            )
+          }
         />
       </Paper>
 
