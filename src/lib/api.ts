@@ -151,6 +151,69 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+// ---------------------------------------------------------------------------
+// R1.3 — staged-extraction review surface types.
+//
+// Exposed at module scope so callers (e.g. the ConnectorRunReview page)
+// can import them without a re-declaration. Shapes mirror
+// `functions/api/connectors/[id]/runs/[runId]/staged.ts` and
+// `functions/api/orders/[id]/approve-staged.ts`.
+// ---------------------------------------------------------------------------
+export interface StagedOrderItem {
+  id: string;
+  product_name: string | null;
+  product_code: string | null;
+  quantity: number | null;
+  lot_number: string | null;
+  confidence: number | null;
+  staged_at: string | null;
+}
+
+export interface StagedOrder {
+  id: string;
+  order_number: string;
+  customer_number: string | null;
+  customer_name: string | null;
+  customer_id: string | null;
+  confidence: number | null;
+  staged_at: string;
+  primary_metadata: Record<string, unknown> | null;
+  extended_metadata: Record<string, unknown> | null;
+  items: StagedOrderItem[];
+}
+
+export interface StagedRunResponse {
+  run: {
+    id: string;
+    started_at: string | null;
+    completed_at: string | null;
+    status: string;
+    records_found: number;
+    records_created: number;
+    records_staged: number;
+  };
+  orders: StagedOrder[];
+}
+
+export interface ApproveStagedItemEdit {
+  id?: string;
+  product_name?: string | null;
+  product_code?: string | null;
+  quantity?: number | null;
+  lot_number?: string | null;
+  _delete?: boolean;
+}
+
+export interface ApproveStagedBody {
+  order_number?: string;
+  po_number?: string;
+  customer_number?: string;
+  customer_name?: string;
+  primary_metadata?: Record<string, unknown>;
+  extended_metadata?: Record<string, unknown>;
+  items?: ApproveStagedItemEdit[];
+}
+
 export const api = {
   auth: {
     /**
@@ -1144,7 +1207,7 @@ export const api = {
       form.append('file', file);
       return fetchApi(`/connectors/${id}/run`, { method: 'POST', body: form });
     },
-    runs(id: string, params?: { limit?: number; offset?: number }) {
+    listRuns(id: string, params?: { limit?: number; offset?: number }) {
       const query = new URLSearchParams();
       if (params?.limit) query.set('limit', String(params.limit));
       if (params?.offset) query.set('offset', String(params.offset));
@@ -1169,6 +1232,20 @@ export const api = {
         customers_created: number;
         errors: string[];
       }>(`/connectors/${id}/runs/${runId}/retry`, { method: 'POST' });
+    },
+    /**
+     * GET /api/connectors/:id/runs/:runId/staged
+     *
+     * R1.3 — fetch orders + items routed to staging by a specific run
+     * because the LLM's confidence on them fell below the threshold.
+     * Returned shape matches `StagedRunResponse` on the server.
+     */
+    runs: {
+      staged(connectorId: string, runId: string) {
+        return fetchApi<StagedRunResponse>(
+          `/connectors/${connectorId}/runs/${runId}/staged`,
+        );
+      },
     },
     /**
      * GET /api/connectors/:id/health
@@ -1338,6 +1415,19 @@ export const api = {
       return fetchApi(`/orders/${id}`, { method: 'PUT', body: JSON.stringify(data) });
     },
     delete(id: string) { return fetchApi(`/orders/${id}`, { method: 'DELETE' }); },
+    /**
+     * POST /api/orders/:id/approve-staged
+     *
+     * R1.3 — promote a staged order out of staging. Optional body
+     * carries field overrides + per-item edits (see ApproveStagedBody).
+     * Returns the updated order + items.
+     */
+    approveStaged(id: string, body?: ApproveStagedBody) {
+      return fetchApi<{ order: Record<string, unknown>; items: Record<string, unknown>[] }>(
+        `/orders/${id}/approve-staged`,
+        { method: 'POST', body: JSON.stringify(body ?? {}) },
+      );
+    },
     naturalSearch(query: string, tenantId?: string) {
       return fetchApi('/orders/search/natural', {
         method: 'POST',

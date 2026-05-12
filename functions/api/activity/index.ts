@@ -313,7 +313,10 @@ async function queryOrdersCreated(
 ): Promise<ActivityEvent[]> {
   if (filters.eventType !== 'all' && filters.eventType !== 'order_created') return [];
 
-  const conds: string[] = ['o.created_at >= ?', 'o.created_at <= ?'];
+  // Hide staged (not-yet-reviewed) orders from the activity feed — they
+  // haven't been promoted to "real" data yet. The run-review page surfaces
+  // them separately.
+  const conds: string[] = ['o.created_at >= ?', 'o.created_at <= ?', 'o.staged_at IS NULL'];
   const params: (string | number)[] = [filters.from, filters.to];
 
   const tc = tenantClause(filters.tenantId, 'o.tenant_id');

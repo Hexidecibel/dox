@@ -17,9 +17,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const user = context.data.user as User;
     const customerId = context.params.id as string;
 
+    // order_count excludes staged orders so the customer detail header
+    // doesn't claim "5 orders" when 3 of them are still awaiting review.
     const customer = await context.env.DB.prepare(
       `SELECT c.*,
-        (SELECT COUNT(*) FROM orders WHERE customer_id = c.id) as order_count
+        (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND staged_at IS NULL) as order_count
       FROM customers c WHERE c.id = ?`
     )
       .bind(customerId)

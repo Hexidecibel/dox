@@ -31,6 +31,7 @@ import ReviewQueue from './pages/ReviewQueue';
 import { Connectors } from './pages/admin/Connectors';
 import { ConnectorDetail } from './pages/admin/ConnectorDetail';
 import { ConnectorWizard } from './pages/admin/ConnectorWizard';
+import { ConnectorRunReview } from './pages/admin/ConnectorRunReview';
 import { Customers } from './pages/admin/Customers';
 import { CustomerDetail } from './pages/admin/CustomerDetail';
 import LearningDashboard from './pages/admin/LearningDashboard';
@@ -123,6 +124,10 @@ function App() {
                 <Route path="/admin/connectors/new" element={<ConnectorWizard />} />
                 <Route path="/admin/connectors/:id/edit" element={<ConnectorWizard />} />
                 <Route path="/admin/connectors/:id" element={<ConnectorDetail />} />
+                <Route
+                  path="/admin/connectors/:id/runs/:runId/review"
+                  element={<ConnectorRunReview />}
+                />
                 <Route path="/admin/customers" element={<Customers />} />
                 <Route path="/admin/customers/:id" element={<CustomerDetail />} />
                 <Route path="/admin/learning-dashboard" element={<LearningDashboard />} />

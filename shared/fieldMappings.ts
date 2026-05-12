@@ -452,6 +452,9 @@ export function buildJsonShapeForPrompt(m: ConnectorFieldMappings): string {
     itemPairs.push(`          "${def.key}": "${type}"`);
   }
   if (itemPairs.length > 0) {
+    // Items carry their own per-item confidence so a high-confidence order
+    // with one shaky line doesn't pull the whole order into staging.
+    itemPairs.push(`          "_confidence": "number 0.0-1.0 — your confidence in THIS line item"`);
     orderPairs.push(`      "items": [\n        {\n${itemPairs.join(',\n')}\n        }\n      ]`);
   }
 
@@ -461,6 +464,9 @@ export function buildJsonShapeForPrompt(m: ConnectorFieldMappings): string {
       .join(',\n');
     orderPairs.push(`      "extended_metadata": {\n${extPairs}\n      }`);
   }
+
+  // Required on every order so the orchestrator can route it.
+  orderPairs.push(`      "_confidence": "number 0.0-1.0 — your confidence in this ORDER record"`);
 
   return `Return JSON in this exact format:
 {
@@ -476,7 +482,8 @@ ${orderPairs.join(',\n')}
       "email": "string or null",
       "contacts": [
         {"name": "string or null", "email": "string", "role": "string or null"}
-      ]
+      ],
+      "_confidence": "number 0.0-1.0 — your confidence in this customer record"
     }
   ]
 }`;

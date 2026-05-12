@@ -217,8 +217,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
 
-    // Build SQL query from parsed result
-    const conditions: string[] = ['o.tenant_id = ?'];
+    // Build SQL query from parsed result. Staged (not-yet-reviewed) orders
+    // are excluded — they're surfaced separately on the run-review page,
+    // not via natural-language order search.
+    const conditions: string[] = ['o.tenant_id = ?', 'o.staged_at IS NULL'];
     const params: (string | number)[] = [tenantId];
 
     let needItemJoin = false;

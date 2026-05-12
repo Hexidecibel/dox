@@ -242,18 +242,20 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
       const primaryEmail = customer.email || contacts[0]?.email || null;
 
       let customerId: string;
+      const customerConfidence = typeof customer._confidence === 'number' ? customer._confidence : null;
       if (existing) {
         customerId = existing.id;
         await db.prepare(
-          `UPDATE customers SET name = ?, email = COALESCE(?, email), updated_at = datetime('now')
+          `UPDATE customers SET name = ?, email = COALESCE(?, email),
+             confidence = COALESCE(?, confidence), updated_at = datetime('now')
            WHERE id = ?`
-        ).bind(customer.name, primaryEmail, customerId).run();
+        ).bind(customer.name, primaryEmail, customerConfidence, customerId).run();
       } else {
         customerId = generateId();
         await db.prepare(
-          `INSERT INTO customers (id, tenant_id, customer_number, name, email)
-           VALUES (?, ?, ?, ?, ?)`
-        ).bind(customerId, tenantId, customer.customer_number, customer.name, primaryEmail).run();
+          `INSERT INTO customers (id, tenant_id, customer_number, name, email, confidence)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).bind(customerId, tenantId, customer.customer_number, customer.name, primaryEmail, customerConfidence).run();
         customersCreated++;
       }
 
@@ -295,10 +297,29 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
     }
   }
 
+  // Confidence threshold below which a record is staged for human review
+  // instead of committed straight to prod tables. Threshold is hardcoded
+  // here for now; R2 plan adds per-supplier overrides via the supplier's
+  // extraction_instructions field.
+  const STAGE_THRESHOLD = 0.7;
+
   // Upsert orders
   let ordersCreated = 0;
+  let ordersStaged = 0;
   for (const order of output.orders) {
     try {
+      // Decide stage vs commit. An order routes to staging if its own
+      // _confidence is below the threshold OR any of its items is. We
+      // can't trust an order with one shaky line; the reviewer needs to
+      // see the whole record. Absent confidence ⇒ 1.0 (commit).
+      const orderConfidence = typeof order._confidence === 'number' ? order._confidence : 1;
+      const itemConfidences = order.items
+        .map(i => (typeof i._confidence === 'number' ? i._confidence : 1));
+      const minItemConfidence = itemConfidences.length > 0 ? Math.min(...itemConfidences) : 1;
+      const recordConfidence = Math.min(orderConfidence, minItemConfidence);
+      const isStaged = recordConfidence < STAGE_THRESHOLD;
+      const stagedAt = isStaged ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null;
+
       // Resolve customer_id from customer_number
       let customerId: string | null = null;
       if (order.customer_number) {
@@ -329,43 +350,54 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
         await db.prepare(
           `UPDATE orders SET po_number = COALESCE(?, po_number), customer_id = COALESCE(?, customer_id),
            customer_number = COALESCE(?, customer_number), customer_name = COALESCE(?, customer_name),
-           source_data = ?, primary_metadata = ?, extended_metadata = ?, updated_at = datetime('now')
+           source_data = ?, primary_metadata = ?, extended_metadata = ?,
+           confidence = ?, staged_at = ?, updated_at = datetime('now')
            WHERE id = ?`
         ).bind(
           order.po_number || null, customerId,
           order.customer_number || null, order.customer_name || null,
           JSON.stringify(order.source_data),
           primaryJson, extendedJson,
+          orderConfidence, stagedAt,
           orderId
         ).run();
       } else {
         orderId = generateId();
         await db.prepare(
           `INSERT INTO orders (id, tenant_id, connector_id, connector_run_id, order_number, po_number,
-           customer_id, customer_number, customer_name, source_data, primary_metadata, extended_metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           customer_id, customer_number, customer_name, source_data, primary_metadata, extended_metadata,
+           confidence, staged_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           orderId, tenantId, connectorId, runId, order.order_number,
           order.po_number || null, customerId,
           order.customer_number || null, order.customer_name || null,
           JSON.stringify(order.source_data),
-          primaryJson, extendedJson
+          primaryJson, extendedJson,
+          orderConfidence, stagedAt
         ).run();
         ordersCreated++;
       }
+      if (isStaged) ordersStaged++;
 
-      // Insert order items (delete existing first for idempotency)
+      // Insert order items (delete existing first for idempotency). Items
+      // inherit the order's stage state so the review UI can show/edit them
+      // together. Per-item confidence is preserved so the reviewer can spot
+      // which line dragged the order down.
       if (order.items.length > 0) {
         await db.prepare(`DELETE FROM order_items WHERE order_id = ?`).bind(orderId).run();
         for (const item of order.items) {
           const itemId = generateId();
+          const itemConfidence = typeof item._confidence === 'number' ? item._confidence : null;
           await db.prepare(
-            `INSERT INTO order_items (id, order_id, product_name, product_code, quantity, lot_number)
-             VALUES (?, ?, ?, ?, ?, ?)`
+            `INSERT INTO order_items (id, order_id, product_name, product_code, quantity, lot_number,
+             confidence, staged_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
           ).bind(
             itemId, orderId,
             item.product_name || null, item.product_code || null,
-            item.quantity || null, item.lot_number || null
+            item.quantity || null, item.lot_number || null,
+            itemConfidence, stagedAt
           ).run();
         }
       }
@@ -384,11 +416,15 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
   const infoMessages = output.info || [];
   const status = errorCount === 0 ? 'success' : (ordersCreated > 0 || customersCreated > 0) ? 'partial' : 'error';
 
-  // Update run record
+  // Update run record. `records_staged` is the subset of created orders
+  // routed to human review because their LLM confidence fell below the
+  // staging threshold; it's a subset of records_created, not in addition
+  // to it.
   await db.prepare(
     `UPDATE connector_runs SET
      status = ?, completed_at = datetime('now'),
      records_found = ?, records_created = ?, records_updated = ?, records_errored = ?,
+     records_staged = ?,
      error_message = ?, details = ?
      WHERE id = ?`
   ).bind(
@@ -399,6 +435,7 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
     // is positive, which would otherwise produce a negative updated count.
     Math.max(0, totalRecords - ordersCreated - customersCreated - errorCount),
     errorCount,
+    ordersStaged,
     errorCount > 0 ? output.errors.map(e => e.message).join('; ') : null,
     JSON.stringify({ errors: output.errors, info: infoMessages }),
     runId

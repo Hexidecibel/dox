@@ -223,10 +223,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          LIMIT ?`,
       ).bind(tenantId, matchExpr, limitPerType),
 
-      // 10: orders — count
+      // 10: orders — count. Staged orders sit in the FTS index (the trigger
+      // doesn't gate on staged_at) so we filter via a join back to `orders`.
       context.env.DB.prepare(
-        `SELECT COUNT(*) AS total FROM orders_fts
-         WHERE tenant_id = ? AND orders_fts MATCH ?`,
+        `SELECT COUNT(*) AS total FROM orders_fts f
+         JOIN orders o ON o.id = f.order_id
+         WHERE f.tenant_id = ? AND orders_fts MATCH ? AND o.staged_at IS NULL`,
       ).bind(tenantId, matchExpr),
       // 11: orders — page (FTS-only projection so snippet() works; the
       // canonical order row is fetched in a follow-up query below).
@@ -238,7 +240,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
            f.customer_text AS customer_name,
            snippet(orders_fts, -1, '<mark>', '</mark>', '…', 8) AS snippet
          FROM orders_fts f
-         WHERE f.tenant_id = ? AND orders_fts MATCH ?
+         JOIN orders o ON o.id = f.order_id
+         WHERE f.tenant_id = ? AND orders_fts MATCH ? AND o.staged_at IS NULL
          ORDER BY rank
          LIMIT ?`,
       ).bind(tenantId, matchExpr, limitPerType),

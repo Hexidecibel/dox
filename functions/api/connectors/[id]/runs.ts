@@ -42,15 +42,19 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .first<{ total: number }>();
 
     // Phase B5: pull `source` + `retry_of_run_id` so the UI can render
-    // the per-source pill and the Retry button. Old DBs predating
-    // migrations 0049 / 0052 throw "no such column" on the explicit
-    // SELECT — fall back to a minimal projection that still works.
+    // the per-source pill and the Retry button.
+    // R1.3: pull `records_staged` so the runs list can surface the
+    // "N staged → review" link inline.
+    // Old DBs predating migrations 0049 / 0052 / 0059 throw "no such
+    // column" on the explicit SELECT — fall back to a minimal
+    // projection that still works.
     let results;
     try {
       results = await context.env.DB.prepare(
         `SELECT id, connector_id, tenant_id, status, source,
                 started_at, completed_at,
                 records_found, records_created, records_updated, records_errored,
+                records_staged,
                 error_message, details, retry_of_run_id
            FROM connector_runs
           WHERE connector_id = ?

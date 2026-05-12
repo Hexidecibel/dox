@@ -427,6 +427,27 @@ async function parseXLSXAttachment(
  *
  * Exported for direct unit testing.
  */
+/**
+ * Coerce an LLM-emitted `_confidence` value into a clean [0, 1] number.
+ *
+ * The LLM is asked to emit a 0.0-1.0 float on every record. In practice it
+ * sometimes emits the field as a string ("0.85"), a percentage ("85%"), or
+ * omits it entirely. The orchestrator's stage-vs-commit logic depends on
+ * this being a reliable number, so we normalize at parse time:
+ *   - undefined / null / non-finite → undefined (orchestrator treats as 1.0)
+ *   - >1 (e.g. 85, 0.85e2) → divided by 100 if that lands it in range
+ *   - else clamped to [0, 1]
+ */
+function clampConfidence(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  let n = typeof raw === 'number' ? raw : parseFloat(String(raw).replace('%', ''));
+  if (!Number.isFinite(n)) return undefined;
+  if (n > 1 && n <= 100) n = n / 100;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
 export function sanitizeCustomerName(name: string | null | undefined): string {
   if (!name) return '';
   // Trim first so the regex `$` anchor sees the real end of the name even
@@ -683,9 +704,11 @@ async function parseWithAI(
           product_code?: string;
           quantity?: number;
           lot_number?: string;
+          _confidence?: number;
         }>;
         primary_metadata?: Record<string, unknown>;
         extended_metadata?: Record<string, unknown>;
+        _confidence?: number;
       }>;
       customers?: Array<{
         customer_number?: string;
@@ -698,6 +721,7 @@ async function parseWithAI(
           role?: string;
           is_primary?: boolean;
         }>;
+        _confidence?: number;
       }>;
     };
 
@@ -723,6 +747,7 @@ async function parseWithAI(
           product_code: item.product_code,
           quantity: item.quantity,
           lot_number: item.lot_number,
+          _confidence: clampConfidence(item._confidence),
         })),
         source_data: o as Record<string, unknown>,
         // Open-ended metadata — whatever the model populated under
@@ -735,6 +760,7 @@ async function parseWithAI(
         extended_metadata: o.extended_metadata && typeof o.extended_metadata === 'object'
           ? o.extended_metadata
           : undefined,
+        _confidence: clampConfidence(o._confidence),
       }));
 
     // Collect unique customers: first from the standalone `customers` array
@@ -788,15 +814,19 @@ async function parseWithAI(
         name: cleanName,
         email: primaryEmail,
         contacts: contacts.length > 0 ? contacts : undefined,
+        _confidence: clampConfidence(c._confidence),
       });
     }
 
     for (const o of orders) {
       if (o.customer_number && !seenCustomers.has(o.customer_number)) {
         seenCustomers.add(o.customer_number);
+        // Customer was implied by an order — inherit the order's confidence
+        // since we have no standalone signal.
         customers.push({
           customer_number: o.customer_number,
           name: o.customer_name || o.customer_number,
+          _confidence: o._confidence,
         });
       }
     }
@@ -866,6 +896,19 @@ const STATIC_PROMPT_BODY = `Rules:
                {"email":"orders@chuckanut.com","role":"Orders"}]}
 - If no line items are visible for an order, return an empty items array.
 - If a field is not present, omit it or set to null.
+- ALWAYS emit \`_confidence\` on every order, customer, and line item — a single
+  number between 0.0 and 1.0 reflecting how sure you are about that record.
+  Calibration:
+    1.0  — every required field was unambiguously present in the source.
+    0.9  — minor uncertainty (one optional field guessed).
+    0.7  — the threshold below which a human will review. Use this when a
+           required field was inferred rather than read directly (e.g. you
+           split a composite cell), or a label was non-standard, or the
+           source format was unusual.
+    0.5  — a required field was guessed from limited context.
+    0.0  — you fabricated a value; the source did not actually contain this.
+  Be honest. A low confidence flag a human can investigate is FAR better
+  than fabricating a high-confidence record.
 - Return valid JSON only, no explanation.
 
 Few-shot examples:
@@ -890,7 +933,8 @@ Output:
         {"email": "alice@acme.com"},
         {"email": "bob@acme.com"},
         {"email": "orders@acme.com"}
-      ]
+      ],
+      "_confidence": 0.95
     }
   ]
 }
@@ -909,11 +953,12 @@ Output:
       "order_number": "1784767",
       "customer_number": "K00166",
       "customer_name": "CHUCKANUT BAY FOODS",
-      "po_number": null
+      "po_number": null,
+      "_confidence": 1.0
     }
   ],
   "customers": [
-    {"customer_number": "K00166", "name": "CHUCKANUT BAY FOODS"}
+    {"customer_number": "K00166", "name": "CHUCKANUT BAY FOODS", "_confidence": 1.0}
   ]
 }
 
@@ -933,7 +978,8 @@ Output:
     {
       "customer_number": "K00166",
       "name": "CHUCKANUT BAY FOODS",
-      "contacts": [{"email": "alice@chuckanut.com"}]
+      "contacts": [{"email": "alice@chuckanut.com"}],
+      "_confidence": 0.9
     }
   ]
 }
@@ -953,10 +999,11 @@ Output:
     {
       "order_number": "1790512",
       "items": [
-        {"product_code": "0406",  "product_name": "WHOLE MILK GAL",        "quantity": -30, "lot_number": "052126"},
-        {"product_code": "10012", "product_name": "CAGE FREE LIQUID EGGS", "quantity": -14, "lot_number": "051926"},
-        {"product_code": "2235",  "product_name": "DG BTR BULK U/S",       "quantity": -2,  "lot_number": "103261021"}
-      ]
+        {"product_code": "0406",  "product_name": "WHOLE MILK GAL",        "quantity": -30, "lot_number": "052126",    "_confidence": 1.0},
+        {"product_code": "10012", "product_name": "CAGE FREE LIQUID EGGS", "quantity": -14, "lot_number": "051926",    "_confidence": 1.0},
+        {"product_code": "2235",  "product_name": "DG BTR BULK U/S",       "quantity": -2,  "lot_number": "103261021", "_confidence": 1.0}
+      ],
+      "_confidence": 1.0
     }
   ],
   "customers": []

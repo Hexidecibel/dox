@@ -23,6 +23,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const customerId = url.searchParams.get('customer_id');
     const connectorId = url.searchParams.get('connector_id');
     const search = url.searchParams.get('search');
+    // Staged orders are hidden from the default list — they haven't been
+    // human-approved yet, so they're not part of "real" prod data. The
+    // run-review page at /admin/connectors/:id/runs/:runId/review pulls
+    // them via its own endpoint. Callers that genuinely want to see
+    // unreviewed records can opt in with ?include_staged=true.
+    const includeStaged = url.searchParams.get('include_staged') === 'true';
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 500);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
@@ -52,6 +58,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (connectorId) {
       conditions.push('o.connector_id = ?');
       params.push(connectorId);
+    }
+
+    if (!includeStaged) {
+      conditions.push('o.staged_at IS NULL');
     }
 
     // FTS5 swap (Phase 4c). When `search` is non-empty and parses to at

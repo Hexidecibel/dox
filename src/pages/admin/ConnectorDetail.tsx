@@ -141,6 +141,9 @@ interface ConnectorRun {
   /** Phase B5: when set, this run is a retry of an earlier failed run.
    *  Surfaces a "retry of …" pill in the runs table. */
   retry_of_run_id: string | null;
+  /** R1.3: subset of records_created routed to staging because the LLM's
+   *  confidence fell below the threshold. NULL on pre-0059 rows. */
+  records_staged: number | null;
 }
 
 /** Phase B5 — observability snapshot from GET /api/connectors/:id/health. */
@@ -334,7 +337,7 @@ export function ConnectorDetail() {
     if (!id) return;
     setRunsLoading(true);
     try {
-      const result = (await api.connectors.runs(id, {
+      const result = (await api.connectors.listRuns(id, {
         limit: RUNS_PER_PAGE,
         offset: (runsPage - 1) * RUNS_PER_PAGE,
       })) as { runs: ConnectorRun[]; total: number };
@@ -1421,25 +1424,45 @@ export function ConnectorDetail() {
                         </Typography>
                       </TableCell>
                       <TableCell align="right">
-                        {run.status === 'error' ? (
-                          <Tooltip
-                            title="Refetch the original file and re-dispatch the run"
-                            arrow
-                          >
-                            <span>
+                        <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                          {run.records_staged != null && run.records_staged > 0 && (
+                            <Tooltip
+                              title={`${run.records_staged} order${run.records_staged === 1 ? '' : 's'} routed to staging — open the review page`}
+                              arrow
+                            >
                               <Button
                                 size="small"
                                 variant="outlined"
-                                startIcon={<RefreshIcon fontSize="small" />}
-                                onClick={() => handleRetryRun(run.id)}
-                                disabled={retryingRunId === run.id}
+                                color="warning"
+                                onClick={() =>
+                                  navigate(`/admin/connectors/${connector.id}/runs/${run.id}/review`)
+                                }
                                 sx={{ minWidth: 0, py: 0.25, px: 1, fontSize: '0.7rem' }}
                               >
-                                {retryingRunId === run.id ? '…' : 'Retry'}
+                                Review {run.records_staged} staged
                               </Button>
-                            </span>
-                          </Tooltip>
-                        ) : null}
+                            </Tooltip>
+                          )}
+                          {run.status === 'error' ? (
+                            <Tooltip
+                              title="Refetch the original file and re-dispatch the run"
+                              arrow
+                            >
+                              <span>
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  startIcon={<RefreshIcon fontSize="small" />}
+                                  onClick={() => handleRetryRun(run.id)}
+                                  disabled={retryingRunId === run.id}
+                                  sx={{ minWidth: 0, py: 0.25, px: 1, fontSize: '0.7rem' }}
+                                >
+                                  {retryingRunId === run.id ? '…' : 'Retry'}
+                                </Button>
+                              </span>
+                            </Tooltip>
+                          ) : null}
+                        </Stack>
                       </TableCell>
                     </TableRow>
                   ))}

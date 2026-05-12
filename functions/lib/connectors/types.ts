@@ -23,6 +23,14 @@ export interface ParsedOrder {
    * parseWithAI, and preview-extraction.
    */
   extended_metadata?: Record<string, unknown>;
+  /**
+   * LLM self-rated confidence in this record, 0.0–1.0. Drives the
+   * stage-vs-commit routing in the orchestrator (default threshold 0.7).
+   * Absent when the source is non-LLM (CSV header-based parsing); the
+   * orchestrator treats absence as `1.0` (high confidence) so deterministic
+   * parsers stay on the commit path.
+   */
+  _confidence?: number;
 }
 
 export interface ParsedOrderItem {
@@ -30,6 +38,8 @@ export interface ParsedOrderItem {
   product_code?: string;
   quantity?: number;
   lot_number?: string;
+  /** Per-item confidence; same semantics as ParsedOrder._confidence. */
+  _confidence?: number;
 }
 
 export interface ParsedContact {
@@ -46,6 +56,8 @@ export interface ParsedCustomer {
   email?: string;
   /** Full contact list — registry rows often have 2-5 entries per customer. */
   contacts?: ParsedContact[];
+  /** Per-customer confidence; same semantics as ParsedOrder._confidence. */
+  _confidence?: number;
 }
 
 export interface ConnectorError {
