@@ -2515,6 +2515,81 @@ export interface FacetCount {
   count: number;
 }
 
+// === Admin — Processing Status health page ===
+//
+// Powers GET /api/admin/processing-status. System-wide view: no tenant
+// scoping. Built so a super_admin can refresh during an outage and see
+// at a glance which subsystem (queue, worker, Qwen GPU host, stale
+// claims) is broken without having to ssh anywhere.
+
+export interface ProcessingStatusQueueOldest {
+  id: string;
+  ageMinutes: number;
+  createdAt: string;
+}
+
+export interface ProcessingStatusQueue {
+  /** Counts grouped by `processing_queue.processing_status`. Includes
+   *  the four known states even when zero, so the UI doesn't have to
+   *  null-check each chip. */
+  counts: { queued: number; processing: number; ready: number; error: number };
+  oldestQueued: ProcessingStatusQueueOldest | null;
+  totalRows: number;
+}
+
+export interface ProcessingStatusWorker {
+  /** Most-recent `ready` row's created_at (proxy for "worker last did
+   *  work"). Null when no rows have ever reached ready. */
+  lastJobCompletedAt: string | null;
+  minutesSinceLastJob: number | null;
+  /** True when minutesSinceLastJob < 10. Idle queue + healthy worker
+   *  is still considered healthy — see endpoint comments. */
+  healthy: boolean;
+}
+
+export interface ProcessingStatusQwen {
+  reachable: boolean;
+  responseTimeMs: number | null;
+  /** Models advertised by `/v1/models` (everything llama-swap *can*
+   *  load). Null when the probe failed. */
+  advertisedModels: string[] | null;
+  /** Models currently resident in VRAM per llama-swap `/running`. Null
+   *  when /running is not available on this host. */
+  loadedModels: string[] | null;
+  /** Populated when reachable=false. */
+  error: string | null;
+}
+
+export interface ProcessingStatusStale {
+  /** Rows in 'processing' for > 15 min — indicates an orphaned worker
+   *  claim (worker died mid-job, no reaper). */
+  orphanedClaims: number;
+  oldestOrphanAgeMinutes: number | null;
+}
+
+export interface ProcessingStatusErrorRow {
+  id: string;
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+export interface ProcessingStatusErrors {
+  /** Most-recent 10 errored rows (id, error_message, created_at). */
+  recent: ProcessingStatusErrorRow[];
+  /** Histogram by first 80 chars of error_message — quick way to spot
+   *  "47 rows of the same Qwen 503". */
+  byPattern: Record<string, number>;
+}
+
+export interface ProcessingStatusResponse {
+  queue: ProcessingStatusQueue;
+  worker: ProcessingStatusWorker;
+  qwen: ProcessingStatusQwen;
+  stale: ProcessingStatusStale;
+  errors: ProcessingStatusErrors;
+  checkedAt: string;
+}
+
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'auth_user';

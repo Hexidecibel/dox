@@ -34,6 +34,7 @@ import { ConnectorWizard } from './pages/admin/ConnectorWizard';
 import { Customers } from './pages/admin/Customers';
 import { CustomerDetail } from './pages/admin/CustomerDetail';
 import LearningDashboard from './pages/admin/LearningDashboard';
+import { ProcessingStatus } from './pages/admin/ProcessingStatus';
 import { Orders } from './pages/Orders';
 import { OrderDetail } from './pages/OrderDetail';
 import { Activity } from './pages/Activity';
@@ -129,6 +130,7 @@ function App() {
               {/* Super admin only routes */}
               <Route element={<ProtectedRoute roles={['super_admin']} />}>
                 <Route path="/admin/tenants" element={<Tenants />} />
+                <Route path="/admin/processing-status" element={<ProcessingStatus />} />
               </Route>
             </Route>
           </Route>

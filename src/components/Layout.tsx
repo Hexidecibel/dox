@@ -47,6 +47,7 @@ import {
   TableView as RecordsIcon,
   AssignmentTurnedIn as ApprovalsIcon,
   HelpOutline as HelpIcon,
+  MonitorHeart as MonitorHeartIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -84,6 +85,7 @@ const adminItems: NavItem[] = [
   { label: 'Customers', path: '/admin/customers', icon: <CustomersIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Learning Dashboard', path: '/admin/learning-dashboard', icon: <InsightsIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Tenants', path: '/admin/tenants', icon: <TenantsIcon />, roles: ['super_admin'] },
+  { label: 'Processing Status', path: '/admin/processing-status', icon: <MonitorHeartIcon />, roles: ['super_admin'] },
 ];
 
 const roleColors: Record<string, 'primary' | 'secondary' | 'default'> = {
