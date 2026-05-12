@@ -140,11 +140,17 @@ export function CustomerDetail() {
   }, [id]);
 
   const loadOrders = useCallback(async () => {
-    if (!id) return;
+    // Wait for the customer to load so we can forward its tenant_id. The
+    // /api/orders endpoint auto-derives tenant_id from the user for non-
+    // super_admins, but a super_admin call without an explicit tenant_id
+    // is rejected with a 400, which would silently leave the orders tab
+    // empty.
+    if (!id || !customer?.tenant_id) return;
     setOrdersLoading(true);
     try {
       const result = await api.orders.list({
         customer_id: id,
+        tenant_id: customer.tenant_id,
         limit: ORDERS_PER_PAGE,
         offset: (ordersPage - 1) * ORDERS_PER_PAGE,
       }) as any;
@@ -155,7 +161,7 @@ export function CustomerDetail() {
     } finally {
       setOrdersLoading(false);
     }
-  }, [id, ordersPage]);
+  }, [id, ordersPage, customer?.tenant_id]);
 
   useEffect(() => {
     loadCustomer();
