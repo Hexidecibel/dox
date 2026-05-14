@@ -21,7 +21,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     requireRole(user, 'super_admin', 'org_admin', 'user');
 
     const body = (await context.request.json()) as {
-      processing_status?: 'processing' | 'ready' | 'error';
+      processing_status?: 'queued' | 'processing' | 'ready' | 'error';
       extracted_text?: string;
       ai_fields?: string;
       ai_confidence?: string;
@@ -49,24 +49,44 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       uncertainty?: string | null;
     };
 
-    if (!body.processing_status || !['processing', 'ready', 'error'].includes(body.processing_status)) {
-      throw new BadRequestError('processing_status must be "processing", "ready", or "error"');
+    if (!body.processing_status || !['queued', 'processing', 'ready', 'error'].includes(body.processing_status)) {
+      throw new BadRequestError('processing_status must be "queued", "processing", "ready", or "error"');
     }
 
     // Verify queue item exists
     const item = await context.env.DB.prepare(
-      'SELECT id, tenant_id, document_type_id, processing_status, source, source_detail, file_name, status FROM processing_queue WHERE id = ?'
+      'SELECT id, tenant_id, document_type_id, processing_status, source, source_detail, file_name, status, attempts FROM processing_queue WHERE id = ?'
     )
       .bind(queueId)
-      .first<{ id: string; tenant_id: string; document_type_id: string | null; processing_status: string; source: string | null; source_detail: string | null; file_name: string; status: string }>();
+      .first<{ id: string; tenant_id: string; document_type_id: string | null; processing_status: string; source: string | null; source_detail: string | null; file_name: string; status: string; attempts: number }>();
 
     if (!item) {
       throw new NotFoundError('Queue item not found');
     }
 
+    // Worker resets stuck items by sending processing_status='queued'. Bump
+    // the attempts counter on each reset; after MAX_ATTEMPTS, force the item
+    // to 'error' so it stops bouncing back into the work pool.
+    const MAX_ATTEMPTS = 3;
+    let effectiveStatus = body.processing_status;
+    let attemptsBump = 0;
+    let forcedErrorMessage: string | null = null;
+    if (body.processing_status === 'queued') {
+      const nextAttempts = (item.attempts ?? 0) + 1;
+      if (nextAttempts > MAX_ATTEMPTS) {
+        effectiveStatus = 'error';
+        forcedErrorMessage = `exceeded retry cap (${MAX_ATTEMPTS} attempts)`;
+      } else {
+        attemptsBump = 1;
+      }
+    }
+
     // Build update query dynamically based on provided fields
     const updates: string[] = ['processing_status = ?'];
-    const params: (string | number | null)[] = [body.processing_status];
+    const params: (string | number | null)[] = [effectiveStatus];
+    if (attemptsBump) {
+      updates.push('attempts = attempts + 1');
+    }
 
     if (body.extracted_text !== undefined) {
       updates.push('extracted_text = ?');
@@ -119,7 +139,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       params.push(body.supplier);
     }
 
-    if (body.error_message !== undefined) {
+    if (forcedErrorMessage !== null) {
+      updates.push('error_message = ?');
+      params.push(forcedErrorMessage);
+    } else if (body.error_message !== undefined) {
       updates.push('error_message = ?');
       params.push(body.error_message);
     }
