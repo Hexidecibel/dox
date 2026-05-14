@@ -321,9 +321,25 @@ async function handleReject(
     file_name: string;
   }
 ): Promise<Response> {
-  // Update queue item status
+  // Update queue item status. Also force processing_status to a terminal
+  // value: rejecting deletes the R2 file, so if the worker were mid-flight
+  // (or still in `queued`/`processing`) it would otherwise spin forever on
+  // a 404. Only overwrite when not already terminal so we don't clobber a
+  // real extraction outcome with our generic message.
   await context.env.DB.prepare(
-    `UPDATE processing_queue SET status = 'rejected', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?`
+    `UPDATE processing_queue
+     SET status = 'rejected',
+         reviewed_by = ?,
+         reviewed_at = datetime('now'),
+         processing_status = CASE
+           WHEN processing_status IN ('ready', 'error') THEN processing_status
+           ELSE 'error'
+         END,
+         error_message = CASE
+           WHEN processing_status IN ('ready', 'error') THEN error_message
+           ELSE 'rejected by user'
+         END
+     WHERE id = ?`
   )
     .bind(user.id, item.id)
     .run();
