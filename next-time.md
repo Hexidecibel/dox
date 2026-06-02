@@ -4,6 +4,82 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-06-02 SESSION WRAP — trust + review + matching + worklist (ALL SHIPPED & PUSHED)
+
+Big, productive session. The intake → review → linkage pipeline now works **end-to-end and
+human-gated**. Everything is committed AND pushed to `origin/master` (commits `6f9e115` → `9960cc9`;
+origin had been 16 behind — prior sessions deployed from the tree without pushing). Prod deploys
+through `c07c48ae` on supdox.com. **Worker NOT restarted — none of this needed it** (all changes
+live in Pages functions; the worker still just writes `ai_records`/`ai_fields`).
+
+### Did we remove connectors? → NO (the #1 open item)
+Direction CONFIRMED with the user: connectors fold into a unified **"Sources"** admin (refactor P9)
+— origin (supplier/internal) × output (coa/order/shipment), killing the connector-vs-upload
+confusion. **NOT started.** Connector code/UI still exists and works; order/shipment linkage still
+flows through it and there's no Sources replacement yet, so it's intentionally left running. This is
+the natural next big architectural piece now that everything reviews through one queue.
+
+### Shipped this session (in order)
+1. **Supplier dedupe** — `isPlausibleSupplierName` guard (junk like `C2#`/cell-refs can't become a
+   supplier); all creation funnels through `findOrCreateSupplier`; merge tool (`/admin/suppliers`
+   duplicates panel + `POST /api/suppliers/merge`). Prod dups reconciled
+   (`bin/reconcile-suppliers-2026-06-02.sql` — committed record). See [[project_supplier_dedupe]].
+2. **NO AUTO-INGEST (deliberate — do NOT revert)** — COA docs from ALL sources always go to Review;
+   templates+confidence are review-ASSIST only. Old auto-approve paths in `results.ts` removed.
+   See [[project_no_auto_ingest_review_v2]].
+3. **Supplier verification gate** — reviewer must confirm/correct supplier before Approve unlocks;
+   admins can change supplier on existing docs (`PUT /api/documents/:id`).
+4. **Kind-aware Review Queue v2** — order/shipment no longer auto-produce; editable Order/Shipment
+   tiles; produce on APPROVE from reviewed `body.records`; shipment confirms weak COA→lot matches
+   inline (`GET /api/lot-matches` + `POST /api/lot-matches/:id`). Kind badges + filter.
+5. **docx inline preview** — `src/components/DocxPreview.tsx` (mammoth browser build) in review, doc
+   detail, import. xlsx still a download card (easy SheetJS follow-up).
+6. **Product-code + lot auto-matching** — order↔COA strong-link key = distributor SKU =
+   `order_items.product_code` vs the **`(NNNN)` prefix of the COA TITLE** (NOT the extracted
+   product_code field — that's the *manufacturer* code). `classifyMatch` new `'lot+code'` basis 0.9.
+   `POST /api/admin/rematch-lots` re-runs linkage.
+7. **Missing-COA worklist** — COA Fulfillment report flags each missing-COA line as **collectible**
+   (we hold a COA for that code → collect this lot's COA and it auto-links) vs **none_on_file**.
+   All/Needs-COA filter + summary chips + CSV export for the partner.
+
+### THE KEY INSIGHT (drives what's next)
+Matching is NOT the bottleneck — **COA lot COVERAGE is**. All 16 unlinked order lines: the product
+is recognized but `coas_code_and_lot = 0` (no COA for the specific shipped lot). The matcher is
+ready and auto-links the instant the right-lot COA arrives. So the operational next step is the
+**partner loading real lot COAs** (following the `(NNNN)` title convention) — coverage climbs on its
+own. `rematch-lots` links ~0 today; run it AFTER COAs load.
+
+### Prod data snapshot (this session's audit)
+COA: 310 approved / 81 pending / 84 rejected / ~24 error. Orders 16, order_items 17 (all lot-bound,
+1 COA-linked). Lots 234. Suggestions 4 (3 pending). 343 active COA docs (6 null supplier — correctly
+left for review). Errors to clean: **13 Qwen-502** (re-queue), **11 R2-404** (files gone, re-upload),
+**1 legacy `.doc`**.
+
+### Open follow-ups (prioritized; none block the loop)
+1. **Connectors → unified Sources admin (P9)** — the big one (see above).
+2. **Suggestions review queue** — weak matches (esp. COA-after-order) have no home outside the
+   shipment tile (am chat #2; partly addressed there).
+3. **Needs-COA worklist into nav** as its own landing (offered, not done).
+4. **VLM for image-letterhead suppliers** — the real `C2#` accuracy fix (`QWEN_VLM_MODE` OFF in
+   prod; worker-host change on the Qwen box).
+5. Code-audit polish: lot/product unification (NULL-product lot → 2 rows; cosmetic, matching is
+   lot_key-based), suggestion confidence-upgrade (`INSERT OR IGNORE` doesn't upgrade), COA-side
+   linkage reconciliation job (linkage only at approval, errors swallowed), negative-qty (outbound)
+   order lines unflagged.
+6. Ingestion cleanup (the 13/11/1 errors above).
+7. Order/shipment tiles never run on a FRESH real doc (the 8 pending audit-trails were produced
+   earlier and re-queued → accept is idempotent). Watch a genuinely new one.
+
+### OPS NOTES / GOTCHAS
+- **SKIP_E2E used all session** — staging D1 is drifted (missing migrations). Re-migrate staging to
+  restore the `bin/deploy` e2e gate.
+- The **`(NNNN)` COA-title-prefix** convention is load-bearing for both the matcher and the worklist
+  — ensure the partner's incoming COAs follow it.
+- Endpoints added this session: `POST /api/suppliers/merge`, `GET /api/suppliers/duplicates`,
+  `POST /api/admin/rematch-lots`, `GET /api/lot-matches` (+ existing `POST /api/lot-matches/:id`).
+
+---
+
 ## 2026-06-02 (pm-2) Pipeline audit + product-code matching — SHIPPED (deploy c6ed1067 / commit f5bf383)
 
 Ran a full prod audit of ingestion→produce→linking and shipped the product-code matcher.
