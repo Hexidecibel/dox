@@ -25,13 +25,21 @@ import type { D1Database } from '@cloudflare/workers-types';
 import { generateId } from '../db';
 import { findOrCreateLot, normalizeLotNumber } from './lots';
 
-// Confidence thresholds. "Strong" requires the product to agree (basis
-// includes product). "Weak" is lot_only.
+// Confidence thresholds. "Strong" requires the product OR the distributor code
+// to agree (basis includes product or code). "Weak" is lot_only.
 export const CONFIDENCE_LOT_PRODUCT_SUPPLIER = 0.95;
 export const CONFIDENCE_LOT_PRODUCT = 0.85;
+// Distributor-code agreement (leading parenthesized title prefix === order
+// product_code). The SKU is the reliable cross-side key even when product
+// names — and thus product_ids — diverge.
+export const CONFIDENCE_LOT_CODE = 0.9;
 export const CONFIDENCE_LOT_ONLY = 0.5;
 
-export type MatchBasis = 'lot+product+supplier' | 'lot+product' | 'lot_only';
+export type MatchBasis =
+  | 'lot+product+supplier'
+  | 'lot+product'
+  | 'lot+code'
+  | 'lot_only';
 
 export interface MatchClassification {
   basis: MatchBasis;
@@ -40,10 +48,58 @@ export interface MatchClassification {
 }
 
 /**
+ * Normalize a distributor code for comparison: trim + uppercase. Empty → null.
+ */
+function normalizeCode(c: string | null | undefined): string | null {
+  if (c == null) return null;
+  const s = String(c).trim().toUpperCase();
+  return s === '' ? null : s;
+}
+
+/**
+ * Extract the distributor code from a COA document title: the leading
+ * parenthesized prefix, e.g.
+ *   "(1167) 76187-29125 CF LIQ WHOLE EGG 2-20# LOT 6141 07-02-26" → "1167".
+ * Returns the trimmed inner code, or null when the title has no such prefix.
+ *
+ * NOTE: this is the DISTRIBUTOR SKU, deliberately NOT the COA's extracted
+ * `product_code` field (which is the manufacturer code like "76187-29125-00").
+ */
+export function parseDistributorCode(
+  title: string | null | undefined
+): string | null {
+  if (title == null) return null;
+  const m = /^\s*\(([0-9A-Za-z][0-9A-Za-z\-]*)\)/.exec(String(title));
+  if (!m) return null;
+  const code = m[1].trim();
+  return code === '' ? null : code;
+}
+
+/**
+ * Two distributor codes agree when their normalized forms are equal, with a
+ * leading-zero-stripped fallback so "0708" and "708" still match.
+ */
+function codesAgree(
+  a: string | null | undefined,
+  b: string | null | undefined
+): boolean {
+  const na = normalizeCode(a);
+  const nb = normalizeCode(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const stripZeros = (s: string) => s.replace(/^0+/, '') || '0';
+  return stripZeros(na) === stripZeros(nb);
+}
+
+/**
  * Classify a candidate pairing into a match basis + confidence.
  *
- * A match is STRONG only when both sides agree on the product. Supplier
- * agreement (when both are known) bumps confidence but is not required.
+ * A match is STRONG when the two sides agree on EITHER the product (resolved
+ * product_id) OR the distributor code (order product_code vs the COA title's
+ * leading parenthesized SKU). Product names diverge across the two halves of
+ * the system, so the distributor SKU is the reliable join; code agreement
+ * alone is enough to auto-link. Supplier agreement (when both are known) bumps
+ * confidence but is never required.
  *
  * `coaSupplierId`/`orderSupplierId` may be null (unknown). An unknown supplier
  * does not contradict; it simply can't reach the supplier-confirmed tier.
@@ -53,16 +109,35 @@ export function classifyMatch(args: {
   orderProductId: string | null;
   coaSupplierId: string | null;
   orderSupplierId: string | null;
+  coaProductCode?: string | null;
+  orderProductCode?: string | null;
 }): MatchClassification {
-  const { coaProductId, orderProductId, coaSupplierId, orderSupplierId } = args;
+  const {
+    coaProductId,
+    orderProductId,
+    coaSupplierId,
+    orderSupplierId,
+    coaProductCode,
+    orderProductCode,
+  } = args;
 
   const productAgrees =
     !!coaProductId && !!orderProductId && coaProductId === orderProductId;
+  const codeAgrees = codesAgree(coaProductCode, orderProductCode);
   const supplierAgrees =
     !!coaSupplierId && !!orderSupplierId && coaSupplierId === orderSupplierId;
 
+  // Product agreement and supplier agreement together is the highest tier.
   if (productAgrees && supplierAgrees) {
     return { basis: 'lot+product+supplier', confidence: CONFIDENCE_LOT_PRODUCT_SUPPLIER, strong: true };
+  }
+  // Distributor codes agree (product_ids may differ because names diverge).
+  // Supplier agreement still upgrades to the supplier-confirmed tier.
+  if (codeAgrees && !productAgrees) {
+    if (supplierAgrees) {
+      return { basis: 'lot+product+supplier', confidence: CONFIDENCE_LOT_PRODUCT_SUPPLIER, strong: true };
+    }
+    return { basis: 'lot+code', confidence: CONFIDENCE_LOT_CODE, strong: true };
   }
   if (productAgrees) {
     return { basis: 'lot+product', confidence: CONFIDENCE_LOT_PRODUCT, strong: true };
@@ -135,6 +210,7 @@ interface OrderItemCandidate {
   id: string;
   order_id: string;
   product_id: string | null;
+  product_code: string | null;
   lot_id: string | null;
   lot_number: string | null;
 }
@@ -169,11 +245,19 @@ export async function linkCoaToOrders(
   const lotKey = lot.lot_key;
   const coaSupplierId = supplierId ?? lot.supplier_id ?? null;
 
+  // The COA's distributor code lives in the document title's leading
+  // parenthesized prefix, e.g. "(1167) ... LOT 6141" → "1167".
+  const doc = await db
+    .prepare('SELECT title FROM documents WHERE id = ? AND tenant_id = ?')
+    .bind(documentId, tenantId)
+    .first<{ title: string | null }>();
+  const coaProductCode = parseDistributorCode(doc?.title);
+
   // Candidate order_items in this tenant: either already lot-resolved to the
   // same key, or carrying a raw lot_number we still need to normalize.
   const rows = await db
     .prepare(
-      `SELECT oi.id, oi.order_id, oi.product_id, oi.lot_id, oi.lot_number
+      `SELECT oi.id, oi.order_id, oi.product_id, oi.product_code, oi.lot_id, oi.lot_number
        FROM order_items oi
        JOIN orders o ON o.id = oi.order_id
        LEFT JOIN lots l ON l.id = oi.lot_id
@@ -194,6 +278,8 @@ export async function linkCoaToOrders(
       orderProductId: oi.product_id,
       coaSupplierId,
       orderSupplierId: null, // order side rarely knows the supplier
+      coaProductCode,
+      orderProductCode: oi.product_code,
     });
 
     if (cls.strong) {
@@ -306,6 +392,7 @@ interface CoaCandidate {
   lot_id: string;
   product_id: string | null;
   supplier_id: string | null;
+  title: string | null;
 }
 
 /**
@@ -331,12 +418,21 @@ export async function linkOrderToCoas(
   if (!lot) return;
   const lotKey = lot.lot_key;
 
-  // COA documents whose linked lot shares the same key in this tenant.
+  // The order line's distributor SKU (already populated by connectors).
+  const oiRow = await db
+    .prepare('SELECT product_code FROM order_items WHERE id = ?')
+    .bind(orderItemId)
+    .first<{ product_code: string | null }>();
+  const orderProductCode = oiRow?.product_code ?? null;
+
+  // COA documents whose linked lot shares the same key in this tenant. Join
+  // documents to read each candidate's title (carries the distributor code).
   const rows = await db
     .prepare(
-      `SELECT dl.document_id, l.id AS lot_id, l.product_id, l.supplier_id
+      `SELECT dl.document_id, l.id AS lot_id, l.product_id, l.supplier_id, d.title
        FROM document_lots dl
        JOIN lots l ON l.id = dl.lot_id
+       JOIN documents d ON d.id = dl.document_id
        WHERE l.tenant_id = ? AND l.lot_key = ?`
     )
     .bind(tenantId, lotKey)
@@ -348,6 +444,8 @@ export async function linkOrderToCoas(
       orderProductId: productId,
       coaSupplierId: coa.supplier_id,
       orderSupplierId: null,
+      coaProductCode: parseDistributorCode(coa.title),
+      orderProductCode,
     });
 
     if (cls.strong) {

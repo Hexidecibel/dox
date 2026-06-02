@@ -15,7 +15,12 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import { runMigrations, seedTestData, cleanTables, generateTestId } from '../helpers/db';
 import { normalizeLotNumber, findOrCreateLot } from '../../functions/lib/entities/lots';
-import { linkCoaToOrders, linkOrderToCoas } from '../../functions/lib/entities/matching';
+import {
+  linkCoaToOrders,
+  linkOrderToCoas,
+  parseDistributorCode,
+  classifyMatch,
+} from '../../functions/lib/entities/matching';
 import { onRequestPost as resolveLotMatch } from '../../functions/api/lot-matches/[id]';
 
 const db = env.DB;
@@ -41,21 +46,30 @@ async function makeProduct(tenantId: string, name: string): Promise<string> {
   return id;
 }
 
-async function makeDocument(tenantId: string, supplierId: string | null): Promise<string> {
+async function makeDocument(
+  tenantId: string,
+  supplierId: string | null,
+  title?: string
+): Promise<string> {
   const id = generateTestId();
   await db
     .prepare(
       `INSERT INTO documents (id, tenant_id, title, tags, current_version, status, created_by, supplier_id)
        VALUES (?, ?, ?, '[]', 1, 'active', ?, ?)`
     )
-    .bind(id, tenantId, `Doc ${id.slice(0, 6)}`, seed.userId, supplierId)
+    .bind(id, tenantId, title ?? `Doc ${id.slice(0, 6)}`, seed.userId, supplierId)
     .run();
   return id;
 }
 
 async function makeOrderWithItem(
   tenantId: string,
-  item: { productId?: string | null; lotId?: string | null; lotNumber?: string | null }
+  item: {
+    productId?: string | null;
+    lotId?: string | null;
+    lotNumber?: string | null;
+    productCode?: string | null;
+  }
 ): Promise<{ orderId: string; orderItemId: string }> {
   const orderId = generateTestId();
   await db
@@ -67,10 +81,17 @@ async function makeOrderWithItem(
   const orderItemId = generateTestId();
   await db
     .prepare(
-      `INSERT INTO order_items (id, order_id, product_id, lot_id, lot_number)
-       VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO order_items (id, order_id, product_id, product_code, lot_id, lot_number)
+       VALUES (?, ?, ?, ?, ?, ?)`
     )
-    .bind(orderItemId, orderId, item.productId ?? null, item.lotId ?? null, item.lotNumber ?? null)
+    .bind(
+      orderItemId,
+      orderId,
+      item.productId ?? null,
+      item.productCode ?? null,
+      item.lotId ?? null,
+      item.lotNumber ?? null
+    )
     .run();
   return { orderId, orderItemId };
 }
@@ -132,6 +153,101 @@ describe('normalizeLotNumber', () => {
     expect(normalizeLotNumber(undefined)).toBe('');
     expect(normalizeLotNumber('   ')).toBe('');
     expect(normalizeLotNumber('LOT #')).toBe('');
+  });
+});
+
+// --- parseDistributorCode --------------------------------------------------
+
+describe('parseDistributorCode', () => {
+  it('extracts the leading parenthesized prefix', () => {
+    expect(parseDistributorCode('(1167) Foo')).toBe('1167');
+    expect(
+      parseDistributorCode('(1167) 76187-29125 CF LIQ WHOLE EGG 2-20# LOT 6141 07-02-26')
+    ).toBe('1167');
+  });
+
+  it('preserves leading zeros and alphanumerics', () => {
+    expect(parseDistributorCode('(0708) x')).toBe('0708');
+    expect(parseDistributorCode('  (AB-12) bar')).toBe('AB-12');
+  });
+
+  it('returns null when there is no parenthesized prefix', () => {
+    expect(parseDistributorCode('no prefix')).toBeNull();
+    expect(parseDistributorCode('LOT 6141 (1167) trailing')).toBeNull();
+    expect(parseDistributorCode(null)).toBeNull();
+    expect(parseDistributorCode(undefined)).toBeNull();
+    expect(parseDistributorCode('() empty')).toBeNull();
+  });
+});
+
+// --- classifyMatch (distributor code) --------------------------------------
+
+describe('classifyMatch: distributor code', () => {
+  it('codes agree (different product_ids) → strong lot+code 0.9', () => {
+    const cls = classifyMatch({
+      coaProductId: 'prod-A',
+      orderProductId: 'prod-B',
+      coaSupplierId: null,
+      orderSupplierId: null,
+      coaProductCode: '1167',
+      orderProductCode: '1167',
+    });
+    expect(cls.strong).toBe(true);
+    expect(cls.basis).toBe('lot+code');
+    expect(cls.confidence).toBe(0.9);
+  });
+
+  it('codes agree + supplier agrees → supplier-confirmed tier', () => {
+    const cls = classifyMatch({
+      coaProductId: 'prod-A',
+      orderProductId: 'prod-B',
+      coaSupplierId: 'sup-1',
+      orderSupplierId: 'sup-1',
+      coaProductCode: '1167',
+      orderProductCode: '1167',
+    });
+    expect(cls.strong).toBe(true);
+    expect(cls.basis).toBe('lot+product+supplier');
+    expect(cls.confidence).toBe(0.95);
+  });
+
+  it('zero-padding fallback ("0708" vs "708") → strong', () => {
+    const cls = classifyMatch({
+      coaProductId: 'prod-A',
+      orderProductId: 'prod-B',
+      coaSupplierId: null,
+      orderSupplierId: null,
+      coaProductCode: '0708',
+      orderProductCode: '708',
+    });
+    expect(cls.strong).toBe(true);
+    expect(cls.basis).toBe('lot+code');
+  });
+
+  it('codes differ + products differ → lot_only weak', () => {
+    const cls = classifyMatch({
+      coaProductId: 'prod-A',
+      orderProductId: 'prod-B',
+      coaSupplierId: null,
+      orderSupplierId: null,
+      coaProductCode: '1167',
+      orderProductCode: '9999',
+    });
+    expect(cls.strong).toBe(false);
+    expect(cls.basis).toBe('lot_only');
+    expect(cls.confidence).toBe(0.5);
+  });
+
+  it('product agreement still wins when codes are absent', () => {
+    const cls = classifyMatch({
+      coaProductId: 'prod-A',
+      orderProductId: 'prod-A',
+      coaSupplierId: null,
+      orderSupplierId: null,
+    });
+    expect(cls.strong).toBe(true);
+    expect(cls.basis).toBe('lot+product');
+    expect(cls.confidence).toBe(0.85);
   });
 });
 
@@ -373,6 +489,133 @@ describe('matching: order → COAs', () => {
     const oi = await getOrderItem(orderItemId);
     expect(oi!.coa_document_id).toBe(docId);
     expect(oi!.coa_match_status).toBe('matched');
+  });
+});
+
+describe('matching: distributor-code auto-confirm', () => {
+  it('order → COA: codes agree (different products) → STRONG auto-link, no suggestion', async () => {
+    const orderProduct = await makeProduct(seed.tenantId, 'WILL CAGE FREE WHOLE LIQ');
+    const coaProduct = await makeProduct(seed.tenantId, 'Willamette Cage-Free Liquid Whole Egg');
+
+    // COA doc: title carries distributor code "1167", lot 6141, product B.
+    const docId = await makeDocument(
+      seed.tenantId,
+      null,
+      '(1167) 76187-29125 CF LIQ WHOLE EGG 2-20# LOT 6141 07-02-26'
+    );
+    const coaLot = await findOrCreateLot(db, seed.tenantId, {
+      lotNumber: '6141',
+      productId: coaProduct,
+    });
+    await db
+      .prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)')
+      .bind(generateTestId(), docId, coaLot!.id)
+      .run();
+
+    // Order line: product code "1167", lot 6141, DIFFERENT product A.
+    const orderLot = await findOrCreateLot(db, seed.tenantId, {
+      lotNumber: '6141',
+      productId: orderProduct,
+    });
+    const { orderItemId } = await makeOrderWithItem(seed.tenantId, {
+      productId: orderProduct,
+      productCode: '1167',
+      lotId: orderLot!.id,
+    });
+
+    await linkOrderToCoas(db, seed.tenantId, {
+      orderItemId,
+      lotId: orderLot!.id,
+      productId: orderProduct,
+    });
+
+    const oi = await getOrderItem(orderItemId);
+    expect(oi!.coa_document_id).toBe(docId);
+    expect(oi!.coa_match_status).toBe('matched');
+    expect(oi!.match_confidence).toBe(0.9);
+    expect(await getSuggestions(orderItemId)).toHaveLength(0);
+  });
+
+  it('order → COA: codes differ → stays a weak suggestion', async () => {
+    const orderProduct = await makeProduct(seed.tenantId, 'Prod A');
+    const coaProduct = await makeProduct(seed.tenantId, 'Prod B');
+
+    const docId = await makeDocument(
+      seed.tenantId,
+      null,
+      '(9999) something else LOT 6141'
+    );
+    const coaLot = await findOrCreateLot(db, seed.tenantId, {
+      lotNumber: '6141',
+      productId: coaProduct,
+    });
+    await db
+      .prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)')
+      .bind(generateTestId(), docId, coaLot!.id)
+      .run();
+
+    const orderLot = await findOrCreateLot(db, seed.tenantId, {
+      lotNumber: '6141',
+      productId: orderProduct,
+    });
+    const { orderItemId } = await makeOrderWithItem(seed.tenantId, {
+      productId: orderProduct,
+      productCode: '1167',
+      lotId: orderLot!.id,
+    });
+
+    await linkOrderToCoas(db, seed.tenantId, {
+      orderItemId,
+      lotId: orderLot!.id,
+      productId: orderProduct,
+    });
+
+    const oi = await getOrderItem(orderItemId);
+    expect(oi!.coa_document_id).toBeNull();
+    const sugg = await getSuggestions(orderItemId);
+    expect(sugg).toHaveLength(1);
+    expect(sugg[0].match_basis).toBe('lot_only');
+  });
+
+  it('COA → orders: codes agree (different products) → STRONG auto-link', async () => {
+    const orderProduct = await makeProduct(seed.tenantId, 'Order Name');
+    const coaProduct = await makeProduct(seed.tenantId, 'Coa Name');
+
+    const orderLot = await findOrCreateLot(db, seed.tenantId, {
+      lotNumber: '6141',
+      productId: orderProduct,
+    });
+    const { orderItemId } = await makeOrderWithItem(seed.tenantId, {
+      productId: orderProduct,
+      productCode: '1167',
+      lotId: orderLot!.id,
+    });
+
+    const docId = await makeDocument(
+      seed.tenantId,
+      null,
+      '(1167) CF LIQ WHOLE EGG LOT 6141'
+    );
+    const coaLot = await findOrCreateLot(db, seed.tenantId, {
+      lotNumber: 'Lot# 6141',
+      productId: coaProduct,
+    });
+    await db
+      .prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)')
+      .bind(generateTestId(), docId, coaLot!.id)
+      .run();
+
+    await linkCoaToOrders(db, seed.tenantId, {
+      documentId: docId,
+      lotId: coaLot!.id,
+      productId: coaProduct,
+      supplierId: null,
+    });
+
+    const oi = await getOrderItem(orderItemId);
+    expect(oi!.coa_document_id).toBe(docId);
+    expect(oi!.coa_match_status).toBe('matched');
+    expect(await getSuggestions(orderItemId)).toHaveLength(0);
   });
 });
 
