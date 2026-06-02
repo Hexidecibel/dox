@@ -39,11 +39,15 @@ describe('process-worker — reviewer instructions wiring', () => {
     );
   });
 
-  it('resolves supplier_id from item.supplier before fetching instructions', () => {
-    // Must use the exact (case-insensitive) name match path — not a loose
-    // LIKE hit — to avoid attaching another supplier's guidance.
+  it('resolves supplier_id from item.supplier with normalized matching', () => {
+    // Matching normalizes case, punctuation, and company suffixes so a queue
+    // item carrying "Darigold Inc." resolves to a "Darigold" supplier row,
+    // then falls back to a single unambiguous containment match. A loose
+    // multi-hit LIKE result must NOT be attached (would pull another
+    // supplier's guidance).
     expect(processWorkerSource).toMatch(/async function resolveSupplierIdByName\s*\(/);
-    expect(processWorkerSource).toContain("rows.find(s => (s.name || '').toLowerCase().trim() === lower)");
+    expect(processWorkerSource).toContain('const exact = rows.find(s => normalize(s.name) === target)');
+    expect(processWorkerSource).toMatch(/inc\|llc\|co\|corp/);
   });
 
   it('applies prependReviewerInstructions to the text-path system prompt', () => {
@@ -79,5 +83,82 @@ describe('process-worker — reviewer instructions wiring', () => {
     const fnStart = processWorkerSource.indexOf('async function fetchReviewerInstructions');
     const fnSlice = processWorkerSource.slice(fnStart, fnStart + 1500);
     expect(fnSlice).toMatch(/return ''/);
+  });
+});
+
+describe('process-worker — two-pass post-extraction instruction application', () => {
+  // The two-pass block lives in processCoaItem, AFTER the primary extraction
+  // produces `parsed`. We slice from the supplier_name read to the end of the
+  // re-extract guard so assertions target that region, not the unrelated
+  // pass-1 wiring.
+  const twoPass = (() => {
+    const start = processWorkerSource.indexOf('Two-pass reviewer-instruction application');
+    const end = processWorkerSource.indexOf('const supplier = parsed.fields?.supplier_name', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return processWorkerSource.slice(start, end);
+  })();
+
+  it('only attempts pass 2 when pass 1 applied NO instructions', () => {
+    // Gating on !reviewerInstructions means suppliers known upfront keep
+    // today's single-call behavior; pass 2 is reserved for the late-resolved
+    // case. This is the zero-extra-cost guard.
+    expect(twoPass).toMatch(/if \(!reviewerInstructions\)/);
+  });
+
+  it('resolves the supplier from the post-extraction supplier_name', () => {
+    // It must use the canonicalized parsed.fields.supplier_name (what the LLM
+    // extracted) and resolve it via the same resolveSupplierIdByName helper
+    // pass 1 uses.
+    expect(twoPass).toContain('parsed.fields?.supplier_name');
+    expect(twoPass).toMatch(/resolveSupplierIdByName\(item\.tenant_id,\s*lateSupplierName\)/);
+  });
+
+  it('fetches reviewer instructions for the late-resolved supplier', () => {
+    // doctype may be null here — fetchReviewerInstructions falls back to
+    // supplier-wide guidance, which is already supported.
+    expect(twoPass).toMatch(
+      /fetchReviewerInstructions\(\s*item\.tenant_id,\s*lateSupplierId,\s*item\.document_type_id\s*\)/
+    );
+  });
+
+  it('only re-extracts when non-empty instructions come back', () => {
+    // The re-extract is gated on instructions actually being found (and
+    // non-whitespace) so docs with no guidance pay zero extra cost.
+    expect(twoPass).toMatch(/if \(lateInstructions && lateInstructions\.trim\(\)\)/);
+  });
+
+  it('re-runs the SAME path that produced the primary parsed', () => {
+    // Pass 2 reuses runVlmSafe() or runTextPath() depending on which path was
+    // primary — multi-page chunking, VLM mode, confidence all unchanged.
+    expect(twoPass).toMatch(/if \(primaryPath === 'vlm'\)/);
+    expect(twoPass).toContain('await runVlmSafe()');
+    expect(twoPass).toContain('await runTextPath()');
+  });
+
+  it('feeds the late instructions into the closed-over prompt builders', () => {
+    // runTextPath()/runVlmSafe() read `reviewerInstructions` at call time, so
+    // it must be reassigned before re-running for the guidance to take effect.
+    expect(twoPass).toContain('reviewerInstructions = lateInstructions');
+  });
+
+  it('guards against re-extraction loops (at most one re-extract)', () => {
+    // No while/for loop around the re-extract; the whole block runs once and
+    // is gated on the pass-1 !reviewerInstructions condition that the
+    // reassignment immediately invalidates.
+    expect(twoPass).not.toMatch(/\bwhile\s*\(/);
+    expect(twoPass).not.toMatch(/\bfor\s*\(/);
+  });
+
+  it('logs the post-extraction re-extract clearly', () => {
+    expect(twoPass).toMatch(/Re-extracting with reviewer instructions for supplier/);
+    expect(twoPass).toContain('(resolved post-extraction)');
+  });
+
+  it('treats the post-extraction re-extract as best-effort (never throws)', () => {
+    // A failed re-extraction must fall back to the pass-1 parsed result, never
+    // block posting.
+    expect(twoPass).toMatch(/catch \(err\)[\s\S]*?Post-extraction instruction re-extract failed/);
+    expect(twoPass).toContain('keeping pass-1 result');
   });
 });

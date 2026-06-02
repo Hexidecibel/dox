@@ -43,9 +43,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!supplierId) {
       throw new BadRequestError('supplier_id is required');
     }
-    if (!documentTypeId) {
-      throw new BadRequestError('document_type_id is required');
-    }
 
     // Tenant resolution: super_admin may pass ?tenant_id= to query any tenant;
     // all other roles are scoped to their own tenant.
@@ -60,26 +57,66 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
     requireTenantAccess(user, tenantId);
 
-    const row = await context.env.DB.prepare(
-      `SELECT instructions, updated_at, updated_by
-       FROM supplier_extraction_instructions
-       WHERE tenant_id = ? AND supplier_id = ? AND document_type_id = ?`
-    )
-      .bind(tenantId, supplierId, documentTypeId)
-      .first<{ instructions: string; updated_at: string; updated_by: string | null }>();
+    // Exact (supplier, document_type) match — used by the reviewer editing UI
+    // (which always knows the doctype) and by the worker when the queue item's
+    // doctype is already resolved. No supplier-wide fallback here: that would
+    // mis-fill the editing textarea with another doctype's guidance.
+    if (documentTypeId) {
+      const row = await context.env.DB.prepare(
+        `SELECT instructions, updated_at, updated_by
+         FROM supplier_extraction_instructions
+         WHERE tenant_id = ? AND supplier_id = ? AND document_type_id = ?`
+      )
+        .bind(tenantId, supplierId, documentTypeId)
+        .first<{ instructions: string; updated_at: string; updated_by: string | null }>();
 
-    if (!row) {
+      return new Response(
+        JSON.stringify(
+          row
+            ? { instructions: row.instructions, updated_at: row.updated_at, updated_by: row.updated_by }
+            : { instructions: null, updated_at: null, updated_by: null }
+        ),
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // No doctype supplied: the queue worker hasn't resolved the document type
+    // yet (it's promoted only AFTER extraction). Return the supplier's guidance
+    // aggregated across all doctypes so instructions still reach the prompt.
+    // When several doctypes have guidance, label each so the model has context.
+    const agg = await context.env.DB.prepare(
+      `SELECT sei.instructions AS instructions,
+              sei.updated_at  AS updated_at,
+              sei.updated_by  AS updated_by,
+              dt.name         AS doctype_name
+       FROM supplier_extraction_instructions sei
+       LEFT JOIN document_types dt ON dt.id = sei.document_type_id
+       WHERE sei.tenant_id = ? AND sei.supplier_id = ?
+       ORDER BY sei.updated_at DESC`
+    )
+      .bind(tenantId, supplierId)
+      .all<{ instructions: string; updated_at: string; updated_by: string | null; doctype_name: string | null }>();
+
+    const list = agg.results || [];
+    if (list.length === 0) {
       return new Response(
         JSON.stringify({ instructions: null, updated_at: null, updated_by: null }),
         { headers: { 'Content-Type': 'application/json' } }
       );
     }
 
+    const instructions =
+      list.length === 1
+        ? list[0].instructions
+        : list
+            .map((r) => `[For ${r.doctype_name || 'document type'}]\n${r.instructions}`)
+            .join('\n\n');
+
     return new Response(
       JSON.stringify({
-        instructions: row.instructions,
-        updated_at: row.updated_at,
-        updated_by: row.updated_by,
+        instructions,
+        updated_at: list[0].updated_at,
+        updated_by: list[0].updated_by,
       }),
       { headers: { 'Content-Type': 'application/json' } }
     );

@@ -24,7 +24,14 @@ import {
   TableHead,
   TableRow,
   Tooltip,
+  CircularProgress,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
 } from '@mui/material';
+import { api } from '../../lib/api';
 import {
   Refresh as RefreshIcon,
   ExpandMore as ExpandMoreIcon,
@@ -34,9 +41,14 @@ import {
   Error as ErrIcon,
 } from '@mui/icons-material';
 import { AUTH_TOKEN_KEY } from '../../lib/types';
+import { formatDateTime } from '../../utils/format';
 import type { ProcessingStatusResponse } from '../../../shared/types';
 
 const REFRESH_MS = 30_000;
+// Faster cadence used only while the pipeline is actively churning (items
+// queued / processing, or stale claims present). Drops back to the 30s
+// baseline once everything settles so we don't poll a quiet pipeline hard.
+const ACTIVE_REFRESH_MS = 5_000;
 
 type Severity = 'ok' | 'warn' | 'error';
 
@@ -143,7 +155,7 @@ function WorkerCard({ data }: { data: ProcessingStatusResponse['worker'] }) {
             Last job completed: <strong>{fmtMin(data.minutesSinceLastJob)}</strong> ago
           </Typography>
           <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-            {new Date(data.lastJobCompletedAt).toLocaleString()}
+            {formatDateTime(data.lastJobCompletedAt)}
           </Typography>
         </>
       ) : (
@@ -239,11 +251,68 @@ function StaleCard({ data }: { data: ProcessingStatusResponse['stale'] }) {
   );
 }
 
-function ErrorsCard({ data }: { data: ProcessingStatusResponse['errors'] }) {
+function ErrorsCard({
+  data,
+  onRefresh,
+}: {
+  data: ProcessingStatusResponse['errors'];
+  onRefresh: () => void;
+}) {
   const [open, setOpen] = useState(false);
+  const [rowLoading, setRowLoading] = useState<Record<string, boolean>>({});
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const totalRecent = data.recent.length;
   const sev: Severity = totalRecent === 0 ? 'ok' : totalRecent > 5 ? 'error' : 'warn';
   const patternEntries = Object.entries(data.byPattern).sort((a, b) => b[1] - a[1]);
+
+  const reprocessOne = async (id: string) => {
+    setRowLoading((m) => ({ ...m, [id]: true }));
+    setError(null);
+    try {
+      await api.queue.reprocess(id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Reprocess failed');
+    } finally {
+      setRowLoading((m) => ({ ...m, [id]: false }));
+    }
+  };
+
+  // Bulk: chunk into batches of 5 in parallel so we don't hammer the API
+  // when an outage produced a wall of identical errors. Each row's loading
+  // state still flips so the user sees forward progress.
+  const reprocessAll = async () => {
+    setBulkLoading(true);
+    setError(null);
+    try {
+      const ids = data.recent.map((r) => r.id);
+      const CHUNK = 5;
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const slice = ids.slice(i, i + CHUNK);
+        setRowLoading((m) => {
+          const next = { ...m };
+          for (const id of slice) next[id] = true;
+          return next;
+        });
+        const results = await Promise.allSettled(slice.map((id) => api.queue.reprocess(id)));
+        setRowLoading((m) => {
+          const next = { ...m };
+          for (const id of slice) next[id] = false;
+          return next;
+        });
+        const firstReject = results.find((r) => r.status === 'rejected');
+        if (firstReject && firstReject.status === 'rejected') {
+          const reason = firstReject.reason;
+          setError(reason instanceof Error ? reason.message : 'One or more reprocess calls failed');
+        }
+      }
+    } finally {
+      setBulkLoading(false);
+      setConfirmOpen(false);
+      onRefresh();
+    }
+  };
 
   return (
     <StatusCard title="Recent errors" severity={sev}>
@@ -291,13 +360,30 @@ function ErrorsCard({ data }: { data: ProcessingStatusResponse['errors'] }) {
             </Box>
           )}
           <Divider sx={{ my: 1 }} />
-          <Button
-            size="small"
-            onClick={() => setOpen((v) => !v)}
-            startIcon={open ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-          >
-            {open ? 'Hide' : `Show top ${totalRecent}`} recent rows
-          </Button>
+          {error && (
+            <Alert severity="error" sx={{ mb: 1 }} onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Button
+              size="small"
+              onClick={() => setOpen((v) => !v)}
+              startIcon={open ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+            >
+              {open ? 'Hide' : `Show top ${totalRecent}`} recent rows
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              color="warning"
+              startIcon={bulkLoading ? <CircularProgress size={14} /> : <RefreshIcon />}
+              disabled={bulkLoading || totalRecent === 0}
+              onClick={() => setConfirmOpen(true)}
+            >
+              Reprocess all visible ({totalRecent})
+            </Button>
+          </Stack>
           <Collapse in={open} timeout="auto">
             <Table size="small" sx={{ mt: 1 }}>
               <TableHead>
@@ -305,6 +391,7 @@ function ErrorsCard({ data }: { data: ProcessingStatusResponse['errors'] }) {
                   <TableCell sx={{ fontSize: '0.75rem' }}>ID</TableCell>
                   <TableCell sx={{ fontSize: '0.75rem' }}>Error</TableCell>
                   <TableCell sx={{ fontSize: '0.75rem' }}>When</TableCell>
+                  <TableCell sx={{ fontSize: '0.75rem' }} align="right">Actions</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -329,7 +416,25 @@ function ErrorsCard({ data }: { data: ProcessingStatusResponse['errors'] }) {
                       </Typography>
                     </TableCell>
                     <TableCell sx={{ fontSize: '0.7rem', whiteSpace: 'nowrap' }}>
-                      {new Date(r.createdAt).toLocaleString()}
+                      {formatDateTime(r.createdAt)}
+                    </TableCell>
+                    <TableCell align="right">
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        startIcon={
+                          rowLoading[r.id]
+                            ? <CircularProgress size={12} />
+                            : <RefreshIcon fontSize="small" />
+                        }
+                        disabled={!!rowLoading[r.id] || bulkLoading}
+                        onClick={async () => {
+                          await reprocessOne(r.id);
+                          onRefresh();
+                        }}
+                      >
+                        Reprocess
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -338,6 +443,32 @@ function ErrorsCard({ data }: { data: ProcessingStatusResponse['errors'] }) {
           </Collapse>
         </>
       )}
+      <Dialog open={confirmOpen} onClose={() => !bulkLoading && setConfirmOpen(false)}>
+        <DialogTitle>Reprocess errored items?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This will reset {totalRecent} errored row{totalRecent === 1 ? '' : 's'}{' '}
+            to <code>queued</code> with <code>attempts=0</code>, bypassing the
+            worker retry cap. Useful after a transient outage (Qwen 502s, etc.)
+            but make sure the underlying issue is resolved or the rows will
+            error again.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmOpen(false)} disabled={bulkLoading}>
+            Cancel
+          </Button>
+          <Button
+            onClick={reprocessAll}
+            color="warning"
+            variant="contained"
+            disabled={bulkLoading}
+            startIcon={bulkLoading ? <CircularProgress size={14} /> : undefined}
+          >
+            {bulkLoading ? 'Reprocessing…' : `Reprocess ${totalRecent}`}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </StatusCard>
   );
 }
@@ -404,6 +535,25 @@ export function ProcessingStatus() {
     };
   }, [load]);
 
+  // "In-flight" = the pipeline is doing (or owes) work: items queued or
+  // processing, or stale claims that need attention. While true we poll fast;
+  // when everything settles this flips false and the fast poll tears down.
+  const isActive = data
+    ? data.queue.counts.queued > 0 ||
+      data.queue.counts.processing > 0 ||
+      data.stale.orphanedClaims > 0
+    : false;
+
+  // Fast auto-refresh while the pipeline is active. Reuses the existing load()
+  // callback (stable) — no duplicate fetch logic. Cleared on unmount and
+  // whenever isActive flips false, so a settled pipeline falls back to the
+  // 30s baseline above.
+  useEffect(() => {
+    if (!isActive) return;
+    const interval = setInterval(() => load(true), ACTIVE_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [isActive, load]);
+
   // Tick the "Xs ago" label every 5s so it drifts smoothly.
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), 5000);
@@ -426,6 +576,15 @@ export function ProcessingStatus() {
           </Typography>
         </Box>
         <Stack direction="row" spacing={1} alignItems="center">
+          {isActive && (
+            <Chip
+              size="small"
+              variant="outlined"
+              color="info"
+              icon={<CircularProgress size={12} thickness={6} />}
+              label="Auto-refreshing"
+            />
+          )}
           {data && (
             <Typography variant="caption" color="text.secondary">
               Checked {checkedAgoSec}s ago
@@ -462,7 +621,7 @@ export function ProcessingStatus() {
           <QwenCard data={data.qwen} />
           <StaleCard data={data.stale} />
           <Box sx={{ gridColumn: { xs: '1', md: '1 / -1' } }}>
-            <ErrorsCard data={data.errors} />
+            <ErrorsCard data={data.errors} onRefresh={() => load(true)} />
           </Box>
         </Box>
       ) : null}

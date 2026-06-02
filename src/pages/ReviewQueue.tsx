@@ -51,8 +51,12 @@ import {
   Edit as EditIcon,
   ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
+  Refresh as RefreshIcon,
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
+import OrderReviewTile from '../components/OrderReviewTile';
+import ShipmentReviewTile from '../components/ShipmentReviewTile';
+import SupplierAutocomplete, { type SupplierValue } from '../components/SupplierAutocomplete';
 import ExtractionInstructionsBox from './ExtractionInstructionsBox';
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { api } from '../lib/api';
@@ -81,11 +85,7 @@ import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { EmptyState } from '../components/EmptyState';
 import { helpContent } from '../lib/helpContent';
-
-function formatDate(dateStr: string): string {
-  const d = new Date(dateStr);
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
+import { formatDateTime } from '../utils/format';
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -186,6 +186,8 @@ export default function ReviewQueue() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('pending');
+  // Review Queue v2: client-side filter on output_kind. 'all' shows everything.
+  const [kindFilter, setKindFilter] = useState<'all' | 'coa' | 'order' | 'shipment'>('all');
   const [docTypeFilter, setDocTypeFilter] = useState('');
   const [tenantFilter, setTenantFilter] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -252,6 +254,19 @@ export default function ReviewQueue() {
   const [reExtractText, setReExtractText] = useState<Record<string, string>>({});
   const [reExtractLoading, setReExtractLoading] = useState<Record<string, boolean>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
+
+  // Human-verified supplier per queue item. Seeded in loadQueue from the
+  // item's pre-resolved supplier_id (VERIFIED) or raw supplier text
+  // (UNVERIFIED). Approval is gated on `verified === true` + a non-empty name.
+  const [supplierVerify, setSupplierVerify] = useState<Record<string, SupplierValue>>({});
+
+  const isSupplierVerified = useCallback(
+    (itemId: string) => {
+      const sv = supplierVerify[itemId];
+      return !!(sv && sv.verified && sv.supplierName.trim());
+    },
+    [supplierVerify],
+  );
 
   // Product autocomplete
   const [productOptions, setProductOptions] = useState<string[]>([]);
@@ -353,8 +368,15 @@ export default function ReviewQueue() {
     loadDocTypes();
   }, [tenantFilter, selectedTenantId, isSuperAdmin]);
 
-  const loadQueue = useCallback(async () => {
-    setLoading(true);
+  // `preserveItemId` keeps the in-progress edit state (fields, tables,
+  // dismissals, renames, multi-product) for one item across a refresh. Used by
+  // the background poller so a list refresh never clobbers unsaved edits on the
+  // card the reviewer is actively working in. `background` skips the loading
+  // spinner so the list doesn't flash on each poll.
+  const loadQueue = useCallback(async (opts?: { background?: boolean; preserveItemId?: string | null }) => {
+    const background = opts?.background ?? false;
+    const preserveItemId = opts?.preserveItemId ?? null;
+    if (!background) setLoading(true);
     setError('');
     try {
       const params: Record<string, any> = { status: statusFilter || undefined };
@@ -372,6 +394,10 @@ export default function ReviewQueue() {
       const names: Record<string, string> = {};
       const parsedHints: Record<string, Record<string, LearnedFieldHint>> = {};
       const parsedUncertainty: Record<string, Record<string, number>> = {};
+      // Seed the verified-supplier control: pre-resolved supplier_id => VERIFIED;
+      // otherwise the raw extracted `supplier` text stays UNVERIFIED so the
+      // reviewer must confirm it before approving.
+      const supplierSeed: Record<string, SupplierValue> = {};
       for (const item of (result.items || [])) {
         let textParsed: Record<string, unknown> = {};
         let vlmParsed: Record<string, unknown> = {};
@@ -427,11 +453,29 @@ export default function ReviewQueue() {
         } catch {
           names[item.id] = '';
         }
+
+        const resolvedSupplierId = (item as ProcessingQueueItem).supplier_id ?? null;
+        supplierSeed[item.id] = resolvedSupplierId
+          ? { supplierId: resolvedSupplierId, supplierName: item.supplier || '', verified: true }
+          : { supplierName: item.supplier || '', verified: false };
       }
-      setEditedFields(fields);
-      setProductNames(names);
+      // When preserving an item under active edit, keep its current edit state
+      // rather than reseeding from the freshly-fetched extraction. Everything
+      // else gets the fresh data.
+      setEditedFields(prev =>
+        preserveItemId && prev[preserveItemId] !== undefined
+          ? { ...fields, [preserveItemId]: prev[preserveItemId] }
+          : fields);
+      setProductNames(prev =>
+        preserveItemId && prev[preserveItemId] !== undefined
+          ? { ...names, [preserveItemId]: prev[preserveItemId] }
+          : names);
       setLearnedHints(parsedHints);
       setUncertaintyByItem(parsedUncertainty);
+      setSupplierVerify(prev =>
+        preserveItemId && prev[preserveItemId] !== undefined
+          ? { ...supplierSeed, [preserveItemId]: prev[preserveItemId] }
+          : supplierSeed);
 
       // Initialize vlmSelectedSource. Two paths:
       //   1. Single-side items: default to whichever side ran (text vs vlm).
@@ -472,7 +516,10 @@ export default function ReviewQueue() {
           }
         }
       }
-      setEditedTables(tables);
+      setEditedTables(prev =>
+        preserveItemId && prev[preserveItemId] !== undefined
+          ? { ...tables, [preserveItemId]: prev[preserveItemId] }
+          : tables);
 
       // Detect multi-product items
       const mp: Record<string, ProductState[]> = {};
@@ -519,11 +566,14 @@ export default function ReviewQueue() {
           }));
         }
       }
-      setMultiProducts(mp);
+      setMultiProducts(prev =>
+        preserveItemId && prev[preserveItemId] !== undefined
+          ? { ...mp, [preserveItemId]: prev[preserveItemId] }
+          : mp);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load queue');
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   }, [statusFilter, docTypeFilter, tenantFilter, selectedTenantId, isSuperAdmin]);
 
@@ -531,10 +581,50 @@ export default function ReviewQueue() {
     loadQueue();
   }, [loadQueue]);
 
+  // Auto-refresh (polling) while any item is still in-flight (queued /
+  // processing). Stops once everything settles so we don't hammer the API.
+  // Resumes automatically when a reprocess / re-extract pushes an item back
+  // in-flight (hasInFlight flips true -> effect re-runs). A ref holds the
+  // latest loadQueue + expandedId so the interval body always sees current
+  // values without being part of the dependency array (which would otherwise
+  // tear down and restack the interval on every keystroke).
+  const POLL_MS = 4500;
+  const hasInFlight = items.some(
+    i => i.processing_status === 'queued' || i.processing_status === 'processing'
+  );
+  const pollRef = useRef<{ load: typeof loadQueue; expandedId: string | null }>({
+    load: loadQueue,
+    expandedId,
+  });
+  pollRef.current = { load: loadQueue, expandedId };
+
+  useEffect(() => {
+    if (!hasInFlight) return;
+    const interval = setInterval(() => {
+      // Preserve edits on whichever card is open so a poll never clobbers
+      // unsaved work mid-review.
+      pollRef.current.load({ background: true, preserveItemId: pollRef.current.expandedId });
+    }, POLL_MS);
+    return () => clearInterval(interval);
+  }, [hasInFlight]);
+
   const handleApprove = async (id: string) => {
+    // Hard gate: never approve without a human-verified supplier. The button is
+    // disabled in this state, but guard here too in case of a programmatic call.
+    if (!isSupplierVerified(id)) {
+      setSnackbar({ open: true, message: 'Verify the supplier before approving.', severity: 'error' });
+      return;
+    }
     setActionLoading(prev => ({ ...prev, [id]: true }));
     try {
       const item = items.find(i => i.id === id);
+
+      // Verified supplier payload: send supplier_id when an existing supplier
+      // was selected, else supplier_name for a newly-confirmed name.
+      const sv = supplierVerify[id];
+      const supplierPayload: { supplier_id?: string; supplier_name?: string } = sv?.supplierId
+        ? { supplier_id: sv.supplierId }
+        : { supplier_name: sv?.supplierName.trim() };
 
       // Use edited fields, falling back to AI fields
       let fields = editedFields[id];
@@ -604,6 +694,7 @@ export default function ReviewQueue() {
         const products = multiProducts[id] || [];
         const tables = editedTables[id] || originalTables;
         await api.queue.approve(id, {
+          ...supplierPayload,
           shared_fields: primaryFields,
           products: products.map(p => ({
             product_name: p.product_name,
@@ -618,6 +709,7 @@ export default function ReviewQueue() {
         setSnackbar({ open: true, message: `${products.length} documents created from multi-product approval`, severity: 'success' });
       } else {
         await api.queue.approve(id, {
+          ...supplierPayload,
           fields: primaryFields,
           product_name: productName || undefined,
           selected_source: selectedSource,
@@ -644,8 +736,9 @@ export default function ReviewQueue() {
         setTemplateDialog({
           open: true,
           itemId: item.id,
-          supplierName: item.supplier || '',
-          supplierId: null,
+          // Reuse the verified supplier the reviewer just confirmed.
+          supplierName: sv?.supplierName || item.supplier || '',
+          supplierId: sv?.supplierId || null,
           docTypeName: docType?.name || (item as any).document_type_guess || '',
           docTypeId: item.document_type_id || null,
           fieldMappings: mappings,
@@ -1052,6 +1145,24 @@ export default function ReviewQueue() {
     }
   };
 
+  // User-initiated reprocess for errored rows. Uses the dedicated reprocess
+  // endpoint which zeroes `attempts` and clears the error so the worker can
+  // pick the item back up — distinct from handleReExtract above, which is
+  // still the right path for "re-extract with my edited text" on ready items
+  // and is subject to the worker's retry cap.
+  const handleReprocess = async (itemId: string) => {
+    setReExtractLoading(prev => ({ ...prev, [itemId]: true }));
+    try {
+      await api.queue.reprocess(itemId);
+      setSnackbar({ open: true, message: 'Item reprocessed', severity: 'success' });
+      loadQueue();
+    } catch {
+      setSnackbar({ open: true, message: 'Reprocess failed', severity: 'error' });
+    } finally {
+      setReExtractLoading(prev => ({ ...prev, [itemId]: false }));
+    }
+  };
+
   const getTableCell = (itemId: string, tableIdx: number, rowIdx: number, cellIdx: number): string => {
     const edited = editedTables[itemId];
     if (edited && edited[tableIdx]?.rows[rowIdx]?.[cellIdx] !== undefined) {
@@ -1083,9 +1194,13 @@ export default function ReviewQueue() {
   };
 
   const filteredItems = (() => {
-    const base = showAutoIngestedOnly
+    let base = showAutoIngestedOnly
       ? items.filter(i => i.auto_ingested === 1)
       : items;
+    // Review Queue v2: kind filter. Treat null output_kind as 'coa'.
+    if (kindFilter !== 'all') {
+      base = base.filter(i => (i.output_kind || 'coa') === kindFilter);
+    }
     if (queueSort !== 'low_confidence') return base;
     // Sort by LLM self-rated confidence ascending. Items with non-null
     // confidence come first, ordered by smallest score; null-confidence
@@ -1150,6 +1265,29 @@ export default function ReviewQueue() {
               color={statusFilter === s ? 'primary' : 'default'}
               onClick={() => setStatusFilter(s)}
               sx={{ textTransform: 'capitalize' }}
+            />
+          ))}
+        </Box>
+
+        {/* Review Queue v2: output_kind filter. Client-side; filters the
+            visible list without re-fetching. */}
+        <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+          <Typography variant="body2" color="text.secondary" sx={{ mr: 0.5 }}>
+            Kind:
+          </Typography>
+          {([
+            { value: 'all', label: 'All' },
+            { value: 'coa', label: 'COA' },
+            { value: 'order', label: 'Order' },
+            { value: 'shipment', label: 'Shipment' },
+          ] as const).map((k) => (
+            <Chip
+              key={k.value}
+              label={k.label}
+              size="small"
+              variant={kindFilter === k.value ? 'filled' : 'outlined'}
+              color={kindFilter === k.value ? 'primary' : 'default'}
+              onClick={() => setKindFilter(k.value)}
             />
           ))}
         </Box>
@@ -1226,6 +1364,20 @@ export default function ReviewQueue() {
         </Box>
       </Box>
 
+      {/* Live auto-refresh indicator — only shown while polling is active
+          (i.e. at least one item is still queued/processing). */}
+      {hasInFlight && (
+        <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+          <Chip
+            size="small"
+            variant="outlined"
+            color="info"
+            icon={<CircularProgress size={12} thickness={6} />}
+            label="Auto-refreshing"
+          />
+        </Box>
+      )}
+
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
           <CircularProgress />
@@ -1264,6 +1416,16 @@ export default function ReviewQueue() {
                     <Typography variant="subtitle1" fontWeight={600} sx={{ flex: 1 }}>
                       {item.file_name}
                     </Typography>
+                    {/* Review Queue v2: output_kind badge. */}
+                    {(() => {
+                      const kind = item.output_kind || 'coa';
+                      const kindLabel = kind === 'coa' ? 'COA' : kind === 'order' ? 'Order' : 'Shipment';
+                      const kindColor: 'default' | 'secondary' | 'info' =
+                        kind === 'order' ? 'secondary' : kind === 'shipment' ? 'info' : 'default';
+                      return (
+                        <Chip label={kindLabel} size="small" color={kindColor} variant="outlined" />
+                      );
+                    })()}
                     <Typography variant="caption" color="text.secondary">
                       {formatFileSize(item.file_size)}
                     </Typography>
@@ -1317,7 +1479,7 @@ export default function ReviewQueue() {
                         <Chip label="Auto-ingested" color="success" size="small" sx={{ ml: 0.5 }} />
                       </Tooltip>
                     )}
-                    {isProcessing && (
+                    {isProcessing && item.processing_status !== 'error' && (
                       <Chip
                         icon={item.processing_status === 'processing' ? <CircularProgress size={14} /> : undefined}
                         label={item.processing_status === 'queued' ? 'Queued' : 'Processing...'}
@@ -1326,8 +1488,37 @@ export default function ReviewQueue() {
                         sx={{ ml: 0.5 }}
                       />
                     )}
+                    {item.processing_status === 'error' && (
+                      <>
+                        <Tooltip title={item.error_message || 'Processing failed'} arrow>
+                          <Chip
+                            label="Error"
+                            color="error"
+                            size="small"
+                            sx={{ ml: 0.5 }}
+                          />
+                        </Tooltip>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          startIcon={
+                            reExtractLoading[item.id]
+                              ? <CircularProgress size={14} />
+                              : <RefreshIcon fontSize="small" />
+                          }
+                          disabled={reExtractLoading[item.id]}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleReprocess(item.id);
+                          }}
+                          sx={{ ml: 0.5 }}
+                        >
+                          Reprocess
+                        </Button>
+                      </>
+                    )}
                     <Typography variant="caption" color="text.secondary">
-                      {formatDate(item.created_at)}
+                      {formatDateTime(item.created_at)}
                     </Typography>
                     <ExpandMoreIcon
                       sx={{
@@ -1448,6 +1639,38 @@ export default function ReviewQueue() {
                             </AccordionDetails>
                           </Accordion>
                         )}
+
+                        {/* Review Queue v2: kind-aware routing. order/shipment
+                            items carry records in ai_records and render their own
+                            editable tiles; COA keeps the existing fields/products/
+                            tables UI below (incl. the supplier-verify gate). */}
+                        {(item.output_kind || 'coa') === 'order' ? (
+                          <OrderReviewTile item={item} onApproved={() => loadQueue()} />
+                        ) : (item.output_kind || 'coa') === 'shipment' ? (
+                          <ShipmentReviewTile item={item} onApproved={() => loadQueue()} />
+                        ) : (
+                        <>
+                        {/* Document-level supplier verification. Gates approval:
+                            the reviewer must confirm/select the supplier before
+                            the Approve button enables. Applies to both single-
+                            and multi-product approve. */}
+                        <Paper variant="outlined" sx={{ p: 1.5, mb: 2, bgcolor: 'action.hover' }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+                            <Typography variant="subtitle2">Supplier</Typography>
+                            <InfoTooltip text="Verify the supplier before approving. Select an existing supplier, or confirm creating a new name." />
+                          </Box>
+                          <SupplierAutocomplete
+                            tenantId={item.tenant_id}
+                            value={supplierVerify[item.id] || { supplierName: item.supplier || '', verified: false }}
+                            onChange={(val) => setSupplierVerify(prev => ({ ...prev, [item.id]: val }))}
+                            disabled={item.status !== 'pending' || isActioning || isProcessing}
+                          />
+                          {!isSupplierVerified(item.id) && item.status === 'pending' && (
+                            <Typography variant="caption" color="warning.main" sx={{ display: 'block', mt: 0.5 }}>
+                              Verify the supplier before approving.
+                            </Typography>
+                          )}
+                        </Paper>
 
                         {isMultiProduct(item.id) && (
                           <Box sx={{ mb: 2 }}>
@@ -2358,9 +2581,16 @@ export default function ReviewQueue() {
                         })()}
                           </>
                         )}
+                        </>
+                        )}
                       </Box>
                     </Box>
 
+                    {/* Re-extract / Notes / Approve are COA-specific. order &
+                        shipment items use their own tile (Accept button inside)
+                        and only need a Reject affordance, rendered below. */}
+                    {(item.output_kind || 'coa') === 'coa' && (
+                      <>
                     {/* Re-extract from text */}
                     {item.status === 'pending' && (
                       <Accordion variant="outlined" sx={{ mt: 2 }}>
@@ -2411,16 +2641,43 @@ export default function ReviewQueue() {
                     {/* Action buttons */}
                     {item.status === 'pending' && (
                       <CardActions sx={{ px: 0, pt: 0 }}>
-                        <Button
-                          variant="contained"
-                          color="success"
-                          size="small"
-                          onClick={(e) => { e.stopPropagation(); handleApprove(item.id); }}
-                          disabled={isActioning || isProcessing}
-                          startIcon={isActioning ? <CircularProgress size={16} color="inherit" /> : <CheckIcon />}
+                        <Tooltip
+                          title={!isSupplierVerified(item.id) ? 'Verify the supplier before approving.' : ''}
+                          arrow
                         >
-                          Approve
+                          {/* span wrapper so the tooltip still shows on a disabled button */}
+                          <span>
+                            <Button
+                              variant="contained"
+                              color="success"
+                              size="small"
+                              onClick={(e) => { e.stopPropagation(); handleApprove(item.id); }}
+                              disabled={isActioning || isProcessing || !isSupplierVerified(item.id)}
+                              startIcon={isActioning ? <CircularProgress size={16} color="inherit" /> : <CheckIcon />}
+                            >
+                              Approve
+                            </Button>
+                          </span>
+                        </Tooltip>
+                        <Button
+                          variant="outlined"
+                          color="error"
+                          size="small"
+                          onClick={(e) => { e.stopPropagation(); handleReject(item.id); }}
+                          disabled={isActioning || isProcessing}
+                          startIcon={<CancelIcon />}
+                        >
+                          Reject
                         </Button>
+                      </CardActions>
+                    )}
+                      </>
+                    )}
+
+                    {/* order/shipment Reject affordance — Accept lives in the
+                        tile, but rejecting the whole item stays here. */}
+                    {(item.output_kind || 'coa') !== 'coa' && item.status === 'pending' && (
+                      <CardActions sx={{ px: 0, pt: 1 }}>
                         <Button
                           variant="outlined"
                           color="error"

@@ -14,6 +14,14 @@ export QWEN_SECRET="${QWEN_SECRET:-f8d806a55d8e50230153dc68d7782a7747b28cc81bef9
 
 mkdir -p logs
 
+# Transpile the shared order-extraction module (shared/orderPrompt.ts + its
+# pure deps) to a CommonJS bundle the plain-Node worker can require at runtime.
+# Single source of truth: the worker and the Cloudflare connector pipeline run
+# the IDENTICAL prompt/parse logic — no hand-duplicated JS mirror. Regenerated
+# on every start so a change to shared/*.ts is always picked up.
+echo "Building shared order-prompt bundle for worker..."
+npm run build:worker-shared
+
 nohup node bin/process-worker > logs/process-worker.log 2>&1 &
 echo "Process worker started (PID: $!)"
 echo "Logs: logs/process-worker.log"

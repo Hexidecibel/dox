@@ -37,6 +37,8 @@ import type {
   ApiSupplier,
   SupplierListResponse,
   SupplierLookupOrCreateResponse,
+  SupplierDuplicatesResponse,
+  SupplierMergeResponse,
   ExtractionTemplate,
   TemplateFieldMapping,
   SupplierExtractionInstructionsGetResponse,
@@ -52,7 +54,12 @@ import type {
   SavedSearchResponse,
   UniversalSearchParams,
   UniversalSearchResponse,
+  LotListResponse,
+  LotDetail,
+  CoaFulfillmentResponse,
+  LotMatchListResponse,
 } from './types';
+import type { ParsedCustomer, ParsedOrder, ParsedShipment } from '../../shared/connectorOutput';
 import { AUTH_TOKEN_KEY } from './types';
 
 const API_BASE = '/api';
@@ -341,7 +348,7 @@ export const api = {
      * Returns: { document: ApiDocument }
      * The updated document has tags as JSON string.
      */
-    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null }>): Promise<Document> => {
+    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; supplier_name: string; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null }>): Promise<Document> => {
       const response = await fetchApi<DocumentUpdateResponse>(`/documents/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -699,6 +706,30 @@ export const api = {
       }),
   },
 
+  lots: {
+    /**
+     * GET /api/lots
+     * Returns: { lots: LotListItem[], total }
+     */
+    list: (params?: { supplier_id?: string; product_id?: string; search?: string; limit?: number; offset?: number; tenant_id?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
+      if (params?.product_id) query.set('product_id', params.product_id);
+      if (params?.search) query.set('search', params.search);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      const qs = query.toString();
+      return fetchApi<LotListResponse>(`/lots${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * GET /api/lots/:id
+     * Returns: { lot, coa_documents, order_lines, suggestions }
+     */
+    get: (id: string) => fetchApi<LotDetail>(`/lots/${id}`),
+  },
+
   suppliers: {
     /**
      * GET /api/suppliers
@@ -757,6 +788,23 @@ export const api = {
       fetchApi<SupplierLookupOrCreateResponse>('/suppliers/lookup-or-create', {
         method: 'POST',
         body: JSON.stringify(data),
+      }),
+
+    /**
+     * GET /api/suppliers/duplicates
+     * Returns clusters of likely-duplicate suppliers for the merge tool.
+     */
+    duplicates: () => fetchApi<SupplierDuplicatesResponse>('/suppliers/duplicates'),
+
+    /**
+     * POST /api/suppliers/merge
+     * Folds loser suppliers into a winner (reassigns documents, products,
+     * lots, templates, and instructions, then deletes the losers).
+     */
+    merge: (winnerId: string, loserIds: string[]) =>
+      fetchApi<SupplierMergeResponse>('/suppliers/merge', {
+        method: 'POST',
+        body: JSON.stringify({ winner_id: winnerId, loser_ids: loserIds }),
       }),
   },
 
@@ -895,6 +943,32 @@ export const api = {
 
       return res.json();
     },
+
+    /**
+     * GET /api/reports/coa-fulfillment
+     * The daily COA-fulfillment view: one row per shipped order line with a
+     * server-computed gap flag, plus a coverage summary. Tenant-scoped.
+     */
+    coaFulfillment: (params?: {
+      tenantId?: string;
+      from?: string;
+      to?: string;
+      customerId?: string;
+      asOf?: string;
+      limit?: number;
+      offset?: number;
+    }): Promise<CoaFulfillmentResponse> => {
+      const query = new URLSearchParams();
+      if (params?.tenantId) query.set('tenant_id', params.tenantId);
+      if (params?.from) query.set('from', params.from);
+      if (params?.to) query.set('to', params.to);
+      if (params?.customerId) query.set('customer_id', params.customerId);
+      if (params?.asOf) query.set('as_of', params.asOf);
+      if (params?.limit !== undefined) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      const qs = query.toString();
+      return fetchApi<CoaFulfillmentResponse>(`/reports/coa-fulfillment${qs ? `?${qs}` : ''}`);
+    },
   },
 
   bundles: {
@@ -978,11 +1052,19 @@ export const api = {
      * POST /api/documents/process
      * Send files for async processing. Returns queue item IDs immediately.
      */
-    process: (files: File[], tenantId: string, documentTypeId?: string): Promise<QueuedResponse> => {
+    process: (
+      files: File[],
+      tenantId: string,
+      documentTypeId?: string,
+      outputKind?: 'coa' | 'order' | 'shipment',
+      sourceId?: string,
+    ): Promise<QueuedResponse> => {
       const form = new FormData();
       files.forEach(f => form.append('files', f));
       if (documentTypeId) form.append('document_type_id', documentTypeId);
       form.append('tenant_id', tenantId);
+      if (outputKind) form.append('output_kind', outputKind);
+      if (sourceId) form.append('source_id', sourceId);
       return fetchApi<QueuedResponse>('/documents/process', {
         method: 'POST',
         body: form,
@@ -1000,6 +1082,14 @@ export const api = {
       fields?: Record<string, string>;
       product_name?: string;
       shared_fields?: Record<string, string>;
+      /**
+       * Human-verified supplier. Precedence on the backend:
+       * supplier_id > supplier_name > legacy extracted value. Send
+       * `supplier_id` when an existing supplier was selected, else
+       * `supplier_name` for a newly-confirmed name (backend find-or-creates).
+       */
+      supplier_id?: string;
+      supplier_name?: string;
       products?: Array<{
         product_name: string;
         fields: Record<string, string>;
@@ -1024,12 +1114,60 @@ export const api = {
       dismissals?: Array<{ field_key: string; action: 'dismissed' | 'extended' }>;
       /** Phase 2 capture: table-level edits (column excludes, header renames, etc). */
       table_edits?: Array<{ table_idx: number; operation: string; detail: Record<string, unknown> }>;
+      /**
+       * Review Queue v2 — human-edited records for order/shipment items.
+       * `{ customers, orders }` for an order item, `{ shipments }` for a
+       * shipment item. The backend re-runs the kind producer over these on
+       * approve. COA items never send this.
+       */
+      records?: {
+        customers?: ParsedCustomer[];
+        orders?: ParsedOrder[];
+        shipments?: ParsedShipment[];
+      };
     }) =>
-      fetchApi<{ document?: any; documents?: any[] }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
+      fetchApi<{ document?: any; documents?: any[]; summary?: string; item?: any }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     reject: (id: string) =>
       fetchApi<void>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'rejected' }) }),
     postResults: (id: string, data: Record<string, unknown>) =>
       fetchApi<{ success: boolean }>(`/queue/${id}/results`, { method: 'PUT', body: JSON.stringify(data) }),
+    reprocess: (id: string) =>
+      fetchApi<{ success: boolean }>(`/queue/${id}/reprocess`, { method: 'POST' }),
+  },
+
+  /**
+   * Review Queue v2 — weak COA→lot match suggestions, produced when a shipment
+   * item is accepted. The reviewer confirms/rejects each candidate binding.
+   */
+  lotMatches: {
+    /**
+     * GET /api/lot-matches?status=pending&order_number=...
+     * Returns: { suggestions: LotMatchSuggestion[] }
+     *
+     * `order_number` may be repeated to scope to several orders at once
+     * (e.g. all the orders a shipment touched).
+     */
+    list: (params?: { status?: string; order_number?: string | string[] }): Promise<LotMatchListResponse> => {
+      const query = new URLSearchParams();
+      if (params?.status) query.set('status', params.status);
+      if (params?.order_number) {
+        const nums = Array.isArray(params.order_number) ? params.order_number : [params.order_number];
+        for (const n of nums) if (n) query.append('order_number', n);
+      }
+      const qs = query.toString();
+      return fetchApi<LotMatchListResponse>(`/lot-matches${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * POST /api/lot-matches/:id  — body: { action: 'accept' | 'reject' }
+     * Confirmed against functions/api/lot-matches/[id].ts (accept promotes the
+     * COA→order_item link; reject just marks the suggestion rejected).
+     */
+    resolve: (id: string, action: 'accept' | 'reject') =>
+      fetchApi<{ success: boolean; status: 'accepted' | 'rejected' }>(`/lot-matches/${id}`, {
+        method: 'POST',
+        body: JSON.stringify({ action }),
+      }),
   },
 
   extractionExamples: {

@@ -2,81 +2,20 @@ import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
 import type { ConnectorFieldMappings } from '../../../shared/fieldMappings';
 
 // === Connector Output Types ===
-
-export interface ParsedOrder {
-  order_number: string;
-  po_number?: string;
-  customer_number?: string;
-  customer_name?: string;
-  items: ParsedOrderItem[];
-  /** Raw, untouched source row — preserved verbatim for audit. */
-  source_data: Record<string, unknown>;
-  /**
-   * Canonical-core fields AFTER field-mapping was applied. Mirrors the
-   * documents.primary_metadata pattern so consumers can index/search without
-   * reparsing source_data. Keys are CoreFieldKey values from fieldMappings.ts.
-   */
-  primary_metadata?: Record<string, unknown>;
-  /**
-   * User-defined extended fields. Keys come from the connector's
-   * field_mappings.extended[].key entries. Populated by parseCSVAttachment,
-   * parseWithAI, and preview-extraction.
-   */
-  extended_metadata?: Record<string, unknown>;
-  /**
-   * LLM self-rated confidence in this record, 0.0–1.0. Drives the
-   * stage-vs-commit routing in the orchestrator (default threshold 0.7).
-   * Absent when the source is non-LLM (CSV header-based parsing); the
-   * orchestrator treats absence as `1.0` (high confidence) so deterministic
-   * parsers stay on the commit path.
-   */
-  _confidence?: number;
-}
-
-export interface ParsedOrderItem {
-  product_name?: string;
-  product_code?: string;
-  quantity?: number;
-  lot_number?: string;
-  /** Per-item confidence; same semantics as ParsedOrder._confidence. */
-  _confidence?: number;
-}
-
-export interface ParsedContact {
-  name?: string;
-  email: string;
-  role?: string;
-  is_primary?: boolean;
-}
-
-export interface ParsedCustomer {
-  customer_number: string;
-  name: string;
-  /** Primary contact email. Back-compat: may be derived from contacts[0]. */
-  email?: string;
-  /** Full contact list — registry rows often have 2-5 entries per customer. */
-  contacts?: ParsedContact[];
-  /** Per-customer confidence; same semantics as ParsedOrder._confidence. */
-  _confidence?: number;
-}
-
-export interface ConnectorError {
-  record_index?: number;
-  field?: string;
-  message: string;
-}
-
-export interface ConnectorOutput {
-  orders: ParsedOrder[];
-  customers: ParsedCustomer[];
-  errors: ConnectorError[];
-  /**
-   * Informational messages that are NOT errors (e.g. "processed N pages in
-   * M chunks, extracted K orders / J customers"). Separate channel so the
-   * orchestrator's status calc doesn't mislabel successful runs as `partial`.
-   */
-  info?: string[];
-}
+//
+// The pure {orders[], customers[], errors[]} output shapes live in
+// shared/connectorOutput.ts so the standalone Node extraction worker can import
+// the exact same types. Re-exported here so existing importers of this module
+// (orchestrator, queue-approve, parsers, tests) are unaffected.
+export type {
+  ParsedOrder,
+  ParsedOrderItem,
+  ParsedContact,
+  ParsedCustomer,
+  ConnectorError,
+  ConnectorOutput,
+} from '../../../shared/connectorOutput';
+import type { ConnectorOutput } from '../../../shared/connectorOutput';
 
 // === Connector Context & Input ===
 

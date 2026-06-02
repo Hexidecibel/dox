@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { formatDate } from '../../utils/format';
 import {
@@ -31,6 +31,7 @@ import {
   Checkbox,
   Slider,
   Divider,
+  Collapse,
 } from '@mui/material';
 import {
   Edit as EditIcon,
@@ -40,10 +41,13 @@ import {
   Add as AddIcon,
   Block as BlockIcon,
   CheckCircle as ActiveIcon,
+  KeyboardArrowDown as ExpandMoreIcon,
+  KeyboardArrowRight as ExpandRightIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { ApiSupplier, ApiProduct, ExtractionTemplate, TemplateFieldMapping } from '../../lib/types';
-import type { Document, SupplierExtractionInstructionsListRow } from '../../lib/types';
+import type { Document, SupplierExtractionInstructionsListRow, LotListItem } from '../../lib/types';
+import { LotDetailPanel, LotBadges } from '../../components/LotDetailPanel';
 import { HelpWell } from '../../components/HelpWell';
 import { EmptyState } from '../../components/EmptyState';
 import { helpContent } from '../../lib/helpContent';
@@ -60,6 +64,150 @@ function TabPanel({ children, value, index }: TabPanelProps) {
     <Box role="tabpanel" hidden={value !== index} sx={{ pt: 2 }}>
       {value === index && children}
     </Box>
+  );
+}
+
+/**
+ * Expandable product row for the SupplierDetail Products tab (Part A).
+ * Level 1 -> 2: expanding the product lazy-loads its lots via
+ * api.lots.list({ supplier_id, product_id }), newest first. Each lot row
+ * is itself expandable (level 2 -> 3) into a LotDetailPanel. Loaded data
+ * is cached on the component so re-expanding doesn't refetch.
+ */
+function ProductLotsRow({
+  product,
+  supplierId,
+}: {
+  product: ApiProduct;
+  supplierId: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [lots, setLots] = useState<LotListItem[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [openLotId, setOpenLotId] = useState<string | null>(null);
+
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next && lots === null && !loading) {
+      setLoading(true);
+      setError('');
+      try {
+        const result = await api.lots.list({ supplier_id: supplierId, product_id: product.id });
+        setLots(result.lots);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load lots');
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  return (
+    <>
+      <TableRow hover sx={{ cursor: 'pointer', '& > *': { borderBottom: open ? 'unset' : undefined } }} onClick={toggle}>
+        <TableCell sx={{ width: 48 }}>
+          <IconButton size="small">
+            {open ? <ExpandMoreIcon fontSize="small" /> : <ExpandRightIcon fontSize="small" />}
+          </IconButton>
+        </TableCell>
+        <TableCell>
+          <Typography variant="body2" fontWeight={500}>{product.name}</Typography>
+        </TableCell>
+        <TableCell>
+          <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {product.description || '-'}
+          </Typography>
+        </TableCell>
+        <TableCell>
+          <Chip
+            label={product.active ? 'Active' : 'Inactive'}
+            size="small"
+            color={product.active ? 'success' : 'default'}
+            variant="outlined"
+          />
+        </TableCell>
+        <TableCell>{formatDate(product.created_at)}</TableCell>
+      </TableRow>
+      <TableRow>
+        <TableCell sx={{ py: 0, borderBottom: open ? undefined : 'none' }} colSpan={5}>
+          <Collapse in={open} timeout="auto" unmountOnExit>
+            <Box sx={{ py: 2 }}>
+              {loading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
+                  <CircularProgress size={22} />
+                </Box>
+              ) : error ? (
+                <Alert severity="error">{error}</Alert>
+              ) : !lots || lots.length === 0 ? (
+                <Typography variant="body2" color="text.secondary" sx={{ px: 1, py: 1 }}>
+                  No lots recorded for this product yet.
+                </Typography>
+              ) : (
+                <TableContainer component={Paper} variant="outlined">
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell sx={{ width: 40 }} />
+                        <TableCell>Lot #</TableCell>
+                        <TableCell>Code / Exp Date</TableCell>
+                        <TableCell>Activity</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {lots.map((lot) => {
+                        const lotOpen = openLotId === lot.id;
+                        return (
+                          <Fragment key={lot.id}>
+                            <TableRow
+                              hover
+                              sx={{ cursor: 'pointer' }}
+                              onClick={() => setOpenLotId(lotOpen ? null : lot.id)}
+                            >
+                              <TableCell>
+                                <IconButton size="small">
+                                  {lotOpen ? <ExpandMoreIcon fontSize="small" /> : <ExpandRightIcon fontSize="small" />}
+                                </IconButton>
+                              </TableCell>
+                              <TableCell>
+                                <Typography variant="body2" fontWeight={500}>{lot.lot_number}</Typography>
+                              </TableCell>
+                              <TableCell>
+                                <Typography variant="body2" color="text.secondary">
+                                  {lot.code_date ? formatDate(lot.code_date) : '—'}
+                                  {lot.expiration_date ? ` / exp ${formatDate(lot.expiration_date)}` : ''}
+                                </Typography>
+                              </TableCell>
+                              <TableCell>
+                                <LotBadges
+                                  coaCount={lot.coa_document_count}
+                                  matchedOrderCount={lot.matched_order_count}
+                                  suggestedCount={lot.suggested_count}
+                                />
+                              </TableCell>
+                            </TableRow>
+                            <TableRow>
+                              <TableCell sx={{ py: 0, borderBottom: lotOpen ? undefined : 'none' }} colSpan={4}>
+                                <Collapse in={lotOpen} timeout="auto" unmountOnExit>
+                                  <Box sx={{ py: 1 }}>
+                                    <LotDetailPanel lotId={lot.id} />
+                                  </Box>
+                                </Collapse>
+                              </TableCell>
+                            </TableRow>
+                          </Fragment>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              )}
+            </Box>
+          </Collapse>
+        </TableCell>
+      </TableRow>
+    </>
   );
 }
 
@@ -506,6 +654,7 @@ export function SupplierDetail() {
             <Table>
               <TableHead>
                 <TableRow>
+                  <TableCell sx={{ width: 48 }} />
                   <TableCell>Name</TableCell>
                   <TableCell>Description</TableCell>
                   <TableCell>Status</TableCell>
@@ -514,25 +663,7 @@ export function SupplierDetail() {
               </TableHead>
               <TableBody>
                 {products.map((product) => (
-                  <TableRow key={product.id} hover>
-                    <TableCell>
-                      <Typography variant="body2" fontWeight={500}>{product.name}</Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {product.description || '-'}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Chip
-                        label={product.active ? 'Active' : 'Inactive'}
-                        size="small"
-                        color={product.active ? 'success' : 'default'}
-                        variant="outlined"
-                      />
-                    </TableCell>
-                    <TableCell>{formatDate(product.created_at)}</TableCell>
-                  </TableRow>
+                  <ProductLotsRow key={product.id} product={product} supplierId={supplier.id} />
                 ))}
               </TableBody>
             </Table>

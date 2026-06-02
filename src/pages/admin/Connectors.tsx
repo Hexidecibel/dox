@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { formatDate } from '../../utils/format';
+import { formatDate, parseUtc } from '../../utils/format';
 import {
   Box,
   Typography,
@@ -64,7 +64,8 @@ interface Connector {
 
 function formatRelativeTime(dateStr: string | null): string {
   if (!dateStr) return 'Never';
-  const date = new Date(dateStr);
+  const date = parseUtc(dateStr);
+  if (!date) return 'Never';
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffMins = Math.floor(diffMs / 60000);

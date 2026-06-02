@@ -7,13 +7,24 @@
  * date string is parsed as UTC before being formatted for display.
  */
 
-function ensureUtc(dateString: string): string {
+export function ensureUtc(dateString: string): string {
   // Already has timezone info (Z, +HH:MM, -HH:MM) — leave it alone
-  if (/[Z]$/i.test(dateString) || /[+-]\d{2}:\d{2}$/.test(dateString)) {
+  if (/[Z]$/i.test(dateString) || /[+-]\d{2}:?\d{2}$/.test(dateString)) {
     return dateString;
   }
   // Treat as UTC
   return dateString + 'Z';
+}
+
+/**
+ * Parse a backend timestamp (UTC, usually without a `Z`) into a Date.
+ * Returns `null` for empty/invalid input. Use this anywhere a raw
+ * `new Date(serverString)` would otherwise be off by the local tz offset.
+ */
+export function parseUtc(dateString: string | null | undefined): Date | null {
+  if (!dateString) return null;
+  const date = new Date(ensureUtc(dateString));
+  return isNaN(date.getTime()) ? null : date;
 }
 
 /** Format a date string as a short date (e.g. "3/25/2026") in the user's locale. */
@@ -36,5 +47,8 @@ export function formatDateTime(dateString: string | null | undefined): string {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
+    // Append a short tz label (e.g. "EDT", "GMT+2") so users know the
+    // value is rendered in their own local timezone, not the server's UTC.
+    timeZoneName: 'short',
   });
 }

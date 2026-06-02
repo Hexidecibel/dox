@@ -44,6 +44,7 @@ import { useTenant } from '../../contexts/TenantContext';
 import { HelpWell } from '../../components/HelpWell';
 import { InfoTooltip } from '../../components/InfoTooltip';
 import { EmptyState } from '../../components/EmptyState';
+import { SupplierDuplicatesPanel } from '../../components/SupplierDuplicatesPanel';
 import { helpContent } from '../../lib/helpContent';
 
 const ITEMS_PER_PAGE = 20;
@@ -60,8 +61,11 @@ export function Suppliers() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
 
-  const { user, isSuperAdmin } = useAuth();
+  const { user, isSuperAdmin, isAdmin } = useAuth();
   const { selectedTenantId } = useTenant();
+
+  // Bump to force the duplicates panel to re-fetch after a supplier change.
+  const [duplicatesKey, setDuplicatesKey] = useState(0);
 
   // Dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -203,6 +207,15 @@ export function Suppliers() {
           {error}
         </Alert>
       )}
+
+      <SupplierDuplicatesPanel
+        key={duplicatesKey}
+        canMerge={isAdmin}
+        onMerged={() => {
+          loadSuppliers();
+          setDuplicatesKey((k) => k + 1);
+        }}
+      />
 
       <TextField
         placeholder="Search suppliers..."

@@ -1,7 +1,8 @@
 import { generateId, logAudit, logIntakeEvent } from '../db';
-import type { ConnectorContext, ConnectorOutput, ConnectorInput, ParsedContact, ParsedCustomer } from './types';
+import type { ConnectorContext, ConnectorOutput, ConnectorInput } from './types';
 import { getConnectorExecutor } from './index';
 import { normalizeFieldMappings } from '../../../shared/fieldMappings';
+import { ingestOrders } from '../kinds/order';
 
 /**
  * Universal-doors orchestrator (Phase B0). The connector row no longer
@@ -119,33 +120,6 @@ export interface OrchestratorResult {
   errors: string[];
 }
 
-/**
- * Build the canonical contact list for a parsed customer.
- * - Prefer the explicit `contacts[]` (from AI extraction of registry rows).
- * - Fall back to the single `email` field when no contacts are present.
- * - Dedup case-insensitively by email within the list.
- */
-function resolveContacts(customer: ParsedCustomer): ParsedContact[] {
-  const result: ParsedContact[] = [];
-  const seen = new Set<string>();
-  const push = (c: ParsedContact) => {
-    const email = c.email?.trim();
-    if (!email) return;
-    const key = email.toLowerCase();
-    if (seen.has(key)) return;
-    seen.add(key);
-    result.push({ ...c, email });
-  };
-
-  if (Array.isArray(customer.contacts)) {
-    for (const c of customer.contacts) push(c);
-  }
-  if (result.length === 0 && customer.email) {
-    push({ email: customer.email });
-  }
-  return result;
-}
-
 export async function executeConnectorRun(params: OrchestratorParams): Promise<OrchestratorResult> {
   const {
     db, r2, tenantId, connectorId,
@@ -233,188 +207,17 @@ export async function executeConnectorRun(params: OrchestratorParams): Promise<O
     return { runId, status: 'error', ordersCreated: 0, customersCreated: 0, errors: [errorMsg] };
   }
 
-  // Upsert customers
-  let customersCreated = 0;
-  for (const customer of output.customers) {
-    try {
-      const existing = await db.prepare(
-        `SELECT id FROM customers WHERE tenant_id = ? AND customer_number = ?`
-      ).bind(tenantId, customer.customer_number).first<{ id: string }>();
-
-      // Resolve the contact list. If the AI/parser only supplied a single
-      // top-level `email`, synthesize a one-entry contact list so the join
-      // table still gets populated.
-      const contacts = resolveContacts(customer);
-      // Always use the first contact's email as the primary backfill when
-      // no explicit email was supplied on the customer.
-      const primaryEmail = customer.email || contacts[0]?.email || null;
-
-      let customerId: string;
-      const customerConfidence = typeof customer._confidence === 'number' ? customer._confidence : null;
-      if (existing) {
-        customerId = existing.id;
-        await db.prepare(
-          `UPDATE customers SET name = ?, email = COALESCE(?, email),
-             confidence = COALESCE(?, confidence), updated_at = datetime('now')
-           WHERE id = ?`
-        ).bind(customer.name, primaryEmail, customerConfidence, customerId).run();
-      } else {
-        customerId = generateId();
-        await db.prepare(
-          `INSERT INTO customers (id, tenant_id, customer_number, name, email, confidence)
-           VALUES (?, ?, ?, ?, ?, ?)`
-        ).bind(customerId, tenantId, customer.customer_number, customer.name, primaryEmail, customerConfidence).run();
-        customersCreated++;
-      }
-
-      // Insert each contact. First in the list is primary (unless the
-      // parser explicitly flagged one). Per-customer email uniqueness is
-      // enforced at the DB layer via a UNIQUE (customer_id, lower(email))
-      // index — duplicates are silently skipped via OR IGNORE so re-runs
-      // don't crash.
-      const explicitPrimarySeen = contacts.some(c => c.is_primary === true);
-      for (let i = 0; i < contacts.length; i++) {
-        const contact = contacts[i];
-        const isPrimary = explicitPrimarySeen
-          ? (contact.is_primary === true ? 1 : 0)
-          : (i === 0 ? 1 : 0);
-        try {
-          await db.prepare(
-            `INSERT OR IGNORE INTO customer_contacts
-             (id, customer_id, tenant_id, name, email, role, is_primary)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`
-          ).bind(
-            generateId(),
-            customerId,
-            tenantId,
-            contact.name || null,
-            contact.email,
-            contact.role || null,
-            isPrimary,
-          ).run();
-        } catch (err) {
-          output.errors.push({
-            message: `Contact insert failed for ${customer.customer_number} (${contact.email}): ${err instanceof Error ? err.message : String(err)}`,
-          });
-        }
-      }
-    } catch (err) {
-      output.errors.push({
-        message: `Customer upsert failed for ${customer.customer_number}: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
-  }
-
-  // Confidence threshold below which a record is staged for human review
-  // instead of committed straight to prod tables. Threshold is hardcoded
-  // here for now; R2 plan adds per-supplier overrides via the supplier's
-  // extraction_instructions field.
-  const STAGE_THRESHOLD = 0.7;
-
-  // Upsert orders
-  let ordersCreated = 0;
-  let ordersStaged = 0;
-  for (const order of output.orders) {
-    try {
-      // Decide stage vs commit. An order routes to staging if its own
-      // _confidence is below the threshold OR any of its items is. We
-      // can't trust an order with one shaky line; the reviewer needs to
-      // see the whole record. Absent confidence ⇒ 1.0 (commit).
-      const orderConfidence = typeof order._confidence === 'number' ? order._confidence : 1;
-      const itemConfidences = order.items
-        .map(i => (typeof i._confidence === 'number' ? i._confidence : 1));
-      const minItemConfidence = itemConfidences.length > 0 ? Math.min(...itemConfidences) : 1;
-      const recordConfidence = Math.min(orderConfidence, minItemConfidence);
-      const isStaged = recordConfidence < STAGE_THRESHOLD;
-      const stagedAt = isStaged ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null;
-
-      // Resolve customer_id from customer_number
-      let customerId: string | null = null;
-      if (order.customer_number) {
-        const customer = await db.prepare(
-          `SELECT id FROM customers WHERE tenant_id = ? AND customer_number = ?`
-        ).bind(tenantId, order.customer_number).first<{ id: string }>();
-        customerId = customer?.id || null;
-      }
-
-      // Check for existing order (upsert by tenant + order_number)
-      const existing = await db.prepare(
-        `SELECT id FROM orders WHERE tenant_id = ? AND order_number = ?`
-      ).bind(tenantId, order.order_number).first<{ id: string }>();
-
-      let orderId: string;
-
-      // Serialize the new metadata blobs. Pass `null` for empty objects so
-      // the DB columns match the legacy-no-mapping behavior exactly.
-      const primaryJson = order.primary_metadata && Object.keys(order.primary_metadata).length > 0
-        ? JSON.stringify(order.primary_metadata)
-        : null;
-      const extendedJson = order.extended_metadata && Object.keys(order.extended_metadata).length > 0
-        ? JSON.stringify(order.extended_metadata)
-        : null;
-
-      if (existing) {
-        orderId = existing.id;
-        await db.prepare(
-          `UPDATE orders SET po_number = COALESCE(?, po_number), customer_id = COALESCE(?, customer_id),
-           customer_number = COALESCE(?, customer_number), customer_name = COALESCE(?, customer_name),
-           source_data = ?, primary_metadata = ?, extended_metadata = ?,
-           confidence = ?, staged_at = ?, updated_at = datetime('now')
-           WHERE id = ?`
-        ).bind(
-          order.po_number || null, customerId,
-          order.customer_number || null, order.customer_name || null,
-          JSON.stringify(order.source_data),
-          primaryJson, extendedJson,
-          orderConfidence, stagedAt,
-          orderId
-        ).run();
-      } else {
-        orderId = generateId();
-        await db.prepare(
-          `INSERT INTO orders (id, tenant_id, connector_id, connector_run_id, order_number, po_number,
-           customer_id, customer_number, customer_name, source_data, primary_metadata, extended_metadata,
-           confidence, staged_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(
-          orderId, tenantId, connectorId, runId, order.order_number,
-          order.po_number || null, customerId,
-          order.customer_number || null, order.customer_name || null,
-          JSON.stringify(order.source_data),
-          primaryJson, extendedJson,
-          orderConfidence, stagedAt
-        ).run();
-        ordersCreated++;
-      }
-      if (isStaged) ordersStaged++;
-
-      // Insert order items (delete existing first for idempotency). Items
-      // inherit the order's stage state so the review UI can show/edit them
-      // together. Per-item confidence is preserved so the reviewer can spot
-      // which line dragged the order down.
-      if (order.items.length > 0) {
-        await db.prepare(`DELETE FROM order_items WHERE order_id = ?`).bind(orderId).run();
-        for (const item of order.items) {
-          const itemId = generateId();
-          const itemConfidence = typeof item._confidence === 'number' ? item._confidence : null;
-          await db.prepare(
-            `INSERT INTO order_items (id, order_id, product_name, product_code, quantity, lot_number,
-             confidence, staged_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-          ).bind(
-            itemId, orderId,
-            item.product_name || null, item.product_code || null,
-            item.quantity || null, item.lot_number || null,
-            itemConfidence, stagedAt
-          ).run();
-        }
-      }
-    } catch (err) {
-      output.errors.push({
-        message: `Order upsert failed for ${order.order_number}: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
-  }
+  // Producer dispatch (Phase P2): hand the parsed customers/orders to the
+  // `order` doc-kind producer, which owns every canonical-entity write
+  // (customers, customer_contacts, orders, order_items + product/lot
+  // resolution + COA linkage) and the stage-vs-commit routing. It mutates
+  // `output.errors` in place and returns the rollup counts the run record
+  // needs.
+  const { ordersCreated, ordersStaged, customersCreated } = await ingestOrders(
+    db,
+    output,
+    { tenantId, connectorId, connectorRunId: runId },
+  );
 
   // Determine final status. `info[]` is purely informational (processing
   // summaries, skipped-sheet notices, etc.) and must NOT count toward the

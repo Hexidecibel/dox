@@ -48,8 +48,15 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     if (supplierIdFilter) {
-      conditions.push('supplier_id = ?');
-      params.push(supplierIdFilter);
+      // A product belongs to a supplier via EITHER the legacy single-FK column
+      // (products.supplier_id) OR the product_suppliers provenance graph
+      // (Model B). Backfilled products carry only the latter, so both paths
+      // must be checked. Table-qualify the legacy column so it isn't ambiguous
+      // with the subquery.
+      conditions.push(
+        '(products.supplier_id = ? OR products.id IN (SELECT product_id FROM product_suppliers WHERE supplier_id = ?))'
+      );
+      params.push(supplierIdFilter, supplierIdFilter);
     }
 
     if (search) {

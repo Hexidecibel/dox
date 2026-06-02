@@ -1,20 +1,17 @@
 /**
- * Doc-R1: PUT /api/queue/:id/results with worker-posted `confidence` should
- * auto-approve the queue item when the tenant has `auto_approve_threshold`
- * set and the LLM confidence meets it.
+ * COA auto-ingest has been REMOVED. The former Doc-R1 confidence-threshold
+ * auto-approve no longer fires: PUT /api/queue/:id/results never approves /
+ * ingests a COA item, regardless of worker-posted `confidence` or the tenant's
+ * `auto_approve_threshold`. Every COA item stays in review.
  *
- * Covers the four gate combinations called out in the spec:
- *   1. confidence=0.95, threshold=0.70 → auto-approve, doc created.
- *   2. confidence=0.50, threshold=0.70 → stays pending.
- *   3. confidence=0.95, threshold=null → stays pending (feature disabled).
- *   4. confidence=null, threshold=0.70 → stays pending (no signal).
+ * This file now guards that removal:
+ *   - confidence >= threshold → STILL stays pending (no doc created, no audit).
+ *   - confidence < threshold / threshold null / confidence null → stays pending.
+ *   - errored worker payload → stays pending.
+ *   - clamped (out-of-range) confidence is still persisted, item stays pending.
  *
- * Plus:
- *   - rejected/errored worker payload does not auto-approve even if the
- *     numeric confidence accidentally crosses the threshold.
- *   - audit log records the threshold-driven approve under
- *     'queue_item.auto_approve_threshold' so Activity can show it as
- *     "auto" instead of a user action.
+ * Confidence is still persisted on the queue item as review-assist; only the
+ * automatic approval was removed.
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
@@ -98,8 +95,8 @@ async function setTenantThreshold(tenantId: string, threshold: number | null): P
     .run();
 }
 
-describe('PUT /api/queue/:id/results — Doc-R1 auto-approve gate', () => {
-  it('auto-approves when confidence >= tenant threshold', async () => {
+describe('PUT /api/queue/:id/results — COA auto-approve removed', () => {
+  it('does NOT auto-approve even when confidence >= tenant threshold (stays pending, no doc, no audit)', async () => {
     const tenantId = seed.tenantId;
     await setTenantThreshold(tenantId, 0.7);
     const queueId = await seedPendingQueueItem(tenantId, seed.userId);
@@ -127,33 +124,30 @@ describe('PUT /api/queue/:id/results — Doc-R1 auto-approve gate', () => {
       .bind(queueId)
       .first<Record<string, unknown>>();
     expect(row).not.toBeNull();
+    // Confidence is still persisted as review assist...
     expect(row!.confidence).toBeCloseTo(0.95, 5);
-    expect(row!.status).toBe('approved');
-    expect(row!.auto_ingested).toBe(1);
-    expect(row!.reviewed_by).toBe(seed.userId);
+    // ...but the item stays in review — NOT approved, NOT ingested.
+    expect(row!.status).toBe('pending');
+    expect(row!.auto_ingested ?? 0).toBe(0);
+    expect(row!.reviewed_by ?? null).toBeNull();
 
-    // A document row should now exist for this queue item.
+    // No document row was created.
     const doc = await db
       .prepare("SELECT id, supplier_id FROM documents WHERE external_ref = ?")
       .bind(`queue-${queueId}`)
       .first<{ id: string; supplier_id: string | null }>();
-    expect(doc).not.toBeNull();
+    expect(doc).toBeNull();
 
-    // Audit log should record the threshold-driven approve so Activity can
-    // surface it as an "auto" actor.
+    // No threshold auto-approve audit entry was written.
     const audit = await db
       .prepare(
-        `SELECT action, details FROM audit_log
+        `SELECT action FROM audit_log
          WHERE resource_type = 'processing_queue' AND resource_id = ?
            AND action = 'queue_item.auto_approve_threshold'`
       )
       .bind(queueId)
-      .first<{ action: string; details: string }>();
-    expect(audit).not.toBeNull();
-    const parsed = JSON.parse(audit!.details);
-    expect(parsed.confidence).toBeCloseTo(0.95, 5);
-    expect(parsed.threshold).toBe(0.7);
-    expect(parsed.actor).toBe('auto');
+      .first<{ action: string }>();
+    expect(audit).toBeNull();
   });
 
   it('stays pending when confidence < tenant threshold', async () => {
@@ -280,13 +274,14 @@ describe('PUT /api/queue/:id/results — Doc-R1 auto-approve gate', () => {
     expect(row!.processing_status).toBe('error');
   });
 
-  it('clamps out-of-range confidence values to [0, 1] before evaluating the gate', async () => {
+  it('clamps out-of-range confidence values to [0, 1] when persisting, but still does NOT auto-approve', async () => {
     const tenantId = seed.tenantId;
     await setTenantThreshold(tenantId, 0.7);
     const queueId = await seedPendingQueueItem(tenantId, seed.userId);
     const user = { id: seed.userId, role: 'user', tenant_id: tenantId };
 
-    // 1.5 should clamp to 1.0 — still >= threshold so this auto-approves.
+    // 1.5 clamps to 1.0 when persisted; with auto-ingest removed the item
+    // still stays pending regardless.
     const response = await updateQueueResults(
       makePutContext(
         queueId,
@@ -306,6 +301,6 @@ describe('PUT /api/queue/:id/results — Doc-R1 auto-approve gate', () => {
       .bind(queueId)
       .first<{ status: string; confidence: number | null }>();
     expect(row!.confidence).toBeCloseTo(1, 5);
-    expect(row!.status).toBe('approved');
+    expect(row!.status).toBe('pending');
   });
 });

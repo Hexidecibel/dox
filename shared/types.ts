@@ -206,6 +206,38 @@ export interface SupplierLookupOrCreateResponse {
   created: boolean;
 }
 
+/**
+ * Supplier de-duplication.
+ *
+ * GET /api/suppliers/duplicates returns clusters of suppliers that are
+ * likely the same real-world entity (e.g. "Medosweet" vs "Medosweet Farms"),
+ * grouped either by normalized-name equality or fuzzy similarity. The merge
+ * tool folds the losers into a chosen winner.
+ */
+export interface SupplierDuplicateMember {
+  id: string;
+  name: string;
+  slug: string;
+  doc_count: number;
+}
+
+export interface SupplierDuplicateCluster {
+  reason: 'normalized' | 'similar';
+  suppliers: SupplierDuplicateMember[];
+}
+
+export interface SupplierDuplicatesResponse {
+  clusters: SupplierDuplicateCluster[];
+}
+
+export interface SupplierMergeResponse {
+  winner_id: string;
+  /** loser supplier id -> number of documents reassigned to the winner */
+  reassigned: Record<string, number>;
+  /** alias strings folded onto the winner from the merged losers */
+  foldedAliases: string[];
+}
+
 export interface DocumentVersionRow {
   id: string;
   document_id: string;
@@ -657,6 +689,14 @@ export interface ProcessingQueueItem {
   confidence: number | null;
   product_names: string | null;
   supplier: string | null;
+  /**
+   * Pre-resolved supplier id: set by the worker when the extracted supplier
+   * text matched a KNOWN existing supplier; null otherwise. The reviewer must
+   * verify the supplier before approving — a non-null value pre-selects it as
+   * verified in the Review Queue; a null value seeds the raw `supplier` text
+   * as unverified.
+   */
+  supplier_id: string | null;
   document_type_guess: string | null;
   status: 'pending' | 'approved' | 'rejected';
   processing_status: 'queued' | 'processing' | 'ready' | 'error';
@@ -672,6 +712,26 @@ export interface ProcessingQueueItem {
   auto_ingested: number;
   source: string | null;
   source_detail: string | null;
+  /**
+   * Review Queue v2 — what the producer emits for this item:
+   *   'coa'      — a certificate; fields/tables render in the COA tile.
+   *   'order'    — order + customer records (ai_records: { customers, orders }).
+   *   'shipment' — WMS order→lot bindings (ai_records: { shipments }).
+   * NULL is treated as 'coa' for back-compat with pre-v2 rows.
+   */
+  output_kind: 'coa' | 'order' | 'shipment' | null;
+  /** Where the item came from (manual upload, connector source, etc.). Informational. */
+  origin_kind: string | null;
+  /**
+   * Extracted records for order/shipment kinds, JSON-stringified. Shape depends
+   * on output_kind: { customers, orders } for 'order', { shipments } for
+   * 'shipment'. NULL for 'coa' items (which use ai_fields/tables instead).
+   */
+  ai_records: string | null;
+  /** Connector/source id this item is attributed to, when applicable. */
+  source_id: string | null;
+  /** Connector run id this item was produced by, when applicable. */
+  connector_run_id: string | null;
   // VLM dual-run extraction (null when QWEN_VLM_MODE=off, which is the default)
   vlm_extracted_fields: string | null;
   vlm_extracted_tables: string | null;
@@ -2627,6 +2687,157 @@ export interface ProcessingStatusResponse {
   stale: ProcessingStatusStale;
   errors: ProcessingStatusErrors;
   checkedAt: string;
+}
+
+// === Lots (entity graph, Phase 2) ===
+
+/** A row in GET /api/lots — one lot with joined names and rollup counts. */
+export interface LotListItem {
+  id: string;
+  lot_number: string;
+  lot_key: string;
+  product_id: string | null;
+  product_name: string | null;
+  supplier_id: string | null;
+  supplier_name: string | null;
+  code_date: string | null;
+  expiration_date: string | null;
+  mfg_date: string | null;
+  created_at: string;
+  /** COUNT(document_lots) for this lot — COA docs linked to it. */
+  coa_document_count: number;
+  /** COUNT(order_items WHERE lot_id = this AND coa_match_status = 'matched'). */
+  matched_order_count: number;
+  /** COUNT(lot_match_suggestions WHERE lot_id = this AND status = 'pending'). */
+  suggested_count: number;
+}
+
+export interface LotListResponse {
+  lots: LotListItem[];
+  total: number;
+}
+
+/** A COA document linked to a lot (GET /api/lots/:id). */
+export interface LotCoaDocument {
+  document_id: string;
+  title: string | null;
+  file_name: string | null;
+  linked_at: string;
+}
+
+/** An order line associated with a lot (GET /api/lots/:id). */
+export interface LotOrderLine {
+  order_item_id: string;
+  order_id: string;
+  order_number: string | null;
+  po_number: string | null;
+  customer_name: string | null;
+  product_name: string | null;
+  quantity: number | null;
+  coa_match_status: string | null;
+  match_confidence: number | null;
+  coa_document_id: string | null;
+}
+
+/** A pending lot-match suggestion for a lot (GET /api/lots/:id). */
+export interface LotSuggestion {
+  id: string;
+  order_item_id: string;
+  order_number: string | null;
+  document_id: string;
+  match_confidence: number | null;
+  match_basis: string | null;
+  status: string;
+}
+
+export interface LotDetail {
+  lot: {
+    id: string;
+    tenant_id: string;
+    supplier_id: string | null;
+    product_id: string | null;
+    lot_number: string;
+    lot_key: string;
+    code_date: string | null;
+    expiration_date: string | null;
+    mfg_date: string | null;
+    primary_metadata: string | null;
+    first_seen_source: string | null;
+    created_at: string;
+    updated_at: string;
+    product_name: string | null;
+    supplier_name: string | null;
+  };
+  coa_documents: LotCoaDocument[];
+  order_lines: LotOrderLine[];
+  suggestions: LotSuggestion[];
+}
+
+// === Reports: COA Fulfillment (entity-graph daily view) ===
+
+/** Per-row gap classification computed server-side. */
+export type CoaGapStatus = 'ok' | 'missing_lot' | 'missing_coa' | 'expired';
+
+/** One shipped order line in GET /api/reports/coa-fulfillment. */
+export interface CoaFulfillmentRow {
+  order_id: string;
+  order_number: string;
+  po_number: string | null;
+  customer_name: string | null;
+  product_id: string | null;
+  product_name: string | null;
+  quantity: number | null;
+  lot_id: string | null;
+  lot_number: string | null;
+  supplier_id: string | null;
+  supplier_name: string | null;
+  expiration_date: string | null;
+  coa_document_id: string | null;
+  coa_file_name: string | null;
+  coa_match_status: string | null;
+  gap: CoaGapStatus;
+}
+
+export interface CoaFulfillmentSummary {
+  total: number;
+  ok: number;
+  missing_lot: number;
+  missing_coa: number;
+  expired: number;
+  /** Share of lines that are fully OK, 0–100, one decimal place. */
+  coverage_pct: number;
+}
+
+export interface CoaFulfillmentResponse {
+  rows: CoaFulfillmentRow[];
+  summary: CoaFulfillmentSummary;
+}
+
+// === Review Queue v2: weak COA→lot match suggestions ===
+
+/**
+ * A pending weak suggestion produced by the matching engine when a shipment is
+ * accepted. Each row proposes binding a COA document to a specific order item /
+ * lot; the reviewer confirms or rejects it. Strong (auto) matches never appear
+ * here — only the low-confidence ones that need a human.
+ */
+export interface LotMatchSuggestion {
+  id: string;
+  order_item_id: string;
+  document_id: string;
+  document_title: string | null;
+  lot_id: string | null;
+  lot_number: string | null;
+  product_name: string | null;
+  /** How the engine arrived at the candidate (e.g. 'product_code', 'fuzzy_name'). */
+  match_basis: string | null;
+  /** Engine confidence in [0, 1]. */
+  match_confidence: number | null;
+  status: 'pending' | 'accepted' | 'rejected';
+}
+
+export interface LotMatchListResponse {
+  suggestions: LotMatchSuggestion[];
 }
 
 // === Auth Token Storage Key (single constant) ===

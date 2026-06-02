@@ -284,6 +284,7 @@ export function Import() {
 
   // Stage 1 state
   const [files, setFiles] = useState<File[]>([]);
+  const [outputKind, setOutputKind] = useState<'coa' | 'order' | 'shipment'>('coa');
   const [documentTypeId, setDocumentTypeId] = useState('');
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
   const [tenantId, setTenantId] = useState('');
@@ -487,7 +488,7 @@ export function Import() {
     setError('');
 
     try {
-      const response = await api.processing.process(files, effectiveTenantId, documentTypeId || undefined);
+      const response = await api.processing.process(files, effectiveTenantId, documentTypeId || undefined, outputKind);
       // Initialize queued items
       const items: QueuedItem[] = response.items.map(item => ({
         id: item.id,
@@ -726,6 +727,7 @@ export function Import() {
   // Reset to stage 1
   const handleStartOver = () => {
     setFiles([]);
+    setOutputKind('coa');
     setDocumentTypeId('');
     setEditableResults([]);
     setQueuedItems([]);
@@ -890,6 +892,20 @@ export function Import() {
               </Select>
             </FormControl>
           )}
+
+          {/* Document kind (intake routing) */}
+          <FormControl fullWidth sx={{ mb: 2 }}>
+            <InputLabel>Document kind</InputLabel>
+            <Select
+              value={outputKind}
+              onChange={(e) => setOutputKind(e.target.value as 'coa' | 'order' | 'shipment')}
+              label="Document kind"
+            >
+              <MenuItem value="coa">COA (default)</MenuItem>
+              <MenuItem value="order">Order report</MenuItem>
+              <MenuItem value="shipment">Shipment / audit trail</MenuItem>
+            </Select>
+          </FormControl>
 
           {/* Drop zone */}
           <Paper

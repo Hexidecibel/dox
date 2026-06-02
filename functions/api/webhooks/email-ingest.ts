@@ -1,9 +1,10 @@
 import { generateId, logAudit } from '../../lib/db';
-import { uploadFile, computeChecksum, buildR2Key } from '../../lib/r2';
+import { uploadFile } from '../../lib/r2';
 import { extractText } from '../../lib/extract';
 import { extractFields } from '../../lib/llm';
 import { computeConfidenceScore } from '../../lib/confidence';
 import { sendEmail, buildEmailIngestSummaryEmail } from '../../lib/email';
+import { resolveExistingSupplierId } from '../../lib/suppliers';
 import type { Env } from '../../lib/types';
 
 const ALLOWED_TYPES = [
@@ -117,27 +118,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return jsonResponse({ error: 'Default user not found or inactive' }, 200);
     }
 
-    // 5. Load document type config (naming, threshold)
+    // 5. Resolve the default document type id (used to scope few-shot
+    //    examples). Auto-ingest config is no longer consulted: email docs
+    //    always go to review.
     const documentTypeId = mapping.default_document_type_id || null;
-    let docTypeName: string | null = null;
-    let autoIngestEnabled = false;
-
-    if (documentTypeId) {
-      const docType = await context.env.DB.prepare(
-        'SELECT id, name, auto_ingest FROM document_types WHERE id = ? AND active = 1'
-      )
-        .bind(documentTypeId)
-        .first<{
-          id: string;
-          name: string;
-          auto_ingest: number;
-        }>();
-
-      if (docType) {
-        docTypeName = docType.name;
-        autoIngestEnabled = !!(docType.auto_ingest);
-      }
-    }
 
     // 6. Few-shot examples fetched per-file after supplier detection (moved below)
 
@@ -174,7 +158,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         const fileData = await file.arrayBuffer();
-        const fileBytes = new Uint8Array(fileData);
 
         // Extract text
         const text = await extractText(fileData.slice(0), mimeType, fileName);
@@ -185,9 +168,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         let confidence: 'high' | 'medium' | 'low' = 'low';
         let confidenceScore = 0.3;
         let supplier: string | null = null;
-        let trainingReady = false;
-
-        const MIN_TRAINING_EXAMPLES = 3;
 
         if (text) {
           // Initial extraction (no few-shot — need supplier first)
@@ -237,186 +217,39 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           productNames = extraction.products;
           confidence = extraction.confidence;
           confidenceScore = computeConfidenceScore(extraction.confidence, extraction.fields);
-
-          // Count training examples for training gate
-          if (documentTypeId) {
-            let exampleCount = 0;
-            if (supplier) {
-              const supplierExamples = await context.env.DB.prepare(
-                `SELECT COUNT(*) as count FROM extraction_examples
-                 WHERE document_type_id = ? AND tenant_id = ? AND supplier = ? AND score >= 0.7`
-              ).bind(documentTypeId, mapping.tenant_id, supplier).first();
-              exampleCount = (supplierExamples?.count as number) || 0;
-            }
-
-            if (exampleCount < MIN_TRAINING_EXAMPLES) {
-              const allExamples = await context.env.DB.prepare(
-                `SELECT COUNT(*) as count FROM extraction_examples
-                 WHERE document_type_id = ? AND tenant_id = ? AND score >= 0.7`
-              ).bind(documentTypeId, mapping.tenant_id).first();
-              exampleCount = (allExamples?.count as number) || 0;
-            }
-
-            trainingReady = exampleCount >= MIN_TRAINING_EXAMPLES;
-          }
         }
 
-        // Decide: auto-ingest or queue for review
-        // Training gate: if not enough training examples, ALWAYS queue for review
-        if (autoIngestEnabled && trainingReady && confidenceScore >= 0.7) {
-          // === AUTO-INGEST: high confidence ===
-          const checksum = await computeChecksum(fileData);
-          const docId = generateId();
-          const versionId = generateId();
-          const externalRef = `email-${Date.now()}-${i}-${senderDomain}`;
-          const title = fileName.replace(/\.[^/.]+$/, '');
-
-          // Build primary_metadata from extracted fields
-          const primaryMetadata: Record<string, string | null> = {};
-          for (const [k, v] of Object.entries(fields)) {
-            if (v != null) primaryMetadata[k] = v;
-          }
-          const primaryMetadataStr = Object.keys(primaryMetadata).length > 0 ? JSON.stringify(primaryMetadata) : null;
-
-          // Resolve supplier
-          let supplierId: string | null = null;
-          if (supplier) {
-            try {
-              // Simple lookup-or-create inline
-              const slug = supplier.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-              let existingSupplier = await context.env.DB.prepare(
-                'SELECT id FROM suppliers WHERE tenant_id = ? AND slug = ?'
-              ).bind(mapping.tenant_id, slug).first<{ id: string }>();
-
-              if (!existingSupplier) {
-                existingSupplier = await context.env.DB.prepare(
-                  'SELECT id FROM suppliers WHERE tenant_id = ? AND LOWER(name) = LOWER(?)'
-                ).bind(mapping.tenant_id, supplier).first<{ id: string }>();
-              }
-
-              if (existingSupplier) {
-                supplierId = existingSupplier.id;
-              } else {
-                const newSupplierId = generateId();
-                await context.env.DB.prepare(
-                  'INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)'
-                ).bind(newSupplierId, mapping.tenant_id, supplier, slug).run();
-                supplierId = newSupplierId;
-              }
-            } catch {
-              // Non-critical
-            }
-          }
-
-          // Use original filename as-is (metadata is searchable separately)
-          const displayFileName = fileName;
-
-          // Upload to R2
-          const r2Key = buildR2Key(
-            mapping.tenant_slug,
-            docId,
-            1,
-            displayFileName
-          );
-          await uploadFile(context.env.FILES, r2Key, fileData, mimeType);
-
-          // Insert document
-          await context.env.DB.prepare(
-            `INSERT INTO documents (id, tenant_id, title, current_version, status, created_by, external_ref, source_metadata, document_type_id, supplier_id, primary_metadata)
-             VALUES (?, ?, ?, 1, 'active', ?, ?, ?, ?, ?, ?)`
-          )
-            .bind(
-              docId,
-              mapping.tenant_id,
-              title,
-              mapping.default_user_id,
-              externalRef,
-              JSON.stringify({
-                source: 'email',
-                sender: senderEmail,
-                subject,
-              }),
-              documentTypeId,
-              supplierId,
-              primaryMetadataStr
-            )
-            .run();
-
-          // Insert version
-          await context.env.DB.prepare(
-            `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, uploaded_by, extracted_text)
-             VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`
-          )
-            .bind(
-              versionId,
-              docId,
-              displayFileName,
-              file.size,
-              mimeType,
-              r2Key,
-              checksum,
-              mapping.default_user_id,
-              text ? text.substring(0, 100_000) : null
-            )
-            .run();
-
-          // Resolve and link products
-          if (productNames.length > 0) {
-            try {
-              const placeholders = productNames.map(() => '?').join(',');
-              const productResults = await context.env.DB.prepare(
-                `SELECT id, name FROM products WHERE tenant_id = ? AND name IN (${placeholders}) AND active = 1`
-              )
-                .bind(mapping.tenant_id, ...productNames)
-                .all();
-
-              for (const product of productResults.results || []) {
-                await context.env.DB.prepare(
-                  `INSERT INTO document_products (id, document_id, product_id)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(document_id, product_id) DO NOTHING`
-                )
-                  .bind(generateId(), docId, product.id as string)
-                  .run();
-              }
-            } catch {
-              // Non-critical — don't fail the ingest if product linking fails
-            }
-          }
-
-          // Audit log
-          await logAudit(
-            context.env.DB,
-            mapping.default_user_id,
-            mapping.tenant_id,
-            'document.ingested',
-            'document',
-            docId,
-            JSON.stringify({
-              source: 'email',
-              sender: senderEmail,
-              file_name: fileName,
-              confidence: confidenceScore,
-            }),
-            context.request.headers.get('cf-connecting-ip') || 'webhook'
-          );
-
-          results.push({
-            fileName,
-            status: 'ingested',
-            documentId: docId,
-            confidence: confidenceScore,
-          });
-        } else {
-          // === LOW CONFIDENCE: queue for review ===
+        // COA auto-ingest from email has been REMOVED. Every email-sourced
+        // document is now QUEUED for human review — identical to an uploaded
+        // doc — regardless of confidence, training-readiness, or the doc type's
+        // auto_ingest flag. We pre-resolve a KNOWN supplier id (alias-aware,
+        // read-only) and stash it on the queue item so the review UI can
+        // pre-select the verified supplier, but we never create a document or
+        // supplier here.
+        {
+          // === ALWAYS QUEUE FOR REVIEW ===
           const queueId = generateId();
           const r2Key = `pending/${mapping.tenant_slug}/${queueId}/${fileName}`;
 
           await uploadFile(context.env.FILES, r2Key, fileData, mimeType);
 
+          // Pre-resolve a known supplier (read-only; null for unknown/junk).
+          let resolvedSupplierId: string | null = null;
+          if (supplier) {
+            try {
+              resolvedSupplierId = await resolveExistingSupplierId(
+                context.env.DB,
+                mapping.tenant_id,
+                supplier
+              );
+            } catch {
+              // Non-critical — leave null, reviewer resolves manually.
+            }
+          }
+
           await context.env.DB.prepare(
-            `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, extracted_text, ai_fields, ai_confidence, confidence_score, product_names, supplier, status, created_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+            `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, extracted_text, ai_fields, ai_confidence, confidence_score, product_names, supplier, supplier_id, source, source_detail, status, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'email', ?, 'pending', ?)`
           )
             .bind(
               queueId,
@@ -432,6 +265,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
               confidenceScore,
               JSON.stringify(productNames),
               supplier,
+              resolvedSupplierId,
+              JSON.stringify({ sender: senderEmail, subject }),
               mapping.default_user_id
             )
             .run();

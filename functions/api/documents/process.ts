@@ -38,6 +38,41 @@ const MIME_TO_EXTENSIONS: Record<string, string[]> = {
   'image/jpeg': ['.jpg', '.jpeg'],
 };
 
+// Reverse map: extension → canonical mime. Browsers (and some upload clients)
+// frequently send Office files with an empty or 'application/octet-stream'
+// Content-Type — most notoriously .docx — which would otherwise fail the
+// ALLOWED_TYPES allowlist and silently drop the file. We recover the canonical
+// mime from the extension in that case.
+const EXTENSION_TO_MIME: Record<string, string> = Object.entries(MIME_TO_EXTENSIONS)
+  .reduce<Record<string, string>>((acc, [mime, exts]) => {
+    for (const ext of exts) acc[ext] = mime;
+    return acc;
+  }, {});
+
+// Mimes we treat as "unknown" and therefore eligible for extension-based
+// recovery. An empty type from the browser also lands here.
+const GENERIC_MIMES = new Set(['', 'application/octet-stream']);
+
+function fileExtension(fileName: string): string {
+  return fileName.includes('.') ? '.' + fileName.split('.').pop()!.toLowerCase() : '';
+}
+
+/**
+ * Resolve the effective mime for an uploaded file. If the client supplied a
+ * recognized mime, trust it. Otherwise (empty / octet-stream) fall back to the
+ * canonical mime implied by the file extension so e.g. .docx uploads aren't
+ * dropped just because the browser didn't set a Content-Type.
+ */
+function resolveMimeType(rawType: string, fileName: string): string {
+  const type = rawType || '';
+  if (!GENERIC_MIMES.has(type) && ALLOWED_TYPES.includes(type)) {
+    return type;
+  }
+  const byExt = EXTENSION_TO_MIME[fileExtension(fileName)];
+  if (byExt) return byExt;
+  return type || 'application/octet-stream';
+}
+
 /**
  * POST /api/documents/process
  * Accept files, upload to R2, create queue entries. Returns immediately.
@@ -53,6 +88,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const tenantId = (formData.get('tenant_id') as string) || user.tenant_id;
     const source = (formData.get('source') as string) || 'import';
     const sourceDetail = formData.get('source_detail') as string | null;
+
+    // Optional intake routing: which downstream kind the worker should produce.
+    // NULL is treated as 'coa' downstream; we default to 'coa' explicitly for clarity.
+    const VALID_OUTPUT_KINDS = ['coa', 'order', 'shipment'];
+    const rawOutputKind = formData.get('output_kind') as string | null;
+    const outputKind = rawOutputKind || 'coa';
+    if (!VALID_OUTPUT_KINDS.includes(outputKind)) {
+      throw new BadRequestError(
+        `Invalid output_kind '${rawOutputKind}'. Must be one of: ${VALID_OUTPUT_KINDS.join(', ')}`
+      );
+    }
+
+    // Optional source (connector) id — pass through if present, else null.
+    const sourceId = (formData.get('source_id') as string) || null;
 
     if (!tenantId) {
       throw new BadRequestError('tenant_id is required');
@@ -126,8 +175,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }> = [];
 
     for (const file of files) {
-      // Validate file type
-      const mimeType = file.type || 'application/octet-stream';
+      // Validate file type. Recover the canonical mime from the extension when
+      // the client sent an empty / octet-stream Content-Type (common for .docx).
+      const fileName = file.name;
+      const mimeType = resolveMimeType(file.type, fileName);
       if (!ALLOWED_TYPES.includes(mimeType)) {
         // Skip invalid files — include error info in response
         queuedItems.push({
@@ -139,8 +190,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       }
 
       // Validate file extension
-      const fileName = file.name;
-      const ext = fileName.includes('.') ? '.' + fileName.split('.').pop()!.toLowerCase() : '';
+      const ext = fileExtension(fileName);
       const expectedExtensions = MIME_TO_EXTENSIONS[mimeType];
       if (expectedExtensions && ext && !expectedExtensions.includes(ext)) {
         queuedItems.push({
@@ -197,10 +247,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
       // Create queue entry
       await context.env.DB.prepare(
-        `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, status, processing_status, checksum, created_by, source, source_detail)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?)`
+        `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, status, processing_status, checksum, created_by, source, source_detail, output_kind, source_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?, ?, ?)`
       )
-        .bind(queueId, tenantId, documentTypeId || null, r2Key, fileName, file.size, mimeType, checksum, user.id, source, sourceDetail)
+        .bind(queueId, tenantId, documentTypeId || null, r2Key, fileName, file.size, mimeType, checksum, user.id, source, sourceDetail, outputKind, sourceId)
         .run();
 
       queuedItems.push({

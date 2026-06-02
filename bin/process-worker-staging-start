@@ -43,6 +43,11 @@ export DOX_API_KEY="$STAGING_KEY"
 export QWEN_URL="${QWEN_URL:-https://qwen.cush.rocks}"
 export QWEN_SECRET="${QWEN_SECRET:-}"
 
+# Regenerate the shared order-prompt CJS bundle the worker requires at runtime
+# (single source of truth: shared/orderPrompt.ts). See process-worker-start.
+echo "Building shared order-prompt bundle for worker..."
+npm run build:worker-shared
+
 nohup node bin/process-worker > "$LOG_FILE" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > "$PID_FILE"

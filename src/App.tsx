@@ -38,6 +38,8 @@ import LearningDashboard from './pages/admin/LearningDashboard';
 import { ProcessingStatus } from './pages/admin/ProcessingStatus';
 import { Orders } from './pages/Orders';
 import { OrderDetail } from './pages/OrderDetail';
+import { Lots } from './pages/Lots';
+import { Reports } from './pages/Reports';
 import { Activity } from './pages/Activity';
 import { Sheets } from './pages/records/Sheets';
 import { SheetDetail } from './pages/records/SheetDetail';
@@ -102,6 +104,10 @@ function App() {
               <Route path="/review" element={<ReviewQueue />} />
               <Route path="/orders" element={<Orders />} />
               <Route path="/orders/:id" element={<OrderDetail />} />
+              <Route path="/lots" element={<Lots />} />
+              <Route element={<ProtectedRoute roles={['super_admin', 'org_admin', 'user']} />}>
+                <Route path="/reports" element={<Reports />} />
+              </Route>
               <Route path="/records" element={<Sheets />} />
               <Route path="/records/:sheetId" element={<SheetDetail />} />
               <Route path="/records/:sheetId/forms/:formId" element={<FormBuilder />} />

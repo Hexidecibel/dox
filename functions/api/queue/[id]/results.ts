@@ -6,6 +6,7 @@ import {
 } from '../../../lib/permissions';
 import { sendEmail } from '../../../lib/email';
 import { logAudit, getClientIp } from '../../../lib/db';
+import { resolveExistingSupplierId } from '../../../lib/suppliers';
 import type { Env, User } from '../../../lib/types';
 
 /**
@@ -24,6 +25,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       processing_status?: 'queued' | 'processing' | 'ready' | 'error';
       extracted_text?: string;
       ai_fields?: string;
+      // P0: optional structured records sidecar (JSON string). Persisted to
+      // the ai_records column for a later phase to consume; no COA behavior
+      // change. Accept-and-ignore semantics if the column is somehow absent.
+      ai_records?: string;
       ai_confidence?: string;
       confidence_score?: number;
       // Doc-R1: LLM self-rated numeric confidence (0..1). Null/undefined when
@@ -55,10 +60,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
     // Verify queue item exists
     const item = await context.env.DB.prepare(
-      'SELECT id, tenant_id, document_type_id, processing_status, source, source_detail, file_name, status, attempts FROM processing_queue WHERE id = ?'
+      'SELECT id, tenant_id, document_type_id, processing_status, source, source_detail, file_name, status, attempts, output_kind, source_id, connector_run_id FROM processing_queue WHERE id = ?'
     )
       .bind(queueId)
-      .first<{ id: string; tenant_id: string; document_type_id: string | null; processing_status: string; source: string | null; source_detail: string | null; file_name: string; status: string; attempts: number }>();
+      .first<{ id: string; tenant_id: string; document_type_id: string | null; processing_status: string; source: string | null; source_detail: string | null; file_name: string; status: string; attempts: number; output_kind: string | null; source_id: string | null; connector_run_id: string | null }>();
 
     if (!item) {
       throw new NotFoundError('Queue item not found');
@@ -96,6 +101,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.ai_fields !== undefined) {
       updates.push('ai_fields = ?');
       params.push(body.ai_fields);
+    }
+
+    if (body.ai_records !== undefined) {
+      updates.push('ai_records = ?');
+      params.push(body.ai_records);
     }
 
     if (body.ai_confidence !== undefined) {
@@ -239,60 +249,83 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }
     }
 
-    // --- Template matching & auto-ingest ---
-    let wasAutoIngested = false;
+    // --- Dispatch by output_kind (Review Queue v2) ---
+    // The worker tags each queued item with what it extracted:
+    //   coa (or NULL)  → review-assist below (template pre-fill, supplier resolve).
+    //   order          → review only; ingestOrders runs on HUMAN approve.
+    //   shipment       → review only; produceShipment runs on HUMAN approve.
+    //
+    // NO auto-produce. order/shipment now mirror COA exactly: the worker's
+    // structured records (body.ai_records) + confidence are persisted onto the
+    // queue item by the column update above, and the item stays in the same
+    // pending/needs-review status a COA item lands in. The producers
+    // (ingestOrders / produceShipment) run ONLY when a human approves the
+    // reviewed records — see functions/api/queue/[id].ts#handleRecordsApprove.
+    // The connector_runs rollup accounting moved there too.
+    const kind = item.output_kind || 'coa';
+
+    if (body.processing_status === 'ready' && (kind === 'order' || kind === 'shipment')) {
+      // Records + confidence already persisted by the dynamic column update
+      // above. Nothing to produce here — leave the item pending for review.
+      return new Response(
+        JSON.stringify({ success: true, id: queueId, processing_status: body.processing_status }),
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // --- COA review-assist (NO auto-ingest) ---
+    //
+    // Auto-ingest of COA documents has been REMOVED: every COA item now stays
+    // in the queue for human review, exactly like a low-confidence item. What
+    // remains here is *assist* work that pre-fills the review form and helps
+    // the reviewer:
+    //   - pre-resolve a matched KNOWN supplier and store its id on the queue
+    //     item (review UI pre-selects the verified supplier); raw `supplier`
+    //     text is still written by the column update above.
+    //   - resolve + attach the matching extraction_template and apply its
+    //     field-mapping to populate the item's ai_fields (pre-filled form).
+    //   - confidence is already computed + persisted by the column update.
+    // We never call approveQueueItem from this handler anymore.
     if (body.processing_status === 'ready') {
       try {
-        // 1. Resolve supplier from the posted supplier name
-        let supplierId: string | null = null;
-        const supplierName = body.supplier;
-        if (supplierName) {
-          const slug = supplierName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        // 1. Resolve supplier from the posted supplier name via the shared
+        //    read-only, alias-aware resolver (slug → name → normalized → alias,
+        //    guarded by the plausibility filter). Returns null for unknown/junk.
+        const supplierId: string | null = await resolveExistingSupplierId(
+          context.env.DB,
+          item.tenant_id,
+          body.supplier
+        );
 
-          // Try slug match
-          let supplier = await context.env.DB.prepare(
-            'SELECT id FROM suppliers WHERE tenant_id = ? AND slug = ?'
-          ).bind(item.tenant_id, slug).first<{ id: string }>();
-
-          // Try name match
-          if (!supplier) {
-            supplier = await context.env.DB.prepare(
-              'SELECT id FROM suppliers WHERE tenant_id = ? AND LOWER(name) = LOWER(?)'
-            ).bind(item.tenant_id, supplierName).first<{ id: string }>();
-          }
-
-          // Alias matching skipped — slug + name is sufficient for this hot path
-
-          if (supplier) {
-            supplierId = supplier.id;
-          }
+        // Persist the pre-resolved known supplier id so the review UI can
+        // pre-select the verified supplier. Leave null when unknown/junk.
+        if (supplierId) {
+          await context.env.DB.prepare(
+            'UPDATE processing_queue SET supplier_id = ? WHERE id = ?'
+          ).bind(supplierId, queueId).run();
         }
 
         // 2. Look up document_type_id (from body update or existing queue item)
         const docTypeId = body.document_type_id || item.document_type_id;
 
-        // 3. Template lookup
+        // 3. Template lookup — attach + pre-fill the review form. No gate check,
+        //    no auto-ingest; the template is only used as review assist now.
         if (supplierId && docTypeId) {
           const template = await context.env.DB.prepare(
-            `SELECT et.*, dt.auto_ingest as dt_auto_ingest
+            `SELECT et.id, et.field_mappings
              FROM extraction_templates et
-             LEFT JOIN document_types dt ON et.document_type_id = dt.id
              WHERE et.tenant_id = ? AND et.supplier_id = ? AND et.document_type_id = ?`
           ).bind(item.tenant_id, supplierId, docTypeId).first<{
             id: string;
             field_mappings: string;
-            auto_ingest_enabled: number;
-            confidence_threshold: number;
-            dt_auto_ingest: number;
           }>();
 
           if (template) {
-            // Store template_id on queue item
+            // Store template_id on queue item so the reviewer sees the match.
             await context.env.DB.prepare(
               'UPDATE processing_queue SET template_id = ? WHERE id = ?'
             ).bind(template.id, queueId).run();
 
-            // 4. Check auto-ingest gates
             const fieldMappings = JSON.parse(template.field_mappings) as Array<{
               field_key: string;
               tier: string;
@@ -301,7 +334,6 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
             }>;
 
             const aiFields = body.ai_fields ? JSON.parse(body.ai_fields) : {};
-            const confidenceScore = body.confidence_score || 0;
 
             // Fuzzy field name matching for OCR typos (e.g., log_number vs lot_number)
             const levenshtein = (a: string, b: string): number => {
@@ -348,176 +380,35 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
               return null;
             };
 
-            // Check all required fields are present
-            const requiredFieldsMet = fieldMappings
-              .filter(f => f.required)
-              .every(f => {
-                const value = fuzzyFindValue(f.field_key, f.aliases || []);
-                return value != null && String(value).trim() !== '';
-              });
-
-            const shouldAutoIngest =
-              template.auto_ingest_enabled === 1 &&
-              template.dt_auto_ingest === 1 &&
-              confidenceScore >= template.confidence_threshold &&
-              requiredFieldsMet;
-
-            if (shouldAutoIngest) {
-              const { approveQueueItem } = await import('../../../lib/queue-approve');
-
-              // Build fields from template mappings
-              const mappedFields: Record<string, string> = {};
-              for (const mapping of fieldMappings) {
-                const value = fuzzyFindValue(mapping.field_key, mapping.aliases || []);
-                if (value != null) {
-                  mappedFields[mapping.field_key] = String(value);
-                }
+            // Apply the template field-mapping onto ai_fields so the review
+            // form is pre-filled with normalized field_keys. We only fill keys
+            // that the template maps and the extraction actually produced; we
+            // do not clobber existing extracted values.
+            const mappedFields: Record<string, unknown> = { ...aiFields };
+            let changed = false;
+            for (const mapping of fieldMappings) {
+              if (mappedFields[mapping.field_key] != null && String(mappedFields[mapping.field_key]).trim() !== '') {
+                continue;
               }
-
-              // Find product name from template field with tier='product_name'
-              const productNameField = fieldMappings.find(f => f.tier === 'product_name');
-              const productName = productNameField ?
-                (mappedFields[productNameField.field_key] || null) : null;
-
-              // Re-fetch full queue item for approve function
-              const fullItem = await context.env.DB.prepare(
-                `SELECT pq.*, t.slug as tenant_slug
-                 FROM processing_queue pq
-                 LEFT JOIN tenants t ON pq.tenant_id = t.id
-                 WHERE pq.id = ?`
-              ).bind(queueId).first();
-
-              if (fullItem) {
-                await approveQueueItem(
-                  context.env.DB,
-                  context.env.FILES,
-                  fullItem as any,
-                  {
-                    fields: mappedFields,
-                    productName: productName || undefined,
-                    userId: user.id,
-                    autoIngested: true,
-                  }
-                );
-
-                // Mark as auto-ingested
-                await context.env.DB.prepare(
-                  'UPDATE processing_queue SET auto_ingested = 1 WHERE id = ?'
-                ).bind(queueId).run();
-                wasAutoIngested = true;
+              const value = fuzzyFindValue(mapping.field_key, mapping.aliases || []);
+              if (value != null) {
+                mappedFields[mapping.field_key] = value;
+                changed = true;
               }
             }
-          }
-        }
-      } catch (autoIngestErr) {
-        // Non-fatal — log but don't fail the results update
-        console.error('Auto-ingest check failed:', autoIngestErr);
-      }
 
-      // --- Doc-R1: per-tenant confidence-threshold auto-approve ---
-      // Independent of the template path above. Fires when:
-      //   - the worker posted a non-null numeric confidence on this update
-      //   - the tenant has auto_approve_threshold set (NULL = disabled)
-      //   - confidence >= threshold
-      //   - the item is still pending (not already approved by the template
-      //     path or a previous run) and has no error
-      // This is the "trust the LLM's own number for low-risk vendors" hatch.
-      // Errors are non-fatal (mirrors the template path) so a bad approve
-      // never blocks the worker from advancing the queue.
-      if (
-        !wasAutoIngested &&
-        body.confidence !== undefined &&
-        body.confidence !== null &&
-        typeof body.confidence === 'number' &&
-        isFinite(body.confidence) &&
-        item.status === 'pending' &&
-        !body.error_message
-      ) {
-        try {
-          const tenantRow = await context.env.DB.prepare(
-            'SELECT auto_approve_threshold FROM tenants WHERE id = ?'
-          )
-            .bind(item.tenant_id)
-            .first<{ auto_approve_threshold: number | null }>();
-          const threshold = tenantRow?.auto_approve_threshold ?? null;
-          const conf = Math.max(0, Math.min(1, body.confidence));
-
-          if (threshold !== null && typeof threshold === 'number' && conf >= threshold) {
-            const { approveQueueItem } = await import('../../../lib/queue-approve');
-
-            // Re-fetch full queue item (with tenant_slug) for the approve helper.
-            const fullItem = await context.env.DB.prepare(
-              `SELECT pq.*, t.slug as tenant_slug
-               FROM processing_queue pq
-               LEFT JOIN tenants t ON pq.tenant_id = t.id
-               WHERE pq.id = ?`
-            )
-              .bind(queueId)
-              .first<Record<string, unknown>>();
-
-            if (fullItem) {
-              const aiFieldsObj = body.ai_fields ? JSON.parse(body.ai_fields) : {};
-              const approvedFields: Record<string, string> = {};
-              for (const [k, v] of Object.entries(aiFieldsObj)) {
-                if (v != null && String(v).trim() !== '') {
-                  approvedFields[k] = String(v);
-                }
-              }
-
-              // Pick product name from a few common AI keys, if any.
-              const productName =
-                approvedFields.product_name ||
-                approvedFields.product ||
-                undefined;
-
-              await approveQueueItem(
-                context.env.DB,
-                context.env.FILES,
-                fullItem as never,
-                {
-                  fields: approvedFields,
-                  productName,
-                  userId: user.id,
-                  autoIngested: true,
-                }
-              );
-
+            if (changed) {
               await context.env.DB.prepare(
-                'UPDATE processing_queue SET auto_ingested = 1 WHERE id = ?'
-              ).bind(queueId).run();
-
-              // Audit-log the threshold-driven auto-approve so it shows up in
-              // Activity with a clear non-user actor. Uses action
-              // 'queue_item.auto_approve_threshold' so we can grep these
-              // separately from human approvals and template-driven ones.
-              try {
-                await logAudit(
-                  context.env.DB,
-                  user.id,
-                  item.tenant_id,
-                  'queue_item.auto_approve_threshold',
-                  'processing_queue',
-                  queueId,
-                  JSON.stringify({
-                    confidence: conf,
-                    threshold,
-                    file_name: item.file_name,
-                    actor: 'auto',
-                  }),
-                  getClientIp(context.request)
-                );
-              } catch {
-                // Non-fatal — audit failure shouldn't break auto-approve.
-              }
-
-              wasAutoIngested = true;
+                'UPDATE processing_queue SET ai_fields = ? WHERE id = ?'
+              ).bind(JSON.stringify(mappedFields), queueId).run();
             }
           }
-        } catch (autoApproveErr) {
-          // Non-fatal — leave the item in pending so the human reviewer can
-          // still handle it. Log so we can debug.
-          console.error('Doc-R1 auto-approve failed:', autoApproveErr);
         }
+      } catch (assistErr) {
+        // Non-fatal — review assist must never fail the results update. The
+        // item simply lands in review without the pre-fill / pre-resolved
+        // supplier.
+        console.error('COA review-assist failed:', assistErr);
       }
 
       // --- Send result email for email-sourced documents ---
@@ -527,37 +418,20 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           const senderEmail = sourceDetail.sender;
 
           if (senderEmail && context.env.RESEND_API_KEY) {
-            const aiFields = body.ai_fields ? JSON.parse(body.ai_fields) : {};
             const confidence = body.confidence_score || 0;
             const fileName = item.file_name;
 
-            let subject: string;
-            let htmlBody: string;
-
-            if (wasAutoIngested) {
-              const fieldRows = Object.entries(aiFields)
-                .filter(([, v]) => v != null && String(v).trim() !== '')
-                .map(([k, v]) => `<tr><td style="padding:4px 12px 4px 0;color:#666;font-weight:600">${(k as string).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</td><td style="padding:4px 0">${v}</td></tr>`)
-                .join('');
-
-              subject = `[SupDox] Document Processed: ${fileName}`;
-              htmlBody = `
-                <div style="font-family:sans-serif;max-width:600px">
-                  <h2 style="color:#2e7d32">Document Auto-Processed</h2>
-                  <p><strong>${fileName}</strong> was automatically processed and ingested (${Math.round(confidence * 100)}% confidence).</p>
-                  <table style="border-collapse:collapse;margin:16px 0">${fieldRows}</table>
-                  <p style="color:#666;font-size:14px">This document was processed automatically based on a saved template. You can view it in the <a href="https://supdox.com/documents">document library</a>.</p>
-                </div>`;
-            } else {
-              subject = `[SupDox] Review Needed: ${fileName}`;
-              htmlBody = `
+            // COA auto-ingest has been removed — every processed COA document
+            // now lands in the Review Queue, so this is always the
+            // needs-review/link notification path.
+            const subject = `[SupDox] Review Needed: ${fileName}`;
+            const htmlBody = `
                 <div style="font-family:sans-serif;max-width:600px">
                   <h2 style="color:#ed6c02">Document Needs Review</h2>
                   <p><strong>${fileName}</strong> was processed but needs human review before it can be ingested (${Math.round(confidence * 100)}% confidence).</p>
                   <p><a href="https://supdox.com/review" style="display:inline-block;padding:10px 20px;background:#1976d2;color:white;text-decoration:none;border-radius:4px">Go to Review Queue</a></p>
                   <p style="color:#666;font-size:14px">Once reviewed and approved, you'll receive a confirmation with the extracted details.</p>
                 </div>`;
-            }
 
             await sendEmail(context.env.RESEND_API_KEY, {
               to: senderEmail,

@@ -69,8 +69,10 @@ test.describe('smart upload', () => {
     const fileChooser = page.locator('input[type="file"]');
     await fileChooser.setInputFiles(SAMPLE_PDF);
 
-    // Click the big Process button.
-    const processBtn = page.getByRole('button', { name: /^process/i });
+    // Click the big Process button. Scope to `main` — the drawer nav has a
+    // "Processing Status" item (added in 64a6151) that also matches /^process/i
+    // and would otherwise trip strict-mode ambiguity.
+    const processBtn = main.getByRole('button', { name: /^process/i });
     await expect(processBtn).toBeEnabled({ timeout: 5_000 });
     await processBtn.click();
 

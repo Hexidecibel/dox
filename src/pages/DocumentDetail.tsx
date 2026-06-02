@@ -54,6 +54,7 @@ import { DocumentPreview } from '../components/DocumentPreview';
 import { CopyId } from '../components/CopyId';
 import { ProductLinker } from '../components/ProductLinker';
 import { useAuth } from '../contexts/AuthContext';
+import SupplierAutocomplete, { type SupplierValue } from '../components/SupplierAutocomplete';
 import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { helpContent } from '../lib/helpContent';
@@ -69,7 +70,7 @@ export function DocumentDetail() {
   const navigate = useNavigate();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
-  const { isReader } = useAuth();
+  const { isReader, isAdmin } = useAuth();
   const [doc, setDoc] = useState<Document | null>(null);
   const [versions, setVersions] = useState<DocumentVersion[]>([]);
   const [loading, setLoading] = useState(true);
@@ -96,6 +97,11 @@ export function DocumentDetail() {
   const [metaEditing, setMetaEditing] = useState(false);
   const [metaFields, setMetaFields] = useState<Record<string, string>>({});
   const [metaSaving, setMetaSaving] = useState(false);
+
+  // Admin-only supplier editing
+  const [supplierEditing, setSupplierEditing] = useState(false);
+  const [supplierValue, setSupplierValue] = useState<SupplierValue>({ supplierName: '', verified: false });
+  const [supplierSaving, setSupplierSaving] = useState(false);
 
   // Source metadata collapse
   const [sourceMetaOpen, setSourceMetaOpen] = useState(false);
@@ -217,6 +223,35 @@ export function DocumentDetail() {
       setError(err instanceof Error ? err.message : 'Failed to update metadata');
     } finally {
       setMetaSaving(false);
+    }
+  };
+
+  // Admin-only: change the supplier on an existing document. Sends supplier_id
+  // when an existing supplier was selected, else supplier_name (find-or-create).
+  const openSupplierEdit = () => {
+    if (!doc) return;
+    setSupplierValue(
+      doc.supplierId
+        ? { supplierId: doc.supplierId, supplierName: doc.supplierName || '', verified: true }
+        : { supplierName: doc.supplierName || '', verified: false },
+    );
+    setSupplierEditing(true);
+  };
+
+  const handleSaveSupplier = async () => {
+    if (!doc || !id) return;
+    setSupplierSaving(true);
+    try {
+      const payload: { supplier_id?: string; supplier_name?: string } = supplierValue.supplierId
+        ? { supplier_id: supplierValue.supplierId }
+        : { supplier_name: supplierValue.supplierName.trim() };
+      await api.documents.update(id, payload);
+      setSupplierEditing(false);
+      loadDocument();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update supplier');
+    } finally {
+      setSupplierSaving(false);
     }
   };
 
@@ -441,16 +476,48 @@ export function DocumentDetail() {
           </Box>
         )}
 
-        {/* Supplier */}
-        {doc.supplierName && (
+        {/* Supplier — read-only chip for everyone; admins can change it. */}
+        {(doc.supplierName || isAdmin) && (
           <Box sx={{ mb: 2 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
               <Typography variant="subtitle2" color="text.secondary" gutterBottom>
                 Supplier
               </Typography>
               <InfoTooltip text={helpContent.documents.list?.columnTooltips?.supplier} />
+              {isAdmin && !supplierEditing && (
+                <IconButton size="small" onClick={openSupplierEdit} aria-label="Change supplier">
+                  <EditIcon fontSize="small" />
+                </IconButton>
+              )}
             </Box>
-            <Chip label={doc.supplierName} color="default" variant="outlined" size="small" />
+            {supplierEditing ? (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, maxWidth: 360 }}>
+                <SupplierAutocomplete
+                  tenantId={doc.tenant_id}
+                  value={supplierValue}
+                  onChange={setSupplierValue}
+                  disabled={supplierSaving}
+                />
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <Button
+                    size="small"
+                    variant="contained"
+                    startIcon={<SaveIcon />}
+                    onClick={handleSaveSupplier}
+                    disabled={supplierSaving || !supplierValue.verified || !supplierValue.supplierName.trim()}
+                  >
+                    {supplierSaving ? 'Saving...' : 'Save'}
+                  </Button>
+                  <Button size="small" onClick={() => setSupplierEditing(false)} disabled={supplierSaving}>
+                    Cancel
+                  </Button>
+                </Box>
+              </Box>
+            ) : doc.supplierName ? (
+              <Chip label={doc.supplierName} color="default" variant="outlined" size="small" />
+            ) : (
+              <Typography variant="body2" color="text.secondary">No supplier set</Typography>
+            )}
           </Box>
         )}
 

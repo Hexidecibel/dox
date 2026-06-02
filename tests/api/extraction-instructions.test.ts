@@ -110,10 +110,31 @@ describe('GET /api/extraction-instructions', () => {
     expect(status).toBe(400);
   });
 
-  it('400s when document_type_id is missing', async () => {
-    const qs = `supplier_id=${supplierId}`;
-    const { status } = await doGet(user(), qs);
-    expect(status).toBe(400);
+  it('returns supplier-wide instructions when document_type_id is omitted', async () => {
+    // The worker omits document_type_id because a queue item's doctype is
+    // usually still unresolved at extraction time (it's promoted AFTER the
+    // LLM call). The endpoint must aggregate the supplier's guidance across
+    // doctypes rather than 400ing.
+    const sId = generateTestId();
+    await db
+      .prepare('INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
+      .bind(sId, seed.tenantId, 'Omit-Doctype Supplier', `omit-dt-${sId.slice(0, 6)}`)
+      .run();
+
+    // No rows yet → 200 with null (no longer a 400).
+    const empty = await doGet(user(), `supplier_id=${sId}`);
+    expect(empty.status).toBe(200);
+    expect(empty.body.instructions).toBeNull();
+
+    // After a PUT, the supplier-wide lookup surfaces the guidance.
+    await doPut(user(), {
+      supplier_id: sId,
+      document_type_id: docTypeId,
+      instructions: 'Supplier-wide guidance: dates are DD/MM/YYYY.',
+    });
+    const got = await doGet(user(), `supplier_id=${sId}`);
+    expect(got.status).toBe(200);
+    expect(got.body.instructions).toContain('Supplier-wide guidance: dates are DD/MM/YYYY.');
   });
 });
 

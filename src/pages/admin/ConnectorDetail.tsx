@@ -18,7 +18,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef, type DragEvent } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { formatDate } from '../../utils/format';
+import { formatDate, formatDateTime, parseUtc } from '../../utils/format';
 import {
   Alert,
   Box,
@@ -184,7 +184,8 @@ function runStatusColor(status: ConnectorRun['status']): 'success' | 'error' | '
 
 function formatRelativeTime(dateStr: string | null): string {
   if (!dateStr) return 'Never';
-  const date = new Date(dateStr);
+  const date = parseUtc(dateStr);
+  if (!date) return 'Never';
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffMins = Math.floor(diffMs / 60000);
@@ -1544,8 +1545,8 @@ export function ConnectorDetail() {
                           )}
                         </Stack>
                       </TableCell>
-                      <TableCell>{formatDate(run.started_at)}</TableCell>
-                      <TableCell>{run.completed_at ? formatDate(run.completed_at) : '-'}</TableCell>
+                      <TableCell>{formatDateTime(run.started_at)}</TableCell>
+                      <TableCell>{run.completed_at ? formatDateTime(run.completed_at) : '-'}</TableCell>
                       <TableCell align="right">{run.records_found}</TableCell>
                       <TableCell align="right">
                         {run.records_created > 0 ? (

@@ -7,6 +7,7 @@ import {
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import { computeDiff } from '../../lib/diff';
+import { findOrCreateSupplier } from '../../lib/suppliers';
 import type { Env, User, Document } from '../../lib/types';
 
 /**
@@ -110,9 +111,31 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       status?: 'active' | 'archived';
       document_type_id?: string | null;
       supplier_id?: string | null;
+      /**
+       * Optional human-typed supplier name. When provided and `supplier_id` is
+       * NOT, it is resolved (and created if needed) via the alias-aware helper
+       * and the resulting id is applied to supplier_id. Lets the frontend send
+       * either a chosen id or a free-typed name.
+       */
+      supplier_name?: string;
       primary_metadata?: Record<string, string | null> | null;
       extended_metadata?: Record<string, string | null> | null;
     };
+
+    // Resolve a typed supplier name into a supplier_id when no explicit id was
+    // given. Mutates the local body so the existing supplier_id update + audit
+    // diff logic below picks it up unchanged.
+    if (body.supplier_id === undefined && body.supplier_name && body.supplier_name.trim()) {
+      try {
+        const r = await findOrCreateSupplier(context.env.DB, doc.tenant_id, body.supplier_name, {
+          userId: user.id,
+          ip: getClientIp(context.request),
+        });
+        body.supplier_id = r.id;
+      } catch {
+        // Implausible name or resolve failure — leave supplier_id untouched.
+      }
+    }
 
     const updates: string[] = [];
     const params: (string | null)[] = [];

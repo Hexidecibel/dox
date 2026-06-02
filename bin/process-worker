@@ -21,6 +21,22 @@ const path = require('path');
 const fs = require('fs');
 const { Agent } = require('undici');
 const { modelFor } = require('./lib/models');
+// Shared order/shipment extraction prompt + parse logic. This is a CJS bundle
+// transpiled from shared/orderPrompt.ts (+ its pure deps fieldMappings.ts /
+// connectorOutput.ts) by `npm run build:worker-shared` — the SAME source the
+// Cloudflare connector pipeline (functions/lib/connectors/email.ts) imports,
+// so the order-extraction prompt + normalization are byte-identical across
+// both surfaces. The bin/process-worker-start scripts regenerate it before
+// launch; it is also committed so the systemd unit (which runs `node
+// bin/process-worker` directly) finds it without a build step.
+const {
+  buildParsingPrompt,
+  prependConnectorInstructions,
+  mergeOutputs,
+  normalizeAiOutput,
+  clampConfidence,
+  getDefaultParsingPrompt,
+} = require('./lib/shared/orderPrompt');
 
 // Increase headers timeout for slow LLM inference (default is 300s, we need 15min)
 const llmDispatcher = new Agent({
@@ -48,6 +64,21 @@ const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '30000', 10);
 const QWEN_VLM_MODE = (process.env.QWEN_VLM_MODE || 'off').toLowerCase();
 const QWEN_VLM_MODEL = process.env.QWEN_VLM_MODEL || 'qwen2.5-vl-7b';
 const QWEN_VLM_MAX_PAGES = parseInt(process.env.QWEN_VLM_MAX_PAGES || '5', 10);
+
+// === Multi-page text-chunking config ===
+// Multi-page PDFs feed an array of page strings into a chunker that builds
+// soft-capped Qwen calls so pages 3+ aren't silently dropped (see Darigold
+// COA bug, 2026-05-21).
+//   TEXT_CHUNK_CHAR_LIMIT — soft target per Qwen call. Sized to leave room
+//     for prompt + few-shot examples within the 8B model's context budget.
+//   TEXT_MAX_CHUNKS       — hard cap on chunks per doc. Intentionally lower
+//     than the connector's MAX_CHUNKS_PER_ATTACHMENT (20) because each Qwen
+//     call here risks a cold-start 502 from the GPU host (see today's
+//     Darigold/76187 errors); the more calls, the more cold-start exposure.
+//     If a doc would require more chunks than this cap, the worker falls
+//     back to a single truncated call (legacy behavior) with a warning.
+const TEXT_CHUNK_CHAR_LIMIT = 24000;
+const TEXT_MAX_CHUNKS = 6;
 
 if (!['off', 'dual', 'vlm'].includes(QWEN_VLM_MODE)) {
   console.error(`Error: QWEN_VLM_MODE must be one of: off, dual, vlm (got "${QWEN_VLM_MODE}")`);
@@ -302,12 +333,38 @@ async function resolveSupplierIdByName(tenantId, name) {
     if (!res.ok) return null;
     const data = await res.json();
     const rows = data.suppliers || [];
-    const lower = name.toLowerCase().trim();
-    // Exact case-insensitive name match first — the `search` param uses LIKE
-    // and would also match loose substring hits we don't want to treat as
-    // "same supplier" for guidance purposes.
-    const exact = rows.find(s => (s.name || '').toLowerCase().trim() === lower);
-    return exact ? exact.id : null;
+    if (rows.length === 0) return null;
+
+    // Normalize for matching: lowercase, strip punctuation, drop common
+    // company suffixes (Inc/LLC/Co/Corp/Ltd/Company), collapse whitespace.
+    // A queue item often carries "Darigold Inc." while the supplier row is
+    // just "Darigold"; without this they never match and instructions are
+    // silently skipped.
+    const normalize = (s) =>
+      (s || '')
+        .toLowerCase()
+        .replace(/[.,&]/g, ' ')
+        .replace(/\b(inc|llc|co|corp|corporation|ltd|limited|company|incorporated)\b/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const target = normalize(name);
+    if (!target) return null;
+
+    // 1. Exact normalized match — preferred.
+    const exact = rows.find(s => normalize(s.name) === target);
+    if (exact) return exact.id;
+
+    // 2. Normalized containment either direction ("Anderson" vs "Anderson
+    //    Dairy"). Only accept when a single candidate matches so we never
+    //    guess between two plausible suppliers.
+    const contains = rows.filter(s => {
+      const n = normalize(s.name);
+      return n && (n.includes(target) || target.includes(n));
+    });
+    if (contains.length === 1) return contains[0].id;
+
+    return null;
   } catch {
     return null;
   }
@@ -325,12 +382,14 @@ async function resolveSupplierIdByName(tenantId, name) {
  * via prependReviewerInstructions() below.
  */
 async function fetchReviewerInstructions(tenantId, supplierId, documentTypeId) {
-  if (!supplierId || !documentTypeId) return '';
+  if (!supplierId) return '';
   try {
-    const params = new URLSearchParams({
-      supplier_id: supplierId,
-      document_type_id: documentTypeId,
-    });
+    const params = new URLSearchParams({ supplier_id: supplierId });
+    // document_type_id is optional: the queue item's doctype is usually still
+    // null at extraction time (it's promoted AFTER the LLM call). When it's
+    // missing we omit the param and the API returns the supplier's guidance
+    // aggregated across doctypes; when known we pass it for an exact match.
+    if (documentTypeId) params.set('document_type_id', documentTypeId);
     // super_admin path needs tenant_id on the query string. Worker auths as
     // whichever user owns the API key, which in staging/prod is super_admin.
     if (tenantId) params.set('tenant_id', tenantId);
@@ -534,7 +593,693 @@ function compactFields(rec) {
   return out;
 }
 
+/**
+ * Split a block of text into chunks of at most `limit` chars, preserving
+ * row (newline) boundaries. Any single row longer than `limit` is emitted
+ * on its own — we don't break mid-row because that corrupts the model's
+ * view of tabular data. Mirrors the helper in
+ * functions/lib/connectors/email.ts.
+ */
+function chunkByRows(text, limit) {
+  const rows = text.split('\n');
+  const chunks = [];
+  let buf = '';
+  for (const row of rows) {
+    if (buf.length + row.length + 1 > limit && buf.length > 0) {
+      chunks.push(buf);
+      buf = '';
+    }
+    buf = buf.length === 0 ? row : `${buf}\n${row}`;
+  }
+  if (buf.length > 0) chunks.push(buf);
+  return chunks;
+}
+
+/**
+ * Accumulate per-page text into Qwen-sized chunks. Each emitted chunk is the
+ * concatenation of one or more whole pages prefixed with a `=== PAGE N ===`
+ * banner so the model sees page boundaries even inside a chunk (COA
+ * extraction benefits from this — multi-page COAs are frequently one product
+ * per page). Pages larger than `TEXT_CHUNK_CHAR_LIMIT` are split row-by-row.
+ *
+ * Returns an array of chunk strings. Whitespace-only chunks are dropped.
+ */
+function buildPageChunks(pages) {
+  const chunks = [];
+  let buf = '';
+
+  const flush = () => {
+    if (buf.trim()) chunks.push(buf);
+    buf = '';
+  };
+
+  for (let i = 0; i < pages.length; i++) {
+    const pageNum = i + 1;
+    const page = pages[i] || '';
+    if (!page.trim()) continue;
+
+    const banner = `=== PAGE ${pageNum} ===\n\n`;
+    const block = banner + page;
+
+    // Oversized single page: flush current buf, then emit row-chunks (each
+    // sub-chunk gets its own page banner so the model still knows where it is).
+    if (block.length > TEXT_CHUNK_CHAR_LIMIT) {
+      flush();
+      const subChunks = chunkByRows(page, TEXT_CHUNK_CHAR_LIMIT - banner.length);
+      for (const sub of subChunks) {
+        chunks.push(banner + sub);
+      }
+      continue;
+    }
+
+    // Normal path: accumulate. Flush first if adding this page would overflow.
+    if (buf.length + block.length + 2 > TEXT_CHUNK_CHAR_LIMIT && buf.length > 0) {
+      flush();
+    }
+    buf = buf.length === 0 ? block : `${buf}\n\n${block}`;
+  }
+  flush();
+
+  return chunks;
+}
+
+/**
+ * Merge per-chunk extraction results into a single parsed object so multi-
+ * page docs surface every page's data. Rules:
+ *   - fields: first non-empty wins (cover-page fields like supplier_name
+ *     stick from page 1, late pages can backfill missing keys).
+ *   - products / tables: concat across chunks (the win for multi-page COAs
+ *     that are one product per page).
+ *   - summary / documentType: first non-empty.
+ *   - confidence / confidenceNum: min across chunks (the worst page's
+ *     confidence dominates — honest signal for the reviewer).
+ *
+ * Callers MUST short-circuit single-chunk docs and return the parsed object
+ * directly; this function is only invoked for multi-chunk runs.
+ */
+function mergeTextExtractions(parsedArray) {
+  const merged = {
+    fields: {},
+    tables: [],
+    products: [],
+    summary: '',
+    confidence: 'low',
+    confidenceNum: null,
+    documentType: null,
+  };
+
+  const isEmpty = (v) => v == null || (typeof v === 'string' && v.trim() === '');
+  const confRank = { high: 3, medium: 2, low: 1 };
+  let minConfBucket = null;
+
+  for (const p of parsedArray) {
+    if (!p) continue;
+
+    // fields: first non-empty wins
+    for (const [k, v] of Object.entries(p.fields || {})) {
+      if (!isEmpty(v) && isEmpty(merged.fields[k])) {
+        merged.fields[k] = v;
+      }
+    }
+
+    if (Array.isArray(p.tables) && p.tables.length > 0) {
+      merged.tables.push(...p.tables);
+    }
+    if (Array.isArray(p.products) && p.products.length > 0) {
+      merged.products.push(...p.products);
+    }
+
+    if (!merged.summary && typeof p.summary === 'string' && p.summary.trim()) {
+      merged.summary = p.summary;
+    }
+    if (!merged.documentType && typeof p.documentType === 'string' && p.documentType.trim()) {
+      merged.documentType = p.documentType;
+    }
+
+    // confidence bucket: track min via rank
+    if (p.confidence && confRank[p.confidence]) {
+      if (minConfBucket == null || confRank[p.confidence] < confRank[minConfBucket]) {
+        minConfBucket = p.confidence;
+      }
+    }
+
+    // numeric confidence: null-safe min
+    if (typeof p.confidenceNum === 'number' && isFinite(p.confidenceNum)) {
+      if (merged.confidenceNum == null || p.confidenceNum < merged.confidenceNum) {
+        merged.confidenceNum = p.confidenceNum;
+      }
+    }
+  }
+
+  if (minConfBucket) merged.confidence = minConfBucket;
+  return merged;
+}
+
+// =============================================================================
+// XLSX support (text-shaped — one CSV per sheet, fed through the chunker)
+// =============================================================================
+
+/**
+ * True when the queue item is an XLSX workbook. Matches the
+ * openxmlformats spreadsheet mime OR a `.xlsx` filename (some sources post a
+ * generic octet-stream mime for spreadsheet attachments).
+ */
+function isXlsxItem(item) {
+  return (
+    item.mime_type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    /\.xlsx$/i.test(item.file_name || '')
+  );
+}
+
+/**
+ * Parse an XLSX buffer into an array of per-sheet CSV strings (pages[]).
+ * Sheets whose name matches /inactive/i are skipped (mirrors the
+ * INACTIVE_CUST skip in functions/lib/connectors/email.ts:parseXLSXAttachment).
+ * Pipe field-separator keeps the model grounded on column boundaries since
+ * cells frequently contain commas. Returns [] if no usable sheets.
+ */
+function xlsxToPages(fileBuffer) {
+  const XLSX = require('xlsx');
+  const workbook = XLSX.read(new Uint8Array(fileBuffer), { type: 'array' });
+  const pages = [];
+  for (const sheetName of workbook.SheetNames) {
+    if (/inactive/i.test(sheetName)) continue;
+    const ws = workbook.Sheets[sheetName];
+    if (!ws) continue;
+    const csv = XLSX.utils.sheet_to_csv(ws, { FS: ' | ' });
+    if (csv && csv.trim()) {
+      pages.push(`=== SHEET: ${sheetName} ===\n${csv}`);
+    }
+  }
+  return pages;
+}
+
+// =============================================================================
+// DOCX support (text-shaped — Word audit trails, BOLs, etc., no OCR/VLM)
+// =============================================================================
+
+/**
+ * True when the queue item is a Word .docx document. Matches the
+ * openxmlformats wordprocessing mime OR a `.docx` filename (some sources post
+ * a generic octet-stream mime for Word attachments). The WMS audit trail that
+ * exposed this gap is a .docx — without this branch the worker extracts no
+ * text and errors with "no text extracted".
+ */
+function isDocxItem(item) {
+  return (
+    item.mime_type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    /\.docx$/i.test(item.file_name || '')
+  );
+}
+
+/**
+ * Extract plain text from a .docx buffer via mammoth (extractRawText). Returns
+ * a `pages[]` array — DOCX has no hard page boundaries we can cheaply recover,
+ * so the whole document is a single text-shaped "page" fed through the same
+ * chunker as the other text formats. Returns [] on empty/failed extraction.
+ */
+async function docxToPages(fileBuffer) {
+  const mammoth = require('mammoth');
+  const { value } = await mammoth.extractRawText({ buffer: Buffer.from(fileBuffer) });
+  const text = (value || '').trim();
+  return text ? [text] : [];
+}
+
+// =============================================================================
+// Shared text/format extraction (order + shipment paths)
+// =============================================================================
+
+/**
+ * Extract `{ text, pages }` from a downloaded file buffer for the text-shaped
+ * order/shipment paths. Handles PDF (unpdf + OCR fallback), text/csv/json,
+ * XLSX, DOCX, and standalone images (OCR). Order/shipment inputs are
+ * overwhelmingly text-shaped (XLSX/CSV/PDF order confirmations, Word audit
+ * trails), so there is NO VLM here.
+ *
+ * The COA path keeps its OWN inline extraction (byte-identical to pre-P3); this
+ * helper is a separate, simpler extractor for the new kinds so the COA branch
+ * is never touched.
+ */
+async function extractTextAndPages(item, fileBuffer, fileBufferCopy) {
+  let text = null;
+  let pages = [];
+
+  if (item.mime_type === 'application/pdf') {
+    try {
+      const { extractText } = await import('unpdf');
+      const result = await extractText(new Uint8Array(fileBuffer), { mergePages: false });
+      const rawPages = Array.isArray(result.text)
+        ? result.text.map(p => (p == null ? '' : String(p)))
+        : (result.text ? [String(result.text)] : []);
+      if (rawPages.length > 0 && rawPages.some(p => p.trim().length > 0)) {
+        pages = rawPages;
+        text = rawPages.join('\n').replace(/\s+/g, ' ').substring(0, 100000);
+      }
+    } catch (err) {
+      console.warn(`PDF extraction failed for ${item.file_name}:`, err.message);
+    }
+    if (text && text.trim().length > 0 && isTextGarbled(text)) {
+      text = null;
+      pages = [];
+    }
+    if (!text || text.trim().length === 0) {
+      const ocrText = ocrPdf(fileBufferCopy);
+      if (ocrText) {
+        text = ocrText.substring(0, 100000);
+        pages = [text];
+      }
+    }
+  } else if (
+    item.mime_type === 'text/plain' ||
+    item.mime_type === 'text/csv' ||
+    item.mime_type === 'application/json'
+  ) {
+    text = new TextDecoder().decode(new Uint8Array(fileBuffer)).substring(0, 100000);
+    pages = [text];
+  } else if (isXlsxItem(item)) {
+    try {
+      pages = xlsxToPages(fileBuffer);
+      text = pages.join('\n').substring(0, 100000);
+    } catch (err) {
+      console.warn(`  XLSX parse failed for ${item.file_name}: ${err.message}`);
+    }
+  } else if (isDocxItem(item)) {
+    try {
+      pages = await docxToPages(fileBuffer);
+      text = pages.join('\n').substring(0, 100000);
+    } catch (err) {
+      console.warn(`  DOCX parse failed for ${item.file_name}: ${err.message}`);
+    }
+  } else if (item.mime_type === 'image/png' || item.mime_type === 'image/jpeg' || item.mime_type === 'image/jpg') {
+    try {
+      const ext = item.mime_type === 'image/png' ? 'png' : 'jpg';
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-ocr-'));
+      const imgPath = path.join(tmpDir, `image.${ext}`);
+      fs.writeFileSync(imgPath, Buffer.from(fileBuffer));
+      detectAndRotateImage(imgPath);
+      try {
+        const result = execFileSync('tesseract', [imgPath, 'stdout', '--psm', '1'], {
+          timeout: 60_000,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        text = result.toString('utf-8').trim();
+        if (text) {
+          text = text.substring(0, 100000);
+          pages = [text];
+        }
+      } catch (err) {
+        console.warn(`  OCR failed for ${item.file_name}: ${err.message}`);
+      }
+      try {
+        fs.unlinkSync(imgPath);
+        fs.rmdirSync(tmpDir);
+      } catch { /* best-effort */ }
+    } catch (err) {
+      console.warn(`  Image OCR setup failed: ${err.message}`);
+    }
+  }
+
+  return { text, pages };
+}
+
+// =============================================================================
+// Extraction profile loading (Phase P3)
+// =============================================================================
+
+/**
+ * Load a unified extraction profile for a queue item.
+ *
+ * For 'order' / 'shipment' kinds with a source_id, fetches
+ * GET /api/sources/:id/profile to get this connector's field_mappings +
+ * extraction_instructions. Returns null fields on any failure so the caller
+ * can fall back to defaults — extraction must always proceed.
+ *
+ * For 'coa' / null kinds this is unused: the COA path keeps TODAY'S exact
+ * resolution (supplier name-resolve, fetchReviewerInstructions, examples,
+ * learned prefs) inline in processCoaItem — untouched.
+ */
+async function loadExtractionProfile(item) {
+  const kind = item.output_kind || 'coa';
+  const profile = {
+    kind,
+    field_mappings: null,
+    extraction_instructions: '',
+    supplier_id: item.supplier_id || null,
+    document_type_id: item.document_type_id || null,
+  };
+
+  if ((kind === 'order' || kind === 'shipment') && item.source_id) {
+    try {
+      const res = await fetch(
+        `${DOX_API_URL}/api/sources/${encodeURIComponent(item.source_id)}/profile`,
+        { headers }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        profile.field_mappings = data.field_mappings || null;
+        profile.extraction_instructions =
+          typeof data.extraction_instructions === 'string' ? data.extraction_instructions : '';
+        if (data.supplier_id) profile.supplier_id = data.supplier_id;
+        if (data.document_type_id) profile.document_type_id = data.document_type_id;
+        console.log(
+          `  Source profile loaded for ${item.source_id} ` +
+          `(instructions=${profile.extraction_instructions.length} chars)`
+        );
+      } else {
+        console.warn(`  Source profile fetch failed: ${res.status} (using defaults)`);
+      }
+    } catch (err) {
+      console.warn(`  Source profile lookup failed (non-critical): ${err.message}`);
+    }
+  }
+
+  return profile;
+}
+
+// =============================================================================
+// Order / shipment text-path Qwen caller (shared by both new kinds)
+// =============================================================================
+
+/**
+ * Call the text-path Qwen model with a single chunk and a fully-composed
+ * system prompt, returning the RAW parsed JSON object (or null on parse
+ * failure). Same retry/timeout shape as the COA runTextQwen, but kind-agnostic:
+ * the caller owns prompt construction (order vs shipment) and downstream
+ * normalization. JSON-only via response_format so the order/shipment shapes
+ * come back clean.
+ */
+async function runRecordsQwen(systemPrompt, userText, fileName) {
+  let qwenData;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 1_800_000); // 30 min
+      const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(QWEN_SECRET ? { Authorization: `Bearer ${QWEN_SECRET}` } : {}),
+        },
+        signal: controller.signal,
+        dispatcher: llmDispatcher,
+        body: JSON.stringify({
+          model: modelFor('best', process.env),
+          temperature: 0,
+          max_tokens: 8192,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `Subject: ${fileName}\n\n${userText}` },
+          ],
+        }),
+      });
+      clearTimeout(timeout);
+      if (!qwenRes.ok) {
+        const errText = await qwenRes.text().catch(() => '');
+        throw new Error(`Qwen HTTP ${qwenRes.status}: ${errText.substring(0, 200)}`);
+      }
+      qwenData = await qwenRes.json();
+      break;
+    } catch (err) {
+      if (attempt === 2) throw new Error(`Qwen call failed: ${err.message}`);
+      console.warn(`  Qwen retry ${attempt}/2 for ${fileName}: ${err.message}`);
+      console.warn('  Waiting 60s for model to load...');
+      await new Promise(r => setTimeout(r, 60_000));
+    }
+  }
+  let content = qwenData.choices?.[0]?.message?.content || '';
+  console.log(`  Qwen response (${content.length} chars): ${content.substring(0, 200)}...`);
+  // Strip thinking blocks / code fences the same way parseExtraction does.
+  content = content.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+  const fenceMatch = content.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/);
+  if (fenceMatch) content = fenceMatch[1].trim();
+  try {
+    return JSON.parse(content);
+  } catch (err) {
+    console.warn(`  JSON parse failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Build the soft-capped text chunks for an order/shipment input. Reuses the
+ * COA chunker (buildPageChunks / chunkByRows) so XLSX sheets and multi-page
+ * PDFs split the same way, with the same TEXT_MAX_CHUNKS cap and legacy
+ * single-truncated fallback.
+ */
+function buildRecordChunks(text, pages) {
+  if (pages.length <= 1) return [text.substring(0, 6000)];
+  const chunks = buildPageChunks(pages);
+  if (chunks.length === 0) return [text.substring(0, 6000)];
+  if (chunks.length > TEXT_MAX_CHUNKS) {
+    console.warn(
+      `  Records chunking: ${pages.length} page(s)/sheet(s) → ${chunks.length} chunks ` +
+      `(cap: ${TEXT_MAX_CHUNKS}) — falling back to legacy 6K-truncation single call`
+    );
+    return [text.substring(0, 6000)];
+  }
+  return chunks;
+}
+
+// =============================================================================
+// Order extraction path (Phase P3)
+// =============================================================================
+
+/**
+ * Extract orders + customers from a queued order document. Builds the prompt
+ * from the connector's field_mappings via the SHARED orderPrompt module
+ * (same code the CF connector pipeline runs), runs one Qwen call per chunk,
+ * normalizes each chunk with normalizeAiOutput, and merges via mergeOutputs.
+ *
+ * Posts ai_records = JSON.stringify({orders, customers}) — NO ai_fields. The
+ * server-side producer that turns ai_records into entities is Phase P4; here
+ * the worker only extracts + posts. Confidence is the LLM self-rating (no
+ * template gate — that's the producer's job).
+ */
+async function processOrderItem(item) {
+  const startTime = Date.now();
+  console.log(`Processing ORDER ${item.file_name} (${item.id})...`);
+
+  try {
+    await postResults(item.id, { processing_status: 'processing' });
+
+    const fileBuffer = await downloadQueueFile(item);
+    const fileBufferCopy = fileBuffer.slice(0);
+    const { text, pages } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
+
+    if (!text || text.trim().length === 0) {
+      await postResults(item.id, {
+        processing_status: 'error',
+        error_message: `Could not extract text from ${item.mime_type} file for order extraction.`,
+      });
+      console.log(`  Skipped ${item.file_name}: no text extracted`);
+      return;
+    }
+
+    const profile = await loadExtractionProfile(item);
+    // field_mappings may be null when no source profile resolved — fall back to
+    // the shared default-mappings prompt so a prompt always builds.
+    const basePrompt = profile.field_mappings
+      ? buildParsingPrompt(profile.field_mappings)
+      : getDefaultParsingPrompt();
+    const systemPrompt = prependConnectorInstructions(basePrompt, profile.extraction_instructions);
+
+    const chunks = buildRecordChunks(text, pages);
+    console.log(`  Order extraction: ${pages.length} page(s)/sheet(s) → ${chunks.length} chunk(s)`);
+
+    const outputs = [];
+    for (let i = 0; i < chunks.length; i++) {
+      console.log(`  Qwen call ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
+      const raw = await runRecordsQwen(systemPrompt, chunks[i], item.file_name);
+      if (raw) {
+        const { orders, customers } = normalizeAiOutput(raw);
+        outputs.push({ orders, customers, errors: [] });
+      }
+    }
+
+    const merged = mergeOutputs(outputs);
+    const orders = merged.orders;
+    const customers = merged.customers;
+
+    // Confidence = min LLM self-rating across orders (honest worst-case for the
+    // reviewer). No template gate — the P4 producer owns that decision.
+    let confidence = null;
+    for (const o of orders) {
+      const c = clampConfidence(o._confidence);
+      if (typeof c === 'number') confidence = confidence == null ? c : Math.min(confidence, c);
+    }
+
+    await postResults(item.id, {
+      processing_status: 'ready',
+      extracted_text: text.substring(0, 100000),
+      ai_records: JSON.stringify({ orders, customers }),
+      confidence,
+      summary: `Extracted ${orders.length} order(s), ${customers.length} customer(s)`,
+    });
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`  Done (order): ${item.file_name} — ${orders.length} order(s), ${customers.length} customer(s), ${elapsed}s`);
+  } catch (err) {
+    console.error(`  Error processing order ${item.file_name}:`, err.message);
+    await postResults(item.id, {
+      processing_status: 'error',
+      error_message: err.message,
+    }).catch(() => {});
+  }
+}
+
+// =============================================================================
+// Shipment extraction path (Phase P3)
+// =============================================================================
+
+const SHIPMENT_PROMPT = `/no_think
+You are a shipment/fulfillment report parser. Extract shipment line records from the input.
+The input may be a shipping manifest, fulfillment export, BOL detail, or a spreadsheet of shipped lots.
+
+Extract every shipment line into a "shipments" array. Each shipment object has:
+  - order_number   (REQUIRED) — the order/invoice/sale identifier this shipment fulfills.
+  - product_name   — product description.
+  - product_code   — product/item code or SKU.
+  - lot_number     (REQUIRED) — the lot/batch/run number shipped.
+  - quantity       — quantity shipped (number; negatives allowed for adjustments).
+  - status         — fulfillment status if present (e.g. "shipped", "picked", "backordered").
+
+Rules:
+- Emit ONE shipment object per shipped line. A single order with three shipped
+  lots becomes three shipment objects, all sharing that order_number.
+- If a row has no order_number OR no lot_number, DROP it — those are the two
+  required keys and a row missing either is not a usable shipment record.
+- Do NOT fabricate order_number or lot_number from adjacent columns. If a value
+  is not clearly present, leave optional fields null and drop the row if a
+  required field is missing.
+- ALWAYS emit \`_confidence\` on every shipment — a single number between 0.0 and
+  1.0 reflecting how sure you are about that record. Be honest; a low confidence
+  flag a human can investigate is FAR better than a fabricated record.
+- Return valid JSON only, no explanation.
+
+Return JSON in this exact shape:
+{ "shipments": [ { "order_number": "...", "product_name": "...", "product_code": "...", "lot_number": "...", "quantity": 0, "status": "...", "_confidence": 0.0 } ] }`;
+
+/**
+ * Extract shipments from a queued shipment document. Minimal new prompt (above),
+ * one Qwen call per chunk, drops rows missing order_number or lot_number, posts
+ * ai_records = JSON.stringify({shipments}). Confidence = min LLM self-rating
+ * across surviving rows. P4 owns turning these into entities.
+ */
+async function processShipmentItem(item) {
+  const startTime = Date.now();
+  console.log(`Processing SHIPMENT ${item.file_name} (${item.id})...`);
+
+  try {
+    await postResults(item.id, { processing_status: 'processing' });
+
+    const fileBuffer = await downloadQueueFile(item);
+    const fileBufferCopy = fileBuffer.slice(0);
+    const { text, pages } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
+
+    if (!text || text.trim().length === 0) {
+      await postResults(item.id, {
+        processing_status: 'error',
+        error_message: `Could not extract text from ${item.mime_type} file for shipment extraction.`,
+      });
+      console.log(`  Skipped ${item.file_name}: no text extracted`);
+      return;
+    }
+
+    const profile = await loadExtractionProfile(item);
+    const systemPrompt = prependConnectorInstructions(SHIPMENT_PROMPT, profile.extraction_instructions);
+
+    const chunks = buildRecordChunks(text, pages);
+    console.log(`  Shipment extraction: ${pages.length} page(s)/sheet(s) → ${chunks.length} chunk(s)`);
+
+    const shipments = [];
+    let confidence = null;
+    for (let i = 0; i < chunks.length; i++) {
+      console.log(`  Qwen call ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
+      const raw = await runRecordsQwen(systemPrompt, chunks[i], item.file_name);
+      if (!raw || !Array.isArray(raw.shipments)) continue;
+      for (const s of raw.shipments) {
+        // Validation: drop rows missing either required key.
+        const orderNumber = s && typeof s.order_number === 'string' ? s.order_number.trim() : '';
+        const lotNumber = s && typeof s.lot_number === 'string' ? s.lot_number.trim() : '';
+        if (!orderNumber || !lotNumber) continue;
+        const conf = clampConfidence(s._confidence);
+        if (typeof conf === 'number') confidence = confidence == null ? conf : Math.min(confidence, conf);
+        shipments.push({
+          order_number: orderNumber,
+          product_name: s.product_name != null ? String(s.product_name) : null,
+          product_code: s.product_code != null ? String(s.product_code) : null,
+          lot_number: lotNumber,
+          quantity: s.quantity != null ? s.quantity : null,
+          status: s.status != null ? String(s.status) : null,
+          _confidence: conf,
+        });
+      }
+    }
+
+    await postResults(item.id, {
+      processing_status: 'ready',
+      extracted_text: text.substring(0, 100000),
+      ai_records: JSON.stringify({ shipments }),
+      confidence,
+      summary: `Extracted ${shipments.length} shipment line(s)`,
+    });
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`  Done (shipment): ${item.file_name} — ${shipments.length} shipment line(s), ${elapsed}s`);
+  } catch (err) {
+    console.error(`  Error processing shipment ${item.file_name}:`, err.message);
+    await postResults(item.id, {
+      processing_status: 'error',
+      error_message: err.message,
+    }).catch(() => {});
+  }
+}
+
+/**
+ * Download a queue item's file with the same 3-attempt retry the COA path uses.
+ * Extracted so the order/shipment paths share it without touching the COA
+ * branch's inline copy.
+ */
+async function downloadQueueFile(item) {
+  let fileBuffer;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const fileRes = await fetch(`${DOX_API_URL}/api/queue/${item.id}/file`, {
+        headers: { 'X-API-Key': DOX_API_KEY },
+      });
+      if (!fileRes.ok) throw new Error(`File download failed: ${fileRes.status}`);
+      fileBuffer = await fileRes.arrayBuffer();
+      return fileBuffer;
+    } catch (err) {
+      if (attempt === 3) throw err;
+      console.warn(`  Retry ${attempt}/3 for ${item.file_name}: ${err.message}`);
+      await new Promise(r => setTimeout(r, 2000 * attempt));
+    }
+  }
+}
+
+/**
+ * Output-kind dispatcher (Phase P3). The single extraction engine now serves
+ * three OUTPUT kinds:
+ *   - 'coa' (and null/unknown) → the original COA/document path, UNCHANGED.
+ *   - 'order'                  → order/customer extraction via the shared
+ *                                orderPrompt module; posts ai_records.
+ *   - 'shipment'               → shipment/lot extraction; posts ai_records.
+ *
+ * The COA branch below is the entire pre-P3 processItem, renamed to
+ * processCoaItem and otherwise byte-identical — same prompt builders, text/VLM
+ * paths, chunker, confidence, and ai_fields/tables result body. The dispatcher
+ * only chooses which path to run; it never edits the COA path's internals.
+ */
 async function processItem(item) {
+  const kind = item.output_kind || 'coa';
+  if (kind === 'order') return await processOrderItem(item);
+  if (kind === 'shipment') return await processShipmentItem(item);
+  return await processCoaItem(item);
+}
+
+async function processCoaItem(item) {
   const startTime = Date.now();
   console.log(`Processing ${item.file_name} (${item.id})...`);
 
@@ -561,8 +1306,16 @@ async function processItem(item) {
       }
     }
 
-    // Extract text based on mime type
+    // Extract text based on mime type.
+    //
+    // `text`  is the single concatenated string used for the extracted_text DB
+    //         column and the isTextGarbled / 6K-truncation legacy paths.
+    // `pages` is the per-page array used by buildPageChunks() for multi-page
+    //         Qwen calls. For non-PDF inputs (or PDFs that fall back to OCR)
+    //         it's a single-element array so the downstream chunker treats
+    //         them as a one-chunk doc identical to today's behavior.
     let text = null;
+    let pages = [];
 
     // Keep a copy of fileBuffer for OCR fallback (unpdf may detach the ArrayBuffer)
     const fileBufferCopy = fileBuffer.slice(0);
@@ -573,8 +1326,25 @@ async function processItem(item) {
     if (item.mime_type === 'application/pdf') {
       try {
         const { extractText } = await import('unpdf');
-        const result = await extractText(new Uint8Array(fileBuffer), { mergePages: true });
-        text = result.text?.substring(0, 100000) || null;
+        // mergePages: false → array of per-page strings so the chunker can
+        // build size-aware multi-page Qwen calls. Earlier behavior was
+        // mergePages: true, which silently truncated pages 3+ after a 6K cap.
+        const result = await extractText(new Uint8Array(fileBuffer), { mergePages: false });
+        // Coerce defensively — older unpdf builds returned a string here.
+        const rawPages = Array.isArray(result.text)
+          ? result.text.map(p => (p == null ? '' : String(p)))
+          : (result.text ? [String(result.text)] : []);
+        if (rawPages.length > 0 && rawPages.some(p => p.trim().length > 0)) {
+          pages = rawPages;
+          // `text` mirrors what unpdf's `mergePages: true` used to produce:
+          // pages joined with "\n" and ALL whitespace collapsed to single
+          // spaces. We preserve that collapsing so the legacy 6K-truncation
+          // fast path, isTextGarbled() check, and extracted_text DB column
+          // all see byte-identical inputs to pre-chunking behavior. The
+          // un-collapsed per-page text lives in `pages[]` for the chunker,
+          // where whitespace matters for table layout.
+          text = rawPages.join('\n').replace(/\s+/g, ' ').substring(0, 100000);
+        }
       } catch (err) {
         console.warn(`PDF extraction failed for ${item.file_name}:`, err.message);
       }
@@ -583,15 +1353,20 @@ async function processItem(item) {
       if (text && text.trim().length > 0 && isTextGarbled(text)) {
         console.log(`  Text looks garbled (avg word len too high), trying OCR for ${item.file_name}...`);
         text = null; // fall through to OCR path below
+        pages = [];
       }
 
-      // OCR fallback for scanned/image-based PDFs
+      // OCR fallback for scanned/image-based PDFs. OCR returns one big string
+      // with no usable page boundaries, so we wrap it as a single-element
+      // pages[] — the chunker then routes it through the legacy 6K-truncation
+      // fast path (we don't want to blow context on OCR'd images).
       if (!text || text.trim().length === 0) {
         console.log(`  No text from unpdf, trying OCR for ${item.file_name}...`);
-        text = ocrPdf(fileBufferCopy);
-        if (text) {
-          console.log(`  OCR extracted ${text.length} chars`);
-          text = text.substring(0, 100000);
+        const ocrText = ocrPdf(fileBufferCopy);
+        if (ocrText) {
+          console.log(`  OCR extracted ${ocrText.length} chars`);
+          text = ocrText.substring(0, 100000);
+          pages = [text];
         }
       }
     } else if (
@@ -600,6 +1375,28 @@ async function processItem(item) {
       item.mime_type === 'application/json'
     ) {
       text = new TextDecoder().decode(new Uint8Array(fileBuffer)).substring(0, 100000);
+      pages = [text];
+    } else if (isXlsxItem(item)) {
+      // XLSX is text-shaped: each non-/inactive/ sheet → pipe-separated CSV
+      // pushed as a pages[] entry so the existing chunker treats sheets like
+      // pages. No OCR / VLM. Mirrors parseXLSXAttachment in
+      // functions/lib/connectors/email.ts.
+      try {
+        pages = xlsxToPages(fileBuffer);
+        text = pages.join('\n').substring(0, 100000);
+      } catch (err) {
+        console.warn(`  XLSX parse failed for ${item.file_name}: ${err.message}`);
+      }
+    } else if (isDocxItem(item)) {
+      // DOCX is text-shaped: mammoth.extractRawText → one page through the
+      // chunker. No OCR / VLM. Same handling as the order/shipment path's
+      // extractTextAndPages so a Word COA extracts instead of erroring.
+      try {
+        pages = await docxToPages(fileBuffer);
+        text = pages.join('\n').substring(0, 100000);
+      } catch (err) {
+        console.warn(`  DOCX parse failed for ${item.file_name}: ${err.message}`);
+      }
     } else if (item.mime_type === 'image/png' || item.mime_type === 'image/jpeg' || item.mime_type === 'image/jpg') {
       // OCR standalone images via tesseract
       try {
@@ -619,6 +1416,7 @@ async function processItem(item) {
           if (text) {
             console.log(`  OCR extracted ${text.length} chars from image`);
             text = text.substring(0, 100000);
+            pages = [text];
           }
         } catch (err) {
           console.warn(`  OCR failed for ${item.file_name}: ${err.message}`);
@@ -642,9 +1440,6 @@ async function processItem(item) {
       console.log(`  Skipped ${item.file_name}: no text extracted`);
       return;
     }
-
-    // Trim text for LLM — 6K covers key fields on first 1-2 pages
-    const llmText = text.substring(0, 6000);
 
     // Try to guess supplier from filename for better example matching
     let guessedSupplier = null;
@@ -676,7 +1471,15 @@ async function processItem(item) {
     try {
       const supplierName = item.supplier || guessedSupplier || null;
       resolvedSupplierIdForLearning = await resolveSupplierIdByName(item.tenant_id, supplierName);
-      if (resolvedSupplierIdForLearning && item.document_type_id) {
+      if (!resolvedSupplierIdForLearning) {
+        console.log(
+          `  Reviewer instructions: no supplier match for "${supplierName || '(none)'}" ` +
+          `— skipping instructions + learned hints`
+        );
+      } else {
+        // Note: item.document_type_id may be null here (it's promoted only
+        // AFTER extraction). We pass it through anyway — the API falls back
+        // to supplier-wide guidance when no doctype is supplied.
         reviewerInstructions = await fetchReviewerInstructions(
           item.tenant_id,
           resolvedSupplierIdForLearning,
@@ -685,7 +1488,13 @@ async function processItem(item) {
         if (reviewerInstructions) {
           console.log(
             `  Reviewer instructions loaded: ${reviewerInstructions.length} chars ` +
-            `(supplier=${supplierName}, doctype=${item.document_type_id})`
+            `(supplier="${supplierName}" id=${resolvedSupplierIdForLearning}, ` +
+            `doctype=${item.document_type_id || 'unresolved→supplier-wide'})`
+          );
+        } else {
+          console.log(
+            `  Reviewer instructions: none on file for supplier="${supplierName}" ` +
+            `id=${resolvedSupplierIdForLearning} (doctype=${item.document_type_id || 'unresolved'})`
           );
         }
         learnedPreferences = await fetchLearnedPreferences(
@@ -700,13 +1509,13 @@ async function processItem(item) {
           );
         }
       }
-    } catch {
-      // Non-critical — continue without instructions or learned hints
+    } catch (err) {
+      console.warn(`  Reviewer instructions: lookup failed (non-critical): ${err.message}`);
     }
 
-    // Helper: call the text-path Qwen3-8B model.
-    // Returns a `parsed` object or throws.
-    async function runTextQwen() {
+    // Helper: call the text-path Qwen3-8B model with a single chunk of
+    // document text. Returns a `parsed` object or throws.
+    async function runTextQwen(llmText) {
       let qwenData;
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
@@ -761,6 +1570,61 @@ async function processItem(item) {
       return parseExtraction(content);
     }
 
+    // Dispatcher: route to either the legacy 6K-truncation single-call path
+    // (single-page docs, OCR fallbacks, image-OCR — byte-identical to pre-
+    // chunking behavior) or the multi-page chunker. Returns a `parsed`
+    // object. Used by BOTH the primary text path and the VLM-primary
+    // fallback path so multi-page docs never silently drop pages 3+.
+    async function runTextPath() {
+      // Single-page (or single-string) fast path: identical behavior to
+      // the pre-chunking worker — same 6K truncation, same single Qwen
+      // call, same log output, same parsed shape.
+      if (pages.length <= 1) {
+        const llmText = text.substring(0, 6000);
+        return await runTextQwen(llmText);
+      }
+
+      const chunks = buildPageChunks(pages);
+
+      // Empty chunks would only happen if every page was whitespace; treat
+      // like the single-page fast path against `text` (which already has
+      // whatever signal there is).
+      if (chunks.length === 0) {
+        const llmText = text.substring(0, 6000);
+        return await runTextQwen(llmText);
+      }
+
+      // Hard cap: if we'd need too many Qwen calls, fall back to a single
+      // truncated call rather than erroring the doc. Each call risks a
+      // cold-start 502 from the GPU host; more calls compound that risk.
+      if (chunks.length > TEXT_MAX_CHUNKS) {
+        console.warn(
+          `  Multi-page chunking: ${pages.length} pages would need ${chunks.length} chunks ` +
+          `(cap: ${TEXT_MAX_CHUNKS}) — falling back to legacy 6K-truncation single call`
+        );
+        const llmText = text.substring(0, 6000);
+        return await runTextQwen(llmText);
+      }
+
+      // Single-chunk fast path (e.g. small multi-page docs that fit under
+      // the chunk limit): one Qwen call, return parsed directly. Skipping
+      // the merge wrapper keeps the common case byte-identical to a
+      // single-page run.
+      if (chunks.length === 1) {
+        return await runTextQwen(chunks[0]);
+      }
+
+      // Multi-chunk path — the new behavior. Run each chunk independently
+      // and merge results so pages 3+ contribute to fields/tables/products.
+      console.log(`  Multi-page chunking: ${pages.length} pages → ${chunks.length} chunk(s)`);
+      const parsedChunks = [];
+      for (let i = 0; i < chunks.length; i++) {
+        console.log(`  Qwen call ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
+        parsedChunks.push(await runTextQwen(chunks[i]));
+      }
+      return mergeTextExtractions(parsedChunks);
+    }
+
     // ===== VLM dual-run dispatcher =====
     // In 'off' mode:     only the text path runs (unchanged legacy behavior).
     // In 'dual' mode:    text path is primary, VLM runs in parallel after and
@@ -808,43 +1672,115 @@ async function processItem(item) {
 
     const canRunVlm = QWEN_VLM_MODE !== 'off' && item.mime_type === 'application/pdf';
 
+    // Canonicalize a VLM result into the same `parsed` shape the text path
+    // produces. Shared by pass 1 and the post-extraction re-extract below so
+    // both passes go through identical normalization.
+    const parsedFromVlm = (res) => ({
+      fields: res.fields,
+      tables: res.tables,
+      products: res.products,
+      summary: res.summary,
+      confidence: res.confidence,
+      documentType: res.documentType,
+    });
+    // Canonicalize text-path fields in place (mutates the parsed object).
+    const canonicalizeTextParsed = (p) => {
+      const canonicalized = canonicalizeFields(p.fields || {});
+      if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
+        canonicalized.supplier_name = null;
+      }
+      p.fields = compactFields(canonicalized);
+      return p;
+    };
+
+    // Which extraction routine produced the primary `parsed`? The
+    // post-extraction re-extract (two-pass instruction application) reuses the
+    // SAME routine so cost/behavior are unchanged aside from the new prompt.
+    // 'vlm'  → re-run runVlmSafe(); 'text' → re-run runTextPath().
+    let primaryPath = null;
+
     if (QWEN_VLM_MODE === 'vlm' && canRunVlm) {
       // VLM-primary mode: run VLM first, fall back to text on failure.
       vlmResult = await runVlmSafe();
       if (vlmResult) {
-        parsed = {
-          fields: vlmResult.fields,
-          tables: vlmResult.tables,
-          products: vlmResult.products,
-          summary: vlmResult.summary,
-          confidence: vlmResult.confidence,
-          documentType: vlmResult.documentType,
-        };
+        parsed = parsedFromVlm(vlmResult);
+        primaryPath = 'vlm';
       } else {
         console.log('  VLM primary failed — falling back to text path');
-        parsed = await runTextQwen();
-        // Canonicalize text fields
-        const canonicalized = canonicalizeFields(parsed.fields || {});
-        if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
-          canonicalized.supplier_name = null;
-        }
-        parsed.fields = compactFields(canonicalized);
+        parsed = canonicalizeTextParsed(await runTextPath());
+        primaryPath = 'text';
       }
     } else {
       // 'off' or 'dual' mode: text path is primary.
-      parsed = await runTextQwen();
-
-      // Canonicalize field names and detect supplier
-      const canonicalized = canonicalizeFields(parsed.fields || {});
-      if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
-        canonicalized.supplier_name = null;
-      }
-      parsed.fields = compactFields(canonicalized);
+      parsed = canonicalizeTextParsed(await runTextPath());
+      primaryPath = 'text';
 
       // In dual mode, now run VLM and capture its separate result.
       if (QWEN_VLM_MODE === 'dual' && canRunVlm) {
         console.log('  Running VLM dual-pass...');
         vlmResult = await runVlmSafe();
+      }
+    }
+
+    // ===== Two-pass reviewer-instruction application =====
+    // Pass 1 (above) only applied reviewer instructions when the supplier was
+    // known UPFRONT (item.supplier or a filename match). Manual imports with
+    // date-only filenames (e.g. "5-27-26 CREAM HG.pdf") carry no supplier, so
+    // resolveSupplierIdByName() returned null and `reviewerInstructions` stayed
+    // empty — the model extracted UNGUIDED even though it then identified the
+    // supplier (e.g. "ANDERSEN DAIRY INC."). Now that pass 1 resolved a
+    // supplier_name, re-resolve the supplier and, if guidance exists that
+    // wasn't already in the pass-1 prompt, re-extract ONCE with it applied.
+    //
+    // Hard guard: at most one re-extraction (no loops) — only when instructions
+    // are actually found. Most docs already had instructions (or have none),
+    // so this is zero extra cost: exactly one Qwen call as today. A second call
+    // happens only when a known-instruction supplier is detected late.
+    if (!reviewerInstructions) {
+      try {
+        // parsed.fields.supplier_name is already canonicalized + address-
+        // stripped by pass 1's canonicalize step, matching how the existing
+        // code derives the supplier name.
+        const lateSupplierName = parsed.fields?.supplier_name || null;
+        const lateSupplierId = await resolveSupplierIdByName(item.tenant_id, lateSupplierName);
+        if (lateSupplierId) {
+          const lateInstructions = await fetchReviewerInstructions(
+            item.tenant_id,
+            lateSupplierId,
+            item.document_type_id
+          );
+          if (lateInstructions && lateInstructions.trim()) {
+            console.log(
+              `  Re-extracting with reviewer instructions for supplier ` +
+              `"${lateSupplierName}" (resolved post-extraction): ` +
+              `${lateInstructions.length} chars`
+            );
+            // Promote the late-resolved supplier for learned-preference capture
+            // and feed the guidance into the (lexically-closed-over) prompt
+            // builders used by runTextPath()/runVlmSafe().
+            reviewerInstructions = lateInstructions;
+            if (!resolvedSupplierIdForLearning) {
+              resolvedSupplierIdForLearning = lateSupplierId;
+            }
+            // Re-run the SAME path that produced the primary parsed, with the
+            // instructions now in scope. Exactly one re-extraction.
+            if (primaryPath === 'vlm') {
+              const reVlm = await runVlmSafe();
+              if (reVlm) {
+                vlmResult = reVlm;
+                parsed = parsedFromVlm(reVlm);
+              } else {
+                console.warn('  Re-extract (VLM) failed — keeping pass-1 result');
+              }
+            } else {
+              parsed = canonicalizeTextParsed(await runTextPath());
+            }
+          }
+        }
+      } catch (err) {
+        // Best-effort: a failed re-extraction must never block posting the
+        // pass-1 result.
+        console.warn(`  Post-extraction instruction re-extract failed (non-critical): ${err.message}`);
       }
     }
 

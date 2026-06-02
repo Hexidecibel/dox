@@ -10,6 +10,7 @@ import {
 import { buildR2Key, uploadFile, computeChecksum } from '../../lib/r2';
 import { sanitizeString } from '../../lib/validation';
 import { extractText } from '../../lib/extract';
+import { attachLotToCoaDocument } from '../../lib/entities/matching';
 import type { Env, User, Document } from '../../lib/types';
 
 const ALLOWED_TYPES = [
@@ -309,6 +310,43 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           )
             .bind(generateId(), existingDoc.id, link.product_id, link.expires_at || null, link.notes || null)
             .run();
+
+          // Record product↔supplier provenance (Model B) when a supplier is
+          // known for this ingest.
+          if (supplierId) {
+            await context.env.DB.prepare(
+              `INSERT INTO product_suppliers (id, tenant_id, product_id, supplier_id)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(product_id, supplier_id) DO NOTHING`
+            )
+              .bind(generateId(), tenantId, link.product_id, supplierId)
+              .run();
+          }
+        }
+      }
+
+      // Phase 2: lot resolution + order⇄COA matching for COA ingests carrying a
+      // lot. Attach once per linked product (or once with null product when no
+      // product links exist). Best-effort — never blocks the ingest.
+      {
+        const ingestLot =
+          (primaryMetadata.lot_number as string | null) || lotNumber || null;
+        if (ingestLot) {
+          const targets = productLinks.length > 0
+            ? productLinks.map((l) => l.product_id)
+            : [null];
+          for (const pid of targets) {
+            await attachLotToCoaDocument(context.env.DB, tenantId, {
+              documentId: existingDoc.id,
+              lotNumber: ingestLot,
+              productId: pid,
+              supplierId: supplierId || null,
+              codeDate: (primaryMetadata.code_date as string | null) || codeDate || null,
+              expirationDate:
+                (primaryMetadata.expiration_date as string | null) || expirationDate || null,
+              source: 'ingest',
+            });
+          }
         }
       }
 
@@ -426,6 +464,42 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           )
             .bind(generateId(), docId, link.product_id, link.expires_at || null, link.notes || null)
             .run();
+
+          // Record product↔supplier provenance (Model B) when a supplier is
+          // known for this ingest.
+          if (supplierId) {
+            await context.env.DB.prepare(
+              `INSERT INTO product_suppliers (id, tenant_id, product_id, supplier_id)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(product_id, supplier_id) DO NOTHING`
+            )
+              .bind(generateId(), tenantId, link.product_id, supplierId)
+              .run();
+          }
+        }
+      }
+
+      // Phase 2: lot resolution + order⇄COA matching (create flow). See the
+      // update flow above for rationale. Best-effort.
+      {
+        const ingestLot =
+          (primaryMetadata.lot_number as string | null) || lotNumber || null;
+        if (ingestLot) {
+          const targets = productLinks.length > 0
+            ? productLinks.map((l) => l.product_id)
+            : [null];
+          for (const pid of targets) {
+            await attachLotToCoaDocument(context.env.DB, tenantId, {
+              documentId: docId,
+              lotNumber: ingestLot,
+              productId: pid,
+              supplierId: supplierId || null,
+              codeDate: (primaryMetadata.code_date as string | null) || codeDate || null,
+              expirationDate:
+                (primaryMetadata.expiration_date as string | null) || expirationDate || null,
+              source: 'ingest',
+            });
+          }
         }
       }
 
