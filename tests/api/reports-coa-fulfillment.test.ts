@@ -381,3 +381,51 @@ describe('COA Fulfillment report — date range selector', () => {
     expect(body.summary.total).toBe(0);
   });
 });
+
+// Appended LAST so the extra tenant-2 rows don't perturb the fixed-count
+// assertions in the tenant-scoping block above (which run earlier in file order).
+describe('COA Fulfillment report — missing-COA availability (collect vs absent)', () => {
+  async function makeItemWithCode(
+    orderId: string, productName: string, productCode: string, lotId: string,
+  ): Promise<void> {
+    await db
+      .prepare(
+        `INSERT INTO order_items (id, order_id, product_id, product_name, product_code, quantity, lot_id, coa_document_id, coa_match_status, created_at)
+         VALUES (?, ?, NULL, ?, ?, 5, ?, NULL, 'suggested', datetime('now'))`,
+      )
+      .bind(generateTestId(), orderId, productName, productCode, lotId)
+      .run();
+  }
+
+  beforeAll(async () => {
+    const supplier = await makeSupplier(seed.tenantId2, 'Avail Supply');
+    const product = await makeProduct(seed.tenantId2, 'Coded Widget');
+    const customer = await makeCustomer(seed.tenantId2, 'Avail Co');
+    // Line A: product code 7777, no COA for its lot — but a COA titled "(7777)"
+    // exists (for a different lot) → collectible / have_other_lot.
+    const lotA = await makeLot(seed.tenantId2, product, supplier, 'AVAIL-LOT-A', '2027-01-01');
+    await makeCoaDoc(seed.tenantId2, '(7777) SOME OTHER LOT COA', 'coa-7777.pdf');
+    const ordA = await makeOrder(seed.tenantId2, 'ORD-AVAIL-A', customer, 'Avail Co', null);
+    await makeItemWithCode(ordA, 'Coded Widget', '7777', lotA);
+    // Line B: product code 8888, no COA anywhere → none_on_file.
+    const lotB = await makeLot(seed.tenantId2, product, supplier, 'AVAIL-LOT-B', '2027-01-01');
+    const ordB = await makeOrder(seed.tenantId2, 'ORD-AVAIL-B', customer, 'Avail Co', null);
+    await makeItemWithCode(ordB, 'Coded Widget', '8888', lotB);
+  });
+
+  it('flags collectible (have_other_lot) vs no_product_coa per missing-COA line', async () => {
+    const { status, body } = await runReport(
+      { id: seed.superAdminId, role: 'super_admin', tenant_id: null },
+      `tenant_id=${seed.tenantId2}&as_of=${AS_OF}`,
+    );
+    expect(status).toBe(200);
+    const a = body.rows.find((r: any) => r.order_number === 'ORD-AVAIL-A');
+    const b = body.rows.find((r: any) => r.order_number === 'ORD-AVAIL-B');
+    expect(a.gap).toBe('missing_coa');
+    expect(a.coa_availability).toBe('have_other_lot');
+    expect(b.gap).toBe('missing_coa');
+    expect(b.coa_availability).toBe('none_on_file');
+    expect(body.summary.collectible).toBeGreaterThanOrEqual(1);
+    expect(body.summary.no_product_coa).toBeGreaterThanOrEqual(1);
+  });
+});

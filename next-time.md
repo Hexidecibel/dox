@@ -4,6 +4,39 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-06-02 (pm-2) Pipeline audit + product-code matching — SHIPPED (deploy c6ed1067 / commit f5bf383)
+
+Ran a full prod audit of ingestion→produce→linking and shipped the product-code matcher.
+
+**Matching fix (your #1 — auto-confirm on product-code + lot):**
+- The reliable cross-side key is the **distributor SKU**: `order_items.product_code` vs the
+  **leading `(NNNN)` prefix of the COA document TITLE** (e.g. `(1167) 76187-29125 CF LIQ WHOLE EGG
+  LOT 6141`). NOT the COA's extracted `product_code` field — that's the *manufacturer* code
+  (`76187-29125-00`) and does NOT match the order. This tripped up the original premise.
+- `classifyMatch` now strong-links on code+lot (new `'lot+code'` basis, 0.9). `POST /api/admin/
+  rematch-lots` re-runs linkage over existing order lines (super_admin/org_admin).
+
+**THE KEY AUDIT FINDING — the real bottleneck is COA lot COVERAGE, not matching.** For all 16
+unlinked order lines: the product IS recognized (COAs with the matching distributor code exist),
+but **0 have a COA for the specific lot that shipped** (`coas_code_and_lot = 0` across the board).
+The system holds COAs for *other* lots of the same products. So order→COA fulfillment is gated by
+collecting the COA for each shipped lot, not by the matcher. The matcher is now ready to auto-link
+them the instant they arrive. Running rematch-lots now links ~0 new (the one real match, Willamette
+1167/6141, is already linked). **Next lever: a "which shipped lots are missing their COA" gap view.**
+
+**Audit health summary:** ingestion healthy (475 COA ready w/ fields; 8 order docs correctly
+pending — auto-ingest-off confirmed live). Errors: 13 Qwen-502 (transient, re-queue), 11 R2-404
+(files gone, need re-upload), 1 legacy `.doc`. Produce idempotent. Integrity clean (0 dangling COA
+links). Suggestions: only 4, still need a real review queue. Lots: date-code lot numbers (071626 =
+a date) reused across products → lot-only stays correctly weak; code anchor disambiguates.
+
+**Other code-audit items (not yet done):** lot/product unification (NULL-product lot vs resolved →
+2 rows; cosmetic since matching is lot_key-based), suggestion confidence-upgrade on re-match
+(INSERT OR IGNORE doesn't upgrade), COA-side linkage only at approval (no reconciliation job),
+negative-qty (outbound) order lines not flagged.
+
+---
+
 ## 2026-06-02 (pm) Supplier verification + NO AUTO-INGEST + kind-aware Review Queue v2 — SHIPPED TO PROD
 
 Deploy `66233f39` / commit `6f9e115` (checkpoint also bundles the entire prior dox-core

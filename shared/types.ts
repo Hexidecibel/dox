@@ -2778,6 +2778,14 @@ export interface LotDetail {
 /** Per-row gap classification computed server-side. */
 export type CoaGapStatus = 'ok' | 'missing_lot' | 'missing_coa' | 'expired';
 
+/**
+ * For a `missing_coa` line: is the product even known to us?
+ *   have_other_lot — a COA exists for this distributor code (different lot) →
+ *                    collect THIS lot's COA and it auto-links.
+ *   none_on_file   — no COA on file for this product code at all.
+ */
+export type CoaAvailability = 'have_other_lot' | 'none_on_file' | null;
+
 /** One shipped order line in GET /api/reports/coa-fulfillment. */
 export interface CoaFulfillmentRow {
   order_id: string;
@@ -2786,6 +2794,7 @@ export interface CoaFulfillmentRow {
   customer_name: string | null;
   product_id: string | null;
   product_name: string | null;
+  product_code: string | null;
   quantity: number | null;
   lot_id: string | null;
   lot_number: string | null;
@@ -2796,6 +2805,7 @@ export interface CoaFulfillmentRow {
   coa_file_name: string | null;
   coa_match_status: string | null;
   gap: CoaGapStatus;
+  coa_availability: CoaAvailability;
 }
 
 export interface CoaFulfillmentSummary {
@@ -2806,6 +2816,10 @@ export interface CoaFulfillmentSummary {
   expired: number;
   /** Share of lines that are fully OK, 0–100, one decimal place. */
   coverage_pct: number;
+  /** missing_coa lines whose product code DOES have a COA (collectible). */
+  collectible: number;
+  /** missing_coa lines with no COA on file for the product at all. */
+  no_product_coa: number;
 }
 
 export interface CoaFulfillmentResponse {

@@ -95,6 +95,7 @@ export type {
   LotSuggestion,
   LotDetail,
   CoaGapStatus,
+  CoaAvailability,
   CoaFulfillmentRow,
   CoaFulfillmentSummary,
   CoaFulfillmentResponse,

@@ -40,6 +40,7 @@ interface FulfillmentRow {
   customer_name: string | null;
   product_id: string | null;
   product_name: string | null;
+  product_code: string | null;
   quantity: number | null;
   lot_id: string | null;
   lot_number: string | null;
@@ -63,6 +64,57 @@ interface FulfillmentRow {
 
 export type GapStatus = 'ok' | 'missing_lot' | 'missing_coa' | 'expired';
 
+// For a `missing_coa` line, is the product even known to us?
+//   have_other_lot — a COA for this distributor code exists (for a different
+//                    lot). Actionable: collect THIS lot's COA; it'll auto-link.
+//   none_on_file   — no COA on file for this product code at all.
+export type CoaAvailability = 'have_other_lot' | 'none_on_file' | null;
+
+/** Normalize a distributor code for comparison (trim + upper). Empty → null. */
+function normCode(c: string | null | undefined): string | null {
+  const s = (c ?? '').trim().toUpperCase();
+  return s === '' ? null : s;
+}
+/** Leading-zero-stripped variant, so "0708" and "708" compare equal. */
+function stripZeros(c: string): string {
+  return c.replace(/^0+/, '') || c;
+}
+
+/**
+ * The set of distributor codes that appear as a leading "(NNNN)" prefix on any
+ * active COA title in this tenant — both normalized and zero-stripped forms,
+ * so membership matches the matcher's code-agreement rule.
+ */
+async function loadCoaCodeSet(
+  db: import('@cloudflare/workers-types').D1Database,
+  tenantId: string
+): Promise<Set<string>> {
+  const rows = await db
+    .prepare(
+      `SELECT DISTINCT UPPER(TRIM(substr(title, 2, instr(title, ')') - 2))) AS code
+       FROM documents
+       WHERE tenant_id = ? AND status = 'active' AND title LIKE '(%)%'`
+    )
+    .bind(tenantId)
+    .all<{ code: string | null }>();
+  const set = new Set<string>();
+  for (const r of rows.results ?? []) {
+    const c = normCode(r.code);
+    if (c) {
+      set.add(c);
+      set.add(stripZeros(c));
+    }
+  }
+  return set;
+}
+
+function computeAvailability(productCode: string | null, codeSet: Set<string>): CoaAvailability {
+  const c = normCode(productCode);
+  if (!c) return 'none_on_file';
+  if (codeSet.has(c) || codeSet.has(stripZeros(c))) return 'have_other_lot';
+  return 'none_on_file';
+}
+
 // ── shape: the SELECT + JOIN graph ──────────────────────────────────────────
 //
 // One row per order line. Customer name prefers the resolved customers.name
@@ -85,6 +137,7 @@ const SHAPE_SQL = `
     COALESCE(cust.name, o.customer_name) AS customer_name,
     oi.product_id         AS product_id,
     oi.product_name       AS product_name,
+    oi.product_code       AS product_code,
     oi.quantity           AS quantity,
     oi.lot_id             AS lot_id,
     l.lot_number          AS lot_number,
@@ -179,10 +232,14 @@ interface Summary {
   missing_coa: number;
   expired: number;
   coverage_pct: number;
+  // Within missing_coa: product is known (a COA exists for the code) → collect
+  // this lot's COA; vs no COA on file for the product at all.
+  collectible: number;
+  no_product_coa: number;
 }
 
 // ── format: project rows + summary into the JSON body ───────────────────────
-function formatJson(rows: FulfillmentRow[], asOf: string) {
+function formatJson(rows: FulfillmentRow[], asOf: string, codeSet: Set<string>) {
   const summary: Summary = {
     total: rows.length,
     ok: 0,
@@ -190,11 +247,18 @@ function formatJson(rows: FulfillmentRow[], asOf: string) {
     missing_coa: 0,
     expired: 0,
     coverage_pct: 0,
+    collectible: 0,
+    no_product_coa: 0,
   };
 
   const out = rows.map((r) => {
     const gap = computeGap(r, asOf);
     summary[gap] += 1;
+    // Only meaningful for a line that has a lot but no COA.
+    const availability: CoaAvailability =
+      gap === 'missing_coa' ? computeAvailability(r.product_code, codeSet) : null;
+    if (availability === 'have_other_lot') summary.collectible += 1;
+    if (availability === 'none_on_file') summary.no_product_coa += 1;
     return {
       order_id: r.order_id,
       order_number: r.order_number,
@@ -202,6 +266,7 @@ function formatJson(rows: FulfillmentRow[], asOf: string) {
       customer_name: r.customer_name,
       product_id: r.product_id,
       product_name: r.product_name,
+      product_code: r.product_code,
       quantity: r.quantity,
       lot_id: r.lot_id,
       lot_number: r.lot_number,
@@ -212,6 +277,7 @@ function formatJson(rows: FulfillmentRow[], asOf: string) {
       coa_file_name: r.coa_file_name,
       coa_match_status: r.coa_match_status,
       gap,
+      coa_availability: availability,
     };
   });
 
@@ -260,8 +326,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(...selector.params, limit, offset)
       .all<FulfillmentRow>();
 
+    // Distributor codes we hold ANY COA for — drives the collect-vs-absent hint.
+    const codeSet = await loadCoaCodeSet(context.env.DB, tenantId);
+
     // 3. gap_rules + 4. format
-    const body = formatJson(result.results || [], asOf);
+    const body = formatJson(result.results || [], asOf, codeSet);
 
     return new Response(JSON.stringify(body), {
       headers: { 'Content-Type': 'application/json' },

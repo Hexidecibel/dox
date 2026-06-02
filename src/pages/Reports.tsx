@@ -92,8 +92,50 @@ function SummaryHeader({ summary }: { summary: CoaFulfillmentSummary }) {
       <Chip label={`No COA ${summary.missing_coa}`} color={summary.missing_coa ? 'error' : 'default'} variant="outlined" />
       <Chip label={`No Lot ${summary.missing_lot}`} color={summary.missing_lot ? 'error' : 'default'} variant="outlined" />
       <Chip label={`Expired ${summary.expired}`} color={summary.expired ? 'warning' : 'default'} variant="outlined" />
+      {summary.collectible > 0 && (
+        <Chip
+          label={`Collectible ${summary.collectible}`}
+          color="warning"
+          sx={{ fontWeight: 700 }}
+          title="Shipped lots with no COA, but we hold COAs for that product — collect this lot's COA and it auto-links."
+        />
+      )}
+      {summary.no_product_coa > 0 && (
+        <Chip
+          label={`No product COA ${summary.no_product_coa}`}
+          color="default"
+          variant="outlined"
+          title="Shipped lots whose product has no COA on file at all."
+        />
+      )}
     </Stack>
   );
+}
+
+/** Build a CSV worklist string from the visible rows. */
+function buildCsv(rows: CoaFulfillmentRow[]): string {
+  const header = ['Customer', 'Order', 'PO', 'Product', 'Code', 'Lot', 'Status', 'Action'];
+  const statusLabel: Record<CoaGapStatus, string> = {
+    ok: 'OK', missing_lot: 'No lot', missing_coa: 'No COA', expired: 'Expired',
+  };
+  const action = (r: CoaFulfillmentRow): string => {
+    if (r.gap !== 'missing_coa') return '';
+    return r.coa_availability === 'have_other_lot'
+      ? 'Collect this lot COA'
+      : 'No COA on file for product';
+  };
+  const esc = (v: string | number | null): string => {
+    const s = v == null ? '' : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [header.join(',')];
+  for (const r of rows) {
+    lines.push([
+      r.customer_name, r.order_number, r.po_number, r.product_name,
+      r.product_code, r.lot_number, statusLabel[r.gap], action(r),
+    ].map(esc).join(','));
+  }
+  return lines.join('\n');
 }
 
 function GapChip({ gap }: { gap: CoaGapStatus }) {
@@ -110,6 +152,7 @@ export function Reports() {
 
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  const [view, setView] = useState<'all' | 'needs'>('all');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -133,7 +176,22 @@ export function Reports() {
     load();
   }, [selectedTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const groups = useMemo(() => groupRows(rows), [rows]);
+  const visibleRows = useMemo(
+    () => (view === 'needs' ? rows.filter((r) => r.gap !== 'ok') : rows),
+    [rows, view],
+  );
+  const groups = useMemo(() => groupRows(visibleRows), [visibleRows]);
+
+  const exportCsv = useCallback(() => {
+    const csv = buildCsv(visibleRows);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `coa-${view === 'needs' ? 'worklist' : 'fulfillment'}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [visibleRows, view]);
 
   return (
     <Box>
@@ -175,6 +233,25 @@ export function Reports() {
             Clear
           </Button>
         )}
+        <Box sx={{ flexGrow: 1 }} />
+        <Button
+          variant={view === 'all' ? 'contained' : 'outlined'}
+          size="small"
+          onClick={() => setView('all')}
+        >
+          All lines
+        </Button>
+        <Button
+          variant={view === 'needs' ? 'contained' : 'outlined'}
+          color="warning"
+          size="small"
+          onClick={() => setView('needs')}
+        >
+          Needs COA{summary ? ` (${summary.total - summary.ok})` : ''}
+        </Button>
+        <Button onClick={exportCsv} size="small" disabled={loading || rows.length === 0}>
+          Export CSV
+        </Button>
       </Box>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
@@ -275,8 +352,20 @@ export function Reports() {
                                   </Link>
                                 ) : row.gap === 'missing_lot' ? (
                                   '-'
+                                ) : row.coa_availability === 'have_other_lot' ? (
+                                  <Chip
+                                    size="small"
+                                    label="Collect lot COA"
+                                    color="warning"
+                                    title="We hold COAs for this product — collect this lot's COA and it auto-links."
+                                  />
                                 ) : (
-                                  <GapChip gap="missing_coa" />
+                                  <Chip
+                                    size="small"
+                                    label="No COA on file"
+                                    variant="outlined"
+                                    title="No COA on file for this product code at all."
+                                  />
                                 )}
                               </TableCell>
                               <TableCell>
