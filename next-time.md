@@ -4,6 +4,45 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-06-02 (pm) Supplier verification + NO AUTO-INGEST + kind-aware Review Queue v2 — SHIPPED TO PROD
+
+Deploy `66233f39` / commit `6f9e115` (checkpoint also bundles the entire prior dox-core
+session, which had been left uncommitted). Full vitest 1397 green; SKIP_E2E (staging drifted).
+
+**DELIBERATE behavior changes — do NOT "fix" these back:**
+- **Nothing auto-ingests anymore.** COA docs from ALL sources (upload/email/connector) now
+  always go to the Review Queue. Templates + confidence are review-ASSIST only (pre-fill +
+  flag). The old template-gate and tenant-confidence auto-approve paths in
+  `functions/api/queue/[id]/results.ts` are gone on purpose.
+- **order/shipment also require review.** They no longer auto-produce on the worker `ready`
+  callback; they route to review with editable kind tiles and produce on APPROVE from the
+  reviewed records (`handleRecordsApprove` reads `body.records`). Worker unchanged (still
+  writes `ai_records`); no worker restart was needed for any of this.
+- **Supplier verification is mandatory** in COA review: the reviewer must confirm/correct the
+  supplier (SupplierAutocomplete) before Approve unlocks. `isPlausibleSupplierName` rejects junk
+  (C2#, cell-refs) so garbage can't become a supplier; all creation funnels through
+  `findOrCreateSupplier`. Merge tool live (`/admin/suppliers` duplicates panel + POST
+  /api/suppliers/merge). Prod dup clusters already reconciled (C2#→Medosweet Farms, etc.).
+
+**Why C2# happened (root cause):** supplier name was a LOGO image; text extraction yielded only
+"C2#" + the address. Real accuracy fix for image-letterheads = VLM (`QWEN_VLM_MODE`, still OFF
+in prod, worker-host change). The guard just stops junk from becoming a supplier.
+
+**Resolved chat items from the am session:** #2 (weak COA→lot matches now confirmed inline in the
+shipment tile via GET /api/lot-matches), #4 (supplier dedupe/merge tool). Review Queue v2 (the
+kind-aware tiles item) is now DONE.
+
+**Still open / next:**
+- **Connectors decommission → unified "Sources" admin (P9).** User confirmed connectors are going
+  away (folded into the one ingest path). Separate workstream — NOT started. This is the natural
+  next big piece now that everything reviews through one queue.
+- Order/shipment producers still also run on the worker `ready` path? NO — removed. But the
+  `connector_runs` rollup now accrues at approve time; revisit when connectors are decommissioned.
+- VLM for image-letterhead suppliers (accuracy, not just the guard).
+- `bin/reconcile-suppliers-2026-06-02.sql` is a committed one-off record of the prod cleanup.
+
+---
+
 ## 2026-06-02 "dox core" — unified intake/extraction/linkage refactor — SHIPPED TO PROD + END-TO-END VERIFIED
 
 Huge session. Collapsed the two parallel AI-ingestion systems (COA worker + connector parser) into ONE output-kind-aware engine, added the missing order↔lot↔COA linkage, and proved it end-to-end on real production docs.

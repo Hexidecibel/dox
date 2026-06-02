@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import PdfViewer from './PdfViewer';
+import DocxPreview, { isDocxFile } from './DocxPreview';
 import {
   Box,
   Paper,
@@ -33,10 +34,11 @@ interface DocumentPreviewProps {
   mimeType: string;
 }
 
-type PreviewType = 'pdf' | 'image' | 'text' | 'csv' | 'json' | 'office' | 'unknown';
+type PreviewType = 'pdf' | 'image' | 'text' | 'csv' | 'json' | 'docx' | 'office' | 'unknown';
 
 function getPreviewType(mimeType: string, fileName?: string): PreviewType {
   if (mimeType === 'application/pdf') return 'pdf';
+  if (isDocxFile(mimeType, fileName)) return 'docx';
   if (['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'].includes(mimeType)) return 'image';
   if (mimeType === 'text/csv') return 'csv';
   if (mimeType === 'application/json') return 'json';
@@ -61,6 +63,7 @@ function getPreviewTypeLabel(type: PreviewType): string {
     case 'text': return 'Text';
     case 'csv': return 'CSV';
     case 'json': return 'JSON';
+    case 'docx': return 'Word';
     case 'office': return 'Office';
     default: return 'File';
   }
@@ -70,7 +73,7 @@ function getPreviewIcon(type: PreviewType) {
   switch (type) {
     case 'pdf': return <PdfIcon fontSize="small" />;
     case 'image': return <ImageIcon fontSize="small" />;
-    case 'text': case 'csv': case 'json': return <TextIcon fontSize="small" />;
+    case 'text': case 'csv': case 'json': case 'docx': return <TextIcon fontSize="small" />;
     default: return <FileIcon fontSize="small" />;
   }
 }
@@ -575,6 +578,7 @@ export function DocumentPreview({ documentId, versionNumber, fileName, mimeType 
       {previewType === 'text' && <TextPreview url={previewUrl} />}
       {previewType === 'json' && <JsonPreview url={previewUrl} />}
       {previewType === 'csv' && <CsvPreview url={previewUrl} />}
+      {previewType === 'docx' && <DocxPreview url={previewUrl} fileName={fileName} />}
       {(previewType === 'office' || previewType === 'unknown') && (
         <NoPreview fileName={fileName} isOffice={previewType === 'office'} />
       )}

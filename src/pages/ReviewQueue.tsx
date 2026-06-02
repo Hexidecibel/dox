@@ -54,6 +54,7 @@ import {
   Refresh as RefreshIcon,
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
+import DocxPreview, { isDocxFile } from '../components/DocxPreview';
 import OrderReviewTile from '../components/OrderReviewTile';
 import ShipmentReviewTile from '../components/ShipmentReviewTile';
 import SupplierAutocomplete, { type SupplierValue } from '../components/SupplierAutocomplete';
@@ -1568,6 +1569,8 @@ export default function ReviewQueue() {
                                 />
                               </Box>
                             </Box>
+                          ) : isDocxFile(item.mime_type, item.file_name) ? (
+                            <DocxPreview url={previewUrls[item.id]} fileName={item.file_name} />
                           ) : (
                             <Paper
                               variant="outlined"

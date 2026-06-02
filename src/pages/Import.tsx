@@ -53,6 +53,7 @@ import {
   Error as ErrorIcon,
 } from '@mui/icons-material';
 import PdfViewer from '../components/PdfViewer';
+import DocxPreview, { isDocxFile } from '../components/DocxPreview';
 import { api } from '../lib/api';
 import type { ApiDocumentType, ProcessingQueueItem, ExtractedTable, ExtractionTemplate, TemplateFieldMapping } from '../lib/types';
 import { AUTH_TOKEN_KEY } from '../lib/types';
@@ -137,6 +138,10 @@ function LocalFilePreview({ file }: { file: File }) {
         />
       </Box>
     );
+  }
+
+  if (isDocxFile(file.type, file.name)) {
+    return <DocxPreview file={file} fileName={file.name} />;
   }
 
   return (
