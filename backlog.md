@@ -26,6 +26,27 @@ partitioned by owner, each with a focused full-screen approval surface.
 - On each approve: update streak/confidence/sample_count; demote tuned→learning if a
   tuned profile starts drawing corrections (regression safety).
 
+### Phase B0 — Learning Interface (SME knowledge elicitation, Qwen-driven)
+The user is NOT the SME; the partner is, and **can't learn a config UI** — so the SYSTEM interviews
+him. Decisions: **Qwen** drives question-gen + answer-synthesis (on-prem, no new dep); **open
+interview** style (conceptual prose Q&A); **batch "go-go-go, surface questions as a group"** for the
+onboarding sprint (dedup the SME's effort — ask each distinct ambiguity ONCE across the corpus, not
+per doc); inline-in-review is the steady-state variant of the same thing.
+**Shape = a CONVERSATIONAL teaching session that converges, then is SELF-SERVICE:** the AI interprets
+the docs and chats with the SME about them until it knows enough (parity loop = the "enough?" meter),
+THEN presents the synthesized rules for the SME to CONFIRM — confirmation is what writes the profile.
+It's a permanent, repeatable feature: going forward the SME himself kicks off a teach-chat for each new
+supplier. He never configures; he talks about docs he understands + confirms. This is the NEW→TUNED
+on-ramp of the maturity ladder; once confirmed, the combo drops to the partner's 1-click queue.
+Loop: (1) Qwen extracts across a batch of one supplier's real docs, flagging per-field uncertainty
+(low confidence / run-to-run disagreement — the parity signal); (2) CLUSTER uncertainties into a small
+set of distinct questions; (3) surface the GROUP as one consolidated questionnaire, grounded with
+example snippets; (4) SME answers in prose; (5) Qwen synthesizes → `supplier_extraction_instructions`
+(+ `extraction_examples`) on the (supplier, doctype) profile; (6) re-run the batch via `bin/parity-coa`,
+measure, surface residual group, repeat → profile reaches TUNED. Reuses existing infra
+(supplier_extraction_instructions w/ field_mappings, extraction_examples, the parity harness as the
+measurement loop). This IS the NEW-state collection step of Phase B / the maturity ladder.
+
 ### Phase B — One guided review flow ("does it all")
 - Progressive, confidence-gated tile instead of disjoint gates: **confirm supplier**
   (only when uncertain) → **confirm doctype** (only when uncertain; this is the
