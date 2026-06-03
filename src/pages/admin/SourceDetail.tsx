@@ -1821,21 +1821,23 @@ export function SourceDetail() {
                       </TableCell>
                       <TableCell align="right">
                         <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                          {/* The old per-run "Review staged" link pointed at the
+                              decommissioned sync-connector staging page. Every door
+                              now enqueues into the unified Review Queue, so staged
+                              orders are reviewed at /review (no per-run surface). */}
                           {run.records_staged != null && run.records_staged > 0 && (
                             <Tooltip
-                              title={`${run.records_staged} order${run.records_staged === 1 ? '' : 's'} routed to staging — open the review page`}
+                              title={`${run.records_staged} order${run.records_staged === 1 ? '' : 's'} from this run — review them in the Review Queue`}
                               arrow
                             >
                               <Button
                                 size="small"
                                 variant="outlined"
                                 color="warning"
-                                onClick={() =>
-                                  navigate(`/admin/sources/${connector.id}/runs/${run.id}/review`)
-                                }
+                                onClick={() => navigate('/review')}
                                 sx={{ minWidth: 0, py: 0.25, px: 1, fontSize: '0.7rem' }}
                               >
-                                Review {run.records_staged} staged
+                                Review {run.records_staged} in queue
                               </Button>
                             </Tooltip>
                           )}

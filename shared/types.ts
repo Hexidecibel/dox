@@ -848,6 +848,14 @@ export interface ProcessingQueueItem {
   tenant_slug?: string;
   created_by_name?: string;
   reviewed_by_name?: string;
+  /**
+   * True when a saved extraction profile (a supplier_extraction_instructions
+   * row with non-empty instructions) exists for this item's
+   * (supplier_id, document_type_id) pair. Always false when supplier_id is NULL
+   * (unverified). Computed by the list/get queue endpoints; lets the review UI
+   * show whether the teach interview already has guidance for this supplier.
+   */
+  profile_exists?: boolean;
 }
 
 /**

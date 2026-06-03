@@ -24,15 +24,23 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     requireRole(user, 'super_admin', 'org_admin', 'user');
 
+    // profile_exists: true when a saved extraction profile (non-empty
+    // instructions) exists for this item's verified (supplier_id,
+    // document_type_id) pair. The join can't match when supplier_id is NULL.
     const item = await context.env.DB.prepare(
       `SELECT pq.*, dt.name as document_type_name, dt.slug as document_type_slug,
               t.name as tenant_name, t.slug as tenant_slug,
-              u.name as created_by_name, r.name as reviewed_by_name
+              u.name as created_by_name, r.name as reviewed_by_name,
+              CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists
        FROM processing_queue pq
        LEFT JOIN document_types dt ON pq.document_type_id = dt.id
        LEFT JOIN tenants t ON pq.tenant_id = t.id
        LEFT JOIN users u ON pq.created_by = u.id
        LEFT JOIN users r ON pq.reviewed_by = r.id
+       LEFT JOIN supplier_extraction_instructions sei
+         ON sei.supplier_id = pq.supplier_id
+        AND sei.document_type_id = pq.document_type_id
+        AND TRIM(COALESCE(sei.instructions, '')) <> ''
        WHERE pq.id = ?`
     )
       .bind(queueId)
@@ -44,8 +52,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     requireTenantAccess(user, item.tenant_id as string);
 
+    const { profile_exists, ...rest } = item as Record<string, unknown>;
+    const enriched = { ...rest, profile_exists: profile_exists === 1 };
+
     return new Response(
-      JSON.stringify({ item }),
+      JSON.stringify({ item: enriched }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (err) {

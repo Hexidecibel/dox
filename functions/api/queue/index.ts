@@ -61,16 +61,25 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(...params)
       .first<{ total: number }>();
 
-    // Get queue items with related info
+    // Get queue items with related info. The supplier_extraction_instructions
+    // join (on the item's verified supplier_id + document_type_id, with
+    // non-empty instructions) drives profile_exists in a single query — no
+    // per-row lookup. sei.id is NULL when no profile row matched (including
+    // when pq.supplier_id is NULL, since the ON condition can't match).
     const results = await context.env.DB.prepare(
       `SELECT pq.*, dt.name as document_type_name, dt.slug as document_type_slug,
               t.name as tenant_name, t.slug as tenant_slug,
-              u.name as created_by_name, r.name as reviewed_by_name
+              u.name as created_by_name, r.name as reviewed_by_name,
+              CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists
        FROM processing_queue pq
        LEFT JOIN document_types dt ON pq.document_type_id = dt.id
        LEFT JOIN tenants t ON pq.tenant_id = t.id
        LEFT JOIN users u ON pq.created_by = u.id
        LEFT JOIN users r ON pq.reviewed_by = r.id
+       LEFT JOIN supplier_extraction_instructions sei
+         ON sei.supplier_id = pq.supplier_id
+        AND sei.document_type_id = pq.document_type_id
+        AND TRIM(COALESCE(sei.instructions, '')) <> ''
        ${whereClause}
        ORDER BY pq.created_at DESC
        LIMIT ? OFFSET ?`
@@ -78,9 +87,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(...params, limit, offset)
       .all();
 
+    const items = (results.results ?? []).map((row) => {
+      const { profile_exists, ...rest } = row as Record<string, unknown>;
+      return { ...rest, profile_exists: profile_exists === 1 };
+    });
+
     return new Response(
       JSON.stringify({
-        items: results.results,
+        items,
         total: countResult?.total || 0,
         limit,
         offset,

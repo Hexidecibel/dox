@@ -58,6 +58,7 @@ import DocxPreview, { isDocxFile } from '../components/DocxPreview';
 import OrderReviewTile from '../components/OrderReviewTile';
 import ShipmentReviewTile from '../components/ShipmentReviewTile';
 import SupplierAutocomplete, { type SupplierValue } from '../components/SupplierAutocomplete';
+import TeachPanel from '../components/teach/TeachPanel';
 import ExtractionInstructionsBox from './ExtractionInstructionsBox';
 import { AUTH_TOKEN_KEY } from '../lib/types';
 import { api } from '../lib/api';
@@ -273,6 +274,39 @@ export default function ReviewQueue() {
       return !!(sv && sv.verified && sv.supplierName.trim());
     },
     [supplierVerify],
+  );
+
+  // Teach-maturity cache, keyed `${supplierId}::${docTypeId}`.
+  //   undefined  — not yet checked (kick a fetch)
+  //   true/false — confirmed via api.extractionInstructions.get (non-empty
+  //                instructions ⇒ taught). This is the AUTHORITATIVE answer for
+  //                the CONFIRMED supplier; `item.profile_exists` (computed from
+  //                the item's *current* supplier_id, NULL for unverified COAs)
+  //                is only a coarse list hint.
+  const [taughtCache, setTaughtCache] = useState<Record<string, boolean>>({});
+  const taughtCheckingRef = useRef<Set<string>>(new Set());
+
+  // Re-check maturity for a confirmed (supplierId, docTypeId) pair once, caching
+  // the result. Safe to call per render — guarded by the cache + in-flight set.
+  const ensureTaughtChecked = useCallback(
+    (supplierId: string, docTypeId: string, tenantId?: string) => {
+      if (!supplierId || !docTypeId) return;
+      const key = `${supplierId}::${docTypeId}`;
+      if (key in taughtCache || taughtCheckingRef.current.has(key)) return;
+      taughtCheckingRef.current.add(key);
+      api.extractionInstructions
+        .get({ supplier_id: supplierId, document_type_id: docTypeId, tenant_id: tenantId })
+        .then((res) => {
+          setTaughtCache((prev) => ({ ...prev, [key]: !!(res.instructions && res.instructions.trim()) }));
+        })
+        .catch(() => {
+          // Leave uncached on error so a later render retries.
+        })
+        .finally(() => {
+          taughtCheckingRef.current.delete(key);
+        });
+    },
+    [taughtCache],
   );
 
   // Product autocomplete
@@ -1451,6 +1485,27 @@ export default function ReviewQueue() {
                         <Chip label={kindLabel} size="small" color={kindColor} variant="outlined" />
                       );
                     })()}
+                    {/* Maturity badge: does the item's (supplier, doctype) already
+                        have a learned extraction profile? `profile_exists` comes off
+                        the queue row (computed from the item's CURRENT supplier_id).
+                        COA-only — order/shipment don't carry a teach profile yet. */}
+                    {(item.output_kind || 'coa') === 'coa' && (
+                      <Tooltip
+                        title={
+                          item.profile_exists
+                            ? 'A learned extraction profile exists for this supplier + document type.'
+                            : 'No learned profile yet — teach the AI while reviewing.'
+                        }
+                        arrow
+                      >
+                        <Chip
+                          label={item.profile_exists ? 'Taught' : 'New'}
+                          size="small"
+                          color={item.profile_exists ? 'success' : 'default'}
+                          variant="outlined"
+                        />
+                      </Tooltip>
+                    )}
                     <Typography variant="caption" color="text.secondary">
                       {formatFileSize(item.file_size)}
                     </Typography>
@@ -2213,29 +2268,109 @@ export default function ReviewQueue() {
                           );
                         })()}
 
-                        {/* Per-(supplier, document_type) extraction instructions.
-                            Only render when both are resolvable — we key on the
-                            supplier_id from the already-loaded suppliers list
-                            (item.supplier is a name, not an id) and on
-                            item.document_type_id. If either is missing there's
-                            nothing to scope instructions to, so skip the box. */}
+                        {/* Folded-in teaching + per-(supplier, document_type)
+                            extraction instructions. Both scope to the CONFIRMED
+                            supplier from the verify gate (NOT the raw extracted
+                            name) so we teach against the entity the reviewer
+                            actually picked. docTypeId = item.document_type_id;
+                            its display name is looked up in `documentTypes`. */}
                         {(() => {
-                          if (!item.supplier || !item.document_type_id) return null;
-                          const supplierRow = suppliers.find(
-                            (s) => s.name.toLowerCase() === (item.supplier || '').toLowerCase()
-                          );
-                          if (!supplierRow) return null;
-                          const docType = documentTypes.find((dt: any) => dt.id === item.document_type_id);
-                          if (!docType) return null;
+                          const sv = supplierVerify[item.id];
+                          const confirmedId = sv?.verified ? sv.supplierId : undefined;
+                          const confirmedName = sv?.supplierName?.trim() || item.supplier || '';
+                          // Gate: only surface teaching once the supplier is
+                          // confirmed AND we have a doctype to scope to.
+                          if (!confirmedId || !item.document_type_id) return null;
+
+                          const docTypeId = item.document_type_id;
+                          const docType = documentTypes.find((dt: any) => dt.id === docTypeId);
+                          const docTypeName = docType?.name
+                            || (item as any).document_type_guess
+                            || 'COA';
+                          // super_admin acts cross-tenant → pass the item's tenant;
+                          // scoped roles get it from the JWT.
+                          const tenantId = isSuperAdmin ? (item.tenant_id || undefined) : undefined;
+
+                          // Authoritative maturity for the CONFIRMED pair. Kick a
+                          // re-check (cached); fall back to the list-level
+                          // profile_exists hint until it resolves.
+                          ensureTaughtChecked(confirmedId, docTypeId, tenantId);
+                          const cacheKey = `${confirmedId}::${docTypeId}`;
+                          const taught = cacheKey in taughtCache
+                            ? taughtCache[cacheKey]
+                            : !!item.profile_exists;
+
                           return (
-                            <ExtractionInstructionsBox
-                              supplierId={supplierRow.id}
-                              supplierName={supplierRow.name}
-                              docTypeId={item.document_type_id}
-                              docTypeName={docType.name}
-                              tenantId={isSuperAdmin ? (item.tenant_id || undefined) : undefined}
-                              disabled={item.status !== 'pending'}
-                            />
+                            <Box sx={{ mb: 2 }}>
+                              {taught ? (
+                                // TAUGHT (lean): no teach panel, just a confirmation
+                                // chip near the top of the editor. The fields below
+                                // already pre-fill from ai_fields + learned hints.
+                                <Box>
+                                  <Box sx={{ mb: 1.5 }}>
+                                    <Chip
+                                      icon={<CheckIcon />}
+                                      color="success"
+                                      variant="outlined"
+                                      size="small"
+                                      label={`Using learned profile for ${confirmedName}`}
+                                    />
+                                  </Box>
+                                  {/* Keep the freeform reviewer-instructions surface
+                                      available even on the lean path — it's distinct
+                                      from the teach interview. */}
+                                  <ExtractionInstructionsBox
+                                    supplierId={confirmedId}
+                                    supplierName={confirmedName}
+                                    docTypeId={docTypeId}
+                                    docTypeName={docTypeName}
+                                    tenantId={tenantId}
+                                    disabled={item.status !== 'pending'}
+                                  />
+                                </Box>
+                              ) : (
+                                // UNTAUGHT: two-pane — existing editor stays below;
+                                // the teach interview sits in a right rail (stacks
+                                // on narrow screens) so the reviewer can answer the
+                                // teach questions while reviewing the fields.
+                                <Box
+                                  sx={{
+                                    display: 'flex',
+                                    gap: 2,
+                                    flexDirection: { xs: 'column', lg: 'row' },
+                                    alignItems: 'stretch',
+                                  }}
+                                >
+                                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                                    <ExtractionInstructionsBox
+                                      supplierId={confirmedId}
+                                      supplierName={confirmedName}
+                                      docTypeId={docTypeId}
+                                      docTypeName={docTypeName}
+                                      tenantId={tenantId}
+                                      disabled={item.status !== 'pending'}
+                                    />
+                                  </Box>
+                                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                                    <Paper variant="outlined" sx={{ p: 1.5, height: '100%' }}>
+                                      <TeachPanel
+                                        supplierId={confirmedId}
+                                        supplierName={confirmedName}
+                                        documentTypeId={docTypeId}
+                                        tenantId={tenantId}
+                                        onTaught={() => {
+                                          // Mark the pair taught so we flip to the
+                                          // lean/chip path, then reload to pull the
+                                          // learned-hint pre-fill into the editor.
+                                          setTaughtCache((prev) => ({ ...prev, [cacheKey]: true }));
+                                          loadQueue();
+                                        }}
+                                      />
+                                    </Paper>
+                                  </Box>
+                                </Box>
+                              )}
+                            </Box>
                           );
                         })()}
 

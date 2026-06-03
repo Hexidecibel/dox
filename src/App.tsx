@@ -31,7 +31,6 @@ import ReviewQueue from './pages/ReviewQueue';
 import { Sources } from './pages/admin/Sources';
 import { SourceDetail } from './pages/admin/SourceDetail';
 import { SourceWizard } from './pages/admin/SourceWizard';
-import { IntakeRunReview } from './pages/admin/IntakeRunReview';
 import { Customers } from './pages/admin/Customers';
 import { CustomerDetail } from './pages/admin/CustomerDetail';
 import LearningDashboard from './pages/admin/LearningDashboard';
@@ -52,7 +51,6 @@ import { PublicDrop } from './pages/PublicDrop';
 import { PublicDocsConnectors } from './pages/PublicDocsConnectors';
 import { Approvals } from './pages/Approvals';
 import { Help } from './pages/Help';
-import Teach from './pages/Teach';
 
 function App() {
   return (
@@ -114,10 +112,6 @@ function App() {
               <Route path="/records/:sheetId/forms/:formId" element={<FormBuilder />} />
               <Route path="/records/:sheetId/workflows/:workflowId" element={<WorkflowBuilder />} />
               <Route path="/approvals" element={<Approvals />} />
-              <Route element={<ProtectedRoute roles={['super_admin', 'org_admin', 'user']} />}>
-                <Route path="/teach" element={<Teach />} />
-                <Route path="/teach/:sessionId" element={<Teach />} />
-              </Route>
               <Route path="/help" element={<Help />} />
               <Route path="/help/:module" element={<Help />} />
 
@@ -135,10 +129,6 @@ function App() {
                 <Route path="/admin/sources/new" element={<SourceWizard />} />
                 <Route path="/admin/sources/:id/edit" element={<SourceWizard />} />
                 <Route path="/admin/sources/:id" element={<SourceDetail />} />
-                <Route
-                  path="/admin/sources/:id/runs/:runId/review"
-                  element={<IntakeRunReview />}
-                />
                 <Route path="/admin/customers" element={<Customers />} />
                 <Route path="/admin/customers/:id" element={<CustomerDetail />} />
                 <Route path="/admin/learning-dashboard" element={<LearningDashboard />} />

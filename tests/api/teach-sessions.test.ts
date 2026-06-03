@@ -135,6 +135,50 @@ describe('POST /api/teach/sessions', () => {
     expect(msgCount?.n).toBe(1);
   });
 
+  it('resumes the open session for the same (supplier, doctype) instead of creating a duplicate', async () => {
+    const body = { supplier_id: supplierId, document_type_id: docTypeId };
+
+    const first = await createSession(
+      makeContext(postReq('http://localhost/api/teach/sessions', body), user()),
+    );
+    expect(first.status).toBe(201);
+    const firstData = (await first.json()) as { session_id: string; resumed: boolean; messages: any[] };
+    expect(firstData.resumed).toBe(false);
+
+    // Second create for the same pair -> resume, NOT a new row.
+    const second = await createSession(
+      makeContext(postReq('http://localhost/api/teach/sessions', body), user()),
+    );
+    expect(second.status).toBe(200);
+    const secondData = (await second.json()) as { session_id: string; resumed: boolean; messages: any[] };
+    expect(secondData.resumed).toBe(true);
+    expect(secondData.session_id).toBe(firstData.session_id);
+    // Resumed response carries the persisted transcript.
+    expect(secondData.messages.length).toBe(firstData.messages.length);
+
+    const count = await db
+      .prepare(
+        'SELECT COUNT(*) AS n FROM teach_sessions WHERE supplier_id = ? AND document_type_id = ?',
+      )
+      .bind(supplierId, docTypeId)
+      .first<{ n: number }>();
+    expect(count?.n).toBe(1);
+
+    // Once the open session is closed (confirmed), a fresh create starts anew.
+    await db
+      .prepare("UPDATE teach_sessions SET status = 'confirmed' WHERE id = ?")
+      .bind(firstData.session_id)
+      .run();
+
+    const third = await createSession(
+      makeContext(postReq('http://localhost/api/teach/sessions', body), user()),
+    );
+    expect(third.status).toBe(201);
+    const thirdData = (await third.json()) as { session_id: string; resumed: boolean };
+    expect(thirdData.resumed).toBe(false);
+    expect(thirdData.session_id).not.toBe(firstData.session_id);
+  });
+
   it('rejects a supplier from another tenant', async () => {
     const req = postReq('http://localhost/api/teach/sessions', {
       supplier_id: 'nonexistent-supplier',

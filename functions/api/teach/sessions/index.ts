@@ -24,6 +24,8 @@ import {
   serializeMessage,
   resolveTenantId,
   insertMessage,
+  parseIssues,
+  loadSessionRow,
 } from '../../../lib/teach/session';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -62,6 +64,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       .first();
     if (!docType) {
       throw new BadRequestError('Document type not found or does not belong to this tenant');
+    }
+
+    // 0. Resume an existing in-progress interview for this exact pair, if any.
+    // "open" (still collecting answers) is the only status we resume; once a
+    // session is synthesized/confirmed/abandoned it's terminal and a fresh
+    // interview should start. This lets the reviewer keep one running interview
+    // while working through multiple docs of the same supplier.
+    const existing = await context.env.DB.prepare(
+      `SELECT id FROM teach_sessions
+       WHERE tenant_id = ? AND supplier_id = ? AND document_type_id = ? AND status = 'open'
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+      .bind(tenantId, body.supplier_id, body.document_type_id)
+      .first<{ id: string }>();
+
+    if (existing) {
+      const row = await loadSessionRow(context.env.DB, existing.id, tenantId);
+      // row is non-null here (we just found it scoped to this tenant).
+      const messages = (await loadMessages(context.env.DB, existing.id)).map(serializeMessage);
+      const issues = row ? parseIssues(row) : [];
+      return new Response(
+        JSON.stringify({ session_id: existing.id, messages, issues, resumed: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
     }
 
     // 1. Analyze recurring extraction ambiguities for this pair.
@@ -132,7 +158,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     );
 
     return new Response(
-      JSON.stringify({ session_id: sessionId, messages, issues: issues ?? [] }),
+      JSON.stringify({ session_id: sessionId, messages, issues: issues ?? [], resumed: false }),
       { status: 201, headers: { 'Content-Type': 'application/json' } },
     );
   } catch (err) {
