@@ -7,6 +7,7 @@ import {
   Toolbar,
   Typography,
   IconButton,
+  Tooltip,
   List,
   ListItem,
   ListItemButton,
@@ -28,32 +29,25 @@ import {
   Dashboard as DashboardIcon,
   Description as DocsIcon,
   Search as SearchIcon,
-  People as UsersIcon,
-  Business as TenantsIcon,
-  VpnKey as ApiKeyIcon,
   Logout as LogoutIcon,
   Person as PersonIcon,
   FilterList as FilterIcon,
   LocalShipping as SuppliersIcon,
-  Category as DocTypesIcon,
-  History as HistoryIcon,
   Timeline as ActivityIcon,
   FileUpload as ImportIcon,
   RateReview as RateReviewIcon,
   ShoppingCart as OrdersIcon,
   Inventory2 as LotsIcon,
   Assessment as ReportsIcon,
-  Hub as ConnectorsIcon,
   ContactMail as CustomersIcon,
-  Insights as InsightsIcon,
   TableView as RecordsIcon,
-  AssignmentTurnedIn as ApprovalsIcon,
   HelpOutline as HelpIcon,
-  MonitorHeart as MonitorHeartIcon,
+  Settings as SettingsIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 import { RoleGuard } from './RoleGuard';
+import { NotificationsBell } from './NotificationsBell';
 
 const DRAWER_WIDTH = 260;
 
@@ -64,33 +58,31 @@ interface NavItem {
   roles?: ('super_admin' | 'org_admin' | 'user' | 'reader')[];
 }
 
+// Primary rail. Each item's path + roles are preserved from the previous
+// nav/admin arrays. Settings is appended separately (pinned, divider above).
 const navItems: NavItem[] = [
   { label: 'Dashboard', path: '/dashboard', icon: <DashboardIcon /> },
-  { label: 'Activity', path: '/activity', icon: <ActivityIcon /> },
-  { label: 'Documents', path: '/documents', icon: <DocsIcon /> },
   { label: 'Search', path: '/search', icon: <SearchIcon /> },
+  { label: 'Documents', path: '/documents', icon: <DocsIcon /> },
   { label: 'Import', path: '/import', icon: <ImportIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Review Queue', path: '/review', icon: <RateReviewIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Ingest History', path: '/ingest-history', icon: <HistoryIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Orders', path: '/orders', icon: <OrdersIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Lots', path: '/lots', icon: <LotsIcon />, roles: ['super_admin', 'org_admin', 'user', 'reader'] },
+  { label: 'Suppliers', path: '/admin/suppliers', icon: <SuppliersIcon />, roles: ['super_admin', 'org_admin'] },
+  { label: 'Customers', path: '/admin/customers', icon: <CustomersIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'COA Fulfillment', path: '/reports', icon: <ReportsIcon />, roles: ['super_admin', 'org_admin', 'user'] },
+  { label: 'Activity', path: '/activity', icon: <ActivityIcon /> },
   { label: 'Records', path: '/records', icon: <RecordsIcon /> },
-  { label: 'Approvals', path: '/approvals', icon: <ApprovalsIcon /> },
-  { label: 'Help', path: '/help', icon: <HelpIcon /> },
 ];
 
-const adminItems: NavItem[] = [
-  { label: 'Users', path: '/admin/users', icon: <UsersIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'API Keys', path: '/admin/api-keys', icon: <ApiKeyIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Suppliers', path: '/admin/suppliers', icon: <SuppliersIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Document Types', path: '/admin/document-types', icon: <DocTypesIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Sources', path: '/admin/sources', icon: <ConnectorsIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Customers', path: '/admin/customers', icon: <CustomersIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Learning Dashboard', path: '/admin/learning-dashboard', icon: <InsightsIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Tenants', path: '/admin/tenants', icon: <TenantsIcon />, roles: ['super_admin'] },
-  { label: 'Processing Status', path: '/admin/processing-status', icon: <MonitorHeartIcon />, roles: ['super_admin'] },
-];
+// Pinned at the bottom of the rail. Gated to roles with at least one
+// Settings section (super_admin, org_admin).
+const settingsItem: NavItem = {
+  label: 'Settings',
+  path: '/settings',
+  icon: <SettingsIcon />,
+  roles: ['super_admin', 'org_admin'],
+};
 
 const roleColors: Record<string, 'primary' | 'secondary' | 'default'> = {
   super_admin: 'primary',
@@ -168,35 +160,20 @@ export function Layout() {
           return button;
         })}
 
-        <RoleGuard roles={['super_admin', 'org_admin']}>
+        <RoleGuard roles={settingsItem.roles!}>
           <Divider sx={{ my: 1.5 }} />
-          <Typography variant="overline" sx={{ px: 2, color: 'text.secondary', fontSize: '0.65rem' }}>
-            Administration
-          </Typography>
-          {adminItems.map((item) => {
-            const adminButton = (
-              <ListItem key={item.label} disablePadding sx={{ mb: 0.5 }}>
-                <ListItemButton
-                  onClick={() => handleNavClick(item.path)}
-                  selected={isActive(item.path)}
-                  sx={{ borderRadius: 1 }}
-                >
-                  <ListItemIcon sx={{ minWidth: 40, color: isActive(item.path) ? 'primary.main' : 'text.secondary' }}>
-                    {item.icon}
-                  </ListItemIcon>
-                  <ListItemText primary={item.label} primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: isActive(item.path) ? 600 : 400 }} />
-                </ListItemButton>
-              </ListItem>
-            );
-            if (item.roles) {
-              return (
-                <RoleGuard key={item.label} roles={item.roles}>
-                  {adminButton}
-                </RoleGuard>
-              );
-            }
-            return adminButton;
-          })}
+          <ListItem disablePadding sx={{ mb: 0.5 }}>
+            <ListItemButton
+              onClick={() => handleNavClick(settingsItem.path)}
+              selected={isActive(settingsItem.path)}
+              sx={{ borderRadius: 1 }}
+            >
+              <ListItemIcon sx={{ minWidth: 40, color: isActive(settingsItem.path) ? 'primary.main' : 'text.secondary' }}>
+                {settingsItem.icon}
+              </ListItemIcon>
+              <ListItemText primary={settingsItem.label} primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: isActive(settingsItem.path) ? 600 : 400 }} />
+            </ListItemButton>
+          </ListItem>
         </RoleGuard>
       </List>
 
@@ -306,6 +283,13 @@ export function Layout() {
               <MenuIcon />
             </IconButton>
             <img src="/logo.svg" alt="Dox" height={24} style={{ flex: 0 }} />
+            <Box sx={{ flex: 1 }} />
+            <NotificationsBell />
+            <Tooltip title="Help">
+              <IconButton onClick={() => handleNavClick('/help')} sx={{ mr: 1 }}>
+                <HelpIcon />
+              </IconButton>
+            </Tooltip>
             {user && (
               <Avatar
                 sx={{
@@ -321,6 +305,29 @@ export function Layout() {
             )}
           </Toolbar>
         </AppBar>
+      )}
+
+      {/* Desktop top bar — hosts the Help shortcut. */}
+      {!isMobile && (
+        <Box
+          sx={{
+            position: 'fixed',
+            top: 0,
+            right: 0,
+            zIndex: (t) => t.zIndex.drawer + 1,
+            p: 1,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.5,
+          }}
+        >
+          <NotificationsBell />
+          <Tooltip title="Help">
+            <IconButton onClick={() => navigate('/help')}>
+              <HelpIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
       )}
 
       {/* Sidebar Drawer */}

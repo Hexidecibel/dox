@@ -51,6 +51,7 @@ import { PublicDrop } from './pages/PublicDrop';
 import { PublicDocsConnectors } from './pages/PublicDocsConnectors';
 import { Approvals } from './pages/Approvals';
 import { Help } from './pages/Help';
+import { Settings } from './pages/Settings';
 
 function App() {
   return (
@@ -117,6 +118,8 @@ function App() {
 
               {/* Admin routes - users management and audit for super_admin and org_admin */}
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>
+                <Route path="/settings" element={<Settings />} />
+                <Route path="/settings/:section" element={<Settings />} />
                 <Route path="/admin/users" element={<Users />} />
                 <Route path="/admin/api-keys" element={<ApiKeys />} />
                 <Route path="/admin/audit" element={<AuditLog />} />

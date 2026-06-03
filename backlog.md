@@ -73,6 +73,14 @@ measurement loop). This IS the NEW-state collection step of Phase B / the maturi
 - NEW combo → the flow collects everything once. TUNED combo → all-green, one-click
   approve, nothing to fix.
 
+### Notifications bell = the unified "waiting on you" tray (started 2026-06-02)
+Built: a top-bar bell (`src/components/NotificationsBell.tsx`, generic `Notification[]` tray) fed by
+workflow approvals (`recordsApi.workflowApprovals.inbox()`). Approvals moved OUT of Settings into the
+bell. Designed to take more feeds additively. **NEXT feed (user-requested): "your assigned review
+items"** — when a doc of a `(supplier, doctype)` the current user OWNS gets ingested/queued, it shows
+on the bell → click → review. This is gated on Phase C (owner_user_id on the profile + assign UI);
+once ownership exists the feed is just "pending review items whose (supplier,doctype) is owned by me."
+
 ### Phase C — Ownership + assignment
 - Assign (supplier, doctype) → user (`owner_user_id` on the profile; or an
   `assignments` table if many-owners/escalation needed later). Unassigned → shared pool.
