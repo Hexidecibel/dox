@@ -109,6 +109,33 @@ async function resolveSupplierName(db: D1Database, tenantId: string, supplierId:
   }
 }
 
+async function resolveDocTypeName(db: D1Database, tenantId: string, documentTypeId: string): Promise<string | null> {
+  try {
+    const row = await db
+      .prepare('SELECT name FROM document_types WHERE id = ? AND tenant_id = ?')
+      .bind(documentTypeId, tenantId)
+      .first<{ name: string | null }>();
+    return row?.name ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Infer the processing_queue.output_kind a doctype's documents extract to, from
+ * the doctype name. Used to constrain the sample to the right document family.
+ * 'coa' also matches legacy NULL output_kind; an unknown name imposes no
+ * output_kind constraint (rely on supplier + doctype matching).
+ */
+function outputKindForDoctype(name: string | null): 'coa' | 'order' | 'shipment' | null {
+  if (!name) return null;
+  const n = name.toLowerCase();
+  if (n.includes('analysis') || n.includes('coa') || n.includes('certificate') || n.includes('c of a')) return 'coa';
+  if (n.includes('order')) return 'order';
+  if (n.includes('shipment') || n.includes('audit') || n.includes('bol') || n.includes('lading')) return 'shipment';
+  return null;
+}
+
 async function loadSample(
   db: D1Database,
   tenantId: string,
@@ -117,16 +144,33 @@ async function loadSample(
   sampleLimit: number,
 ): Promise<SampleRow[]> {
   const supplierName = await resolveSupplierName(db, tenantId, supplierId);
+  const docTypeName = await resolveDocTypeName(db, tenantId, documentTypeId);
+  const kind = outputKindForDoctype(docTypeName);
+
+  // Constrain to the right document family by output_kind. 'coa' also accepts
+  // legacy rows where output_kind was never set (NULL). order/shipment match
+  // exactly. Unknown doctype → no output_kind filter.
+  const kindBinds: string[] = [];
+  let kindClause = '';
+  if (kind === 'coa') {
+    kindClause = "AND (output_kind IS NULL OR output_kind = 'coa')";
+  } else if (kind) {
+    kindClause = 'AND output_kind = ?';
+    kindBinds.push(kind);
+  }
 
   // Match by pre-resolved supplier_id OR (for older rows) by supplier name.
-  // Restrict to COA-ish output (coa or legacy NULL) and reviewable states.
+  // Doctype match is RELAXED to also accept NULL: legacy COA queue items were
+  // ingested before per-(supplier,doctype) tagging and carry a NULL
+  // document_type_id, so a strict `= ?` would miss the real corpus (mirrors
+  // the selection bin/parity-coa uses). reviewable states + non-empty fields.
   const sql = `
     SELECT id, file_name, ai_fields
     FROM processing_queue
     WHERE tenant_id = ?
-      AND document_type_id = ?
+      AND (document_type_id = ? OR document_type_id IS NULL)
       AND (supplier_id = ? OR (supplier_id IS NULL AND supplier IS NOT NULL AND ? IS NOT NULL AND lower(supplier) = lower(?)))
-      AND (output_kind IS NULL OR output_kind = 'coa')
+      ${kindClause}
       AND processing_status IN ('ready', 'approved')
       AND ai_fields IS NOT NULL
       AND trim(ai_fields) != ''
@@ -137,7 +181,7 @@ async function loadSample(
 
   const res = await db
     .prepare(sql)
-    .bind(tenantId, documentTypeId, supplierId, supplierName, supplierName, sampleLimit)
+    .bind(tenantId, documentTypeId, supplierId, supplierName, supplierName, ...kindBinds, sampleLimit)
     .all<{ id: string; file_name: string | null; ai_fields: string }>();
 
   const rows: SampleRow[] = [];

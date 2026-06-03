@@ -143,6 +143,33 @@ describe('analyzeUncertainty', () => {
     expect(issues.some((i) => i.id === 'product_code:phone-like')).toBe(true);
   });
 
+  it('matches legacy rows with NULL document_type_id (relaxed doctype + supplier-name)', async () => {
+    // Real-corpus shape: ingested before per-(supplier,doctype) tagging —
+    // supplier_id NULL, supplier name set, document_type_id NULL, coa. A strict
+    // `document_type_id = ?` (the old bug) would miss these entirely.
+    const legacy = (id: string, fields: Record<string, string | null>) =>
+      db
+        .prepare(
+          `INSERT INTO processing_queue
+            (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type,
+             ai_fields, processing_status, supplier_id, supplier, output_kind, status, created_at)
+           VALUES (?, ?, NULL, ?, ?, 1, 'application/pdf', ?, 'ready', NULL, ?, 'coa', 'pending', datetime('now'))`,
+        )
+        .bind(id, TENANT, `k/${id}`, `${id}.pdf`, JSON.stringify(fields), SUPPLIER_NAME)
+        .run();
+    await legacy('lg1', { product_code: '800-555-7777', lot_number: 'A1' });
+    await legacy('lg2', { product_code: '800-555-7778', lot_number: 'A2' });
+    await legacy('lg3', { product_code: '800-555-7779', lot_number: 'A3' });
+
+    const { issues } = await analyzeUncertainty(db, {
+      tenantId: TENANT,
+      supplierId: SUPPLIER,
+      documentTypeId: DOCTYPE,
+    });
+    // The relaxed doctype match + supplier-name fallback must surface these.
+    expect(issues.some((i) => i.id === 'product_code:phone-like')).toBe(true);
+  });
+
   it('ignores rows from other suppliers / output_kind / non-ready status', async () => {
     // different supplier
     await row('w1', { product_code: '800-555-1212' }, { supplierId: 'tu-supplier-other' });
