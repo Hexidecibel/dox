@@ -16,6 +16,73 @@ import {
   slugifyConnectorName,
 } from '../../../shared/connectorSlug';
 import { validateEmailConfig } from './[id]/test';
+import {
+  VALID_OUTPUT_KINDS,
+  VALID_ORIGIN_KINDS,
+  type OutputKind,
+  type OriginKind,
+} from '../../../shared/connectorOutput';
+
+/**
+ * Validate the optional routing fields (migration 0067) shared by the
+ * create + update handlers. Returns the normalized values (NULL when
+ * omitted) or throws a BadRequestError on an invalid enum value.
+ * supplier_id / document_type_id are free-form ids — we don't verify
+ * existence here, matching the documents/process intake handler.
+ */
+function parseRoutingFields(body: {
+  origin_kind?: unknown;
+  output_kind?: unknown;
+  supplier_id?: unknown;
+  document_type_id?: unknown;
+}): {
+  origin_kind: OriginKind | null;
+  output_kind: OutputKind | null;
+  supplier_id: string | null;
+  document_type_id: string | null;
+} {
+  let originKind: OriginKind | null = null;
+  if (body.origin_kind !== undefined && body.origin_kind !== null && body.origin_kind !== '') {
+    if (
+      typeof body.origin_kind !== 'string' ||
+      !VALID_ORIGIN_KINDS.includes(body.origin_kind as OriginKind)
+    ) {
+      throw new BadRequestError(
+        `Invalid origin_kind. Must be one of: ${VALID_ORIGIN_KINDS.join(', ')}`,
+      );
+    }
+    originKind = body.origin_kind as OriginKind;
+  }
+
+  let outputKind: OutputKind | null = null;
+  if (body.output_kind !== undefined && body.output_kind !== null && body.output_kind !== '') {
+    if (
+      typeof body.output_kind !== 'string' ||
+      !VALID_OUTPUT_KINDS.includes(body.output_kind as OutputKind)
+    ) {
+      throw new BadRequestError(
+        `Invalid output_kind. Must be one of: ${VALID_OUTPUT_KINDS.join(', ')}`,
+      );
+    }
+    outputKind = body.output_kind as OutputKind;
+  }
+
+  const supplierId =
+    typeof body.supplier_id === 'string' && body.supplier_id.length > 0
+      ? body.supplier_id
+      : null;
+  const documentTypeId =
+    typeof body.document_type_id === 'string' && body.document_type_id.length > 0
+      ? body.document_type_id
+      : null;
+
+  return {
+    origin_kind: originKind,
+    output_kind: outputKind,
+    supplier_id: supplierId,
+    document_type_id: documentTypeId,
+  };
+}
 
 /**
  * Generate a 32-byte random hex token for the connector's HTTP POST drop
@@ -171,11 +238,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       schedule?: string;
       tenant_id?: string;
       sample_r2_key?: string | null;
+      origin_kind?: string;
+      output_kind?: string;
+      supplier_id?: string | null;
+      document_type_id?: string | null;
     };
 
     if (!body.name?.trim()) {
       throw new BadRequestError('name is required');
     }
+
+    // Validate + normalize the optional routing fields (migration 0067).
+    // Invalid enum values throw a 400 before we touch the DB.
+    const routing = parseRoutingFields(body);
 
     // If the caller has populated email-scoping config (subject patterns
     // or sender filter), validate it. Phase B0: connectors are universal,
@@ -307,13 +382,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         id, tenant_id, name, slug,
         config, field_mappings, credentials_encrypted, credentials_iv,
         schedule, sample_r2_key, active, api_token,
+        origin_kind, output_kind, supplier_id, document_type_id,
         created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'), datetime('now'))`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
     )
       .bind(
         id, tenantId, name, requestedSlug,
         config, fieldMappings, credentialsEncrypted, credentialsIv,
-        schedule, sampleR2Key, apiToken, user.id
+        schedule, sampleR2Key, apiToken,
+        routing.origin_kind, routing.output_kind, routing.supplier_id, routing.document_type_id,
+        user.id
       )
       .run();
 

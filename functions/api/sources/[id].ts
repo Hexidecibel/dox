@@ -11,6 +11,12 @@ import { encryptCredentials } from '../../lib/connectors/crypto';
 import type { Env, User } from '../../lib/types';
 import { normalizeFieldMappings, validateFieldMappings } from '../../../shared/fieldMappings';
 import { validateEmailConfig } from './[id]/test';
+import {
+  VALID_OUTPUT_KINDS,
+  VALID_ORIGIN_KINDS,
+  type OutputKind,
+  type OriginKind,
+} from '../../../shared/connectorOutput';
 
 /**
  * Transform a DB row into the API-facing shape. Parses field_mappings JSON
@@ -131,6 +137,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
        *  Empty string clears the row's existing guidance (treated the
        *  same as null on the read side). */
       extraction_instructions?: string | null;
+      // === Source routing (migration 0067). All optional; partial-update
+      //     semantics — only applied when the key is present in the body. ===
+      origin_kind?: string | null;
+      output_kind?: string | null;
+      supplier_id?: string | null;
+      document_type_id?: string | null;
     };
 
     /** Hard cap on stored instructions length. Mirrors the
@@ -258,6 +270,61 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         updates.push('extraction_instructions = ?');
         params.push(trimmed.length === 0 ? null : trimmed);
       }
+    }
+
+    // === Source routing fields (migration 0067) ===
+    // Partial-update: only touched when the key is present. An explicit
+    // null / empty string clears the column; a valid enum sets it.
+    if (body.origin_kind !== undefined) {
+      if (body.origin_kind === null || body.origin_kind === '') {
+        updates.push('origin_kind = ?');
+        params.push(null);
+      } else if (
+        typeof body.origin_kind !== 'string' ||
+        !VALID_ORIGIN_KINDS.includes(body.origin_kind as OriginKind)
+      ) {
+        throw new BadRequestError(
+          `Invalid origin_kind. Must be one of: ${VALID_ORIGIN_KINDS.join(', ')}`,
+        );
+      } else {
+        updates.push('origin_kind = ?');
+        params.push(body.origin_kind);
+      }
+    }
+
+    if (body.output_kind !== undefined) {
+      if (body.output_kind === null || body.output_kind === '') {
+        updates.push('output_kind = ?');
+        params.push(null);
+      } else if (
+        typeof body.output_kind !== 'string' ||
+        !VALID_OUTPUT_KINDS.includes(body.output_kind as OutputKind)
+      ) {
+        throw new BadRequestError(
+          `Invalid output_kind. Must be one of: ${VALID_OUTPUT_KINDS.join(', ')}`,
+        );
+      } else {
+        updates.push('output_kind = ?');
+        params.push(body.output_kind);
+      }
+    }
+
+    if (body.supplier_id !== undefined) {
+      updates.push('supplier_id = ?');
+      params.push(
+        typeof body.supplier_id === 'string' && body.supplier_id.length > 0
+          ? body.supplier_id
+          : null,
+      );
+    }
+
+    if (body.document_type_id !== undefined) {
+      updates.push('document_type_id = ?');
+      params.push(
+        typeof body.document_type_id === 'string' && body.document_type_id.length > 0
+          ? body.document_type_id
+          : null,
+      );
     }
 
     if (updates.length === 0) {

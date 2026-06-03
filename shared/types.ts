@@ -912,6 +912,15 @@ export interface ConnectorRow {
   public_link_token?: string | null;
   /** B4 — Optional public-link expiry (unix seconds). NULL = no expiry. */
   public_link_expires_at?: number | null;
+  // === Source routing (migration 0067) ===
+  /** Where documents originate: external supplier vs internal system. NULL => 'supplier'-ish default. */
+  origin_kind?: 'supplier' | 'internal' | null;
+  /** Downstream record the worker should produce. NULL => treated as 'coa'. */
+  output_kind?: 'coa' | 'order' | 'shipment' | null;
+  /** Pre-resolved supplier for supplier-dedicated channels; also keys the extraction profile. */
+  supplier_id?: string | null;
+  /** Document type for this source; also keys the extraction profile. */
+  document_type_id?: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;

@@ -32,6 +32,11 @@ import {
   CircularProgress,
   useMediaQuery,
   useTheme,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Divider,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -50,6 +55,8 @@ import { StepLivePreview } from '../../components/connectors/StepLivePreview';
 import { StepTestAndActivate } from '../../components/connectors/StepTestAndActivate';
 import { HelpWell } from '../../components/HelpWell';
 import { InfoTooltip } from '../../components/InfoTooltip';
+import SupplierAutocomplete from '../../components/SupplierAutocomplete';
+import type { ApiDocumentType } from '../../lib/types';
 import { helpContent } from '../../lib/helpContent';
 import {
   defaultFieldMappings,
@@ -87,9 +94,19 @@ interface WizardState {
    * mode; the wizard itself doesn't author them.
    */
   supplierId: string | null;
+  /** Supplier display name, so the SupplierAutocomplete renders its value. */
+  supplierName: string;
   documentTypeId: string | null;
   /** Tenant the profile lookup/save scopes to (needed for super_admin). */
   tenantId: string | null;
+  /**
+   * Source routing (migration 0067). The worker routes extraction by these:
+   * origin_kind (supplier|internal) + output_kind (coa|order|shipment). NULL
+   * output_kind is treated as 'coa' downstream, so a source created without
+   * setting these is wrongly treated as COA — hence the wizard now sets them.
+   */
+  originKind: 'supplier' | 'internal' | null;
+  outputKind: 'coa' | 'order' | 'shipment' | null;
 }
 
 /**
@@ -122,8 +139,11 @@ const initialState: WizardState = {
   active: false,
   sample: null,
   supplierId: null,
+  supplierName: '',
   documentTypeId: null,
   tenantId: null,
+  originKind: null,
+  outputKind: null,
 };
 
 export function SourceWizard() {
@@ -174,6 +194,8 @@ export function SourceWizard() {
         const supplierId = (c.supplier_id as string | null) ?? null;
         const documentTypeId = (c.document_type_id as string | null) ?? null;
         const profileTenantId = (c.tenant_id as string | null) ?? null;
+        const originKind = (c.origin_kind as 'supplier' | 'internal' | null) ?? null;
+        const outputKind = (c.output_kind as 'coa' | 'order' | 'shipment' | null) ?? null;
 
         // Connectors -> Sources: when this source has a (supplier, document type)
         // pair, the canonical field_mappings live on the extraction profile —
@@ -231,6 +253,19 @@ export function SourceWizard() {
           }
         }
 
+        // Resolve the supplier display name so the SupplierAutocomplete
+        // renders its current value in edit mode (the connector row only
+        // stores the id). Non-fatal — fall back to an empty name.
+        let supplierName = '';
+        if (supplierId) {
+          try {
+            const sup = await api.suppliers.get(supplierId);
+            supplierName = sup.supplier?.name || '';
+          } catch (supErr) {
+            console.warn('Supplier name load failed:', supErr);
+          }
+        }
+
         setState({
           name: c.name as string,
           // Edit mode: trust the persisted slug. Mark touched so any
@@ -244,8 +279,11 @@ export function SourceWizard() {
           active: !!c.active,
           sample: rehydratedSample,
           supplierId,
+          supplierName,
           documentTypeId,
           tenantId: profileTenantId,
+          originKind,
+          outputKind,
         });
         // Seed the auto-apply guard with the rehydrated sample_id. Without
         // this, the FIRST Back-to-Upload -> Next round-trip in edit mode
@@ -390,6 +428,12 @@ export function SourceWizard() {
         schedule: state.schedule || undefined,
         active: activate,
         sample_r2_key: state.sample?.sample_id,
+        // Source routing (migration 0067). Send null to clear; the PUT/POST
+        // handlers treat null as "clear column" / "leave NULL".
+        origin_kind: state.originKind,
+        output_kind: state.outputKind,
+        supplier_id: state.supplierId,
+        document_type_id: state.documentTypeId,
       };
 
       let resultId: string;
@@ -415,6 +459,10 @@ export function SourceWizard() {
           schedule: data.schedule as string | undefined,
           tenant_id: currentTenantId,
           sample_r2_key: state.sample?.sample_id,
+          origin_kind: state.originKind ?? undefined,
+          output_kind: state.outputKind ?? undefined,
+          supplier_id: state.supplierId,
+          document_type_id: state.documentTypeId,
         });
         if (!result.ok) {
           // Bounce back to the Name step (index 0) with the suggestion
@@ -531,7 +579,7 @@ export function SourceWizard() {
       {/* Step content */}
       <Box sx={{ minHeight: 300, mb: 4 }}>
         {role === 'name' && (
-          <StepName state={state} onChange={updateState} />
+          <StepName state={state} onChange={updateState} tenantId={currentTenantId} />
         )}
         {role === 'upload' && (
           <StepUploadSample
@@ -637,10 +685,32 @@ export function SourceWizard() {
 function StepName({
   state,
   onChange,
+  tenantId,
 }: {
   state: WizardState;
   onChange: (patch: Partial<WizardState>) => void;
+  tenantId: string | null;
 }) {
+  // Document types for the routing selector, scoped to the source's tenant.
+  const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
+  useEffect(() => {
+    if (!tenantId) {
+      setDocumentTypes([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.documentTypes.list({ tenant_id: tenantId, active: 1 });
+        if (!cancelled) setDocumentTypes(res.documentTypes || []);
+      } catch {
+        if (!cancelled) setDocumentTypes([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
   // Phase B0.5: auto-populate the slug from the name UNTIL the user
   // touches the slug field. Once `slugTouched` is true, name edits no
   // longer overwrite the slug — this matches the "edit-as-you-go but
@@ -716,6 +786,117 @@ function StepName({
         sx={{ mb: 3, fontFamily: 'monospace' }}
         InputProps={{ sx: { fontFamily: 'monospace' } }}
       />
+
+      <Divider sx={{ my: 3 }} />
+
+      {/* Routing (migration 0067) — tells the extraction worker how to route
+          documents from this source. Without these, a new source defaults to
+          NULL output_kind and is wrongly treated as COA. */}
+      <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 0.5 }}>
+        Routing
+      </Typography>
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
+        How the extraction worker should route documents from this source.
+      </Typography>
+
+      <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+        <InputLabel id="origin-kind-label">Origin</InputLabel>
+        <Select
+          labelId="origin-kind-label"
+          label="Origin"
+          value={state.originKind ?? ''}
+          onChange={(e) =>
+            onChange({
+              originKind: (e.target.value || null) as 'supplier' | 'internal' | null,
+            })
+          }
+          displayEmpty
+        >
+          <MenuItem value="">
+            <em>Unset</em>
+          </MenuItem>
+          <MenuItem value="supplier">Supplier (external)</MenuItem>
+          <MenuItem value="internal">Internal system</MenuItem>
+        </Select>
+      </FormControl>
+
+      <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+        <InputLabel id="output-kind-label">Produces</InputLabel>
+        <Select
+          labelId="output-kind-label"
+          label="Produces"
+          value={state.outputKind ?? ''}
+          onChange={(e) =>
+            onChange({
+              outputKind: (e.target.value || null) as
+                | 'coa'
+                | 'order'
+                | 'shipment'
+                | null,
+            })
+          }
+          displayEmpty
+        >
+          <MenuItem value="">
+            <em>Unset (treated as COA)</em>
+          </MenuItem>
+          <MenuItem value="coa">COA</MenuItem>
+          <MenuItem value="order">Order</MenuItem>
+          <MenuItem value="shipment">Shipment</MenuItem>
+        </Select>
+      </FormControl>
+
+      {tenantId && (
+        <Box sx={{ mb: 2 }}>
+          <SupplierAutocomplete
+            tenantId={tenantId}
+            size="medium"
+            showStatus={false}
+            label="Supplier (optional)"
+            value={{
+              supplierId: state.supplierId ?? undefined,
+              supplierName: state.supplierName,
+              verified: !!state.supplierId,
+            }}
+            onChange={(v) =>
+              onChange({
+                // Only an EXISTING supplier (with an id) keys the extraction
+                // profile; a free-typed name without an id isn't persisted as
+                // routing — clear the id in that case.
+                supplierId: v.supplierId ?? null,
+                supplierName: v.supplierName,
+              })
+            }
+          />
+        </Box>
+      )}
+
+      <FormControl fullWidth size="small" sx={{ mb: 1 }}>
+        <InputLabel id="doctype-label" shrink>
+          Document type (optional)
+        </InputLabel>
+        <Select
+          labelId="doctype-label"
+          label="Document type (optional)"
+          value={state.documentTypeId ?? ''}
+          onChange={(e) => onChange({ documentTypeId: e.target.value || null })}
+          displayEmpty
+          notched
+        >
+          <MenuItem value="">
+            <em>None</em>
+          </MenuItem>
+          {documentTypes.map((dt) => (
+            <MenuItem key={dt.id} value={dt.id}>
+              {dt.name}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+      <Typography variant="caption" color="text.secondary">
+        Supplier + document type key the extraction profile the worker reads
+        field mappings from.
+      </Typography>
     </Box>
   );
 }

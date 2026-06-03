@@ -94,6 +94,20 @@ export interface ConnectorError {
   message: string;
 }
 
+/**
+ * Source routing enums (migration 0067). A source's `origin_kind` says
+ * whether documents come from an external supplier or an internal system;
+ * `output_kind` says which downstream record the worker should produce.
+ * The worker routes extraction by these (and resolves the extraction
+ * profile from supplier_id + document_type_id). Shared so the REST
+ * handlers, frontend wizard, and worker all validate against one list.
+ */
+export const VALID_OUTPUT_KINDS = ['coa', 'order', 'shipment'] as const;
+export type OutputKind = (typeof VALID_OUTPUT_KINDS)[number];
+
+export const VALID_ORIGIN_KINDS = ['supplier', 'internal'] as const;
+export type OriginKind = (typeof VALID_ORIGIN_KINDS)[number];
+
 export interface ConnectorOutput {
   orders: ParsedOrder[];
   customers: ParsedCustomer[];

@@ -249,3 +249,61 @@ describe('PUT /api/connectors/:id — subject_patterns persistence (Issue 1)', (
     expect(response.status).toBe(200);
   });
 });
+
+describe('Source routing fields (migration 0067)', () => {
+  it('POST persists output_kind/origin_kind and GET returns them', async () => {
+    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
+    const response = await createConnector(
+      makePostContext(
+        {
+          name: 'Order Feed Source',
+          tenant_id: seed.tenantId,
+          output_kind: 'order',
+          origin_kind: 'internal',
+        },
+        user,
+      ),
+    );
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      connector: { id: string; output_kind: string | null; origin_kind: string | null };
+    };
+    expect(body.connector.output_kind).toBe('order');
+    expect(body.connector.origin_kind).toBe('internal');
+
+    const getResponse = await getConnector(makeGetContext(body.connector.id, user));
+    expect(getResponse.status).toBe(200);
+    const getBody = (await getResponse.json()) as {
+      connector: { output_kind: string | null; origin_kind: string | null };
+    };
+    expect(getBody.connector.output_kind).toBe('order');
+    expect(getBody.connector.origin_kind).toBe('internal');
+  });
+
+  it('POST rejects an invalid output_kind with 400', async () => {
+    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
+    const response = await createConnector(
+      makePostContext(
+        { name: 'Bad Kind Source', tenant_id: seed.tenantId, output_kind: 'invoice' },
+        user,
+      ),
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it('PUT updates output_kind and GET reflects the change', async () => {
+    const connectorId = await insertEmailConnector({ subject_patterns: ['Placeholder'] });
+    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
+
+    const putResponse = await updateConnector(
+      makePutContext(connectorId, { output_kind: 'shipment' }, user),
+    );
+    expect(putResponse.status).toBe(200);
+
+    const getResponse = await getConnector(makeGetContext(connectorId, user));
+    const getBody = (await getResponse.json()) as {
+      connector: { output_kind: string | null };
+    };
+    expect(getBody.connector.output_kind).toBe('shipment');
+  });
+});

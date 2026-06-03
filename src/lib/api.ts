@@ -1297,6 +1297,11 @@ export const api = {
       schedule?: string;
       tenant_id?: string;
       sample_r2_key?: string;
+      /** Source routing (migration 0067). All optional. */
+      origin_kind?: 'supplier' | 'internal';
+      output_kind?: 'coa' | 'order' | 'shipment';
+      supplier_id?: string | null;
+      document_type_id?: string | null;
     }) {
       return fetchApi('/sources', { method: 'POST', body: JSON.stringify(data) });
     },
@@ -1319,6 +1324,11 @@ export const api = {
       schedule?: string;
       tenant_id?: string;
       sample_r2_key?: string;
+      /** Source routing (migration 0067). All optional. */
+      origin_kind?: 'supplier' | 'internal';
+      output_kind?: 'coa' | 'order' | 'shipment';
+      supplier_id?: string | null;
+      document_type_id?: string | null;
     }): Promise<
       | { ok: true; connector: { id: string; slug?: string } & Record<string, unknown> }
       | { ok: false; conflict: { suggested: string } }

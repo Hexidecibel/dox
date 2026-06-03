@@ -1,0 +1,6 @@
+order_number,customer_number,customer_name,product_code,product_name,lot_number,quantity
+SO-90001,K00100,Acme Foods,30417,Whole Milk 5G,LOT-AAA111,12
+SO-90001,K00100,Acme Foods,20322,Bulk Butter 55lb,LOT-BBB222,4
+SO-90002,K00100,Acme Foods,30417,Whole Milk 5G,LOT-CCC333,6
+SO-90003,P00200,Zenith Provisions,20322,Bulk Butter 55lb,LOT-DDD444,8
+SO-90004,P00200,Zenith Provisions,99999,Mystery Cheese,LOT-EEE555,2

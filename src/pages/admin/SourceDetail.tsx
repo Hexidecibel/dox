@@ -30,8 +30,13 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  Divider,
+  FormControl,
   FormHelperText,
+  InputLabel,
+  MenuItem,
   Pagination,
+  Select,
   Paper,
   Snackbar,
   Stack,
@@ -63,7 +68,8 @@ import {
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import { sourceKindLabel } from '../../lib/sourceLabels';
-import type { Tenant } from '../../lib/types';
+import SupplierAutocomplete from '../../components/SupplierAutocomplete';
+import type { Tenant, ApiDocumentType } from '../../lib/types';
 import {
   defaultFieldMappings,
   normalizeFieldMappings,
@@ -372,6 +378,172 @@ function ConnectorExtractionInstructionsEditor({
         helperText="Prepended to the AI parsing prompt on every run of this connector."
       />
     </Box>
+  );
+}
+
+/**
+ * Routing card — edits the source's origin_kind / output_kind / supplier /
+ * document type (migration 0067). The extraction worker routes by these and
+ * resolves the extraction profile from (supplier_id, document_type_id), so a
+ * source with NULL routing is wrongly treated as COA. Changes are persisted
+ * immediately via the parent's `patchConnector` (optimistic + rollback).
+ */
+function RoutingCard({
+  connector,
+  tenantId,
+  onPatch,
+}: {
+  connector: Connector;
+  tenantId: string;
+  onPatch: (
+    partial: Record<string, unknown>,
+    optimistic?: Partial<Connector>,
+  ) => void;
+}) {
+  const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
+  const [supplierName, setSupplierName] = useState('');
+
+  useEffect(() => {
+    if (!tenantId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.documentTypes.list({ tenant_id: tenantId, active: 1 });
+        if (!cancelled) setDocumentTypes(res.documentTypes || []);
+      } catch {
+        if (!cancelled) setDocumentTypes([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
+
+  // Resolve the supplier display name for the autocomplete value.
+  useEffect(() => {
+    if (!connector.supplier_id) {
+      setSupplierName('');
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const sup = await api.suppliers.get(connector.supplier_id as string);
+        if (!cancelled) setSupplierName(sup.supplier?.name || '');
+      } catch {
+        if (!cancelled) setSupplierName('');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [connector.supplier_id]);
+
+  return (
+    <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+      <Box sx={{ mb: 2 }}>
+        <Typography variant="h6" fontWeight={600}>
+          Routing
+        </Typography>
+        <Typography variant="caption" color="text.secondary">
+          How the extraction worker routes documents from this source. Supplier +
+          document type key the extraction profile the worker reads field
+          mappings from.
+        </Typography>
+      </Box>
+
+      <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+        <InputLabel id="rc-origin-label">Origin</InputLabel>
+        <Select
+          labelId="rc-origin-label"
+          label="Origin"
+          value={connector.origin_kind ?? ''}
+          onChange={(e) => {
+            const v = (e.target.value || null) as 'supplier' | 'internal' | null;
+            onPatch({ origin_kind: v }, { origin_kind: v });
+          }}
+          displayEmpty
+        >
+          <MenuItem value="">
+            <em>Unset</em>
+          </MenuItem>
+          <MenuItem value="supplier">Supplier (external)</MenuItem>
+          <MenuItem value="internal">Internal system</MenuItem>
+        </Select>
+      </FormControl>
+
+      <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+        <InputLabel id="rc-output-label">Produces</InputLabel>
+        <Select
+          labelId="rc-output-label"
+          label="Produces"
+          value={connector.output_kind ?? ''}
+          onChange={(e) => {
+            const v = (e.target.value || null) as Connector['output_kind'];
+            onPatch({ output_kind: v }, { output_kind: v });
+          }}
+          displayEmpty
+        >
+          <MenuItem value="">
+            <em>Unset (treated as COA)</em>
+          </MenuItem>
+          <MenuItem value="coa">COA</MenuItem>
+          <MenuItem value="order">Order</MenuItem>
+          <MenuItem value="shipment">Shipment</MenuItem>
+        </Select>
+      </FormControl>
+
+      <Divider sx={{ my: 2 }} />
+
+      <Box sx={{ mb: 2 }}>
+        <SupplierAutocomplete
+          tenantId={tenantId}
+          size="medium"
+          showStatus={false}
+          label="Supplier (optional)"
+          value={{
+            supplierId: connector.supplier_id ?? undefined,
+            supplierName,
+            verified: !!connector.supplier_id,
+          }}
+          onChange={(val) => {
+            // Only an EXISTING supplier (with an id) keys the extraction
+            // profile; a free-typed name without an id is cleared.
+            const newId = val.supplierId ?? null;
+            setSupplierName(val.supplierName);
+            if (newId !== (connector.supplier_id ?? null)) {
+              onPatch({ supplier_id: newId }, { supplier_id: newId });
+            }
+          }}
+        />
+      </Box>
+
+      <FormControl fullWidth size="small">
+        <InputLabel id="rc-doctype-label" shrink>
+          Document type (optional)
+        </InputLabel>
+        <Select
+          labelId="rc-doctype-label"
+          label="Document type (optional)"
+          value={connector.document_type_id ?? ''}
+          onChange={(e) => {
+            const v = e.target.value || null;
+            onPatch({ document_type_id: v }, { document_type_id: v });
+          }}
+          displayEmpty
+          notched
+        >
+          <MenuItem value="">
+            <em>None</em>
+          </MenuItem>
+          {documentTypes.map((dt) => (
+            <MenuItem key={dt.id} value={dt.id}>
+              {dt.name}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+    </Paper>
   );
 }
 
@@ -1390,6 +1562,15 @@ export function SourceDetail() {
           onCommit={commitFieldMappings}
         />
       </Paper>
+
+      {/* ------------------------------------------------------------ */}
+      {/* 4a. Routing card (migration 0067)                             */}
+      {/* ------------------------------------------------------------ */}
+      <RoutingCard
+        connector={connector}
+        tenantId={connector.tenant_id}
+        onPatch={patchConnector}
+      />
 
       {/* ------------------------------------------------------------ */}
       {/* 4b. Extraction Instructions card (R2.b)                       */}

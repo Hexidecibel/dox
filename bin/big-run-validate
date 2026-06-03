@@ -1,0 +1,630 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/big-run-validate — BIG end-to-end validation of the unified
+ * "Connectors -> Sources" intake pipeline against a LOCAL dev server.
+ *
+ * What it does (full run):
+ *   1. Login (or register) a super_admin and grab a JWT.
+ *   2. Create a fresh tenant (suffixed with RUN_TAG so re-runs don't collide).
+ *   3. Create suppliers:
+ *        - a COA supplier ("Darigold-RUN", origin=supplier)
+ *        - two internal-origin suppliers ("ERP-RUN", "WMS-RUN")
+ *      NOTE: the `suppliers` table has NO origin_kind column — origin_kind is a
+ *      property of the SOURCE (connectors row) + the queue row, not the
+ *      supplier. We model the internal origins as ordinary supplier rows and
+ *      stamp origin_kind='internal' on their sources.
+ *   4. Create document types: "COA", "Order Report", "Audit Trail".
+ *   5. Create one Source (connectors row) per door/kind we exercise. The
+ *      POST/PUT /api/sources handlers do NOT accept the routing columns
+ *      (origin_kind/output_kind/supplier_id/document_type_id) — those live on
+ *      the connectors row but have no API setter — so we set them directly via
+ *      `wrangler d1 execute --local`. This is intentional and owned by this
+ *      script (Scripts First).
+ *   6. Set the unified extraction profile (PUT /api/extraction-instructions)
+ *      with field_mappings for the ORDER sources so the worker's DETERMINISTIC
+ *      CSV/XLSX path triggers.
+ *   7. Create a dox_sk_ API key and PRINT it (the orchestrator launches the
+ *      worker with DOX_API_KEY=that).
+ *   8. Push the corpus through EVERY door:
+ *        - manual Import      POST /api/documents/process       (coa + order)
+ *        - source run         POST /api/sources/:id/run          (multipart)
+ *        - source drop        POST /api/sources/:id/drop         (bearer api_token)
+ *        - email webhook      POST /api/webhooks/connector-email-ingest (JSON b64)
+ *      (R2 poll + public-link are SKIPPED — see SKIPPED note in the report.)
+ *   9. Print the created API key + queue item ids it is waiting on.
+ *  10. POLL the queue until every item reaches processing_status ready|error
+ *      (timeout default 10 min) — works while a worker drains concurrently.
+ *  11. APPROVE each ready item (kind-aware payload).
+ *  12. Run verification reads + print a PASS/FAIL report.
+ *
+ * Re-run safety: every created name is suffixed with RUN_TAG (arg or generated
+ * from a timestamp), so a second invocation makes a brand-new tenant and never
+ * touches the prior one.
+ *
+ * Report-only mode (re-check after the worker drains):
+ *   bin/big-run-validate --report-only --tenant <tenantId>
+ *
+ * Usage:
+ *   bin/big-run-validate [RUN_TAG] [--report-only --tenant <id>]
+ * Env:
+ *   DOX_BASE       (default http://localhost:8788)   target dev server
+ *   DOX_ADMIN_EMAIL(default a@a.a)                   admin login
+ *   DOX_ADMIN_PASS (default a)                       admin password
+ *   POLL_TIMEOUT_MS(default 600000)                  queue readiness timeout
+ *   POLL_INTERVAL_MS(default 5000)
+ *   DOX_D1_NAME    (default doc-upload-db)           wrangler d1 database name
+ *
+ * Validates syntax only with `node --check bin/big-run-validate`.
+ */
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execFileSync } = require('child_process');
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+const BASE = (process.env.DOX_BASE || 'http://localhost:8788').replace(/\/$/, '');
+const ADMIN_EMAIL = process.env.DOX_ADMIN_EMAIL || 'a@a.a';
+const ADMIN_PASS = process.env.DOX_ADMIN_PASS || 'a';
+const POLL_TIMEOUT_MS = parseInt(process.env.POLL_TIMEOUT_MS || '600000', 10);
+const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '5000', 10);
+const D1_NAME = process.env.DOX_D1_NAME || 'doc-upload-db';
+
+const PROJECT_ROOT = path.resolve(__dirname, '..');
+const FIXTURES_DIR = path.join(__dirname, 'fixtures', 'big-run');
+const DROPS_DIR = path.join(os.homedir(), 'drops', 'dox-linkage');
+
+// Real corpus subset (representative, not exhaustive — per brief).
+const CORPUS = {
+  coa: [
+    '30417_WHOLE_5G_05-24-26.pdf',
+    '_20322__310347_-__1042601017_BULK_BUTTER_55.115___MFG_01-10-26.pdf',
+  ],
+  order: ['COA_Orders-05312026-153520.pdf'],
+  shipment: ['Audit_Trail_Report__1_.docx', 'Audit_Trail_Report__2_.docx', 'Audit_Trail_Report__3_.docx'],
+};
+
+// ---------------------------------------------------------------------------
+// Small utilities
+// ---------------------------------------------------------------------------
+function log(...args) { console.log(...args); }
+function section(title) { log('\n' + '='.repeat(70) + '\n' + title + '\n' + '='.repeat(70)); }
+
+function nowTag() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+let JWT = null;
+async function api(method, urlPath, { body, headers, raw } = {}) {
+  const h = Object.assign({}, headers);
+  if (JWT && !h.Authorization) h.Authorization = `Bearer ${JWT}`;
+  let payload = body;
+  if (body !== undefined && !(body instanceof Buffer) && typeof body !== 'string' && !raw) {
+    // Not FormData (node's fetch FormData is handled by raw flag); JSON it.
+    if (typeof FormData !== 'undefined' && body instanceof FormData) {
+      payload = body;
+    } else {
+      payload = JSON.stringify(body);
+      h['Content-Type'] = 'application/json';
+    }
+  }
+  const res = await fetch(`${BASE}${urlPath}`, { method, headers: h, body: payload });
+  const text = await res.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
+  if (!res.ok) {
+    const msg = (json && (json.error || json.message)) || text || `HTTP ${res.status}`;
+    const err = new Error(`${method} ${urlPath} -> ${res.status}: ${msg}`);
+    err.status = res.status;
+    err.body = json;
+    throw err;
+  }
+  return json;
+}
+
+/**
+ * Run a SQL statement against the LOCAL D1 via wrangler. We use this ONLY to
+ * set the source routing columns (output_kind/origin_kind/supplier_id/
+ * document_type_id) which have no REST setter. Synchronous on purpose — these
+ * are quick setup writes and keep ordering obvious.
+ */
+function d1Exec(sql) {
+  return execFileSync(
+    'npx',
+    ['wrangler', 'd1', 'execute', D1_NAME, '--local', '--command', sql],
+    { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'] }
+  ).toString();
+}
+function sqlStr(v) {
+  if (v === null || v === undefined) return 'NULL';
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
+
+function readFixtureOrDrop(name, kind) {
+  // CORPUS files live in ~/drops/dox-linkage; synthetic fixtures in FIXTURES_DIR.
+  const p = path.join(DROPS_DIR, name);
+  if (fs.existsSync(p)) return fs.readFileSync(p);
+  const fp = path.join(FIXTURES_DIR, name);
+  if (fs.existsSync(fp)) return fs.readFileSync(fp);
+  throw new Error(`corpus/fixture file not found: ${name} (looked in ${DROPS_DIR} and ${FIXTURES_DIR})`);
+}
+
+function mimeFor(name) {
+  const ext = name.toLowerCase().split('.').pop();
+  return ({
+    pdf: 'application/pdf',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    csv: 'text/csv',
+    txt: 'text/plain',
+  })[ext] || 'application/octet-stream';
+}
+
+// ---------------------------------------------------------------------------
+// field_mappings for the ORDER CSV/XLSX sources (v2 shape from
+// shared/fieldMappings.ts). Must carry source_labels matching our CSV headers
+// so parseCSVAttachment binds deterministically (no Qwen).
+// ---------------------------------------------------------------------------
+function orderFieldMappings() {
+  return {
+    version: 2,
+    core: {
+      order_number:    { enabled: true,  source_labels: ['order_number', 'order #', 'so', 'sales order'], format_hint: 'SO-12345' },
+      customer_number: { enabled: true,  source_labels: ['customer_number', 'cust #', 'customer id'],     format_hint: 'K00123' },
+      customer_name:   { enabled: true,  source_labels: ['customer_name', 'customer', 'company'],          format_hint: 'Business name' },
+      po_number:       { enabled: false, source_labels: ['po_number', 'po'],                               format_hint: 'PO-98765' },
+      product_name:    { enabled: true,  source_labels: ['product_name', 'product', 'description'],         format_hint: 'Product description' },
+      product_code:    { enabled: true,  source_labels: ['product_code', 'sku', 'item code'],               format_hint: 'SKU' },
+      quantity:        { enabled: true,  source_labels: ['quantity', 'qty', 'units'],                       format_hint: 'Numeric' },
+      lot_number:      { enabled: true,  source_labels: ['lot_number', 'lot', 'batch'],                     format_hint: 'LOT-456' },
+    },
+    extended: [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// registry.xlsx generator — multi-sheet workbook via SheetJS (project dep).
+//   "ACTIVE A-M"  customers A..M
+//   "ACTIVE N-Z"  customers N..Z incl. "Zenith Foods" (last sheet, late alpha)
+//   "INACTIVE"    rows that MUST be skipped by the worker (/inactive/i)
+// PASS check: Zenith (last sheet, late alphabet) appears; INACTIVE rows do NOT.
+// ---------------------------------------------------------------------------
+function generateRegistryXlsx(outPath) {
+  let XLSX;
+  try {
+    XLSX = require(path.join(PROJECT_ROOT, 'node_modules', 'xlsx'));
+  } catch {
+    XLSX = require('xlsx');
+  }
+  const header = ['order_number', 'customer_number', 'customer_name', 'product_code', 'product_name', 'lot_number', 'quantity'];
+  const sheetAM = [
+    header,
+    ['SO-91001', 'K00301', 'Acme Bakery',     '30417', 'Whole Milk 5G',  'LOT-AM001', 5],
+    ['SO-91002', 'K00302', 'Mountain Dairy',  '20322', 'Bulk Butter 55', 'LOT-AM002', 3],
+  ];
+  const sheetNZ = [
+    header,
+    ['SO-91101', 'K00401', 'Northwind Foods', '30417', 'Whole Milk 5G',  'LOT-NZ001', 7],
+    ['SO-91102', 'K00402', 'Zenith Foods',    '20322', 'Bulk Butter 55', 'LOT-NZ002', 9], // late-alphabet, last sheet
+  ];
+  const sheetInactive = [
+    header,
+    ['SO-99901', 'K09001', 'Defunct Distributors', '30417', 'Whole Milk 5G', 'LOT-DEAD1', 1],
+    ['SO-99902', 'K09002', 'Closed Co',             '20322', 'Bulk Butter',  'LOT-DEAD2', 1],
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sheetAM), 'ACTIVE A-M');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sheetNZ), 'ACTIVE N-Z');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sheetInactive), 'INACTIVE');
+  XLSX.writeFile(wb, outPath);
+  return outPath;
+}
+
+// ---------------------------------------------------------------------------
+// Multipart upload helpers (node 18+ global FormData/Blob/fetch)
+// ---------------------------------------------------------------------------
+function fileBlob(buf, name) {
+  return new Blob([buf], { type: mimeFor(name) });
+}
+
+async function importDoc({ tenantId, documentTypeId, outputKind, sourceId, fileName, buf }) {
+  const fd = new FormData();
+  fd.append('files', fileBlob(buf, fileName), fileName);
+  fd.append('tenant_id', tenantId);
+  if (documentTypeId) fd.append('document_type_id', documentTypeId);
+  fd.append('output_kind', outputKind);
+  if (sourceId) fd.append('source_id', sourceId);
+  fd.append('source', 'import');
+  const res = await api('POST', '/api/documents/process', { body: fd, raw: true });
+  // returns { queued, items: [{id, file_name}] }
+  return (res.items || []).filter((i) => i.id).map((i) => i.id);
+}
+
+async function sourceRun({ sourceId, fileName, buf }) {
+  const fd = new FormData();
+  fd.append('file', fileBlob(buf, fileName), fileName);
+  const res = await api('POST', `/api/sources/${sourceId}/run`, { body: fd, raw: true });
+  return res.queue_id; // { queued, queue_id, run_id }
+}
+
+async function sourceDrop({ sourceId, apiToken, fileName, buf }) {
+  const fd = new FormData();
+  fd.append('file', fileBlob(buf, fileName), fileName);
+  const res = await api('POST', `/api/sources/${sourceId}/drop`, {
+    body: fd, raw: true, headers: { Authorization: `Bearer ${apiToken}` },
+  });
+  return res.queue_id;
+}
+
+async function emailWebhook({ connectorId, tenantId, fileName, buf }) {
+  const body = {
+    connector_id: connectorId,
+    tenant_id: tenantId,
+    subject: `big-run ${fileName}`,
+    sender: 'vendor@example.com',
+    body: 'automated big-run validation',
+    attachments: [
+      {
+        filename: fileName,
+        content_base64: Buffer.from(buf).toString('base64'),
+        content_type: mimeFor(fileName),
+        size: buf.length,
+      },
+    ],
+  };
+  const res = await api('POST', '/api/webhooks/connector-email-ingest', { body });
+  return (res.items || []).map((i) => i.queue_id);
+}
+
+// ---------------------------------------------------------------------------
+// Source creation: POST /api/sources (name/slug), then stamp routing columns
+// directly in D1 (no REST setter for them).
+// ---------------------------------------------------------------------------
+async function createSource({ tenantId, name, slug, originKind, outputKind, supplierId, documentTypeId, fieldMappings }) {
+  const created = await api('POST', '/api/sources', {
+    body: { name, slug, tenant_id: tenantId },
+  });
+  const conn = created.connector;
+  // Stamp routing fields directly (these have no REST setter on POST/PUT).
+  d1Exec(
+    `UPDATE connectors SET origin_kind=${sqlStr(originKind)}, output_kind=${sqlStr(outputKind)}, ` +
+    `supplier_id=${sqlStr(supplierId)}, document_type_id=${sqlStr(documentTypeId)} WHERE id=${sqlStr(conn.id)}`
+  );
+  // Set the unified extraction profile when field_mappings supplied (order/shipment).
+  if (fieldMappings && supplierId && documentTypeId) {
+    await api('PUT', '/api/extraction-instructions', {
+      body: {
+        supplier_id: supplierId,
+        document_type_id: documentTypeId,
+        instructions: `big-run profile for ${name}`,
+        field_mappings: fieldMappings,
+        tenant_id: tenantId,
+      },
+    });
+  }
+  return { id: conn.id, slug: conn.slug, apiToken: conn.api_token };
+}
+
+// ---------------------------------------------------------------------------
+// Queue polling + approve
+// ---------------------------------------------------------------------------
+async function getQueueItem(id) {
+  const r = await api('GET', `/api/queue/${id}`);
+  return r.item;
+}
+
+async function pollUntilReady(queueIds, tenantId) {
+  const start = Date.now();
+  const pending = new Set(queueIds);
+  const terminal = {}; // id -> {processing_status, output_kind, error_message}
+  log(`Polling ${queueIds.length} queue item(s) until ready|error (timeout ${Math.round(POLL_TIMEOUT_MS / 1000)}s)...`);
+  while (pending.size > 0 && Date.now() - start < POLL_TIMEOUT_MS) {
+    for (const id of Array.from(pending)) {
+      let item;
+      try { item = await getQueueItem(id); } catch (e) { log(`  poll ${id}: ${e.message}`); continue; }
+      const ps = item.processing_status;
+      if (ps === 'ready' || ps === 'error') {
+        terminal[id] = {
+          processing_status: ps,
+          output_kind: item.output_kind || 'coa',
+          error_message: item.error_message || null,
+          ai_records: item.ai_records || null,
+          supplier_id: item.supplier_id || null,
+        };
+        pending.delete(id);
+        log(`  ${id} -> ${ps}${item.error_message ? ' (' + item.error_message + ')' : ''}`);
+      }
+    }
+    if (pending.size > 0) await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  for (const id of pending) {
+    terminal[id] = { processing_status: 'timeout', output_kind: null, error_message: 'poll timeout', ai_records: null };
+  }
+  return terminal;
+}
+
+async function approveItem(id, info, fallbackSupplierId) {
+  const kind = info.output_kind || 'coa';
+  if (info.processing_status !== 'ready') return { id, approved: false, reason: info.processing_status };
+  if (kind === 'order') {
+    const recs = info.ai_records ? JSON.parse(info.ai_records) : { orders: [], customers: [] };
+    const body = { status: 'approved', records: { orders: recs.orders || [], customers: recs.customers || [] } };
+    const r = await api('PUT', `/api/queue/${id}`, { body });
+    return { id, approved: true, kind, summary: r.summary };
+  }
+  if (kind === 'shipment') {
+    const recs = info.ai_records ? JSON.parse(info.ai_records) : { shipments: [] };
+    const body = { status: 'approved', records: { shipments: recs.shipments || [] } };
+    const r = await api('PUT', `/api/queue/${id}`, { body });
+    return { id, approved: true, kind, summary: r.summary };
+  }
+  // COA: worker-extracted ai_fields are the defaults; we just confirm the
+  // supplier (verification gate) and approve. fields omitted => uses extraction.
+  const body = { status: 'approved', supplier_id: info.supplier_id || fallbackSupplierId };
+  const r = await api('PUT', `/api/queue/${id}`, { body });
+  return { id, approved: true, kind, document: r.document && r.document.id };
+}
+
+// ---------------------------------------------------------------------------
+// Verification report
+// ---------------------------------------------------------------------------
+async function verify(tenantId) {
+  const out = { checks: [], pass: true };
+  const check = (name, ok, detail) => { out.checks.push({ name, ok, detail }); if (!ok) out.pass = false; };
+
+  // Queue items by status
+  const q = await api('GET', `/api/queue?tenant_id=${tenantId}&status=all&limit=200`);
+  const byProc = {};
+  for (const it of q.items || []) byProc[it.processing_status] = (byProc[it.processing_status] || 0) + 1;
+  const byStatus = {};
+  for (const it of q.items || []) byStatus[it.status] = (byStatus[it.status] || 0) + 1;
+  log(`\nQueue (total ${q.total}): processing_status=${JSON.stringify(byProc)} status=${JSON.stringify(byStatus)}`);
+  check('no queue items in error', !byProc.error, `error=${byProc.error || 0}`);
+  check('no queue items stuck (queued/processing)', !byProc.queued && !byProc.processing,
+    `queued=${byProc.queued || 0} processing=${byProc.processing || 0}`);
+
+  const orders = await api('GET', `/api/orders?tenant_id=${tenantId}&include_staged=true&limit=500`);
+  const customers = await api('GET', `/api/customers?tenant_id=${tenantId}&limit=500`);
+  const lots = await api('GET', `/api/lots?tenant_id=${tenantId}&limit=200`);
+  const suppliers = await api('GET', `/api/suppliers?tenant_id=${tenantId}&limit=500`);
+
+  let itemTotal = 0, itemMatched = 0;
+  for (const o of orders.orders || []) {
+    itemTotal += Number(o.item_count || 0);
+    itemMatched += Number(o.matched_count || 0);
+  }
+  log(`Orders:    ${orders.total}`);
+  log(`Customers: ${customers.total}`);
+  log(`Lots:      ${lots.total}`);
+  log(`Suppliers: ${suppliers.total}`);
+  log(`Order items: ${itemTotal} total, ${itemMatched} lot-matched, ${itemTotal - itemMatched} unlinked`);
+
+  check('orders created', (orders.total || 0) > 0, `orders=${orders.total}`);
+  check('customers created', (customers.total || 0) > 0, `customers=${customers.total}`);
+
+  // CSV deterministic path: expect customers K00100 + P00200 from orders.csv.
+  const custNums = new Set((customers.customers || []).map((c) => c.customer_number));
+  check('CSV customers present (K00100, P00200)', custNums.has('K00100') && custNums.has('P00200'),
+    `have=${Array.from(custNums).join(',')}`);
+
+  // XLSX isolation: Zenith Foods (late alphabet, last sheet) must be present;
+  // INACTIVE rows (Defunct Distributors / Closed Co) must be ABSENT.
+  const custNames = new Set((customers.customers || []).map((c) => (c.name || '').toLowerCase()));
+  check('XLSX late-alphabet row present (Zenith Foods)', custNames.has('zenith foods'),
+    `names=${Array.from(custNames).join(' | ')}`);
+  check('XLSX INACTIVE rows skipped (no Defunct/Closed)',
+    !custNames.has('defunct distributors') && !custNames.has('closed co'),
+    'INACTIVE sheet should be excluded');
+
+  // COA fulfillment report
+  let coa = null;
+  try {
+    coa = await api('GET', `/api/reports/coa-fulfillment?tenant_id=${tenantId}&limit=1000`);
+  } catch (e) {
+    check('coa-fulfillment report reachable', false, e.message);
+  }
+  if (coa && coa.summary) {
+    const s = coa.summary;
+    log(`\nCOA fulfillment summary: ${JSON.stringify(s)}`);
+    check('coa-fulfillment report reachable', true, `coverage_pct=${s.coverage_pct}`);
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Login / register
+// ---------------------------------------------------------------------------
+async function loginOrRegister() {
+  try {
+    const r = await api('POST', '/api/auth/login', { body: { email: ADMIN_EMAIL, password: ADMIN_PASS } });
+    JWT = r.token;
+    log(`Logged in as ${r.user.email} (role=${r.user.role})`);
+    if (r.user.role !== 'super_admin') {
+      throw new Error(`admin ${ADMIN_EMAIL} is role ${r.user.role}, need super_admin (run bin/seed)`);
+    }
+    return;
+  } catch (e) {
+    log(`Login failed (${e.message}). The dev DB likely needs seeding: ./bin/seed`);
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+async function fullRun(RUN_TAG) {
+  section(`BIG RUN VALIDATION  (RUN_TAG=${RUN_TAG}, BASE=${BASE})`);
+
+  await loginOrRegister();
+
+  // Tenant
+  const tenantName = `BigRun ${RUN_TAG}`;
+  const tenantSlug = `bigrun-${RUN_TAG}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const tenant = await api('POST', '/api/tenants', { body: { name: tenantName, slug: tenantSlug } });
+  const tenantId = tenant.id;
+  log(`Tenant: ${tenantId} (${tenantSlug})`);
+
+  // Suppliers
+  const supCoa = (await api('POST', '/api/suppliers', { body: { name: `Darigold-RUN ${RUN_TAG}`, tenant_id: tenantId } })).supplier;
+  const supErp = (await api('POST', '/api/suppliers', { body: { name: `ERP-RUN ${RUN_TAG}`, tenant_id: tenantId } })).supplier;
+  const supWms = (await api('POST', '/api/suppliers', { body: { name: `WMS-RUN ${RUN_TAG}`, tenant_id: tenantId } })).supplier;
+  log(`Suppliers: coa=${supCoa.id} erp=${supErp.id} wms=${supWms.id}`);
+
+  // Document types
+  const dtCoa = (await api('POST', '/api/document-types', { body: { name: `COA ${RUN_TAG}`, tenant_id: tenantId } })).documentType;
+  const dtOrder = (await api('POST', '/api/document-types', { body: { name: `Order Report ${RUN_TAG}`, tenant_id: tenantId } })).documentType;
+  const dtAudit = (await api('POST', '/api/document-types', { body: { name: `Audit Trail ${RUN_TAG}`, tenant_id: tenantId } })).documentType;
+  log(`DocTypes: coa=${dtCoa.id} order=${dtOrder.id} audit=${dtAudit.id}`);
+
+  // Sources — one per door/kind. slug must be globally unique.
+  const orderFM = orderFieldMappings();
+  const sRun = await createSource({
+    tenantId, name: `Run-Order-CSV ${RUN_TAG}`, slug: `run-order-csv-${RUN_TAG}`.toLowerCase(),
+    originKind: 'internal', outputKind: 'order', supplierId: supErp.id, documentTypeId: dtOrder.id, fieldMappings: orderFM,
+  });
+  const sDrop = await createSource({
+    tenantId, name: `Drop-Order-XLSX ${RUN_TAG}`, slug: `drop-order-xlsx-${RUN_TAG}`.toLowerCase(),
+    originKind: 'internal', outputKind: 'order', supplierId: supWms.id, documentTypeId: dtOrder.id, fieldMappings: orderFM,
+  });
+  const sEmail = await createSource({
+    tenantId, name: `Email-COA ${RUN_TAG}`, slug: `email-coa-${RUN_TAG}`.toLowerCase(),
+    originKind: 'supplier', outputKind: 'coa', supplierId: supCoa.id, documentTypeId: dtCoa.id, fieldMappings: null,
+  });
+  const sShip = await createSource({
+    tenantId, name: `Run-Shipment ${RUN_TAG}`, slug: `run-shipment-${RUN_TAG}`.toLowerCase(),
+    originKind: 'internal', outputKind: 'shipment', supplierId: supWms.id, documentTypeId: dtAudit.id, fieldMappings: orderFM,
+  });
+  log(`Sources: run=${sRun.id} drop=${sDrop.id} email=${sEmail.id} ship=${sShip.id}`);
+
+  // API key for the worker
+  const keyRes = await api('POST', '/api/api-keys', { body: { name: `big-run-worker ${RUN_TAG}`, tenantId: null } });
+  const DOX_API_KEY = keyRes.key;
+
+  // Generate synthetic xlsx fixture
+  const xlsxPath = path.join(FIXTURES_DIR, `registry-${RUN_TAG}.xlsx`);
+  generateRegistryXlsx(xlsxPath);
+  log(`Generated ${xlsxPath}`);
+
+  // ---- Push corpus through every door ----
+  section('PUSHING CORPUS THROUGH ALL DOORS');
+  const queueIds = [];
+
+  // Door 1: manual Import (documents/process) — coa + order
+  for (const name of CORPUS.coa) {
+    const ids = await importDoc({ tenantId, documentTypeId: dtCoa.id, outputKind: 'coa', sourceId: sEmail.id, fileName: name, buf: readFixtureOrDrop(name) });
+    queueIds.push(...ids); log(`[import coa] ${name} -> ${ids.join(',')}`);
+  }
+  {
+    const name = CORPUS.order[0];
+    const ids = await importDoc({ tenantId, documentTypeId: dtOrder.id, outputKind: 'order', sourceId: sRun.id, fileName: name, buf: readFixtureOrDrop(name) });
+    queueIds.push(...ids); log(`[import order] ${name} -> ${ids.join(',')}`);
+  }
+
+  // Door 2: source run (multipart) — synthetic orders.csv (deterministic CSV path)
+  {
+    const buf = readFixtureOrDrop('orders.csv');
+    const qid = await sourceRun({ sourceId: sRun.id, fileName: 'orders.csv', buf });
+    queueIds.push(qid); log(`[run order-csv] orders.csv -> ${qid}`);
+  }
+
+  // Door 3: source drop (bearer) — synthetic registry.xlsx (deterministic XLSX path)
+  {
+    const buf = fs.readFileSync(xlsxPath);
+    const qid = await sourceDrop({ sourceId: sDrop.id, apiToken: sDrop.apiToken, fileName: 'registry.xlsx', buf });
+    queueIds.push(qid); log(`[drop order-xlsx] registry.xlsx -> ${qid}`);
+  }
+
+  // Door 4: email webhook (JSON base64) — shipment audit trails
+  for (const name of CORPUS.shipment) {
+    const ids = await emailWebhook({ connectorId: sShip.id, tenantId, fileName: name, buf: readFixtureOrDrop(name) });
+    queueIds.push(...ids); log(`[email shipment] ${name} -> ${ids.join(',')}`);
+  }
+
+  // ---- Print the key + queue ids the worker must drain ----
+  section('WORKER HANDOFF');
+  log(`DOX_API_KEY=${DOX_API_KEY}`);
+  log(`TENANT_ID=${tenantId}`);
+  log(`QUEUE_IDS=${queueIds.join(',')}`);
+  log(`\nLaunch the worker (separate process) with that DOX_API_KEY, then this`);
+  log(`script will poll. To re-verify later: bin/big-run-validate --report-only --tenant ${tenantId}`);
+
+  // ---- Poll until ready ----
+  section('POLLING QUEUE');
+  const terminal = await pollUntilReady(queueIds, tenantId);
+
+  // ---- Approve ----
+  section('APPROVING READY ITEMS');
+  const approveResults = [];
+  for (const id of queueIds) {
+    const info = terminal[id];
+    try {
+      const r = await approveItem(id, info, supCoa.id);
+      approveResults.push(r);
+      log(`  approve ${id}: ${JSON.stringify(r)}`);
+    } catch (e) {
+      approveResults.push({ id, approved: false, error: e.message });
+      log(`  approve ${id} FAILED: ${e.message}`);
+    }
+  }
+
+  // ---- Verify + report ----
+  section('VERIFICATION');
+  const result = await verify(tenantId);
+  printReport(result, { tenantId, queueIds, terminal, approveResults, DOX_API_KEY });
+  process.exit(result.pass ? 0 : 1);
+}
+
+async function reportOnly(tenantId) {
+  await loginOrRegister();
+  section(`REPORT-ONLY  (tenant=${tenantId})`);
+  const result = await verify(tenantId);
+  printReport(result, { tenantId });
+  process.exit(result.pass ? 0 : 1);
+}
+
+function printReport(result, ctx) {
+  section('PASS / FAIL REPORT');
+  for (const c of result.checks) {
+    log(`  [${c.ok ? 'PASS' : 'FAIL'}] ${c.name}${c.detail ? '  (' + c.detail + ')' : ''}`);
+  }
+  if (ctx.terminal) {
+    const errs = Object.entries(ctx.terminal).filter(([, v]) => v.processing_status !== 'ready');
+    if (errs.length) {
+      log('\n  ERRORED / NON-READY queue items:');
+      for (const [id, v] of errs) log(`    ${id}: ${v.processing_status} ${v.error_message || ''}`);
+    }
+  }
+  log('\n' + (result.pass ? '*** OVERALL: PASS ***' : '*** OVERALL: FAIL ***'));
+  if (ctx.tenantId) log(`tenant_id=${ctx.tenantId}`);
+}
+
+// ---------------------------------------------------------------------------
+// Arg parsing
+// ---------------------------------------------------------------------------
+(async function main() {
+  const args = process.argv.slice(2);
+  const reportIdx = args.indexOf('--report-only');
+  if (reportIdx !== -1) {
+    const tIdx = args.indexOf('--tenant');
+    if (tIdx === -1 || !args[tIdx + 1]) {
+      console.error('--report-only requires --tenant <tenantId>');
+      process.exit(2);
+    }
+    await reportOnly(args[tIdx + 1]);
+    return;
+  }
+  const RUN_TAG = (args[0] && !args[0].startsWith('--')) ? args[0] : nowTag();
+  await fullRun(RUN_TAG);
+})().catch((e) => {
+  console.error('\nFATAL:', e.message);
+  if (e.body) console.error('  body:', JSON.stringify(e.body));
+  process.exit(1);
+});
