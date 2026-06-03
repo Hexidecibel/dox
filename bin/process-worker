@@ -2830,7 +2830,280 @@ function computeConfidenceScore(aiConfidence, extractedFields, tables = []) {
   return Math.max(0, Math.min(1, score));
 }
 
+// =============================================================================
+// PARITY DRY-RUN MODE (read-only) — see bin/parity-coa
+// =============================================================================
+//
+// Activated ONLY when process.env.PARITY_ITEM_IDS is set (a comma-separated
+// list of processing_queue item ids). When that env var is UNSET, control flow
+// below is unchanged: the normal poller (`loop()`) runs exactly as it does in
+// production. The guard sits immediately before the startup logs + loop() call
+// so the byte-identical normal path is preserved.
+//
+// runParityMode RE-EXTRACTS each item through the CURRENT COA extraction
+// sequence — mirroring processCoaItem's order/branches and calling the SAME
+// module-level helpers (extractTextAndPages, fetchExtractionExamples,
+// resolveSupplierIdByName, fetchReviewerInstructions, fetchLearnedPreferences,
+// buildPrompt/buildVlmPrompt + the prepend chain, parseExtraction,
+// canonicalizeFields, isLikelyAddress, compactFields, buildPageChunks,
+// mergeTextExtractions, extractWithVLM). It NEVER claims the item (no
+// processing_status flip) and NEVER POSTs results — it only GETs the item +
+// its file, runs extraction, and prints the fresh `extracted_fields` (the same
+// object the worker would have stored in the `ai_fields` column) to stdout.
+//
+// The text-path Qwen request below is reconstructed to be byte-identical to
+// processCoaItem's nested runTextQwen (same model/temperature/max_tokens, same
+// prepend chain, same user message, same parseExtraction). It is duplicated
+// here ONLY because runTextQwen is a closure inside processCoaItem and cannot
+// be called from the outside; the PROMPT/PARSE logic itself comes entirely
+// from the shared helpers, not a rewrite.
+
+async function fetchQueueItem(id) {
+  const res = await fetch(`${DOX_API_URL}/api/queue/${encodeURIComponent(id)}`, { headers });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`GET /api/queue/${id} failed: ${res.status} ${text.substring(0, 160)}`);
+  }
+  const data = await res.json();
+  if (!data || !data.item) throw new Error(`GET /api/queue/${id}: no item in response`);
+  return data.item;
+}
+
+async function runParityMode() {
+  const ids = (process.env.PARITY_ITEM_IDS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  console.error(`[parity] read-only re-extraction of ${ids.length} item(s)`);
+  console.error(`[parity] API=${DOX_API_URL} Qwen=${QWEN_URL} VLM=${QWEN_VLM_MODE}`);
+
+  for (const id of ids) {
+    try {
+      const item = await fetchQueueItem(id);
+
+      // ---- Download the file (read-only GET) ----
+      const fileBuffer = await downloadQueueFile(item);
+      // Copies: unpdf detaches the ArrayBuffer it's given (matches processCoaItem).
+      const fileBufferCopy = fileBuffer.slice(0);
+      const fileBufferForVlm = fileBuffer.slice(0);
+
+      // ---- Text + pages extraction (SAME branches as processCoaItem) ----
+      // extractTextAndPages is the shared extractor whose PDF/OCR/text/CSV/
+      // XLSX/DOCX/image branches are line-for-line identical to the COA path's
+      // inline extractor; reusing it keeps the parity run faithful without
+      // duplicating that block.
+      const { text, pages } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
+
+      if (!text || text.trim().length === 0) {
+        process.stdout.write(JSON.stringify({
+          id,
+          error: `no text extracted from ${item.mime_type}`,
+        }) + '\n');
+        continue;
+      }
+
+      // ---- Supplier guess + examples + reviewer instructions + learned prefs
+      // (mirrors processCoaItem's pass-1 resolution exactly) ----
+      let guessedSupplier = null;
+      const supplierMatch = (item.file_name || '').match(
+        /^[\(\d\)\s]*([A-Za-z][A-Za-z\s&.]+?)[\s-]+(COA|BOL|SDS|cert|lot|spec)/i
+      );
+      if (supplierMatch) guessedSupplier = supplierMatch[1].trim();
+
+      let examples = [];
+      try {
+        examples = await fetchExtractionExamples(item.tenant_id, item.document_type_id, guessedSupplier);
+      } catch { /* non-critical */ }
+
+      let reviewerInstructions = '';
+      let learnedPreferences = null;
+      let resolvedSupplierIdForLearning = null;
+      try {
+        const supplierName = item.supplier || guessedSupplier || null;
+        resolvedSupplierIdForLearning = await resolveSupplierIdByName(item.tenant_id, supplierName);
+        if (resolvedSupplierIdForLearning) {
+          reviewerInstructions = await fetchReviewerInstructions(
+            item.tenant_id, resolvedSupplierIdForLearning, item.document_type_id
+          );
+          learnedPreferences = await fetchLearnedPreferences(
+            item.tenant_id, resolvedSupplierIdForLearning, item.document_type_id
+          );
+        }
+      } catch { /* non-critical */ }
+
+      // ---- Local Qwen text caller — byte-identical request to runTextQwen ----
+      // (see header note: closure can't be reused; prompt/parse come from the
+      // shared helpers).
+      const runTextQwen = async (llmText) => {
+        let qwenData;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 1_800_000);
+            const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(QWEN_SECRET ? { Authorization: `Bearer ${QWEN_SECRET}` } : {}),
+              },
+              signal: controller.signal,
+              dispatcher: llmDispatcher,
+              body: JSON.stringify({
+                model: modelFor('best', process.env),
+                temperature: 0,
+                max_tokens: 4096,
+                messages: [
+                  {
+                    role: 'system',
+                    content: prependFilenameHint(
+                      prependAttentionBias(
+                        prependReviewerInstructions(buildPrompt(examples), reviewerInstructions),
+                        learnedPreferences
+                      ),
+                      item.file_name
+                    ),
+                  },
+                  {
+                    role: 'user',
+                    content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+                  },
+                ],
+              }),
+            });
+            clearTimeout(timeout);
+            if (!qwenRes.ok) {
+              const errText = await qwenRes.text().catch(() => '');
+              throw new Error(`Qwen HTTP ${qwenRes.status}: ${errText.substring(0, 200)}`);
+            }
+            qwenData = await qwenRes.json();
+            break;
+          } catch (err) {
+            if (attempt === 2) throw new Error(`Qwen call failed: ${err.message}`);
+            await new Promise(r => setTimeout(r, 60_000));
+          }
+        }
+        const content = qwenData.choices?.[0]?.message?.content || '';
+        return parseExtraction(content);
+      };
+
+      // ---- Text-path dispatcher: same chunking branches as runTextPath ----
+      const runTextPath = async () => {
+        if (pages.length <= 1) return await runTextQwen(text.substring(0, 6000));
+        const chunks = buildPageChunks(pages);
+        if (chunks.length === 0) return await runTextQwen(text.substring(0, 6000));
+        if (chunks.length > TEXT_MAX_CHUNKS) return await runTextQwen(text.substring(0, 6000));
+        if (chunks.length === 1) return await runTextQwen(chunks[0]);
+        const parsedChunks = [];
+        for (let i = 0; i < chunks.length; i++) {
+          parsedChunks.push(await runTextQwen(chunks[i]));
+        }
+        return mergeTextExtractions(parsedChunks);
+      };
+
+      // ---- Canonicalization helpers — identical to processCoaItem ----
+      const canonicalizeTextParsed = (p) => {
+        const canonicalized = canonicalizeFields(p.fields || {});
+        if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
+          canonicalized.supplier_name = null;
+        }
+        p.fields = compactFields(canonicalized);
+        return p;
+      };
+      const parsedFromVlm = (res) => ({
+        fields: res.fields, tables: res.tables, products: res.products,
+        summary: res.summary, confidence: res.confidence, documentType: res.documentType,
+      });
+
+      const canRunVlm = QWEN_VLM_MODE !== 'off' && item.mime_type === 'application/pdf';
+      const runVlmSafe = async () => {
+        try {
+          const res = await extractWithVLM(
+            fileBufferForVlm,
+            prependAttentionBias(
+              prependReviewerInstructions(buildVlmPrompt(examples), reviewerInstructions),
+              learnedPreferences
+            ),
+            'Extract all structured data from the document image(s). Return JSON only.',
+            item.file_name
+          );
+          const canonicalizedVlm = canonicalizeFields(res.fields || {});
+          if (canonicalizedVlm.supplier_name && isLikelyAddress(canonicalizedVlm.supplier_name)) {
+            canonicalizedVlm.supplier_name = null;
+          }
+          res.fields = compactFields(canonicalizedVlm);
+          return res;
+        } catch {
+          return null;
+        }
+      };
+
+      // ---- Primary extraction (same VLM-mode branches as processCoaItem) ----
+      let parsed;
+      let primaryPath = null;
+      if (QWEN_VLM_MODE === 'vlm' && canRunVlm) {
+        const vlmResult = await runVlmSafe();
+        if (vlmResult) { parsed = parsedFromVlm(vlmResult); primaryPath = 'vlm'; }
+        else { parsed = canonicalizeTextParsed(await runTextPath()); primaryPath = 'text'; }
+      } else {
+        parsed = canonicalizeTextParsed(await runTextPath());
+        primaryPath = 'text';
+        // 'dual' mode runs VLM too, but it does NOT alter the primary `parsed`
+        // (it only fills vlm_* columns), so for the ai_fields parity compare we
+        // skip the extra dual VLM call.
+      }
+
+      // ---- Two-pass reviewer-instruction re-extract (same guard/branch) ----
+      if (!reviewerInstructions) {
+        try {
+          const lateSupplierName = parsed.fields?.supplier_name || null;
+          const lateSupplierId = await resolveSupplierIdByName(item.tenant_id, lateSupplierName);
+          if (lateSupplierId) {
+            const lateInstructions = await fetchReviewerInstructions(
+              item.tenant_id, lateSupplierId, item.document_type_id
+            );
+            if (lateInstructions && lateInstructions.trim()) {
+              reviewerInstructions = lateInstructions;
+              if (primaryPath === 'vlm') {
+                const reVlm = await runVlmSafe();
+                if (reVlm) parsed = parsedFromVlm(reVlm);
+              } else {
+                parsed = canonicalizeTextParsed(await runTextPath());
+              }
+            }
+          }
+        } catch { /* non-critical */ }
+      }
+
+      // ---- Print the fresh extraction. `extracted_fields` matches the object
+      // processCoaItem posts as ai_fields (JSON.stringify(parsed.fields)). ----
+      process.stdout.write(JSON.stringify({
+        id,
+        extracted_fields: parsed.fields || {},
+      }) + '\n');
+    } catch (err) {
+      process.stdout.write(JSON.stringify({
+        id,
+        error: err && err.message ? err.message : String(err),
+      }) + '\n');
+    }
+  }
+}
+
 // === Main loop ===
+
+// PARITY GUARD: when PARITY_ITEM_IDS is set, do the read-only dry-run and exit
+// WITHOUT starting the poller. When unset, control falls through to the normal
+// startup + loop() below, byte-identical to production.
+if (process.env.PARITY_ITEM_IDS) {
+  runParityMode()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error('[parity] fatal:', err && err.message ? err.message : err);
+      process.exit(1);
+    });
+  return;
+}
 
 console.log(`Dox process worker started`);
 console.log(`  API: ${DOX_API_URL}`);

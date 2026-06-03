@@ -1,0 +1,407 @@
+#!/usr/bin/env node
+
+/**
+ * bin/parity-coa — READ-ONLY COA extraction parity harness.
+ *
+ * Goal: verify the CURRENT (refactored) worker extracts COAs the SAME as the
+ * stored extractions on REAL prod docs. For a sample of real prod COA queue
+ * items, it re-runs the worker's COA extraction sequence through the CURRENT
+ * code (via `bin/process-worker` in PARITY_ITEM_IDS dry-run mode), then diffs
+ * the FRESH extraction against each item's STORED extraction.
+ *
+ * READ-ONLY GUARANTEE — this script and the dry-run worker NEVER write to prod:
+ *   - Discovery uses only GET /api/queue and GET /api/queue/:id.
+ *   - The worker runs with PARITY_ITEM_IDS set, which takes the read-only
+ *     branch: it GETs each item + its file, extracts, and prints JSON. It never
+ *     flips processing_status and never PUTs /results. No DB/R2 mutation.
+ *
+ * Stored-extraction column: the worker posts the COA fields as `ai_fields`
+ * (JSON of parsed.fields) — see functions/api/queue/[id]/results.ts and
+ * bin/process-worker's processCoaItem resultBody. That is the column we diff
+ * the fresh extraction against. (`vlm_extracted_fields` is the VLM side, not
+ * the primary; we compare against the primary ai_fields.)
+ *
+ * Env:
+ *   DOX_API_URL  — prod base URL, e.g. https://dox.cush.rocks (default https://supdox.com)
+ *   DOX_API_KEY  — prod API key (X-API-Key). REQUIRED.
+ *   QWEN_URL     — Qwen endpoint (default http://127.0.0.1:9600)
+ *   QWEN_SECRET  — optional Bearer token for the Qwen auth proxy
+ *   SAMPLE_N     — how many COA items to sample (default 12)
+ *   QWEN_VLM_MODE — passed through to the worker (default off = text path only)
+ *
+ * Usage:
+ *   DOX_API_URL=https://dox.cush.rocks DOX_API_KEY=dox_sk_... \
+ *   QWEN_URL=http://127.0.0.1:9600 QWEN_SECRET=... SAMPLE_N=12 \
+ *   node bin/parity-coa
+ */
+
+const path = require('path');
+const { spawn } = require('child_process');
+
+const DOX_API_URL = (process.env.DOX_API_URL || 'https://supdox.com').replace(/\/+$/, '');
+const DOX_API_KEY = process.env.DOX_API_KEY || '';
+const QWEN_URL = (process.env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
+const QWEN_SECRET = process.env.QWEN_SECRET || '';
+const SAMPLE_N = parseInt(process.env.SAMPLE_N || '12', 10);
+const QWEN_VLM_MODE = (process.env.QWEN_VLM_MODE || 'off').toLowerCase();
+
+if (!DOX_API_KEY) {
+  console.error('Error: DOX_API_KEY is required (prod API key, dox_sk_...).');
+  process.exit(1);
+}
+
+const headers = {
+  'X-API-Key': DOX_API_KEY,
+  'Content-Type': 'application/json',
+};
+
+// Core fields we report on individually (the canonical COA fields the worker
+// targets). Any extra keys present on either side are also compared, but these
+// are the ones that matter most for a regression signal.
+const CORE_FIELDS = [
+  'supplier_name', 'customer_name', 'product_name', 'product_code',
+  'lot_number', 'po_number', 'code_date', 'expiration_date',
+  'ship_date', 'grade', 'plant_number', 'net_weight', 'order_number',
+];
+
+/** Normalize a value for comparison: trim, collapse whitespace, lowercase.
+ *  null/undefined/'' all normalize to '' (empty). */
+function norm(v) {
+  if (v == null) return '';
+  return String(v).trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/** Parse a possibly-JSON-string ai_fields column into an object. */
+function parseStoredFields(raw) {
+  if (raw == null) return null;
+  if (typeof raw === 'object') return raw;
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!s) return null;
+    try {
+      const obj = JSON.parse(s);
+      return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Does this object have at least one non-empty value? */
+function hasNonEmpty(obj) {
+  if (!obj) return false;
+  return Object.values(obj).some(v => norm(v) !== '');
+}
+
+async function listCoaCandidates() {
+  // Pull a wide window across statuses, then filter client-side for COA items
+  // (output_kind 'coa' or null) that have a non-empty stored ai_fields, a file
+  // in R2 (file_r2_key present), and processing_status in ready/approved.
+  // The list endpoint filters by a single processing_status, so we fetch both
+  // 'ready' and 'approved' windows and merge.
+  const candidates = [];
+  const seen = new Set();
+
+  for (const ps of ['ready', 'approved']) {
+    let offset = 0;
+    const pageSize = 200;
+    // Cap pagination so a huge prod queue doesn't spin forever — 1000 rows per
+    // status is plenty to find SAMPLE_N usable COAs.
+    for (let page = 0; page < 5; page++) {
+      const url =
+        `${DOX_API_URL}/api/queue?status=all&processing_status=${ps}` +
+        `&limit=${pageSize}&offset=${offset}`;
+      const res = await fetch(url, { headers });
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        throw new Error(`GET /api/queue (${ps}) failed: ${res.status} ${t.substring(0, 160)}`);
+      }
+      const data = await res.json();
+      const items = data.items || [];
+      for (const it of items) {
+        if (seen.has(it.id)) continue;
+        const kind = it.output_kind || 'coa';
+        if (kind !== 'coa') continue;
+        if (!it.file_r2_key) continue;
+        const stored = parseStoredFields(it.ai_fields);
+        if (!hasNonEmpty(stored)) continue;
+        seen.add(it.id);
+        candidates.push({
+          id: it.id,
+          file_name: it.file_name,
+          supplier: it.supplier || null,
+          mime_type: it.mime_type,
+          processing_status: it.processing_status,
+          stored,
+        });
+      }
+      if (items.length < pageSize) break;
+      offset += pageSize;
+    }
+  }
+  return candidates;
+}
+
+/** Spawn the worker in read-only PARITY mode for the given ids; collect the
+ *  per-item JSON lines it prints to stdout. */
+function runWorkerParity(ids) {
+  return new Promise((resolve, reject) => {
+    const workerPath = path.join(__dirname, 'process-worker');
+    const child = spawn('node', [workerPath], {
+      env: {
+        ...process.env,
+        PARITY_ITEM_IDS: ids.join(','),
+        DOX_API_URL,
+        DOX_API_KEY,
+        QWEN_URL,
+        QWEN_SECRET,
+        QWEN_VLM_MODE,
+      },
+      stdio: ['ignore', 'pipe', 'inherit'], // worker logs go to our stderr
+    });
+
+    let out = '';
+    child.stdout.on('data', (chunk) => { out += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      const results = {};
+      for (const line of out.split('\n')) {
+        const s = line.trim();
+        if (!s) continue;
+        try {
+          const obj = JSON.parse(s);
+          if (obj && obj.id) results[obj.id] = obj;
+        } catch {
+          // ignore non-JSON noise on stdout
+        }
+      }
+      if (code !== 0 && Object.keys(results).length === 0) {
+        reject(new Error(`worker exited ${code} with no parseable output`));
+        return;
+      }
+      resolve(results);
+    });
+  });
+}
+
+/** Diff stored vs fresh fields. Returns per-field status + counts. */
+function diffFields(stored, fresh) {
+  const keys = new Set([
+    ...Object.keys(stored || {}),
+    ...Object.keys(fresh || {}),
+  ]);
+
+  const perField = [];
+  let matched = 0;
+  let differed = 0;
+  let comparedCount = 0;
+  const structuralMissing = []; // had a value in stored, empty in fresh
+  const structuralExtra = [];   // empty in stored, value in fresh
+
+  for (const key of keys) {
+    const sv = stored ? stored[key] : undefined;
+    const fv = fresh ? fresh[key] : undefined;
+    const sn = norm(sv);
+    const fn = norm(fv);
+
+    // Skip keys empty on BOTH sides — nothing to compare.
+    if (sn === '' && fn === '') continue;
+
+    comparedCount++;
+    const isCore = CORE_FIELDS.includes(key);
+    if (sn === fn) {
+      matched++;
+      perField.push({ key, status: 'match', stored: sv, fresh: fv, isCore });
+    } else {
+      differed++;
+      // Structural diff = one side has a value and the other is empty.
+      if (sn !== '' && fn === '') {
+        structuralMissing.push(key);
+        perField.push({ key, status: 'missing-in-fresh', stored: sv, fresh: fv, isCore });
+      } else if (sn === '' && fn !== '') {
+        structuralExtra.push(key);
+        perField.push({ key, status: 'extra-in-fresh', stored: sv, fresh: fv, isCore });
+      } else {
+        // Both sides non-empty but differ → likely minor LLM text variance,
+        // UNLESS the values are wildly different.
+        perField.push({ key, status: 'value-diff', stored: sv, fresh: fv, isCore });
+      }
+    }
+  }
+
+  return { perField, matched, differed, comparedCount, structuralMissing, structuralExtra };
+}
+
+/** Heuristic: is a value-diff "wild" (structural) vs minor text variance?
+ *  Wild = neither value is a substring of the other after normalization, AND
+ *  their lengths differ a lot. Minor = small edits / substrings / formatting. */
+function isWildDiff(a, b) {
+  const an = norm(a);
+  const bn = norm(b);
+  if (an === '' || bn === '') return true;
+  if (an.includes(bn) || bn.includes(an)) return false;
+  const lenRatio = Math.min(an.length, bn.length) / Math.max(an.length, bn.length);
+  return lenRatio < 0.5;
+}
+
+function fmtVal(v) {
+  if (v == null) return '(empty)';
+  const s = String(v);
+  return s.length > 60 ? s.slice(0, 57) + '...' : s;
+}
+
+async function main() {
+  console.log('='.repeat(72));
+  console.log('COA EXTRACTION PARITY HARNESS (READ-ONLY)');
+  console.log('='.repeat(72));
+  console.log(`API:        ${DOX_API_URL}`);
+  console.log(`Qwen:       ${QWEN_URL}`);
+  console.log(`VLM mode:   ${QWEN_VLM_MODE}`);
+  console.log(`Sample N:   ${SAMPLE_N}`);
+  console.log(`Stored col: ai_fields (worker primary extraction)`);
+  console.log('');
+
+  console.log('Step A: discovering COA candidates (GET /api/queue, read-only)...');
+  const candidates = await listCoaCandidates();
+  console.log(`  Found ${candidates.length} COA item(s) with a non-empty stored extraction + R2 file.`);
+  if (candidates.length === 0) {
+    console.log('  Nothing to compare. Exiting.');
+    return;
+  }
+
+  // Deterministic sample: take the first SAMPLE_N (discovery is ordered by
+  // created_at DESC, so this favors the most recent docs).
+  const sample = candidates.slice(0, SAMPLE_N);
+  const ids = sample.map(c => c.id);
+  console.log(`  Sampling ${sample.length} item(s):`);
+  for (const c of sample) {
+    console.log(`    - ${c.id}  ${c.file_name}  [${c.processing_status}]`);
+  }
+  console.log('');
+
+  console.log('Step B: re-extracting via worker PARITY mode (read-only dry-run)...');
+  const fresh = await runWorkerParity(ids);
+  console.log(`  Worker returned ${Object.keys(fresh).length} result(s).`);
+  console.log('');
+
+  console.log('Step C: field-by-field diff (stored vs fresh)');
+  console.log('-'.repeat(72));
+
+  let totalMatched = 0;
+  let totalCompared = 0;
+  const allStructuralMissing = {};
+  const allStructuralExtra = {};
+  const wildValueDiffs = {}; // fieldKey -> count
+  const perItemSummary = [];
+
+  for (const c of sample) {
+    const fr = fresh[c.id];
+    console.log(`\n### ${c.file_name} (${c.id})`);
+
+    if (!fr) {
+      console.log('  ERROR: worker returned no result for this id.');
+      perItemSummary.push({ id: c.id, file_name: c.file_name, error: 'no worker result' });
+      continue;
+    }
+    if (fr.error) {
+      console.log(`  ERROR from worker: ${fr.error}`);
+      perItemSummary.push({ id: c.id, file_name: c.file_name, error: fr.error });
+      continue;
+    }
+
+    const d = diffFields(c.stored, fr.extracted_fields || {});
+    totalMatched += d.matched;
+    totalCompared += d.comparedCount;
+
+    const rate = d.comparedCount > 0 ? (d.matched / d.comparedCount) : 1;
+    console.log(`  Match: ${d.matched}/${d.comparedCount} fields (${(rate * 100).toFixed(0)}%)`);
+
+    // Show differences (core fields first).
+    const diffs = d.perField.filter(f => f.status !== 'match');
+    diffs.sort((a, b) => (b.isCore ? 1 : 0) - (a.isCore ? 1 : 0));
+    for (const f of diffs) {
+      const tag =
+        f.status === 'missing-in-fresh' ? 'MISSING (structural)' :
+        f.status === 'extra-in-fresh' ? 'EXTRA (structural)' :
+        isWildDiff(f.stored, f.fresh) ? 'WILD value diff' : 'minor value diff';
+      console.log(
+        `    [${f.isCore ? 'core' : 'extra'}] ${f.key}: ${tag}\n` +
+        `        stored: ${fmtVal(f.stored)}\n` +
+        `        fresh:  ${fmtVal(f.fresh)}`
+      );
+      if (f.status === 'missing-in-fresh') {
+        allStructuralMissing[f.key] = (allStructuralMissing[f.key] || 0) + 1;
+      } else if (f.status === 'extra-in-fresh') {
+        allStructuralExtra[f.key] = (allStructuralExtra[f.key] || 0) + 1;
+      } else if (f.status === 'value-diff' && isWildDiff(f.stored, f.fresh)) {
+        wildValueDiffs[f.key] = (wildValueDiffs[f.key] || 0) + 1;
+      }
+    }
+    if (diffs.length === 0) console.log('    (all compared fields matched)');
+
+    perItemSummary.push({
+      id: c.id,
+      file_name: c.file_name,
+      matched: d.matched,
+      compared: d.comparedCount,
+      rate,
+    });
+  }
+
+  // ---- Overall report ----
+  console.log('\n' + '='.repeat(72));
+  console.log('OVERALL REPORT');
+  console.log('='.repeat(72));
+
+  const overall = totalCompared > 0 ? (totalMatched / totalCompared) : 1;
+  console.log(`Overall match rate: ${totalMatched}/${totalCompared} fields (${(overall * 100).toFixed(1)}%)`);
+  console.log('');
+  console.log('Per-item:');
+  for (const s of perItemSummary) {
+    if (s.error) {
+      console.log(`  ✗ ${s.file_name}: ERROR (${s.error})`);
+    } else {
+      console.log(`  - ${s.file_name}: ${s.matched}/${s.compared} (${(s.rate * 100).toFixed(0)}%)`);
+    }
+  }
+
+  console.log('');
+  console.log('Systematic / STRUCTURAL differences (real regression signal):');
+  const structAny =
+    Object.keys(allStructuralMissing).length ||
+    Object.keys(allStructuralExtra).length ||
+    Object.keys(wildValueDiffs).length;
+  if (!structAny) {
+    console.log('  None. Remaining diffs (if any) are minor text variance — expected from LLM non-determinism, NOT a regression.');
+  } else {
+    if (Object.keys(allStructuralMissing).length) {
+      console.log('  Fields present in STORED but MISSING in fresh (worker now drops them):');
+      for (const [k, n] of Object.entries(allStructuralMissing).sort((a, b) => b[1] - a[1])) {
+        console.log(`    - ${k}: ${n} item(s)`);
+      }
+    }
+    if (Object.keys(allStructuralExtra).length) {
+      console.log('  Fields EXTRA in fresh (worker now emits them, stored had none):');
+      for (const [k, n] of Object.entries(allStructuralExtra).sort((a, b) => b[1] - a[1])) {
+        console.log(`    - ${k}: ${n} item(s)`);
+      }
+    }
+    if (Object.keys(wildValueDiffs).length) {
+      console.log('  WILD value differences (both sides non-empty but very different):');
+      for (const [k, n] of Object.entries(wildValueDiffs).sort((a, b) => b[1] - a[1])) {
+        console.log(`    - ${k}: ${n} item(s)`);
+      }
+    }
+  }
+
+  console.log('');
+  console.log('Note: minor value differences (formatting, casing, small text edits) are');
+  console.log('EXPECTED from LLM non-determinism and are NOT a regression. Focus on the');
+  console.log('STRUCTURAL section above (missing/extra fields, wild value diffs).');
+}
+
+main().catch((err) => {
+  console.error('parity-coa fatal:', err && err.message ? err.message : err);
+  process.exit(1);
+});
