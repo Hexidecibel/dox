@@ -2,6 +2,58 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## DIRECTION: Owned Review Flow + Profile Lifecycle (multi-user maintenance)
+
+Confirmed direction 2026-06-02. The long-term shape for running dox with multiple
+maintainers as content volume grows. Builds directly on the (supplier, document_type)
+extraction profile shipped this session. **Locked decisions:** steady-state =
+one-click-confirm (NOT auto-ingest — keeps the human gate, just trivial); maturity =
+hybrid (system *suggests* promotion, owner confirms); assignment unit = **(supplier,
+doctype) combo** (unassigned → shared pool).
+
+**Core model:** the `(supplier, doctype)` profile becomes a *stateful, owned* entity.
+The Review Queue is the ONE guided flow that both onboards a new combo and teaches the
+profile; reviewing IS teaching. As a profile matures, review gets lighter. Work is
+partitioned by owner, each with a focused full-screen approval surface.
+
+### Phase A — Profile as a first-class stateful entity
+- Extend the profile (today: `supplier_extraction_instructions`, keyed (supplier_id,
+  document_type_id), with `field_mappings`) with lifecycle fields: `maturity_state`
+  (new|learning|tuned), `clean_streak`, `last_confidence`, `sample_count`,
+  `owner_user_id`, `trusted_at`. (Decide: extend that table vs a dedicated
+  `extraction_profiles` table — the instructions table is getting overloaded.)
+- Lazily upsert a profile row on first doc of a combo (it's the NEW state).
+- On each approve: update streak/confidence/sample_count; demote tuned→learning if a
+  tuned profile starts drawing corrections (regression safety).
+
+### Phase B — One guided review flow ("does it all")
+- Progressive, confidence-gated tile instead of disjoint gates: **confirm supplier**
+  (only when uncertain) → **confirm doctype** (only when uncertain; this is the
+  "missed doc type" path — make it smooth, supplier-scoped per the 0069 reparenting)
+  → **review parse**. Corrections write back to the profile (mappings + instructions
+  + examples) in the same action — the teaching loop (partly exists today; unify it).
+- NEW combo → the flow collects everything once. TUNED combo → all-green, one-click
+  approve, nothing to fix.
+
+### Phase C — Ownership + assignment
+- Assign (supplier, doctype) → user (`owner_user_id` on the profile; or an
+  `assignments` table if many-owners/escalation needed later). Unassigned → shared pool.
+- Admin assignment UI. Queue items resolve their owner via their profile.
+
+### Phase D — Per-user full-screen approval queue
+- A focused, keyboard-driven, full-screen "My Queue" = items for combos I own,
+  prioritized. NEW combos show the full onboarding flow; TUNED show 1-click. This is
+  the daily work surface for maintainers (distinct from the admin grid).
+
+### Phase E — Promotion / trust mechanics (hybrid)
+- System detects a profile looks stable (clean_streak ≥ N & confidence ≥ X) and
+  SUGGESTS promotion in the owner's queue ("Willamette COA looks stable — trust it?").
+  Owner confirms → tuned → review lightens. Tie into the deferred drift-detection +
+  golden-set safety nets below.
+
+Smallest first slice: Phase A (lifecycle fields + streak tracking) → unlocks B and E.
+Assignment (C/D) is independently shippable once profiles are stateful.
+
 ## Smarter Extraction — Deferred Items
 
 - **Auto-suggest reviewer instructions from comment clustering** — TF-IDF
