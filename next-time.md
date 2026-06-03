@@ -4,6 +4,26 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-06-02 (pm-5) UNIFIED CONTEXTUAL REVIEW QUEUE — teaching folded in — SHIPPED PROD+STAGING
+
+Rebuilt review into ONE contextual surface (commit `22ebaa2`, prod+staging, vitest 1389/1389). Per
+COA item: after supplier-confirm, **untaught (supplier,doctype) → two-pane: editor + inline
+`TeachPanel`** (grounded interview, "Lock it in" writes the profile); **taught → lean** ("✓ using
+learned profile" chip, pre-filled). Queue rows badge Taught/New. Maturity is INFERRED (profile/
+instructions row exists = taught; no maturity schema yet). Reused the proven editors (multi-product/
+VLM/tables/hints) + the teach engine; approve paths unchanged.
+- **Retired:** standalone `/teach` page+route+nav, supplier/source Teach buttons, legacy
+  `IntakeRunReview` (its staged-order data was the decommissioned sync path; SourceDetail run-link
+  repointed to `/review`). Kept teach API endpoints + `src/components/teach/*`.
+- **Backend adds:** resume-or-create teach session per (supplier,doctype); queue items carry
+  `profile_exists`.
+- **Order/shipment teach DEFERRED** (tiles unchanged for v1; can get teaching via source supplier later).
+- **TEST TENANT on prod:** "Test Lab" — login `test@supdox.com` / `supdox-test-26` (org_admin,
+  isolated). Upload COAs → review → untaught supplier shows teach panel inline. Delete tenant when done.
+- Worker UNCHANGED (teaching+approve are Pages/Qwen). NOT yet driven end-to-end by a real SME.
+
+---
+
 ## 2026-06-02 (pm-4) DOCTYPES REPARENTED UNDER SUPPLIERS (hybrid) — SHIPPED TO PROD + STAGING
 
 `document_types` now carry a nullable `supplier_id` (migration **0069**; commit `f7d341e`). HYBRID
