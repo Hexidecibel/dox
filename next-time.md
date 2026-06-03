@@ -4,6 +4,24 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-06-02 (pm-4) DOCTYPES REPARENTED UNDER SUPPLIERS (hybrid) — SHIPPED TO PROD + STAGING
+
+`document_types` now carry a nullable `supplier_id` (migration **0069**; commit `f7d341e`). HYBRID
+model (user-chosen): NULL = shared/global doctype (existing rows untouched, NO document relinking);
+non-null = owned by that supplier. `GET /api/document-types?supplier_id=X` returns global + X's union;
+create/update accept `supplier_id`. Doctype selectors (SourceWizard/Detail, DocumentDetail,
+ReviewQueue "save template") scope to the relevant supplier; SupplierDetail gained a per-supplier
+"Document Types" tab; global admin page preserved. Extraction profile still keys on
+`document_type_id` (unchanged). vitest **1377/0**, build clean. 0069 applied to staging + prod
+(direct execute; recorded in prod `_migrations`; staging has no `_migrations` table — uses the
+run-everything migrator). Worker UNCHANGED (no restart needed). Deployed: prod Pages + staging.
+
+KNOWN/DEFERRED: doctype uniqueness stays `(tenant_id, slug)` tenant-wide → a supplier can't reuse a
+global doctype's exact slug. Fits the hybrid intent (use shared, or name it distinctly). Rescope the
+unique index to `(tenant_id, supplier_id, slug)` only if same-name-per-supplier is wanted later.
+
+---
+
 ## 2026-06-02 (pm-3) CONNECTORS → SOURCES hard-cut unification — SHIPPED TO PROD + BIG-RUN VALIDATED
 
 Big architectural pass. **Connectors are gone as a separate subsystem** — folded into the one
