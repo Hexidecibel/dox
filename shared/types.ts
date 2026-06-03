@@ -110,6 +110,12 @@ export interface SupplierExtractionInstructions {
 export interface SupplierExtractionInstructionsGetResponse {
   // null when no row exists yet for the (supplier, document_type) pair.
   instructions: string | null;
+  // Parsed field_mappings JSON for the pair, or null when none saved.
+  // The Source wizard's mapping step loads/saves this here (the worker now
+  // reads mappings from the (supplier, document_type) profile, not the
+  // connector row). Only present on the exact-pair lookup, not the
+  // supplier-wide aggregate fallback.
+  field_mappings?: unknown | null;
   updated_at: string | null;
   updated_by: string | null;
 }

@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData } from '../helpers/db';
-import { onRequestPost as discoverSchema } from '../../functions/api/connectors/discover-schema';
+import { onRequestPost as discoverSchema } from '../../functions/api/sources/discover-schema';
 import { installQwenMock, uninstallQwenMock } from '../helpers/qwen-mock';
 import { loadWeeklyMasterXlsx, loadCoaOrdersPdf } from '../helpers/fixtures-binary';
 

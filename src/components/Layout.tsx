@@ -85,7 +85,7 @@ const adminItems: NavItem[] = [
   { label: 'API Keys', path: '/admin/api-keys', icon: <ApiKeyIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Suppliers', path: '/admin/suppliers', icon: <SuppliersIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Document Types', path: '/admin/document-types', icon: <DocTypesIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Connectors', path: '/admin/connectors', icon: <ConnectorsIcon />, roles: ['super_admin', 'org_admin'] },
+  { label: 'Sources', path: '/admin/sources', icon: <ConnectorsIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Customers', path: '/admin/customers', icon: <CustomersIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Learning Dashboard', path: '/admin/learning-dashboard', icon: <InsightsIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'Tenants', path: '/admin/tenants', icon: <TenantsIcon />, roles: ['super_admin'] },

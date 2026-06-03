@@ -11,8 +11,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { onRequestPost as generatePost } from '../../functions/api/connectors/[id]/public-link/generate';
-import { onRequestDelete as revokeDelete } from '../../functions/api/connectors/[id]/public-link/index';
+import { onRequestPost as generatePost } from '../../functions/api/sources/[id]/public-link/generate';
+import { onRequestDelete as revokeDelete } from '../../functions/api/sources/[id]/public-link/index';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;

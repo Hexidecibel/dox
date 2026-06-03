@@ -1,9 +1,9 @@
-import { logAudit, getClientIp } from '../../lib/db';
+import { logAudit, getClientIp, generateId } from '../../lib/db';
 import { BadRequestError, errorToResponse } from '../../lib/permissions';
-import { executeConnectorRun } from '../../lib/connectors/orchestrator';
-import { decryptCredentials } from '../../lib/connectors/crypto';
+import { computeChecksum } from '../../lib/r2';
+import { enqueueDocument } from '../../lib/intake/enqueue';
+import { createConnectorRunHeader } from '../../lib/intake/connectorRunHeader';
 import type { Env, User } from '../../lib/types';
-import type { EmailAttachment } from '../../lib/connectors/types';
 
 interface EmailAttachmentPayload {
   filename: string;
@@ -48,33 +48,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     //    gate. The dispatch path discriminator is `input.type = 'email'`
     //    on the orchestrator call below. Phase B0.6 added the slug
     //    fallback so the email-worker can resolve by either identifier.
+    const connectorCols =
+      'id, name, tenant_id, active, output_kind, supplier_id, document_type_id';
+    type ConnectorRow = {
+      id: string;
+      name: string | null;
+      tenant_id: string;
+      active: number;
+      output_kind: string | null;
+      supplier_id: string | null;
+      document_type_id: string | null;
+    };
     const connector = payload.connector_id
       ? await context.env.DB.prepare(
-          `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active, extraction_instructions
-           FROM connectors WHERE id = ?`
-        ).bind(payload.connector_id).first<{
-          id: string;
-          tenant_id: string;
-          config: string;
-          field_mappings: string;
-          credentials_encrypted: string | null;
-          credentials_iv: string | null;
-          active: number;
-          extraction_instructions: string | null;
-        }>()
+          `SELECT ${connectorCols} FROM connectors WHERE id = ?`
+        ).bind(payload.connector_id).first<ConnectorRow>()
       : await context.env.DB.prepare(
-          `SELECT id, tenant_id, config, field_mappings, credentials_encrypted, credentials_iv, active, extraction_instructions
-           FROM connectors WHERE slug = ?`
-        ).bind(payload.connector_slug!).first<{
-          id: string;
-          tenant_id: string;
-          config: string;
-          field_mappings: string;
-          credentials_encrypted: string | null;
-          credentials_iv: string | null;
-          active: number;
-          extraction_instructions: string | null;
-        }>();
+          `SELECT ${connectorCols} FROM connectors WHERE slug = ?`
+        ).bind(payload.connector_slug!).first<ConnectorRow>();
 
     if (!connector) {
       return jsonResponse({ error: 'Connector not found' }, 404);
@@ -94,62 +85,103 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return jsonResponse({ error: 'Access denied' }, 403);
     }
 
-    // 3. Parse attachments from base64
-    const attachments: EmailAttachment[] = (payload.attachments || []).map((att) => {
+    // 3. Decode attachments from base64 into ArrayBuffers.
+    const attachments = (payload.attachments || []).map((att) => {
       const binaryString = atob(att.content_base64);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
       return {
-        filename: att.filename,
+        filename: att.filename || 'attachment',
         content: bytes.buffer as ArrayBuffer,
-        contentType: att.content_type,
-        size: att.size,
+        contentType: att.content_type || 'application/octet-stream',
+        size: att.size ?? bytes.byteLength,
       };
     });
 
-    // 4. Parse connector config and field mappings
-    const config = JSON.parse(connector.config || '{}');
-    const fieldMappings = JSON.parse(connector.field_mappings || '{}');
-
-    // Decrypt credentials if present
-    let credentials: Record<string, unknown> | undefined;
-    if (connector.credentials_encrypted && connector.credentials_iv && context.env.CONNECTOR_ENCRYPTION_KEY) {
-      credentials = await decryptCredentials(
-        connector.credentials_encrypted,
-        connector.credentials_iv,
-        context.env.CONNECTOR_ENCRYPTION_KEY,
+    if (attachments.length === 0) {
+      // No attachments to enqueue. We still 200 (the email arrived and was
+      // routed correctly), just with an empty queued list.
+      await logAudit(
+        context.env.DB,
+        user.id,
         connector.tenant_id,
-        connector.id
+        'connector.email_ingest',
+        'connector',
+        connector.id,
+        JSON.stringify({
+          sender: payload.sender,
+          subject: payload.subject,
+          attachments: 0,
+        }),
+        getClientIp(context.request)
       );
+      return jsonResponse({ queued: true, run_id: null, items: [] }, 200);
     }
 
-    // 5. Build ConnectorInput and execute
-    const result = await executeConnectorRun({
-      db: context.env.DB,
-      r2: context.env.FILES,
-      tenantId: connector.tenant_id,
+    // 4. Connectors → Sources: one batch ROLLUP HEADER for the whole email,
+    //    then one enqueue per attachment under that run. Nothing auto-ingests;
+    //    each attachment flows through the worker → Review Queue.
+    const connectorRunId = await createConnectorRunHeader(context.env.DB, {
       connectorId: connector.id,
-      config,
-      fieldMappings,
-      credentials,
-      input: {
-        type: 'email',
-        body: payload.body || '',
-        html: payload.html,
-        subject: payload.subject || 'Email Ingest',
-        sender: payload.sender,
-        attachments,
-      },
-      userId: user.id,
-      qwenUrl: context.env.QWEN_URL,
-      qwenSecret: context.env.QWEN_SECRET,
-      // R2.b: forward reviewer-authored guidance to the parsing prompt.
-      extractionInstructions: connector.extraction_instructions ?? undefined,
+      tenantId: connector.tenant_id,
+      source: 'email',
     });
 
-    // 6. Audit log
+    const sourceDetail = `email:${payload.sender}`;
+    const items: { queue_id: string; file_name: string }[] = [];
+    for (const att of attachments) {
+      const checksum = await computeChecksum(att.content);
+      const safeName = att.filename
+        .replace(/[^A-Za-z0-9._-]+/g, '_')
+        .slice(0, 200);
+      const isoStamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const r2Key = `connector-drops/${connector.id}/${isoStamp}-${generateId().slice(0, 8)}-${safeName}`;
+      await context.env.FILES.put(r2Key, att.content, {
+        httpMetadata: { contentType: att.contentType },
+        customMetadata: {
+          connector_id: connector.id,
+          tenant_id: connector.tenant_id,
+          source: 'email',
+          original_name: att.filename,
+        },
+      });
+
+      const { queueId } = await enqueueDocument(context.env.DB, {
+        id: generateId(),
+        tenantId: connector.tenant_id,
+        documentTypeId: connector.document_type_id,
+        fileR2Key: r2Key,
+        fileName: att.filename,
+        fileSize: att.size,
+        mimeType: att.contentType,
+        checksum,
+        createdBy: user.id,
+        source: 'email',
+        sourceDetail,
+        outputKind: connector.output_kind,
+        sourceId: connector.id,
+        supplierId: connector.supplier_id,
+        connectorRunId,
+      });
+
+      try {
+        await context.env.DB.prepare(
+          `INSERT OR IGNORE INTO connector_processed_keys
+             (id, connector_id, r2_key, processed_at, run_id)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+          .bind(generateId(), connector.id, r2Key, Date.now(), connectorRunId)
+          .run();
+      } catch (err) {
+        console.warn(`email-ingest: failed to write processed_keys for ${r2Key}:`, err);
+      }
+
+      items.push({ queue_id: queueId, file_name: att.filename });
+    }
+
+    // 5. Audit log
     await logAudit(
       context.env.DB,
       user.id,
@@ -158,21 +190,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'connector',
       connector.id,
       JSON.stringify({
-        run_id: result.runId,
-        status: result.status,
+        run_id: connectorRunId,
         sender: payload.sender,
         subject: payload.subject,
-        attachments: (payload.attachments || []).length,
+        attachments: items.length,
       }),
       getClientIp(context.request)
     );
 
     return jsonResponse({
-      success: true,
-      run_id: result.runId,
-      status: result.status,
-      orders_created: result.ordersCreated,
-      customers_created: result.customersCreated,
+      queued: true,
+      run_id: connectorRunId,
+      items,
     }, 200);
   } catch (err) {
     console.error('Connector email ingest error:', err);

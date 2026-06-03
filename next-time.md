@@ -4,6 +4,58 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-06-02 (pm-3) CONNECTORS → SOURCES hard-cut unification — COMMITTED, NOT YET REAL-DATA-VALIDATED / NOT DEPLOYED
+
+Big architectural pass. **Connectors are gone as a separate subsystem** — folded into the one
+document-intake pipeline. State: full vitest **1371/0 green** + `npm run build` clean + worker
+`node --check` clean. **NOT yet validated against real docs/orders, NOT deployed, migration 0068 NOT
+applied to staging/prod D1.** This commit is a green-tests checkpoint only.
+
+### What changed (plan: ~/.claude/plans/cozy-bouncing-wigderson.md)
+- **Hard cut:** deleted the synchronous engine `functions/lib/connectors/{orchestrator,email,
+  fileWatch,index}.ts`. `executeConnectorRun` has ZERO callers. Pure CSV parse moved to
+  `shared/orderParse.ts` (+ worker artifact `bin/lib/shared/orderParse.js`).
+- **All doors enqueue now:** run/drop/public-link/email-webhook/retry/poll → store-to-R2 +
+  `enqueueDocument` (`functions/lib/intake/enqueue.ts`) into `processing_queue` → worker → Review →
+  producers. Response contract changed to `{queued, queue_id, run_id}`. Each intake writes a
+  `connector_runs` rollup header (`functions/lib/intake/connectorRunHeader.ts`); counts fill at
+  approve via existing `accumulateRunRollup`. Aligns with no-auto-ingest.
+- **Unified extraction profile** keyed `(supplier_id, document_type_id)`: migration **0068** adds
+  `field_mappings` to `supplier_extraction_instructions`; `functions/lib/extractionProfiles.ts`;
+  GET/PUT `/api/extraction-instructions` carry field_mappings; profile endpoint re-keyed. Internal
+  ERP/WMS = `origin_kind='internal'` supplier rows (nameless-internal backfill deferred to app level
+  — see migration comment). Worker reads mappings from the profile; SourceWizard + SourceDetail both
+  write mappings there now (NOT the connector row).
+- **Worker gains:** deterministic CSV path (order kind, falls back to Qwen); **per-sheet XLSX
+  isolation** (skips /inactive/i, merges) — fixes the dropped-late-alphabet-rows bug. COA branch
+  BYTE-IDENTICAL (diff-verified).
+- **Sources rebrand:** `functions/api/connectors/**` → `sources/**` (URLs `/api/sources/*`); compat
+  shim left ONLY at `connectors/[id]/drop.ts` (external vendor bearer-drop). UI: Sources/SourceDetail/
+  SourceWizard/IntakeRunReview; nav "Sources"; origin×output labels (`src/lib/sourceLabels.ts`).
+  Public slug path `/api/public/connectors/:slug` kept stable.
+
+### IMMEDIATE NEXT STEPS (in order — user wants all)
+1. **REAL-DATA PARITY REPLAY (the actual validation — NOT done yet).** COA = low risk (byte-identical).
+   Orders/CSV/XLSX = changed → must replay. Corpus in `~/drops/dox-linkage/` (8 audit-trail .docx =
+   shipment, ERP/COA .pdf) exercises the order/shipment Qwen path + linkage but NOT CSV/XLSX — need a
+   real order CSV + the Darigold multi-sheet XLSX to validate those. Diff resulting orders/customers/
+   lots + COA-fulfillment graph against current prod.
+2. **Staging E2E:** staging D1 is DRIFTED (missing migs) → re-migrate first to restore the deploy
+   gate, apply 0068, deploy staging, drive every door.
+3. **Prod deploy:** `bin/deploy` (Pages) + **restart `dox-process-worker.service`** (picks up CSV/XLSX
+   ports + profile-by-key). Apply 0068 to prod D1 first. Small blast radius (~16 orders).
+4. **Doctype reparenting (user-confirmed follow-up, task #9):** make `document_types` supplier-scoped
+   (add supplier_id, migrate, rework doctype CRUD/UI + selectors). Builds on the (supplier,doctype)
+   profile. Plan separately before coding.
+
+### OPEN/WATCH
+- CSV/XLSX deterministic paths have unit coverage (`orderParse.test.ts`) but NO real-file validation.
+- preview-extraction is now CSV-only (non-CSV → 501); wizard live-preview still works for CSV.
+- Shipment CSV stays on Qwen (parseCSVAttachment emits orders/customers, not shipments) — intentional.
+- `connectors`/`connector_runs`/`connector_processed_keys` TABLE names kept (rebrand was code/UI only).
+
+---
+
 ## 2026-06-02 SESSION WRAP — trust + review + matching + worklist (ALL SHIPPED & PUSHED)
 
 Big, productive session. The intake → review → linkage pipeline now works **end-to-end and

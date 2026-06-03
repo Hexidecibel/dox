@@ -2,8 +2,16 @@
  * API tests for GET /api/sources/:id/profile.
  *
  * A "source" is a `connectors` row. This endpoint is the read surface the
- * unified intake worker will hit to learn how to route + extract a queued
- * document (Phase P0 — nothing consumes it yet).
+ * unified intake worker hits to learn how to route + extract a queued
+ * document.
+ *
+ * As of migration 0068 (Connectors -> Sources refactor), the extraction
+ * profile (field_mappings + extraction_instructions + examples) is keyed on
+ * (tenant_id, supplier_id, document_type_id) and read from
+ * `supplier_extraction_instructions` — NOT from the connector row. The :id
+ * route resolves the source's supplier_id + document_type_id from the
+ * connector, then loads the profile from the unified store. These tests seed
+ * the profile store accordingly.
  *
  * Drives onRequestGet directly with a fake PagesFunction context — mirrors
  * tests/api/extraction-instructions.test.ts since this project's
@@ -85,20 +93,55 @@ async function insertSource(
   return id;
 }
 
+let supplierId = '';
+let docTypeId = '';
+
 beforeAll(async () => {
   await runMigrations(db);
   seed = await seedTestData(db);
 
+  // Real supplier + document type for the unified profile key.
+  supplierId = generateTestId();
+  await db
+    .prepare('INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
+    .bind(supplierId, seed.tenantId, 'Profile Supplier', `profile-supp-${supplierId.slice(0, 6)}`)
+    .run();
+
+  docTypeId = generateTestId();
+  await db
+    .prepare('INSERT INTO document_types (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
+    .bind(docTypeId, seed.tenantId, 'COA', `coa-${docTypeId.slice(0, 6)}`)
+    .run();
+
+  // The profile (instructions + field_mappings) lives in the unified store,
+  // keyed (tenant, supplier, document_type) — NOT on the connector row.
+  await db
+    .prepare(
+      `INSERT INTO supplier_extraction_instructions
+         (id, supplier_id, document_type_id, tenant_id, instructions, field_mappings,
+          created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+    )
+    .bind(
+      generateTestId(),
+      supplierId,
+      docTypeId,
+      seed.tenantId,
+      'Dates are DD/MM/YYYY.',
+      JSON.stringify({ version: 2, fields: [{ source: 'Lot No', target: 'lot_number' }] }),
+    )
+    .run();
+
+  // Connector carries only the routing key; its own field_mappings /
+  // extraction_instructions columns are intentionally left as defaults to
+  // prove the endpoint no longer reads them.
   connectorId = await insertSource(seed.tenantId, {
     originKind: 'supplier',
     outputKind: 'coa',
-    supplierId: 'supp-123',
-    documentTypeId: 'dt-456',
-    extractionInstructions: 'Dates are DD/MM/YYYY.',
-    fieldMappings: JSON.stringify({
-      version: 2,
-      fields: [{ source: 'Lot No', target: 'lot_number' }],
-    }),
+    supplierId,
+    documentTypeId: docTypeId,
+    extractionInstructions: null,
+    fieldMappings: '{}',
   });
 
   otherTenantConnectorId = await insertSource(seed.tenantId2, {
@@ -117,8 +160,9 @@ describe('GET /api/sources/:id/profile', () => {
       tenant_id: seed.tenantId,
       origin_kind: 'supplier',
       output_kind: 'coa',
-      supplier_id: 'supp-123',
-      document_type_id: 'dt-456',
+      supplier_id: supplierId,
+      document_type_id: docTypeId,
+      // resolved from supplier_extraction_instructions, not the connector row
       extraction_instructions: 'Dates are DD/MM/YYYY.',
     });
     // field_mappings is normalized to the canonical shape (always present).

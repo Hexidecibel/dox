@@ -27,6 +27,7 @@ interface SupplierInstructionsRow {
   document_type_id: string;
   document_type_name: string;
   instructions: string | null;
+  field_mappings: string | null;
   updated_at: string | null;
   updated_by: string | null;
 }
@@ -88,6 +89,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          dt.id AS document_type_id,
          dt.name AS document_type_name,
          sei.instructions AS instructions,
+         sei.field_mappings AS field_mappings,
          sei.updated_at AS updated_at,
          sei.updated_by AS updated_by
        FROM document_types dt

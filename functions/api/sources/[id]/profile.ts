@@ -4,15 +4,29 @@ import {
   errorToResponse,
 } from '../../../lib/permissions';
 import { normalizeFieldMappings } from '../../../../shared/fieldMappings';
+import { loadExtractionProfile } from '../../../lib/extractionProfiles';
 import type { Env, User } from '../../../lib/types';
 
 /**
  * GET /api/sources/:id/profile
  *
- * Returns a "source" mapping/profile for the unified intake engine to consume
- * (Phase P0 — nothing routes through this yet). A "source" is a `connectors`
- * row; this endpoint is the read surface the worker will hit to learn how to
- * route + extract a queued document.
+ * Returns the unified extraction profile the worker consumes to extract a
+ * queued document. As of the Connectors -> Sources refactor (migration 0068),
+ * the profile (field_mappings + extraction_instructions + examples) is keyed on
+ * (tenant_id, supplier_id, document_type_id) and lives in
+ * `supplier_extraction_instructions` — NOT on the connector row.
+ *
+ * This :id route is now a thin wrapper: it resolves the source's
+ * supplier_id + document_type_id (+ output_kind) from the `connectors` row,
+ * then delegates to loadExtractionProfile() to read the actual profile from
+ * the unified store. Connector columns (field_mappings, extraction_instructions)
+ * are intentionally NOT read here — they remain in the DB for a later cleanup
+ * but are no longer the source of truth.
+ *
+ * Response contract (kept identical to what bin/process-worker's
+ * loadExtractionProfile expects):
+ *   { id, tenant_id, origin_kind, output_kind, supplier_id,
+ *     document_type_id, extraction_instructions, field_mappings, examples }
  *
  * Auth: the worker authenticates via an API key that resolves to super_admin,
  * so super_admin may read any source. Otherwise the caller must own the
@@ -26,8 +40,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     requireRole(user, 'super_admin', 'org_admin', 'user');
 
     const source = await context.env.DB.prepare(
-      `SELECT id, tenant_id, origin_kind, output_kind, supplier_id,
-              document_type_id, extraction_instructions, field_mappings
+      `SELECT id, tenant_id, origin_kind, output_kind, supplier_id, document_type_id
        FROM connectors
        WHERE id = ?`
     )
@@ -39,8 +52,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         output_kind: string | null;
         supplier_id: string | null;
         document_type_id: string | null;
-        extraction_instructions: string | null;
-        field_mappings: string | null;
       }>();
 
     if (!source) {
@@ -53,16 +64,15 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       throw new NotFoundError('Source not found');
     }
 
-    // Parse field_mappings JSON through the shared normalizer so legacy v1
-    // configs load transparently (mirrors functions/api/connectors/[id].ts).
-    let parsedMappings: unknown = {};
-    if (typeof source.field_mappings === 'string') {
-      try {
-        parsedMappings = JSON.parse(source.field_mappings);
-      } catch {
-        parsedMappings = {};
-      }
-    }
+    // Resolve the unified profile from supplier_extraction_instructions, keyed
+    // by the source's (tenant_id, supplier_id, document_type_id). Returns empty
+    // mappings/instructions when the source has no supplier/doctype or no
+    // authored profile yet — extraction must always be able to proceed.
+    const profile = await loadExtractionProfile(context.env.DB, {
+      tenantId: source.tenant_id,
+      supplierId: source.supplier_id,
+      documentTypeId: source.document_type_id,
+    });
 
     return new Response(
       JSON.stringify({
@@ -72,8 +82,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         output_kind: source.output_kind,
         supplier_id: source.supplier_id,
         document_type_id: source.document_type_id,
-        extraction_instructions: source.extraction_instructions,
-        field_mappings: normalizeFieldMappings(parsedMappings),
+        extraction_instructions: profile.extraction_instructions,
+        field_mappings: normalizeFieldMappings(profile.field_mappings ?? {}),
+        examples: profile.examples,
       }),
       { headers: { 'Content-Type': 'application/json' } }
     );

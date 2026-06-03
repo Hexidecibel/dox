@@ -19,7 +19,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { onRequestPost as dropPost } from '../../functions/api/connectors/[id]/drop';
+import { onRequestPost as dropPost } from '../../functions/api/sources/[id]/drop';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;
@@ -218,7 +218,7 @@ describe('POST /api/connectors/:id/drop — body validation', () => {
 });
 
 describe('POST /api/connectors/:id/drop — happy path', () => {
-  it('accepts a CSV, writes R2, dispatches a run with source=api, and dedupes', async () => {
+  it('accepts a CSV, writes R2, ENQUEUES a run with source=api, and dedupes', async () => {
     const { id } = await insertConnector({
       tenantId: seed.tenantId,
       apiToken: 'happy-token',
@@ -236,24 +236,51 @@ describe('POST /api/connectors/:id/drop — happy path', () => {
     const resp = await dropPost(makeContext(id, req));
     expect(resp.status).toBe(200);
 
+    // Connectors → Sources: the drop door no longer runs the synchronous
+    // orchestrator. It stashes the file in R2 + ENQUEUES into
+    // processing_queue. Response is the enqueue envelope, NOT order counts.
     const body = (await resp.json()) as {
+      queued: boolean;
+      queue_id: string;
       run_id: string;
       file_key: string;
       accepted_at: string;
-      status: string;
-      orders_created: number;
-      customers_created: number;
     };
+    expect(body.queued).toBe(true);
+    expect(body.queue_id).toMatch(/^[a-f0-9]+$/);
     expect(body.run_id).toMatch(/^[a-f0-9]+$/);
     expect(body.file_key).toMatch(new RegExp(`^connector-drops/${id}/`));
     expect(body.accepted_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(body.orders_created).toBe(2);
 
     // R2 object exists at the returned key.
     const obj = await r2.get(body.file_key);
     expect(obj).toBeTruthy();
 
-    // connector_runs row exists with source='api'.
+    // A processing_queue row was created tagged with this source + run, and
+    // it points at the same R2 key. The worker (not this door) parses it.
+    const queued = await db
+      .prepare(
+        `SELECT source, source_id, connector_run_id, file_r2_key, status, processing_status
+           FROM processing_queue WHERE id = ?`,
+      )
+      .bind(body.queue_id)
+      .first<{
+        source: string | null;
+        source_id: string | null;
+        connector_run_id: string | null;
+        file_r2_key: string | null;
+        status: string;
+        processing_status: string;
+      }>();
+    expect(queued).toBeTruthy();
+    expect(queued!.source).toBe('api');
+    expect(queued!.source_id).toBe(id);
+    expect(queued!.connector_run_id).toBe(body.run_id);
+    expect(queued!.file_r2_key).toBe(body.file_key);
+    expect(queued!.status).toBe('pending');
+    expect(queued!.processing_status).toBe('queued');
+
+    // connector_runs ROLLUP HEADER exists with source='api'.
     const run = await db
       .prepare(`SELECT id, status, source FROM connector_runs WHERE id = ?`)
       .bind(body.run_id)

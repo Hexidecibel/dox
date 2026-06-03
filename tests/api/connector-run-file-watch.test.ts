@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { onRequestPost as runConnector } from '../../functions/api/connectors/[id]/run';
+import { onRequestPost as runConnector } from '../../functions/api/sources/[id]/run';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;
@@ -113,8 +113,8 @@ function multipartRequest(id: string, file: File | null): Request {
   });
 }
 
-describe('POST /api/connectors/:id/run — manual-upload happy path', () => {
-  it('parses a CSV, inserts orders + customer, writes a connector_runs row', async () => {
+describe('POST /api/connectors/:id/run — manual-upload happy path (ENQUEUE)', () => {
+  it('stashes the CSV in R2 and ENQUEUES a processing_queue row + run header', async () => {
     const connectorId = await insertConnector({ tenantId: seed.tenantId });
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
 
@@ -126,64 +126,77 @@ SO-RUN-3,K-R002,Beta Ice,PO-R-200`;
     const response = await runConnector(makeContext(connectorId, multipartRequest(connectorId, file), user));
 
     expect(response.status).toBe(200);
+
+    // Connectors → Sources: the run door no longer parses synchronously. It
+    // stores the file to R2 and ENQUEUES it. The worker → Review Queue does
+    // the parsing/landing later. Response is the enqueue envelope.
     const body = (await response.json()) as {
+      queued: boolean;
+      queue_id: string;
       run_id: string;
-      status: string;
-      rows_processed: number;
-      rows_inserted: number;
-      rows_skipped: number;
-      customers_created: number;
     };
+    expect(body.queued).toBe(true);
+    expect(body.queue_id).toBeTruthy();
     expect(body.run_id).toBeTruthy();
-    expect(body.status).toBe('success');
-    expect(body.rows_inserted).toBe(3);
-    expect(body.rows_skipped).toBe(0);
-    expect(body.customers_created).toBe(2);
 
-    // Verify orders actually landed in D1 with the right tenant scope.
-    const ordersRow = await db
+    // A processing_queue row landed, tagged with this source + run header,
+    // in the pending/queued state the worker drains.
+    const queued = await db
       .prepare(
-        `SELECT COUNT(*) as count FROM orders
-         WHERE tenant_id = ? AND connector_id = ? AND order_number LIKE 'SO-RUN-%'`,
+        `SELECT tenant_id, source, source_id, connector_run_id, status, processing_status, file_r2_key
+           FROM processing_queue WHERE id = ?`,
       )
-      .bind(seed.tenantId, connectorId)
-      .first<{ count: number }>();
-    expect(ordersRow?.count).toBe(3);
-
-    // Verify customers table has both entries.
-    const customersRow = await db
-      .prepare(
-        `SELECT COUNT(*) as count FROM customers
-         WHERE tenant_id = ? AND customer_number IN ('K-R001', 'K-R002')`,
-      )
-      .bind(seed.tenantId)
-      .first<{ count: number }>();
-    expect(customersRow?.count).toBe(2);
-
-    // Verify connector_runs row exists with the expected shape.
-    const runRow = await db
-      .prepare(
-        `SELECT status, records_found, records_created, records_errored
-         FROM connector_runs WHERE id = ?`,
-      )
-      .bind(body.run_id)
+      .bind(body.queue_id)
       .first<{
+        tenant_id: string;
+        source: string | null;
+        source_id: string | null;
+        connector_run_id: string | null;
         status: string;
-        records_found: number;
-        records_created: number;
-        records_errored: number;
+        processing_status: string;
+        file_r2_key: string | null;
       }>();
+    expect(queued).toBeTruthy();
+    expect(queued!.tenant_id).toBe(seed.tenantId);
+    expect(queued!.source).toBe('manual');
+    expect(queued!.source_id).toBe(connectorId);
+    expect(queued!.connector_run_id).toBe(body.run_id);
+    expect(queued!.status).toBe('pending');
+    expect(queued!.processing_status).toBe('queued');
+    expect(queued!.file_r2_key).toMatch(new RegExp(`^connector-drops/${connectorId}/`));
+
+    // The R2 object is present at the enqueued key.
+    const obj = await env.FILES.get(queued!.file_r2_key!);
+    expect(obj).toBeTruthy();
+
+    // connector_runs ROLLUP HEADER exists for this manual run. Counts are
+    // filled in later as items are approved out of the Review Queue, so we
+    // only assert the header is present (not final counts).
+    const runRow = await db
+      .prepare(`SELECT id, source FROM connector_runs WHERE id = ?`)
+      .bind(body.run_id)
+      .first<{ id: string; source: string | null }>();
     expect(runRow).toBeTruthy();
-    expect(runRow!.status).toBe('success');
-    expect(runRow!.records_errored).toBe(0);
+    expect(runRow!.source).toBe('manual');
+
+    // Dedup row written so the R2 poller doesn't double-enqueue the same key.
+    const dedup = await db
+      .prepare(
+        `SELECT COUNT(*) as count FROM connector_processed_keys
+          WHERE connector_id = ? AND r2_key = ?`,
+      )
+      .bind(connectorId, queued!.file_r2_key)
+      .first<{ count: number }>();
+    expect(dedup?.count).toBe(1);
   });
 
-  it('skips rows missing order_number but keeps the valid ones', async () => {
+  it('enqueues regardless of per-row content (parsing/validation is deferred to the worker)', async () => {
     const connectorId = await insertConnector({ tenantId: seed.tenantId });
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
 
-    // Row 2 has no order number — parseCSVAttachment should push an error
-    // and move on. Row 1 + row 3 should still land.
+    // Row 2 has no order number. Under the old synchronous model this would
+    // have produced a "partial" run. Now the door doesn't parse at all — it
+    // just enqueues the raw file; the worker decides what to do per-row.
     const csv = `Order #,Cust #,Customer Name,PO Number
 SO-PARTIAL-1,K-P001,Acme Foods,PO-P-1
 ,K-P002,No Order Co,PO-P-2
@@ -192,15 +205,16 @@ SO-PARTIAL-3,K-P003,Gamma LLC,PO-P-3`;
     const response = await runConnector(makeContext(connectorId, multipartRequest(connectorId, file), user));
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      rows_inserted: number;
-      rows_skipped: number;
-      status: string;
-    };
-    expect(body.rows_inserted).toBe(2);
-    expect(body.rows_skipped).toBeGreaterThanOrEqual(1);
-    // Partial status because some rows errored but at least one landed.
-    expect(body.status).toBe('partial');
+    const body = (await response.json()) as { queued: boolean; queue_id: string };
+    expect(body.queued).toBe(true);
+
+    const queued = await db
+      .prepare(`SELECT status, processing_status FROM processing_queue WHERE id = ?`)
+      .bind(body.queue_id)
+      .first<{ status: string; processing_status: string }>();
+    expect(queued).toBeTruthy();
+    expect(queued!.status).toBe('pending');
+    expect(queued!.processing_status).toBe('queued');
   });
 });
 

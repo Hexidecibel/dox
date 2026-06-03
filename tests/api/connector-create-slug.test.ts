@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData } from '../helpers/db';
-import { onRequestPost as createConnector } from '../../functions/api/connectors/index';
+import { onRequestPost as createConnector } from '../../functions/api/sources/index';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;

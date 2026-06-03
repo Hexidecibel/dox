@@ -28,10 +28,10 @@ import { BundleDetail } from './pages/BundleDetail';
 import { IngestHistory } from './pages/IngestHistory';
 import { Import } from './pages/Import';
 import ReviewQueue from './pages/ReviewQueue';
-import { Connectors } from './pages/admin/Connectors';
-import { ConnectorDetail } from './pages/admin/ConnectorDetail';
-import { ConnectorWizard } from './pages/admin/ConnectorWizard';
-import { ConnectorRunReview } from './pages/admin/ConnectorRunReview';
+import { Sources } from './pages/admin/Sources';
+import { SourceDetail } from './pages/admin/SourceDetail';
+import { SourceWizard } from './pages/admin/SourceWizard';
+import { IntakeRunReview } from './pages/admin/IntakeRunReview';
 import { Customers } from './pages/admin/Customers';
 import { CustomerDetail } from './pages/admin/CustomerDetail';
 import LearningDashboard from './pages/admin/LearningDashboard';
@@ -77,7 +77,7 @@ function App() {
           {/* Phase B4 — public drop link. Vendors land here from a
               tenant-shared URL; the link token is the auth, the
               page renders an upload form, and submissions POST to
-              the existing /api/connectors/:slug/drop endpoint with
+              the existing /api/sources/:slug/drop endpoint with
               the token as the bearer. No app shell, no login. */}
           <Route path="/drop/:slug/:token" element={<PublicDrop />} />
 
@@ -126,13 +126,13 @@ function App() {
                 <Route path="/admin/products/:id" element={<ProductDetail />} />
                 <Route path="/admin/suppliers" element={<Suppliers />} />
                 <Route path="/admin/suppliers/:id" element={<SupplierDetail />} />
-                <Route path="/admin/connectors" element={<Connectors />} />
-                <Route path="/admin/connectors/new" element={<ConnectorWizard />} />
-                <Route path="/admin/connectors/:id/edit" element={<ConnectorWizard />} />
-                <Route path="/admin/connectors/:id" element={<ConnectorDetail />} />
+                <Route path="/admin/sources" element={<Sources />} />
+                <Route path="/admin/sources/new" element={<SourceWizard />} />
+                <Route path="/admin/sources/:id/edit" element={<SourceWizard />} />
+                <Route path="/admin/sources/:id" element={<SourceDetail />} />
                 <Route
-                  path="/admin/connectors/:id/runs/:runId/review"
-                  element={<ConnectorRunReview />}
+                  path="/admin/sources/:id/runs/:runId/review"
+                  element={<IntakeRunReview />}
                 />
                 <Route path="/admin/customers" element={<Customers />} />
                 <Route path="/admin/customers/:id" element={<CustomerDetail />} />

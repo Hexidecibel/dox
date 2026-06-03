@@ -1,5 +1,8 @@
 /**
- * Regression tests for getDefaultParsingPrompt() in functions/lib/connectors/email.ts.
+ * Regression tests for getDefaultParsingPrompt() in shared/orderPrompt.ts.
+ * (Moved out of the deleted functions/lib/connectors/email.ts during the
+ * Connectors → Sources refactor; the prompt + sanitizer helpers are pure
+ * and now live in the shared module consumed by both Worker and worker.)
  *
  * The prompt is the single biggest lever on extraction quality. These tests
  * lock in the hard rules that fixed real hallucinations observed in the
@@ -15,7 +18,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { getDefaultParsingPrompt, sanitizeCustomerName } from '../../functions/lib/connectors/email';
+import { getDefaultParsingPrompt, sanitizeCustomerName } from '../../shared/orderPrompt';
 
 describe('getDefaultParsingPrompt — hard rules', () => {
   const prompt = getDefaultParsingPrompt();

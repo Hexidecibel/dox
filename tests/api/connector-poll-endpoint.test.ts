@@ -15,7 +15,7 @@ import { env } from 'cloudflare:test';
 import {
   onRequestPost as pollPost,
   onRequestGet as pollGet,
-} from '../../functions/api/connectors/poll';
+} from '../../functions/api/sources/poll';
 
 function makeContext(request: Request, overrideEnv?: Record<string, unknown>) {
   return {

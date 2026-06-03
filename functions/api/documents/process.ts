@@ -1,5 +1,6 @@
 import { computeChecksum, uploadFile } from '../../lib/r2';
 import { generateId } from '../../lib/db';
+import { enqueueDocument } from '../../lib/intake/enqueue';
 import {
   requireRole,
   requireTenantAccess,
@@ -246,12 +247,21 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       await uploadFile(context.env.FILES, r2Key, fileData, mimeType);
 
       // Create queue entry
-      await context.env.DB.prepare(
-        `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, status, processing_status, checksum, created_by, source, source_detail, output_kind, source_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(queueId, tenantId, documentTypeId || null, r2Key, fileName, file.size, mimeType, checksum, user.id, source, sourceDetail, outputKind, sourceId)
-        .run();
+      await enqueueDocument(context.env.DB, {
+        id: queueId,
+        tenantId,
+        documentTypeId: documentTypeId || null,
+        fileR2Key: r2Key,
+        fileName,
+        fileSize: file.size,
+        mimeType,
+        checksum,
+        createdBy: user.id,
+        source,
+        sourceDetail,
+        outputKind,
+        sourceId,
+      });
 
       queuedItems.push({
         id: queueId,

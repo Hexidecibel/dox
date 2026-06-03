@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { onRequestGet as healthGet } from '../../functions/api/connectors/[id]/health';
+import { onRequestGet as healthGet } from '../../functions/api/sources/[id]/health';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;

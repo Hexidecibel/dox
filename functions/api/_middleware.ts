@@ -34,7 +34,7 @@ const PUBLIC_ROUTES = [
   // Scheduled R2 prefix poller endpoint. Authed by a bearer token
   // (CONNECTOR_POLL_TOKEN) checked inside the handler — bypasses JWT so
   // the companion `dox-connector-poller` Worker can drive it on cron.
-  '/api/connectors/poll',
+  '/api/sources/poll',
   '/api/forms/public',
   // Records update requests — recipient form gate is the unguessable
   // token in the URL, not a login. Same scoping rule as /api/forms/public:
@@ -58,15 +58,19 @@ const PUBLIC_ROUTES = [
  * sibling endpoint that happens to share a prefix. We also constrain
  * the connector id segment to `[a-zA-Z0-9_-]+` to keep the match tight.
  *
- * Currently only one entry — the Phase B2 HTTP POST drop door at
- * `/api/connectors/<id>/drop`. The handler validates the bearer
- * (connectors.api_token) in constant time; this regex just keeps the
- * request from being short-circuited by the JWT gate first. Sibling
- * admin endpoints at `/api/connectors/<id>/run`, `/test`, `/runs`,
- * `/sample`, and `/api-token/rotate` continue to require JWT/API-key
- * auth because they are not in this list.
+ * The Phase B2 HTTP POST drop door at `/api/sources/<id>/drop`. The
+ * handler validates the bearer (connectors.api_token) in constant time;
+ * this regex just keeps the request from being short-circuited by the
+ * JWT gate first. Sibling admin endpoints at `/api/sources/<id>/run`,
+ * `/test`, `/runs`, `/sample`, and `/api-token/rotate` continue to
+ * require JWT/API-key auth because they are not in this list.
+ *
+ * The legacy `/api/connectors/<id>/drop` path remains allowlisted too:
+ * it's a thin compat shim (functions/api/connectors/[id]/drop.ts) kept
+ * for external vendor integrations wired to the pre-rename URL.
  */
 const PUBLIC_ROUTE_PATTERNS: RegExp[] = [
+  /^\/api\/sources\/[a-zA-Z0-9_-]+\/drop$/,
   /^\/api\/connectors\/[a-zA-Z0-9_-]+\/drop$/,
 ];
 

@@ -37,6 +37,11 @@ const {
   clampConfidence,
   getDefaultParsingPrompt,
 } = require('./lib/shared/orderPrompt');
+// Deterministic CSV field-mapping parser — the SAME code the CF connector
+// pipeline uses to turn a delimited file + field_mappings into the canonical
+// {orders, customers} record shape, no LLM involved. Used by the order path
+// when the profile carries field_mappings and the input is CSV/TSV-shaped.
+const { parseCSVAttachment } = require('./lib/shared/orderParse');
 
 // Increase headers timeout for slow LLM inference (default is 300s, we need 15min)
 const llmDispatcher = new Agent({
@@ -774,6 +779,73 @@ function xlsxToPages(fileBuffer) {
   return pages;
 }
 
+/**
+ * Parse an XLSX buffer into an array of { name, csv, csvComma } per-sheet
+ * records, in workbook order. Sheets whose name matches /inactive/i are skipped
+ * (mirrors the INACTIVE_CUST skip in functions/lib/connectors/email.ts). Empty
+ * sheets are dropped. Returns [] if no usable sheets.
+ *
+ *   - `csv`      — pipe field-separated (` | `). Used as the LLM-facing text
+ *                  block, where pipes keep the model grounded on column
+ *                  boundaries (cells often contain commas).
+ *   - `csvComma` — standard comma-separated. Used by the DETERMINISTIC
+ *                  parseCSVAttachment path, whose splitter only understands
+ *                  comma/tab delimiters — pipes would collapse every row into
+ *                  one field.
+ *
+ * Unlike xlsxToPages (which concatenates all sheets into the chunker, dropping
+ * late-alphabet rows on big workbooks), this keeps sheets ISOLATED so the
+ * order/shipment path can extract each sheet independently and merge.
+ */
+function xlsxToSheets(fileBuffer) {
+  const XLSX = require('xlsx');
+  const workbook = XLSX.read(new Uint8Array(fileBuffer), { type: 'array' });
+  const sheets = [];
+  for (const sheetName of workbook.SheetNames) {
+    if (/inactive/i.test(sheetName)) {
+      console.log(`  Skipping sheet: ${sheetName} (inactive customers excluded)`);
+      continue;
+    }
+    const ws = workbook.Sheets[sheetName];
+    if (!ws) continue;
+    const csv = XLSX.utils.sheet_to_csv(ws, { FS: ' | ', RS: '\n', blankrows: false });
+    if (csv && csv.trim()) {
+      const csvComma = XLSX.utils.sheet_to_csv(ws, { RS: '\n', blankrows: false });
+      sheets.push({ name: sheetName, csv, csvComma });
+    }
+  }
+  return sheets;
+}
+
+/**
+ * True when the queue item is a CSV/TSV-shaped delimited file: text/csv mime
+ * OR a .csv / .tsv filename (some sources post generic text/plain or
+ * octet-stream mimes for CSV attachments). Used by the order/shipment path to
+ * route to the deterministic parseCSVAttachment when field_mappings exist.
+ */
+function isCsvItem(item) {
+  return (
+    item.mime_type === 'text/csv' ||
+    item.mime_type === 'text/tab-separated-values' ||
+    /\.(csv|tsv)$/i.test(item.file_name || '')
+  );
+}
+
+/**
+ * True when there are usable field_mappings on the profile — at least one
+ * enabled core mapping or one extended mapping. An empty/zeroed mappings
+ * object means the deterministic parser can't bind any columns, so the caller
+ * falls back to the Qwen path.
+ */
+function hasUsableFieldMappings(fm) {
+  if (!fm || typeof fm !== 'object') return false;
+  const coreEnabled =
+    fm.core && typeof fm.core === 'object' &&
+    Object.values(fm.core).some((c) => c && c.enabled);
+  const hasExtended = Array.isArray(fm.extended) && fm.extended.length > 0;
+  return Boolean(coreEnabled || hasExtended);
+}
+
 // =============================================================================
 // DOCX support (text-shaped — Word audit trails, BOLs, etc., no OCR/VLM)
 // =============================================================================
@@ -909,10 +981,18 @@ async function extractTextAndPages(item, fileBuffer, fileBufferCopy) {
 /**
  * Load a unified extraction profile for a queue item.
  *
- * For 'order' / 'shipment' kinds with a source_id, fetches
- * GET /api/sources/:id/profile to get this connector's field_mappings +
- * extraction_instructions. Returns null fields on any failure so the caller
- * can fall back to defaults — extraction must always proceed.
+ * The profile is keyed on the UNIFIED (supplier_id, document_type_id) pair —
+ * connectors and uploads now resolve the same way. Resolution order for the
+ * new 'order' / 'shipment' kinds:
+ *   1. source_id present → GET /api/sources/:id/profile (the endpoint itself
+ *      now resolves by the source's supplier+doctype and returns
+ *      field_mappings + extraction_instructions).
+ *   2. else supplier_id + document_type_id present →
+ *      GET /api/extraction-instructions?supplier_id=&document_type_id= which
+ *      returns { instructions, field_mappings } for that exact pair.
+ *
+ * Always returns a safe object (null field_mappings ⇒ caller uses the default
+ * prompt). Never throws — extraction must always proceed.
  *
  * For 'coa' / null kinds this is unused: the COA path keeps TODAY'S exact
  * resolution (supplier name-resolve, fetchReviewerInstructions, examples,
@@ -928,7 +1008,9 @@ async function loadExtractionProfile(item) {
     document_type_id: item.document_type_id || null,
   };
 
-  if ((kind === 'order' || kind === 'shipment') && item.source_id) {
+  if (kind !== 'order' && kind !== 'shipment') return profile;
+
+  if (item.source_id) {
     try {
       const res = await fetch(
         `${DOX_API_URL}/api/sources/${encodeURIComponent(item.source_id)}/profile`,
@@ -943,13 +1025,50 @@ async function loadExtractionProfile(item) {
         if (data.document_type_id) profile.document_type_id = data.document_type_id;
         console.log(
           `  Source profile loaded for ${item.source_id} ` +
-          `(instructions=${profile.extraction_instructions.length} chars)`
+          `(supplier=${profile.supplier_id}, doctype=${profile.document_type_id}, ` +
+          `mappings=${profile.field_mappings ? 'yes' : 'none'}, ` +
+          `instructions=${profile.extraction_instructions.length} chars)`
         );
       } else {
         console.warn(`  Source profile fetch failed: ${res.status} (using defaults)`);
       }
     } catch (err) {
       console.warn(`  Source profile lookup failed (non-critical): ${err.message}`);
+    }
+    return profile;
+  }
+
+  // No source_id: resolve by (supplier_id, document_type_id) via the
+  // instructions endpoint, which also carries the field_mappings for that
+  // pair. Needs BOTH ids — the supplier-wide aggregate path of that endpoint
+  // returns no field_mappings, so we only call it when both are present.
+  if (profile.supplier_id && profile.document_type_id) {
+    try {
+      const params = new URLSearchParams({
+        supplier_id: profile.supplier_id,
+        document_type_id: profile.document_type_id,
+      });
+      if (item.tenant_id) params.set('tenant_id', item.tenant_id);
+      const res = await fetch(
+        `${DOX_API_URL}/api/extraction-instructions?${params.toString()}`,
+        { headers }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        profile.field_mappings = data.field_mappings || null;
+        profile.extraction_instructions =
+          typeof data.instructions === 'string' ? data.instructions : '';
+        console.log(
+          `  Profile resolved by (supplier=${profile.supplier_id}, ` +
+          `doctype=${profile.document_type_id}): ` +
+          `mappings=${profile.field_mappings ? 'yes' : 'none'}, ` +
+          `instructions=${profile.extraction_instructions.length} chars`
+        );
+      } else {
+        console.warn(`  Extraction-instructions fetch failed: ${res.status} (using defaults)`);
+      }
+    } catch (err) {
+      console.warn(`  Extraction-instructions lookup failed (non-critical): ${err.message}`);
     }
   }
 
@@ -1063,43 +1182,166 @@ async function processOrderItem(item) {
   try {
     await postResults(item.id, { processing_status: 'processing' });
 
-    const fileBuffer = await downloadQueueFile(item);
-    const fileBufferCopy = fileBuffer.slice(0);
-    const { text, pages } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
-
-    if (!text || text.trim().length === 0) {
-      await postResults(item.id, {
-        processing_status: 'error',
-        error_message: `Could not extract text from ${item.mime_type} file for order extraction.`,
-      });
-      console.log(`  Skipped ${item.file_name}: no text extracted`);
-      return;
-    }
-
     const profile = await loadExtractionProfile(item);
-    // field_mappings may be null when no source profile resolved — fall back to
-    // the shared default-mappings prompt so a prompt always builds.
-    const basePrompt = profile.field_mappings
-      ? buildParsingPrompt(profile.field_mappings)
-      : getDefaultParsingPrompt();
-    const systemPrompt = prependConnectorInstructions(basePrompt, profile.extraction_instructions);
+    const haveMappings = hasUsableFieldMappings(profile.field_mappings);
 
-    const chunks = buildRecordChunks(text, pages);
-    console.log(`  Order extraction: ${pages.length} page(s)/sheet(s) → ${chunks.length} chunk(s)`);
+    // Download once up front — every path below needs the bytes (deterministic
+    // CSV/XLSX parse OR text extraction for Qwen).
+    const fileBuffer = await downloadQueueFile(item);
 
-    const outputs = [];
-    for (let i = 0; i < chunks.length; i++) {
-      console.log(`  Qwen call ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
-      const raw = await runRecordsQwen(systemPrompt, chunks[i], item.file_name);
-      if (raw) {
-        const { orders, customers } = normalizeAiOutput(raw);
-        outputs.push({ orders, customers, errors: [] });
+    // ===== Deterministic paths (no Qwen) when field_mappings exist =====
+    // The shared parseCSVAttachment binds columns to the canonical
+    // {orders, customers} shape using the profile's field_mappings — the SAME
+    // code the CF connector pipeline runs, so output is byte-identical. We use
+    // it for CSV (whole file) and XLSX (per-sheet, merged). Falls through to
+    // the Qwen path on null/empty mappings OR zero records parsed.
+    let orders = null;
+    let customers = null;
+    let extractedText = '';
+    let parseMethod = 'qwen';
+
+    if (haveMappings && isCsvItem(item)) {
+      try {
+        const out = parseCSVAttachment(
+          { fieldMappings: profile.field_mappings },
+          { content: fileBuffer }
+        );
+        if (out && Array.isArray(out.orders) && out.orders.length > 0) {
+          orders = out.orders;
+          customers = out.customers || [];
+          extractedText = new TextDecoder().decode(new Uint8Array(fileBuffer)).substring(0, 100000);
+          parseMethod = 'csv-deterministic';
+          console.log(
+            `  Order CSV (deterministic): ${orders.length} order(s), ${customers.length} customer(s)`
+          );
+        } else {
+          console.log('  CSV deterministic parse yielded 0 orders — falling back to Qwen');
+        }
+      } catch (err) {
+        console.warn(`  CSV deterministic parse failed (${err.message}) — falling back to Qwen`);
+      }
+    } else if (haveMappings && isXlsxItem(item)) {
+      try {
+        const sheets = xlsxToSheets(fileBuffer);
+        const sheetOutputs = [];
+        const textBlocks = [];
+        for (const sheet of sheets) {
+          textBlocks.push(`=== SHEET: ${sheet.name} ===\n${sheet.csv}`);
+          // parseCSVAttachment consumes an ArrayBuffer and splits on comma/tab,
+          // so feed the comma-rendered CSV (not the pipe LLM rendering).
+          const content = new TextEncoder().encode(sheet.csvComma).buffer;
+          const out = parseCSVAttachment(
+            { fieldMappings: profile.field_mappings },
+            { content }
+          );
+          sheetOutputs.push({
+            orders: out.orders || [],
+            customers: out.customers || [],
+            errors: out.errors || [],
+          });
+          console.log(
+            `  Sheet "${sheet.name}" (deterministic): ` +
+            `${(out.orders || []).length} order(s), ${(out.customers || []).length} customer(s)`
+          );
+        }
+        const mergedSheets = mergeOutputs(sheetOutputs);
+        if (mergedSheets.orders.length > 0) {
+          orders = mergedSheets.orders;
+          customers = mergedSheets.customers;
+          extractedText = textBlocks.join('\n').substring(0, 100000);
+          parseMethod = 'xlsx-deterministic';
+          console.log(
+            `  Order XLSX (deterministic): ${sheets.length} sheet(s) → ` +
+            `${orders.length} order(s), ${customers.length} customer(s)`
+          );
+        } else {
+          console.log('  XLSX deterministic parse yielded 0 orders — falling back to Qwen');
+        }
+      } catch (err) {
+        console.warn(`  XLSX deterministic parse failed (${err.message}) — falling back to Qwen`);
       }
     }
 
-    const merged = mergeOutputs(outputs);
-    const orders = merged.orders;
-    const customers = merged.customers;
+    // ===== Qwen fallback path (no usable mappings, or deterministic yielded 0) =====
+    if (orders == null) {
+      const fileBufferCopy = fileBuffer.slice(0);
+
+      // field_mappings may be null when no profile resolved — fall back to the
+      // shared default-mappings prompt so a prompt always builds.
+      const basePrompt = profile.field_mappings
+        ? buildParsingPrompt(profile.field_mappings)
+        : getDefaultParsingPrompt();
+      const systemPrompt = prependConnectorInstructions(basePrompt, profile.extraction_instructions);
+
+      const outputs = [];
+
+      if (isXlsxItem(item)) {
+        // Per-sheet isolation: run one extraction PER SHEET and merge, so
+        // late-alphabet rows on big workbooks aren't dropped by concatenating
+        // everything into one chunker stream. Mirrors parseXLSXAttachment in
+        // functions/lib/connectors/email.ts.
+        let sheets = [];
+        try {
+          sheets = xlsxToSheets(fileBuffer);
+        } catch (err) {
+          console.warn(`  XLSX parse failed for ${item.file_name}: ${err.message}`);
+        }
+        const textBlocks = [];
+        for (const sheet of sheets) {
+          textBlocks.push(`=== SHEET: ${sheet.name} ===\n${sheet.csv}`);
+          // Chunk THIS sheet alone so a single huge sheet still splits safely.
+          const sheetPages = [`=== SHEET: ${sheet.name} ===\n${sheet.csv}`];
+          const sheetText = sheetPages[0];
+          const chunks = buildRecordChunks(sheetText, sheetPages);
+          for (let i = 0; i < chunks.length; i++) {
+            console.log(
+              `  Qwen call sheet "${sheet.name}" ${i + 1}/${chunks.length} (${chunks[i].length} chars)`
+            );
+            const raw = await runRecordsQwen(systemPrompt, chunks[i], item.file_name);
+            if (raw) {
+              const { orders: o, customers: c } = normalizeAiOutput(raw);
+              outputs.push({ orders: o, customers: c, errors: [] });
+            }
+          }
+        }
+        extractedText = textBlocks.join('\n').substring(0, 100000);
+        if (textBlocks.length === 0) {
+          await postResults(item.id, {
+            processing_status: 'error',
+            error_message: `Could not extract text from ${item.mime_type} file for order extraction.`,
+          });
+          console.log(`  Skipped ${item.file_name}: no usable sheets`);
+          return;
+        }
+      } else {
+        // Non-XLSX: PDF / CSV-without-mappings / DOCX / image. Single text
+        // stream through the chunker, exactly as before.
+        const { text, pages } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
+        if (!text || text.trim().length === 0) {
+          await postResults(item.id, {
+            processing_status: 'error',
+            error_message: `Could not extract text from ${item.mime_type} file for order extraction.`,
+          });
+          console.log(`  Skipped ${item.file_name}: no text extracted`);
+          return;
+        }
+        extractedText = text.substring(0, 100000);
+        const chunks = buildRecordChunks(text, pages);
+        console.log(`  Order extraction: ${pages.length} page(s) → ${chunks.length} chunk(s)`);
+        for (let i = 0; i < chunks.length; i++) {
+          console.log(`  Qwen call ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
+          const raw = await runRecordsQwen(systemPrompt, chunks[i], item.file_name);
+          if (raw) {
+            const { orders: o, customers: c } = normalizeAiOutput(raw);
+            outputs.push({ orders: o, customers: c, errors: [] });
+          }
+        }
+      }
+
+      const merged = mergeOutputs(outputs);
+      orders = merged.orders;
+      customers = merged.customers;
+    }
 
     // Confidence = min LLM self-rating across orders (honest worst-case for the
     // reviewer). No template gate — the P4 producer owns that decision.
@@ -1111,14 +1353,14 @@ async function processOrderItem(item) {
 
     await postResults(item.id, {
       processing_status: 'ready',
-      extracted_text: text.substring(0, 100000),
+      extracted_text: extractedText,
       ai_records: JSON.stringify({ orders, customers }),
       confidence,
       summary: `Extracted ${orders.length} order(s), ${customers.length} customer(s)`,
     });
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`  Done (order): ${item.file_name} — ${orders.length} order(s), ${customers.length} customer(s), ${elapsed}s`);
+    console.log(`  Done (order/${parseMethod}): ${item.file_name} — ${orders.length} order(s), ${customers.length} customer(s), ${elapsed}s`);
   } catch (err) {
     console.error(`  Error processing order ${item.file_name}:`, err.message);
     await postResults(item.id, {
@@ -1174,32 +1416,23 @@ async function processShipmentItem(item) {
     await postResults(item.id, { processing_status: 'processing' });
 
     const fileBuffer = await downloadQueueFile(item);
-    const fileBufferCopy = fileBuffer.slice(0);
-    const { text, pages } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
-
-    if (!text || text.trim().length === 0) {
-      await postResults(item.id, {
-        processing_status: 'error',
-        error_message: `Could not extract text from ${item.mime_type} file for shipment extraction.`,
-      });
-      console.log(`  Skipped ${item.file_name}: no text extracted`);
-      return;
-    }
 
     const profile = await loadExtractionProfile(item);
     const systemPrompt = prependConnectorInstructions(SHIPMENT_PROMPT, profile.extraction_instructions);
 
-    const chunks = buildRecordChunks(text, pages);
-    console.log(`  Shipment extraction: ${pages.length} page(s)/sheet(s) → ${chunks.length} chunk(s)`);
-
     const shipments = [];
     let confidence = null;
-    for (let i = 0; i < chunks.length; i++) {
-      console.log(`  Qwen call ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
-      const raw = await runRecordsQwen(systemPrompt, chunks[i], item.file_name);
-      if (!raw || !Array.isArray(raw.shipments)) continue;
+    let extractedText = '';
+
+    // Drain one Qwen response's shipments[] into the accumulator, applying the
+    // same required-field validation regardless of which input path produced
+    // the chunk. Shipments have no deterministic field-mapping parser (the
+    // shared parser emits orders/customers, a different schema), so shipments
+    // always go through Qwen — but per-sheet for XLSX so big workbooks don't
+    // drop late rows.
+    const drainShipments = (raw) => {
+      if (!raw || !Array.isArray(raw.shipments)) return;
       for (const s of raw.shipments) {
-        // Validation: drop rows missing either required key.
         const orderNumber = s && typeof s.order_number === 'string' ? s.order_number.trim() : '';
         const lotNumber = s && typeof s.lot_number === 'string' ? s.lot_number.trim() : '';
         if (!orderNumber || !lotNumber) continue;
@@ -1215,11 +1448,62 @@ async function processShipmentItem(item) {
           _confidence: conf,
         });
       }
+    };
+
+    if (isXlsxItem(item)) {
+      // Per-sheet isolation: extract each sheet independently and merge, so
+      // late-alphabet rows on big workbooks aren't dropped by concatenating
+      // every sheet into one chunker stream.
+      let sheets = [];
+      try {
+        sheets = xlsxToSheets(fileBuffer);
+      } catch (err) {
+        console.warn(`  XLSX parse failed for ${item.file_name}: ${err.message}`);
+      }
+      if (sheets.length === 0) {
+        await postResults(item.id, {
+          processing_status: 'error',
+          error_message: `Could not extract text from ${item.mime_type} file for shipment extraction.`,
+        });
+        console.log(`  Skipped ${item.file_name}: no usable sheets`);
+        return;
+      }
+      const textBlocks = [];
+      for (const sheet of sheets) {
+        const block = `=== SHEET: ${sheet.name} ===\n${sheet.csv}`;
+        textBlocks.push(block);
+        const chunks = buildRecordChunks(block, [block]);
+        for (let i = 0; i < chunks.length; i++) {
+          console.log(
+            `  Qwen call sheet "${sheet.name}" ${i + 1}/${chunks.length} (${chunks[i].length} chars)`
+          );
+          drainShipments(await runRecordsQwen(systemPrompt, chunks[i], item.file_name));
+        }
+      }
+      extractedText = textBlocks.join('\n').substring(0, 100000);
+    } else {
+      const fileBufferCopy = fileBuffer.slice(0);
+      const { text, pages } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
+      if (!text || text.trim().length === 0) {
+        await postResults(item.id, {
+          processing_status: 'error',
+          error_message: `Could not extract text from ${item.mime_type} file for shipment extraction.`,
+        });
+        console.log(`  Skipped ${item.file_name}: no text extracted`);
+        return;
+      }
+      extractedText = text.substring(0, 100000);
+      const chunks = buildRecordChunks(text, pages);
+      console.log(`  Shipment extraction: ${pages.length} page(s) → ${chunks.length} chunk(s)`);
+      for (let i = 0; i < chunks.length; i++) {
+        console.log(`  Qwen call ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
+        drainShipments(await runRecordsQwen(systemPrompt, chunks[i], item.file_name));
+      }
     }
 
     await postResults(item.id, {
       processing_status: 'ready',
-      extracted_text: text.substring(0, 100000),
+      extracted_text: extractedText,
       ai_records: JSON.stringify({ shipments }),
       confidence,
       summary: `Extracted ${shipments.length} shipment line(s)`,

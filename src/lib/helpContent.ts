@@ -310,7 +310,7 @@ const connectors: ConnectorsHelp = {
         heading: 'Slugs and naming',
         body:
           "The slug is the URL-safe identifier baked into every vendor-facing address. It must be lowercase, kebab-case, and alphanumeric (1 to 64 characters). " +
-          "When you create a connector the slug is auto-generated from the name; type into the slug field to override. Once you save, the slug is locked into the email address (<slug>@supdox.com), the API URL (/api/connectors/<slug>/drop), the S3 bucket name (dox-<slug>-<random>), and the public link path. " +
+          "When you create a connector the slug is auto-generated from the name; type into the slug field to override. Once you save, the slug is locked into the email address (<slug>@supdox.com), the API URL (/api/sources/<slug>/drop), the S3 bucket name (dox-<slug>-<random>), and the public link path. " +
           "Renaming a connector is fine — the slug is independent of the name and stays put unless you explicitly change it. Slugs must be globally unique across all tenants; the wizard surfaces a conflict suggestion if you pick one that's taken.",
       },
       {
@@ -1436,7 +1436,7 @@ const settings: ModuleHelpExpanded = {
           "Document types (/admin/document-types) — define COA, Spec Sheet, SDS, etc. for your tenant; per-type extraction rules and naming format. " +
           "Naming templates (/admin/naming-templates if surfaced, or via document_types) — file naming patterns applied at ingest. " +
           "Email domain mappings — route inbound emails to the right tenant + connector by sender domain. " +
-          "Connectors (/admin/connectors) — ingestion channels per upstream system. " +
+          "Connectors (/admin/sources) — ingestion channels per upstream system. " +
           "Users (/admin/users) and API keys (/admin/api-keys) — auth surfaces.",
       },
       {

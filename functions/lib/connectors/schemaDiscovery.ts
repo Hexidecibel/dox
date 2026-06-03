@@ -31,7 +31,7 @@ import {
   CORE_FIELD_DEFINITIONS,
   defaultFieldMappings,
 } from '../../../shared/fieldMappings';
-import { parseCSVText } from './email';
+import { parseCSVText } from '../../../shared/orderParse';
 import { modelFor } from '../models';
 
 export type DetectedFieldType = 'string' | 'number' | 'date' | 'id' | 'email' | 'phone';

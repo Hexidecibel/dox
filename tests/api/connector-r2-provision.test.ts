@@ -15,8 +15,8 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { onRequestPost as provisionPost } from '../../functions/api/connectors/[id]/r2/provision';
-import { onRequestPost as rotatePost } from '../../functions/api/connectors/[id]/r2/rotate';
+import { onRequestPost as provisionPost } from '../../functions/api/sources/[id]/r2/provision';
+import { onRequestPost as rotatePost } from '../../functions/api/sources/[id]/r2/rotate';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;

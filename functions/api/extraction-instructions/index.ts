@@ -23,6 +23,21 @@ import type { Env, User } from '../../lib/types';
  *  Qwen prompt. Generous enough for multi-paragraph reviewer guidance. */
 const MAX_INSTRUCTIONS_LENGTH = 8000;
 
+/** Hard cap on serialized field_mappings JSON (defense against runaway blobs). */
+const MAX_FIELD_MAPPINGS_LENGTH = 32000;
+
+/** Parse the stored field_mappings JSON column to an object, or null. */
+function parseFieldMappings(raw: string | null): unknown | null {
+  if (typeof raw !== 'string' || raw.trim() === '' || raw.trim() === '{}') {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * GET /api/extraction-instructions?supplier_id=X&document_type_id=Y[&tenant_id=Z]
  * Look up the instructions row for a (supplier, document_type) pair.
@@ -63,18 +78,23 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // mis-fill the editing textarea with another doctype's guidance.
     if (documentTypeId) {
       const row = await context.env.DB.prepare(
-        `SELECT instructions, updated_at, updated_by
+        `SELECT instructions, field_mappings, updated_at, updated_by
          FROM supplier_extraction_instructions
          WHERE tenant_id = ? AND supplier_id = ? AND document_type_id = ?`
       )
         .bind(tenantId, supplierId, documentTypeId)
-        .first<{ instructions: string; updated_at: string; updated_by: string | null }>();
+        .first<{ instructions: string; field_mappings: string | null; updated_at: string; updated_by: string | null }>();
 
       return new Response(
         JSON.stringify(
           row
-            ? { instructions: row.instructions, updated_at: row.updated_at, updated_by: row.updated_by }
-            : { instructions: null, updated_at: null, updated_by: null }
+            ? {
+                instructions: row.instructions,
+                field_mappings: parseFieldMappings(row.field_mappings),
+                updated_at: row.updated_at,
+                updated_by: row.updated_by,
+              }
+            : { instructions: null, field_mappings: null, updated_at: null, updated_by: null }
         ),
         { headers: { 'Content-Type': 'application/json' } }
       );
@@ -146,6 +166,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       supplier_id?: string;
       document_type_id?: string;
       instructions?: string;
+      field_mappings?: unknown;
       tenant_id?: string;
     };
 
@@ -163,6 +184,24 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       throw new BadRequestError(
         `instructions too long (max ${MAX_INSTRUCTIONS_LENGTH} chars)`
       );
+    }
+
+    // field_mappings is optional. When provided it must be a JSON object (or
+    // null to clear). `undefined` means "don't touch the existing mappings".
+    let fieldMappingsJson: string | null | undefined;
+    if (body.field_mappings === undefined) {
+      fieldMappingsJson = undefined;
+    } else if (body.field_mappings === null) {
+      fieldMappingsJson = null;
+    } else if (typeof body.field_mappings === 'object') {
+      fieldMappingsJson = JSON.stringify(body.field_mappings);
+      if (fieldMappingsJson.length > MAX_FIELD_MAPPINGS_LENGTH) {
+        throw new BadRequestError(
+          `field_mappings too large (max ${MAX_FIELD_MAPPINGS_LENGTH} chars)`
+        );
+      }
+    } else {
+      throw new BadRequestError('field_mappings must be an object or null');
     }
 
     // Tenant resolution (mirrors GET).
@@ -201,21 +240,33 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     // Upsert. SQLite UPSERT via ON CONFLICT on the UNIQUE(supplier_id,
     // document_type_id) constraint — keeps the original id + created_at
     // while bumping instructions/updated_at/updated_by.
+    // On a fresh insert, store the provided mappings (NULL when not given).
+    // On conflict: if field_mappings was provided (object or explicit null),
+    // overwrite; if it was omitted (undefined), preserve the existing value via
+    // COALESCE — passing a sentinel marker through `excluded` isn't possible, so
+    // we branch the UPDATE clause on whether mappings were supplied.
+    const insertMappings = fieldMappingsJson === undefined ? null : fieldMappingsJson;
+    const updateMappingsClause =
+      fieldMappingsJson === undefined
+        ? 'field_mappings = supplier_extraction_instructions.field_mappings'
+        : 'field_mappings = excluded.field_mappings';
+
     const newId = generateId();
     await context.env.DB.prepare(
       `INSERT INTO supplier_extraction_instructions
-         (id, supplier_id, document_type_id, tenant_id, instructions, updated_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+         (id, supplier_id, document_type_id, tenant_id, instructions, field_mappings, updated_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
        ON CONFLICT(supplier_id, document_type_id) DO UPDATE SET
          instructions = excluded.instructions,
+         ${updateMappingsClause},
          updated_by   = excluded.updated_by,
          updated_at   = datetime('now')`
     )
-      .bind(newId, body.supplier_id, body.document_type_id, tenantId, instructions, user.id)
+      .bind(newId, body.supplier_id, body.document_type_id, tenantId, instructions, insertMappings, user.id)
       .run();
 
     const saved = await context.env.DB.prepare(
-      `SELECT id, supplier_id, document_type_id, tenant_id, instructions,
+      `SELECT id, supplier_id, document_type_id, tenant_id, instructions, field_mappings,
               created_at, updated_at, updated_by
        FROM supplier_extraction_instructions
        WHERE supplier_id = ? AND document_type_id = ?`
@@ -234,6 +285,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         supplier_id: body.supplier_id,
         document_type_id: body.document_type_id,
         length: instructions.length,
+        field_mappings_updated: fieldMappingsJson !== undefined,
       }),
       getClientIp(context.request)
     );

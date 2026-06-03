@@ -200,6 +200,7 @@ function sliceFn(src: string, decl: string): string {
   if (start === -1) return '';
   // Each top-level fn in the worker is followed by another `\n// ====` banner
   // or another `\nasync function` / `\nfunction` declaration. Grab a generous
-  // window — these functions are < 120 lines each.
-  return src.slice(start, start + 5000);
+  // window — the order/shipment fns grew with the deterministic CSV + per-sheet
+  // XLSX arms (P5 connectors→sources unification), so 10K keeps the whole body.
+  return src.slice(start, start + 10000);
 }

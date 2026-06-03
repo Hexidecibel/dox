@@ -13,7 +13,7 @@
  *     title="No connectors yet"
  *     description="Connectors ingest from external systems."
  *     actionLabel="New connector"
- *     onAction={() => navigate('/admin/connectors/new')}
+ *     onAction={() => navigate('/admin/sources/new')}
  *   />
  */
 

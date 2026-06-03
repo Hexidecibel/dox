@@ -71,7 +71,7 @@ export function StepLivePreview({ sample, fieldMappings, onPreviewLoaded }: Step
       setLoading(true);
       setError(null);
 
-      api.connectors
+      api.sources
         .previewExtraction({
           sample_id: sample.sample_id,
           field_mappings: fieldMappings,

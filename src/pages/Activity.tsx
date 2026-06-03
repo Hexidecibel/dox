@@ -217,7 +217,7 @@ function ExpandedRow({ event, onNavigate }: { event: ActivityEvent; onNavigate: 
                 <Button
                   size="small"
                   startIcon={<OpenInNewIcon />}
-                  onClick={() => onNavigate(`/admin/connectors/${event.connector_id}`)}
+                  onClick={() => onNavigate(`/admin/sources/${event.connector_id}`)}
                 >
                   View connector
                 </Button>
@@ -253,7 +253,7 @@ function ExpandedRow({ event, onNavigate }: { event: ActivityEvent; onNavigate: 
                   <Button
                     size="small"
                     variant="outlined"
-                    onClick={() => onNavigate(`/admin/connectors/${event.connector_id}`)}
+                    onClick={() => onNavigate(`/admin/sources/${event.connector_id}`)}
                   >
                     View connector
                   </Button>
@@ -385,7 +385,7 @@ export function Activity() {
   // ---- load connector list once ----
   useEffect(() => {
     let cancelled = false;
-    api.connectors
+    api.sources
       .list({ limit: 200 } as any)
       .then((res: any) => {
         if (cancelled) return;

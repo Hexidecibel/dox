@@ -164,7 +164,7 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
 //
 // Exposed at module scope so callers (e.g. the ConnectorRunReview page)
 // can import them without a re-declaration. Shapes mirror
-// `functions/api/connectors/[id]/runs/[runId]/staged.ts` and
+// `functions/api/sources/[id]/runs/[runId]/staged.ts` and
 // `functions/api/orders/[id]/approve-staged.ts`.
 // ---------------------------------------------------------------------------
 export interface StagedOrderItem {
@@ -1239,6 +1239,14 @@ export const api = {
       supplier_id: string;
       document_type_id: string;
       instructions: string;
+      /**
+       * Optional field_mappings to persist on the (supplier, document_type)
+       * extraction profile. Omit to leave existing mappings untouched; pass
+       * `null` to clear. The Source wizard's mapping step sends these here so
+       * the worker (which reads from the profile, not the connector row)
+       * picks them up. Shape is the v2 ConnectorFieldMappings object.
+       */
+      field_mappings?: unknown | null;
       tenant_id?: string;
     }) =>
       fetchApi<SupplierExtractionInstructionsPutResponse>('/extraction-instructions', {
@@ -1266,7 +1274,7 @@ export const api = {
       body: JSON.stringify({ query, tenant_id: tenantId }),
     }),
 
-  connectors: {
+  sources: {
     list(params?: { tenant_id?: string; search?: string; active?: string; limit?: number; offset?: number }) {
       const query = new URLSearchParams();
       if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
@@ -1274,9 +1282,9 @@ export const api = {
       if (params?.active) query.set('active', params.active);
       if (params?.limit) query.set('limit', String(params.limit));
       if (params?.offset) query.set('offset', String(params.offset));
-      return fetchApi(`/connectors?${query}`);
+      return fetchApi(`/sources?${query}`);
     },
-    get(id: string) { return fetchApi(`/connectors/${id}`); },
+    get(id: string) { return fetchApi(`/sources/${id}`); },
     create(data: {
       name: string;
       /** Phase B0.5 — globally-unique URL-safe handle. Required by the
@@ -1290,7 +1298,7 @@ export const api = {
       tenant_id?: string;
       sample_r2_key?: string;
     }) {
-      return fetchApi('/connectors', { method: 'POST', body: JSON.stringify(data) });
+      return fetchApi('/sources', { method: 'POST', body: JSON.stringify(data) });
     },
     /**
      * Variant of `create` that surfaces the structured 409 slug-taken
@@ -1316,7 +1324,7 @@ export const api = {
       | { ok: false; conflict: { suggested: string } }
     > {
       const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      const res = await fetch(`${API_BASE}/connectors`, {
+      const res = await fetch(`${API_BASE}/sources`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1342,7 +1350,7 @@ export const api = {
       return { ok: true, connector: body.connector };
     },
     update(id: string, data: Record<string, unknown> & { sample_r2_key?: string }) {
-      return fetchApi(`/connectors/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+      return fetchApi(`/sources/${id}`, { method: 'PUT', body: JSON.stringify(data) });
     },
     /**
      * Patch a connector with a partial update. Thin alias over `update()` —
@@ -1351,12 +1359,12 @@ export const api = {
      * the ConnectorDetail page's inline-edit handlers read naturally.
      */
     patch(id: string, partial: Record<string, unknown> & { sample_r2_key?: string | null }) {
-      return fetchApi(`/connectors/${id}`, { method: 'PUT', body: JSON.stringify(partial) });
+      return fetchApi(`/sources/${id}`, { method: 'PUT', body: JSON.stringify(partial) });
     },
-    delete(id: string) { return fetchApi(`/connectors/${id}`, { method: 'DELETE' }); },
-    test(id: string) { return fetchApi(`/connectors/${id}/test`, { method: 'POST' }); },
+    delete(id: string) { return fetchApi(`/sources/${id}`, { method: 'DELETE' }); },
+    test(id: string) { return fetchApi(`/sources/${id}/test`, { method: 'POST' }); },
     /**
-     * POST /api/connectors/:id/run
+     * POST /api/sources/:id/run
      *
      * Triggers a manual connector run. Phase B0 universal-doors model: every
      * connector exposes the manual-upload door, and this endpoint is that
@@ -1368,16 +1376,16 @@ export const api = {
     run(id: string, file: File) {
       const form = new FormData();
       form.append('file', file);
-      return fetchApi(`/connectors/${id}/run`, { method: 'POST', body: form });
+      return fetchApi(`/sources/${id}/run`, { method: 'POST', body: form });
     },
     listRuns(id: string, params?: { limit?: number; offset?: number }) {
       const query = new URLSearchParams();
       if (params?.limit) query.set('limit', String(params.limit));
       if (params?.offset) query.set('offset', String(params.offset));
-      return fetchApi(`/connectors/${id}/runs?${query}`);
+      return fetchApi(`/sources/${id}/runs?${query}`);
     },
     /**
-     * POST /api/connectors/:id/runs/:runId/retry
+     * POST /api/sources/:id/runs/:runId/retry
      *
      * Phase B5 — replay a failed run. The backend refetches the
      * original file from R2 (or the per-connector S3 bucket for
@@ -1394,10 +1402,10 @@ export const api = {
         orders_created: number;
         customers_created: number;
         errors: string[];
-      }>(`/connectors/${id}/runs/${runId}/retry`, { method: 'POST' });
+      }>(`/sources/${id}/runs/${runId}/retry`, { method: 'POST' });
     },
     /**
-     * GET /api/connectors/:id/runs/:runId/staged
+     * GET /api/sources/:id/runs/:runId/staged
      *
      * R1.3 — fetch orders + items routed to staging by a specific run
      * because the LLM's confidence on them fell below the threshold.
@@ -1406,12 +1414,12 @@ export const api = {
     runs: {
       staged(connectorId: string, runId: string) {
         return fetchApi<StagedRunResponse>(
-          `/connectors/${connectorId}/runs/${runId}/staged`,
+          `/sources/${connectorId}/runs/${runId}/staged`,
         );
       },
     },
     /**
-     * GET /api/connectors/:id/health
+     * GET /api/sources/:id/health
      *
      * Phase B5 — observability snapshot for the connector detail
      * page's Health card: 24h dispatched/success counts, last error
@@ -1434,42 +1442,42 @@ export const api = {
         } | null;
         by_source: Record<string, number>;
         window_hours: number;
-      }>(`/connectors/${id}/health`);
+      }>(`/sources/${id}/health`);
     },
     /**
-     * POST /api/connectors/discover-schema
+     * POST /api/sources/discover-schema
      * Multipart upload: drop a sample file and get back detected fields +
      * suggested v2 field_mappings. Used by StepUploadSample in the wizard.
      */
     discoverSchema(formData: FormData) {
       return fetchApi<import('../types/connectorSchema').DiscoverSchemaResponse>(
-        '/connectors/discover-schema',
+        '/sources/discover-schema',
         { method: 'POST', body: formData },
       );
     },
     /**
-     * POST /api/connectors/preview-extraction
+     * POST /api/sources/preview-extraction
      * Pure preview — runs the parser over a stored sample with the given
      * field_mappings and returns extracted rows. Never writes to D1.
      */
     previewExtraction(payload: import('../types/connectorSchema').PreviewExtractionRequest) {
       return fetchApi<import('../types/connectorSchema').PreviewExtractionResponse>(
-        '/connectors/preview-extraction',
+        '/sources/preview-extraction',
         { method: 'POST', body: JSON.stringify(payload) },
       );
     },
     /**
-     * GET /api/connectors/:id/sample
+     * GET /api/sources/:id/sample
      * Rehydrates the stored sample for an existing connector — same shape as
      * discoverSchema(), used by the ConnectorDetail "Re-test" button.
      */
     rehydrateSample(id: string) {
       return fetchApi<import('../types/connectorSchema').DiscoverSchemaResponse>(
-        `/connectors/${id}/sample`,
+        `/sources/${id}/sample`,
       );
     },
     /**
-     * POST /api/connectors/:id/api-token/rotate
+     * POST /api/sources/:id/api-token/rotate
      *
      * Rotate the per-connector bearer token used by the Phase B2 HTTP
      * POST drop endpoint. Returns the new plaintext token in the
@@ -1479,12 +1487,12 @@ export const api = {
      */
     rotateApiToken(id: string) {
       return fetchApi<{ api_token: string; rotated_at: string }>(
-        `/connectors/${id}/api-token/rotate`,
+        `/sources/${id}/api-token/rotate`,
         { method: 'POST' },
       );
     },
     /**
-     * POST /api/connectors/:id/r2/provision
+     * POST /api/sources/:id/r2/provision
      *
      * Phase B3 — lazy bring-up of the per-connector S3 drop bucket.
      * Returns the vendor-facing creds; the secret is plaintext ONCE
@@ -1498,10 +1506,10 @@ export const api = {
         secret_access_key: string;
         endpoint: string;
         provisioned_at: string;
-      }>(`/connectors/${id}/r2/provision`, { method: 'POST' });
+      }>(`/sources/${id}/r2/provision`, { method: 'POST' });
     },
     /**
-     * POST /api/connectors/:id/r2/rotate
+     * POST /api/sources/:id/r2/rotate
      *
      * Phase B3 — rotate the vendor R2 token. Revokes the existing CF
      * token and mints a fresh one against the same bucket. The new
@@ -1515,10 +1523,10 @@ export const api = {
         secret_access_key: string;
         endpoint: string;
         rotated_at: string;
-      }>(`/connectors/${id}/r2/rotate`, { method: 'POST' });
+      }>(`/sources/${id}/r2/rotate`, { method: 'POST' });
     },
     /**
-     * POST /api/connectors/:id/public-link/generate
+     * POST /api/sources/:id/public-link/generate
      *
      * Phase B4 — generate (or rotate) the public drop link. The
      * endpoint is idempotent on rotation: if the connector already
@@ -1537,13 +1545,13 @@ export const api = {
         url: string;
         generated_at: string;
         rotated: boolean;
-      }>(`/connectors/${id}/public-link/generate`, {
+      }>(`/sources/${id}/public-link/generate`, {
         method: 'POST',
         body: JSON.stringify(payload),
       });
     },
     /**
-     * DELETE /api/connectors/:id/public-link
+     * DELETE /api/sources/:id/public-link
      *
      * Phase B4 — revoke the public drop link. Idempotent — calling
      * on a connector with no link returns `{ revoked: false }`.
@@ -1552,7 +1560,7 @@ export const api = {
      */
     revokePublicLink(id: string) {
       return fetchApi<{ revoked: boolean }>(
-        `/connectors/${id}/public-link`,
+        `/sources/${id}/public-link`,
         { method: 'DELETE' },
       );
     },

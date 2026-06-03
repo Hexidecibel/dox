@@ -33,10 +33,10 @@
 import { AwsClient } from 'aws4fetch';
 import type { Env } from '../types';
 import { generateId } from '../db';
-import { decryptCredentials } from './crypto';
 import { decryptIntakeSecret } from '../intakeEncryption';
-import { executeConnectorRun } from './orchestrator';
-import { normalizeFieldMappings } from '../../../shared/fieldMappings';
+import { computeChecksum } from '../r2';
+import { enqueueDocument } from '../intake/enqueue';
+import { createConnectorRunHeader } from '../intake/connectorRunHeader';
 
 /** Per-tick budgets. */
 export const MAX_FILES_PER_TICK = 25;
@@ -44,16 +44,15 @@ export const MAX_KEYS_PER_CONNECTOR = 100;
 
 interface ConnectorRow {
   id: string;
+  name: string | null;
   tenant_id: string;
-  config: string | null;
-  field_mappings: string | null;
-  credentials_encrypted: string | null;
-  credentials_iv: string | null;
+  // Sources routing fields (migration 0067) — tag each enqueued queue row.
+  output_kind: string | null;
+  supplier_id: string | null;
+  document_type_id: string | null;
   r2_bucket_name: string;
   r2_access_key_id: string | null;
   r2_secret_access_key_encrypted: string | null;
-  /** R2.b — reviewer-authored guidance forwarded to the parsing prompt. */
-  extraction_instructions: string | null;
 }
 
 export interface PollConnectorSummary {
@@ -76,28 +75,6 @@ export interface PollSummary {
 function basename(key: string): string {
   const idx = key.lastIndexOf('/');
   return idx >= 0 ? key.slice(idx + 1) : key;
-}
-
-function parseConfig(rawConfig: string | null): Record<string, unknown> {
-  if (!rawConfig) return {};
-  try {
-    const parsed = JSON.parse(rawConfig);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-  } catch {
-    /* fallthrough */
-  }
-  return {};
-}
-
-function parseFieldMappings(raw: string | null): unknown {
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
 }
 
 /**
@@ -213,11 +190,10 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
 
   const rows = await env.DB
     .prepare(
-      `SELECT id, tenant_id, config, field_mappings,
-              credentials_encrypted, credentials_iv,
+      `SELECT id, name, tenant_id,
+              output_kind, supplier_id, document_type_id,
               r2_bucket_name, r2_access_key_id,
-              r2_secret_access_key_encrypted,
-              extraction_instructions
+              r2_secret_access_key_encrypted
          FROM connectors
         WHERE active = 1
           AND deleted_at IS NULL
@@ -271,30 +247,6 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
       const keys = await listBucketKeys(aws, endpoint, row.r2_bucket_name);
       summary.listed = keys.length;
 
-      const config = parseConfig(row.config);
-      const fieldMappings = normalizeFieldMappings(
-        parseFieldMappings(row.field_mappings),
-      );
-
-      let credentials: Record<string, unknown> | undefined;
-      if (
-        row.credentials_encrypted &&
-        row.credentials_iv &&
-        env.CONNECTOR_ENCRYPTION_KEY
-      ) {
-        try {
-          credentials = await decryptCredentials(
-            row.credentials_encrypted,
-            row.credentials_iv,
-            env.CONNECTOR_ENCRYPTION_KEY,
-            row.tenant_id,
-            row.id,
-          );
-        } catch {
-          credentials = undefined;
-        }
-      }
-
       for (const key of keys) {
         if (result.total_dispatched >= MAX_FILES_PER_TICK) {
           result.truncated = true;
@@ -319,9 +271,9 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
 
         try {
           // Pull the file bytes via SigV4 — the per-connector bucket
-          // isn't bound to the Worker, so the orchestrator can't
-          // resolve the key from `ctx.r2`. We pass `content` inline
-          // and a synthetic R2 key for the run row.
+          // isn't bound to the Worker. Copy them into the default FILES
+          // bucket under the standard connector-drops prefix so the
+          // worker (which only sees FILES) can read the queued file.
           const { buffer, contentType } = await getBucketObject(
             aws,
             endpoint,
@@ -329,40 +281,60 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
             key,
           );
 
-          const runResult = await executeConnectorRun({
-            db: env.DB,
-            r2: env.FILES,
-            tenantId: row.tenant_id,
-            connectorId: row.id,
-            config,
-            fieldMappings,
-            credentials,
-            input: {
-              type: 'file_watch',
-              fileName: basename(key),
-              contentType,
-              // Synthetic R2 reference — the actual bytes ride the
-              // `content` channel since the per-connector bucket
-              // isn't bound to the Worker.
-              r2Key: `s3://${row.r2_bucket_name}/${key}`,
-              content: buffer,
+          const fileName = basename(key);
+          const checksum = await computeChecksum(buffer);
+          const safeName = (fileName || 'file')
+            .replace(/[^A-Za-z0-9._-]+/g, '_')
+            .slice(0, 200);
+          const isoStamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const destKey = `connector-drops/${row.id}/${isoStamp}-${safeName}`;
+          await env.FILES.put(destKey, buffer, {
+            httpMetadata: { contentType },
+            customMetadata: {
+              connector_id: row.id,
+              tenant_id: row.tenant_id,
+              source: 's3',
+              original_name: fileName,
             },
-            // 's3' tags this run so the activity feed can distinguish
-            // S3-bucket polls from manual / API drops / email runs.
-            source: 's3',
-            qwenUrl: env.QWEN_URL,
-            qwenSecret: env.QWEN_SECRET,
-            // R2.b: forward reviewer-authored guidance to the parsing prompt.
-            extractionInstructions: row.extraction_instructions ?? undefined,
           });
 
+          // Per-key batch ROLLUP HEADER; counts filled at approve time.
+          const connectorRunId = await createConnectorRunHeader(env.DB, {
+            connectorId: row.id,
+            tenantId: row.tenant_id,
+            source: 's3',
+          });
+
+          // Enqueue into processing_queue → worker → Review Queue. Nothing
+          // auto-ingests.
+          await enqueueDocument(env.DB, {
+            id: generateId(),
+            tenantId: row.tenant_id,
+            documentTypeId: row.document_type_id,
+            fileR2Key: destKey,
+            fileName,
+            fileSize: buffer.byteLength,
+            mimeType: contentType || 'application/octet-stream',
+            checksum,
+            // Vendor/scheduled, not user-attributed; created_by is nullable.
+            createdBy: null,
+            source: 's3',
+            sourceDetail: row.name ? `connector:${row.name}` : `connector:${row.id}`,
+            outputKind: row.output_kind,
+            sourceId: row.id,
+            supplierId: row.supplier_id,
+            connectorRunId,
+          });
+
+          // Dedup row keyed on the ORIGINAL bucket key (unchanged from the
+          // prior incarnation) so the next tick skips this object.
           await env.DB
             .prepare(
               `INSERT OR IGNORE INTO connector_processed_keys
                  (id, connector_id, r2_key, processed_at, run_id)
                VALUES (?, ?, ?, ?, ?)`,
             )
-            .bind(generateId(), row.id, key, Date.now(), runResult.runId)
+            .bind(generateId(), row.id, key, Date.now(), connectorRunId)
             .run();
 
           summary.dispatched++;

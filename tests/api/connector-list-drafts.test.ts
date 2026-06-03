@@ -15,8 +15,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { onRequestGet as listConnectors } from '../../functions/api/connectors/index';
-import { onRequestDelete as deleteConnector } from '../../functions/api/connectors/[id]';
+import { onRequestGet as listConnectors } from '../../functions/api/sources/index';
+import { onRequestDelete as deleteConnector } from '../../functions/api/sources/[id]';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;

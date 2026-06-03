@@ -12,7 +12,7 @@
  *      revoked — we render the "not active" state and stop.
  *   2. The drag-drop zone accepts a single file. On submit (or
  *      auto-submit on drop) we POST to
- *      /api/connectors/:slug/drop with `Authorization: Bearer <token>`
+ *      /api/sources/:slug/drop with `Authorization: Bearer <token>`
  *      so the link token never appears in the URL we POST against,
  *      and the existing Phase B2 drop endpoint handles the body.
  *   3. Success / error states render inline with no nav, so the vendor
@@ -107,7 +107,7 @@ export function PublicDrop() {
       try {
         const form = new FormData();
         form.append('file', file);
-        const res = await fetch(`/api/connectors/${encodeURIComponent(slug)}/drop`, {
+        const res = await fetch(`/api/sources/${encodeURIComponent(slug)}/drop`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}` },
           body: form,

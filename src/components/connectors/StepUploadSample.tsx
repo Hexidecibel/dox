@@ -146,7 +146,7 @@ export function StepUploadSample({ sample, onSample, currentTenantId }: StepUplo
 
       setUploading(true);
       try {
-        const result = await api.connectors.discoverSchema(formData);
+        const result = await api.sources.discoverSchema(formData);
         // If discovery returned zero fields, surface the warnings explicitly
         // so the user isn't left staring at an empty Review step.
         if (result.detected_fields.length === 0 && result.warnings.length > 0) {
@@ -251,7 +251,7 @@ export function StepUploadSample({ sample, onSample, currentTenantId }: StepUplo
 
     setUploading(true);
     try {
-      const result = await api.connectors.discoverSchema(formData);
+      const result = await api.sources.discoverSchema(formData);
       if (result.detected_fields.length === 0 && result.warnings.length > 0) {
         setError(`Schema discovery returned no fields: ${result.warnings.join(' ')}`);
       }

@@ -20,7 +20,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { onRequestGet as stagedGet } from '../../functions/api/connectors/[id]/runs/[runId]/staged';
+import { onRequestGet as stagedGet } from '../../functions/api/sources/[id]/runs/[runId]/staged';
 import { onRequestPost as approveStagedPost } from '../../functions/api/orders/[id]/approve-staged';
 import { onRequestDelete as orderDelete } from '../../functions/api/orders/[id]';
 

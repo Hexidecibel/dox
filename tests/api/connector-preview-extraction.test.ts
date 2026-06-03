@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { onRequestPost as previewExtraction } from '../../functions/api/connectors/preview-extraction';
+import { onRequestPost as previewExtraction } from '../../functions/api/sources/preview-extraction';
 import { defaultFieldMappings } from '../../shared/fieldMappings';
 import { installQwenMock, uninstallQwenMock, MOCK_PDF_ORDERS_RESPONSE } from '../helpers/qwen-mock';
 import { loadWeeklyMasterXlsx, loadCoaOrdersPdf } from '../helpers/fixtures-binary';
@@ -198,15 +198,16 @@ async function seedBinarySample(
   return sampleId;
 }
 
-describe('POST /api/connectors/preview-extraction — XLSX', () => {
-  beforeEach(() => {
-    installQwenMock();
-  });
-  afterEach(() => {
-    uninstallQwenMock();
-  });
-
-  it('runs the XLSX path through the email connector and returns customers', async () => {
+// Connectors → Sources: the synchronous XLSX/PDF extraction engine (the
+// old email-connector `execute()` + Qwen calls) was deleted from the Worker.
+// Live preview is now CSV-only — the deterministic field-mapping projection.
+// XLSX/PDF samples are processed asynchronously at ingest time by
+// bin/process-worker, so the preview endpoint returns 501 for them. These
+// tests pin that 501 "CSV-only" contract (the old 200 happy-path assertions
+// against the deleted engine are gone; that extraction is covered by the
+// processWorker* unit tests).
+describe('POST /api/connectors/preview-extraction — non-CSV samples (501)', () => {
+  it('returns 501 for an XLSX sample (async at ingest, no live preview)', async () => {
     const buffer = loadWeeklyMasterXlsx();
     const sampleId = await seedBinarySample(
       seed.tenantId,
@@ -216,40 +217,20 @@ describe('POST /api/connectors/preview-extraction — XLSX', () => {
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     );
 
-    const mappings = defaultFieldMappings();
-
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
     const ctx = makeContext({
       sample_id: sampleId,
-      field_mappings: mappings,
-      connector_type: 'email',
+      field_mappings: defaultFieldMappings(),
       limit: 5,
     }, user);
-    ctx.env = { ...env, QWEN_URL: 'https://qwen.test', QWEN_SECRET: 'test' };
 
     const response = await previewExtraction(ctx);
-    expect(response.status).toBe(200);
-    const data = await response.json() as {
-      rows: unknown[];
-      customers: Array<{ customer_number: string }>;
-      total_customers_in_sample: number;
-    };
-    // XLSX registry mock returns zero orders, multiple customers per call.
-    // After merge-dedupe we expect at least one customer.
-    expect(data.total_customers_in_sample).toBeGreaterThan(0);
-    expect(data.customers.length).toBeGreaterThan(0);
-  });
-});
-
-describe('POST /api/connectors/preview-extraction — PDF', () => {
-  beforeEach(() => {
-    installQwenMock();
-  });
-  afterEach(() => {
-    uninstallQwenMock();
+    expect(response.status).toBe(501);
+    const data = await response.json() as { error: string };
+    expect(data.error).toMatch(/only available for CSV/i);
   });
 
-  it('runs the PDF path and returns extracted orders', async () => {
+  it('returns 501 for a PDF sample (async at ingest, no live preview)', async () => {
     const buffer = loadCoaOrdersPdf();
     const sampleId = await seedBinarySample(
       seed.tenantId,
@@ -259,24 +240,16 @@ describe('POST /api/connectors/preview-extraction — PDF', () => {
       'application/pdf',
     );
 
-    const mappings = defaultFieldMappings();
-
     const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
     const ctx = makeContext({
       sample_id: sampleId,
-      field_mappings: mappings,
+      field_mappings: defaultFieldMappings(),
       limit: 10,
     }, user);
-    ctx.env = { ...env, QWEN_URL: 'https://qwen.test', QWEN_SECRET: 'test' };
 
     const response = await previewExtraction(ctx);
-    expect(response.status).toBe(200);
-    const data = await response.json() as {
-      rows: Array<{ order_number: string }>;
-      total_rows_in_sample: number;
-    };
-    expect(data.total_rows_in_sample).toBe(MOCK_PDF_ORDERS_RESPONSE.orders.length);
-    expect(data.rows.length).toBe(Math.min(10, data.total_rows_in_sample));
-    expect(data.rows[0].order_number).toBe('1784767');
+    expect(response.status).toBe(501);
+    const data = await response.json() as { error: string };
+    expect(data.error).toMatch(/only available for CSV/i);
   });
 });

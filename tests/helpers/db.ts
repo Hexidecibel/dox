@@ -64,6 +64,7 @@ import m0064 from '../../migrations/0064_product_suppliers.sql?raw';
 import m0065 from '../../migrations/0065_lots.sql?raw';
 import m0066 from '../../migrations/0066_order_item_lot_linking.sql?raw';
 import m0067 from '../../migrations/0067_queue_source_routing.sql?raw';
+import m0068 from '../../migrations/0068_extraction_profiles_and_internal_suppliers.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -72,7 +73,7 @@ const migrations: string[] = [
   m0030, m0031, m0032, m0033, m0034, m0035, m0036, m0037, m0038, m0039,
   m0046, m0047, m0048, m0049, m0050, m0051, m0052, m0053, m0054, m0055,
   m0056, m0057, m0058, m0059, m0060, m0061, m0062, m0063,
-  m0064, m0065, m0066, m0067,
+  m0064, m0065, m0066, m0067, m0068,
 ];
 
 /**

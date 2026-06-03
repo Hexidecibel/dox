@@ -24,7 +24,7 @@ import { runMigrations, seedTestData, generateTestId } from '../helpers/db';
 import {
   onRequestGet as getConnector,
   onRequestPut as putConnector,
-} from '../../functions/api/connectors/[id]';
+} from '../../functions/api/sources/[id]';
 
 const db = env.DB;
 let seed: Awaited<ReturnType<typeof seedTestData>>;
@@ -213,7 +213,7 @@ describe('parseWithAI prompt prepend (R2.b integration)', () => {
     // the API tests so a single test file covers both the persistence path
     // (PUT/GET) and the prompt-construction path (the *reason* we persist).
     const { prependConnectorInstructions, getDefaultParsingPrompt } = await import(
-      '../../functions/lib/connectors/email'
+      '../../shared/orderPrompt'
     );
 
     const base = getDefaultParsingPrompt();
@@ -227,7 +227,7 @@ describe('parseWithAI prompt prepend (R2.b integration)', () => {
 
   it('is a no-op when instructions are empty / whitespace / undefined', async () => {
     const { prependConnectorInstructions, getDefaultParsingPrompt } = await import(
-      '../../functions/lib/connectors/email'
+      '../../shared/orderPrompt'
     );
     const base = getDefaultParsingPrompt();
     expect(prependConnectorInstructions(base, undefined)).toBe(base);

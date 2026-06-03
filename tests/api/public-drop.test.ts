@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { onRequestPost as dropPost } from '../../functions/api/connectors/[id]/drop';
+import { onRequestPost as dropPost } from '../../functions/api/sources/[id]/drop';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;

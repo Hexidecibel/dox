@@ -335,7 +335,7 @@ export function OrderDetail() {
                 size="small"
                 variant="outlined"
                 component={RouterLink}
-                to={`/admin/connectors/${order.connector_id}`}
+                to={`/admin/sources/${order.connector_id}`}
               >
                 View connector
               </Button>
