@@ -109,6 +109,53 @@ async function resolveSupplierName(db: D1Database, tenantId: string, supplierId:
   }
 }
 
+/**
+ * Normalize a supplier name for fuzzy matching: lowercase, drop punctuation
+ * and common corporate suffixes (Inc/LLC/...) so "Medosweet Farms, Inc." and
+ * the supplier record "Medosweet Farms" collapse to the same key. Legacy COA
+ * queue items have NULL supplier_id and only an inconsistent `supplier` name,
+ * so exact matching misses most of the corpus.
+ */
+function normName(s: string | null | undefined): string {
+  return String(s ?? '')
+    .toLowerCase()
+    .replace(/[.,/&]/g, ' ')
+    .replace(/\b(inc|llc|ltd|co|corp|corporation|company|farms?)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Find the distinct `supplier` name strings on this tenant's queue items that
+ * fuzzily match the target supplier's name, returned lowercased+trimmed for an
+ * IN-list match against `lower(trim(supplier))`.
+ */
+async function resolveMatchingSupplierNames(
+  db: D1Database,
+  tenantId: string,
+  supplierName: string | null,
+): Promise<string[]> {
+  const target = normName(supplierName);
+  if (!target) return [];
+  try {
+    const res = await db
+      .prepare(`SELECT DISTINCT supplier FROM processing_queue WHERE tenant_id = ? AND supplier IS NOT NULL AND trim(supplier) != ''`)
+      .bind(tenantId)
+      .all<{ supplier: string }>();
+    const out = new Set<string>();
+    for (const r of res.results ?? []) {
+      const nc = normName(r.supplier);
+      if (!nc) continue;
+      if (nc === target || nc.includes(target) || target.includes(nc)) {
+        out.add(String(r.supplier).trim().toLowerCase());
+      }
+    }
+    return Array.from(out);
+  } catch {
+    return [];
+  }
+}
+
 async function resolveDocTypeName(db: D1Database, tenantId: string, documentTypeId: string): Promise<string | null> {
   try {
     const row = await db
@@ -146,6 +193,9 @@ async function loadSample(
   const supplierName = await resolveSupplierName(db, tenantId, supplierId);
   const docTypeName = await resolveDocTypeName(db, tenantId, documentTypeId);
   const kind = outputKindForDoctype(docTypeName);
+  // Legacy queue items carry NULL supplier_id + an inconsistent supplier name;
+  // resolve the set of name strings that fuzzily match this supplier.
+  const matchNames = await resolveMatchingSupplierNames(db, tenantId, supplierName);
 
   // Constrain to the right document family by output_kind. 'coa' also accepts
   // legacy rows where output_kind was never set (NULL). order/shipment match
@@ -159,7 +209,16 @@ async function loadSample(
     kindBinds.push(kind);
   }
 
-  // Match by pre-resolved supplier_id OR (for older rows) by supplier name.
+  // Supplier match: pre-resolved supplier_id, OR (legacy rows with NULL
+  // supplier_id) any `supplier` name that fuzzily matches this supplier.
+  const supplierBinds: string[] = [supplierId];
+  let supplierClause = 'AND supplier_id = ?';
+  if (matchNames.length > 0) {
+    const ph = matchNames.map(() => '?').join(', ');
+    supplierClause = `AND (supplier_id = ? OR (supplier_id IS NULL AND lower(trim(supplier)) IN (${ph})))`;
+    supplierBinds.push(...matchNames);
+  }
+
   // Doctype match is RELAXED to also accept NULL: legacy COA queue items were
   // ingested before per-(supplier,doctype) tagging and carry a NULL
   // document_type_id, so a strict `= ?` would miss the real corpus (mirrors
@@ -169,7 +228,7 @@ async function loadSample(
     FROM processing_queue
     WHERE tenant_id = ?
       AND (document_type_id = ? OR document_type_id IS NULL)
-      AND (supplier_id = ? OR (supplier_id IS NULL AND supplier IS NOT NULL AND ? IS NOT NULL AND lower(supplier) = lower(?)))
+      ${supplierClause}
       ${kindClause}
       AND processing_status IN ('ready', 'approved')
       AND ai_fields IS NOT NULL
@@ -181,7 +240,7 @@ async function loadSample(
 
   const res = await db
     .prepare(sql)
-    .bind(tenantId, documentTypeId, supplierId, supplierName, supplierName, ...kindBinds, sampleLimit)
+    .bind(tenantId, documentTypeId, ...supplierBinds, ...kindBinds, sampleLimit)
     .all<{ id: string; file_name: string | null; ai_fields: string }>();
 
   const rows: SampleRow[] = [];
