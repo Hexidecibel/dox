@@ -41,6 +41,7 @@ import {
   Add as AddIcon,
   Block as BlockIcon,
   CheckCircle as ActiveIcon,
+  School as TeachIcon,
   KeyboardArrowDown as ExpandMoreIcon,
   KeyboardArrowRight as ExpandRightIcon,
 } from '@mui/icons-material';
@@ -1246,6 +1247,17 @@ export function SupplierDetail() {
                                 />
                               </TableCell>
                               <TableCell align="right">
+                                <Tooltip title="Teach the AI how to read this supplier's documents of this type">
+                                  <IconButton
+                                    size="small"
+                                    color="primary"
+                                    onClick={() =>
+                                      navigate(`/teach?supplier_id=${supplier.id}&document_type_id=${dt.id}`)
+                                    }
+                                  >
+                                    <TeachIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
                                 <Tooltip title="Edit">
                                   <IconButton size="small" onClick={() => openEditDocType(dt)}>
                                     <EditIcon fontSize="small" />
@@ -1282,6 +1294,7 @@ export function SupplierDetail() {
                             <TableCell>Slug</TableCell>
                             <TableCell>Description</TableCell>
                             <TableCell>Status</TableCell>
+                            <TableCell align="right">Actions</TableCell>
                           </TableRow>
                         </TableHead>
                         <TableBody>
@@ -1307,6 +1320,19 @@ export function SupplierDetail() {
                                   color={dt.active ? 'success' : 'default'}
                                   variant="outlined"
                                 />
+                              </TableCell>
+                              <TableCell align="right">
+                                <Tooltip title="Teach the AI how to read this supplier's documents of this type">
+                                  <IconButton
+                                    size="small"
+                                    color="primary"
+                                    onClick={() =>
+                                      navigate(`/teach?supplier_id=${supplier.id}&document_type_id=${dt.id}`)
+                                    }
+                                  >
+                                    <TeachIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
                               </TableCell>
                             </TableRow>
                           ))}

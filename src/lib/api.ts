@@ -44,6 +44,12 @@ import type {
   SupplierExtractionInstructionsGetResponse,
   SupplierExtractionInstructionsPutResponse,
   SupplierExtractionInstructionsListResponse,
+  TeachExample,
+  TeachSessionCreateResponse,
+  TeachMessageResponse,
+  TeachSynthesizeResponse,
+  TeachSessionDetailResponse,
+  TeachConfirmResponse,
   ActivityFilters,
   ActivityListResponse,
   ActivityEventType,
@@ -1267,6 +1273,46 @@ export const api = {
         `/extraction-instructions/by-supplier?${qs.toString()}`,
       );
     },
+  },
+
+  /**
+   * Learning Interface (teach-chat). A domain expert teaches the system how to
+   * read a supplier's documents through a guided conversation; on confirm the
+   * proposal is written to the (supplier, document_type) extraction profile.
+   */
+  teach: {
+    /** POST /api/teach/sessions — start a session, returns the opening AI message. */
+    createSession: (data: { supplier_id: string; document_type_id: string; tenant_id?: string }) =>
+      fetchApi<TeachSessionCreateResponse>('/teach/sessions', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    /** GET /api/teach/sessions/:id — session + transcript + issues + proposal. */
+    getSession: (id: string, tenantId?: string) => {
+      const qs = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+      return fetchApi<TeachSessionDetailResponse>(`/teach/sessions/${id}${qs}`);
+    },
+    /** POST /api/teach/sessions/:id/messages — append an SME answer. */
+    postMessage: (id: string, content: string, tenantId?: string) =>
+      fetchApi<TeachMessageResponse>(`/teach/sessions/${id}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ content, tenant_id: tenantId }),
+      }),
+    /** POST /api/teach/sessions/:id/synthesize — draft the proposal. */
+    synthesize: (id: string, tenantId?: string) =>
+      fetchApi<TeachSynthesizeResponse>(`/teach/sessions/${id}/synthesize`, {
+        method: 'POST',
+        body: JSON.stringify({ tenant_id: tenantId }),
+      }),
+    /** POST /api/teach/sessions/:id/confirm — write to the profile (allow edits). */
+    confirm: (
+      id: string,
+      data?: { instructions?: string; examples?: TeachExample[]; tenant_id?: string },
+    ) =>
+      fetchApi<TeachConfirmResponse>(`/teach/sessions/${id}/confirm`, {
+        method: 'POST',
+        body: JSON.stringify(data ?? {}),
+      }),
   },
 
   naturalSearch: (query: string, tenantId?: string) =>

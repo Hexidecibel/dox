@@ -50,6 +50,7 @@ import {
   AssignmentTurnedIn as ApprovalsIcon,
   HelpOutline as HelpIcon,
   MonitorHeart as MonitorHeartIcon,
+  School as TeachIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -71,6 +72,7 @@ const navItems: NavItem[] = [
   { label: 'Search', path: '/search', icon: <SearchIcon /> },
   { label: 'Import', path: '/import', icon: <ImportIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Review Queue', path: '/review', icon: <RateReviewIcon />, roles: ['super_admin', 'org_admin'] },
+  { label: 'Teach the AI', path: '/teach', icon: <TeachIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Ingest History', path: '/ingest-history', icon: <HistoryIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Orders', path: '/orders', icon: <OrdersIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Lots', path: '/lots', icon: <LotsIcon />, roles: ['super_admin', 'org_admin', 'user', 'reader'] },

@@ -52,6 +52,7 @@ import { PublicDrop } from './pages/PublicDrop';
 import { PublicDocsConnectors } from './pages/PublicDocsConnectors';
 import { Approvals } from './pages/Approvals';
 import { Help } from './pages/Help';
+import Teach from './pages/Teach';
 
 function App() {
   return (
@@ -113,6 +114,10 @@ function App() {
               <Route path="/records/:sheetId/forms/:formId" element={<FormBuilder />} />
               <Route path="/records/:sheetId/workflows/:workflowId" element={<WorkflowBuilder />} />
               <Route path="/approvals" element={<Approvals />} />
+              <Route element={<ProtectedRoute roles={['super_admin', 'org_admin', 'user']} />}>
+                <Route path="/teach" element={<Teach />} />
+                <Route path="/teach/:sessionId" element={<Teach />} />
+              </Route>
               <Route path="/help" element={<Help />} />
               <Route path="/help/:module" element={<Help />} />
 

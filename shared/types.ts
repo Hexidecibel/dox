@@ -148,6 +148,94 @@ export interface SupplierExtractionInstructionsListResponse {
   document_types: SupplierExtractionInstructionsListRow[];
 }
 
+// === Learning Interface (teach-chat) ===
+//
+// A domain expert teaches the system how to read a supplier's documents
+// through a guided conversation. The AI asks grounded questions about
+// recurring extraction ambiguities, the SME answers in prose, the AI
+// synthesizes a proposal, and on confirm it writes the
+// (supplier_id, document_type_id) extraction profile.
+// NOTE: UncertaintyIssue is owned by functions/lib/teach/uncertainty.ts —
+// it is intentionally NOT redefined here.
+
+export type TeachSessionStatus = 'open' | 'synthesized' | 'confirmed' | 'abandoned';
+
+export interface TeachSession {
+  id: string;
+  tenant_id: string;
+  supplier_id: string;
+  document_type_id: string;
+  status: TeachSessionStatus;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type TeachMessageRole = 'ai' | 'sme' | 'system';
+
+export interface TeachMessage {
+  id: string;
+  session_id: string;
+  role: TeachMessageRole;
+  content: string;
+  /** Optional parsed grounding JSON (which issues/values this turn references). */
+  grounding?: unknown | null;
+  created_at: string;
+}
+
+/** A single distilled few-shot example in a synthesized proposal. */
+export interface TeachExample {
+  field: string;
+  value: string;
+  note: string;
+}
+
+/**
+ * The synthesized extraction guidance the SME reviews before it's written to
+ * the (supplier, document_type) profile.
+ */
+export interface TeachProposal {
+  instructions: string;
+  examples: TeachExample[];
+  summary: string;
+}
+
+/** POST /api/teach/sessions response. */
+export interface TeachSessionCreateResponse {
+  session_id: string;
+  messages: TeachMessage[];
+  /** Issues captured at session start (UncertaintyIssue[] from the analyzer). */
+  issues: unknown[];
+}
+
+/** POST /api/teach/sessions/:id/messages response. */
+export interface TeachMessageResponse {
+  messages: TeachMessage[];
+  ready_to_synthesize: boolean;
+}
+
+/** POST /api/teach/sessions/:id/synthesize response. */
+export interface TeachSynthesizeResponse {
+  session_id: string;
+  status: TeachSessionStatus;
+  proposal: TeachProposal;
+}
+
+/** GET /api/teach/sessions/:id response. */
+export interface TeachSessionDetailResponse {
+  session: TeachSession;
+  messages: TeachMessage[];
+  issues: unknown[];
+  proposal: TeachProposal | null;
+}
+
+/** POST /api/teach/sessions/:id/confirm response. */
+export interface TeachConfirmResponse {
+  ok: true;
+  session_id: string;
+  examples_written: number;
+}
+
 export interface DocumentTypeRow {
   id: string;
   tenant_id: string;
