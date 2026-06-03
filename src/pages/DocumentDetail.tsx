@@ -150,13 +150,16 @@ export function DocumentDetail() {
     }
   }, [doc]);
 
-  // Load document types for the dropdown
+  // Load document types for the dropdown, scoped to the document's
+  // supplier so the picker shows global (supplier_id NULL) + that
+  // supplier's own doctypes rather than the whole tenant list.
   useEffect(() => {
     const loadDocTypes = async () => {
       try {
         const result = await api.documentTypes.list({
           tenant_id: doc?.tenant_id || undefined,
           active: 1,
+          supplier_id: doc?.supplierId ?? undefined,
         });
         setDocumentTypes(result.documentTypes || []);
       } catch {
@@ -164,7 +167,7 @@ export function DocumentDetail() {
       }
     };
     if (doc?.tenant_id) loadDocTypes();
-  }, [doc?.tenant_id]);
+  }, [doc?.tenant_id, doc?.supplierId]);
 
   const handleUploadSuccess = () => {
     setUploadOpen(false);

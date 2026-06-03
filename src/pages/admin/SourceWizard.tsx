@@ -691,7 +691,10 @@ function StepName({
   onChange: (patch: Partial<WizardState>) => void;
   tenantId: string | null;
 }) {
-  // Document types for the routing selector, scoped to the source's tenant.
+  // Document types for the routing selector, scoped to the source's tenant
+  // and (when chosen) the source's supplier — so the list shows global
+  // (supplier_id NULL) + that supplier's own doctypes, matching the
+  // (supplier, doctype) extraction profile the worker resolves.
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
   useEffect(() => {
     if (!tenantId) {
@@ -701,7 +704,11 @@ function StepName({
     let cancelled = false;
     (async () => {
       try {
-        const res = await api.documentTypes.list({ tenant_id: tenantId, active: 1 });
+        const res = await api.documentTypes.list({
+          tenant_id: tenantId,
+          active: 1,
+          supplier_id: state.supplierId ?? undefined,
+        });
         if (!cancelled) setDocumentTypes(res.documentTypes || []);
       } catch {
         if (!cancelled) setDocumentTypes([]);
@@ -710,7 +717,7 @@ function StepName({
     return () => {
       cancelled = true;
     };
-  }, [tenantId]);
+  }, [tenantId, state.supplierId]);
   // Phase B0.5: auto-populate the slug from the name UNTIL the user
   // touches the slug field. Once `slugTouched` is true, name edits no
   // longer overwrite the slug — this matches the "edit-as-you-go but

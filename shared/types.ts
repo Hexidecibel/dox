@@ -154,6 +154,7 @@ export interface DocumentTypeRow {
   name: string;
   slug: string;
   description: string | null;
+  supplier_id: string | null; // null = shared/global doctype; set = owned by this supplier
   auto_ingest_threshold: number | null; // deprecated, unused
   auto_ingest: number;       // 0 or 1
   extract_tables: number;    // 0 or 1

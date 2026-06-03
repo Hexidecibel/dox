@@ -403,12 +403,19 @@ function RoutingCard({
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
   const [supplierName, setSupplierName] = useState('');
 
+  // Scope the routing doctype options to global (supplier_id NULL) +
+  // this source's supplier, so the dropdown mirrors what the worker can
+  // resolve for the (supplier, doctype) extraction profile.
   useEffect(() => {
     if (!tenantId) return;
     let cancelled = false;
     (async () => {
       try {
-        const res = await api.documentTypes.list({ tenant_id: tenantId, active: 1 });
+        const res = await api.documentTypes.list({
+          tenant_id: tenantId,
+          active: 1,
+          supplier_id: connector.supplier_id ?? undefined,
+        });
         if (!cancelled) setDocumentTypes(res.documentTypes || []);
       } catch {
         if (!cancelled) setDocumentTypes([]);
@@ -417,7 +424,7 @@ function RoutingCard({
     return () => {
       cancelled = true;
     };
-  }, [tenantId]);
+  }, [tenantId, connector.supplier_id]);
 
   // Resolve the supplier display name for the autocomplete value.
   useEffect(() => {

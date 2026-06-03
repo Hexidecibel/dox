@@ -91,6 +91,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       name?: string;
       description?: string;
       active?: number | boolean;
+      supplier_id?: string | null;
       auto_ingest?: number;
       extract_tables?: number;
     };
@@ -176,6 +177,26 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }
       updates.push('extract_tables = ?');
       params.push(body.extract_tables);
+    }
+
+    // supplier_id: present in body sets ownership; null/"" clears to global.
+    if (body.supplier_id !== undefined) {
+      const supplierId = body.supplier_id ? body.supplier_id : null;
+      if (supplierId) {
+        const supplier = await context.env.DB.prepare(
+          'SELECT id FROM suppliers WHERE id = ? AND tenant_id = ?'
+        )
+          .bind(supplierId, documentType.tenant_id)
+          .first();
+        if (!supplier) {
+          return new Response(
+            JSON.stringify({ error: 'supplier_id does not reference a supplier in this tenant' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+      updates.push('supplier_id = ?');
+      params.push(supplierId);
     }
 
     if (updates.length === 0) {

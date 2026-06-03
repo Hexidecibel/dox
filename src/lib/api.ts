@@ -813,10 +813,11 @@ export const api = {
      * GET /api/document-types
      * Returns: { documentTypes: ApiDocumentType[] }
      */
-    list: (params?: { tenant_id?: string; active?: number }) => {
+    list: (params?: { tenant_id?: string; active?: number; supplier_id?: string }) => {
       const query = new URLSearchParams();
       if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
       if (params?.active !== undefined) query.set('active', String(params.active));
+      if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
       const qs = query.toString();
       return fetchApi<DocumentTypeListResponse>(`/document-types${qs ? `?${qs}` : ''}`);
     },
@@ -831,7 +832,7 @@ export const api = {
      * POST /api/document-types
      * Returns: { documentType: ApiDocumentType }
      */
-    create: (data: { name: string; description?: string; tenant_id?: string; auto_ingest?: number; extract_tables?: number }) =>
+    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number }) =>
       fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -841,7 +842,7 @@ export const api = {
      * PUT /api/document-types/:id
      * Returns: { documentType: ApiDocumentType }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number; auto_ingest?: number; extract_tables?: number }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number }) =>
       fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),

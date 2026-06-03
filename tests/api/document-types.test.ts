@@ -91,6 +91,70 @@ describe('Document Types - List', () => {
   });
 });
 
+describe('Document Types - Supplier scope (hybrid model)', () => {
+  let supplierA: string;
+  let supplierB: string;
+
+  beforeAll(async () => {
+    supplierA = generateTestId();
+    supplierB = generateTestId();
+    await db
+      .prepare('INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
+      .bind(supplierA, seed.tenantId, 'Supplier A', `supplier-a-${supplierA.slice(0, 6)}`).run();
+    await db
+      .prepare('INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
+      .bind(supplierB, seed.tenantId, 'Supplier B', `supplier-b-${supplierB.slice(0, 6)}`).run();
+  });
+
+  it('should persist supplier_id on create and return it', async () => {
+    const id = generateTestId();
+    await db
+      .prepare(
+        'INSERT INTO document_types (id, tenant_id, name, slug, supplier_id, active) VALUES (?, ?, ?, ?, ?, 1)'
+      )
+      .bind(id, seed.tenantId, 'Owned DT', `owned-dt-${id.slice(0, 6)}`, supplierA)
+      .run();
+
+    const dt = await db.prepare('SELECT * FROM document_types WHERE id = ?').bind(id).first();
+    expect(dt!.supplier_id).toBe(supplierA);
+  });
+
+  it('should default supplier_id to NULL (global) when omitted', async () => {
+    const id = generateTestId();
+    await db
+      .prepare('INSERT INTO document_types (id, tenant_id, name, slug, active) VALUES (?, ?, ?, ?, 1)')
+      .bind(id, seed.tenantId, 'Global DT', `global-dt-${id.slice(0, 6)}`)
+      .run();
+
+    const dt = await db.prepare('SELECT supplier_id FROM document_types WHERE id = ?').bind(id).first();
+    expect(dt!.supplier_id).toBeNull();
+  });
+
+  it('list?supplier_id=X returns global + that supplier but not other suppliers', async () => {
+    const tag = `scope-${Date.now()}`;
+    const globalId = generateTestId();
+    const aId = generateTestId();
+    const bId = generateTestId();
+    await db.prepare('INSERT INTO document_types (id, tenant_id, name, slug, active) VALUES (?, ?, ?, ?, 1)')
+      .bind(globalId, seed.tenantId, `${tag}-global`, `${tag}-global`).run();
+    await db.prepare('INSERT INTO document_types (id, tenant_id, name, slug, supplier_id, active) VALUES (?, ?, ?, ?, ?, 1)')
+      .bind(aId, seed.tenantId, `${tag}-a`, `${tag}-a`, supplierA).run();
+    await db.prepare('INSERT INTO document_types (id, tenant_id, name, slug, supplier_id, active) VALUES (?, ?, ?, ?, ?, 1)')
+      .bind(bId, seed.tenantId, `${tag}-b`, `${tag}-b`, supplierB).run();
+
+    // Mirrors the endpoint's filter: WHERE tenant_id=? AND active=1 AND (supplier_id IS NULL OR supplier_id=?)
+    const result = await db
+      .prepare(
+        'SELECT id FROM document_types WHERE tenant_id = ? AND active = 1 AND (supplier_id IS NULL OR supplier_id = ?)'
+      )
+      .bind(seed.tenantId, supplierA).all();
+    const ids = result.results.map((r) => r.id);
+    expect(ids).toContain(globalId);
+    expect(ids).toContain(aId);
+    expect(ids).not.toContain(bId);
+  });
+});
+
 describe('Document Types - Get by ID', () => {
   it('should get document type by ID', async () => {
     const id = generateTestId();

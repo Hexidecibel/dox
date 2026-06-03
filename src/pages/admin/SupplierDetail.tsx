@@ -46,7 +46,7 @@ import {
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { ApiSupplier, ApiProduct, ExtractionTemplate, TemplateFieldMapping } from '../../lib/types';
-import type { Document, SupplierExtractionInstructionsListRow, LotListItem } from '../../lib/types';
+import type { Document, SupplierExtractionInstructionsListRow, LotListItem, ApiDocumentType } from '../../lib/types';
 import { LotDetailPanel, LotBadges } from '../../components/LotDetailPanel';
 import { HelpWell } from '../../components/HelpWell';
 import { EmptyState } from '../../components/EmptyState';
@@ -257,6 +257,20 @@ export function SupplierDetail() {
   const [instructionsLoading, setInstructionsLoading] = useState(false);
   const [instructionsError, setInstructionsError] = useState('');
 
+  // Document Types state (per-supplier doctype management). The list call
+  // passes supplier_id so it returns global (supplier_id NULL) + this
+  // supplier's own types; we split them in the render so "owned" vs
+  // "global (shared)" are clearly separated. Only owned ones are editable.
+  const [docTypes, setDocTypes] = useState<ApiDocumentType[]>([]);
+  const [docTypesLoading, setDocTypesLoading] = useState(false);
+  const [docTypeDialogOpen, setDocTypeDialogOpen] = useState(false);
+  const [editingDocType, setEditingDocType] = useState<ApiDocumentType | null>(null);
+  const [dtName, setDtName] = useState('');
+  const [dtDescription, setDtDescription] = useState('');
+  const [dtAutoIngest, setDtAutoIngest] = useState(false);
+  const [dtExtractTables, setDtExtractTables] = useState(true);
+  const [savingDocType, setSavingDocType] = useState(false);
+
   const parseAliases = (aliases: string | string[] | null): string[] => {
     if (!aliases) return [];
     if (Array.isArray(aliases)) return aliases;
@@ -345,6 +359,23 @@ export function SupplierDetail() {
     }
   }, [id, supplier]);
 
+  const loadDocTypes = useCallback(async () => {
+    if (!id || !supplier) return;
+    setDocTypesLoading(true);
+    try {
+      const result = await api.documentTypes.list({
+        tenant_id: supplier.tenant_id,
+        supplier_id: id,
+      });
+      setDocTypes(result.documentTypes);
+    } catch (err) {
+      setDocTypes([]);
+      setError(err instanceof Error ? err.message : 'Failed to load document types');
+    } finally {
+      setDocTypesLoading(false);
+    }
+  }, [id, supplier]);
+
   useEffect(() => {
     loadSupplier();
   }, [loadSupplier]);
@@ -354,7 +385,68 @@ export function SupplierDetail() {
     else if (tab === 1) loadTemplates();
     else if (tab === 2) loadDocuments();
     else if (tab === 3) loadInstructions();
-  }, [tab, loadProducts, loadTemplates, loadDocuments, loadInstructions]);
+    else if (tab === 4) loadDocTypes();
+  }, [tab, loadProducts, loadTemplates, loadDocuments, loadInstructions, loadDocTypes]);
+
+  const openCreateDocType = () => {
+    setEditingDocType(null);
+    setDtName('');
+    setDtDescription('');
+    setDtAutoIngest(false);
+    setDtExtractTables(true);
+    setDocTypeDialogOpen(true);
+  };
+
+  const openEditDocType = (dt: ApiDocumentType) => {
+    setEditingDocType(dt);
+    setDtName(dt.name);
+    setDtDescription(dt.description || '');
+    setDtAutoIngest(!!dt.auto_ingest);
+    setDtExtractTables(dt.extract_tables !== 0);
+    setDocTypeDialogOpen(true);
+  };
+
+  const handleSaveDocType = async () => {
+    if (!supplier) return;
+    setSavingDocType(true);
+    setError('');
+    try {
+      if (editingDocType) {
+        await api.documentTypes.update(editingDocType.id, {
+          name: dtName.trim(),
+          description: dtDescription.trim() || undefined,
+          auto_ingest: dtAutoIngest ? 1 : 0,
+          extract_tables: dtExtractTables ? 1 : 0,
+        });
+      } else {
+        await api.documentTypes.create({
+          name: dtName.trim(),
+          description: dtDescription.trim() || undefined,
+          tenant_id: supplier.tenant_id,
+          // Owned by THIS supplier (vs the global DocumentTypes admin page
+          // which leaves supplier_id null for shared types).
+          supplier_id: supplier.id,
+          auto_ingest: dtAutoIngest ? 1 : 0,
+          extract_tables: dtExtractTables ? 1 : 0,
+        });
+      }
+      setDocTypeDialogOpen(false);
+      loadDocTypes();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save document type');
+    } finally {
+      setSavingDocType(false);
+    }
+  };
+
+  const handleToggleDocTypeActive = async (dt: ApiDocumentType) => {
+    try {
+      await api.documentTypes.update(dt.id, { active: dt.active ? 0 : 1 });
+      loadDocTypes();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update document type');
+    }
+  };
 
   const handleSaveHeader = async () => {
     if (!id || !supplier) return;
@@ -626,6 +718,7 @@ export function SupplierDetail() {
           <Tab label="Templates" />
           <Tab label={`Documents${documentsTotal ? ` (${documentsTotal})` : ''}`} />
           <Tab label="Extraction Instructions" />
+          <Tab label="Document Types" />
         </Tabs>
       </Box>
 
@@ -1076,6 +1169,215 @@ export function SupplierDetail() {
             ))}
           </Box>
         )}
+      </TabPanel>
+
+      {/* Document Types Tab — per-supplier doctype management. */}
+      {/* The list call is scoped with supplier_id, so it returns global   */}
+      {/* (supplier_id NULL, shared across the tenant) + this supplier's    */}
+      {/* own types. Owned ones are editable here; global ones are shown    */}
+      {/* read-only for reference and managed on the global admin page.     */}
+      <TabPanel value={tab} index={4}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+          <Typography variant="h6" fontWeight={600}>Document Types</Typography>
+          <Button variant="outlined" size="small" startIcon={<AddIcon />} onClick={openCreateDocType}>
+            Add Document Type
+          </Button>
+        </Box>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Types owned by this supplier, plus the global (shared) types available to every
+          supplier in the tenant. Global types are managed on the Document Types admin page.
+        </Typography>
+
+        {docTypesLoading ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+            <CircularProgress size={24} />
+          </Box>
+        ) : (
+          (() => {
+            const owned = docTypes.filter((dt) => dt.supplier_id === supplier.id);
+            const global = docTypes.filter((dt) => !dt.supplier_id);
+            return (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <Box>
+                  <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>
+                    This supplier's types
+                  </Typography>
+                  {owned.length === 0 ? (
+                    <EmptyState
+                      title="No supplier-specific document types yet"
+                      description="Create a document type owned by this supplier when its documents need their own type that isn't shared tenant-wide. Shared types appear under Global types below."
+                      actionLabel="Add document type"
+                      onAction={openCreateDocType}
+                    />
+                  ) : (
+                    <TableContainer component={Paper} variant="outlined">
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Name</TableCell>
+                            <TableCell>Slug</TableCell>
+                            <TableCell>Description</TableCell>
+                            <TableCell>Status</TableCell>
+                            <TableCell align="right">Actions</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {owned.map((dt) => (
+                            <TableRow key={dt.id} hover>
+                              <TableCell>
+                                <Typography variant="body2" fontWeight={500}>{dt.name}</Typography>
+                              </TableCell>
+                              <TableCell>
+                                <Typography variant="body2" color="text.secondary" fontFamily="monospace">
+                                  {dt.slug}
+                                </Typography>
+                              </TableCell>
+                              <TableCell>
+                                <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {dt.description || '-'}
+                                </Typography>
+                              </TableCell>
+                              <TableCell>
+                                <Chip
+                                  label={dt.active ? 'Active' : 'Inactive'}
+                                  size="small"
+                                  color={dt.active ? 'success' : 'default'}
+                                  variant="outlined"
+                                />
+                              </TableCell>
+                              <TableCell align="right">
+                                <Tooltip title="Edit">
+                                  <IconButton size="small" onClick={() => openEditDocType(dt)}>
+                                    <EditIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                                <Tooltip title={dt.active ? 'Deactivate' : 'Activate'}>
+                                  <IconButton size="small" onClick={() => handleToggleDocTypeActive(dt)}>
+                                    {dt.active ? (
+                                      <BlockIcon fontSize="small" color="warning" />
+                                    ) : (
+                                      <ActiveIcon fontSize="small" color="success" />
+                                    )}
+                                  </IconButton>
+                                </Tooltip>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  )}
+                </Box>
+
+                {global.length > 0 && (
+                  <Box>
+                    <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>
+                      Global types (shared)
+                    </Typography>
+                    <TableContainer component={Paper} variant="outlined">
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Name</TableCell>
+                            <TableCell>Slug</TableCell>
+                            <TableCell>Description</TableCell>
+                            <TableCell>Status</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {global.map((dt) => (
+                            <TableRow key={dt.id} hover>
+                              <TableCell>
+                                <Typography variant="body2" fontWeight={500}>{dt.name}</Typography>
+                              </TableCell>
+                              <TableCell>
+                                <Typography variant="body2" color="text.secondary" fontFamily="monospace">
+                                  {dt.slug}
+                                </Typography>
+                              </TableCell>
+                              <TableCell>
+                                <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {dt.description || '-'}
+                                </Typography>
+                              </TableCell>
+                              <TableCell>
+                                <Chip
+                                  label={dt.active ? 'Active' : 'Inactive'}
+                                  size="small"
+                                  color={dt.active ? 'success' : 'default'}
+                                  variant="outlined"
+                                />
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  </Box>
+                )}
+              </Box>
+            );
+          })()
+        )}
+
+        {/* Create/Edit doctype dialog — mirrors the global DocumentTypes */}
+        {/* admin form (name, description, auto-ingest, extract-tables).   */}
+        <Dialog open={docTypeDialogOpen} onClose={() => setDocTypeDialogOpen(false)} maxWidth="sm" fullWidth>
+          <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            {editingDocType ? 'Edit Document Type' : 'Add Document Type'}
+            <IconButton onClick={() => setDocTypeDialogOpen(false)} size="small">
+              <CloseIcon />
+            </IconButton>
+          </DialogTitle>
+          <DialogContent dividers>
+            <TextField
+              label="Name"
+              fullWidth
+              required
+              value={dtName}
+              onChange={(e) => setDtName(e.target.value)}
+              disabled={savingDocType}
+              autoFocus
+              sx={{ mt: 1, mb: 2 }}
+            />
+            <TextField
+              label="Description"
+              fullWidth
+              multiline
+              rows={2}
+              value={dtDescription}
+              onChange={(e) => setDtDescription(e.target.value)}
+              disabled={savingDocType}
+              sx={{ mb: 2 }}
+            />
+            <FormControlLabel
+              control={<Switch checked={dtAutoIngest} onChange={(e) => setDtAutoIngest(e.target.checked)} disabled={savingDocType} />}
+              label="Auto-ingest"
+            />
+            <Typography variant="body2" color="text.secondary" sx={{ ml: 4, mt: -0.5, mb: 1 }}>
+              Automatically import high-confidence documents (requires 3+ training examples)
+            </Typography>
+            <FormControlLabel
+              control={<Switch checked={dtExtractTables} onChange={(e) => setDtExtractTables(e.target.checked)} disabled={savingDocType} />}
+              label="Extract tables"
+            />
+            <Typography variant="body2" color="text.secondary" sx={{ ml: 4, mt: -0.5 }}>
+              Extract tabular data like test results and specifications
+            </Typography>
+          </DialogContent>
+          <DialogActions sx={{ px: 3, pb: 2 }}>
+            <Button onClick={() => setDocTypeDialogOpen(false)} disabled={savingDocType}>
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              onClick={handleSaveDocType}
+              disabled={!dtName.trim() || savingDocType}
+            >
+              {savingDocType ? 'Saving...' : editingDocType ? 'Save Changes' : 'Add Document Type'}
+            </Button>
+          </DialogActions>
+        </Dialog>
       </TabPanel>
     </Box>
   );

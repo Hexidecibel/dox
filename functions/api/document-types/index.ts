@@ -1,6 +1,6 @@
 import { generateId } from '../../lib/db';
 import { logAudit, getClientIp } from '../../lib/db';
-import { requireRole, requireTenantAccess, errorToResponse } from '../../lib/permissions';
+import { requireRole, errorToResponse } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import type { Env, User } from '../../lib/types';
 
@@ -29,6 +29,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const url = new URL(context.request.url);
     const activeFilter = url.searchParams.get('active');
     const tenantIdParam = url.searchParams.get('tenant_id');
+    const supplierIdParam = url.searchParams.get('supplier_id');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
@@ -52,6 +53,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     } else {
       // Default to showing only active document types
       conditions.push('active = 1');
+    }
+
+    // Optional supplier scoping: return shared/global doctypes (supplier_id
+    // IS NULL) plus those owned by the given supplier, so selectors can show
+    // the union. When absent, return all tenant doctypes (admin view).
+    if (supplierIdParam) {
+      conditions.push('(supplier_id IS NULL OR supplier_id = ?)');
+      params.push(supplierIdParam);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -116,6 +125,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       name?: string;
       description?: string;
       tenant_id?: string;
+      supplier_id?: string | null;
       auto_ingest?: number;
       extract_tables?: number;
     };
@@ -167,16 +177,32 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
 
+    // Optional supplier ownership. Empty string is treated as "global" (NULL).
+    const supplierId = body.supplier_id ? body.supplier_id : null;
+    if (supplierId) {
+      const supplier = await context.env.DB.prepare(
+        'SELECT id FROM suppliers WHERE id = ? AND tenant_id = ?'
+      )
+        .bind(supplierId, tenantId)
+        .first();
+      if (!supplier) {
+        return new Response(
+          JSON.stringify({ error: 'supplier_id does not reference a supplier in this tenant' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+    }
+
     const id = generateId();
 
     const autoIngest = body.auto_ingest === 1 ? 1 : 0;
     const extractTables = body.extract_tables === 0 ? 0 : 1;
 
     await context.env.DB.prepare(
-      `INSERT INTO document_types (id, tenant_id, name, slug, description, active, auto_ingest, extract_tables)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`
+      `INSERT INTO document_types (id, tenant_id, name, slug, description, supplier_id, active, auto_ingest, extract_tables)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`
     )
-      .bind(id, tenantId, body.name, slug, body.description || null, autoIngest, extractTables)
+      .bind(id, tenantId, body.name, slug, body.description || null, supplierId, autoIngest, extractTables)
       .run();
 
     await logAudit(

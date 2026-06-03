@@ -196,6 +196,12 @@ export default function ReviewQueue() {
   const [productNames, setProductNames] = useState<Record<string, string>>({});
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
+  // Supplier-scoped doctype options for the Save-Template dialog. The
+  // shared `documentTypes` above backs the queue FILTER (which spans every
+  // supplier, so it stays tenant-wide). Once the reviewer has confirmed the
+  // item's supplier, the template dialog instead offers global (supplier_id
+  // NULL) + that supplier's own doctypes.
+  const [dialogDocTypes, setDialogDocTypes] = useState<ApiDocumentType[]>([]);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
   const [dismissedFields, setDismissedFields] = useState<Record<string, Set<string>>>({});
@@ -368,6 +374,24 @@ export default function ReviewQueue() {
     };
     loadDocTypes();
   }, [tenantFilter, selectedTenantId, isSuperAdmin]);
+
+  // Load supplier-scoped doctype options for the Save-Template dialog.
+  // Re-runs whenever the dialog's confirmed supplier changes; falls back to
+  // the tenant-wide list when no supplier is resolved yet.
+  useEffect(() => {
+    const supplierId = templateDialog?.supplierId ?? undefined;
+    const loadScoped = async () => {
+      try {
+        const tid = isSuperAdmin ? (tenantFilter || selectedTenantId || undefined) : undefined;
+        const result = await api.documentTypes.list({ tenant_id: tid, active: 1, supplier_id: supplierId });
+        setDialogDocTypes(result.documentTypes);
+      } catch {
+        // Silently fall back to the shared list in the render path.
+        setDialogDocTypes([]);
+      }
+    };
+    if (templateDialog?.open) loadScoped();
+  }, [templateDialog?.open, templateDialog?.supplierId, tenantFilter, selectedTenantId, isSuperAdmin]);
 
   // `preserveItemId` keeps the in-progress edit state (fields, tables,
   // dismissals, renames, multi-product) for one item across a refresh. Used by
@@ -2757,13 +2781,18 @@ export default function ReviewQueue() {
                 )}
               />
 
-              {/* Document Type */}
+              {/* Document Type — scoped to the confirmed supplier (global +
+                  that supplier's own types); falls back to the tenant-wide
+                  list before the scoped fetch resolves. */}
+              {(() => {
+              const dtOptions = dialogDocTypes.length > 0 ? dialogDocTypes : documentTypes;
+              return (
               <Autocomplete
                 freeSolo
-                options={documentTypes.map(dt => dt.name)}
+                options={dtOptions.map(dt => dt.name)}
                 value={templateDialog.docTypeName}
                 onChange={(_, value) => {
-                  const match = documentTypes.find(dt => dt.name === value);
+                  const match = dtOptions.find(dt => dt.name === value);
                   setTemplateDialog(prev => prev ? {
                     ...prev,
                     docTypeName: (value as string) || '',
@@ -2774,7 +2803,7 @@ export default function ReviewQueue() {
                   setTemplateDialog(prev => prev ? {
                     ...prev,
                     docTypeName: value,
-                    docTypeId: documentTypes.find(dt => dt.name === value)?.id || null,
+                    docTypeId: dtOptions.find(dt => dt.name === value)?.id || null,
                   } : null);
                 }}
                 renderInput={(params) => (
@@ -2787,6 +2816,8 @@ export default function ReviewQueue() {
                   />
                 )}
               />
+              );
+              })()}
 
               {/* Field Mappings */}
               <Typography variant="subtitle2" sx={{ mt: 3, mb: 1 }}>
