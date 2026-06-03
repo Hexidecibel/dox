@@ -21,27 +21,41 @@ echo "Press Ctrl+C within 5 seconds to cancel..."
 sleep 5
 
 echo "Enumerating tables..."
-TABLES=$(npx wrangler d1 execute "$STAGING_DB" --remote --json \
-  --command="SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'd1_%';" \
+# Build an ordered DROP script for every schema object. FTS5 shadow tables
+# (*_fts_data/_idx/_content/_docsize/_config) are excluded — they are removed
+# automatically when their *_fts virtual table is dropped, and cannot be
+# dropped directly while it exists. Order: triggers, then views, then tables.
+DROP_SQL=$(npx wrangler d1 execute "$STAGING_DB" --remote --json \
+  --command="SELECT name, type FROM sqlite_master WHERE type IN ('table','view','trigger') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'd1_%' AND name NOT GLOB '*_fts_data' AND name NOT GLOB '*_fts_idx' AND name NOT GLOB '*_fts_content' AND name NOT GLOB '*_fts_docsize' AND name NOT GLOB '*_fts_config';" \
   2>/dev/null | node -e "
     let data = '';
     process.stdin.on('data', c => data += c);
     process.stdin.on('end', () => {
-      const parsed = JSON.parse(data);
-      const rows = (parsed[0]?.results) || [];
-      console.log(rows.map(r => r.name).join(' '));
+      const rows = (JSON.parse(data)[0]?.results) || [];
+      const kw = { trigger: 'TRIGGER', view: 'VIEW', table: 'TABLE' };
+      // triggers, then views, then tables in REVERSE creation order so parent
+      // tables (e.g. tenants, created first) drop last — after every child
+      // that references them — avoiding 'no such table' on the implicit delete.
+      const ordered = [
+        ...rows.filter(r => r.type === 'trigger'),
+        ...rows.filter(r => r.type === 'view'),
+        ...rows.filter(r => r.type === 'table').reverse(),
+      ];
+      console.log(ordered.map(r => 'DROP ' + kw[r.type] + ' IF EXISTS \"' + r.name + '\";').join('\n'));
     });
   ")
 
-if [ -n "$TABLES" ]; then
-  echo "Dropping: $TABLES"
-  DROPS=""
-  for t in $TABLES; do
-    DROPS+="DROP TABLE IF EXISTS \"$t\";"$'\n'
-  done
-  npx wrangler d1 execute "$STAGING_DB" --remote --command="$DROPS" >/dev/null
+if [ -n "$DROP_SQL" ]; then
+  echo "Dropping $(printf '%s\n' "$DROP_SQL" | grep -c '^DROP') schema objects..."
+  # defer_foreign_keys=ON defers FK checks to commit (by which point every
+  # referenced table is also dropped) — `foreign_keys=OFF` is a no-op inside
+  # D1's implicit transaction. Triggers are dropped first (above) so the
+  # implicit row-delete on DROP TABLE can't fire FTS triggers that reference
+  # already-dropped tables.
+  npx wrangler d1 execute "$STAGING_DB" --remote --command="PRAGMA defer_foreign_keys=ON;
+$DROP_SQL" >/dev/null
 else
-  echo "(no tables to drop)"
+  echo "(no objects to drop)"
 fi
 
 echo "Re-applying migrations..."

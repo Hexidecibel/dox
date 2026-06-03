@@ -4,12 +4,30 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-## 2026-06-02 (pm-3) CONNECTORS → SOURCES hard-cut unification — COMMITTED, NOT YET REAL-DATA-VALIDATED / NOT DEPLOYED
+## 2026-06-02 (pm-3) CONNECTORS → SOURCES hard-cut unification — SHIPPED TO PROD + BIG-RUN VALIDATED
 
 Big architectural pass. **Connectors are gone as a separate subsystem** — folded into the one
-document-intake pipeline. State: full vitest **1371/0 green** + `npm run build` clean + worker
-`node --check` clean. **NOT yet validated against real docs/orders, NOT deployed, migration 0068 NOT
-applied to staging/prod D1.** This commit is a green-tests checkpoint only.
+document-intake pipeline. State: full vitest **1371/0 green** + build clean + worker `node --check`.
+**Deployed to prod** (Pages `6d6a2bb4` / supdox.com; commits `20c370c` + `6595499` on master) and
+**validated by a big real-data run on staging** (fresh tenant, all doors, real Qwen extraction):
+**OVERALL PASS** — 8 docs through import/run/drop/email; profile-by-(supplier,doctype) resolution +
+output_kind routing confirmed live; deterministic CSV + per-sheet XLSX (Zenith late-alphabet present,
+INACTIVE skipped) proven; 20 orders / 15 customers / 2 lots created; 0 worker errors. Migration 0068
+applied to **staging AND prod** D1 (prod via direct `wrangler d1 execute` + recorded in `_migrations`;
+prod `_migrations` only tracked through 0058, 0059–0067 were applied untracked — KNOWN GAP, reconcile
+before any `bin/migrate --remote`). Re-run validation any time: `bin/big-run-validate` (see header).
+
+GOTCHA from this session: `pkill -f process-worker` killed the PROD systemd worker; it auto-restarted
+onto the new code. That's now consistent (prod Pages deployed). The prod worker was NOT cleanly
+restarted via systemctl (polkit timed out — no passwordless privilege); it's running the new code and
+matches prod. Companion `dox-connector-poller` Worker was redeployed (its URL moved
+`/api/connectors/poll` → `/api/sources/poll`).
+
+Bugs fixed along the way: (1) `bin/reset-staging-db` couldn't wipe (FK + FTS-trigger errors) — now
+drops triggers→views→tables-reverse-order with `PRAGMA defer_foreign_keys=ON`. (2) Sources
+create/update API had NO setter for the 0067 routing columns (origin/output_kind, supplier/doctype) —
+UI-created sources would mis-route as COA; fixed + wired into SourceWizard/SourceDetail (commit
+`6595499`).
 
 ### What changed (plan: ~/.claude/plans/cozy-bouncing-wigderson.md)
 - **Hard cut:** deleted the synchronous engine `functions/lib/connectors/{orchestrator,email,

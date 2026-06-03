@@ -19,7 +19,7 @@ export interface Env {
 }
 
 async function dispatchPoll(env: Env): Promise<void> {
-  const url = `${env.DOX_API_BASE.replace(/\/+$/, '')}/api/connectors/poll`;
+  const url = `${env.DOX_API_BASE.replace(/\/+$/, '')}/api/sources/poll`;
   let resp: Response;
   try {
     resp = await fetch(url, {

@@ -2,7 +2,8 @@
 /* eslint-disable no-console */
 /**
  * bin/big-run-validate — BIG end-to-end validation of the unified
- * "Connectors -> Sources" intake pipeline against a LOCAL dev server.
+ * "Connectors -> Sources" intake pipeline against a LOCAL dev server OR a
+ * remote STAGING Cloudflare environment (set DOX_BASE + DOX_D1_REMOTE).
  *
  * What it does (full run):
  *   1. Login (or register) a super_admin and grab a JWT.
@@ -16,11 +17,10 @@
  *      stamp origin_kind='internal' on their sources.
  *   4. Create document types: "COA", "Order Report", "Audit Trail".
  *   5. Create one Source (connectors row) per door/kind we exercise. The
- *      POST/PUT /api/sources handlers do NOT accept the routing columns
- *      (origin_kind/output_kind/supplier_id/document_type_id) — those live on
- *      the connectors row but have no API setter — so we set them directly via
- *      `wrangler d1 execute --local`. This is intentional and owned by this
- *      script (Scripts First).
+ *      POST /api/sources handler accepts (and enum-validates) the routing
+ *      fields (origin_kind/output_kind/supplier_id/document_type_id), so we
+ *      set them in the create body via the JWT-authed API — no D1 stamping.
+ *      This exercises the real config path end-to-end.
  *   6. Set the unified extraction profile (PUT /api/extraction-instructions)
  *      with field_mappings for the ORDER sources so the worker's DETERMINISTIC
  *      CSV/XLSX path triggers.
@@ -48,12 +48,17 @@
  * Usage:
  *   bin/big-run-validate [RUN_TAG] [--report-only --tenant <id>]
  * Env:
- *   DOX_BASE       (default http://localhost:8788)   target dev server
+ *   DOX_BASE       (default http://localhost:8788)   target server (set to the
+ *                  staging Pages URL, e.g. https://doc-upload-site-staging.pages.dev)
  *   DOX_ADMIN_EMAIL(default a@a.a)                   admin login
  *   DOX_ADMIN_PASS (default a)                       admin password
  *   POLL_TIMEOUT_MS(default 600000)                  queue readiness timeout
  *   POLL_INTERVAL_MS(default 5000)
- *   DOX_D1_NAME    (default doc-upload-db)           wrangler d1 database name
+ *   DOX_D1_REMOTE  (unset = local)                   set to target the staging
+ *                  remote DB (doc-upload-db-staging --remote) for any residual
+ *                  d1Exec fallback; default is the LOCAL dev DB.
+ *   DOX_D1_NAME    (default doc-upload-db, or doc-upload-db-staging when
+ *                  DOX_D1_REMOTE is set)             override wrangler d1 database name
  *
  * Validates syntax only with `node --check bin/big-run-validate`.
  */
@@ -73,7 +78,15 @@ const ADMIN_EMAIL = process.env.DOX_ADMIN_EMAIL || 'a@a.a';
 const ADMIN_PASS = process.env.DOX_ADMIN_PASS || 'a';
 const POLL_TIMEOUT_MS = parseInt(process.env.POLL_TIMEOUT_MS || '600000', 10);
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '5000', 10);
-const D1_NAME = process.env.DOX_D1_NAME || 'doc-upload-db';
+
+// D1 target. By default we hit the LOCAL dev DB (`doc-upload-db --local`).
+// Set DOX_D1_REMOTE (any non-empty value) to target the STAGING remote DB
+// (`doc-upload-db-staging --remote`). This mirrors how bin/migrate-staging
+// addresses the staging DB by explicit name + --remote, which works WITHOUT
+// the wrangler.toml <-> wrangler.staging.toml swap (the DB is named on the
+// CLI). Prod D1 is never a target of this script.
+const D1_REMOTE = !!(process.env.DOX_D1_REMOTE && process.env.DOX_D1_REMOTE !== '0' && process.env.DOX_D1_REMOTE !== 'false');
+const D1_NAME = process.env.DOX_D1_NAME || (D1_REMOTE ? 'doc-upload-db-staging' : 'doc-upload-db');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const FIXTURES_DIR = path.join(__dirname, 'fixtures', 'big-run');
@@ -130,15 +143,18 @@ async function api(method, urlPath, { body, headers, raw } = {}) {
 }
 
 /**
- * Run a SQL statement against the LOCAL D1 via wrangler. We use this ONLY to
- * set the source routing columns (output_kind/origin_kind/supplier_id/
- * document_type_id) which have no REST setter. Synchronous on purpose — these
- * are quick setup writes and keep ordering obvious.
+ * Run a SQL statement against D1 via wrangler. Routing columns now have a REST
+ * setter (POST/PUT /api/sources accept origin_kind/output_kind/supplier_id/
+ * document_type_id), so this is no longer used for source setup — it remains
+ * only as a minimal fallback for any column without an API setter. Honors
+ * DOX_D1_REMOTE: when set, targets the staging DB with --remote (named
+ * explicitly, so no wrangler.toml swap needed); otherwise the LOCAL dev DB.
+ * Synchronous on purpose — quick setup writes, obvious ordering.
  */
 function d1Exec(sql) {
   return execFileSync(
     'npx',
-    ['wrangler', 'd1', 'execute', D1_NAME, '--local', '--command', sql],
+    ['wrangler', 'd1', 'execute', D1_NAME, D1_REMOTE ? '--remote' : '--local', '--command', sql],
     { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'] }
   ).toString();
 }
@@ -284,19 +300,26 @@ async function emailWebhook({ connectorId, tenantId, fileName, buf }) {
 }
 
 // ---------------------------------------------------------------------------
-// Source creation: POST /api/sources (name/slug), then stamp routing columns
-// directly in D1 (no REST setter for them).
+// Source creation: POST /api/sources with the routing fields in the body.
+// As of the routing-setter fix, POST/PUT /api/sources accept (and enum-
+// validate) origin_kind/output_kind/supplier_id/document_type_id, so we set
+// them on the create call — no D1 stamping. This exercises the real config
+// path end-to-end. (d1Exec/sqlStr remain available as a fallback for any
+// future column lacking an API setter; none are needed today.)
 // ---------------------------------------------------------------------------
 async function createSource({ tenantId, name, slug, originKind, outputKind, supplierId, documentTypeId, fieldMappings }) {
   const created = await api('POST', '/api/sources', {
-    body: { name, slug, tenant_id: tenantId },
+    body: {
+      name,
+      slug,
+      tenant_id: tenantId,
+      origin_kind: originKind,
+      output_kind: outputKind,
+      supplier_id: supplierId,
+      document_type_id: documentTypeId,
+    },
   });
   const conn = created.connector;
-  // Stamp routing fields directly (these have no REST setter on POST/PUT).
-  d1Exec(
-    `UPDATE connectors SET origin_kind=${sqlStr(originKind)}, output_kind=${sqlStr(outputKind)}, ` +
-    `supplier_id=${sqlStr(supplierId)}, document_type_id=${sqlStr(documentTypeId)} WHERE id=${sqlStr(conn.id)}`
-  );
   // Set the unified extraction profile when field_mappings supplied (order/shipment).
   if (fieldMappings && supplierId && documentTypeId) {
     await api('PUT', '/api/extraction-instructions', {
