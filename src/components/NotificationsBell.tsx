@@ -2,18 +2,20 @@
  * NotificationsBell — top-bar bell with a badge + dropdown tray surfacing the
  * current user's actionable notifications.
  *
- * Today the tray is fed by a single source: pending workflow approvals
- * (`recordsApi.workflowApprovals.inbox()`). The internal model is a generic
- * `Notification` list (each tagged with a `type`) so other notification kinds
- * can be appended later without reworking the UI — but only the approvals feed
- * is wired now. Keep it simple.
+ * Two feeds, merged into one generic `Notification` list (each tagged with a
+ * `type`) and grouped under labeled headers in the tray:
+ *   - 'approval' — pending workflow approvals (`recordsApi.workflowApprovals.inbox()`).
+ *     Rows + footer navigate to /approvals.
+ *   - 'review'   — review-queue items assigned to the current user
+ *     (`api.queue.list({ mine, status: 'pending', processing_status: 'ready' })`).
+ *     Rows navigate to /review.
  *
  * Behaviour:
  *  - Fetch on mount, then on a light 3-minute interval, and again whenever the
  *    menu opens (so the count is fresh when the user looks).
- *  - Badge = number of pending approvals; hidden at 0.
- *  - Fetch errors are swallowed (empty tray, no crash).
- *  - Rows + footer navigate to /approvals, which owns approve/reject.
+ *  - Both feeds are fetched in parallel; either failing degrades gracefully to
+ *    an empty contribution rather than crashing the top bar.
+ *  - Badge = approvals + assigned-review count; hidden at 0.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -33,9 +35,11 @@ import {
 import {
   NotificationsNone as BellIcon,
   AccountTree as WorkflowIcon,
+  RateReview as ReviewIcon,
 } from '@mui/icons-material';
 import { recordsApi } from '../lib/recordsApi';
-import type { WorkflowApprovalInboxItem } from '../../shared/types';
+import { api } from '../lib/api';
+import type { WorkflowApprovalInboxItem, ProcessingQueueItem } from '../../shared/types';
 
 const POLL_MS = 3 * 60 * 1000; // 3 minutes
 const MAX_VISIBLE = 6;
@@ -43,7 +47,7 @@ const MAX_VISIBLE = 6;
 /** Generic tray item. Extend the union as new sources are added. */
 interface Notification {
   id: string;
-  type: 'approval';
+  type: 'approval' | 'review';
   title: string;
   /** e.g. "Step name · Sheet name" */
   subtitle: string;
@@ -59,6 +63,17 @@ function approvalToNotification(item: WorkflowApprovalInboxItem): Notification {
     title: item.row_title || 'Untitled record',
     subtitle: parts.join(' · '),
     dueAt: item.due_at,
+  };
+}
+
+function reviewToNotification(item: ProcessingQueueItem): Notification {
+  const parts = [item.document_type_guess, item.output_kind].filter(Boolean);
+  return {
+    id: `review:${item.id}`,
+    type: 'review',
+    title: item.file_name || item.supplier || 'Untitled document',
+    subtitle: parts.join(' · '),
+    dueAt: null,
   };
 }
 
@@ -82,8 +97,22 @@ export function NotificationsBell() {
     if (inFlight.current) return;
     inFlight.current = true;
     try {
-      const res = await recordsApi.workflowApprovals.inbox();
-      setNotifications((res.items ?? []).map(approvalToNotification));
+      // Fetch both feeds in parallel; either may fail independently.
+      const [approvalsRes, reviewRes] = await Promise.allSettled([
+        recordsApi.workflowApprovals.inbox(),
+        api.queue.list({ mine: true, status: 'pending', processing_status: 'ready', limit: MAX_VISIBLE }),
+      ]);
+
+      const approvals: Notification[] =
+        approvalsRes.status === 'fulfilled'
+          ? (approvalsRes.value.items ?? []).map(approvalToNotification)
+          : [];
+      const reviews: Notification[] =
+        reviewRes.status === 'fulfilled'
+          ? (reviewRes.value.items ?? []).map(reviewToNotification)
+          : [];
+
+      setNotifications([...approvals, ...reviews]);
     } catch {
       // Swallow — show an empty tray rather than crashing the top bar.
       setNotifications([]);
@@ -108,9 +137,17 @@ export function NotificationsBell() {
     handleClose();
     navigate('/approvals');
   };
+  const goToReview = () => {
+    handleClose();
+    navigate('/review');
+  };
 
-  const count = notifications.length;
-  const visible = notifications.slice(0, MAX_VISIBLE);
+  const approvals = notifications.filter((n) => n.type === 'approval');
+  const reviews = notifications.filter((n) => n.type === 'review');
+  // Badge = approvals + assigned-review count.
+  const count = approvals.length + reviews.length;
+  const visibleApprovals = approvals.slice(0, MAX_VISIBLE);
+  const visibleReviews = reviews.slice(0, MAX_VISIBLE);
 
   return (
     <>
@@ -145,27 +182,62 @@ export function NotificationsBell() {
           </Box>
         ) : (
           <Box>
-            {visible.map((n) => {
-              const due = formatDue(n.dueAt);
-              return (
-                <ListItemButton key={n.id} onClick={goToApprovals} sx={{ alignItems: 'flex-start', py: 1 }}>
-                  <WorkflowIcon sx={{ fontSize: 18, color: 'text.secondary', mt: 0.3, mr: 1.25 }} />
-                  <ListItemText
-                    primary={n.title}
-                    secondary={[n.subtitle, due].filter(Boolean).join(' · ')}
-                    primaryTypographyProps={{ variant: 'body2', fontWeight: 600, noWrap: true }}
-                    secondaryTypographyProps={{ variant: 'caption', noWrap: true }}
-                  />
-                </ListItemButton>
-              );
-            })}
+            {visibleApprovals.length > 0 && (
+              <>
+                <Typography
+                  variant="overline"
+                  sx={{ display: 'block', px: 2, pt: 1, color: 'text.secondary', fontSize: '0.65rem' }}
+                >
+                  Approvals
+                </Typography>
+                {visibleApprovals.map((n) => {
+                  const due = formatDue(n.dueAt);
+                  return (
+                    <ListItemButton key={n.id} onClick={goToApprovals} sx={{ alignItems: 'flex-start', py: 1 }}>
+                      <WorkflowIcon sx={{ fontSize: 18, color: 'text.secondary', mt: 0.3, mr: 1.25 }} />
+                      <ListItemText
+                        primary={n.title}
+                        secondary={[n.subtitle, due].filter(Boolean).join(' · ')}
+                        primaryTypographyProps={{ variant: 'body2', fontWeight: 600, noWrap: true }}
+                        secondaryTypographyProps={{ variant: 'caption', noWrap: true }}
+                      />
+                    </ListItemButton>
+                  );
+                })}
+              </>
+            )}
+
+            {visibleReviews.length > 0 && (
+              <>
+                <Typography
+                  variant="overline"
+                  sx={{ display: 'block', px: 2, pt: 1, color: 'text.secondary', fontSize: '0.65rem' }}
+                >
+                  Needs review
+                </Typography>
+                {visibleReviews.map((n) => (
+                  <ListItemButton key={n.id} onClick={goToReview} sx={{ alignItems: 'flex-start', py: 1 }}>
+                    <ReviewIcon sx={{ fontSize: 18, color: 'text.secondary', mt: 0.3, mr: 1.25 }} />
+                    <ListItemText
+                      primary={n.title}
+                      secondary={n.subtitle}
+                      primaryTypographyProps={{ variant: 'body2', fontWeight: 600, noWrap: true }}
+                      secondaryTypographyProps={{ variant: 'caption', noWrap: true }}
+                    />
+                  </ListItemButton>
+                ))}
+              </>
+            )}
           </Box>
         )}
 
         <Divider />
-        <Box sx={{ p: 1 }}>
+        <Box sx={{ p: 1, display: 'flex', gap: 1 }}>
           <Button fullWidth size="small" onClick={goToApprovals}>
-            See all approvals
+            Approvals
+          </Button>
+          <Button fullWidth size="small" onClick={goToReview}>
+            Review queue
           </Button>
         </Box>
       </Menu>

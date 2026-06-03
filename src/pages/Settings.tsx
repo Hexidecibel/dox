@@ -14,6 +14,7 @@ import {
   Category as DocTypesIcon,
   Hub as ConnectorsIcon,
   People as UsersIcon,
+  AssignmentInd as AssignmentsIcon,
   VpnKey as ApiKeyIcon,
   Business as TenantsIcon,
   History as HistoryIcon,
@@ -28,6 +29,7 @@ import type { Role } from '../lib/types';
 import { DocumentTypes } from './admin/DocumentTypes';
 import { Sources } from './admin/Sources';
 import { Users } from './admin/Users';
+import { Assignments } from './admin/Assignments';
 import { ApiKeys } from './admin/ApiKeys';
 import { Tenants } from './admin/Tenants';
 import { IngestHistory } from './IngestHistory';
@@ -62,6 +64,7 @@ const SECTIONS: SettingsSection[] = [
     title: 'Access',
     items: [
       { key: 'users', label: 'Users', icon: <UsersIcon />, roles: ALL_ADMIN, component: Users },
+      { key: 'assignments', label: 'Assignments', icon: <AssignmentsIcon />, roles: ALL_ADMIN, component: Assignments },
       { key: 'api-keys', label: 'API Keys', icon: <ApiKeyIcon />, roles: ALL_ADMIN, component: ApiKeys },
       { key: 'tenants', label: 'Tenants', icon: <TenantsIcon />, roles: ['super_admin'], component: Tenants },
     ],

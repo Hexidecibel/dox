@@ -188,6 +188,9 @@ export default function ReviewQueue() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('pending');
+  // "Mine" — only items whose (supplier, doctype) is owned by the current user.
+  // Server-side filter passed to api.queue.list. Default off.
+  const [mineOnly, setMineOnly] = useState(false);
   // Review Queue v2: client-side filter on output_kind. 'all' shows everything.
   const [kindFilter, setKindFilter] = useState<'all' | 'coa' | 'order' | 'shipment'>('all');
   const [docTypeFilter, setDocTypeFilter] = useState('');
@@ -439,6 +442,7 @@ export default function ReviewQueue() {
     setError('');
     try {
       const params: Record<string, any> = { status: statusFilter || undefined };
+      if (mineOnly) params.mine = true;
       if (docTypeFilter) params.document_type_id = docTypeFilter;
       if (isSuperAdmin && tenantFilter) params.tenant_id = tenantFilter;
       else if (selectedTenantId) params.tenant_id = selectedTenantId;
@@ -634,7 +638,7 @@ export default function ReviewQueue() {
     } finally {
       if (!background) setLoading(false);
     }
-  }, [statusFilter, docTypeFilter, tenantFilter, selectedTenantId, isSuperAdmin]);
+  }, [statusFilter, mineOnly, docTypeFilter, tenantFilter, selectedTenantId, isSuperAdmin]);
 
   useEffect(() => {
     loadQueue();
@@ -1327,6 +1331,16 @@ export default function ReviewQueue() {
             />
           ))}
         </Box>
+
+        {/* "Mine" — server-side filter to items owned by the current user via
+            the supplier×doctype assignment. Re-fetches the queue when toggled. */}
+        <Chip
+          label="Mine"
+          size="small"
+          variant={mineOnly ? 'filled' : 'outlined'}
+          color={mineOnly ? 'primary' : 'default'}
+          onClick={() => setMineOnly((v) => !v)}
+        />
 
         {/* Review Queue v2: output_kind filter. Client-side; filters the
             visible list without re-fetching. */}

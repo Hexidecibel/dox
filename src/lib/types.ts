@@ -3,7 +3,7 @@ import type { TemplateFieldMapping } from '../../shared/types';
 
 // Re-export frontend-friendly types from shared
 export type { Role, DocumentStatus } from '../../shared/types';
-export type { User, Tenant, Document, DocumentVersion, AuthPayload } from '../../shared/types';
+export type { User, Tenant, Document, DocumentVersion, AuthPayload, Assignment } from '../../shared/types';
 export type {
   ApiDocument,
   ApiDocumentVersion,

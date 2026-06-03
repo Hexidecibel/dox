@@ -2966,6 +2966,31 @@ export interface LotMatchListResponse {
   suggestions: LotMatchSuggestion[];
 }
 
+// === Assignments ===
+
+/**
+ * Ownership of a (supplier, document_type) review combo within a tenant.
+ * One owner per combo. owner_user_id is the user owner today; owner_group_id
+ * is a forward-compatible slot for groups (no groups table exists yet).
+ * GET /api/assignments rows carry the joined supplier/doctype/owner labels.
+ */
+export interface Assignment {
+  id: string;
+  tenant_id: string;
+  supplier_id: string;
+  document_type_id: string;
+  owner_user_id: string | null;
+  owner_group_id: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  // Joined labels (GET row shape).
+  supplier_name: string | null;
+  document_type_name: string | null;
+  owner_user_name: string | null;
+  owner_user_email: string | null;
+}
+
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'auth_user';

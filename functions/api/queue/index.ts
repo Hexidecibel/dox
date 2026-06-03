@@ -20,6 +20,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const status = url.searchParams.get('status') || 'pending'; // pass 'all' to skip status filter
     const processingStatus = url.searchParams.get('processing_status');
     const documentTypeId = url.searchParams.get('document_type_id');
+    const mine = url.searchParams.get('mine') === '1' || url.searchParams.get('owned_by_me') === '1';
     let tenantId = url.searchParams.get('tenant_id');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
@@ -52,13 +53,27 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       params.push(documentTypeId);
     }
 
+    // "Mine" filter: restrict to items whose (supplier_id, document_type_id)
+    // has an assignments row owned by the current user (same tenant). INNER
+    // JOIN so unowned items — and items with NULL supplier_id, which can't
+    // match the ON condition — are excluded. Powers both the Review "Mine"
+    // view and the notifications bell feed. Composes with the other filters.
+    const mineJoin = mine
+      ? `INNER JOIN assignments am
+           ON am.tenant_id = pq.tenant_id
+          AND am.supplier_id = pq.supplier_id
+          AND am.document_type_id = pq.document_type_id
+          AND am.owner_user_id = ?`
+      : '';
+    const mineParam: string[] = mine ? [user.id] : [];
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     // Get total count
     const countResult = await context.env.DB.prepare(
-      `SELECT COUNT(*) as total FROM processing_queue pq ${whereClause}`
+      `SELECT COUNT(*) as total FROM processing_queue pq ${mineJoin} ${whereClause}`
     )
-      .bind(...params)
+      .bind(...mineParam, ...params)
       .first<{ total: number }>();
 
     // Get queue items with related info. The supplier_extraction_instructions
@@ -72,6 +87,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
               u.name as created_by_name, r.name as reviewed_by_name,
               CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists
        FROM processing_queue pq
+       ${mineJoin}
        LEFT JOIN document_types dt ON pq.document_type_id = dt.id
        LEFT JOIN tenants t ON pq.tenant_id = t.id
        LEFT JOIN users u ON pq.created_by = u.id
@@ -84,7 +100,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
        ORDER BY pq.created_at DESC
        LIMIT ? OFFSET ?`
     )
-      .bind(...params, limit, offset)
+      .bind(...mineParam, ...params, limit, offset)
       .all();
 
     const items = (results.results ?? []).map((row) => {
