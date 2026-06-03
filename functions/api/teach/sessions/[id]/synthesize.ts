@@ -54,12 +54,38 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }));
     const issues = parseIssues(row) as UncertaintyIssue[];
 
-    const raw = await callQwenChat(
-      context.env,
-      buildSynthesisPrompt(conversation, issues),
-      { model: 'best', temperature: 0.1, maxTokens: 3072 },
-    );
-    const proposal = parseSynthesis(raw);
+    // Synthesis output is short (a paragraph of rules + a few examples), so cap
+    // tokens low to keep it well under the wall-clock budget, with headroom on
+    // the timeout. If Qwen is slow/unreachable or returns nothing usable, fall
+    // back to a draft built from the SME's own answers — the flow must NEVER
+    // 500 here; the SME can always edit/confirm the draft.
+    const fallbackProposal = () => {
+      const smeText = conversation
+        .filter((t) => t.role === 'sme')
+        .map((t) => t.content.trim())
+        .filter(Boolean)
+        .join('\n\n');
+      return {
+        instructions: smeText,
+        examples: [] as { field: string; value: string; note: string }[],
+        summary: smeText
+          ? 'Draft assembled from your answers — please review and edit.'
+          : '',
+      };
+    };
+    let proposal;
+    try {
+      const raw = await callQwenChat(
+        context.env,
+        buildSynthesisPrompt(conversation, issues),
+        { model: 'best', temperature: 0.1, maxTokens: 1280, timeoutMs: 110_000 },
+      );
+      const parsed = parseSynthesis(raw);
+      proposal = parsed.instructions.trim() ? parsed : fallbackProposal();
+    } catch (synthErr) {
+      console.error('Teach synthesize: Qwen failed, using fallback draft:', synthErr);
+      proposal = fallbackProposal();
+    }
 
     await context.env.DB.prepare(
       `UPDATE teach_sessions
