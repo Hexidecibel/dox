@@ -26,7 +26,24 @@ partitioned by owner, each with a focused full-screen approval surface.
 - On each approve: update streak/confidence/sample_count; demote tuned→learning if a
   tuned profile starts drawing corrections (regression safety).
 
+### FOLLOW-UP: Legacy corpus supplier reconciliation (surfaced 2026-06-02)
+Building the teach interface revealed the legacy COA corpus is poorly tagged: **every legacy
+processing_queue COA item has `supplier_id = NULL`** — matched only by an inconsistent `supplier`
+NAME string ("Medosweet Farms, Inc." vs the supplier record "Medosweet Farms"; "ANDERSEN DAIRY INC."
+vs "Andersen Dairy Inc."), and some docs are mis-extracted entirely (a Medosweet file extracted as
+"Willamette Egg Farms"). The teach uncertainty detector now works around this with normalized fuzzy
+name matching, but the real fix benefits the WHOLE system: a **backfill job** that resolves each
+legacy queue item's supplier name → a canonical `supplier_id` (dedupe name variants, ties into the
+existing supplier-dedupe/merge tooling). Until then, anything supplier-scoped over legacy data leans
+on fuzzy name matching. New docs (post connectors→sources unification) ARE tagged with supplier_id, so
+this is a legacy-data cleanup, not a forward problem.
+
 ### Phase B0 — Learning Interface (SME knowledge elicitation, Qwen-driven)
+STATUS 2026-06-02: BUILT + DEPLOYED to prod (commits up to 0ac487f) + PROVEN LIVE — a real Medosweet
+teach session on supdox.com matched 21 real docs, surfaced real issues (grade/product_code often-empty,
+plant_number/product_name/supplier_name inconsistent), and Qwen asked a specific grounded question
+quoting real extracted values, even on the 7B. Synthesize→confirm→write-profile wired + unit-tested
+(not yet exercised by a real SME end-to-end). Detail below.
 The user is NOT the SME; the partner is, and **can't learn a config UI** — so the SYSTEM interviews
 him. Decisions: **Qwen** drives question-gen + answer-synthesis (on-prem, no new dep); **open
 interview** style (conceptual prose Q&A); **batch "go-go-go, surface questions as a group"** for the
