@@ -20,7 +20,19 @@ VLM/tables/hints) + the teach engine; approve paths unchanged.
 - **Order/shipment teach DEFERRED** (tiles unchanged for v1; can get teaching via source supplier later).
 - **TEST TENANT on prod:** "Test Lab" — login `test@supdox.com` / `supdox-test-26` (org_admin,
   isolated). Upload COAs → review → untaught supplier shows teach panel inline. Delete tenant when done.
-- Worker UNCHANGED (teaching+approve are Pages/Qwen). NOT yet driven end-to-end by a real SME.
+- Worker UNCHANGED (teaching+approve are Pages/Qwen).
+- **FULL LOOP PROVEN LIVE on prod (Test Lab)** — I drove a session as the SME against a seeded
+  "Sunrise Dairy" supplier (5 noisy COA rows): detect → interview → synthesize → confirm →
+  **profile written** (real instructions: "product_code only if SKU format, not a phone number;
+  normalize grade to 'Grade A'; lot_number only if LT- present" + 3 examples). Verified in
+  supplier_extraction_instructions. Commit `04105b0`.
+- **Bug fixed:** synthesize used to 500 (3072-token gen hit the 60s callQwenChat timeout). Now
+  maxTokens 1280 + 110s timeout + fallback that drafts instructions from the SME's own answers →
+  never 500s.
+- **Quality follow-ups (not blockers; better w/ bigger model + prompt tuning):** opening question is
+  sometimes generic (7B variance; was grounded in the Medosweet run); `ready_to_synthesize` fires too
+  eagerly (buildFollowupPrompt returns KNOW_ENOUGH after ~1 answer — should cover all issues first).
+- Test Lab still has the seeded Sunrise Dairy supplier + a taught profile (demo); wipe the tenant when done.
 
 ---
 
