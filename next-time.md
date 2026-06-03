@@ -4,6 +4,30 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-06-02 (pm-6) MENU CONSOLIDATION + NOTIFICATIONS BELL + ASSIGNMENT/OWNERSHIP — SHIPPED PROD+STAGING
+
+Three shipped pieces (commits `fa7ad3b`, `f760a39`; vitest 1403/1403):
+1. **Menu consolidation:** left rail 22→13. Primary work items + one **Settings** entry; `Settings.tsx`
+   hubs config/admin pages in grouped sections (Catalog & Sources / Access / System & Monitoring),
+   reusing the existing page components (old routes kept). Help → top-bar `?` icon.
+2. **Notifications bell** (`src/components/NotificationsBell.tsx`) — top-bar, generic `Notification[]`
+   tray. Feed #1 = workflow approvals (Approvals moved OUT of Settings into the bell). Feed #2 =
+   **assigned review items** (see #3). Merged dropdown ("Approvals" / "Needs review"), badge = sum.
+3. **Assignment/ownership (Phase C core)** — migration **0071** `assignments` table
+   ((tenant,supplier,doctype)→`owner_user_id`, group-ready `owner_group_id` slot; NO groups table yet —
+   user confirmed "groups coming soon"). API: list/upsert(PUT)/delete + **`GET /api/queue?mine=1`**
+   (items whose supplier×doctype the caller owns) powering BOTH the Review "Mine" filter and bell
+   feed #2. UI: **Assignments screen** in Settings→Access (assign to a user; Groups disabled "coming
+   soon"). **Verified live** on Test Lab: assigned Sunrise/COA→test user → `?mine=1` returned the 5
+   Sunrise docs.
+
+REMAINING for the owned-review-flow vision: real **maturity columns** (Phase A: maturity_state/
+clean_streak + hybrid promotion — today maturity is inferred), **user GROUPS** (then wire
+owner_group_id + group membership into the mine filter), order/shipment inline teach, teach
+question-quality tuning (eager ready-to-synthesize + sometimes-generic opener — better w/ bigger model).
+
+---
+
 ## 2026-06-02 (pm-5) UNIFIED CONTEXTUAL REVIEW QUEUE — teaching folded in — SHIPPED PROD+STAGING
 
 Rebuilt review into ONE contextual surface (commit `22ebaa2`, prod+staging, vitest 1389/1389). Per
