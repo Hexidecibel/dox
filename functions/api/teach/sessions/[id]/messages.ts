@@ -32,6 +32,7 @@ import {
   insertMessage,
 } from '../../../../lib/teach/session';
 import type { UncertaintyIssue } from '../../../../lib/teach/uncertainty';
+import { loadTeachBackground } from '../../../../lib/teach/background';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -65,11 +66,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }));
     const issues = parseIssues(row) as UncertaintyIssue[];
 
+    // Ground the follow-up decision in already-known context for this pair.
+    const background = await loadTeachBackground(context.env.DB, {
+      tenantId,
+      supplierId: row.supplier_id,
+      documentTypeId: row.document_type_id,
+    });
+
     let decision = '';
     try {
       decision = await callQwenChat(
         context.env,
-        buildFollowupPrompt(conversation, issues),
+        buildFollowupPrompt(conversation, issues, background),
         { model: 'best', temperature: 0.2 },
       );
     } catch (err) {

@@ -29,6 +29,7 @@ import {
   resolveTenantId,
 } from '../../../../lib/teach/session';
 import type { UncertaintyIssue } from '../../../../lib/teach/uncertainty';
+import { loadTeachBackground } from '../../../../lib/teach/background';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -54,6 +55,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }));
     const issues = parseIssues(row) as UncertaintyIssue[];
 
+    // Ground synthesis in already-known context so the proposal is supplier
+    // deltas, not a restatement of org-level / existing instructions.
+    const background = await loadTeachBackground(context.env.DB, {
+      tenantId,
+      supplierId: row.supplier_id,
+      documentTypeId: row.document_type_id,
+    });
+
     // Synthesis output is short (a paragraph of rules + a few examples), so cap
     // tokens low to keep it well under the wall-clock budget, with headroom on
     // the timeout. If Qwen is slow/unreachable or returns nothing usable, fall
@@ -77,7 +86,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     try {
       const raw = await callQwenChat(
         context.env,
-        buildSynthesisPrompt(conversation, issues),
+        buildSynthesisPrompt(conversation, issues, background),
         { model: 'best', temperature: 0.1, maxTokens: 1280, timeoutMs: 110_000 },
       );
       const parsed = parseSynthesis(raw);

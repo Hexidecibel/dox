@@ -196,6 +196,43 @@ function renderIssues(issues: UncertaintyIssue[]): string {
   return issues.map((iss, i) => renderIssue(iss, i)).join('\n');
 }
 
+/**
+ * Read-only "already-known" context fed into every teach prompt so the model
+ * doesn't re-ask / re-teach what the system already has. Both pieces optional;
+ * when both are empty the section is omitted entirely.
+ */
+export interface TeachBackground {
+  /** Org-level extraction context (tenants.extraction_context), or ''. */
+  tenantContext?: string;
+  /** Existing instructions for this exact (supplier, doctype), or ''. */
+  existingInstructions?: string;
+}
+
+/**
+ * Render the shared "ALREADY-ESTABLISHED CONTEXT" grounding block. Returns ''
+ * when both pieces are empty/whitespace so callers can omit it cleanly. Each
+ * sub-block is omitted independently when its piece is empty.
+ */
+function renderKnownContext(background?: TeachBackground): string {
+  const tenantContext = (background?.tenantContext ?? '').trim();
+  const existingInstructions = (background?.existingInstructions ?? '').trim();
+  if (!tenantContext && !existingInstructions) return '';
+
+  const parts = [
+    'ALREADY-ESTABLISHED CONTEXT — this is already known and applied to every',
+    'extraction. Do NOT ask the SME about anything covered here, and do NOT',
+    'propose instructions that merely restate it. Only surface what is NEW or',
+    "specific to THIS supplier's documents beyond the following.",
+  ];
+  if (tenantContext) {
+    parts.push('', '[Organization context]', tenantContext);
+  }
+  if (existingInstructions) {
+    parts.push('', '[Existing instructions for this supplier + document type]', existingInstructions);
+  }
+  return parts.join('\n');
+}
+
 function renderDocExamples(docExamples?: Array<{ text?: string; label?: string }>): string {
   if (!docExamples || docExamples.length === 0) return '';
   const blocks = docExamples
@@ -215,8 +252,11 @@ function renderDocExamples(docExamples?: Array<{ text?: string; label?: string }
 export function buildQuestionsPrompt(
   issues: UncertaintyIssue[],
   docExamples?: Array<{ text?: string; label?: string }>,
+  background?: TeachBackground,
 ): ChatMessage[] {
+  const known = renderKnownContext(background);
   const user = [
+    ...(known ? [known, ''] : []),
     'I have analyzed this supplier\'s documents and found the following',
     'recurring ambiguities the extraction model struggles with:',
     '',
@@ -228,6 +268,8 @@ export function buildQuestionsPrompt(
     '- asks about the MOST important 1-3 ambiguities above, grounded in the real',
     '  example values (quote them),',
     '- invites a prose answer.',
+    'Skip any issue already answered by the established context above; only ask',
+    'about genuine remaining ambiguities.',
     'Do NOT number the questions like a form. Do NOT output JSON. Plain text only.',
     '/no_think',
   ].join('\n');
@@ -302,8 +344,11 @@ export function renderConversation(conversation: ConversationTurn[]): string {
 export function buildFollowupPrompt(
   conversation: ConversationTurn[],
   issues: UncertaintyIssue[],
+  background?: TeachBackground,
 ): ChatMessage[] {
+  const known = renderKnownContext(background);
   const user = [
+    ...(known ? [known, ''] : []),
     'Here is the interview so far:',
     '',
     renderConversation(conversation),
@@ -342,6 +387,7 @@ export interface SynthesizedProposal {
 export function buildSynthesisPrompt(
   conversation: ConversationTurn[],
   issues: UncertaintyIssue[],
+  background?: TeachBackground,
 ): ChatMessage[] {
   const system = [
     TEACH_PERSONA,
@@ -350,7 +396,9 @@ export function buildSynthesisPrompt(
     'guidance. Output STRICT JSON only — no prose, no markdown fences.',
   ].join('\n');
 
+  const known = renderKnownContext(background);
   const user = [
+    ...(known ? [known, ''] : []),
     'Interview transcript:',
     '',
     renderConversation(conversation),
@@ -371,6 +419,8 @@ export function buildSynthesisPrompt(
     '  ],',
     '  "summary": string         // one-sentence summary of what was learned',
     '}',
+    'Do not restate the established context; output only the supplier-specific',
+    'deltas, and do not duplicate instructions already present above.',
     'Return ONLY that JSON object.',
     '/no_think',
   ].join('\n');

@@ -20,6 +20,7 @@ import type { TeachSessionSummary } from '../../../../shared/types';
 import type { Env, User } from '../../../lib/types';
 import { analyzeUncertainty } from '../../../lib/teach/uncertainty';
 import { callQwenChat, buildQuestionsPrompt } from '../../../lib/teach/qwen';
+import { loadTeachBackground } from '../../../lib/teach/background';
 import {
   loadMessages,
   serializeMessage,
@@ -152,12 +153,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       )
       .run();
 
-    // 3. Ask Qwen for the opening interview message.
+    // 3. Ask Qwen for the opening interview message, grounded in already-known
+    //    context (org-level + any prior instructions for this exact pair) so we
+    //    don't re-ask what the system already knows.
+    const background = await loadTeachBackground(context.env.DB, {
+      tenantId,
+      supplierId: body.supplier_id,
+      documentTypeId: body.document_type_id,
+    });
     let aiContent: string;
     try {
       aiContent = await callQwenChat(
         context.env,
-        buildQuestionsPrompt(issues ?? []),
+        buildQuestionsPrompt(issues ?? [], undefined, background),
         { model: 'best', temperature: 0.3 },
       );
     } catch (err) {
