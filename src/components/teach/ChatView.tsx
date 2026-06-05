@@ -75,6 +75,17 @@ export default function ChatView({
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
+  // Soft, advisory guidance — never blocks typing or submission.
+  // The backend trims each message to ~2000 chars before the model sees it
+  // (see renderConversation in functions/lib/teach/qwen.ts); warn a bit early.
+  const LONG_ANSWER_HINT = 1500;
+  // Once the SME has sent this many turns, nudge them to wrap up + synthesize.
+  const LONG_CHAT_NUDGE = 8;
+  const draftLen = draft.length;
+  const draftTooLong = draftLen > LONG_ANSWER_HINT;
+  const smeCount = messages.filter((m) => m.role === 'sme').length;
+  const showSynthNudge = smeCount >= LONG_CHAT_NUDGE;
+
   // Auto-scroll the transcript on new messages / pending turns.
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -128,6 +139,31 @@ export default function ChatView({
         </Box>
       )}
 
+      {/* Soft nudge once the chat runs long — advisory only, never auto-fires.
+          Suppressed when the model has already raised the ready-to-synthesize
+          banner above (which carries its own synthesize action). */}
+      {!readOnly && showSynthNudge && !readyToSynthesize && (
+        <Box sx={{ px: compact ? 2 : 3, pt: 2 }}>
+          <Alert
+            severity="info"
+            variant="outlined"
+            sx={{ py: 0 }}
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                disabled={synthesizing}
+                onClick={onSynthesize}
+              >
+                Synthesize
+              </Button>
+            }
+          >
+            This chat is getting long — you can wrap up and synthesize.
+          </Alert>
+        </Box>
+      )}
+
       {/* Composer */}
       {!readOnly && (
       <Box sx={{ p: compact ? 1.5 : 2, display: 'flex', gap: 1, alignItems: 'flex-end' }}>
@@ -146,6 +182,12 @@ export default function ChatView({
             }
           }}
           disabled={sending}
+          error={draftTooLong}
+          helperText={
+            draftTooLong
+              ? 'Long answers get trimmed before the model sees them — keep it tight.'
+              : undefined
+          }
         />
         <Tooltip title="Send (Enter)">
           <span>

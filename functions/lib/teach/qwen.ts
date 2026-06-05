@@ -244,11 +244,53 @@ export interface ConversationTurn {
   content: string;
 }
 
-function renderConversation(conversation: ConversationTurn[]): string {
-  return conversation
-    .filter((t) => t.role !== 'system')
-    .map((t) => `${t.role === 'ai' ? 'COACH' : 'SME'}: ${t.content}`)
-    .join('\n\n');
+/**
+ * Transcript capping bounds. Teach sessions re-send the WHOLE conversation to
+ * the model every turn, so without limits a verbose SME (paste walls) or a long
+ * chat grows the prompt unbounded — slow, and timeout-prone on the 7B. We cap
+ * both axes here in the single chokepoint both prompt builders share:
+ *   - MAX_TURN_CHARS bounds any one message fed to the model (per-turn).
+ *   - MAX_TURNS_WINDOW bounds how many messages are rendered, keeping the AI
+ *     opening (it grounds the issues) + the most-recent turns, and noting the
+ *     gap with one synthetic line so the model knows context was elided rather
+ *     than silently dropping the SME's teaching answers.
+ */
+const MAX_TURN_CHARS = 2000;
+const MAX_TURNS_WINDOW = 30;
+
+/** Truncate a single message's content to the per-turn cap, marking the cut. */
+function capTurnContent(content: string): string {
+  if (content.length <= MAX_TURN_CHARS) return content;
+  return content.slice(0, MAX_TURN_CHARS) + ' …[truncated]';
+}
+
+/** Render one (already role-filtered) turn in the model-facing format. */
+function renderTurn(t: ConversationTurn): string {
+  return `${t.role === 'ai' ? 'COACH' : 'SME'}: ${capTurnContent(t.content)}`;
+}
+
+/**
+ * Render the conversation for the model, bounded on both axes (see
+ * MAX_TURN_CHARS / MAX_TURNS_WINDOW). Exported so the capping can be unit-tested
+ * directly; signature unchanged.
+ */
+export function renderConversation(conversation: ConversationTurn[]): string {
+  const turns = conversation.filter((t) => t.role !== 'system');
+
+  if (turns.length <= MAX_TURNS_WINDOW) {
+    return turns.map(renderTurn).join('\n\n');
+  }
+
+  // Keep the first turn (AI opening) + the most-recent (window - 1) turns,
+  // dropping the middle and noting how many were omitted.
+  const recent = turns.slice(turns.length - (MAX_TURNS_WINDOW - 1));
+  const omitted = turns.length - 1 - recent.length;
+  const parts = [
+    renderTurn(turns[0]),
+    `[… ${omitted} earlier turns omitted to keep this chat within budget …]`,
+    ...recent.map(renderTurn),
+  ];
+  return parts.join('\n\n');
 }
 
 /**
