@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Re-enqueue REVIEW-QUEUE items for re-extraction by the process worker.
+#
+# Use this after authoring new tenant-level or (supplier,doctype) extraction
+# instructions, to re-run the AI extraction on documents still awaiting review
+# so they pick up the new prompts.
+#
+# Usage:
+#   ./bin/reprocess-queue --tenant <tenant_id> [--remote] [--apply] [--yes]
+#
+#   (no flags)   dry-run against LOCAL D1: show what WOULD be re-enqueued
+#   --remote     target PROD D1 (the queue the prod worker polls)
+#   --apply      actually perform the re-enqueue UPDATE (otherwise dry-run)
+#   --yes        skip the confirmation prompt (for scripts)
+#
+# SAFETY (hard rules, not configurable):
+#   - Only rows with status='pending' are EVER touched. Approved and rejected
+#     items are terminal (their data is committed to `documents`) and are never
+#     modified — so no human review work can be clobbered.
+#   - Re-enqueue resets the AI pipeline only: processing_status='queued',
+#     attempts=0, error_message=NULL. The worker (polls ~30s) then re-extracts
+#     and OVERWRITES the AI output fields (ai_fields, tables, summary, etc.).
+#   - This re-runs the Qwen GPU once per document, serially. A large queue will
+#     take a while and load the GPU.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DB="doc-upload-db"
+REMOTE_FLAG=""
+APPLY=0
+SKIP_CONFIRM=0
+TENANT=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tenant) TENANT="${2:-}"; shift 2 ;;
+    --remote|-r) REMOTE_FLAG="--remote"; shift ;;
+    --apply) APPLY=1; shift ;;
+    --yes|-y) SKIP_CONFIRM=1; shift ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "$TENANT" ]; then
+  echo "ERROR: --tenant <tenant_id> is required." >&2
+  exit 2
+fi
+
+# Single-quote escaping for the tenant id (defensive; ids are hex but be safe).
+TENANT_ESC="${TENANT//\'/\'\'}"
+WHERE="tenant_id = '$TENANT_ESC' AND status = 'pending'"
+
+target_label="LOCAL D1"
+[ -n "$REMOTE_FLAG" ] && target_label="REMOTE (PROD) D1"
+echo "Target: $target_label   tenant: $TENANT"
+echo
+
+echo "Review-queue items that match (status='pending'):"
+npx wrangler d1 execute "$DB" $REMOTE_FLAG --command \
+  "SELECT processing_status AS proc, COUNT(*) AS n FROM processing_queue WHERE $WHERE GROUP BY processing_status;"
+
+if [ "$APPLY" != "1" ]; then
+  echo
+  echo "DRY-RUN. Re-run with --apply to re-enqueue these for reprocessing."
+  exit 0
+fi
+
+if [ "$SKIP_CONFIRM" != "1" ]; then
+  echo
+  echo "This will re-enqueue ALL status='pending' items for tenant $TENANT on $target_label."
+  echo "Their AI extraction output will be OVERWRITTEN when the worker re-runs them."
+  read -r -p "Type 'reprocess' to continue: " reply
+  [ "$reply" = "reprocess" ] || { echo "Aborted."; exit 1; }
+fi
+
+echo "Re-enqueuing..."
+npx wrangler d1 execute "$DB" $REMOTE_FLAG --command \
+  "UPDATE processing_queue
+     SET processing_status = 'queued', attempts = 0, error_message = NULL
+   WHERE $WHERE;"
+
+echo
+echo "Done. The worker (poll ~30s) will pick these up and re-extract with the"
+echo "current tenant + (supplier,doctype) instructions. Watch: bin/logs / journalctl."
