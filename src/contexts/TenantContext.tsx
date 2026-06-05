@@ -14,6 +14,9 @@ interface TenantContextType {
 
 const TenantContext = createContext<TenantContextType | null>(null);
 
+/** Persist the super_admin's selected tenant across reloads/navigation. */
+const SELECTED_TENANT_KEY = 'dox.selectedTenantId';
+
 export function TenantProvider({ children }: { children: ReactNode }) {
   const { user, isSuperAdmin, isAuthenticated } = useAuth();
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -32,6 +35,18 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       try {
         const list = await api.tenants.list();
         setTenants(list);
+        // Restore a previously-selected tenant (super_admin) across reloads —
+        // but only if it's still a tenant they can actually see.
+        if (isSuperAdmin) {
+          try {
+            const saved = localStorage.getItem(SELECTED_TENANT_KEY);
+            if (saved && list.some((t) => t.id === saved)) {
+              setSelectedTenantIdState(saved);
+            }
+          } catch {
+            /* localStorage unavailable — ignore */
+          }
+        }
       } catch {
         // Silently fail — tenants may not be accessible
         setTenants([]);
@@ -41,7 +56,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
     };
 
     loadTenants();
-  }, [isAuthenticated]);
+  }, [isAuthenticated, isSuperAdmin]);
 
   // For non-super_admin, lock to their own tenant
   useEffect(() => {
@@ -54,6 +69,12 @@ export function TenantProvider({ children }: { children: ReactNode }) {
     (id: string | null) => {
       if (!isSuperAdmin) return; // Only super_admin can switch
       setSelectedTenantIdState(id);
+      try {
+        if (id) localStorage.setItem(SELECTED_TENANT_KEY, id);
+        else localStorage.removeItem(SELECTED_TENANT_KEY);
+      } catch {
+        /* localStorage unavailable — selection just won't persist */
+      }
     },
     [isSuperAdmin]
   );

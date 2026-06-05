@@ -19,6 +19,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Box, Button, TextField, Typography } from '@mui/material';
 import { useAuth } from '../contexts/AuthContext';
+import { useTenant } from '../contexts/TenantContext';
 import { api } from '../lib/api';
 
 interface Props {
@@ -42,7 +43,11 @@ function formatTimestamp(ts: string | null): string {
 
 export default function TenantExtractionContextBox({ tenantId }: Props) {
   const { user } = useAuth();
-  const effectiveTenantId = tenantId ?? user?.tenant_id ?? undefined;
+  const { selectedTenantId } = useTenant();
+  // Super_admins have no own tenant_id — they act on the tenant chosen in the
+  // top-bar tenant selector. TenantContext locks selectedTenantId to an
+  // org_admin's own tenant, so this resolves correctly for BOTH roles.
+  const effectiveTenantId = tenantId ?? selectedTenantId ?? user?.tenant_id ?? undefined;
 
   const [value, setValue] = useState('');
   // Snapshot of what's persisted on the server — we only save when `value`
@@ -58,6 +63,13 @@ export default function TenantExtractionContextBox({ tenantId }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    if (!effectiveTenantId) {
+      // No tenant resolved (super_admin without a selection) — nothing to load.
+      setLoading(false);
+      setValue('');
+      setPersistedValue('');
+      return;
+    }
     setLoading(true);
     setSaveState('idle');
     setErrorMessage(null);
@@ -155,6 +167,20 @@ export default function TenantExtractionContextBox({ tenantId }: Props) {
     if (saveState === 'error') return errorMessage || 'Save failed';
     return '';
   })();
+
+  if (!effectiveTenantId) {
+    return (
+      <Box>
+        <Typography variant="h6" fontWeight={700} gutterBottom>
+          Extraction Context
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          Select a tenant from the selector in the top bar to view and edit its
+          extraction context.
+        </Typography>
+      </Box>
+    );
+  }
 
   return (
     <Box>
