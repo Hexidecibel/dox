@@ -2,6 +2,25 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## IDEA: Industry profiles (dairy / meat / etc.) as selectable tenant bases (2026-06-05)
+
+Floated 2026-06-05. Today the tenant extraction-prompt layer (`tenants.extraction_context`,
+migration 0072) defaults to a single baked-in `DEFAULT_DAIRY_CONTEXT` constant
+(duplicated in `functions/lib/llm.ts` + `bin/process-worker`) — effectively a hardcoded
+"dairy profile." Generalize into a library of **industry profiles** (dairy, meat,
+produce, …) that a tenant picks from; the chosen profile seeds/initializes that tenant's
+editable `extraction_context`. **Not a rewrite** — additive:
+- A small `industry_profiles` table (slug, name, base_context TEXT) — move the dairy
+  brain into a row instead of a code constant.
+- On tenant create / a "Start from profile" button in the Extraction Context editor,
+  copy the profile's `base_context` into `tenants.extraction_context` (then it's
+  tenant-owned + editable, same as today's seeded Cush Co).
+- Combo layer (`supplier_extraction_instructions`) is unaffected — still per supplier×doctype.
+
+**For now: dairy is the only base.** Cush Co's tenant context was seeded with the dairy
+brain on prod 2026-06-05 and is editable in Settings → Extraction Context — refine it
+there. See [[project_two_layer_prompts]]. Revisit profiles when a non-dairy tenant appears.
+
 ## DIRECTION: Owned Review Flow + Profile Lifecycle (multi-user maintenance)
 
 Confirmed direction 2026-06-02. The long-term shape for running dox with multiple
