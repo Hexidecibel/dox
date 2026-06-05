@@ -58,6 +58,7 @@ export default function ChatView({
   onSynthesize,
   synthesizing = false,
   compact = false,
+  readOnly = false,
 }: {
   messages: TeachMessage[];
   issues: UncertaintyIssue[];
@@ -69,6 +70,8 @@ export default function ChatView({
   onSynthesize: () => void;
   synthesizing?: boolean;
   compact?: boolean;
+  /** Read-only transcript view: hides the synthesize prompt + composer. */
+  readOnly?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -102,9 +105,9 @@ export default function ChatView({
         </Stack>
       </Box>
 
-      <Divider />
+      {!readOnly && <Divider />}
 
-      {readyToSynthesize && (
+      {!readOnly && readyToSynthesize && (
         <Box sx={{ px: compact ? 2 : 3, pt: 2 }}>
           <Alert
             severity="success"
@@ -126,6 +129,7 @@ export default function ChatView({
       )}
 
       {/* Composer */}
+      {!readOnly && (
       <Box sx={{ p: compact ? 1.5 : 2, display: 'flex', gap: 1, alignItems: 'flex-end' }}>
         <TextField
           fullWidth
@@ -156,6 +160,7 @@ export default function ChatView({
           </span>
         </Tooltip>
       </Box>
+      )}
     </>
   );
 

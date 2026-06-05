@@ -6,15 +6,37 @@ import {
   Button,
   CircularProgress,
   Alert,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
+  Chip,
+  Collapse,
+  Stack,
 } from '@mui/material';
 import {
   School as TeachIcon,
   CheckCircle as CheckCircleIcon,
+  ExpandMore as ExpandMoreIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import ChatView, { type UncertaintyIssue } from './ChatView';
 import ProposalView from './ProposalView';
-import type { TeachMessage, TeachProposal, TeachExample } from '../../lib/types';
+import type {
+  TeachMessage,
+  TeachProposal,
+  TeachExample,
+  TeachSessionSummary,
+} from '../../lib/types';
+
+const STATUS_CHIP: Record<
+  TeachSessionSummary['status'],
+  { label: string; color: 'success' | 'default' | 'warning' | 'info' }
+> = {
+  confirmed: { label: 'Confirmed', color: 'success' },
+  abandoned: { label: 'Abandoned', color: 'default' },
+  synthesized: { label: 'Draft', color: 'info' },
+  open: { label: 'Active', color: 'warning' },
+};
 
 type Phase = 'loading' | 'chat' | 'proposal' | 'done' | 'error';
 
@@ -63,6 +85,13 @@ export default function TeachPanel({
   const [editExamples, setEditExamples] = useState<TeachExample[]>([]);
   const [confirming, setConfirming] = useState(false);
 
+  // Past chats (non-active sessions) for this pair.
+  const [pastSessions, setPastSessions] = useState<TeachSessionSummary[]>([]);
+  const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
+  const [pastTranscript, setPastTranscript] = useState<TeachMessage[]>([]);
+  const [pastTranscriptIssues, setPastTranscriptIssues] = useState<UncertaintyIssue[]>([]);
+  const [loadingTranscript, setLoadingTranscript] = useState(false);
+
   // Tracks the most recent (supplier, doctype) we kicked a session for, so a
   // late-resolving createSession from a previous pair can't clobber state.
   const pairRef = useRef<string>('');
@@ -87,6 +116,9 @@ export default function TeachPanel({
     setProposal(null);
     setEditInstructions('');
     setEditExamples([]);
+    setExpandedSessionId(null);
+    setPastTranscript([]);
+    setPastTranscriptIssues([]);
 
     api.teach
       .createSession({ supplier_id: supplierId, document_type_id: documentTypeId, tenant_id: tenantId })
@@ -107,6 +139,58 @@ export default function TeachPanel({
       cancelled = true;
     };
   }, [supplierId, documentTypeId, tenantId]);
+
+  // ---------------------------------------------------------------------------
+  // Past chats: fetch the non-active sessions for the pair. `phase` is in the
+  // deps so the list refreshes after the live session reaches a terminal state
+  // (e.g. just confirmed → now shows up as a past chat).
+  // ---------------------------------------------------------------------------
+  const reloadPastSessions = useCallback(() => {
+    if (!supplierId || !documentTypeId) {
+      setPastSessions([]);
+      return;
+    }
+    const pair = `${supplierId}::${documentTypeId}`;
+    api.teach
+      .listSessions({ supplier_id: supplierId, document_type_id: documentTypeId, tenant_id: tenantId })
+      .then((res) => {
+        if (pairRef.current !== pair) return;
+        setPastSessions(res.sessions || []);
+      })
+      .catch(() => {
+        if (pairRef.current !== pair) return;
+        setPastSessions([]);
+      });
+  }, [supplierId, documentTypeId, tenantId]);
+
+  useEffect(() => {
+    reloadPastSessions();
+  }, [reloadPastSessions, phase]);
+
+  const handleToggleSession = useCallback(
+    (id: string) => {
+      if (expandedSessionId === id) {
+        setExpandedSessionId(null);
+        return;
+      }
+      setExpandedSessionId(id);
+      setPastTranscript([]);
+      setPastTranscriptIssues([]);
+      setLoadingTranscript(true);
+      api.teach
+        .getSession(id, tenantId)
+        .then((res) => {
+          setPastTranscript(res.messages || []);
+          setPastTranscriptIssues((res.issues || []) as UncertaintyIssue[]);
+        })
+        .catch(() => {
+          setPastTranscript([]);
+          setPastTranscriptIssues([]);
+        })
+        .finally(() => setLoadingTranscript(false));
+    },
+    [expandedSessionId, tenantId],
+  );
 
   // ---------------------------------------------------------------------------
   // Actions
@@ -284,6 +368,95 @@ export default function TeachPanel({
           onSynthesize={handleSynthesize}
           synthesizing={synthesizing}
         />
+      )}
+
+      {/* Past chats — collapsed by default, contextual to this supplier×doctype. */}
+      {pastSessions.length > 0 && (
+        <Accordion
+          disableGutters
+          elevation={0}
+          variant="outlined"
+          sx={{ '&:before': { display: 'none' }, borderRadius: 1, mt: 'auto' }}
+        >
+          <AccordionSummary expandIcon={<ExpandMoreIcon fontSize="small" />} sx={{ minHeight: 40 }}>
+            <Typography variant="subtitle2" fontWeight={600}>
+              Past chats ({pastSessions.length})
+            </Typography>
+          </AccordionSummary>
+          <AccordionDetails sx={{ p: 0 }}>
+            <Stack divider={<Box sx={{ borderBottom: 1, borderColor: 'divider' }} />}>
+              {pastSessions.map((s) => {
+                const chip = STATUS_CHIP[s.status] ?? STATUS_CHIP.abandoned;
+                const preview = s.proposed_instructions
+                  ? s.proposed_instructions.slice(0, 80) +
+                    (s.proposed_instructions.length > 80 ? '…' : '')
+                  : '—';
+                const isOpen = expandedSessionId === s.id;
+                return (
+                  <Box key={s.id}>
+                    <Box
+                      onClick={() => handleToggleSession(s.id)}
+                      sx={{
+                        px: 1.5,
+                        py: 1,
+                        cursor: 'pointer',
+                        '&:hover': { bgcolor: 'action.hover' },
+                      }}
+                    >
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.25 }}>
+                        <Chip label={chip.label} size="small" color={chip.color} variant="outlined" />
+                        <Typography variant="caption" color="text.secondary">
+                          {new Date(s.created_at).toLocaleString()}
+                        </Typography>
+                      </Box>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{
+                          display: 'block',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {preview}
+                      </Typography>
+                    </Box>
+                    <Collapse in={isOpen} unmountOnExit>
+                      <Box sx={{ px: 1, pb: 1.5, height: 360, display: 'flex' }}>
+                        {loadingTranscript ? (
+                          <Box
+                            sx={{
+                              flex: 1,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                            }}
+                          >
+                            <CircularProgress size={18} />
+                          </Box>
+                        ) : (
+                          <ChatView
+                            compact
+                            readOnly
+                            messages={pastTranscript}
+                            issues={pastTranscriptIssues}
+                            draft=""
+                            onDraftChange={() => {}}
+                            onSend={() => {}}
+                            sending={false}
+                            readyToSynthesize={false}
+                            onSynthesize={() => {}}
+                          />
+                        )}
+                      </Box>
+                    </Collapse>
+                  </Box>
+                );
+              })}
+            </Stack>
+          </AccordionDetails>
+        </Accordion>
       )}
     </Box>
   );

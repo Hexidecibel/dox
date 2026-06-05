@@ -16,6 +16,7 @@ import {
   BadRequestError,
   errorToResponse,
 } from '../../../lib/permissions';
+import type { TeachSessionSummary } from '../../../../shared/types';
 import type { Env, User } from '../../../lib/types';
 import { analyzeUncertainty } from '../../../lib/teach/uncertainty';
 import { callQwenChat, buildQuestionsPrompt } from '../../../lib/teach/qwen';
@@ -71,6 +72,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // session is synthesized/confirmed/abandoned it's terminal and a fresh
     // interview should start. This lets the reviewer keep one running interview
     // while working through multiple docs of the same supplier.
+    //
+    // Invariant: at most one active `open` session per
+    // (tenant, supplier, doctype). The newest open row is resumed; any older
+    // open rows are stale orphans (a chat that was started then abandoned) and
+    // get flipped to `abandoned` below so they stop accumulating forever.
     const existing = await context.env.DB.prepare(
       `SELECT id FROM teach_sessions
        WHERE tenant_id = ? AND supplier_id = ? AND document_type_id = ? AND status = 'open'
@@ -78,6 +84,35 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     )
       .bind(tenantId, body.supplier_id, body.document_type_id)
       .first<{ id: string }>();
+
+    // Archive every OTHER open session for this pair (no-op when none exist or
+    // there's nothing to resume). Keeps a single live interview per combo.
+    const archived = await context.env.DB.prepare(
+      `UPDATE teach_sessions
+         SET status = 'abandoned', updated_at = datetime('now')
+       WHERE tenant_id = ? AND supplier_id = ? AND document_type_id = ?
+         AND status = 'open' AND id != ?`,
+    )
+      .bind(tenantId, body.supplier_id, body.document_type_id, existing?.id ?? '')
+      .run();
+
+    const archivedCount = archived.meta?.changes ?? 0;
+    if (archivedCount > 0) {
+      await logAudit(
+        context.env.DB,
+        user.id,
+        tenantId,
+        'teach_sessions_auto_archived',
+        'teach_session',
+        existing?.id ?? null,
+        JSON.stringify({
+          supplier_id: body.supplier_id,
+          document_type_id: body.document_type_id,
+          archived_count: archivedCount,
+        }),
+        getClientIp(context.request),
+      );
+    }
 
     if (existing) {
       const row = await loadSessionRow(context.env.DB, existing.id, tenantId);
@@ -165,6 +200,76 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;
     console.error('Create teach session error:', err);
+    return new Response(JSON.stringify({ error: 'Internal server error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+};
+
+/**
+ * GET /api/teach/sessions?supplier_id=X&document_type_id=Y
+ *
+ * List PAST (non-active) teach sessions for a (supplier, document_type) pair:
+ * everything except the single active `open` session — i.e. `confirmed`,
+ * `abandoned`, and `synthesized`. Newest first, capped. Light rows only (a
+ * message_count subquery, no inline transcript) — full transcripts come from
+ * GET /api/teach/sessions/:id.
+ *
+ * Auth + tenant scoping mirror the POST handler above.
+ */
+export const onRequestGet: PagesFunction<Env> = async (context) => {
+  try {
+    const user = context.data.user as User;
+    requireRole(user, 'super_admin', 'org_admin', 'user');
+
+    const url = new URL(context.request.url);
+    const supplierId = url.searchParams.get('supplier_id');
+    const documentTypeId = url.searchParams.get('document_type_id');
+    if (!supplierId) throw new BadRequestError('supplier_id is required');
+    if (!documentTypeId) throw new BadRequestError('document_type_id is required');
+
+    const tenantId = resolveTenantId(user, url.searchParams.get('tenant_id'));
+    if (!tenantId) {
+      throw new BadRequestError('tenant_id is required for super_admin');
+    }
+    requireTenantAccess(user, tenantId);
+
+    const res = await context.env.DB.prepare(
+      `SELECT s.id, s.status, s.created_at, s.updated_at, s.proposed_instructions,
+              (SELECT COUNT(*) FROM teach_messages m WHERE m.session_id = s.id) AS message_count
+       FROM teach_sessions s
+       WHERE s.tenant_id = ? AND s.supplier_id = ? AND s.document_type_id = ?
+         AND s.status != 'open'
+       ORDER BY s.created_at DESC
+       LIMIT 50`,
+    )
+      .bind(tenantId, supplierId, documentTypeId)
+      .all<{
+        id: string;
+        status: string;
+        created_at: string;
+        updated_at: string;
+        proposed_instructions: string | null;
+        message_count: number;
+      }>();
+
+    const sessions: TeachSessionSummary[] = (res.results ?? []).map((r) => ({
+      id: r.id,
+      status: r.status as TeachSessionSummary['status'],
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+      proposed_instructions: r.proposed_instructions,
+      message_count: Number(r.message_count) || 0,
+    }));
+
+    return new Response(JSON.stringify({ sessions }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (err) {
+    const httpErr = errorToResponse(err);
+    if (httpErr) return httpErr;
+    console.error('List teach sessions error:', err);
     return new Response(JSON.stringify({ error: 'Internal server error' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },

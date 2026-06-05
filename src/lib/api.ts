@@ -50,6 +50,7 @@ import type {
   TeachSynthesizeResponse,
   TeachSessionDetailResponse,
   TeachConfirmResponse,
+  TeachSessionListResponse,
   ActivityFilters,
   ActivityListResponse,
   ActivityEventType,
@@ -1341,6 +1342,15 @@ export const api = {
     getSession: (id: string, tenantId?: string) => {
       const qs = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
       return fetchApi<TeachSessionDetailResponse>(`/teach/sessions/${id}${qs}`);
+    },
+    /** GET /api/teach/sessions — past (non-active) sessions for a (supplier, doctype) pair. */
+    listSessions: (data: { supplier_id: string; document_type_id: string; tenant_id?: string }) => {
+      const params = new URLSearchParams({
+        supplier_id: data.supplier_id,
+        document_type_id: data.document_type_id,
+      });
+      if (data.tenant_id) params.set('tenant_id', data.tenant_id);
+      return fetchApi<TeachSessionListResponse>(`/teach/sessions?${params.toString()}`);
     },
     /** POST /api/teach/sessions/:id/messages — append an SME answer. */
     postMessage: (id: string, content: string, tenantId?: string) =>

@@ -13,7 +13,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
-import { onRequestPost as createSession } from '../../functions/api/teach/sessions/index';
+import {
+  onRequestPost as createSession,
+  onRequestGet as listSessions,
+} from '../../functions/api/teach/sessions/index';
 import { onRequestPost as postMessage } from '../../functions/api/teach/sessions/[id]/messages';
 import { onRequestPost as confirmSession } from '../../functions/api/teach/sessions/[id]/confirm';
 
@@ -78,6 +81,10 @@ function makeContext(
 
 function postReq(url: string, body: unknown): Request {
   return new Request(url, { method: 'POST', body: JSON.stringify(body) });
+}
+
+function getReq(url: string): Request {
+  return new Request(url, { method: 'GET' });
 }
 
 beforeAll(async () => {
@@ -185,6 +192,119 @@ describe('POST /api/teach/sessions', () => {
       document_type_id: docTypeId,
     });
     const res = await createSession(makeContext(req, user()));
+    expect(res.status).toBe(400);
+  });
+
+  it('auto-archives stale open sessions, leaving exactly one active open', async () => {
+    // Seed two extra stale 'open' rows for the same pair (orphaned chats).
+    // staleB is newer, so it's the one that should be resumed.
+    const staleA = generateTestId();
+    const staleB = generateTestId();
+    await db
+      .prepare(
+        `INSERT INTO teach_sessions (id, tenant_id, supplier_id, document_type_id, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'open', datetime('now', '-2 hours'), datetime('now', '-2 hours'))`,
+      )
+      .bind(staleA, seed.tenantId, supplierId, docTypeId)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO teach_sessions (id, tenant_id, supplier_id, document_type_id, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'open', datetime('now', '-1 hour'), datetime('now', '-1 hour'))`,
+      )
+      .bind(staleB, seed.tenantId, supplierId, docTypeId)
+      .run();
+
+    // Create -> resumes the newest open, abandons the older two.
+    const res = await createSession(
+      makeContext(
+        postReq('http://localhost/api/teach/sessions', {
+          supplier_id: supplierId,
+          document_type_id: docTypeId,
+        }),
+        user(),
+      ),
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { session_id: string; resumed: boolean };
+    expect(data.resumed).toBe(true);
+    // Resumed the newest of the two stale opens.
+    expect(data.session_id).toBe(staleB);
+
+    const openCount = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM teach_sessions WHERE supplier_id = ? AND document_type_id = ? AND status = 'open'",
+      )
+      .bind(supplierId, docTypeId)
+      .first<{ n: number }>();
+    expect(openCount?.n).toBe(1);
+
+    const staleAStatus = await db
+      .prepare('SELECT status FROM teach_sessions WHERE id = ?')
+      .bind(staleA)
+      .first<{ status: string }>();
+    expect(staleAStatus?.status).toBe('abandoned');
+  });
+});
+
+describe('GET /api/teach/sessions', () => {
+  it('lists past (non-active) sessions for a pair, excluding the active open', async () => {
+    // One active open (should NOT be listed).
+    await createSession(
+      makeContext(
+        postReq('http://localhost/api/teach/sessions', {
+          supplier_id: supplierId,
+          document_type_id: docTypeId,
+        }),
+        user(),
+      ),
+    );
+    // One confirmed past session with proposed_instructions + 2 messages.
+    const past = generateTestId();
+    await db
+      .prepare(
+        `INSERT INTO teach_sessions (id, tenant_id, supplier_id, document_type_id, status, proposed_instructions, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'confirmed', ?, datetime('now', '-2 hours'), datetime('now', '-2 hours'))`,
+      )
+      .bind(past, seed.tenantId, supplierId, docTypeId, 'Read lot from top-right box.')
+      .run();
+    for (const role of ['ai', 'sme'] as const) {
+      await db
+        .prepare(
+          `INSERT INTO teach_messages (id, session_id, role, content) VALUES (?, ?, ?, ?)`,
+        )
+        .bind(generateTestId(), past, role, 'hi')
+        .run();
+    }
+
+    const res = await listSessions(
+      makeContext(
+        getReq(
+          `http://localhost/api/teach/sessions?supplier_id=${supplierId}&document_type_id=${docTypeId}`,
+        ),
+        user(),
+      ),
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      sessions: Array<{
+        id: string;
+        status: string;
+        proposed_instructions: string | null;
+        message_count: number;
+      }>;
+    };
+    expect(data.sessions.length).toBe(1);
+    expect(data.sessions[0].id).toBe(past);
+    expect(data.sessions[0].status).toBe('confirmed');
+    expect(data.sessions[0].proposed_instructions).toBe('Read lot from top-right box.');
+    expect(data.sessions[0].message_count).toBe(2);
+  });
+
+  it('requires supplier_id and document_type_id', async () => {
+    const res = await listSessions(
+      makeContext(getReq('http://localhost/api/teach/sessions'), user()),
+    );
     expect(res.status).toBe(400);
   });
 });

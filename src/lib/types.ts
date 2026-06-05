@@ -73,6 +73,8 @@ export type {
   TeachSynthesizeResponse,
   TeachSessionDetailResponse,
   TeachConfirmResponse,
+  TeachSessionSummary,
+  TeachSessionListResponse,
   ActivityEvent,
   ActivityEventType,
   ActivitySourceFilter,

@@ -236,6 +236,21 @@ export interface TeachConfirmResponse {
   examples_written: number;
 }
 
+/** A lightweight past-session summary (no inline transcript). */
+export interface TeachSessionSummary {
+  id: string;
+  status: TeachSessionStatus;
+  created_at: string;
+  updated_at: string;
+  proposed_instructions: string | null;
+  message_count: number;
+}
+
+/** GET /api/teach/sessions?supplier_id&document_type_id response. */
+export interface TeachSessionListResponse {
+  sessions: TeachSessionSummary[];
+}
+
 export interface DocumentTypeRow {
   id: string;
   tenant_id: string;
