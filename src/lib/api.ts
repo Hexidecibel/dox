@@ -1296,6 +1296,36 @@ export const api = {
   },
 
   /**
+   * Per-tenant extraction context. The org-wide prompt layer prepended to every
+   * extraction for this tenant (the editable "industry/domain" slot). NULL on
+   * the server means fall back to the built-in dairy default; the GET returns
+   * that default as `default_template` so the UI can seed the editor without
+   * duplicating the text client-side.
+   */
+  tenantExtractionContext: {
+    get: (params?: { tenant_id?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.tenant_id) qs.set('tenant_id', params.tenant_id);
+      const suffix = qs.toString() ? `?${qs.toString()}` : '';
+      return fetchApi<{
+        extraction_context: string | null;
+        default_template: string;
+        updated_at: string | null;
+        updated_by: string | null;
+      }>(`/tenant-extraction-context${suffix}`);
+    },
+    put: (body: { extraction_context: string; tenant_id?: string }) =>
+      fetchApi<{
+        extraction_context: string;
+        updated_at: string;
+        updated_by: string;
+      }>('/tenant-extraction-context', {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }),
+  },
+
+  /**
    * Learning Interface (teach-chat). A domain expert teaches the system how to
    * read a supplier's documents through a guided conversation; on confirm the
    * proposal is written to the (supplier, document_type) extraction profile.

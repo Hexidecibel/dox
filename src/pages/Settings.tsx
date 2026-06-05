@@ -20,6 +20,7 @@ import {
   History as HistoryIcon,
   MonitorHeart as MonitorHeartIcon,
   Insights as InsightsIcon,
+  Psychology as ExtractionContextIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import type { Role } from '../lib/types';
@@ -35,6 +36,7 @@ import { Tenants } from './admin/Tenants';
 import { IngestHistory } from './IngestHistory';
 import { ProcessingStatus } from './admin/ProcessingStatus';
 import LearningDashboard from './admin/LearningDashboard';
+import TenantExtractionContextBox from './TenantExtractionContextBox';
 
 interface SettingsItem {
   // URL-friendly key used as /settings/:section
@@ -56,6 +58,7 @@ const SECTIONS: SettingsSection[] = [
   {
     title: 'Catalog & Sources',
     items: [
+      { key: 'extraction-context', label: 'Extraction Context', icon: <ExtractionContextIcon />, roles: ALL_ADMIN, component: TenantExtractionContextBox },
       { key: 'document-types', label: 'Document Types', icon: <DocTypesIcon />, roles: ALL_ADMIN, component: DocumentTypes },
       { key: 'sources', label: 'Sources', icon: <ConnectorsIcon />, roles: ALL_ADMIN, component: Sources },
     ],

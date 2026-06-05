@@ -53,8 +53,11 @@ describe('process-worker — reviewer instructions wiring', () => {
   it('applies prependReviewerInstructions to the text-path system prompt', () => {
     // The text-path Qwen call must receive buildPrompt() wrapped in
     // prependReviewerInstructions() so reviewer guidance gets honored.
+    // buildPrompt now also takes the tenant-level extraction context as its
+    // 2nd arg (the editable per-tenant industry layer); combo reviewer
+    // instructions still stack on top.
     expect(processWorkerSource).toMatch(
-      /prependReviewerInstructions\(buildPrompt\(examples\), reviewerInstructions\)/
+      /prependReviewerInstructions\(buildPrompt\(examples, tenantContext\), reviewerInstructions\)/
     );
   });
 
@@ -62,7 +65,7 @@ describe('process-worker — reviewer instructions wiring', () => {
     // Same requirement for the VLM path — dual mode sends the same doc to
     // both models and both need the guidance.
     expect(processWorkerSource).toMatch(
-      /prependReviewerInstructions\(buildVlmPrompt\(examples\), reviewerInstructions\)/
+      /prependReviewerInstructions\(buildVlmPrompt\(examples, tenantContext\), reviewerInstructions\)/
     );
   });
 

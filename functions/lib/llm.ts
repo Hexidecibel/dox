@@ -70,12 +70,25 @@ Return JSON with:
 
 export const INDUSTRY_PROMPTS: Record<string, string> = {
   DAIRY_FOOD: `
+ORG CONTEXT:
+[Describe your organization and what these documents are for — edit this. e.g. "We are a dairy distributor managing supplier Certificates of Analysis for regulatory compliance. Lot traceability is critical; every document must be tied to a lot."]
+
 INDUSTRY CONTEXT — Dairy & Food:
 - Common COA tests: Standard Plate Count (SPC), coliform, E. coli, yeast & mold, somatic cell count, butterfat %, moisture %, pH, acidity, temperature
 - Grade designations: Grade A, Grade AA, US Extra, USDA grades
 - Plant/facility numbers: USDA plant numbers (e.g., "Plant 42-1234")
 - Code dates may use Julian format (YDDD where Y=last digit of year, DDD=day)
 - Net weights: common units are lbs, gallons, kg
+
+DAIRY COA DOMAIN RULES (hard rules — follow exactly):
+- Lab consumables are NEVER product data. Reagent / control / buffer lot numbers (e.g. 3M Petrifilm CC/AC/BUFFER lots and their expirations), dilution rows, plate-incubation tables, and incubator temperatures must never be bound to a product field. A reagent lot mistaken for the product's lot is the single worst error.
+- Certification / legal boilerplate numbers are reference, not results. Numbers inside raw-milk certification clauses or regulatory citations (e.g. "standard plate count 100,000 per ml", "somatic cell 400,000 per ml") are reference thresholds, NOT this product's measured values. Do not extract them as results.
+- Capture specifications verbatim; NEVER derive pass/fail. Copy the spec string exactly as printed. Leave pass/fail empty unless the document itself prints an explicit verdict — the human decides conformance.
+- Result is not the spec. When a table has Spec and Result columns, the measured value is the Result; never report the spec/limit as the result.
+- Lot is the most important field and keys every record. If there is no explicit lot label but a CODE DATE / DATE CODE is present, it may serve as the lot — capture it as the lot, and also keep it in its own date field.
+- A missing required pathogen result (Listeria, Salmonella) is a GAP, not a pass — return null; do not infer absence.
+- Capture yeast/mold and sensory (flavor / color / odor) exactly as printed — never auto-combine, split, or collapse them.
+- Normalize dates to YYYY-MM-DD; when numeric order is genuinely ambiguous (e.g. 03/04/26 could be Mar or Apr), keep as-is rather than guess.
 
 EXAMPLE — Dairy COA extraction:
 Input: "Darigold Inc. COA for Grade AA Butter 68#, Lot L26-0842, PO PO-44821, Packed 03/15/26, Best By 09/15/26, Plant 42-1234. Tests: Fat >80% result 81.2% Pass, Moisture <16% result 15.4% Pass, Coliform <10 CFU/g result <1 Pass, SPC <20000 CFU/g result 4500 Pass"
@@ -109,6 +122,14 @@ Output:
   "document_type": "Certificate of Analysis"
 }`,
 };
+
+/**
+ * The seeded default for a tenant's editable extraction_context (the dairy
+ * "industry layer"). When a tenant has no custom extraction_context, this string
+ * occupies the industry-layer slot. Served by GET /api/tenant-extraction-context
+ * as `default_template` so the editor UI can seed without duplicating the text.
+ */
+export const DEFAULT_DAIRY_CONTEXT = INDUSTRY_PROMPTS.DAIRY_FOOD;
 
 function buildPrompt(options?: { examples?: Array<{ text: string; result: string }>; industryPrompt?: string }): string {
   const { examples, industryPrompt = INDUSTRY_PROMPTS.DAIRY_FOOD } = options || {};

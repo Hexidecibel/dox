@@ -87,7 +87,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // 3. Look up email domain mapping
     const mapping = await context.env.DB.prepare(
       `SELECT edm.tenant_id, edm.default_user_id, edm.default_document_type_id,
-              t.slug AS tenant_slug, t.name AS tenant_name
+              t.slug AS tenant_slug, t.name AS tenant_name,
+              t.extraction_context AS extraction_context
        FROM email_domain_mappings edm
        JOIN tenants t ON t.id = edm.tenant_id
        WHERE edm.domain = ? AND edm.active = 1`
@@ -99,6 +100,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         default_document_type_id: string | null;
         tenant_slug: string;
         tenant_name: string;
+        extraction_context: string | null;
       }>();
 
     if (!mapping) {
@@ -170,8 +172,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         let supplier: string | null = null;
 
         if (text) {
+          // The tenant's editable extraction_context occupies the industry-layer
+          // slot. When null, extractFields falls back to the seeded default dairy
+          // context (no regression).
+          const tenantContext = mapping.extraction_context || undefined;
+
           // Initial extraction (no few-shot — need supplier first)
-          const initialExtraction = await extractFields(text, context.env);
+          const initialExtraction = await extractFields(text, context.env, {
+            industryPrompt: tenantContext,
+          });
 
           // Detect supplier from extracted fields
           const supplierKeys = ['supplier_name', 'supplier', 'manufacturer', 'vendor', 'company', 'from'];
@@ -210,6 +219,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           const extraction = fewShotExamples.length > 0
             ? await extractFields(text, context.env, {
                 examples: fewShotExamples.map(e => ({ text: e.input_text, result: e.corrected_output })),
+                industryPrompt: tenantContext,
               })
             : initialExtraction;
 

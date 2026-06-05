@@ -411,6 +411,31 @@ async function fetchReviewerInstructions(tenantId, supplierId, documentTypeId) {
 }
 
 /**
+ * Fetch the tenant's editable extraction context (the "industry layer" / dairy
+ * brain). When a tenant has set one, it replaces the hardcoded
+ * DAIRY_FOOD_INDUSTRY_PROMPT default in the assembled system prompt; when unset
+ * (null / empty), the caller falls back to the default. Non-fatal — returns
+ * null on miss or any error, never throws (mirrors fetchReviewerInstructions).
+ *
+ * See migration 0072_tenant_extraction_context.sql + /api/tenant-extraction-context.
+ */
+async function fetchTenantContext(tenantId) {
+  if (!tenantId) return null;
+  try {
+    const params = new URLSearchParams({ tenant_id: tenantId });
+    const res = await fetch(
+      `${DOX_API_URL}/api/tenant-extraction-context?${params.toString()}`,
+      { headers }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data && typeof data.extraction_context === 'string') ? data.extraction_context : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch the Phase 3 learned preferences for a (supplier, doctype) pair, if
  * any exist. Returns null on missing inputs / failure / no signal — never
  * throws. The worker uses this for two things:
@@ -1752,6 +1777,10 @@ async function processCoaItem(item) {
     let reviewerInstructions = '';
     let learnedPreferences = null;
     let resolvedSupplierIdForLearning = null;
+    // Tenant-level extraction context (the editable "industry layer"). Fetched
+    // once per item; when null the prompt builders fall back to the hardcoded
+    // dairy default. Combo reviewer instructions still stack on top of this.
+    const tenantContext = await fetchTenantContext(item.tenant_id);
     try {
       const supplierName = item.supplier || guessedSupplier || null;
       resolvedSupplierIdForLearning = await resolveSupplierIdByName(item.tenant_id, supplierName);
@@ -1822,7 +1851,7 @@ async function processCoaItem(item) {
                   role: 'system',
                   content: prependFilenameHint(
                     prependAttentionBias(
-                      prependReviewerInstructions(buildPrompt(examples), reviewerInstructions),
+                      prependReviewerInstructions(buildPrompt(examples, tenantContext), reviewerInstructions),
                       learnedPreferences
                     ),
                     item.file_name
@@ -1929,7 +1958,7 @@ async function processCoaItem(item) {
         const res = await extractWithVLM(
           fileBufferForVlm,
           prependAttentionBias(
-            prependReviewerInstructions(buildVlmPrompt(examples), reviewerInstructions),
+            prependReviewerInstructions(buildVlmPrompt(examples, tenantContext), reviewerInstructions),
             learnedPreferences
           ),
           'Extract all structured data from the document image(s). Return JSON only.',
@@ -2373,12 +2402,25 @@ Return JSON with:
 }`;
 
 const DAIRY_FOOD_INDUSTRY_PROMPT = `
+ORG CONTEXT:
+[Describe your organization and what these documents are for — edit this. e.g. "We are a dairy distributor managing supplier Certificates of Analysis for regulatory compliance. Lot traceability is critical; every document must be tied to a lot."]
+
 INDUSTRY CONTEXT — Dairy & Food:
 - Common COA tests: Standard Plate Count (SPC), coliform, E. coli, yeast & mold, somatic cell count, butterfat %, moisture %, pH, acidity, temperature
 - Grade designations: Grade A, Grade AA, US Extra, USDA grades
 - Plant/facility numbers: USDA plant numbers (e.g., "Plant 42-1234")
 - Code dates may use Julian format (YDDD where Y=last digit of year, DDD=day)
 - Net weights: common units are lbs, gallons, kg
+
+DAIRY COA DOMAIN RULES (hard rules — follow exactly):
+- Lab consumables are NEVER product data. Reagent / control / buffer lot numbers (e.g. 3M Petrifilm CC/AC/BUFFER lots and their expirations), dilution rows, plate-incubation tables, and incubator temperatures must never be bound to a product field. A reagent lot mistaken for the product's lot is the single worst error.
+- Certification / legal boilerplate numbers are reference, not results. Numbers inside raw-milk certification clauses or regulatory citations (e.g. "standard plate count 100,000 per ml", "somatic cell 400,000 per ml") are reference thresholds, NOT this product's measured values. Do not extract them as results.
+- Capture specifications verbatim; NEVER derive pass/fail. Copy the spec string exactly as printed. Leave pass/fail empty unless the document itself prints an explicit verdict — the human decides conformance.
+- Result is not the spec. When a table has Spec and Result columns, the measured value is the Result; never report the spec/limit as the result.
+- Lot is the most important field and keys every record. If there is no explicit lot label but a CODE DATE / DATE CODE is present, it may serve as the lot — capture it as the lot, and also keep it in its own date field.
+- A missing required pathogen result (Listeria, Salmonella) is a GAP, not a pass — return null; do not infer absence.
+- Capture yeast/mold and sensory (flavor / color / odor) exactly as printed — never auto-combine, split, or collapse them.
+- Normalize dates to YYYY-MM-DD; when numeric order is genuinely ambiguous (e.g. 03/04/26 could be Mar or Apr), keep as-is rather than guess.
 
 EXAMPLE — Dairy COA extraction:
 Input: "Darigold Inc. COA for Grade AA Butter 68#, Lot L26-0842, PO PO-44821, Packed 03/15/26, Best By 09/15/26, Plant 42-1234. Tests: Fat >80% result 81.2% Pass, Moisture <16% result 15.4% Pass, Coliform <10 CFU/g result <1 Pass, SPC <20000 CFU/g result 4500 Pass"
@@ -2412,8 +2454,8 @@ Output:
   "document_type": "Certificate of Analysis"
 }`;
 
-function buildPrompt(examples = []) {
-  let prompt = BASE_PROMPT + '\n\n' + DAIRY_FOOD_INDUSTRY_PROMPT;
+function buildPrompt(examples = [], tenantContext = null) {
+  let prompt = BASE_PROMPT + '\n\n' + (tenantContext || DAIRY_FOOD_INDUSTRY_PROMPT);
 
   if (examples.length > 0) {
     prompt += '\n\nPREVIOUS CORRECTIONS FOR THIS SUPPLIER/DOCUMENT TYPE:';
@@ -2501,7 +2543,7 @@ async function renderPdfPagesToPng(pdfBuffer, maxPages) {
  * VLM-specific rules that lean on the model's ability to read the image
  * directly (no OCR garble to worry about).
  */
-function buildVlmPrompt(examples = []) {
+function buildVlmPrompt(examples = [], tenantContext = null) {
   const VLM_HEADER = `You are a document data extraction assistant looking at an IMAGE of the document (no OCR text — you read the pixels directly).
 
 VLM-SPECIFIC RULES:
@@ -2577,7 +2619,7 @@ Return JSON with:
   "document_type": "Certificate of Analysis" | "Bill of Lading" | etc.
 }`;
 
-  let prompt = VLM_HEADER + '\n\n' + DAIRY_FOOD_INDUSTRY_PROMPT;
+  let prompt = VLM_HEADER + '\n\n' + (tenantContext || DAIRY_FOOD_INDUSTRY_PROMPT);
 
   if (examples.length > 0) {
     prompt += '\n\nPREVIOUS CORRECTIONS FOR THIS SUPPLIER/DOCUMENT TYPE:';
@@ -2919,6 +2961,10 @@ async function runParityMode() {
       let reviewerInstructions = '';
       let learnedPreferences = null;
       let resolvedSupplierIdForLearning = null;
+      // Tenant-level extraction context (editable "industry layer"); null →
+      // prompt builders fall back to the hardcoded dairy default. Combo reviewer
+      // instructions still stack on top of this.
+      const tenantContext = await fetchTenantContext(item.tenant_id);
       try {
         const supplierName = item.supplier || guessedSupplier || null;
         resolvedSupplierIdForLearning = await resolveSupplierIdByName(item.tenant_id, supplierName);
@@ -2958,7 +3004,7 @@ async function runParityMode() {
                     role: 'system',
                     content: prependFilenameHint(
                       prependAttentionBias(
-                        prependReviewerInstructions(buildPrompt(examples), reviewerInstructions),
+                        prependReviewerInstructions(buildPrompt(examples, tenantContext), reviewerInstructions),
                         learnedPreferences
                       ),
                       item.file_name
@@ -3021,7 +3067,7 @@ async function runParityMode() {
           const res = await extractWithVLM(
             fileBufferForVlm,
             prependAttentionBias(
-              prependReviewerInstructions(buildVlmPrompt(examples), reviewerInstructions),
+              prependReviewerInstructions(buildVlmPrompt(examples, tenantContext), reviewerInstructions),
               learnedPreferences
             ),
             'Extract all structured data from the document image(s). Return JSON only.',

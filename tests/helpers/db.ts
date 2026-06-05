@@ -68,6 +68,7 @@ import m0068 from '../../migrations/0068_extraction_profiles_and_internal_suppli
 import m0069 from '../../migrations/0069_document_types_supplier_scope.sql?raw';
 import m0070 from '../../migrations/0070_teach_sessions.sql?raw';
 import m0071 from '../../migrations/0071_assignments.sql?raw';
+import m0072 from '../../migrations/0072_tenant_extraction_context.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -77,6 +78,7 @@ const migrations: string[] = [
   m0046, m0047, m0048, m0049, m0050, m0051, m0052, m0053, m0054, m0055,
   m0056, m0057, m0058, m0059, m0060, m0061, m0062, m0063,
   m0064, m0065, m0066, m0067, m0068, m0069, m0070, m0071,
+  m0072,
 ];
 
 /**
