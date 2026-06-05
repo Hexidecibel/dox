@@ -46,6 +46,58 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Multi-product / multi-lot / multi-page COAs (make COA a records-kind)
+
+**Status:** planned (2026-06-05). Motivation: a multi-page COA (Darigold
+one-product-per-page, Savencia multi-product-per-row, Darigold multi-lot/sublot)
+is captured but FLATTENED — the text path chunks every page then
+`mergeTextExtractions` concatenates `products[]`/`tables[]` and keeps one flat
+field map, so per-product/per-lot structure is lost and only a crude manual
+"multi-product mode" splits it. Goal: no data lost on any COA; each product/lot
+becomes its own reviewable, approvable record → its own `documents` + `lots` row,
+so order⇄COA matching works per lot.
+
+**Key insight:** orders/shipments ALREADY have the records model COA needs —
+`processing_queue.ai_records` (mig 0067) + `output_kind` routing + per-record
+review tile (`OrderReviewTile`) + `handleRecordsApprove`. This is "make `coa` a
+records-kind," not a greenfield build. Adopts Chris's playbook DATA model
+(`record_cardinality`, `record_key_basis`, page-metadata vs per-record, `sub_lot_code`,
+structured groups) — not his prompt machinery (we have the two-layer prompt + teach loop).
+
+**Approach:** hybrid extraction — LLM emits `records`/`record_cardinality`/`page_metadata`
+(prompt return-shape extension), a deterministic `mergeCoaRecords` assembles records
+across chunk boundaries (the LLM is blind across chunks) and hoists shared fields to
+`page_metadata` (over-split guard). Reuse `ai_records` (no migration P1–P4). New
+`CoaRecordsReviewTile` (per-record edit + partial approve). Generalize
+`produceMultiProductCoa` → `produceCoaRecords` with per-record lot linkage.
+Flag-gated `COA_RECORDS_MODE=off|shadow|on`, staging-first.
+
+**Full plan:** `/home/hexi/.claude/plans/coa-multi-record.md`
+
+#### P1 — Model + worker emits records (shadow) ships when:
+- `shared/types.ts` has `CoaRecord`/`CoaRecordsPayload`/cardinality enums
+- Worker COA prompt returns `records`/`record_cardinality`/`page_metadata`
+- `mergeCoaRecords` assembles + dedupes records across chunks (lot/sublot/product key)
+- `COA_RECORDS_MODE=shadow` posts `ai_records` alongside `ai_fields`; real
+  Darigold/Savencia/Andersen COAs inspected and split correctly
+
+#### P2 — Queue storage/serving ships when:
+- GET/list queue endpoints surface records-shaped COA `ai_records` with per-record confidence
+
+#### P3 — Review UI ships when:
+- `CoaRecordsReviewTile` renders page-metadata panel + one editable record per
+  product/lot with source-page + low-confidence chips
+- `ReviewQueue` dispatches records-shaped COA → new tile; single-record → flat editor unchanged
+
+#### P4 — Per-record approval (`on`) ships when:
+- Record unit = per lot/sublot: approving an N-lot COA creates N documents + N lots; order⇄COA matches per lot
+- Each split document stores a PAGE-SCOPED PDF (its own `source_pages` extracted via `unpdf`), not the whole file
+- Partial approval (approve/hold/reject per record) leaves held records `pending`
+
+#### P5 — Retire manual multi-product mode ships when:
+- `isMultiProduct()` heuristic + shared/per-product UI removed; `produceMultiProductCoa`
+  collapsed into `produceCoaRecords`; multi-product COAs route only via the records path
+
 ### Connector extraction repair surface (3-stage, sequenced)
 
 **Status:** planned (2026-05-12). Motivation: extraction occasionally
