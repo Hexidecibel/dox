@@ -29,6 +29,7 @@ DB="doc-upload-db"
 REMOTE_FLAG=""
 APPLY=0
 SKIP_CONFIRM=0
+ONLY_ERRORS=0
 TENANT=""
 
 while [ $# -gt 0 ]; do
@@ -37,6 +38,7 @@ while [ $# -gt 0 ]; do
     --remote|-r) REMOTE_FLAG="--remote"; shift ;;
     --apply) APPLY=1; shift ;;
     --yes|-y) SKIP_CONFIRM=1; shift ;;
+    --only-errors) ONLY_ERRORS=1; shift ;;   # only re-enqueue pending rows stuck in processing_status='error'
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -50,6 +52,7 @@ fi
 # Single-quote escaping for the tenant id (defensive; ids are hex but be safe).
 TENANT_ESC="${TENANT//\'/\'\'}"
 WHERE="tenant_id = '$TENANT_ESC' AND status = 'pending'"
+[ "$ONLY_ERRORS" = "1" ] && WHERE="$WHERE AND processing_status = 'error'"
 
 target_label="LOCAL D1"
 [ -n "$REMOTE_FLAG" ] && target_label="REMOTE (PROD) D1"
