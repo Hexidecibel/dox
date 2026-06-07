@@ -1022,7 +1022,7 @@ type DiscoveryOutcome =
   | { ok: true; result: DiscoveryResult }
   | { ok: false; reason: string };
 
-const DISCOVERY_TIMEOUT_MS = 60_000;
+const DISCOVERY_TIMEOUT_MS = 300_000;
 
 /**
  * Call Qwen with the schema-discovery prompt against a chunk of source text.

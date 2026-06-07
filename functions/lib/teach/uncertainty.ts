@@ -386,7 +386,7 @@ async function maybeQwenJudge(
 
   const baseUrl = (env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const timeout = setTimeout(() => controller.abort(), 300_000);
   try {
     const response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',

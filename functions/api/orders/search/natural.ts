@@ -79,7 +79,7 @@ async function parseOrderQuery(
   ].join('\n');
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const timeout = setTimeout(() => controller.abort(), 300_000);
 
   let response: Response;
   try {
@@ -106,7 +106,7 @@ async function parseOrderQuery(
   } catch (err: unknown) {
     clearTimeout(timeout);
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error('LLM request timed out after 30 seconds');
+      throw new Error('LLM request timed out after 300 seconds');
     }
     throw new Error(`LLM server not reachable at ${baseUrl}. Is Qwen running?`);
   } finally {

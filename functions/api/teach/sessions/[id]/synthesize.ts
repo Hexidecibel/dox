@@ -87,7 +87,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const raw = await callQwenChat(
         context.env,
         buildSynthesisPrompt(conversation, issues, background),
-        { model: 'best', temperature: 0.1, maxTokens: 1280, timeoutMs: 110_000 },
+        { model: 'best', temperature: 0.1, maxTokens: 1280, timeoutMs: 300_000 },
       );
       const parsed = parseSynthesis(raw);
       proposal = parsed.instructions.trim() ? parsed : fallbackProposal();
