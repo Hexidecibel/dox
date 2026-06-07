@@ -4,6 +4,36 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-06-06/07 COA MULTI-RECORD SPLIT (page-first) + GPU/TIMEOUT FIXES — IN PROGRESS
+
+**Pick up here:** waiting on the teammate's answer to the **sublot-grain** question
+(user said he has an answer, giving it next session). The question sent to him:
+for a product with sublots (e.g. Darigold item 810004, lot 10426110, sublots 05/04/02),
+**one record per product/main-lot** (sublots as test-table columns — current behavior)
+**or one record per sublot** (own document + lot row)? Answer drives whether
+`mergeCoaRecords` needs a second-level sublot split before P3.
+
+**Shipped this session (all pushed to master):**
+- **COA P1 page-first split** (commit `b539928`): multi-page COA PDFs are N independent
+  single-page COAs bundled by PO/EDI order# — each page = one product. Worker now does
+  **per-page extraction** (one LLM call/page); `bin/lib/coaRecords.js` `mergeCoaRecords`
+  concatenates per-page records, NEVER merges across pages, hoists only doc-global fields
+  (supplier/order#). Gated by `COA_RECORDS_MODE` (currently **shadow** on prod worker via
+  systemd drop-in — emits `ai_records` alongside `ai_fields`, no reviewer impact yet).
+  **Live-validated:** `EDI178057` 1 product (v1, dropped 6) → **7 products/7 lots, one per page**.
+- **P2** (`12fe2fa`): `parseCoaRecords` helper + frontend type re-exports; queue GET/list
+  already serve `ai_records`.
+- **GPU/timeout root cause** (`4b9dbae`): `bin/qwen-proxy` hardcoded the slow 3080 and
+  502'd big requests at 60s; repointed to the local **model-router** (→ 4090). Plus dox-side
+  LLM timeouts raised to 300s (`12fe2fa`). Big extraction 502@60s → 200@1s.
+- Removed stale connector e2e specs; `bin/coa-records-mode`, `bin/reprocess-queue` added.
+
+**Next after sublot answer:** finalize P1 (sublot split if needed) → **P3 review UI**
+(`CoaRecordsReviewTile`, per-product tiles) → P4 (per-record approval + page-scoped PDFs).
+Plan: `~/.claude/plans/coa-multi-record.md`. Design notes: `COA_SPLIT_REVIEW.md` (repo root).
+
+---
+
 ## 2026-06-02 (pm-6) MENU CONSOLIDATION + NOTIFICATIONS BELL + ASSIGNMENT/OWNERSHIP — SHIPPED PROD+STAGING
 
 Three shipped pieces (commits `fa7ad3b`, `f760a39`; vitest 1403/1403):
