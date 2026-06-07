@@ -114,8 +114,14 @@ export type {
   CoaFulfillmentResponse,
   LotMatchSuggestion,
   LotMatchListResponse,
+  CoaRecordCardinality,
+  CoaRecordKeyBasis,
+  CoaResultCell,
+  CoaRecord,
+  CoaRecordsPayload,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';
+export { parseCoaRecords } from '../../shared/types';
 
 export interface ExtractionTemplate {
   id: string;

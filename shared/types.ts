@@ -825,6 +825,63 @@ export interface CoaRecordsPayload {
   records: CoaRecord[];
 }
 
+const COA_CARDINALITIES: ReadonlyArray<CoaRecordCardinality> = ['single', 'multi_lot', 'multi_product'];
+const COA_KEY_BASES: ReadonlyArray<CoaRecordKeyBasis> = ['lot', 'lot+sublot', 'product'];
+
+/**
+ * Safely parse + shape-validate a `processing_queue.ai_records` value as a
+ * CoaRecordsPayload. PURE and NEVER throws — returns null on anything that
+ * isn't a well-formed COA records payload:
+ *   - null / undefined / empty string
+ *   - non-JSON garbage
+ *   - a non-object, or an array
+ *   - an order/shipment payload ({ customers, orders } / { shipments }) that
+ *     lacks `record_cardinality` + `records[]`
+ *
+ * Centralizing this keeps the review UI (and any future COA consumer) from
+ * re-implementing defensive parsing. Mirrors the never-throw contract of
+ * `normalizeFieldMappings` in shared/fieldMappings.ts.
+ *
+ * Note: `ai_records` may already be a parsed object (e.g. fetched from a row)
+ * or a JSON string; both are accepted.
+ */
+export function parseCoaRecords(aiRecords: string | null | undefined): CoaRecordsPayload | null {
+  if (aiRecords == null) return null;
+
+  let raw: unknown = aiRecords;
+  if (typeof aiRecords === 'string') {
+    const trimmed = aiRecords.trim();
+    if (trimmed === '') return null;
+    try {
+      raw = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+
+  // Must look like a COA records payload, not an order/shipment one.
+  if (!COA_CARDINALITIES.includes(obj.record_cardinality as CoaRecordCardinality)) return null;
+  if (!Array.isArray(obj.records)) return null;
+
+  const keyBasis = COA_KEY_BASES.includes(obj.record_key_basis as CoaRecordKeyBasis)
+    ? (obj.record_key_basis as CoaRecordKeyBasis)
+    : 'lot';
+  const pageMetadata =
+    obj.page_metadata && typeof obj.page_metadata === 'object' && !Array.isArray(obj.page_metadata)
+      ? (obj.page_metadata as Record<string, string | null>)
+      : {};
+
+  return {
+    record_cardinality: obj.record_cardinality as CoaRecordCardinality,
+    record_key_basis: keyBasis,
+    page_metadata: pageMetadata,
+    records: obj.records as CoaRecord[],
+  };
+}
+
 // === Extraction Examples & Processing Queue ===
 
 export interface ExtractionExampleRow {
