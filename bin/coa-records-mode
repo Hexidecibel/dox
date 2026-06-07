@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Toggle COA_RECORDS_MODE on the prod process-worker (systemd) via a drop-in.
+#
+# Controls the multi-record COA pipeline (see plan: make COA a records-kind):
+#   off    — no records emitted (default; pre-P1 behavior)
+#   shadow — worker posts ai_records ALONGSIDE ai_fields for multi-record COAs,
+#            but review/approve still use ai_fields (P1 — observe real splits)
+#   on     — records drive review + approval (P3/P4)
+#
+# Usage:
+#   ./bin/coa-records-mode <off|shadow|on>
+#   ./bin/coa-records-mode status
+#
+# Implementation: writes a systemd drop-in (Environment=COA_RECORDS_MODE=...),
+# daemon-reloads, and restarts the worker. Requires sudo (systemctl).
+set -euo pipefail
+
+SERVICE=dox-process-worker.service
+DROPIN_DIR=/etc/systemd/system/${SERVICE}.d
+DROPIN=${DROPIN_DIR}/coa-records.conf
+
+MODE="${1:-status}"
+
+if [ "$MODE" = "status" ]; then
+  echo "active: $(systemctl is-active "$SERVICE" 2>/dev/null || echo unknown)"
+  systemctl show "$SERVICE" -p Environment 2>/dev/null | tr ' ' '\n' | grep -i COA_RECORDS_MODE || echo "COA_RECORDS_MODE=off (unset → default)"
+  exit 0
+fi
+
+case "$MODE" in
+  off|shadow|on) ;;
+  *) echo "Usage: $0 <off|shadow|on|status>" >&2; exit 2 ;;
+esac
+
+echo "Setting COA_RECORDS_MODE=$MODE on $SERVICE ..."
+sudo mkdir -p "$DROPIN_DIR"
+printf '[Service]\nEnvironment=COA_RECORDS_MODE=%s\n' "$MODE" | sudo tee "$DROPIN" >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart "$SERVICE"
+sleep 2
+
+if ! systemctl is-active --quiet "$SERVICE"; then
+  echo "ERROR: worker did not come back active after restart. Check: journalctl -u $SERVICE -n 30" >&2
+  exit 1
+fi
+echo "active: $(systemctl is-active "$SERVICE")"
+systemctl show "$SERVICE" -p Environment | tr ' ' '\n' | grep -i COA_RECORDS_MODE || echo "(flag not visible — check drop-in)"
+echo "Done. COA_RECORDS_MODE=$MODE"
