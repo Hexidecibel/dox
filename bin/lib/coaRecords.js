@@ -1,22 +1,37 @@
 // =============================================================================
-// COA multi-record assembly — deterministic cross-chunk merge.
+// COA multi-record assembly — PAGE-FIRST, no cross-page merge.
 //
-// This is the load-bearing "P1" assembly for first-class multi-product /
-// multi-lot / multi-page COAs (see coa-multi-record.md). The LLM extracts
-// per-chunk (one chunk = one or more page banners), but it is BLIND across
-// chunk boundaries — page 4 is its own Qwen call and cannot see page 1's
-// cardinality. So the worker runs each chunk independently and then this
-// module deterministically assembles every chunk's records into ONE
+// Domain fact (verified against real prod docs): a multi-page COA PDF is N
+// independent single-page COAs bundled by a PO/EDI order number. Each page is
+// literally "Page 1 of 1" — a self-sufficient COA with its own full header
+// (supplier, item#, lot#, plant, date). So:
+//
+//   • Each page = exactly ONE product. We split per page, ALWAYS, and NEVER
+//     merge records across pages (the v1 bug stuffed all pages into one LLM
+//     call and dropped all-but-one product; the fix is per-page extraction +
+//     this page-first assembly).
+//   • Within a page, that one product may have multiple lots/sublots → the LLM
+//     emits one record per lot/sublot for that page. We keep them as-is.
+//
+// The worker runs one LLM call per PAGE (see buildPerPageChunks in
+// bin/process-worker), so each parsed chunk here corresponds to exactly one
+// page (oversized pages are sub-chunked but all sub-chunks carry the SAME page
+// number, so they recombine into that one page's product).
+//
+// This module deterministically assembles every page's records into one
 // CoaRecordsPayload:
 //
-//   1. Normalize each chunk's output to records (flat chunk with no `records[]`
-//      → one record per `products[]` entry, or a single record).
-//   2. Tag each record with its chunk's page numbers (source_pages).
-//   3. Decide record_key_basis (lot+sublot > lot > product).
-//   4. Key + merge records that share a non-empty key across chunk boundaries.
-//   5. Hoist fields identical+non-empty across ALL records into page_metadata
-//      (the over-split guard).
-//   6. Derive record_cardinality, per-record confidence, reindex.
+//   1. For each page chunk: take its records (or synthesize ONE record from
+//      the page's flat fields when the model returned no records[]). Tag each
+//      with source_pages = [thatPageNumber].
+//   2. CONCATENATE records across all pages. NEVER merge records across
+//      different pages — two pages with a coincidentally equal lot number are
+//      still two separate records.
+//   3. Hoist ONLY fields byte-identical across ALL records of the WHOLE doc
+//      into page_metadata (e.g. manufacturer/supplier, the bundle PO/EDI order
+//      number). Product/lot/sublot/plant/dates vary per page → stay per-record.
+//   4. Derive record_cardinality / record_key_basis, per-record confidence,
+//      reindex 1..N across the whole doc.
 //
 // CommonJS so the plain-Node `bin/process-worker` can `require()` it (the
 // worker has no TS build step). Mirror of the types in shared/types.ts —
@@ -30,8 +45,7 @@ const asString = (v) => (v == null ? null : String(v));
 
 // Field keys that identify a lot / sublot / product. The flat extraction uses
 // canonical names (lot_number, product_name, product_code) but the record
-// schema prefers lot_code / sub_lot_code. We accept either when keying so a
-// chunk's flat `fields` and a chunk's structured `records[]` key consistently.
+// schema prefers lot_code / sub_lot_code. We accept either when keying.
 const LOT_KEYS = ['lot_code', 'lot_number'];
 const SUBLOT_KEYS = ['sub_lot_code', 'sub_lot_number', 'sublot_code', 'sublot'];
 const PRODUCT_NAME_KEYS = ['product_name', 'product'];
@@ -45,29 +59,43 @@ function firstNonEmpty(fields, keys) {
 }
 
 /**
- * Normalize a single parsed chunk into an array of record objects, each tagged
- * with `source_pages`. A chunk that already carries structured `records[]`
- * contributes those directly; a flat-only chunk synthesizes one record per
- * `products[]` entry (or a single record carrying the chunk's fields/tables
- * when 0 or 1 products).
+ * Normalize a single PAGE's parsed output into an array of record objects, each
+ * tagged with this page's number as `source_pages`. A page that already carries
+ * structured `records[]` (one per lot/sublot) contributes those directly; a
+ * flat-only page synthesizes exactly ONE record from its fields/tables (a page
+ * is one product → one or more lots, but if the model returned no records[] we
+ * treat the whole page as a single record). We never synthesize multiple
+ * records from a flat page's products[] — a page is one product.
  *
- * @param {object} parsed   one parseExtraction() result
- * @param {number[]} pages  the 1-based page numbers this chunk covered
+ * @param {object} parsed   one parseExtraction() result for ONE page
+ * @param {number[]} pages  the 1-based page number(s) this page-chunk covered
+ *                          (normally a single page; sub-chunked oversized pages
+ *                          are pre-collapsed by the worker to one page number)
  * @returns {Array<{fields, groups, tables, source_pages, _confidence, flags}>}
  */
-function recordsFromChunk(parsed, pages) {
+function recordsFromPage(parsed, pages) {
   if (!parsed) return [];
   const chunkConf =
     typeof parsed.confidenceNum === 'number' && isFinite(parsed.confidenceNum)
       ? parsed.confidenceNum
       : null;
 
-  // Structured path: the LLM emitted records for this chunk.
+  // Structured path: the LLM emitted records for this page (one per lot/sublot).
   if (Array.isArray(parsed.records) && parsed.records.length > 0) {
+    // The page may also carry page_metadata constant across its own records
+    // (e.g. the page's product). Fold it back onto each record so the doc-wide
+    // hoist later sees the full per-record field set (a page's product is NOT
+    // doc-wide, so it must live on the record, not be lost in page_metadata).
+    const pageMeta = parsed.page_metadata && typeof parsed.page_metadata === 'object'
+      ? parsed.page_metadata
+      : {};
     return parsed.records.map((r) => {
       const fields = {};
+      for (const [k, v] of Object.entries(pageMeta)) {
+        if (!isEmpty(v)) fields[k] = asString(v);
+      }
       for (const [k, v] of Object.entries(r.fields || {})) {
-        fields[k] = asString(v);
+        if (!isEmpty(v)) fields[k] = asString(v);
       }
       const recConf =
         typeof r._confidence === 'number' && isFinite(r._confidence)
@@ -84,58 +112,59 @@ function recordsFromChunk(parsed, pages) {
     });
   }
 
-  // Flat path: synthesize records from products[]. The chunk's flat `fields`
-  // describe the cover/header; when there are multiple products we attach the
-  // product name onto each synthesized record so product-basis keying works.
+  // Flat path: the page is one product with (implicitly) one record. Synthesize
+  // a single record from the page's fields + tables. We attach the product name
+  // if products[] carried one (single-product page).
   const flatFields = {};
   for (const [k, v] of Object.entries(parsed.fields || {})) {
-    flatFields[k] = asString(v);
+    if (!isEmpty(v)) flatFields[k] = asString(v);
   }
   const tables = Array.isArray(parsed.tables) ? parsed.tables : [];
   const products = Array.isArray(parsed.products) ? parsed.products.filter(Boolean) : [];
 
-  // A flat chunk with no fields and no products contributes nothing (garbage
-  // / empty page).
+  // If the flat fields lack a product name but products[] named exactly one,
+  // stamp it (each page is one product).
+  if (isEmpty(firstNonEmpty(flatFields, PRODUCT_NAME_KEYS)) && products.length >= 1) {
+    const p0 = products[0];
+    flatFields.product_name = typeof p0 === 'string' ? p0 : asString(p0 && p0.product_name);
+  }
+
+  // A flat page with no fields, no products and no tables contributes nothing
+  // (garbage / empty page).
   const hasAnyField = Object.values(flatFields).some((v) => !isEmpty(v));
-  if (!hasAnyField && products.length === 0 && tables.length === 0) {
+  if (!hasAnyField && tables.length === 0) {
     return [];
   }
 
-  if (products.length <= 1) {
-    return [
-      {
-        fields: flatFields,
-        groups: undefined,
-        tables,
-        source_pages: pages.slice(),
-        _confidence: chunkConf,
-        flags: [],
-      },
-    ];
-  }
-
-  // Multiple products on a flat chunk → one record per product. Each carries
-  // the chunk's shared fields plus its own product_name. Tables are attached
-  // to the first record only (we can't reliably split a flat table per product
-  // without structure); the hoist guard later moves shared fields up.
-  return products.map((prod, idx) => {
-    const fields = { ...flatFields };
-    // Only stamp product_name when the flat fields didn't already carry a
-    // single product name (avoid clobbering an explicit single value).
-    fields.product_name = typeof prod === 'string' ? prod : asString(prod && prod.product_name);
-    return {
-      fields,
+  return [
+    {
+      fields: flatFields,
       groups: undefined,
-      tables: idx === 0 ? tables : [],
+      tables,
       source_pages: pages.slice(),
       _confidence: chunkConf,
       flags: [],
-    };
-  });
+    },
+  ];
 }
 
-/** Decide the key basis from the whole record set. */
+/**
+ * Decide the key basis from the whole record set. This is descriptive only —
+ * records are NEVER merged by key (page-first, no cross-page merge). It reports
+ * what distinguishes records:
+ *   - multiple distinct products → 'product'
+ *   - one product, sublots present → 'lot+sublot'
+ *   - one product, lots present → 'lot'
+ *   - otherwise → 'product'
+ */
 function decideKeyBasis(records) {
+  const distinctProducts = new Set(
+    records
+      .map((r) => firstNonEmpty(r.fields, PRODUCT_NAME_KEYS) || firstNonEmpty(r.fields, PRODUCT_CODE_KEYS) || '')
+      .filter((p) => p !== '')
+  );
+  if (distinctProducts.size > 1) return 'product';
+
   const anyLot = records.some((r) => !isEmpty(firstNonEmpty(r.fields, LOT_KEYS)));
   const anySublot = records.some((r) => !isEmpty(firstNonEmpty(r.fields, SUBLOT_KEYS)));
   if (anySublot && anyLot) return 'lot+sublot';
@@ -144,65 +173,11 @@ function decideKeyBasis(records) {
 }
 
 /**
- * Compute a record's merge key for a given basis. Returns null when the
- * record has no usable key value (those are kept distinct, never merged).
- */
-function recordKey(record, basis) {
-  const f = record.fields;
-  if (basis === 'lot' || basis === 'lot+sublot') {
-    const lot = firstNonEmpty(f, LOT_KEYS);
-    if (isEmpty(lot)) return null;
-    if (basis === 'lot+sublot') {
-      const sub = firstNonEmpty(f, SUBLOT_KEYS);
-      return isEmpty(sub) ? `lot:${lot}` : `lot:${lot}|sub:${sub}`;
-    }
-    return `lot:${lot}`;
-  }
-  // product basis
-  const name = firstNonEmpty(f, PRODUCT_NAME_KEYS);
-  const code = firstNonEmpty(f, PRODUCT_CODE_KEYS);
-  if (isEmpty(name) && isEmpty(code)) return null;
-  return `prod:${name || ''}|code:${code || ''}`;
-}
-
-/** Merge record `b` into record `a` (same key) in place. */
-function mergeInto(a, b) {
-  // fields: first non-empty wins (a is the incumbent).
-  for (const [k, v] of Object.entries(b.fields || {})) {
-    if (!isEmpty(v) && isEmpty(a.fields[k])) a.fields[k] = v;
-  }
-  // tables: concat.
-  if (Array.isArray(b.tables) && b.tables.length > 0) {
-    a.tables = (a.tables || []).concat(b.tables);
-  }
-  // groups: shallow-merge group-by-group (first non-empty cell wins).
-  if (b.groups) {
-    a.groups = a.groups || {};
-    for (const [g, cells] of Object.entries(b.groups)) {
-      a.groups[g] = a.groups[g] || {};
-      for (const [cellKey, cell] of Object.entries(cells || {})) {
-        if (a.groups[g][cellKey] === undefined) a.groups[g][cellKey] = cell;
-      }
-    }
-  }
-  // source_pages: union, sorted.
-  const pages = new Set([...(a.source_pages || []), ...(b.source_pages || [])]);
-  a.source_pages = [...pages].sort((x, y) => x - y);
-  // confidence: min (null-safe — a present number always beats null).
-  if (typeof b._confidence === 'number') {
-    a._confidence =
-      typeof a._confidence === 'number' ? Math.min(a._confidence, b._confidence) : b._confidence;
-  }
-  // flags: union.
-  const flags = new Set([...(a.flags || []), ...(b.flags || [])]);
-  a.flags = [...flags];
-}
-
-/**
- * Hoist fields whose value is identical AND non-empty across ALL records into
- * page_metadata, deleting them from each record. This is the over-split guard:
- * a field the LLM repeated on every record (e.g. manufacturer, coa_number)
- * is document-level metadata, not a per-record distinguisher.
+ * Hoist fields whose value is byte-identical AND non-empty across ALL records
+ * of the WHOLE doc into page_metadata, deleting them from each record. With
+ * correct per-page records, product/lot/etc. vary across pages and naturally
+ * will NOT hoist; only genuinely doc-wide fields (manufacturer/supplier, the
+ * bundle PO/EDI order number) do.
  *
  * Mutates `records` in place; returns the page_metadata object.
  */
@@ -235,26 +210,28 @@ function hoistSharedFields(records) {
 }
 
 /**
- * Assemble parsed chunks into a single CoaRecordsPayload.
+ * Assemble parsed PAGE chunks into a single CoaRecordsPayload — page-first,
+ * with NO cross-page merge.
  *
- * @param {object[]} parsedChunks      array of parseExtraction() results, in chunk order.
+ * @param {object[]} parsedChunks      array of parseExtraction() results, one per page, in page order.
  * @param {number[][]} chunkPageRanges array parallel to parsedChunks; each entry
- *                                     is the 1-based page numbers that chunk covered.
+ *                                     is the 1-based page number(s) that chunk covered
+ *                                     (normally a single page).
  * @param {object} [opts]
- * @param {boolean} [opts.truncated]   true when the >TEXT_MAX_CHUNKS fallback fired
- *                                     (single truncated extraction) → one record
- *                                     flagged 'truncated_multipage'.
+ * @param {boolean} [opts.truncated]   true when a truncated single-call fallback
+ *                                     fired → one record flagged 'truncated_multipage'.
  * @returns {import('../../shared/types').CoaRecordsPayload}
  */
 function mergeCoaRecords(parsedChunks, chunkPageRanges, opts = {}) {
   const chunks = Array.isArray(parsedChunks) ? parsedChunks : [];
   const ranges = Array.isArray(chunkPageRanges) ? chunkPageRanges : [];
 
-  // 1+2. Normalize each chunk to records tagged with its pages.
+  // 1. Normalize each page to its records, tagged with that page's number.
+  //    CONCATENATE across pages — never merge across pages.
   let records = [];
   for (let i = 0; i < chunks.length; i++) {
     const pages = Array.isArray(ranges[i]) ? ranges[i] : [];
-    const recs = recordsFromChunk(chunks[i], pages);
+    const recs = recordsFromPage(chunks[i], pages);
     records.push(...recs);
   }
 
@@ -279,70 +256,61 @@ function mergeCoaRecords(parsedChunks, chunkPageRanges, opts = {}) {
     };
   }
 
-  // 3. Decide key basis from the full set.
-  const keyBasis = decideKeyBasis(records);
-
-  // 4. Key + merge records sharing a non-empty key. Null-key records are kept
-  //    distinct and flagged.
-  const byKey = new Map();
-  const merged = [];
+  // 2. Records are already concatenated (no merge). Flag any record with no
+  //    explicit lot label so a reviewer fills it before approve.
   for (const rec of records) {
-    const key = recordKey(rec, keyBasis);
-    if (key == null) {
-      if (keyBasis !== 'product') {
-        rec.flags = [...new Set([...(rec.flags || []), 'lot_not_explicitly_labeled'])];
-      }
-      merged.push(rec);
-      continue;
-    }
-    if (byKey.has(key)) {
-      mergeInto(byKey.get(key), rec);
-    } else {
-      byKey.set(key, rec);
-      merged.push(rec);
+    const hasLot = !isEmpty(firstNonEmpty(rec.fields, LOT_KEYS));
+    if (!hasLot) {
+      rec.flags = [...new Set([...(rec.flags || []), 'lot_not_explicitly_labeled'])];
     }
   }
 
-  // 5. Hoist fields identical across ALL surviving records into page_metadata.
-  const pageMetadata = hoistSharedFields(merged);
+  // 3. Decide key basis (descriptive) from the full set.
+  const keyBasis = decideKeyBasis(records);
 
-  // 6. Reindex + decide cardinality.
-  merged.forEach((r, i) => {
+  // 4. Hoist fields identical across ALL records (whole doc) into page_metadata.
+  const pageMetadata = hoistSharedFields(records);
+
+  // 5. Reindex + clean transient empties.
+  records.forEach((r, i) => {
     r.record_index = i + 1;
-    // Drop the transient empty-flags array to keep the payload clean, but keep
-    // non-empty flags.
     if (Array.isArray(r.flags) && r.flags.length === 0) delete r.flags;
     if (r.groups && Object.keys(r.groups).length === 0) delete r.groups;
   });
 
+  // 6. Cardinality:
+  //    single        → exactly one record total.
+  //    multi_product → >1 distinct product across records.
+  //    multi_lot     → one product, multiple lots/sublots (incl. single-page
+  //                    multi-sublot).
   let cardinality;
-  if (merged.length <= 1) {
+  if (records.length <= 1) {
     cardinality = 'single';
   } else {
-    // Multi-lot when product is shared across all records (i.e. product got
-    // hoisted into page_metadata, or every record carries the same product),
-    // and they differ by lot/sublot. Otherwise multi_product.
-    const productHoisted = PRODUCT_NAME_KEYS.some((k) => !isEmpty(pageMetadata[k]));
+    const productHoisted =
+      PRODUCT_NAME_KEYS.some((k) => !isEmpty(pageMetadata[k])) ||
+      PRODUCT_CODE_KEYS.some((k) => !isEmpty(pageMetadata[k]));
     const distinctProducts = new Set(
-      merged.map((r) => firstNonEmpty(r.fields, PRODUCT_NAME_KEYS) || '')
+      records
+        .map((r) => firstNonEmpty(r.fields, PRODUCT_NAME_KEYS) || firstNonEmpty(r.fields, PRODUCT_CODE_KEYS) || '')
+        .filter((p) => p !== '')
     );
-    const productShared = productHoisted || distinctProducts.size <= 1;
-    cardinality = productShared ? 'multi_lot' : 'multi_product';
+    const multiProduct = !productHoisted && distinctProducts.size > 1;
+    cardinality = multiProduct ? 'multi_product' : 'multi_lot';
   }
 
   return {
     record_cardinality: cardinality,
     record_key_basis: keyBasis,
     page_metadata: pageMetadata,
-    records: merged,
+    records,
   };
 }
 
 module.exports = {
   mergeCoaRecords,
   // Exported for unit tests / reuse.
-  recordsFromChunk,
+  recordsFromPage,
   decideKeyBasis,
-  recordKey,
   hoistSharedFields,
 };

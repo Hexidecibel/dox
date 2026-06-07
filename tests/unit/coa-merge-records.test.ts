@@ -1,7 +1,14 @@
 /**
- * Unit tests for mergeCoaRecords — the deterministic cross-chunk assembly that
- * turns per-chunk COA extractions into a single CoaRecordsPayload (first-class
+ * Unit tests for mergeCoaRecords — the deterministic PAGE-FIRST assembly that
+ * turns per-PAGE COA extractions into a single CoaRecordsPayload (first-class
  * multi-product / multi-lot / multi-page COAs, P1; see coa-multi-record.md).
+ *
+ * Domain fact: a multi-page COA PDF is N independent single-page COAs bundled
+ * by a PO/EDI order number. Each page = exactly ONE product. The worker runs
+ * one LLM call per PAGE, and this module CONCATENATES the pages' records with
+ * NO cross-page merge (two pages with a coincidentally equal lot are still two
+ * records). Only fields byte-identical across ALL records of the whole doc
+ * hoist into page_metadata.
  *
  * mergeCoaRecords lives in bin/lib/coaRecords.js (CommonJS, so the plain-Node
  * bin/process-worker can require it without a TS build step) and is unit-tested
@@ -12,8 +19,10 @@ import { describe, it, expect } from 'vitest';
 // @ts-expect-error — plain CJS module, no types.
 import { mergeCoaRecords } from '../../bin/lib/coaRecords.js';
 
-describe('mergeCoaRecords', () => {
-  it('single product → 1 record, cardinality single', () => {
+type Rec = { record_index: number; fields: Record<string, string>; source_pages: number[]; flags?: string[]; _confidence?: number };
+
+describe('mergeCoaRecords (page-first)', () => {
+  it('single-page single-product → 1 record, cardinality single', () => {
     const payload = mergeCoaRecords(
       [
         {
@@ -34,8 +43,8 @@ describe('mergeCoaRecords', () => {
     expect(payload.records[0].source_pages).toEqual([1]);
   });
 
-  it('4 sublots same page → 4 records, key lot+sublot, product hoisted, multi_lot', () => {
-    const records = [1, 2, 3, 4].map((n) => ({
+  it('single-page multi-sublot → 3 records, key lot+sublot, multi_lot, sublots distinct', () => {
+    const records = [1, 2, 3].map((n) => ({
       fields: {
         lot_code: 'L100',
         sub_lot_code: 'S' + n,
@@ -46,145 +55,201 @@ describe('mergeCoaRecords', () => {
     }));
     const payload = mergeCoaRecords([{ records, confidenceNum: 0.8 }], [[6]]);
 
-    expect(payload.records).toHaveLength(4);
+    expect(payload.records).toHaveLength(3);
     expect(payload.record_key_basis).toBe('lot+sublot');
     expect(payload.record_cardinality).toBe('multi_lot');
-    // Product + facility + lot identical across all 4 → hoisted into page_metadata.
+    // One product across all 3 → product/facility/lot identical → hoisted.
     expect(payload.page_metadata.product_name).toBe('Cheddar');
     expect(payload.page_metadata.manufacturing_facility).toBe('Plant 42');
     expect(payload.page_metadata.lot_code).toBe('L100');
-    // Per-record distinguishers stay on the record.
-    expect(payload.records[0].fields.sub_lot_code).toBe('S1');
+    // The 3 sublots are DISTINCT records (no intra-page merge beyond model output).
+    const subs = (payload.records as Rec[]).map((r) => r.fields.sub_lot_code).sort();
+    expect(subs).toEqual(['S1', 'S2', 'S3']);
     expect(payload.records[0].fields.butterfat).toBe('31');
     expect(payload.records[0].fields.product_name).toBeUndefined();
-    // All back this single page.
-    expect(payload.records[3].source_pages).toEqual([6]);
+    // All back the same single page.
+    expect((payload.records as Rec[]).every((r) => JSON.stringify(r.source_pages) === '[6]')).toBe(true);
     // Reindexed 1..N.
-    expect(payload.records.map((r: { record_index: number }) => r.record_index)).toEqual([1, 2, 3, 4]);
+    expect((payload.records as Rec[]).map((r) => r.record_index)).toEqual([1, 2, 3]);
   });
 
-  it('distinct products → multi_product', () => {
-    const payload = mergeCoaRecords(
-      [
-        {
-          records: [
-            { fields: { lot_code: 'A', product_name: 'Brie' } },
-            { fields: { lot_code: 'B', product_name: 'Gouda' } },
-          ],
-          confidenceNum: 0.7,
+  it('multi-page bundle: 7 pages (page 7 has 3 sublots) → 9 records, products NOT collapsed', () => {
+    // 6 single-lot single-product pages + 1 page with 3 sublots of a 7th product.
+    const products = [
+      { code: '810001', name: 'Butter A', lot: 'LA' },
+      { code: '810002', name: 'Butter B', lot: 'LB' },
+      { code: '810003', name: 'Butter C', lot: 'LC' },
+      { code: '810004', name: 'Butter D', lot: 'LD' },
+      { code: '810005', name: 'Butter E', lot: 'LE' },
+      { code: '810006', name: 'Butter F', lot: 'LF' },
+    ];
+    const supplier = 'Darigold Inc.';
+    const order = 'EDI178057';
+
+    const chunks: any[] = [];
+    const ranges: number[][] = [];
+
+    products.forEach((p, i) => {
+      chunks.push({
+        records: [
+          {
+            fields: {
+              supplier_name: supplier,
+              order_number: order,
+              product_code: p.code,
+              product_name: p.name,
+              lot_code: p.lot,
+            },
+          },
+        ],
+        confidenceNum: 0.9,
+      });
+      ranges.push([i + 1]);
+    });
+
+    // Page 7: one product, 3 sublots.
+    chunks.push({
+      records: [1, 2, 3].map((n) => ({
+        fields: {
+          supplier_name: supplier,
+          order_number: order,
+          product_code: '810007',
+          product_name: 'Butter G',
+          lot_code: 'LG',
+          sub_lot_code: 'G' + n,
         },
-      ],
-      [[1]]
+      })),
+      confidenceNum: 0.85,
+    });
+    ranges.push([7]);
+
+    const payload = mergeCoaRecords(chunks, ranges);
+
+    // 6 + 3 = 9 records total.
+    expect(payload.records).toHaveLength(9);
+    // All 7 products present — NOT collapsed to one (the v1 bug).
+    const codes = new Set(
+      (payload.records as Rec[]).map((r) => r.fields.product_code).filter(Boolean)
     );
-    expect(payload.records).toHaveLength(2);
+    expect(codes).toEqual(new Set(['810001', '810002', '810003', '810004', '810005', '810006', '810007']));
     expect(payload.record_cardinality).toBe('multi_product');
-    // product_name varies → NOT hoisted.
+    // Supplier + order are doc-wide constant → hoisted.
+    expect(payload.page_metadata.supplier_name).toBe(supplier);
+    expect(payload.page_metadata.order_number).toBe(order);
+    // Product + lot vary per page → NOT hoisted.
+    expect(payload.page_metadata.product_code).toBeUndefined();
     expect(payload.page_metadata.product_name).toBeUndefined();
-    expect(payload.records[0].fields.product_name).toBe('Brie');
-    expect(payload.records[1].fields.product_name).toBe('Gouda');
+    expect(payload.page_metadata.lot_code).toBeUndefined();
+    // Each record tagged with its own page; reindexed 1..9.
+    const pages = (payload.records as Rec[]).map((r) => r.source_pages[0]);
+    expect(pages).toEqual([1, 2, 3, 4, 5, 6, 7, 7, 7]);
+    expect((payload.records as Rec[]).map((r) => r.record_index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 
-  it('same lot key split across 2 chunks → 1 merged record, unioned source_pages + tables', () => {
+  it('no cross-page merge: two pages, SAME lot_code, different products → stay 2 records', () => {
     const payload = mergeCoaRecords(
       [
-        {
-          records: [
-            {
-              fields: { lot_code: 'L9', product_name: 'X' },
-              tables: [{ name: 't1', headers: ['a'], rows: [['1']] }],
-            },
-          ],
-          confidenceNum: 0.9,
-        },
-        {
-          records: [
-            {
-              fields: { lot_code: 'L9', expiration_date: '2026-01-01' },
-              tables: [{ name: 't2', headers: ['b'], rows: [['2']] }],
-            },
-          ],
-          confidenceNum: 0.6,
-        },
+        { records: [{ fields: { lot_code: 'L9', product_name: 'Brie', product_code: 'P1' } }], confidenceNum: 0.9 },
+        { records: [{ fields: { lot_code: 'L9', product_name: 'Gouda', product_code: 'P2' } }], confidenceNum: 0.7 },
       ],
       [[1], [2]]
     );
-    expect(payload.records).toHaveLength(1);
-    const rec = payload.records[0];
-    expect(rec.source_pages).toEqual([1, 2]);
-    expect(rec.tables).toHaveLength(2);
-    // Min confidence across the two chunks.
-    expect(rec._confidence).toBe(0.6);
-    // The late expiration_date backfilled (reconstructs via page_metadata ∪ fields).
-    const flat = { ...payload.page_metadata, ...rec.fields };
-    expect(flat.expiration_date).toBe('2026-01-01');
-    expect(flat.lot_code).toBe('L9');
+    // Same lot but different products on different pages → NOT merged.
+    expect(payload.records).toHaveLength(2);
+    expect(payload.record_cardinality).toBe('multi_product');
+    expect(payload.records[0].source_pages).toEqual([1]);
+    expect(payload.records[1].source_pages).toEqual([2]);
+    expect(payload.records[0].fields.product_name).toBe('Brie');
+    expect(payload.records[1].fields.product_name).toBe('Gouda');
+    // lot_code is identical across both → it hoists (byte-identical doc-wide);
+    // products differ so they stay per-record. Either way, two records.
+    expect(payload.records[0].fields.product_code).toBe('P1');
+    expect(payload.records[1].fields.product_code).toBe('P2');
   });
 
-  it('hoist: manufacturer identical across records → page_metadata, not per-record', () => {
+  it('distinct products on separate pages → multi_product, product not hoisted', () => {
     const payload = mergeCoaRecords(
       [
-        {
-          records: [
-            { fields: { lot_code: 'L1', manufacturer: 'ACME Dairy', butterfat: '80' } },
-            { fields: { lot_code: 'L2', manufacturer: 'ACME Dairy', butterfat: '81' } },
-          ],
-          confidenceNum: 0.85,
-        },
+        { records: [{ fields: { lot_code: 'A', product_name: 'Brie' } }], confidenceNum: 0.7 },
+        { records: [{ fields: { lot_code: 'B', product_name: 'Gouda' } }], confidenceNum: 0.7 },
       ],
-      [[1]]
+      [[1], [2]]
+    );
+    expect(payload.records).toHaveLength(2);
+    expect(payload.record_cardinality).toBe('multi_product');
+    expect(payload.page_metadata.product_name).toBeUndefined();
+    const names = (payload.records as Rec[]).map((r) => r.fields.product_name).sort();
+    expect(names).toEqual(['Brie', 'Gouda']);
+  });
+
+  it('hoist: supplier identical across pages → page_metadata, lot stays per-record', () => {
+    const payload = mergeCoaRecords(
+      [
+        { records: [{ fields: { lot_code: 'L1', manufacturer: 'ACME Dairy', product_name: 'A', butterfat: '80' } }], confidenceNum: 0.85 },
+        { records: [{ fields: { lot_code: 'L2', manufacturer: 'ACME Dairy', product_name: 'B', butterfat: '81' } }], confidenceNum: 0.85 },
+      ],
+      [[1], [2]]
     );
     expect(payload.records).toHaveLength(2);
     expect(payload.page_metadata.manufacturer).toBe('ACME Dairy');
     expect(payload.records[0].fields.manufacturer).toBeUndefined();
     expect(payload.records[1].fields.manufacturer).toBeUndefined();
-    // The varying field stays per-record.
+    // Per-page distinguishers stay per-record.
+    expect(payload.records[0].fields.lot_code).toBe('L1');
+    expect(payload.records[1].fields.lot_code).toBe('L2');
     expect(payload.records[0].fields.butterfat).toBe('80');
     expect(payload.records[1].fields.butterfat).toBe('81');
   });
 
-  it('null lot key → records kept distinct and flagged', () => {
+  it('no explicit lot → record kept, flagged lot_not_explicitly_labeled', () => {
     const payload = mergeCoaRecords(
       [
-        {
-          records: [
-            { fields: { product_name: 'P1' } },
-            { fields: { product_name: 'P2' } },
-            { fields: { lot_code: 'L1', product_name: 'P3' } },
-          ],
-          confidenceNum: 0.5,
-        },
+        { records: [{ fields: { product_name: 'P1' } }], confidenceNum: 0.5 },
+        { records: [{ fields: { product_name: 'P2' } }], confidenceNum: 0.5 },
+        { records: [{ fields: { lot_code: 'L1', product_name: 'P3' } }], confidenceNum: 0.5 },
       ],
-      [[1]]
+      [[1], [2], [3]]
     );
-    // 3 distinct records — the two null-lot ones are NOT merged together.
+    // 3 distinct records — never merged across pages.
     expect(payload.records).toHaveLength(3);
-    expect(payload.record_key_basis).toBe('lot');
-    const flagged = payload.records.filter((r: { flags?: string[] }) =>
+    const flagged = (payload.records as Rec[]).filter((r) =>
       (r.flags || []).includes('lot_not_explicitly_labeled')
     );
     expect(flagged).toHaveLength(2);
   });
 
-  it('flat chunk with multiple products → one record per product', () => {
+  it('per-page confidence: each record keeps its own page confidence', () => {
+    const payload = mergeCoaRecords(
+      [
+        { records: [{ fields: { lot_code: 'L1', product_name: 'A' }, _confidence: 0.9 }], confidenceNum: 0.9 },
+        { records: [{ fields: { lot_code: 'L2', product_name: 'B' }, _confidence: 0.6 }], confidenceNum: 0.6 },
+      ],
+      [[1], [2]]
+    );
+    expect(payload.records).toHaveLength(2);
+    expect(payload.records[0]._confidence).toBe(0.9);
+    expect(payload.records[1]._confidence).toBe(0.6);
+  });
+
+  it('flat page with no records[] → one synthesized record (page = one product)', () => {
     const payload = mergeCoaRecords(
       [
         {
-          fields: { supplier_name: 'Savencia', coa_number: 'C-100' },
-          products: ['Brie', 'Camembert'],
+          fields: { supplier_name: 'Savencia', coa_number: 'C-100', lot_number: 'L7' },
+          products: ['Brie'],
           tables: [{ name: 'tests', headers: ['x'], rows: [['1']] }],
           confidenceNum: 0.7,
         },
       ],
       [[1]]
     );
-    expect(payload.records).toHaveLength(2);
-    expect(payload.record_cardinality).toBe('multi_product');
-    expect(payload.record_key_basis).toBe('product');
-    // Shared cover fields hoisted.
-    expect(payload.page_metadata.supplier_name).toBe('Savencia');
-    expect(payload.page_metadata.coa_number).toBe('C-100');
-    const names = payload.records.map((r: { fields: Record<string, string> }) => r.fields.product_name).sort();
-    expect(names).toEqual(['Brie', 'Camembert']);
+    // A flat page is ONE product → exactly one record (not one-per-products[]).
+    expect(payload.records).toHaveLength(1);
+    expect(payload.record_cardinality).toBe('single');
+    const flat = { ...payload.page_metadata, ...payload.records[0].fields };
+    expect(flat.supplier_name).toBe('Savencia');
+    expect(flat.product_name).toBe('Brie');
+    expect(payload.records[0].tables).toHaveLength(1);
   });
 
   it('truncation fallback → single record flagged truncated_multipage', () => {
@@ -197,15 +262,15 @@ describe('mergeCoaRecords', () => {
     expect(payload.records[0].flags).toContain('truncated_multipage');
   });
 
-  it('garbage/empty chunk contributes no records', () => {
+  it('garbage/empty page contributes no records', () => {
     const payload = mergeCoaRecords(
       [
         { fields: {}, products: [], tables: [], confidenceNum: 0.1 },
-        { fields: { lot_code: 'L1', product_name: 'Real' }, products: ['Real'], confidenceNum: 0.9 },
+        { records: [{ fields: { lot_code: 'L1', product_name: 'Real' } }], confidenceNum: 0.9 },
       ],
       [[1], [2]]
     );
-    // Only the real chunk contributes.
+    // Only the real page contributes.
     expect(payload.records).toHaveLength(1);
     expect(payload.records[0].source_pages).toEqual([2]);
   });

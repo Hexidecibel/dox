@@ -103,6 +103,21 @@ const COA_RECORDS_MODE = (process.env.COA_RECORDS_MODE || 'off').toLowerCase();
 const TEXT_CHUNK_CHAR_LIMIT = 24000;
 const TEXT_MAX_CHUNKS = 6;
 
+// === Per-page COA chunking config ===
+// A multi-page COA PDF is N independent single-page COAs bundled by PO/EDI
+// order number — each page is literally "Page 1 of 1", a self-sufficient COA
+// with its own full header (supplier, item#, lot#, plant, date). So the COA
+// text path splits ONE CHUNK PER PAGE (never grouped) and runs one Qwen call
+// per page: each call sees exactly one page = one product, and pages are never
+// merged across LLM calls. This fixes the v1 collapse bug where all pages were
+// stuffed into ≤6 grouped chunks and the model returned only ONE product,
+// dropping the rest (a real 7-page bundle kept 1 of 7).
+//   TEXT_MAX_PAGES_COA — hard cap on per-page COA calls. A bundle can legitimately
+//     have many pages (validated example: 7). Requests are small + fast on the
+//     current GPU, so this is generous. If a doc somehow exceeds it, we process
+//     the first N pages and LOG that pages were dropped (never silently truncate).
+const TEXT_MAX_PAGES_COA = 40;
+
 if (!['off', 'dual', 'vlm'].includes(QWEN_VLM_MODE)) {
   console.error(`Error: QWEN_VLM_MODE must be one of: off, dual, vlm (got "${QWEN_VLM_MODE}")`);
   process.exit(1);
@@ -709,6 +724,44 @@ function buildPageChunks(pages) {
   flush();
 
   return chunks;
+}
+
+/**
+ * Build ONE chunk per PAGE for the COA path. Unlike buildPageChunks (which
+ * GROUPS pages into ≤TEXT_CHUNK_CHAR_LIMIT chunks — the v1 collapse bug), this
+ * never merges pages: each page becomes its own Qwen call so the model sees
+ * exactly one single-page COA = one product.
+ *
+ * Each returned entry is `{ chunk, page }` where `page` is the 1-based page
+ * number. A page whose text exceeds TEXT_CHUNK_CHAR_LIMIT is sub-chunked
+ * row-by-row, but EVERY sub-chunk is tagged with the SAME page number so the
+ * assembler recombines them into that one page's product (a page is never split
+ * into two products). Whitespace-only pages are dropped.
+ *
+ * Returns an array of { chunk: string, page: number }.
+ */
+function buildPerPageChunks(pages) {
+  const out = [];
+  for (let i = 0; i < pages.length; i++) {
+    const pageNum = i + 1;
+    const page = pages[i] || '';
+    if (!page.trim()) continue;
+
+    const banner = `=== PAGE ${pageNum} ===\n\n`;
+    const block = banner + page;
+
+    if (block.length > TEXT_CHUNK_CHAR_LIMIT) {
+      // Oversized page → sub-chunk by rows, but tag every sub-chunk with the
+      // SAME page number so it recombines into one product.
+      const subChunks = chunkByRows(page, TEXT_CHUNK_CHAR_LIMIT - banner.length);
+      for (const sub of subChunks) {
+        out.push({ chunk: banner + sub, page: pageNum });
+      }
+    } else {
+      out.push({ chunk: block, page: pageNum });
+    }
+  }
+  return out;
 }
 
 /**
@@ -1939,59 +1992,63 @@ async function processCoaItem(item) {
         return parsed1;
       }
 
-      const chunks = buildPageChunks(pages);
+      // PAGE-FIRST chunking: one chunk per PAGE (never grouped). Each page is
+      // a self-sufficient single-page COA = one product; running one call per
+      // page is what prevents the v1 collapse (model returning only one product
+      // and dropping the rest). A page too large for one call is sub-chunked but
+      // its sub-chunks stay tagged with the same page number so they recombine
+      // into that one page's product.
+      let pageChunks = buildPerPageChunks(pages);
 
       // Empty chunks would only happen if every page was whitespace; treat
       // like the single-page fast path against `text` (which already has
       // whatever signal there is).
-      if (chunks.length === 0) {
+      if (pageChunks.length === 0) {
         const llmText = text.substring(0, 6000);
         const parsed0 = await runTextQwen(llmText);
         coaRecordsCapture = { parsedChunks: [parsed0], chunkPageRanges: [[1]], truncated: false };
         return parsed0;
       }
 
-      // Hard cap: if we'd need too many Qwen calls, fall back to a single
-      // truncated call rather than erroring the doc. Each call risks a
-      // cold-start 502 from the GPU host; more calls compound that risk.
-      if (chunks.length > TEXT_MAX_CHUNKS) {
+      // Hard cap on distinct PAGES (not chunks). A COA bundle can have many
+      // pages; the cap is generous (TEXT_MAX_PAGES_COA). If a doc somehow
+      // exceeds it, process the first N pages and LOG that pages were dropped —
+      // never silently truncate the bundle into one call.
+      const distinctPages = [...new Set(pageChunks.map((c) => c.page))];
+      if (distinctPages.length > TEXT_MAX_PAGES_COA) {
+        const keptPages = new Set(distinctPages.slice(0, TEXT_MAX_PAGES_COA));
+        const droppedPages = distinctPages.filter((p) => !keptPages.has(p));
         console.warn(
-          `  Multi-page chunking: ${pages.length} pages would need ${chunks.length} chunks ` +
-          `(cap: ${TEXT_MAX_CHUNKS}) — falling back to legacy 6K-truncation single call`
+          `  Per-page COA: ${distinctPages.length} pages exceeds cap ${TEXT_MAX_PAGES_COA} — ` +
+          `processing pages ${[...keptPages].join(',')} and DROPPING pages ${droppedPages.join(',')}`
         );
-        const llmText = text.substring(0, 6000);
-        const parsedT = await runTextQwen(llmText);
-        // Truncated single extraction → mergeCoaRecords emits a single record
-        // flagged 'truncated_multipage'.
-        coaRecordsCapture = { parsedChunks: [parsedT], chunkPageRanges: [[]], truncated: true };
-        return parsedT;
+        pageChunks = pageChunks.filter((c) => keptPages.has(c.page));
       }
 
-      // Single-chunk fast path (e.g. small multi-page docs that fit under
-      // the chunk limit): one Qwen call, return parsed directly. Skipping
-      // the merge wrapper keeps the common case byte-identical to a
-      // single-page run.
-      if (chunks.length === 1) {
-        const parsedS = await runTextQwen(chunks[0]);
+      // Single-chunk fast path (a one-page doc reaching here, e.g. a multi-page
+      // PDF where only one page had text): one Qwen call, return parsed
+      // directly. The records payload is still assembled from coaRecordsCapture.
+      if (pageChunks.length === 1) {
+        const parsedS = await runTextQwen(pageChunks[0].chunk);
         coaRecordsCapture = {
           parsedChunks: [parsedS],
-          chunkPageRanges: [chunkPageNumbers(chunks[0])],
+          chunkPageRanges: [[pageChunks[0].page]],
           truncated: false,
         };
         return parsedS;
       }
 
-      // Multi-chunk path — the new behavior. Run each chunk independently
-      // and merge results so pages 3+ contribute to fields/tables/products.
-      console.log(`  Multi-page chunking: ${pages.length} pages → ${chunks.length} chunk(s)`);
+      // Per-page path — one Qwen call per page. Each call sees ONE page = ONE
+      // product; mergeCoaRecords concatenates them with NO cross-page merge.
+      console.log(`  Per-page COA: ${distinctPages.length} page(s) → ${pageChunks.length} call(s)`);
       const parsedChunks = [];
-      for (let i = 0; i < chunks.length; i++) {
-        console.log(`  Qwen call ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
-        parsedChunks.push(await runTextQwen(chunks[i]));
+      for (let i = 0; i < pageChunks.length; i++) {
+        console.log(`  Qwen call ${i + 1}/${pageChunks.length} (page ${pageChunks[i].page}, ${pageChunks[i].chunk.length} chars)`);
+        parsedChunks.push(await runTextQwen(pageChunks[i].chunk));
       }
       coaRecordsCapture = {
         parsedChunks,
-        chunkPageRanges: chunks.map((c) => chunkPageNumbers(c)),
+        chunkPageRanges: pageChunks.map((c) => [c.page]),
         truncated: false,
       };
       // Flat merge still drives ai_fields/tables (unchanged). The records
@@ -2492,26 +2549,26 @@ Return JSON with:
   "document_type": "Certificate of Analysis" | "Bill of Lading" | etc.
 }
 
-MULTI-RECORD COAs (optional, additive — keep emitting the flat fields/tables/products/_confidence above for back-compat):
-A single COA often covers MULTIPLE lots, sublots, or products. When the pages you can see carry more than one distinct lot/sublot (even the SAME product) or more than one product, ALSO return a "records" array, one entry per lot/sublot (preferred) or per product:
+SINGLE-PAGE COA — ONE PRODUCT (records, additive — keep emitting the flat fields/tables/products/_confidence above for back-compat):
+The input you are given is ONE complete single-page COA for ONE product (it has its own full header: supplier, item#, lot#, plant, date). Extract that one product and ALL of its lots/sublots as a "records" array — ONE record per lot/sublot. A single lot → exactly one record. Do NOT invent more than one product; there is only one product on this page.
 {
   "records": [
     {
       "fields": { "lot_code": "...", "sub_lot_code": "...", "product_name": "...", "product_code": "...", "expiration_date": "...", ... },
-      "tables": [ ...this record's own test-result table(s)... ],
+      "tables": [ ...this lot/sublot's own test-result table(s)... ],
       "groups": { "yeast_mold": { ... }, "sensory": { ... } }
     }
   ],
-  "record_cardinality": "single" | "multi_lot" | "multi_product",
-  "record_key_basis": "lot" | "lot+sublot" | "product",
-  "page_metadata": { ...fields CONSTANT across every record on these pages (e.g. supplier_name, coa_number, manufacturer)... }
+  "record_cardinality": "single" | "multi_lot",
+  "record_key_basis": "lot" | "lot+sublot",
+  "page_metadata": { ...fields CONSTANT across every record on THIS page (e.g. supplier_name, product_name, product_code, coa_number, manufacturer)... }
 }
 RULES for records:
-- Emit ONE record PER LOT and PER SUBLOT. If a single product has 4 sublots, that is 4 records (record_key_basis "lot+sublot"). Only key by product (record_key_basis "product") when records genuinely differ by product with NO per-lot split.
-- Put fields that vary between records in each record's "fields"; put fields constant across all records in "page_metadata". Do not duplicate constant fields into every record.
-- These pages may be only PART of a larger document — extract only what is present here. The assembler stitches records across pages; you do not need to see the whole document.
+- This page is ONE product. Emit ONE record PER LOT and PER SUBLOT of that product. If the product has 4 sublots, that is 4 records (record_key_basis "lot+sublot"). If it has exactly one lot, that is one record (record_cardinality "single").
+- Put fields that vary between this page's lots/sublots in each record's "fields"; put fields constant across them (including this page's product) in "page_metadata". Do not duplicate constant fields into every record.
+- This is ONE page of what may be a larger PO/EDI bundle of single-page COAs — extract ONLY this page's product. The assembler concatenates pages; it NEVER merges your records with another page's, so do not worry about other pages.
 - Specs verbatim, never derive pass/fail, lab consumables are never product data — the same domain rules as above apply inside each record.
-- When the pages carry exactly ONE lot/product, you may omit "records" entirely (the flat fields suffice).`;
+- When this page carries exactly ONE lot, you may omit "records" entirely (the flat fields suffice).`;
 
 const DAIRY_FOOD_INDUSTRY_PROMPT = `
 ORG CONTEXT:
