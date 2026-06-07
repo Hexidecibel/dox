@@ -6,7 +6,12 @@ const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 const SECRET_FILE = path.join(ROOT, '.qwen-proxy-secret');
 const PORT = parseInt(process.env.QWEN_PROXY_PORT || '9601', 10);
-const GPU_HOST = process.env.QWEN_GPU_HOST || '192.168.1.67';
+// Default to the LOCAL model-router (127.0.0.1:9600), which now does all GPU
+// routing/load-balancing (4090 buddy over Tailscale, 3080 windows, local).
+// Previously hardcoded the 3080 (192.168.1.67) directly, which bypassed the
+// router, sent every request to the slow card, and 502'd big extractions at
+// the 3080's 60s cap. Override with QWEN_GPU_HOST only to pin a specific host.
+const GPU_HOST = process.env.QWEN_GPU_HOST || '127.0.0.1';
 const GPU_PORT = 9600;
 const LOCAL_PORT = 9600;
 const CONNECT_TIMEOUT = 2000;
