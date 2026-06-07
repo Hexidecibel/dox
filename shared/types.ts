@@ -764,6 +764,67 @@ export interface ProcessingResponse {
   };
 }
 
+// === Multi-record COA model (first-class multi-product / multi-lot / multi-page) ===
+//
+// A COA document may carry several reviewable/approvable records — one per
+// lot/sublot (preferred) or per product. The worker emits a CoaRecordsPayload
+// (stored on processing_queue.ai_records, the same column orders/shipments use)
+// when a doc genuinely contains >= 2 records; single-record docs keep posting
+// the flat ai_fields shape so the common case is byte-identical. See the plan
+// at coa-multi-record.md and migration-free P1.
+
+/** How many distinct records a COA carries and what they differ by. */
+export type CoaRecordCardinality = 'single' | 'multi_lot' | 'multi_product';
+
+/** Which field(s) key a record for cross-chunk assembly + dedup. */
+export type CoaRecordKeyBasis = 'lot' | 'lot+sublot' | 'product';
+
+/**
+ * One structured result cell inside a record's `groups` (e.g. a single
+ * yeast/mold or sensory measurement). Specs are captured verbatim and
+ * pass/fail is never derived (see the worker's dairy domain rules).
+ */
+export interface CoaResultCell {
+  value: string | null;
+  unit?: string | null;
+  spec?: string | null;
+  raw_value?: string | null;
+  raw_label?: string | null;
+  flags?: string[];
+}
+
+/**
+ * A single COA record — one lot/sublot (or one product) with its own fields,
+ * tables, structured groups, and the source page(s) that back it.
+ * `page_metadata ∪ fields` reconstructs the flat field map (back-compat lever).
+ */
+export interface CoaRecord {
+  record_index: number;
+  /** Per-record fields: lot_code, sub_lot_code, product_name, product_code, butterfat, manufacturing_facility, usda_plant_number, expiration_date, ... */
+  fields: Record<string, string | null>;
+  /** Structured groups: yeast_mold, sensory, item_number, ... */
+  groups?: Record<string, Record<string, CoaResultCell>>;
+  tables?: ExtractedTable[];
+  /** 1-based source page numbers backing this record (load-bearing for page-scoped PDFs in P4). */
+  source_pages?: number[];
+  /** Per-record confidence = min of this record's cell/chunk confidences. */
+  _confidence?: number;
+  /** Assembly flags, e.g. 'lot_not_explicitly_labeled', 'truncated_multipage'. */
+  flags?: string[];
+}
+
+/**
+ * The full multi-record payload. Stored as
+ * `ai_records = JSON.stringify(CoaRecordsPayload)`.
+ */
+export interface CoaRecordsPayload {
+  record_cardinality: CoaRecordCardinality;
+  record_key_basis: CoaRecordKeyBasis;
+  /** Fields constant across all records (manufacturer, coa_number, supplier_name, sometimes product). */
+  page_metadata: Record<string, string | null>;
+  records: CoaRecord[];
+}
+
 // === Extraction Examples & Processing Queue ===
 
 export interface ExtractionExampleRow {

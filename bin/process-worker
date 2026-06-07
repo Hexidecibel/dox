@@ -42,6 +42,12 @@ const {
 // {orders, customers} record shape, no LLM involved. Used by the order path
 // when the profile carries field_mappings and the input is CSV/TSV-shaped.
 const { parseCSVAttachment } = require('./lib/shared/orderParse');
+// Deterministic multi-record COA assembly (first-class multi-product /
+// multi-lot / multi-page COAs — see coa-multi-record.md). The LLM extracts
+// per-chunk; this module assembles every chunk's records into one
+// CoaRecordsPayload across chunk boundaries (the LLM is blind across chunks).
+// Used in shadow mode by processCoaItem; gated by COA_RECORDS_MODE.
+const { mergeCoaRecords } = require('./lib/coaRecords');
 
 // Increase headers timeout for slow LLM inference (default is 300s, we need 15min)
 const llmDispatcher = new Agent({
@@ -69,6 +75,18 @@ const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '30000', 10);
 const QWEN_VLM_MODE = (process.env.QWEN_VLM_MODE || 'off').toLowerCase();
 const QWEN_VLM_MODEL = process.env.QWEN_VLM_MODEL || 'qwen2.5-vl-7b';
 const QWEN_VLM_MAX_PAGES = parseInt(process.env.QWEN_VLM_MAX_PAGES || '5', 10);
+
+// === Multi-record COA mode (first-class multi-product / multi-lot / multi-page) ===
+//   off    — never compute/post ai_records on the COA path (byte-identical to
+//            pre-feature behavior). Default.
+//   shadow — ALSO compute mergeCoaRecords() and post ai_records ALONGSIDE the
+//            flat ai_fields when the doc genuinely carries >= 2 records, so we
+//            can eyeball splits on real docs without any review/approve change.
+//   on     — same posting behavior as shadow in P1 (the review/approve wiring
+//            that consumes ai_records is P3/P4).
+// In all modes, single-record COAs post EXACTLY as today (flat ai_fields, no
+// ai_records) so the common case is unchanged.
+const COA_RECORDS_MODE = (process.env.COA_RECORDS_MODE || 'off').toLowerCase();
 
 // === Multi-page text-chunking config ===
 // Multi-page PDFs feed an array of page strings into a chunker that builds
@@ -691,6 +709,22 @@ function buildPageChunks(pages) {
   flush();
 
   return chunks;
+}
+
+/**
+ * Extract the 1-based page numbers a chunk covers from its `=== PAGE N ===`
+ * banners. Used to tag mergeCoaRecords() records with their source_pages.
+ * Returns [] when a chunk carries no banner (e.g. the single-page fast path).
+ */
+function chunkPageNumbers(chunk) {
+  const nums = [];
+  const re = /=== PAGE (\d+) ===/g;
+  let m;
+  while ((m = re.exec(chunk || '')) !== null) {
+    const n = parseInt(m[1], 10);
+    if (!isNaN(n)) nums.push(n);
+  }
+  return nums;
 }
 
 /**
@@ -1883,6 +1917,12 @@ async function processCoaItem(item) {
       return parseExtraction(content);
     }
 
+    // Shadow-mode capture of the raw per-chunk parses + their page ranges so
+    // processCoaItem can run mergeCoaRecords() AFTER extraction. Populated by
+    // runTextPath() on every branch (single-call, single-chunk, multi-chunk,
+    // truncation fallback). Only read when COA_RECORDS_MODE !== 'off'.
+    let coaRecordsCapture = { parsedChunks: [], chunkPageRanges: [], truncated: false };
+
     // Dispatcher: route to either the legacy 6K-truncation single-call path
     // (single-page docs, OCR fallbacks, image-OCR — byte-identical to pre-
     // chunking behavior) or the multi-page chunker. Returns a `parsed`
@@ -1894,7 +1934,9 @@ async function processCoaItem(item) {
       // call, same log output, same parsed shape.
       if (pages.length <= 1) {
         const llmText = text.substring(0, 6000);
-        return await runTextQwen(llmText);
+        const parsed1 = await runTextQwen(llmText);
+        coaRecordsCapture = { parsedChunks: [parsed1], chunkPageRanges: [[1]], truncated: false };
+        return parsed1;
       }
 
       const chunks = buildPageChunks(pages);
@@ -1904,7 +1946,9 @@ async function processCoaItem(item) {
       // whatever signal there is).
       if (chunks.length === 0) {
         const llmText = text.substring(0, 6000);
-        return await runTextQwen(llmText);
+        const parsed0 = await runTextQwen(llmText);
+        coaRecordsCapture = { parsedChunks: [parsed0], chunkPageRanges: [[1]], truncated: false };
+        return parsed0;
       }
 
       // Hard cap: if we'd need too many Qwen calls, fall back to a single
@@ -1916,7 +1960,11 @@ async function processCoaItem(item) {
           `(cap: ${TEXT_MAX_CHUNKS}) — falling back to legacy 6K-truncation single call`
         );
         const llmText = text.substring(0, 6000);
-        return await runTextQwen(llmText);
+        const parsedT = await runTextQwen(llmText);
+        // Truncated single extraction → mergeCoaRecords emits a single record
+        // flagged 'truncated_multipage'.
+        coaRecordsCapture = { parsedChunks: [parsedT], chunkPageRanges: [[]], truncated: true };
+        return parsedT;
       }
 
       // Single-chunk fast path (e.g. small multi-page docs that fit under
@@ -1924,7 +1972,13 @@ async function processCoaItem(item) {
       // the merge wrapper keeps the common case byte-identical to a
       // single-page run.
       if (chunks.length === 1) {
-        return await runTextQwen(chunks[0]);
+        const parsedS = await runTextQwen(chunks[0]);
+        coaRecordsCapture = {
+          parsedChunks: [parsedS],
+          chunkPageRanges: [chunkPageNumbers(chunks[0])],
+          truncated: false,
+        };
+        return parsedS;
       }
 
       // Multi-chunk path — the new behavior. Run each chunk independently
@@ -1935,6 +1989,13 @@ async function processCoaItem(item) {
         console.log(`  Qwen call ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
         parsedChunks.push(await runTextQwen(chunks[i]));
       }
+      coaRecordsCapture = {
+        parsedChunks,
+        chunkPageRanges: chunks.map((c) => chunkPageNumbers(c)),
+        truncated: false,
+      };
+      // Flat merge still drives ai_fields/tables (unchanged). The records
+      // payload is assembled separately from coaRecordsCapture in shadow mode.
       return mergeTextExtractions(parsedChunks);
     }
 
@@ -2196,6 +2257,36 @@ async function processCoaItem(item) {
       resultBody.uncertainty = JSON.stringify(uncertainty);
     }
 
+    // ===== Multi-record COA (shadow mode) =====
+    // Assemble the per-chunk extractions into a CoaRecordsPayload and, when the
+    // doc GENUINELY carries >= 2 records, post it as ai_records ALONGSIDE the
+    // flat ai_fields/tables above. Single-record docs post EXACTLY as today (no
+    // ai_records) so the common case is byte-identical. The flat result
+    // (mergeTextExtractions) still drives ai_fields regardless. P1 treats
+    // 'shadow' and 'on' identically for posting; the review/approve wiring that
+    // consumes ai_records is P3/P4. coaRecordsCapture is only populated when the
+    // text path ran (it doesn't run in VLM-primary success); when empty we post
+    // exactly as today.
+    if (COA_RECORDS_MODE !== 'off' && coaRecordsCapture.parsedChunks.length > 0) {
+      try {
+        const recordsPayload = mergeCoaRecords(
+          coaRecordsCapture.parsedChunks,
+          coaRecordsCapture.chunkPageRanges,
+          { truncated: coaRecordsCapture.truncated }
+        );
+        if (recordsPayload.records.length >= 2) {
+          resultBody.ai_records = JSON.stringify(recordsPayload);
+          console.log(
+            `  COA records (${COA_RECORDS_MODE}): ${recordsPayload.records.length} records ` +
+            `(${recordsPayload.record_cardinality}/${recordsPayload.record_key_basis}) — posting ai_records`
+          );
+        }
+      } catch (recErr) {
+        // Shadow assembly must NEVER fail the post. Fall through with flat-only.
+        console.warn(`  COA records assembly failed (non-critical): ${recErr.message}`);
+      }
+    }
+
     await postResults(item.id, resultBody);
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -2399,7 +2490,28 @@ Return JSON with:
   "summary": "one-sentence description",
   "_confidence": 0.0-1.0,
   "document_type": "Certificate of Analysis" | "Bill of Lading" | etc.
-}`;
+}
+
+MULTI-RECORD COAs (optional, additive — keep emitting the flat fields/tables/products/_confidence above for back-compat):
+A single COA often covers MULTIPLE lots, sublots, or products. When the pages you can see carry more than one distinct lot/sublot (even the SAME product) or more than one product, ALSO return a "records" array, one entry per lot/sublot (preferred) or per product:
+{
+  "records": [
+    {
+      "fields": { "lot_code": "...", "sub_lot_code": "...", "product_name": "...", "product_code": "...", "expiration_date": "...", ... },
+      "tables": [ ...this record's own test-result table(s)... ],
+      "groups": { "yeast_mold": { ... }, "sensory": { ... } }
+    }
+  ],
+  "record_cardinality": "single" | "multi_lot" | "multi_product",
+  "record_key_basis": "lot" | "lot+sublot" | "product",
+  "page_metadata": { ...fields CONSTANT across every record on these pages (e.g. supplier_name, coa_number, manufacturer)... }
+}
+RULES for records:
+- Emit ONE record PER LOT and PER SUBLOT. If a single product has 4 sublots, that is 4 records (record_key_basis "lot+sublot"). Only key by product (record_key_basis "product") when records genuinely differ by product with NO per-lot split.
+- Put fields that vary between records in each record's "fields"; put fields constant across all records in "page_metadata". Do not duplicate constant fields into every record.
+- These pages may be only PART of a larger document — extract only what is present here. The assembler stitches records across pages; you do not need to see the whole document.
+- Specs verbatim, never derive pass/fail, lab consumables are never product data — the same domain rules as above apply inside each record.
+- When the pages carry exactly ONE lot/product, you may omit "records" entirely (the flat fields suffice).`;
 
 const DAIRY_FOOD_INDUSTRY_PROMPT = `
 ORG CONTEXT:
@@ -2764,6 +2876,19 @@ function parseExtraction(content) {
   const summary = typeof parsed.summary === 'string' ? parsed.summary : '';
   const documentType = typeof parsed.document_type === 'string' ? parsed.document_type : null;
 
+  // Multi-record COA shape (optional — older / single-product responses won't
+  // carry these). Passed through untouched for mergeCoaRecords() to assemble
+  // across chunks; the flat fields/tables above still drive ai_fields.
+  const records = Array.isArray(parsed.records) ? parsed.records : null;
+  const recordCardinality =
+    typeof parsed.record_cardinality === 'string' ? parsed.record_cardinality : null;
+  const recordKeyBasis =
+    typeof parsed.record_key_basis === 'string' ? parsed.record_key_basis : null;
+  const pageMetadata =
+    parsed.page_metadata && typeof parsed.page_metadata === 'object' && !Array.isArray(parsed.page_metadata)
+      ? parsed.page_metadata
+      : null;
+
   // Build fields
   const fields = {};
   const rawFields =
@@ -2778,7 +2903,20 @@ function parseExtraction(content) {
     }
   }
 
-  return { fields: flattenFields(fields), tables, products, summary, confidence, confidenceNum, documentType };
+  return {
+    fields: flattenFields(fields),
+    tables,
+    products,
+    summary,
+    confidence,
+    confidenceNum,
+    documentType,
+    // Multi-record COA passthrough (null when the model didn't emit them).
+    records,
+    recordCardinality,
+    recordKeyBasis,
+    pageMetadata,
+  };
 }
 
 // === Flatten nested objects/arrays in extracted fields ===
