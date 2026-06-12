@@ -40,13 +40,35 @@ combined → exact) — migration + FTS reindex.
 skip ~11 R2-404s). **Clone-rehearse: YES** — new `bin/clone-org` copies a prod org → test
 tenant; rehearse Option B + reprocess there before prod.
 
-**Build order:** (1) BACKEND FOUNDATION — *in progress, dispatched as bg agent
-2026-06-11*: lots migration (`sub_lot_code`, composite identity, `''` sentinel) +
-`produceCoaRecords` (`external_ref=queue-{id}-{lot_key}`) + `handleCoaRecordsApprove`
-(partial approval) + tests. (2) `CoaRecordsReviewTile` per-sublot cards + Lots `Sublot`
-column. (3) FTS lot-indexing migration + reindex (lot_number/sub_lot_code/lot_key into
-documents_fts + query normalize). (4) `bin/clone-org` + rehearse. (5) flip
-`COA_RECORDS_MODE` shadow→on. (6) targeted multi-sublot reprocess → `rematch-lots`.
+**STATUS 2026-06-11: core built + committed on branch `feat/coa-sublot-split`
+(commit `2ec5542`). Build clean; 141 tests passing (coa/queue/lots/search). NOT deployed,
+migrations 0073/0074 NOT applied to any D1.** Done in that commit:
+- (1) FOUNDATION: migration **0073** (`sub_lot_code` on lots, composite identity, `''`
+  sentinel), `produceCoaRecords` (`external_ref=queue-{id}-{lot_key}`),
+  `handleCoaRecordsApprove` (partial per-record approve/hold/reject), entities/lots+matching.
+- (2) UI: `CoaRecordsReviewTile` + ReviewQueue dispatch, Lots `Sublot` column,
+  DocumentDetail linked-lots (added doc→lots join to documents GET).
+- (3) LOT SEARCH: migration **0074** (`lot_text` in documents_fts + triggers on
+  document_lots/lots changes + query normalization), reindex extended.
+- (4) OPS SCRIPTS: `bin/clone-org`, `bin/reprocess-multisublot` (dry-run validated).
+
+**IN PROGRESS (bg agent 2026-06-11):** page-scoped per-record PDF in `produceCoaRecords`
+(currently whole-binary w/ P4 TODO) — extract `record.source_pages` via **pdf-lib** at
+approve time, fallbacks for non-PDF/missing pages. Last code piece.
+
+**REMAINING after page-scoping (deploy/validation sequence):**
+- a. Apply 0073+0074 surgically (check prod `_migrations` first — chain not re-runnable;
+  prod was missing 0059–0067 untracked) + run an FTS **reindex** (lot_text backfill).
+- b. Shadow-validate splits on prod (`COA_RECORDS_MODE` still shadow).
+- c. **Rehearsal = PROD-INSERT isolated tenant** (user-chosen 2026-06-11; local is stale
+  ~0013, staging drifted): `bin/clone-org --prod-insert` a real org → throwaway tenant,
+  drive Option B review→produce→match + `bin/reprocess-multisublot`, verify lot_keys vs
+  WMS lines, delete tenant.
+- d. Flip `COA_RECORDS_MODE` shadow→on (new COAs split forward).
+- e. `bin/reprocess-multisublot --apply` (targeted backlog) → `rematch-lots`.
+- Deferred/minor: NL search (`natural.ts`) lot-aware (one-line swap); Lots-page search
+  separator normalization; legacy `isMultiProduct()` retirement (now unreachable for
+  records-shaped items); R2 copy-vs-reuse in clone-org (v1 reuses source keys, read-only).
 
 **Shipped this session (all pushed to master):**
 - **COA P1 page-first split** (commit `b539928`): multi-page COA PDFs are N independent

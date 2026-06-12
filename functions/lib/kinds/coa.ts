@@ -3,6 +3,7 @@ import { generateId, logAudit } from '../db';
 import { buildR2Key, uploadFile, downloadFile, deleteFile, computeChecksum } from '../r2';
 import { findOrCreateSupplier } from '../suppliers';
 import { findOrCreateProduct } from '../entities/products';
+import { extractRecordPdf } from './coaPageScope';
 import { attachLotToCoaDocument, extractLotNumber } from '../entities/matching';
 import { normalizeLotNumber, normalizeSubLotCode } from '../entities/lots';
 import { getLearnedPreferences } from '../learnedPreferences';
@@ -954,13 +955,24 @@ export async function produceCoaRecords(
       docId = generateId();
       const r2Key = buildR2Key(item.tenant_slug, docId, 1, item.file_name);
 
-      // P4 TODO (page-scoped PDF): the design calls for extracting
-      // record.source_pages from the original PDF into a per-record PDF (via
-      // unpdf) so each document carries only its own page(s). Page extraction is
-      // non-trivial and the foundation must not block on it, so for now we
-      // re-upload the WHOLE binary per record — same as produceMultiProductCoa.
-      // source_pages is preserved in extended_metadata below for the later split.
-      await uploadFile(files, r2Key, fileData, item.mime_type);
+      // P4 (page-scoped PDF): each per-record document is the customer
+      // deliverable, so it must carry ONLY its own page(s). Extract
+      // record.source_pages from the original PDF (downloaded once above,
+      // reused across all records) into a per-record PDF and upload THAT.
+      // extractRecordPdf never throws: non-PDF sources, missing/empty
+      // source_pages, or wholly out-of-range pages fall back to the whole
+      // binary (scoped=false) so approval is never blocked.
+      const scope = await extractRecordPdf(
+        fileData,
+        record.source_pages,
+        item.mime_type,
+        item.file_name
+      );
+      const recordBytes = scope.bytes;
+      const recordMime = scope.scoped ? 'application/pdf' : item.mime_type;
+      const recordSize = recordBytes.byteLength;
+      const recordChecksum = scope.scoped ? await computeChecksum(recordBytes) : checksum;
+      await uploadFile(files, r2Key, recordBytes, recordMime);
 
       const primaryMetadata: Record<string, string> = {};
       for (const [k, v] of Object.entries(mergedFields)) {
@@ -976,6 +988,18 @@ export async function produceCoaRecords(
       if (record.groups && Object.keys(record.groups).length > 0) extended.groups = record.groups;
       if (record.source_pages && record.source_pages.length > 0) {
         extended.source_pages = record.source_pages;
+      }
+      // Record the page-scope outcome so the UI / audits can tell a true
+      // single-page deliverable from a whole-binary fallback. Only the
+      // out-of-range case is a "failure" worth flagging (the source claimed
+      // pages but none were valid); not_pdf / no_pages are expected non-PDF
+      // or page-less inputs, not errors.
+      if (scope.scoped) {
+        extended.page_scoped = true;
+        extended.scoped_pages = scope.includedPages;
+      } else if (scope.reason === 'out_of_range' || scope.reason === 'extract_failed') {
+        extended.page_scope_failed = true;
+        extended.page_scope_fail_reason = scope.reason;
       }
       const extendedMetadataStr =
         Object.keys(extended).length > 0 ? JSON.stringify(extended) : null;
@@ -1010,10 +1034,10 @@ export async function produceCoaRecords(
           versionId,
           docId,
           item.file_name,
-          item.file_size,
-          item.mime_type,
+          recordSize,
+          recordMime,
           r2Key,
-          checksum,
+          recordChecksum,
           userId,
           item.extracted_text
         )
