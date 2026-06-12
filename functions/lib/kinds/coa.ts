@@ -925,7 +925,10 @@ export async function produceCoaRecords(
       ...record.fields,
     };
 
-    const lot = computeRecordLotKey(record.fields ?? {});
+    // Use mergedFields, not record.fields: the lot_code is frequently hoisted
+    // into page_metadata (constant across a page's sublot records), so reading
+    // record.fields alone would drop the lot and yield no combined lot_key.
+    const lot = computeRecordLotKey(mergedFields);
 
     // Idempotent external_ref keyed on SUBLOT IDENTITY (lot_key), not record
     // index — re-running the same approval upserts the same document rather
