@@ -210,6 +210,9 @@ export default function ReviewQueue() {
   const [dialogDocTypes, setDialogDocTypes] = useState<ApiDocumentType[]>([]);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
+  // Per-item PDF page driven by the COA records tile's page navigator, so the
+  // left-side PdfViewer follows the page being reviewed on the right.
+  const [coaPdfPage, setCoaPdfPage] = useState<Record<string, number>>({});
   const [dismissedFields, setDismissedFields] = useState<Record<string, Set<string>>>({});
   const [fieldRenames, setFieldRenames] = useState<Record<string, Record<string, string>>>({});
   // {queueItemId: {currentKey: originalAiKey}}  — tracks what was renamed from what
@@ -1638,7 +1641,11 @@ export default function ReviewQueue() {
                         ) : previewUrls[item.id] ? (
                           item.mime_type === 'application/pdf' ? (
                             <Box sx={{ minHeight: 400, height: '100%' }}>
-                              <PdfViewer url={previewUrls[item.id]} fileName={item.file_name} />
+                              <PdfViewer
+                                url={previewUrls[item.id]}
+                                fileName={item.file_name}
+                                page={coaPdfPage[item.id]}
+                              />
                             </Box>
                           ) : item.mime_type.startsWith('image/') ? (
                             <Box sx={{ bgcolor: 'grey.50', borderRadius: 1, overflow: 'hidden' }}>
@@ -1754,7 +1761,13 @@ export default function ReviewQueue() {
                           const coaRecords = parseCoaRecords(item.ai_records);
                           return coaRecords && coaRecords.records.length >= 1;
                         })() ? (
-                          <CoaRecordsReviewTile item={item} onApproved={() => loadQueue()} />
+                          <CoaRecordsReviewTile
+                            item={item}
+                            onApproved={() => loadQueue()}
+                            onPageChange={(page) =>
+                              setCoaPdfPage((prev) => ({ ...prev, [item.id]: page }))
+                            }
+                          />
                         ) : (
                         <>
                         {/* Document-level supplier verification. Gates approval:

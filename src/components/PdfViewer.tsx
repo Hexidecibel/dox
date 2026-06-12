@@ -16,9 +16,18 @@ pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/b
 interface PdfViewerProps {
   url: string;
   fileName: string;
+  /**
+   * Optional externally-controlled page. When this prop changes the viewer
+   * jumps to that page (clamped to the document). Internal page navigation
+   * (buttons / arrow keys / input) still works on top of it — the prop only
+   * acts as a "jump to" signal, it does not lock the viewer. Used by the COA
+   * records review tile to keep the left-side PDF in sync with the page being
+   * reviewed on the right.
+   */
+  page?: number;
 }
 
-export default function PdfViewer({ url, fileName }: PdfViewerProps) {
+export default function PdfViewer({ url, fileName, page }: PdfViewerProps) {
   const [numPages, setNumPages] = useState<number>(0);
   const [pageNumber, setPageNumber] = useState<number>(1);
   const [scale, setScale] = useState<number>(1.0);
@@ -60,6 +69,16 @@ export default function PdfViewer({ url, fileName }: PdfViewerProps) {
     setPageNumber(clamped);
     setPageInputValue(String(clamped));
   }, [numPages]);
+
+  // Sync to an externally-controlled page (e.g. the COA records tile stepper).
+  // Runs once the document is loaded so the requested page can be clamped to a
+  // known page count.
+  useEffect(() => {
+    if (page == null || numPages === 0) return;
+    const clamped = Math.max(1, Math.min(page, numPages));
+    setPageNumber(clamped);
+    setPageInputValue(String(clamped));
+  }, [page, numPages]);
 
   const handlePageInputBlur = useCallback(() => {
     const p = parseInt(pageInputValue);

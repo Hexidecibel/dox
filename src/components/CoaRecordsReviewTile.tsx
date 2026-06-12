@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Box,
   Typography,
@@ -19,12 +19,19 @@ import {
   Divider,
   ToggleButton,
   ToggleButtonGroup,
+  Collapse,
 } from '@mui/material';
 import {
   Add as AddIcon,
   Delete as DeleteIcon,
   CheckCircle as CheckIcon,
   InfoOutlined as InfoIcon,
+  NavigateBefore as NavigateBeforeIcon,
+  NavigateNext as NavigateNextIcon,
+  ExpandMore as ExpandMoreIcon,
+  CheckCircle as ApproveDotIcon,
+  PauseCircleOutline as HoldDotIcon,
+  Cancel as RejectDotIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
 import { parseCoaRecords } from '../lib/types';
@@ -68,6 +75,39 @@ type ItemOutcome = 'approve_all' | 'partial_hold' | 'with_reject';
 
 function isLowConf(conf: number | undefined): boolean {
   return conf != null && conf < STAGE_THRESHOLD;
+}
+
+/**
+ * Group record array-indices by the source PDF page they belong to.
+ *
+ * A "page" is the set of records whose `source_pages` include that page number.
+ * A record that spans multiple pages appears under each of its pages (so its
+ * decision is reachable from any of them). Records with no `source_pages`
+ * (older payloads / EDI rows the worker didn't page-tag) are bucketed under a
+ * synthetic page key (0) so they remain reviewable. Returns ordered pages.
+ */
+const UNTAGGED_PAGE = 0;
+
+interface PageGroup {
+  /** Display page number; UNTAGGED_PAGE (0) means "no page tag". */
+  page: number;
+  /** Record array indices on this page, in original order. */
+  indices: number[];
+}
+
+function groupRecordsByPage(records: CoaRecord[]): PageGroup[] {
+  const byPage = new Map<number, number[]>();
+  records.forEach((r, idx) => {
+    const pages = r.source_pages && r.source_pages.length > 0 ? r.source_pages : [UNTAGGED_PAGE];
+    for (const p of pages) {
+      const bucket = byPage.get(p);
+      if (bucket) bucket.push(idx);
+      else byPage.set(p, [idx]);
+    }
+  });
+  return [...byPage.keys()]
+    .sort((a, b) => a - b)
+    .map((page) => ({ page, indices: byPage.get(page)! }));
 }
 
 /** Deep-ish clone of a record so edits never mutate the parsed source. */
@@ -157,9 +197,17 @@ function RecordTable({ table }: { table: ExtractedTable }) {
 export default function CoaRecordsReviewTile({
   item,
   onApproved,
+  onPageChange,
 }: {
   item: ProcessingQueueItem;
   onApproved: () => void;
+  /**
+   * Fired with the currently-reviewed source PDF page (1-based) whenever the
+   * page navigator moves. ReviewQueue feeds this into the left-side PdfViewer
+   * so the PDF follows the records being reviewed. Not fired for untagged
+   * records (which have no real page to jump to).
+   */
+  onPageChange?: (page: number) => void;
 }) {
   const initial = useMemo<CoaRecordsPayload | null>(
     () => parseCoaRecords(item.ai_records),
@@ -174,6 +222,16 @@ export default function CoaRecordsReviewTile({
   );
   // Per-record decision keyed by array index; defaults to 'approve' when absent.
   const [decisions, setDecisions] = useState<Record<number, CoaRecordDecision>>({});
+
+  // Page grouping: records bucketed by their source PDF page. Drives the page
+  // navigator; the records column shows only the active page's records.
+  const pageGroups = useMemo(() => groupRecordsByPage(records), [records]);
+  const multiPage = pageGroups.length > 1;
+  // Index into pageGroups (NOT the page number itself), so untagged-only docs
+  // and gappy page sets both navigate cleanly.
+  const [activePageIdx, setActivePageIdx] = useState(0);
+  // Collapsible shared-fields header, open by default so nothing is hidden.
+  const [pageMetaOpen, setPageMetaOpen] = useState(true);
 
   const [supplier, setSupplier] = useState<SupplierValue>(() => ({
     supplierId: item.supplier_id || undefined,
@@ -237,6 +295,49 @@ export default function CoaRecordsReviewTile({
 
   const approveCount = records.filter((_, i) => decisionFor(i) === 'approve').length;
 
+  // Keep activePageIdx in range if pages ever change (e.g. records mutated).
+  useEffect(() => {
+    if (activePageIdx > pageGroups.length - 1) {
+      setActivePageIdx(Math.max(0, pageGroups.length - 1));
+    }
+  }, [pageGroups.length, activePageIdx]);
+
+  // Drive the left-side PDF: announce the active page (skip the untagged bucket,
+  // which has no real PDF page to jump to).
+  const activeGroup = pageGroups[activePageIdx];
+  useEffect(() => {
+    if (activeGroup && activeGroup.page !== UNTAGGED_PAGE) {
+      onPageChange?.(activeGroup.page);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeGroup?.page]);
+
+  /** Worst-case decision across a page's records, for the page-strip dot. */
+  const pageOutcome = (indices: number[]): ItemOutcome => {
+    let hold = false;
+    for (const i of indices) {
+      const d = decisionFor(i);
+      if (d === 'reject') return 'with_reject';
+      if (d === 'hold') hold = true;
+    }
+    return hold ? 'partial_hold' : 'approve_all';
+  };
+
+  /** Count of records on other pages that are held or rejected. */
+  const offPageFlagged = useMemo(() => {
+    const visible = new Set(activeGroup?.indices ?? []);
+    let held = 0;
+    let rejected = 0;
+    records.forEach((_, i) => {
+      if (visible.has(i)) return;
+      const d = decisionFor(i);
+      if (d === 'hold') held++;
+      else if (d === 'reject') rejected++;
+    });
+    return { held, rejected };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [records, decisions, activeGroup]);
+
   const handleApprove = async () => {
     if (!supplierVerified) {
       setError('Verify the supplier before approving.');
@@ -286,6 +387,162 @@ export default function CoaRecordsReviewTile({
     }
   };
 
+  /** Render one editable record card by its array index. */
+  const renderRecordCard = (idx: number) => {
+    const record = records[idx];
+    if (!record) return null;
+    const lowConf = isLowConf(record._confidence);
+    const decision = decisionFor(idx);
+    const fieldEntries = Object.entries(record.fields || {});
+    const groupEntries = record.groups ? Object.entries(record.groups) : [];
+    const dimmed = decision === 'reject';
+    return (
+      <Paper
+        key={idx}
+        variant="outlined"
+        sx={{
+          p: 2,
+          mb: 2,
+          opacity: dimmed ? 0.6 : 1,
+          borderColor: decision === 'hold' ? 'warning.main' : undefined,
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5, flexWrap: 'wrap' }}>
+          <Typography variant="subtitle2">Record {idx + 1}</Typography>
+          {record.fields?.lot_code && <Chip label={`lot ${record.fields.lot_code}`} size="small" />}
+          {record.fields?.sub_lot_code && (
+            <Chip
+              label={`sublot ${record.fields.sub_lot_code}`}
+              size="small"
+              color="primary"
+              variant="outlined"
+            />
+          )}
+          {record.source_pages && record.source_pages.length > 0 && (
+            <Chip label={`p. ${record.source_pages.join(', ')}`} size="small" variant="outlined" />
+          )}
+          {lowConf && (
+            <Tooltip
+              title={`LLM confidence ${Math.round((record._confidence ?? 0) * 100)}% — below the ${Math.round(
+                STAGE_THRESHOLD * 100,
+              )}% threshold.`}
+              arrow
+            >
+              <Chip label="Low confidence" size="small" color="warning" variant="outlined" />
+            </Tooltip>
+          )}
+          {record.flags?.map((f) => (
+            <Chip
+              key={f}
+              label={f.replace(/_/g, ' ')}
+              size="small"
+              color="warning"
+              variant="outlined"
+            />
+          ))}
+
+          <Box sx={{ flexGrow: 1 }} />
+
+          {!readOnly && (
+            <ToggleButtonGroup
+              size="small"
+              exclusive
+              value={decision}
+              onChange={(_, v: CoaRecordDecision | null) => v && setDecision(idx, v)}
+              disabled={submitting}
+            >
+              <ToggleButton value="approve" color="success">
+                Approve
+              </ToggleButton>
+              <ToggleButton value="hold" color="warning">
+                Hold
+              </ToggleButton>
+              <ToggleButton value="reject" color="error">
+                Reject
+              </ToggleButton>
+            </ToggleButtonGroup>
+          )}
+        </Box>
+
+        {/* Editable per-record fields. */}
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
+            gap: 1.5,
+            mb: groupEntries.length || record.tables?.length ? 2 : 0,
+          }}
+        >
+          {fieldEntries.map(([key, value]) => (
+            <Box key={key} sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+              <TextField
+                label={key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
+                value={value ?? ''}
+                onChange={(e) => updateRecordField(idx, key, e.target.value)}
+                size="small"
+                fullWidth
+                disabled={readOnly || submitting}
+              />
+              {!readOnly && (
+                <IconButton
+                  size="small"
+                  onClick={() => removeRecordField(idx, key)}
+                  disabled={submitting}
+                  title="Remove field"
+                >
+                  <DeleteIcon fontSize="small" />
+                </IconButton>
+              )}
+            </Box>
+          ))}
+        </Box>
+        {!readOnly && (
+          <Button
+            size="small"
+            startIcon={<AddIcon />}
+            onClick={() => addRecordField(idx)}
+            disabled={submitting}
+            sx={{ mb: groupEntries.length || record.tables?.length ? 2 : 0 }}
+          >
+            Add field
+          </Button>
+        )}
+
+        {/* Structured groups (read-only verbatim). */}
+        {groupEntries.length > 0 && (
+          <>
+            <Divider sx={{ mb: 1 }} />
+            {groupEntries.map(([groupName, cells]) => (
+              <Box key={groupName} sx={{ mb: 1.5 }}>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                  {groupName.replace(/_/g, ' ')}
+                </Typography>
+                <GroupCells cells={cells} />
+              </Box>
+            ))}
+          </>
+        )}
+
+        {/* Tables (read-only). */}
+        {record.tables && record.tables.length > 0 && (
+          <>
+            <Divider sx={{ mb: 1 }} />
+            {record.tables.map((t, ti) => (
+              <RecordTable key={ti} table={t} />
+            ))}
+          </>
+        )}
+      </Paper>
+    );
+  };
+
+  /** Small colored status dot for the page strip / stepper summary. */
+  const PageOutcomeDot = ({ o }: { o: ItemOutcome }) => {
+    if (o === 'with_reject') return <RejectDotIcon sx={{ fontSize: 14, color: 'error.main' }} />;
+    if (o === 'partial_hold') return <HoldDotIcon sx={{ fontSize: 14, color: 'warning.main' }} />;
+    return <ApproveDotIcon sx={{ fontSize: 14, color: 'success.main' }} />;
+  };
+
   if (!initial) {
     return (
       <Alert severity="warning">
@@ -295,6 +552,7 @@ export default function CoaRecordsReviewTile({
   }
 
   const pageMetaKeys = Object.keys(pageMetadata);
+  const pageLabel = (p: number) => (p === UNTAGGED_PAGE ? 'untagged' : `p.${p}`);
 
   return (
     <Box>
@@ -343,36 +601,62 @@ export default function CoaRecordsReviewTile({
         )}
       </Paper>
 
-      {/* Shared / constant fields — edited once. */}
-      <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>
-          Shared fields (page metadata)
-        </Typography>
-        {pageMetaKeys.length === 0 ? (
-          <Typography variant="caption" color="text.secondary">
-            No constant fields were hoisted for this document.
-          </Typography>
-        ) : (
-          <Box
+      {/* Shared / constant fields — edited once, collapsible so they stay out
+          of the way while paging but remain reachable from any page. */}
+      <Paper variant="outlined" sx={{ mb: 2 }}>
+        <Box
+          onClick={() => setPageMetaOpen((o) => !o)}
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            px: 2,
+            py: 1.25,
+            cursor: 'pointer',
+            userSelect: 'none',
+          }}
+        >
+          <Typography variant="subtitle2">Shared fields (page metadata)</Typography>
+          <Chip label={`${pageMetaKeys.length}`} size="small" variant="outlined" />
+          <Box sx={{ flexGrow: 1 }} />
+          <ExpandMoreIcon
+            fontSize="small"
             sx={{
-              display: 'grid',
-              gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
-              gap: 1.5,
+              transform: pageMetaOpen ? 'rotate(180deg)' : 'rotate(0deg)',
+              transition: 'transform 0.2s',
+              color: 'text.secondary',
             }}
-          >
-            {pageMetaKeys.map((key) => (
-              <TextField
-                key={key}
-                label={key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
-                value={pageMetadata[key] ?? ''}
-                onChange={(e) => updatePageMetaField(key, e.target.value)}
-                size="small"
-                fullWidth
-                disabled={readOnly || submitting}
-              />
-            ))}
+          />
+        </Box>
+        <Collapse in={pageMetaOpen} unmountOnExit>
+          <Box sx={{ px: 2, pb: 2 }}>
+            {pageMetaKeys.length === 0 ? (
+              <Typography variant="caption" color="text.secondary">
+                No constant fields were hoisted for this document.
+              </Typography>
+            ) : (
+              <Box
+                sx={{
+                  display: 'grid',
+                  gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
+                  gap: 1.5,
+                }}
+              >
+                {pageMetaKeys.map((key) => (
+                  <TextField
+                    key={key}
+                    label={key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
+                    value={pageMetadata[key] ?? ''}
+                    onChange={(e) => updatePageMetaField(key, e.target.value)}
+                    size="small"
+                    fullWidth
+                    disabled={readOnly || submitting}
+                  />
+                ))}
+              </Box>
+            )}
           </Box>
-        )}
+        </Collapse>
       </Paper>
 
       {records.length === 0 && (
@@ -381,146 +665,78 @@ export default function CoaRecordsReviewTile({
         </Alert>
       )}
 
-      {records.map((record, idx) => {
-        const lowConf = isLowConf(record._confidence);
-        const decision = decisionFor(idx);
-        const fieldEntries = Object.entries(record.fields || {});
-        const groupEntries = record.groups ? Object.entries(record.groups) : [];
-        const dimmed = decision === 'reject';
-        return (
-          <Paper
-            key={idx}
-            variant="outlined"
-            sx={{
-              p: 2,
-              mb: 2,
-              opacity: dimmed ? 0.6 : 1,
-              borderColor: decision === 'hold' ? 'warning.main' : undefined,
-            }}
-          >
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5, flexWrap: 'wrap' }}>
-              <Typography variant="subtitle2">Record {idx + 1}</Typography>
-              {record.fields?.lot_code && (
-                <Chip label={`lot ${record.fields.lot_code}`} size="small" />
-              )}
-              {record.fields?.sub_lot_code && (
-                <Chip label={`sublot ${record.fields.sub_lot_code}`} size="small" color="primary" variant="outlined" />
-              )}
-              {record.source_pages && record.source_pages.length > 0 && (
-                <Chip
-                  label={`p. ${record.source_pages.join(', ')}`}
-                  size="small"
-                  variant="outlined"
-                />
-              )}
-              {lowConf && (
-                <Tooltip
-                  title={`LLM confidence ${Math.round((record._confidence ?? 0) * 100)}% — below the ${Math.round(
-                    STAGE_THRESHOLD * 100,
-                  )}% threshold.`}
-                  arrow
-                >
-                  <Chip label="Low confidence" size="small" color="warning" variant="outlined" />
-                </Tooltip>
-              )}
-              {record.flags?.map((f) => (
-                <Chip key={f} label={f.replace(/_/g, ' ')} size="small" color="warning" variant="outlined" />
-              ))}
-
-              <Box sx={{ flexGrow: 1 }} />
-
-              {!readOnly && (
-                <ToggleButtonGroup
-                  size="small"
-                  exclusive
-                  value={decision}
-                  onChange={(_, v: CoaRecordDecision | null) => v && setDecision(idx, v)}
-                  disabled={submitting}
-                >
-                  <ToggleButton value="approve" color="success">
-                    Approve
-                  </ToggleButton>
-                  <ToggleButton value="hold" color="warning">
-                    Hold
-                  </ToggleButton>
-                  <ToggleButton value="reject" color="error">
-                    Reject
-                  </ToggleButton>
-                </ToggleButtonGroup>
-              )}
-            </Box>
-
-            {/* Editable per-record fields. */}
-            <Box
-              sx={{
-                display: 'grid',
-                gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
-                gap: 1.5,
-                mb: groupEntries.length || record.tables?.length ? 2 : 0,
-              }}
+      {/* PAGE NAVIGATOR — only when the doc spans >1 distinct source page. The
+          records column below shows only the active page's records; the stepper
+          + tab strip carry a per-page decision dot so the reviewer can see the
+          overall state without scrolling every page. */}
+      {multiPage && (
+        <Paper variant="outlined" sx={{ p: 1, mb: 2, bgcolor: 'action.hover' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+            <IconButton
+              size="small"
+              onClick={() => setActivePageIdx((i) => Math.max(0, i - 1))}
+              disabled={activePageIdx <= 0}
+              title="Previous page"
             >
-              {fieldEntries.map(([key, value]) => (
-                <Box key={key} sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
-                  <TextField
-                    label={key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
-                    value={value ?? ''}
-                    onChange={(e) => updateRecordField(idx, key, e.target.value)}
-                    size="small"
-                    fullWidth
-                    disabled={readOnly || submitting}
-                  />
-                  {!readOnly && (
-                    <IconButton
-                      size="small"
-                      onClick={() => removeRecordField(idx, key)}
-                      disabled={submitting}
-                      title="Remove field"
-                    >
-                      <DeleteIcon fontSize="small" />
-                    </IconButton>
-                  )}
-                </Box>
-              ))}
-            </Box>
-            {!readOnly && (
-              <Button
-                size="small"
-                startIcon={<AddIcon />}
-                onClick={() => addRecordField(idx)}
-                disabled={submitting}
-                sx={{ mb: groupEntries.length || record.tables?.length ? 2 : 0 }}
-              >
-                Add field
-              </Button>
-            )}
+              <NavigateBeforeIcon />
+            </IconButton>
+            <Typography variant="subtitle2" sx={{ minWidth: 0, flexShrink: 0 }}>
+              Page {activePageIdx + 1} of {pageGroups.length}
+              {activeGroup && (
+                <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.75 }}>
+                  ({pageLabel(activeGroup.page)} · {activeGroup.indices.length} record
+                  {activeGroup.indices.length === 1 ? '' : 's'})
+                </Typography>
+              )}
+            </Typography>
+            <Box sx={{ flexGrow: 1 }} />
+            <IconButton
+              size="small"
+              onClick={() => setActivePageIdx((i) => Math.min(pageGroups.length - 1, i + 1))}
+              disabled={activePageIdx >= pageGroups.length - 1}
+              title="Next page"
+            >
+              <NavigateNextIcon />
+            </IconButton>
+          </Box>
 
-            {/* Structured groups (read-only verbatim). */}
-            {groupEntries.length > 0 && (
-              <>
-                <Divider sx={{ mb: 1 }} />
-                {groupEntries.map(([groupName, cells]) => (
-                  <Box key={groupName} sx={{ mb: 1.5 }}>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                      {groupName.replace(/_/g, ' ')}
-                    </Typography>
-                    <GroupCells cells={cells} />
-                  </Box>
-                ))}
-              </>
-            )}
+          {/* Compact page tab strip with per-page status dots. */}
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+            {pageGroups.map((g, i) => {
+              const o = pageOutcome(g.indices);
+              const active = i === activePageIdx;
+              return (
+                <Chip
+                  key={g.page}
+                  size="small"
+                  clickable
+                  onClick={() => setActivePageIdx(i)}
+                  color={active ? 'primary' : 'default'}
+                  variant={active ? 'filled' : 'outlined'}
+                  icon={<PageOutcomeDot o={o} />}
+                  label={pageLabel(g.page)}
+                />
+              );
+            })}
+          </Box>
+        </Paper>
+      )}
 
-            {/* Tables (read-only). */}
-            {record.tables && record.tables.length > 0 && (
-              <>
-                <Divider sx={{ mb: 1 }} />
-                {record.tables.map((t, ti) => (
-                  <RecordTable key={ti} table={t} />
-                ))}
-              </>
-            )}
-          </Paper>
-        );
-      })}
+      {/* Active-page records (or all records, when single-page). */}
+      {(activeGroup ? activeGroup.indices : records.map((_, i) => i)).map((idx) =>
+        renderRecordCard(idx),
+      )}
+
+      {/* Heads-up: records on OTHER pages are held/rejected. */}
+      {multiPage && (offPageFlagged.held > 0 || offPageFlagged.rejected > 0) && (
+        <Alert severity="warning" sx={{ mb: 2 }} icon={false}>
+          On other pages:
+          {offPageFlagged.held > 0 && ` ${offPageFlagged.held} held`}
+          {offPageFlagged.held > 0 && offPageFlagged.rejected > 0 && ' ·'}
+          {offPageFlagged.rejected > 0 && ` ${offPageFlagged.rejected} rejected`}
+          . Approving submits decisions for ALL pages.
+        </Alert>
+      )}
 
       {!readOnly && (
         <>
