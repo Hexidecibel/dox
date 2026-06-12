@@ -46,7 +46,7 @@ import {
   Save as SaveIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
-import type { Document, DocumentVersion, ApiDocumentType } from '../lib/types';
+import type { Document, DocumentVersion, ApiDocumentType, DocumentLinkedLot } from '../lib/types';
 import { VersionHistory } from '../components/VersionHistory';
 import { UploadDialog } from '../components/UploadDialog';
 import { RoleGuard } from '../components/RoleGuard';
@@ -109,16 +109,22 @@ export function DocumentDetail() {
   // Document types for dropdown
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
 
+  // Linked lots (one per sublot under Option B). Best-effort; empty for docs
+  // with no lot linkage.
+  const [linkedLots, setLinkedLots] = useState<DocumentLinkedLot[]>([]);
+
   const loadDocument = async () => {
     if (!id) return;
     setLoading(true);
     try {
-      const [document, vers] = await Promise.all([
+      const [document, vers, lots] = await Promise.all([
         api.documents.get(id),
         api.documents.versions(id),
+        api.documents.lots(id).catch(() => [] as DocumentLinkedLot[]),
       ]);
       setDoc(document);
       setVersions(vers);
+      setLinkedLots(lots);
       // Set preview to latest version (or keep current selection if still valid)
       if (vers.length > 0) {
         setPreviewVersion((prev) => {
@@ -728,6 +734,35 @@ export function DocumentDetail() {
         tenantId={doc.tenant_id}
         readOnly={isReader}
       />
+
+      {/* Linked Lots (one per sublot under Option B). lot_key is the combined
+          match key (lot_number + sub_lot_code) used against order lines. */}
+      {linkedLots.length > 0 && (
+        <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+            <Typography variant="h6" fontWeight={600}>
+              Linked Lots
+            </Typography>
+            <InfoTooltip text="Each lot this document certifies. Under sublot split, one COA links to one lot per sublot; the combined key is what matches order lines." />
+          </Box>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+            {linkedLots.map((lot) => (
+              <Box key={lot.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                <Typography variant="body2">
+                  lot <strong>{lot.lot_number}</strong>
+                  {lot.sub_lot_code ? ` · sublot ${lot.sub_lot_code}` : ''}
+                </Typography>
+                <Chip label={lot.lot_key} size="small" variant="outlined" />
+                {lot.product_name && (
+                  <Typography variant="caption" color="text.secondary">
+                    {lot.product_name}
+                  </Typography>
+                )}
+              </Box>
+            ))}
+          </Box>
+        </Paper>
+      )}
 
       {/* Document Preview */}
       {previewVersion && (

@@ -11,7 +11,9 @@ import { deleteFile } from '../../lib/r2';
 import { approveQueueItem, approveMultiProductQueueItem } from '../../lib/queue-approve';
 import type { QueueItem, FieldPickCapture, FieldDismissalCapture, TableEditCapture } from '../../lib/queue-approve';
 import type { Env, User } from '../../lib/types';
-import type { TemplateFieldMapping } from '../../../shared/types';
+import { parseCoaRecords } from '../../../shared/types';
+import type { TemplateFieldMapping, CoaRecordsPayload } from '../../../shared/types';
+import { produceCoaRecords, type CoaRecordDecision } from '../../lib/kinds/coa';
 
 /**
  * GET /api/queue/:id
@@ -128,8 +130,17 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
        *   shipment → { shipments: ParsedShipment[] }
        * Absent for COA approves; absent for older order/shipment items, in
        * which case handleRecordsApprove falls back to item.ai_records.
+       *
+       * For records-shaped COA items (Option B), `records` is the human-edited
+       * CoaRecordsPayload; produceCoaRecords runs against it.
        */
       records?: unknown;
+      /**
+       * COA partial approval: per-record decision keyed by record_index. Absent
+       * index → 'approve'. If any record is 'hold', the queue item stays
+       * pending and only the approved records produce documents.
+       */
+      record_decisions?: Record<string, CoaRecordDecision>;
     };
 
     if (!body.status || !['approved', 'rejected'].includes(body.status)) {
@@ -174,6 +185,28 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         return await handleRecordsApprove(context, user, item, body.records);
       }
       const selectedSource: 'text' | 'vlm' = body.selected_source === 'vlm' ? 'vlm' : 'text';
+
+      // Records-shaped COA (Option B): one queue item → N sublot docs/lots.
+      // Source the payload from the human-edited body.records first, falling
+      // back to the persisted worker output for older items. Only dispatch when
+      // it actually parses as a CoaRecordsPayload — otherwise fall through to
+      // the flat single/multi-product paths below.
+      {
+        const coaPayload =
+          parseCoaRecords(body.records as string | null | undefined) ??
+          parseCoaRecords(item.ai_records);
+        if (kind === 'coa' && coaPayload) {
+          return await handleCoaRecordsApprove(
+            context,
+            user,
+            item,
+            coaPayload,
+            body.record_decisions,
+            selectedSource,
+            { supplierId: body.supplier_id, supplierName: body.supplier_name }
+          );
+        }
+      }
       const captures = {
         fieldPicks: body.field_picks,
         dismissals: body.dismissals,
@@ -588,6 +621,113 @@ async function handleRecordsApprove(
     JSON.stringify({
       item: { id: item.id, status: 'approved', reviewed_by: user.id, output_kind: kind },
       summary,
+    }),
+    { headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
+/**
+ * Convert the raw body.record_decisions (string-keyed, loosely-typed JSON) into
+ * a number-keyed map of validated CoaRecordDecision. Unknown values default to
+ * 'approve'. Never throws — a malformed decisions blob just means "approve all".
+ */
+function normalizeRecordDecisions(
+  raw: Record<string, CoaRecordDecision> | undefined
+): Record<number, CoaRecordDecision> {
+  const out: Record<number, CoaRecordDecision> = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [k, v] of Object.entries(raw)) {
+    const idx = Number(k);
+    if (!Number.isInteger(idx)) continue;
+    if (v === 'approve' || v === 'hold' || v === 'reject') out[idx] = v;
+  }
+  return out;
+}
+
+/**
+ * Approve a records-shaped COA queue item (Option B — per-sublot split).
+ *
+ * Mirrors handleRecordsApprove (order/shipment): produces against the
+ * human-EDITED records (body.records → CoaRecordsPayload), supports PARTIAL
+ * approval via record_decisions (per-record approve/hold/reject). When ANY
+ * record is held the queue item STAYS pending — produceCoaRecords leaves the
+ * status untouched in that case and we record a partial-approval audit row.
+ * Held records are NOT produced; approved records each become their own
+ * documents + lots row keyed on the combined lot_key.
+ */
+async function handleCoaRecordsApprove(
+  context: EventContext<Env, string, Record<string, unknown>>,
+  user: User,
+  item: QueueItem & {
+    output_kind: string | null;
+    ai_records: string | null;
+  },
+  payload: CoaRecordsPayload,
+  rawDecisions: Record<string, CoaRecordDecision> | undefined,
+  selectedSource: 'text' | 'vlm',
+  supplierOverride: { supplierId?: string; supplierName?: string }
+): Promise<Response> {
+  const decisions = normalizeRecordDecisions(rawDecisions);
+
+  let result;
+  try {
+    result = await produceCoaRecords(context.env.DB, context.env.FILES, item, {
+      payload,
+      decisions,
+      userId: user.id,
+      clientIp: getClientIp(context.request),
+      selectedSource,
+      supplierId: supplierOverride.supplierId,
+      supplierName: supplierOverride.supplierName,
+    });
+  } catch (err) {
+    throw new BadRequestError(
+      `Failed to produce COA records: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  const heldCount = result.heldRecordIndexes.length;
+  const fullyApproved = heldCount === 0;
+
+  // Persist the corrected records back onto the item for audit + so a re-open
+  // shows what was reviewed. produceCoaRecords already flipped status to
+  // 'approved' (+ stamped reviewer) when nothing was held; when records are
+  // held we leave status = 'pending' so the item stays in the queue.
+  if (fullyApproved) {
+    await context.env.DB.prepare(
+      `UPDATE processing_queue SET ai_records = ? WHERE id = ?`
+    )
+      .bind(JSON.stringify(payload), item.id)
+      .run();
+  } else {
+    await context.env.DB.prepare(
+      `UPDATE processing_queue SET ai_records = ?, status = 'pending' WHERE id = ?`
+    )
+      .bind(JSON.stringify(payload), item.id)
+      .run();
+  }
+
+  return new Response(
+    JSON.stringify({
+      item: {
+        id: item.id,
+        status: fullyApproved ? 'approved' : 'pending',
+        reviewed_by: fullyApproved ? user.id : null,
+        output_kind: 'coa',
+      },
+      documents: result.documents.map(d => ({
+        id: d.documentId,
+        tenant_id: item.tenant_id,
+        title: d.title,
+        external_ref: d.externalRef,
+        lot_key: d.lotKey,
+        sub_lot_code: d.subLotCode,
+        record_index: d.recordIndex,
+        current_version: 1,
+        status: 'active',
+      })),
+      held_record_indexes: result.heldRecordIndexes,
+      summary: `${result.documents.length} produced, ${heldCount} held`,
     }),
     { headers: { 'Content-Type': 'application/json' } }
   );

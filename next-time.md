@@ -4,14 +4,49 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-## 2026-06-06/07 COA MULTI-RECORD SPLIT (page-first) + GPU/TIMEOUT FIXES — IN PROGRESS
+## 2026-06-11 SUBLOT GRAIN DECIDED — Option B (per-sublot) — PLAN LOCKED, NOT BUILT
 
-**Pick up here:** waiting on the teammate's answer to the **sublot-grain** question
-(user said he has an answer, giving it next session). The question sent to him:
-for a product with sublots (e.g. Darigold item 810004, lot 10426110, sublots 05/04/02),
-**one record per product/main-lot** (sublots as test-table columns — current behavior)
-**or one record per sublot** (own document + lot row)? Answer drives whether
-`mergeCoaRecords` needs a second-level sublot split before P3.
+**Decision (user + buddy, 2026-06-11): OPTION B.** Each sublot → its own `documents` row +
+its own `lots` row (full per-sublot traceability). Extraction already emits per-sublot
+records (shadow); the build pushes sublot DOWN into lots/matching/producer (main-lot-grain
+today). Full design contract is in `~/.claude/plans/coa-multi-record.md` (section
+"SUBLOT GRAIN LOCKED — Option B"). Key facts:
+- **WMS combines lot+sublot into ONE lot, one combined lot per sublot**, CONCATENATED:
+  lot `10426110` + sublot `05` → `1042611005`. So `order_items.lot_number` already carries
+  the combined value → **NO order/shipment-side change**. All new work is COA-side.
+- **Combine rule:** `lot_key = lot_number + sub_lot_code` (sublots are ALWAYS 2 digits, so
+  verbatim concat; single-lot → `lot_key = lot_number`). Store lot_number / sub_lot_code /
+  lot_key separately; matcher unchanged in shape (`product_code + lot_key`), just fed
+  combined keys. Run `rematch-lots` after P4 to relink waiting order lines.
+- **Deliverable = per-sublot COAs** (per-sublot page-scoped doc IS the deliverable; no
+  rollup report). Sublots usually share one page → N near-identical 1-page docs, lot shows
+  as N rows in the list. Confirmed acceptable.
+- **Migration:** `sub_lot_code` on `lots`; identity → `(tenant_id, product_id, lot_key,
+  sub_lot_code)`; main-lot rows use `''` NOT NULL (SQLite unique-index NULL trap).
+- **Model:** worker going **q4 → q8** (quantization = fidelity, NOT context). KEEP
+  page-first split + `mergeCoaRecords`. Watch VRAM (q8 ~2× weights; sysmem fallback = 502s).
+
+**UI/search scope (locked 2026-06-11): NO new screens.** Review = `CoaRecordsReviewTile`
+(one queue item/PDF, N sublot cards, per-sublot approve). Lots page = **flat + a `Sublot`
+column** (add `sub_lot_code` to `LotListItem`; lot search also matches combined `lot_key`/
+main-lot prefix). Doc detail = minor "Linked Lots" line. Fulfillment report = NO change
+(already per order-line = per combined-lot = per sublot for free). **Lot search in
+`documents_fts` = YES this redesign:** flatten lot_number/sub_lot_code/lot_key via
+document_lots into a docs_fts lot column + normalize query (main lot → all sublots,
+combined → exact) — migration + FTS reindex.
+
+**Data migration (locked 2026-06-11):** single-lot COAs already match → leave them.
+**Reprocess multi-sublot COAs ONLY** (find via shadow `ai_records` w/ ≥2 sublot records;
+skip ~11 R2-404s). **Clone-rehearse: YES** — new `bin/clone-org` copies a prod org → test
+tenant; rehearse Option B + reprocess there before prod.
+
+**Build order:** (1) BACKEND FOUNDATION — *in progress, dispatched as bg agent
+2026-06-11*: lots migration (`sub_lot_code`, composite identity, `''` sentinel) +
+`produceCoaRecords` (`external_ref=queue-{id}-{lot_key}`) + `handleCoaRecordsApprove`
+(partial approval) + tests. (2) `CoaRecordsReviewTile` per-sublot cards + Lots `Sublot`
+column. (3) FTS lot-indexing migration + reindex (lot_number/sub_lot_code/lot_key into
+documents_fts + query normalize). (4) `bin/clone-org` + rehearse. (5) flip
+`COA_RECORDS_MODE` shadow→on. (6) targeted multi-sublot reprocess → `rematch-lots`.
 
 **Shipped this session (all pushed to master):**
 - **COA P1 page-first split** (commit `b539928`): multi-page COA PDFs are N independent

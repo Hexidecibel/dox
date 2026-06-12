@@ -1,0 +1,440 @@
+#!/usr/bin/env bash
+# Clone one tenant (org) + its dependent data into a NEW throwaway test tenant.
+#
+# Purpose: rehearse the COA "sublot split (Option B)" rollout + the targeted
+# multi-sublot reprocess against a real copy of an org's data WITHOUT touching
+# the source org. Run the full review -> produce -> match pipeline in the clone,
+# verify the new sublot lot_keys against the WMS order lines, THEN do prod.
+#
+# Usage:
+#   ./bin/clone-org --source <tenant_id|name> --name "<new tenant name>" [flags]
+#
+# Target selection (where the NEW tenant is written; source is read from there):
+#   (default)        LOCAL D1   (doc-upload-db, no --remote)
+#   --staging        STAGING D1 (doc-upload-db-staging --remote; needs .dev.vars)
+#   --prod-insert    PROD D1    (doc-upload-db --remote) -- INSERT-ONLY of a NEW
+#                    tenant. The source org is NEVER mutated. Requires the extra
+#                    --i-understand-prod flag and a typed confirmation.
+#
+# Other flags:
+#   --source <id|name>   REQUIRED. Source tenant id, or its exact name.
+#   --name "<name>"      REQUIRED. Name for the new (clone) tenant.
+#   --slug <slug>        Optional slug for the new tenant (default: derived).
+#   --dry-run            Print the per-table row counts it WOULD copy; no writes.
+#   --yes / -y           Skip the interactive confirmation (still honors prod gate).
+#   -h / --help          Show this help.
+#
+# R2 FILES (v1 decision): the cloned documents/queue rows REUSE the original
+#   R2 object keys (file_r2_key / r2_key) verbatim -- no objects are copied.
+#   Downloads in the clone READ the original files (read-only reuse). This is
+#   safe for a rehearsal: the pipeline never deletes/overwrites source R2 objects
+#   by key, and the clone is throwaway. If you later need isolated R2, copy the
+#   objects to new keys and rewrite the key columns (deferred; not v1).
+#
+# SAFETY:
+#   - Source org is READ-ONLY in every mode (we only SELECT from its rows).
+#   - The clone is built with FRESH ids for every row and a consistent FK
+#     id-remap, so it cannot collide with or reference source rows by id.
+#   - --dry-run writes nothing. A loud confirmation precedes any write.
+#   - Schema is INTROSPECTED at runtime (actual columns per table), so the
+#     script tolerates schema drift between local/staging/prod and only copies
+#     tables/columns that actually exist in the target DB.
+#
+# Tables copied (tenant-scoped, FK-safe order) -- skipped if absent in target:
+#   suppliers, products, product_suppliers, document_types,
+#   supplier_extraction_instructions, extraction_examples, extraction_templates,
+#   naming_templates, email_domain_mappings, assignments, teach_sessions,
+#   teach_messages, customers, customer_contacts, documents, document_versions,
+#   document_products, lots, document_lots, orders, order_items,
+#   lot_match_suggestions, processing_queue (INCLUDING ai_records / ai_fields so
+#   the multi-sublot shadow data comes along), reviewer_field_picks,
+#   reviewer_field_dismissals, reviewer_table_edits.
+#
+# Intentionally NOT copied (non-essential for the COA rehearsal; noted, not
+# silently dropped):
+#   - users / api_keys / sessions / saved_searches  (global/per-user; the clone
+#     reuses the SAME super_admin + tenant users by id, so created_by/uploaded_by
+#     FKs still resolve -- see note below).
+#   - connectors / connector_runs / connector_processed_keys /
+#     connector_extraction_corrections  (intake plumbing; the rehearsal drives
+#     review->produce->match, not live connector polling).
+#   - records_* module tables (the spreadsheet/records product is orthogonal to COA).
+#   - audit_log / email_ingest_log  (history; not needed to exercise the pipeline).
+#   - *_fts / *_fts_map / search_reindex_jobs (virtual/shadow; rebuilt by reindex).
+#   To pull any of these in later, add them to TABLE_ORDER in the embedded node
+#   program below (they follow the same remap pattern).
+#
+# NOTE on user FKs: created_by / uploaded_by / reviewed_by / updated_by /
+#   created_by_user_id point at users. Users are NOT tenant-scoped here and are
+#   NOT cloned; the clone REUSES the original user ids verbatim. That keeps the
+#   FKs valid (the users still exist) and is fine for a throwaway rehearsal. If
+#   a target DB lacks those users (e.g. a fresh staging), pass --null-user-fks
+#   to NULL out nullable user FK columns instead (NOT NULL ones keep the id).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PROD_DB="doc-upload-db"
+STAGING_DB="doc-upload-db-staging"
+
+TARGET="local"          # local | staging | prod
+DB="$PROD_DB"
+REMOTE_FLAG=""
+SOURCE=""
+NEW_NAME=""
+NEW_SLUG=""
+DRY_RUN=0
+SKIP_CONFIRM=0
+PROD_OK=0
+NULL_USER_FKS=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source) SOURCE="${2:-}"; shift 2 ;;
+    --name) NEW_NAME="${2:-}"; shift 2 ;;
+    --slug) NEW_SLUG="${2:-}"; shift 2 ;;
+    --staging) TARGET="staging"; shift ;;
+    --prod-insert) TARGET="prod"; shift ;;
+    --i-understand-prod) PROD_OK=1; shift ;;
+    --null-user-fks) NULL_USER_FKS=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --yes|-y) SKIP_CONFIRM=1; shift ;;
+    -h|--help) sed -n '2,90p' "$0"; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "$SOURCE" ]; then echo "ERROR: --source <tenant_id|name> is required." >&2; exit 2; fi
+if [ -z "$NEW_NAME" ]; then echo "ERROR: --name \"<new tenant name>\" is required." >&2; exit 2; fi
+
+case "$TARGET" in
+  local)   DB="$PROD_DB"; REMOTE_FLAG=""; TARGET_LABEL="LOCAL D1 ($DB)" ;;
+  staging) DB="$STAGING_DB"; REMOTE_FLAG="--remote"; TARGET_LABEL="STAGING D1 ($DB, remote)" ;;
+  prod)
+    DB="$PROD_DB"; REMOTE_FLAG="--remote"; TARGET_LABEL="PROD D1 ($DB, remote) [INSERT-ONLY]"
+    if [ "$PROD_OK" != "1" ]; then
+      echo "ERROR: --prod-insert requires --i-understand-prod as well." >&2
+      echo "       It will INSERT a new tenant into PROD (source is never mutated)." >&2
+      exit 2
+    fi
+    ;;
+esac
+
+# Staging + prod (remote) need CF creds from .dev.vars.
+if [ -n "$REMOTE_FLAG" ]; then
+  if [ ! -f .dev.vars ]; then
+    echo "ERROR: .dev.vars not found (needed for remote D1 creds)." >&2
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1091
+  source .dev.vars
+  set +a
+fi
+
+echo "clone-org"
+echo "  target : $TARGET_LABEL"
+echo "  source : $SOURCE"
+echo "  newname: $NEW_NAME"
+[ "$DRY_RUN" = "1" ] && echo "  mode   : DRY-RUN (no writes)"
+echo
+
+# --- helper: run a SELECT and return D1 --json output on stdout ---
+d1_json() {
+  npx wrangler d1 execute "$DB" $REMOTE_FLAG --json --command "$1" 2>/dev/null
+}
+
+# --- resolve the source tenant id (accept id OR exact name) ---
+SRC_TENANT_ID=$(SOURCE_ARG="$SOURCE" node -e '
+  const src = process.env.SOURCE_ARG;
+  const esc = s => String(s).replace(/'\''/g, "'\'\''");
+  // Print a query that matches by id OR name; the shell runs it next.
+  process.stdout.write(
+    "SELECT id, name, slug FROM tenants WHERE id='\''" + esc(src) + "'\'' OR name='\''" + esc(src) + "'\'' LIMIT 1;"
+  );
+')
+SRC_ROW=$(d1_json "$SRC_TENANT_ID")
+RESOLVED=$(printf '%s' "$SRC_ROW" | node -e '
+  let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+    let rows=[];try{rows=(JSON.parse(d)[0]||{}).results||[];}catch{}
+    if(!rows.length){console.error("ERROR: source tenant not found.");process.exit(3);}
+    const t=rows[0];
+    console.log(JSON.stringify({id:t.id,name:t.name,slug:t.slug}));
+  });
+') || exit 3
+SRC_ID=$(printf '%s' "$RESOLVED" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).id))')
+SRC_NAME=$(printf '%s' "$RESOLVED" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).name))')
+echo "Resolved source tenant: $SRC_NAME ($SRC_ID)"
+echo
+
+# === The clone engine (node). Reads source rows via repeated wrangler SELECTs,
+# === builds the id-remap, and emits a single ordered INSERT script to stdout.
+# === In --dry-run it instead prints a per-table count table and exits 0.
+CLONE_SQL=$(mktemp)
+COUNTS=$(mktemp)
+trap 'rm -f "$CLONE_SQL" "$COUNTS"' EXIT
+
+# Export config for the node program.
+export DB REMOTE_FLAG SRC_ID NEW_NAME NEW_SLUG DRY_RUN NULL_USER_FKS COUNTS
+
+node <<'NODE' > "$CLONE_SQL"
+const { execFileSync } = require('child_process');
+const crypto = require('crypto');
+const fs = require('fs');
+
+const DB = process.env.DB;
+const REMOTE = process.env.REMOTE_FLAG ? ['--remote'] : [];
+const SRC_ID = process.env.SRC_ID;
+const NEW_NAME = process.env.NEW_NAME;
+const NEW_SLUG = process.env.NEW_SLUG;
+const DRY_RUN = process.env.DRY_RUN === '1';
+const NULL_USER_FKS = process.env.NULL_USER_FKS === '1';
+const COUNTS = process.env.COUNTS;
+
+const newId = () => crypto.randomUUID().replace(/-/g, '');
+const sqlStr = v =>
+  v === null || v === undefined ? 'NULL' : "'" + String(v).replace(/'/g, "''") + "'";
+
+function d1(command) {
+  const out = execFileSync(
+    'npx',
+    ['wrangler', 'd1', 'execute', DB, ...REMOTE, '--json', '--command', command],
+    { encoding: 'utf8', maxBuffer: 1 << 30 }
+  );
+  try { return (JSON.parse(out)[0] || {}).results || []; } catch { return []; }
+}
+
+function tableExists(name) {
+  const r = d1(`SELECT name FROM sqlite_master WHERE type='table' AND name='${name}';`);
+  return r.length > 0;
+}
+function columnsOf(name) {
+  // PRAGMA via SELECT so --json returns rows.
+  const r = d1(`SELECT name, "notnull" AS nn FROM pragma_table_info('${name}');`);
+  return r.map(c => ({ name: c.name, notnull: Number(c.nn) === 1 }));
+}
+
+// FK rewrite map: column name -> which remap table its value should be looked
+// up in. Applied per-table. Columns not listed are copied verbatim (except the
+// PK 'id' which always gets a fresh id, and tenant_id which becomes the new
+// tenant). User FK columns are handled specially (reuse id, or NULL if asked).
+const USER_FK_COLS = new Set([
+  'created_by', 'uploaded_by', 'reviewed_by', 'updated_by', 'invited_by',
+  'created_by_user_id', 'reviewer_id', 'author_id', 'actor_id', 'default_user_id',
+  'owner_user_id', 'triggered_by_user_id',
+]);
+
+// Per-table: map of FK-column -> source remap-table key.
+const FK = {
+  products:                       { supplier_id: 'suppliers' },
+  product_suppliers:              { product_id: 'products', supplier_id: 'suppliers' },
+  document_types:                 { supplier_id: 'suppliers' },
+  supplier_extraction_instructions:{ supplier_id: 'suppliers', document_type_id: 'document_types' },
+  extraction_examples:            { document_type_id: 'document_types' },
+  extraction_templates:           { supplier_id: 'suppliers', document_type_id: 'document_types' },
+  email_domain_mappings:          { default_document_type_id: 'document_types' },
+  assignments:                    { supplier_id: 'suppliers', document_type_id: 'document_types' },
+  teach_sessions:                 { supplier_id: 'suppliers', document_type_id: 'document_types' },
+  teach_messages:                 { session_id: 'teach_sessions' },
+  customer_contacts:              { customer_id: 'customers' },
+  documents:                      { document_type_id: 'document_types', supplier_id: 'suppliers' },
+  document_versions:              { document_id: 'documents' },
+  document_products:              { document_id: 'documents', product_id: 'products' },
+  lots:                           { supplier_id: 'suppliers', product_id: 'products' },
+  document_lots:                  { document_id: 'documents', lot_id: 'lots' },
+  orders:                         { customer_id: 'customers' },
+  order_items:                    { order_id: 'orders', product_id: 'products', coa_document_id: 'documents', lot_id: 'lots' },
+  lot_match_suggestions:          { order_item_id: 'order_items', document_id: 'documents', lot_id: 'lots' },
+  processing_queue:               { document_type_id: 'document_types', supplier_id: 'suppliers', template_id: 'extraction_templates' },
+  reviewer_field_picks:           { queue_item_id: 'processing_queue', supplier_id: 'suppliers', document_type_id: 'document_types' },
+  reviewer_field_dismissals:      { queue_item_id: 'processing_queue', supplier_id: 'suppliers', document_type_id: 'document_types' },
+  reviewer_table_edits:           { queue_item_id: 'processing_queue', supplier_id: 'suppliers', document_type_id: 'document_types' },
+};
+
+// How to scope each table's source rows. Direct = has tenant_id. Otherwise we
+// scope by a parent id-set already remapped.
+const SCOPE = {
+  teach_messages:        { via: 'session_id', parent: 'teach_sessions' },
+  customer_contacts:     { via: 'customer_id', parent: 'customers' },
+  document_versions:     { via: 'document_id', parent: 'documents' },
+  document_products:     { via: 'document_id', parent: 'documents' },
+  document_lots:         { via: 'document_id', parent: 'documents' },
+  order_items:           { via: 'order_id', parent: 'orders' },
+};
+
+// FK-safe insertion order.
+const TABLE_ORDER = [
+  'suppliers',
+  'products',
+  'product_suppliers',
+  'document_types',
+  'supplier_extraction_instructions',
+  'extraction_examples',
+  'extraction_templates',
+  'naming_templates',
+  'email_domain_mappings',
+  'assignments',
+  'teach_sessions',
+  'teach_messages',
+  'customers',
+  'customer_contacts',
+  'documents',
+  'document_versions',
+  'document_products',
+  'lots',
+  'document_lots',
+  'orders',
+  'order_items',
+  'lot_match_suggestions',
+  'processing_queue',
+  'reviewer_field_picks',
+  'reviewer_field_dismissals',
+  'reviewer_table_edits',
+];
+
+// remap[table] = Map(oldId -> newId)
+const remap = {};
+const counts = [];
+const sqlLines = [];
+
+// --- new tenant row ---
+const newTenantId = newId();
+const tcols = tableExists('tenants') ? columnsOf('tenants') : [];
+const srcTenant = d1(`SELECT * FROM tenants WHERE id='${SRC_ID.replace(/'/g, "''")}' LIMIT 1;`)[0] || {};
+{
+  const colNames = tcols.map(c => c.name);
+  const vals = colNames.map(c => {
+    if (c === 'id') return sqlStr(newTenantId);
+    if (c === 'name') return sqlStr(NEW_NAME);
+    if (c === 'slug') {
+      const slug = NEW_SLUG || ('clone-' + (srcTenant.slug || 'org') + '-' + newTenantId.slice(0, 6));
+      return sqlStr(slug);
+    }
+    if (c === 'created_at' || c === 'updated_at') return "datetime('now')";
+    return sqlStr(srcTenant[c]);
+  });
+  sqlLines.push(`INSERT INTO tenants (${colNames.map(n => '"' + n + '"').join(', ')}) VALUES (${vals.join(', ')});`);
+}
+counts.push({ table: 'tenants', rows: 1 });
+
+const idEsc = SRC_ID.replace(/'/g, "''");
+
+for (const table of TABLE_ORDER) {
+  remap[table] = new Map();
+  if (!tableExists(table)) { counts.push({ table, rows: 0, note: 'absent' }); continue; }
+  const cols = columnsOf(table);
+  const colNames = cols.map(c => c.name);
+  const hasTenant = colNames.includes('tenant_id');
+
+  // Build the source-row query (scoped to tenant directly or via parent set).
+  let rows = [];
+  const scope = SCOPE[table];
+  if (hasTenant) {
+    rows = d1(`SELECT * FROM ${table} WHERE tenant_id='${idEsc}';`);
+  } else if (scope && remap[scope.parent]) {
+    const parentIds = [...remap[scope.parent].keys()];
+    if (parentIds.length === 0) { counts.push({ table, rows: 0 }); continue; }
+    const inList = parentIds.map(id => "'" + String(id).replace(/'/g, "''") + "'").join(',');
+    rows = d1(`SELECT * FROM ${table} WHERE ${scope.via} IN (${inList});`);
+  } else {
+    // No tenant_id and no known parent scope -> skip (can't safely scope).
+    counts.push({ table, rows: 0, note: 'no-scope-skip' });
+    continue;
+  }
+
+  counts.push({ table, rows: rows.length });
+  if (rows.length === 0) continue;
+
+  // First pass: allocate new ids so self/cross refs within the batch resolve.
+  for (const r of rows) remap[table].set(r.id, newId());
+
+  const fkMap = FK[table] || {};
+  for (const r of rows) {
+    const vals = colNames.map(c => {
+      if (c === 'id') return sqlStr(remap[table].get(r.id));
+      if (c === 'tenant_id') return sqlStr(newTenantId);
+      if (c === 'created_at' || c === 'updated_at') {
+        return r[c] == null ? 'NULL' : sqlStr(r[c]);
+      }
+      // user FK columns: reuse id, or NULL nullable ones if requested.
+      if (USER_FK_COLS.has(c)) {
+        if (NULL_USER_FKS) {
+          const col = cols.find(x => x.name === c);
+          if (col && !col.notnull) return 'NULL';
+        }
+        return sqlStr(r[c]);
+      }
+      // mapped FK columns -> look up the remapped id (fall back to original if
+      // the referenced row wasn't in our scope, e.g. a cross-table value we
+      // didn't clone; that keeps a valid reference to the source row).
+      if (fkMap[c] != null) {
+        const tgt = fkMap[c];
+        if (r[c] != null && remap[tgt] && remap[tgt].has(r[c])) {
+          return sqlStr(remap[tgt].get(r[c]));
+        }
+        return sqlStr(r[c]);
+      }
+      return sqlStr(r[c]);
+    });
+    sqlLines.push(`INSERT INTO ${table} (${colNames.map(n => '"' + n + '"').join(', ')}) VALUES (${vals.join(', ')});`);
+  }
+}
+
+// Persist the per-table counts for the bash side to render.
+fs.writeFileSync(COUNTS, JSON.stringify({ newTenantId, counts }));
+
+if (DRY_RUN) {
+  // Emit nothing to the SQL file in dry-run.
+  process.stdout.write('');
+} else {
+  process.stdout.write(
+    'PRAGMA defer_foreign_keys=ON;\n' + sqlLines.join('\n') + '\n'
+  );
+}
+NODE
+
+# --- render counts ---
+echo "Per-table row counts to copy (source tenant -> new tenant):"
+node -e '
+  const fs=require("fs");
+  const {newTenantId,counts}=JSON.parse(fs.readFileSync(process.env.COUNTS,"utf8"));
+  let total=0;
+  for(const c of counts){
+    const note=c.note?("  ("+c.note+")"):"";
+    console.log("  "+c.table.padEnd(34)+String(c.rows).padStart(6)+note);
+    if(c.table!=="tenants") total+=c.rows;
+  }
+  console.log("  "+"".padEnd(34)+"------");
+  console.log("  "+"TOTAL (excl. tenant row)".padEnd(34)+String(total).padStart(6));
+  console.log("\n  new tenant id (would be): "+newTenantId);
+'
+echo
+
+if [ "$DRY_RUN" = "1" ]; then
+  echo "DRY-RUN complete. No rows written. Re-run without --dry-run to clone."
+  exit 0
+fi
+
+if [ ! -s "$CLONE_SQL" ]; then
+  echo "Nothing to write (empty clone script). Aborting." >&2
+  exit 1
+fi
+
+if [ "$SKIP_CONFIRM" != "1" ]; then
+  echo "About to WRITE the clone into: $TARGET_LABEL"
+  echo "  source org: $SRC_NAME ($SRC_ID)   (READ-ONLY, never modified)"
+  echo "  new tenant: $NEW_NAME"
+  if [ "$TARGET" = "prod" ]; then
+    read -r -p "Type 'clone-to-prod' to insert the new tenant into PROD: " reply
+    [ "$reply" = "clone-to-prod" ] || { echo "Aborted."; exit 1; }
+  else
+    read -r -p "Type 'clone' to continue: " reply
+    [ "$reply" = "clone" ] || { echo "Aborted."; exit 1; }
+  fi
+fi
+
+echo "Writing clone..."
+npx wrangler d1 execute "$DB" $REMOTE_FLAG --file="$CLONE_SQL"
+echo
+echo "Done. The clone tenant '$NEW_NAME' now exists on $TARGET_LABEL."
+echo "R2: cloned docs reuse the ORIGINAL r2 keys (read-only reuse) -- see header."
+echo "Next: run the Option B pipeline + bin/reprocess-multisublot against this tenant."

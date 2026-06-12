@@ -57,6 +57,8 @@ import PdfViewer from '../components/PdfViewer';
 import DocxPreview, { isDocxFile } from '../components/DocxPreview';
 import OrderReviewTile from '../components/OrderReviewTile';
 import ShipmentReviewTile from '../components/ShipmentReviewTile';
+import CoaRecordsReviewTile from '../components/CoaRecordsReviewTile';
+import { parseCoaRecords } from '../lib/types';
 import SupplierAutocomplete, { type SupplierValue } from '../components/SupplierAutocomplete';
 import TeachPanel from '../components/teach/TeachPanel';
 import ExtractionInstructionsBox from './ExtractionInstructionsBox';
@@ -1744,6 +1746,15 @@ export default function ReviewQueue() {
                           <OrderReviewTile item={item} onApproved={() => loadQueue()} />
                         ) : (item.output_kind || 'coa') === 'shipment' ? (
                           <ShipmentReviewTile item={item} onApproved={() => loadQueue()} />
+                        ) : (() => {
+                          // COA records-shaped (Option B / sublot split): ai_records
+                          // parses as a CoaRecordsPayload with >= 1 record → render
+                          // the multi-record tile. Otherwise fall through to the flat
+                          // single/multi-product COA editor (unchanged).
+                          const coaRecords = parseCoaRecords(item.ai_records);
+                          return coaRecords && coaRecords.records.length >= 1;
+                        })() ? (
+                          <CoaRecordsReviewTile item={item} onApproved={() => loadQueue()} />
                         ) : (
                         <>
                         {/* Document-level supplier verification. Gates approval:

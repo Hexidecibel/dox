@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+# Re-queue ONLY the multi-sublot COAs for re-extraction + split (COA Option B).
+#
+# Per the locked data-migration strategy (coa-multi-record.md, "DATA MIGRATION
+# STRATEGY"): single-lot COAs already match the WMS (lot_key == plain lot), so
+# they are LEFT ALONE. The ONLY reprocess targets are genuinely multi-sublot /
+# multi-record COAs -- today flattened to one main-lot doc that won't match the
+# WMS combined lines (e.g. 1042611005). This script finds them precisely and
+# re-enqueues just those, so the worker re-extracts (q8) and splits per sublot.
+#
+# Targeting: a queue item is a target iff its shadow `ai_records` payload parses
+# as a CoaRecordsPayload with >= 2 records (see parseCoaRecords in shared/types.ts:
+#   record_cardinality in {single,multi_lot,multi_product} AND records[] present,
+#   and records.length >= 2). Single-record / flat COAs are NOT targets.
+#
+# R2-404 skip: the ~11 COAs whose source file is gone from R2 CANNOT be
+# reprocessed (no bytes to re-extract). By default this probes R2 for each
+# target's file_r2_key and SKIPS missing ones, reporting the count. Use
+# --no-r2-check to skip probing (faster; assumes all files present).
+#
+# Usage:
+#   ./bin/reprocess-multisublot --tenant <tenant_id> [flags]
+#
+#   (no flags)        DRY-RUN against LOCAL D1: list targets (id, lots, supplier)
+#   --staging         target STAGING D1 (doc-upload-db-staging --remote) + bucket
+#   --remote          target PROD D1 (doc-upload-db --remote) + prod bucket
+#   --supplier <q>    only items whose supplier name/id LIKE this filter
+#   --apply           actually re-enqueue (otherwise dry-run)
+#   --no-r2-check     skip the per-item R2 existence probe (faster, less safe)
+#   --include-pending also target status='pending' items (default: approved only)
+#   --yes / -y        skip the confirmation prompt
+#   -h / --help       show this help
+#
+# SAFETY (hard rules):
+#   - NEVER auto-approves. Re-enqueue only resets the AI pipeline:
+#       processing_status='queued', attempts=0, error_message=NULL.
+#     Every reprocessed COA flows back through HUMAN review (nothing auto-ingests).
+#   - Approved items: re-enqueue resets only the AI fields; the already-committed
+#     `documents` rows are NOT touched here (supersede/archive of the old
+#     flattened doc is a SEPARATE, later step in the strategy).
+#   - Dry-run by default. A loud confirmation precedes any write.
+#   - This re-runs the Qwen GPU once per target, serially -- bounded set, but
+#     watch the worker logs (journalctl -u dox-process-worker.service).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PROD_DB="doc-upload-db"
+STAGING_DB="doc-upload-db-staging"
+PROD_BUCKET="doc-upload-files"
+STAGING_BUCKET="doc-upload-files-staging"
+
+TARGET="local"
+DB="$PROD_DB"
+BUCKET="$PROD_BUCKET"
+REMOTE_FLAG=""
+TENANT=""
+SUPPLIER=""
+APPLY=0
+R2_CHECK=1
+INCLUDE_PENDING=0
+SKIP_CONFIRM=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tenant) TENANT="${2:-}"; shift 2 ;;
+    --supplier) SUPPLIER="${2:-}"; shift 2 ;;
+    --staging) TARGET="staging"; shift ;;
+    --remote|-r) TARGET="prod"; shift ;;
+    --apply) APPLY=1; shift ;;
+    --no-r2-check) R2_CHECK=0; shift ;;
+    --include-pending) INCLUDE_PENDING=1; shift ;;
+    --yes|-y) SKIP_CONFIRM=1; shift ;;
+    -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "$TENANT" ]; then echo "ERROR: --tenant <tenant_id> is required." >&2; exit 2; fi
+
+case "$TARGET" in
+  local)   DB="$PROD_DB"; BUCKET="$PROD_BUCKET"; REMOTE_FLAG=""; TARGET_LABEL="LOCAL D1 ($DB)" ;;
+  staging) DB="$STAGING_DB"; BUCKET="$STAGING_BUCKET"; REMOTE_FLAG="--remote"; TARGET_LABEL="STAGING D1 ($DB, remote)" ;;
+  prod)    DB="$PROD_DB"; BUCKET="$PROD_BUCKET"; REMOTE_FLAG="--remote"; TARGET_LABEL="REMOTE (PROD) D1 ($DB)" ;;
+esac
+
+if [ -n "$REMOTE_FLAG" ]; then
+  if [ ! -f .dev.vars ]; then echo "ERROR: .dev.vars not found (needed for remote D1/R2 creds)." >&2; exit 1; fi
+  set -a
+  # shellcheck disable=SC1091
+  source .dev.vars
+  set +a
+fi
+
+# R2 probe target: local D1 pairs with the LOCAL r2 store; remote with --remote.
+R2_REMOTE=""
+[ -n "$REMOTE_FLAG" ] && R2_REMOTE="--remote"
+[ -z "$REMOTE_FLAG" ] && R2_REMOTE="--local"
+
+echo "reprocess-multisublot"
+echo "  target  : $TARGET_LABEL"
+echo "  tenant  : $TENANT"
+[ -n "$SUPPLIER" ] && echo "  supplier: LIKE %$SUPPLIER%"
+echo "  r2-check: $([ "$R2_CHECK" = 1 ] && echo on || echo off)   apply: $([ "$APPLY" = 1 ] && echo yes || echo "no (dry-run)")"
+echo
+
+TENANT_ESC="${TENANT//\'/\'\'}"
+STATUS_CLAUSE="q.status='approved'"
+[ "$INCLUDE_PENDING" = "1" ] && STATUS_CLAUSE="q.status IN ('approved','pending')"
+
+SUP_JOIN="LEFT JOIN suppliers s ON s.id = q.supplier_id"
+SUP_CLAUSE=""
+if [ -n "$SUPPLIER" ]; then
+  SUP_ESC="${SUPPLIER//\'/\'\'}"
+  SUP_CLAUSE="AND (s.name LIKE '%$SUP_ESC%' OR q.supplier LIKE '%$SUP_ESC%' OR q.supplier_id = '$SUP_ESC')"
+fi
+
+# Pull candidate COA queue items with their ai_records payload. output_kind may
+# be 'coa' or NULL on older rows; we don't hard-filter on it -- parseCoaRecords
+# rejects non-COA payloads (orders/shipments) so the records-shape check is the
+# real gate.
+QUERY="SELECT q.id AS id, q.file_r2_key AS r2_key, q.file_name AS file_name,
+              COALESCE(s.name, q.supplier, '') AS supplier, q.ai_records AS ai_records
+       FROM processing_queue q
+       $SUP_JOIN
+       WHERE q.tenant_id = '$TENANT_ESC'
+         AND $STATUS_CLAUSE
+         AND q.ai_records IS NOT NULL AND TRIM(q.ai_records) != ''
+         $SUP_CLAUSE;"
+
+# Capture stderr too so a schema mismatch (e.g. a stale LOCAL D1 missing the
+# ai_records / supplier_id columns added by later migrations) yields a clear
+# message instead of a bare non-zero exit. The real targets are STAGING/PROD,
+# which carry the full schema.
+if ! RAW=$(npx wrangler d1 execute "$DB" $REMOTE_FLAG --json --command "$QUERY" 2>&1); then
+  echo "ERROR: failed to query processing_queue on $TARGET_LABEL." >&2
+  if printf '%s' "$RAW" | grep -qiE "no such column|no such table"; then
+    echo "       The target DB is missing columns/tables this script needs" >&2
+    echo "       (ai_records, supplier_id, ...). Apply migrations first (e.g." >&2
+    echo "       ./bin/migrate or ./bin/migrate-staging). LOCAL D1 is often stale." >&2
+  else
+    printf '%s\n' "$RAW" | tail -8 >&2
+  fi
+  exit 1
+fi
+
+# Filter to multi-record (>=2) using the SAME shape check as parseCoaRecords.
+TARGETS=$(printf '%s' "$RAW" | node -e '
+  let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+    let rows=[];try{rows=(JSON.parse(d)[0]||{}).results||[];}catch{}
+    const CARD=new Set(["single","multi_lot","multi_product"]);
+    const out=[];
+    for(const r of rows){
+      let p=r.ai_records;
+      if(typeof p==="string"){const t=p.trim();if(!t)continue;try{p=JSON.parse(t);}catch{continue;}}
+      if(!p||typeof p!=="object"||Array.isArray(p))continue;
+      if(!CARD.has(p.record_cardinality))continue;            // not a COA records payload
+      if(!Array.isArray(p.records))continue;
+      if(p.records.length<2)continue;                         // single-record/flat -> NOT a target
+      out.push({id:r.id,r2_key:r.r2_key,file_name:r.file_name,supplier:r.supplier,lots:p.records.length});
+    }
+    process.stdout.write(JSON.stringify(out));
+  });
+')
+
+N_TARGETS=$(printf '%s' "$TARGETS" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).length))')
+
+if [ "$N_TARGETS" = "0" ]; then
+  echo "No multi-sublot COA targets found for tenant $TENANT$([ -n "$SUPPLIER" ] && echo " (supplier filter: $SUPPLIER)")."
+  exit 0
+fi
+
+# --- R2-404 skip: probe each target's source file; partition into present/missing ---
+PRESENT_IDS=""
+SKIPPED_404=0
+if [ "$R2_CHECK" = "1" ]; then
+  echo "Probing R2 ($BUCKET) for $N_TARGETS source files..."
+  # Iterate ids+keys; probe with `r2 object get` (HEAD-like; -1 byte range keeps it cheap).
+  while IFS=$'\t' read -r id key; do
+    [ -z "$id" ] && continue
+    if [ -z "$key" ]; then SKIPPED_404=$((SKIPPED_404+1)); echo "  SKIP (no r2 key): $id"; continue; fi
+    if npx wrangler r2 object get "$BUCKET/$key" $R2_REMOTE --pipe >/dev/null 2>&1; then
+      PRESENT_IDS="$PRESENT_IDS $id"
+    else
+      SKIPPED_404=$((SKIPPED_404+1))
+      echo "  SKIP (R2 404): $id  ($key)"
+    fi
+  done < <(printf '%s' "$TARGETS" | node -e '
+    let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+      for(const t of JSON.parse(d)) process.stdout.write(t.id+"\t"+(t.r2_key||"")+"\n");
+    });
+  ')
+  echo
+else
+  PRESENT_IDS=$(printf '%s' "$TARGETS" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(JSON.parse(d).map(t=>t.id).join(" "))}')
+fi
+
+# Render the target list (id, lot count, supplier), marking skipped ones.
+echo "Multi-sublot COA targets (id | lots | supplier | file):"
+printf '%s' "$TARGETS" | PRESENT="$PRESENT_IDS" node -e '
+  let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+    const present=new Set((process.env.PRESENT||"").trim().split(/\s+/).filter(Boolean));
+    for(const t of JSON.parse(d)){
+      const mark = present.has(t.id) ? "  " : "x ";  // x = skipped (R2 404 / no key)
+      console.log("  "+mark+t.id+" | "+String(t.lots).padStart(2)+" | "+(t.supplier||"?").padEnd(20).slice(0,20)+" | "+(t.file_name||""));
+    }
+  });
+'
+N_PRESENT=$(echo $PRESENT_IDS | wc -w | tr -d ' ')
+echo
+echo "Summary: $N_TARGETS multi-sublot target(s); $SKIPPED_404 skipped (R2 404 / no key); $N_PRESENT to re-enqueue."
+echo
+
+if [ "$APPLY" != "1" ]; then
+  echo "DRY-RUN. Re-run with --apply to re-enqueue the $N_PRESENT present target(s)."
+  exit 0
+fi
+
+if [ "$N_PRESENT" = "0" ]; then
+  echo "Nothing to re-enqueue (all targets skipped). Aborting."
+  exit 0
+fi
+
+if [ "$SKIP_CONFIRM" != "1" ]; then
+  echo "This will re-enqueue $N_PRESENT multi-sublot COA(s) for tenant $TENANT on $TARGET_LABEL."
+  echo "Their AI extraction will be OVERWRITTEN by the worker; they flow back through HUMAN review."
+  echo "Nothing is auto-approved."
+  read -r -p "Type 'reprocess' to continue: " reply
+  [ "$reply" = "reprocess" ] || { echo "Aborted."; exit 1; }
+fi
+
+# Build the id IN-list and re-enqueue (same mechanism as bin/reprocess-queue).
+IN_LIST=$(node -e '
+  const ids=process.argv.slice(1);
+  process.stdout.write(ids.map(i=>"'\''"+String(i).replace(/'\''/g,"'\'\''")+"'\''").join(","));
+' $PRESENT_IDS)
+
+echo "Re-enqueuing $N_PRESENT item(s)..."
+npx wrangler d1 execute "$DB" $REMOTE_FLAG --command \
+  "UPDATE processing_queue
+      SET processing_status = 'queued', attempts = 0, error_message = NULL
+    WHERE tenant_id = '$TENANT_ESC' AND id IN ($IN_LIST);"
+
+echo
+echo "Done. The worker (poll ~30s) will re-extract + split these per sublot."
+echo "They remain in their current review status until a HUMAN approves the new"
+echo "split records. Watch: journalctl -u dox-process-worker.service / bin/logs."

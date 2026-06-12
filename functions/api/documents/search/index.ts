@@ -49,7 +49,7 @@
  *     filter does the work.
  */
 
-import { buildMatchExpr, DOCUMENTS_FTS_COLS } from '../../../lib/search-fts';
+import { buildMatchExprWithLot, DOCUMENTS_FTS_COLS } from '../../../lib/search-fts';
 import type { Env, User } from '../../../lib/types';
 
 type SortMode = 'relevance' | 'newest' | 'oldest' | 'name';
@@ -76,7 +76,9 @@ function buildSearchClause(
   rawQuery: string,
   tenantId: string,
 ): { matchExpr: string | null; bindArgs: (string | number)[] } {
-  const expr = buildMatchExpr(rawQuery);
+  // Lot-aware: documents_fts has a lot_text column (migration 0074), so a
+  // main-lot term returns all sublot COAs and separators don't matter.
+  const expr = buildMatchExprWithLot(rawQuery);
   if (!expr) {
     return { matchExpr: null, bindArgs: [] };
   }

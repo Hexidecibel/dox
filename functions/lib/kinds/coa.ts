@@ -4,7 +4,9 @@ import { buildR2Key, uploadFile, downloadFile, deleteFile, computeChecksum } fro
 import { findOrCreateSupplier } from '../suppliers';
 import { findOrCreateProduct } from '../entities/products';
 import { attachLotToCoaDocument, extractLotNumber } from '../entities/matching';
+import { normalizeLotNumber, normalizeSubLotCode } from '../entities/lots';
 import { getLearnedPreferences } from '../learnedPreferences';
+import type { CoaRecordsPayload } from '../../../shared/types';
 import type {
   QueueItem,
   ApproveOptions,
@@ -755,4 +757,340 @@ export async function produceMultiProductCoa(
   );
 
   return { documents: results, supplierId };
+}
+
+// === produceCoaRecords (Option B: per-sublot split) ========================
+//
+// Generalizes produceMultiProductCoa for the records model: given a
+// CoaRecordsPayload (page_metadata + records[]), produce ONE documents row +
+// ONE lots row PER record (sublot/product). Each record is attached to ITS OWN
+// lot via the combined lot_key = norm(lot_number) + sub_lot_code, so order⇄COA
+// matching works at sublot grain. Supplier resolved once; binary downloaded
+// once. produceCoa (single-record) is left intact.
+
+/** Field keys a record may carry the lot number under. */
+const COA_RECORD_LOT_KEYS = ['lot_code', 'lot_number', 'lot', 'lot_no'];
+/** Field keys a record may carry the sublot code under. */
+const COA_RECORD_SUBLOT_KEYS = ['sub_lot_code', 'sublot', 'sub_lot'];
+
+function firstField(
+  fields: Record<string, string | null>,
+  keys: string[]
+): string | null {
+  for (const key of keys) {
+    for (const [k, v] of Object.entries(fields)) {
+      if (k.toLowerCase() === key && v != null && String(v).trim() !== '') {
+        return String(v).trim();
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Compute the combined lot_key for a record per the Option B rule:
+ *   lot_key = norm(lot_number) + sub_lot_code   (sublot present)
+ *           = norm(lot_number)                  (no sublot)
+ * Returns { lotNumber, subLotCode, lotKey } with subLotCode='' when absent, or
+ * null when the record has no usable lot number.
+ */
+export function computeRecordLotKey(
+  fields: Record<string, string | null>
+): { lotNumber: string; subLotCode: string; lotKey: string } | null {
+  const lotNumber = firstField(fields, COA_RECORD_LOT_KEYS);
+  if (!lotNumber) return null;
+  const base = normalizeLotNumber(lotNumber);
+  if (!base) return null;
+  const subLotCode = normalizeSubLotCode(firstField(fields, COA_RECORD_SUBLOT_KEYS));
+  return { lotNumber, subLotCode, lotKey: base + subLotCode };
+}
+
+/** Per-record decision from the reviewer (partial approval). */
+export type CoaRecordDecision = 'approve' | 'hold' | 'reject';
+
+export interface CoaRecordsApproveOptions {
+  /** The payload to produce — reviewer-edited records take precedence upstream. */
+  payload: CoaRecordsPayload;
+  /**
+   * Per-record decisions keyed by record_index. Absent index defaults to
+   * 'approve'. Only 'approve' records produce documents; 'hold'/'reject' are
+   * skipped here (the caller decides whether the item stays pending).
+   */
+  decisions?: Record<number, CoaRecordDecision>;
+  userId: string;
+  clientIp?: string;
+  selectedSource?: 'text' | 'vlm';
+  supplierId?: string;
+  supplierName?: string;
+}
+
+export interface CoaRecordsApproveResult {
+  documents: Array<{
+    documentId: string;
+    title: string;
+    externalRef: string;
+    lotKey: string | null;
+    subLotCode: string;
+    recordIndex: number;
+  }>;
+  supplierId: string | null;
+  /** record_index of records that were held (kept pending upstream). */
+  heldRecordIndexes: number[];
+}
+
+export async function produceCoaRecords(
+  db: D1Database,
+  files: R2Bucket,
+  item: QueueItem,
+  options: CoaRecordsApproveOptions
+): Promise<CoaRecordsApproveResult> {
+  const {
+    payload,
+    decisions = {},
+    userId,
+    clientIp,
+    selectedSource = 'text',
+    supplierId: overrideSupplierId,
+    supplierName: overrideSupplierName,
+  } = options;
+
+  const pageMetadata = payload.page_metadata ?? {};
+
+  // Download binary ONCE.
+  const pendingFile = await downloadFile(files, item.file_r2_key);
+  if (!pendingFile) {
+    throw new Error('Pending file not found in storage');
+  }
+  const fileData = await pendingFile.arrayBuffer();
+  const checksum = await computeChecksum(fileData);
+
+  // Resolve supplier ONCE (same precedence as produceCoa / produceMultiProductCoa):
+  //   1. overrideSupplierId (validated against tenant) → use directly.
+  //   2. overrideSupplierName → findOrCreateSupplier.
+  //   3. legacy item.supplier / page_metadata supplier path.
+  let supplierId: string | null = null;
+  if (overrideSupplierId) {
+    const row = await db
+      .prepare('SELECT id FROM suppliers WHERE id = ? AND tenant_id = ?')
+      .bind(overrideSupplierId, item.tenant_id)
+      .first<{ id: string }>();
+    if (row) supplierId = row.id;
+  }
+  if (!supplierId && overrideSupplierName && overrideSupplierName.trim()) {
+    try {
+      const r = await findOrCreateSupplier(db, item.tenant_id, overrideSupplierName, {
+        userId,
+        ip: clientIp || null,
+      });
+      supplierId = r.id;
+    } catch {
+      // Non-critical (e.g. ImplausibleSupplierNameError)
+    }
+  }
+  if (!supplierId) {
+    const supplierName =
+      item.supplier ||
+      pageMetadata.supplier ||
+      pageMetadata.supplier_name ||
+      pageMetadata.manufacturer ||
+      null;
+    if (supplierName) {
+      try {
+        const r = await findOrCreateSupplier(db, item.tenant_id, supplierName, {
+          userId,
+          ip: clientIp || null,
+        });
+        supplierId = r.id;
+      } catch {
+        // Non-critical
+      }
+    }
+  }
+
+  const results: CoaRecordsApproveResult['documents'] = [];
+  const heldRecordIndexes: number[] = [];
+
+  for (const record of payload.records) {
+    const decision = decisions[record.record_index] ?? 'approve';
+    if (decision === 'reject') continue;
+    if (decision === 'hold') {
+      heldRecordIndexes.push(record.record_index);
+      continue;
+    }
+
+    // Reconstruct the flat field map: page_metadata ∪ record.fields (record wins).
+    const mergedFields: Record<string, string | null> = {
+      ...pageMetadata,
+      ...record.fields,
+    };
+
+    const lot = computeRecordLotKey(record.fields ?? {});
+
+    // Idempotent external_ref keyed on SUBLOT IDENTITY (lot_key), not record
+    // index — re-running the same approval upserts the same document rather
+    // than creating a duplicate. Records with no lot fall back to the index.
+    const refSuffix = lot ? lot.lotKey : `r${record.record_index}`;
+    const externalRef = `queue-${item.id}-${refSuffix}`;
+
+    const title =
+      mergedFields.title ||
+      record.fields?.product_name ||
+      pageMetadata.product_name ||
+      item.file_name.replace(/\.[^/.]+$/, '');
+
+    // Idempotent re-ingest: external_ref is unique per (tenant, external_ref).
+    // If a document already exists for this sublot identity, REUSE it — skip the
+    // insert/upload/version, but still run product + lot linkage below (both are
+    // idempotent), so a re-run reconciles links without creating duplicates.
+    const existingDoc = await db
+      .prepare('SELECT id FROM documents WHERE tenant_id = ? AND external_ref = ?')
+      .bind(item.tenant_id, externalRef)
+      .first<{ id: string }>();
+
+    let docId: string;
+    if (existingDoc) {
+      docId = existingDoc.id;
+    } else {
+      docId = generateId();
+      const r2Key = buildR2Key(item.tenant_slug, docId, 1, item.file_name);
+
+      // P4 TODO (page-scoped PDF): the design calls for extracting
+      // record.source_pages from the original PDF into a per-record PDF (via
+      // unpdf) so each document carries only its own page(s). Page extraction is
+      // non-trivial and the foundation must not block on it, so for now we
+      // re-upload the WHOLE binary per record — same as produceMultiProductCoa.
+      // source_pages is preserved in extended_metadata below for the later split.
+      await uploadFile(files, r2Key, fileData, item.mime_type);
+
+      const primaryMetadata: Record<string, string> = {};
+      for (const [k, v] of Object.entries(mergedFields)) {
+        if (['title', 'description', 'category'].includes(k)) continue;
+        if (v) primaryMetadata[k] = String(v);
+      }
+      const primaryMetadataStr =
+        Object.keys(primaryMetadata).length > 0 ? JSON.stringify(primaryMetadata) : null;
+
+      // tables + structured groups + source_pages live in extended_metadata.
+      const extended: Record<string, unknown> = {};
+      if (record.tables && record.tables.length > 0) extended.tables = record.tables;
+      if (record.groups && Object.keys(record.groups).length > 0) extended.groups = record.groups;
+      if (record.source_pages && record.source_pages.length > 0) {
+        extended.source_pages = record.source_pages;
+      }
+      const extendedMetadataStr =
+        Object.keys(extended).length > 0 ? JSON.stringify(extended) : null;
+
+      await db
+        .prepare(
+          `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata, extended_metadata)
+           VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          docId,
+          item.tenant_id,
+          title,
+          (mergedFields.description as string) || null,
+          (mergedFields.category as string) || null,
+          userId,
+          externalRef,
+          item.document_type_id,
+          supplierId,
+          primaryMetadataStr,
+          extendedMetadataStr
+        )
+        .run();
+
+      const versionId = generateId();
+      await db
+        .prepare(
+          `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, uploaded_by, extracted_text)
+           VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          versionId,
+          docId,
+          item.file_name,
+          item.file_size,
+          item.mime_type,
+          r2Key,
+          checksum,
+          userId,
+          item.extracted_text
+        )
+        .run();
+    }
+
+    // Link product (per-record product_name, falling back to page metadata).
+    let perProductId: string | null = null;
+    const productName = record.fields?.product_name || pageMetadata.product_name || null;
+    if (productName) {
+      const productRecord = await findOrCreateProduct(db, item.tenant_id, productName, { supplierId });
+      perProductId = productRecord.id;
+      await db
+        .prepare(
+          `INSERT INTO document_products (id, document_id, product_id) VALUES (?, ?, ?) ON CONFLICT(document_id, product_id) DO NOTHING`
+        )
+        .bind(generateId(), docId, productRecord.id)
+        .run();
+    }
+
+    // Per-record lot linkage — the core Option B win. Attach THIS doc to its
+    // own combined lot (lot_number + sub_lot_code). Best-effort.
+    if (lot) {
+      await attachLotToCoaDocument(db, item.tenant_id, {
+        documentId: docId,
+        lotNumber: lot.lotNumber,
+        subLotCode: lot.subLotCode,
+        productId: perProductId,
+        supplierId,
+        codeDate: (mergedFields.code_date as string) || null,
+        expirationDate: (mergedFields.expiration_date as string) || null,
+        mfgDate: (mergedFields.mfg_date as string) || null,
+        source: 'coa',
+      });
+    }
+
+    results.push({
+      documentId: docId,
+      title,
+      externalRef,
+      lotKey: lot ? lot.lotKey : null,
+      subLotCode: lot ? lot.subLotCode : '',
+      recordIndex: record.record_index,
+    });
+  }
+
+  // Update queue status: 'approved' only when nothing is held; otherwise the
+  // caller keeps it pending (handled in the queue handler, but be defensive).
+  if (heldRecordIndexes.length === 0) {
+    await db
+      .prepare(
+        `UPDATE processing_queue SET status = 'approved', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?`
+      )
+      .bind(userId, item.id)
+      .run();
+
+    // Delete pending R2 file only when the whole item is resolved.
+    await deleteFile(files, item.file_r2_key);
+  }
+
+  await logAudit(
+    db,
+    userId,
+    item.tenant_id,
+    heldRecordIndexes.length === 0 ? 'queue_item.approved' : 'queue_item.partial_approved',
+    'processing_queue',
+    item.id,
+    JSON.stringify({
+      document_ids: results.map(r => r.documentId),
+      file_name: item.file_name,
+      record_count: payload.records.length,
+      approved_count: results.length,
+      held_count: heldRecordIndexes.length,
+      selected_source: selectedSource,
+    }),
+    clientIp || null
+  );
+
+  return { documents: results, supplierId, heldRecordIndexes };
 }

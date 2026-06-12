@@ -341,6 +341,8 @@ export async function attachLotToCoaDocument(
   args: {
     documentId: string;
     lotNumber: string | null | undefined;
+    /** Sublot code (Option B); '' / omitted = main-lot-only. */
+    subLotCode?: string | null;
     productId: string | null;
     supplierId: string | null;
     codeDate?: string | null;
@@ -352,6 +354,7 @@ export async function attachLotToCoaDocument(
   try {
     const lot = await findOrCreateLot(db, tenantId, {
       lotNumber: args.lotNumber,
+      subLotCode: args.subLotCode ?? null,
       supplierId: args.supplierId,
       productId: args.productId,
       codeDate: args.codeDate ?? null,

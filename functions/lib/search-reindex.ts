@@ -163,14 +163,14 @@ async function reindexBatch(
       `INSERT INTO documents_fts (
          rowid, title, description, tags_text, file_name,
          extracted_text, primary_metadata_text, extended_metadata_text,
-         supplier_text, document_type_text, product_text,
+         supplier_text, document_type_text, product_text, lot_text,
          doc_id, tenant_id
        )
        SELECT
          m.rowid,
          src.title, src.description, src.tags_text, src.file_name,
          src.extracted_text, src.primary_metadata_text, src.extended_metadata_text,
-         src.supplier_text, src.document_type_text, src.product_text,
+         src.supplier_text, src.document_type_text, src.product_text, src.lot_text,
          src.doc_id, src.tenant_id
        FROM documents_fts_source src
        JOIN documents_fts_map m ON m.doc_id = src.doc_id

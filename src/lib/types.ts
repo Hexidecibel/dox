@@ -16,6 +16,7 @@ export type {
   RegisterResponse,
   DocumentListResponse,
   DocumentGetResponse,
+  DocumentLinkedLot,
   DocumentCreateResponse,
   DocumentUpdateResponse,
   DocumentVersionsResponse,
@@ -119,6 +120,7 @@ export type {
   CoaResultCell,
   CoaRecord,
   CoaRecordsPayload,
+  CoaRecordDecision,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';
 export { parseCoaRecords } from '../../shared/types';

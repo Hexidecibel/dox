@@ -47,6 +47,9 @@ function LotRow({ lot }: { lot: LotListItem }) {
           <Typography variant="body2" fontWeight={500}>{lot.lot_number}</Typography>
         </TableCell>
         <TableCell>
+          <Typography variant="body2" color="text.secondary">{lot.sub_lot_code || '—'}</Typography>
+        </TableCell>
+        <TableCell>
           <Typography variant="body2" color="text.secondary">{lot.product_name || '—'}</Typography>
         </TableCell>
         <TableCell>
@@ -67,7 +70,7 @@ function LotRow({ lot }: { lot: LotListItem }) {
         </TableCell>
       </TableRow>
       <TableRow>
-        <TableCell sx={{ py: 0, borderBottom: open ? undefined : 'none' }} colSpan={6}>
+        <TableCell sx={{ py: 0, borderBottom: open ? undefined : 'none' }} colSpan={7}>
           <Collapse in={open} timeout="auto" unmountOnExit>
             <Box sx={{ py: 1 }}>
               <LotDetailPanel lotId={lot.id} />
@@ -163,7 +166,7 @@ export function Lots() {
       )}
 
       <TextField
-        placeholder="Search by lot number…"
+        placeholder="Search by lot or sublot key…"
         size="small"
         value={searchInput}
         onChange={(e) => setSearchInput(e.target.value)}
@@ -198,6 +201,7 @@ export function Lots() {
                 <TableRow>
                   <TableCell sx={{ width: 48 }} />
                   <TableCell>Lot #</TableCell>
+                  <TableCell>Sublot</TableCell>
                   <TableCell>Product</TableCell>
                   <TableCell>Supplier</TableCell>
                   <TableCell>Code / Exp Date</TableCell>

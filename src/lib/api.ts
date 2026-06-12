@@ -8,6 +8,7 @@ import type {
   RegisterResponse,
   DocumentListResponse,
   DocumentGetResponse,
+  DocumentLinkedLot,
   DocumentCreateResponse,
   DocumentUpdateResponse,
   DocumentVersionsResponse,
@@ -65,6 +66,8 @@ import type {
   LotDetail,
   CoaFulfillmentResponse,
   LotMatchListResponse,
+  CoaRecordsPayload,
+  CoaRecordDecision,
 } from './types';
 import type { ParsedCustomer, ParsedOrder, ParsedShipment } from '../../shared/connectorOutput';
 import { AUTH_TOKEN_KEY } from './types';
@@ -324,6 +327,15 @@ export const api = {
     get: async (id: string): Promise<Document> => {
       const data = await fetchApi<DocumentGetResponse>(`/documents/${id}`);
       return parseDocument(data.document);
+    },
+
+    /**
+     * GET /api/documents/:id -- linked lots only (one per sublot under Option B).
+     * Returns [] for older responses that don't carry the `lots` envelope.
+     */
+    lots: async (id: string): Promise<DocumentLinkedLot[]> => {
+      const data = await fetchApi<DocumentGetResponse>(`/documents/${id}`);
+      return data.lots ?? [];
     },
 
     /**
@@ -1146,13 +1158,26 @@ export const api = {
        * Review Queue v2 — human-edited records for order/shipment items.
        * `{ customers, orders }` for an order item, `{ shipments }` for a
        * shipment item. The backend re-runs the kind producer over these on
-       * approve. COA items never send this.
+       * approve.
+       *
+       * For records-shaped COA items (Option B / sublot split) this is the
+       * human-edited `CoaRecordsPayload`; the backend auto-dispatches to
+       * produceCoaRecords when this parses as one. See CoaRecordsReviewTile.
        */
-      records?: {
-        customers?: ParsedCustomer[];
-        orders?: ParsedOrder[];
-        shipments?: ParsedShipment[];
-      };
+      records?:
+        | {
+            customers?: ParsedCustomer[];
+            orders?: ParsedOrder[];
+            shipments?: ParsedShipment[];
+          }
+        | CoaRecordsPayload;
+      /**
+       * COA partial approval (Option B): per-record decision keyed by
+       * `record_index` (as a string). An absent index defaults to 'approve'.
+       * If ANY record is 'hold', the queue item stays pending; all-approve
+       * flips it to approved.
+       */
+      record_decisions?: Record<string, CoaRecordDecision>;
     }) =>
       fetchApi<{ document?: any; documents?: any[]; summary?: string; item?: any }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     reject: (id: string) =>

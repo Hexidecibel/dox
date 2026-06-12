@@ -44,7 +44,74 @@ export const DOCUMENTS_FTS_COLS = {
   supplier_text: 7,
   document_type_text: 8,
   product_text: 9,
+  // Added in migration 0074 (COA sublot split / lot search). Flattens the
+  // doc's linked lots: lot_number, norm(lot_number), sub_lot_code, lot_key.
+  lot_text: 10,
 } as const;
+
+/**
+ * Normalize a user-typed lot term for matching against `documents_fts.lot_text`.
+ *
+ * Mirrors functions/lib/entities/lots.ts#normalizeLotNumber so the term lines
+ * up with the normalized forms indexed in lot_text (norm(lot_number) and
+ * lot_key, both of which are uppercase + separator-free):
+ *   - uppercase + trim
+ *   - strip a leading "LOT"/"LOT#"/"LOT:"/"#" noise prefix
+ *   - drop every non-alphanumeric char (dashes, spaces, dots, slashes)
+ *
+ * So "10426110-05", "10426110 05", "lot# 1042611005" all collapse to
+ * "1042611005", and the bare main lot "10426110" collapses to "10426110".
+ *
+ * Returns "" when the input has no alphanumeric content.
+ */
+export function normalizeLotTerm(raw: string | null | undefined): string {
+  if (!raw) return '';
+  let s = String(raw).toUpperCase().trim();
+  if (!s) return '';
+  s = s.replace(/^(?:LOT\b|#)\s*[#:]?\s*/i, '').trim();
+  s = s.replace(/[^A-Z0-9]/g, '');
+  return s;
+}
+
+/**
+ * Build a `documents_fts MATCH` expression that ANDs the standard
+ * free-text expression with a column-scoped, normalized lot prefix term.
+ *
+ * Rationale: a lot term like "10426110-05" must (a) survive separator
+ * differences and (b) prefix-match `lot_key` so the MAIN lot returns ALL
+ * its sublots ("10426110" prefixes "1042611005", "1042611006", ...) while
+ * the combined term returns the exact sublot. The standard buildMatchExpr
+ * already quotes + prefixes the raw token, but it does NOT normalize away
+ * separators — so the punctuated form would miss the separator-free
+ * indexed `lot_key`/`norm(lot_number)`. This helper adds the normalized
+ * form as an explicit `lot_text :` column filter ORed onto the base.
+ *
+ * The two parts are combined as `(<base>) OR (lot_text : "<norm>"*)` so a
+ * lot query still matches docs that mention the lot in title/extracted
+ * text etc. AND docs that only carry it in the linked-lot column.
+ *
+ * Returns the same value as buildMatchExpr when the term has no
+ * normalizable lot content (so non-lot searches are unaffected), or null
+ * when the input sanitizes to nothing.
+ */
+export function buildMatchExprWithLot(input: string | null | undefined): string | null {
+  const base = buildMatchExpr(input);
+  if (base === null) return null;
+
+  const norm = normalizeLotTerm(input);
+  // Only augment when the normalized term is a single contiguous
+  // alphanumeric run of reasonable length — i.e. it actually looks like a
+  // lot/identifier rather than a multi-word phrase. (normalizeLotTerm
+  // already stripped whitespace, so any normalized value is contiguous;
+  // we still guard on length to avoid degenerate single-char prefixes.)
+  if (norm.length < 2) return base;
+
+  // Column-scoped prefix term. The lot_text column carries the normalized
+  // lot_key + norm(lot_number), both separator-free + uppercase; FTS5
+  // case-folds, so a lowercase phrase matches.
+  const lotTerm = `lot_text : "${norm.toLowerCase()}"*`;
+  return `(${base}) OR (${lotTerm})`;
+}
 
 /**
  * Build a safe FTS5 MATCH expression from user input.

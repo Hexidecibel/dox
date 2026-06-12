@@ -494,9 +494,25 @@ export interface DocumentListResponse {
   offset: number;
 }
 
+/**
+ * A lot linked to a document via document_lots. Under Option B (sublot split) a
+ * COA links to one lot row per sublot; `lot_key` is the combined match key
+ * (norm(lot_number) + sub_lot_code) used against order_items.lot_number.
+ */
+export interface DocumentLinkedLot {
+  id: string;
+  lot_number: string;
+  sub_lot_code: string;
+  lot_key: string;
+  product_name: string | null;
+  supplier_name: string | null;
+}
+
 export interface DocumentGetResponse {
   document: ApiDocument;
   currentVersion: ApiDocumentVersion | null;
+  /** Linked lots (one per sublot under Option B). Absent on older responses. */
+  lots?: DocumentLinkedLot[];
 }
 
 export interface DocumentCreateResponse {
@@ -824,6 +840,15 @@ export interface CoaRecordsPayload {
   page_metadata: Record<string, string | null>;
   records: CoaRecord[];
 }
+
+/**
+ * Per-record reviewer decision for COA partial approval. Keyed by
+ * `record_index` in the approve body's `record_decisions` map; an absent index
+ * defaults to 'approve'. If ANY record is 'hold', the server keeps the queue
+ * item pending (and retains the pending blob); all-approve flips it to
+ * approved. Mirrors the backend `CoaRecordDecision` in functions/lib/kinds/coa.ts.
+ */
+export type CoaRecordDecision = 'approve' | 'hold' | 'reject';
 
 const COA_CARDINALITIES: ReadonlyArray<CoaRecordCardinality> = ['single', 'multi_lot', 'multi_product'];
 const COA_KEY_BASES: ReadonlyArray<CoaRecordKeyBasis> = ['lot', 'lot+sublot', 'product'];
@@ -2940,6 +2965,9 @@ export interface ProcessingStatusResponse {
 export interface LotListItem {
   id: string;
   lot_number: string;
+  /** 2-digit sublot code (e.g. "05"); '' for main-lot-only rows. */
+  sub_lot_code: string;
+  /** Combined match key = norm(lot_number) + sub_lot_code. */
   lot_key: string;
   product_id: string | null;
   product_name: string | null;
@@ -3002,6 +3030,8 @@ export interface LotDetail {
     supplier_id: string | null;
     product_id: string | null;
     lot_number: string;
+    /** 2-digit sublot code (e.g. "05"); '' for main-lot-only rows. */
+    sub_lot_code: string;
     lot_key: string;
     code_date: string | null;
     expiration_date: string | null;

@@ -49,8 +49,32 @@ export function normalizeLotNumber(raw: string | null | undefined): string {
   return s;
 }
 
+/**
+ * Normalize a sublot code into the 2-digit string stored on `lots.sub_lot_code`
+ * and concatenated into `lot_key`.
+ *
+ * Sublots are ALWAYS 2 digits (user, 2026-06-11), so the value is taken
+ * verbatim after stripping separators/whitespace and uppercasing — the same
+ * cleaning the main lot gets. A 1-digit value is left-padded to 2 digits
+ * defensively (a source should never emit one, but a stray "5" must not collide
+ * with "50"). Empty/whitespace → '' (the main-lot-only sentinel; NEVER null).
+ */
+export function normalizeSubLotCode(raw: string | null | undefined): string {
+  if (!raw) return '';
+  const s = String(raw).toUpperCase().trim().replace(/[^A-Z0-9]/g, '');
+  if (!s) return '';
+  // Defensive pad only — real sources always emit exactly 2 digits.
+  return /^[0-9]$/.test(s) ? `0${s}` : s;
+}
+
 export interface FindOrCreateLotOpts {
   lotNumber: string | null | undefined;
+  /**
+   * Sublot code (Option B). Concatenated onto the normalized lot number to form
+   * `lot_key` and stored separately on `lots.sub_lot_code`. Omitted/empty →
+   * main-lot-only ('' sentinel).
+   */
+  subLotCode?: string | null;
   supplierId?: string | null;
   productId?: string | null;
   codeDate?: string | null;
@@ -82,8 +106,14 @@ export async function findOrCreateLot(
   tenantId: string,
   opts: FindOrCreateLotOpts
 ): Promise<FindOrCreateLotResult | null> {
-  const lotKey = normalizeLotNumber(opts.lotNumber);
-  if (!lotKey) return null;
+  const baseLotKey = normalizeLotNumber(opts.lotNumber);
+  if (!baseLotKey) return null;
+
+  // Option B: sublot is verbatim-concatenated onto the normalized lot number.
+  // sub_lot_code is the 2-digit code ('' when none); lot_key embeds it so the
+  // matcher anchor (product_code + lot_key) lines up with the WMS combined lot.
+  const subLotCode = normalizeSubLotCode(opts.subLotCode);
+  const lotKey = baseLotKey + subLotCode;
 
   const rawLot = String(opts.lotNumber).trim();
   const supplierId = opts.supplierId ?? null;
@@ -99,15 +129,15 @@ export async function findOrCreateLot(
   const existing = productId
     ? await db
         .prepare(
-          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date FROM lots WHERE tenant_id = ? AND lot_key = ? AND product_id = ?'
+          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date FROM lots WHERE tenant_id = ? AND lot_key = ? AND sub_lot_code = ? AND product_id = ?'
         )
-        .bind(tenantId, lotKey, productId)
+        .bind(tenantId, lotKey, subLotCode, productId)
         .first<LotRow>()
     : await db
         .prepare(
-          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date FROM lots WHERE tenant_id = ? AND lot_key = ? AND product_id IS NULL'
+          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date FROM lots WHERE tenant_id = ? AND lot_key = ? AND sub_lot_code = ? AND product_id IS NULL'
         )
-        .bind(tenantId, lotKey)
+        .bind(tenantId, lotKey, subLotCode)
         .first<LotRow>();
 
   if (existing) {
@@ -150,9 +180,9 @@ export async function findOrCreateLot(
   await db
     .prepare(
       `INSERT INTO lots
-         (id, tenant_id, supplier_id, product_id, lot_number, lot_key,
+         (id, tenant_id, supplier_id, product_id, lot_number, sub_lot_code, lot_key,
           code_date, expiration_date, mfg_date, primary_metadata, first_seen_source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -160,6 +190,7 @@ export async function findOrCreateLot(
       supplierId,
       productId,
       rawLot,
+      subLotCode,
       lotKey,
       codeDate,
       expirationDate,

@@ -63,8 +63,29 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(docId)
       .all();
 
+    // Linked lots (Option B sublot split): a COA may link to N lots, one per
+    // sublot. Surface lot_number / sub_lot_code / lot_key so the detail page can
+    // show the combined match key (e.g. "lot 10426110 · sublot 05 → 1042611005").
+    const linkedLots = await context.env.DB.prepare(
+      `SELECT l.id, l.lot_number, l.sub_lot_code, l.lot_key,
+              p.name AS product_name, s.name AS supplier_name
+       FROM document_lots dl
+       INNER JOIN lots l ON dl.lot_id = l.id
+       LEFT JOIN products p ON l.product_id = p.id
+       LEFT JOIN suppliers s ON l.supplier_id = s.id
+       WHERE dl.document_id = ?
+       ORDER BY l.lot_number ASC, l.sub_lot_code ASC`
+    )
+      .bind(docId)
+      .all();
+
     return new Response(
-      JSON.stringify({ document: doc, currentVersion, products: linkedProducts.results }),
+      JSON.stringify({
+        document: doc,
+        currentVersion,
+        products: linkedProducts.results,
+        lots: linkedLots.results,
+      }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (err) {

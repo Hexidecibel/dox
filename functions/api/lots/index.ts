@@ -78,6 +78,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       `SELECT
          lots.id              AS id,
          lots.lot_number      AS lot_number,
+         lots.sub_lot_code    AS sub_lot_code,
          lots.lot_key         AS lot_key,
          lots.product_id      AS product_id,
          products.name        AS product_name,

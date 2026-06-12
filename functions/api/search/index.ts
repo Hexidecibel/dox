@@ -40,7 +40,7 @@
  */
 
 import { errorToResponse, BadRequestError } from '../../lib/permissions';
-import { buildMatchExpr, DOCUMENTS_FTS_COLS } from '../../lib/search-fts';
+import { buildMatchExpr, buildMatchExprWithLot, DOCUMENTS_FTS_COLS } from '../../lib/search-fts';
 import type { Env, User } from '../../lib/types';
 
 const DEFAULT_LIMIT_PER_TYPE = 5;
@@ -89,6 +89,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     const matchExpr = buildMatchExpr(q);
+    // documents_fts carries a `lot_text` column (migration 0074); the
+    // doc-specific match expr ORs in a normalized, column-scoped lot
+    // prefix so typing a main lot returns all its sublot COAs. Other
+    // per-entity FTS tables have no lot_text column, so they keep the
+    // plain matchExpr.
+    const docMatchExpr = buildMatchExprWithLot(q);
     const empty: PerEntityBlock<Record<string, unknown>> = { total: 0, results: [] };
 
     // ----------------------------------------------------------------
@@ -253,7 +259,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          FROM documents_fts f
          JOIN documents d ON d.id = f.doc_id
          WHERE f.tenant_id = ? AND documents_fts MATCH ? AND d.status = 'active'`,
-      ).bind(tenantId, matchExpr),
+      ).bind(tenantId, docMatchExpr),
       // 13: documents — page. snippet() is used inside a CTE on
       // documents_fts (no JOIN there), then the CTE is joined to
       // documents for projection.
@@ -270,6 +276,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          )
          SELECT
            d.*,
+           -- (lot-aware match expr; see docMatchExpr)
            u.name AS creator_name,
            dt.name AS document_type_name,
            dt.slug AS document_type_slug,
@@ -286,7 +293,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          WHERE d.status = 'active'
          ORDER BY m.rank
          LIMIT ? OFFSET ?`,
-      ).bind(tenantId, matchExpr, docLimit, docOffset),
+      ).bind(tenantId, docMatchExpr, docLimit, docOffset),
     ];
 
     const batchResults = await context.env.DB.batch<RowWithCount>(stmts);
