@@ -1932,7 +1932,7 @@ async function processCoaItem(item) {
             body: JSON.stringify({
               model: modelFor('best', process.env),
               temperature: 0,
-              max_tokens: 4096,
+              max_tokens: 16384,
               messages: [
                 {
                   role: 'system',
@@ -2565,10 +2565,11 @@ The input you are given is ONE complete single-page COA for ONE product (it has 
 }
 RULES for records:
 - This page is ONE product. Emit ONE record PER LOT and PER SUBLOT of that product. If the product has 4 sublots, that is 4 records (record_key_basis "lot+sublot"). If it has exactly one lot, that is one record (record_cardinality "single").
+- SUBLOTS ARE OFTEN COLUMNS IN A TRANSPOSED MATRIX. A "Sub Lot Number" (or "Sublot") row lists the sublot codes left-to-right, e.g. "Sub Lot Number 14 13 12", and each following test/attribute row (Butterfat, Moisture, pH, Weight, Quantity, Production Date, ...) gives that row's value for each sublot in the SAME left-to-right column order. When you see this, emit ONE record PER SUBLOT COLUMN: read DOWN each column to collect that sublot's value for every test. The lot_code is usually shared across all columns; each column's "Sub Lot Number" value is that record's sub_lot_code. Do NOT collapse a multi-column sublot matrix into one flat record.
 - Put fields that vary between this page's lots/sublots in each record's "fields"; put fields constant across them (including this page's product) in "page_metadata". Do not duplicate constant fields into every record.
 - This is ONE page of what may be a larger PO/EDI bundle of single-page COAs — extract ONLY this page's product. The assembler concatenates pages; it NEVER merges your records with another page's, so do not worry about other pages.
 - Specs verbatim, never derive pass/fail, lab consumables are never product data — the same domain rules as above apply inside each record.
-- When this page carries exactly ONE lot, you may omit "records" entirely (the flat fields suffice).`;
+- Omit "records" ONLY when the page has exactly ONE lot AND ONE sublot (a single result). If there are MULTIPLE sublots — even all under the same lot number — you MUST emit one record per sublot; never collapse multiple sublots into flat fields.`;
 
 const DAIRY_FOOD_INDUSTRY_PROMPT = `
 ORG CONTEXT:
@@ -3193,7 +3194,7 @@ async function runParityMode() {
               body: JSON.stringify({
                 model: modelFor('best', process.env),
                 temperature: 0,
-                max_tokens: 4096,
+                max_tokens: 16384,
                 messages: [
                   {
                     role: 'system',
