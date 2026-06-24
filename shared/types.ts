@@ -324,6 +324,7 @@ export interface ProductMapEntry {
   coa_product_id: string | null;
   order_product_id: string;
   distributor_sku: string | null;
+  order_product_name?: string | null; // joined from products on GET, for display
   created_by: string | null;
   created_at: string;
   updated_at: string;

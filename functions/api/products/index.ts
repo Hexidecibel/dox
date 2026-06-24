@@ -39,7 +39,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       }
     }
 
-    if (activeFilter !== null) {
+    if (activeFilter === 'all') {
+      // Explicitly include inactive products (e.g. the product-map editor needs
+      // to map inactive-but-still-shipping products to distributor SKUs).
+    } else if (activeFilter !== null) {
       conditions.push('active = ?');
       params.push(Number(activeFilter));
     } else {

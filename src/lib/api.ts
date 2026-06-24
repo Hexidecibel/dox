@@ -672,7 +672,7 @@ export const api = {
      * GET /api/products
      * Returns: { products: ApiProduct[], total, limit, offset }
      */
-    list: (params?: { search?: string; active?: number; limit?: number; offset?: number; tenant_id?: string; supplier_id?: string }) => {
+    list: (params?: { search?: string; active?: number | 'all'; limit?: number; offset?: number; tenant_id?: string; supplier_id?: string }) => {
       const query = new URLSearchParams();
       if (params?.search) query.set('search', params.search);
       if (params?.active !== undefined) query.set('active', String(params.active));

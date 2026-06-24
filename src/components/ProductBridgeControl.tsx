@@ -123,7 +123,7 @@ export default function ProductBridgeControl({
         onChange({
           order_product_id: res.mapping.order_product_id,
           distributor_sku: res.mapping.distributor_sku,
-          order_product_name: null,
+          order_product_name: res.mapping.order_product_name ?? null,
         });
       } catch {
         // Non-fatal — no prefill.

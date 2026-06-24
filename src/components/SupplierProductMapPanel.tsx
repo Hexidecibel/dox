@@ -68,8 +68,10 @@ export default function SupplierProductMapPanel({
     (async () => {
       try {
         // Supplier-scoped COA products — the products whose supplier_id is this
-        // supplier (created via COA review / connector ingest).
-        const res = await api.products.list({ supplier_id: supplierId, tenant_id: tenantId });
+        // supplier (created via COA review / connector ingest). Include inactive
+        // ones: high-volume products can be marked inactive yet still ship and
+        // need mapping (the matcher keys the map by product name, not active state).
+        const res = await api.products.list({ supplier_id: supplierId, tenant_id: tenantId, active: 'all' });
         if (!cancelled) setProducts(res.products);
       } catch (err) {
         if (!cancelled) {

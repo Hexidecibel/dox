@@ -55,8 +55,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const key = normalizeProductNameKey(coaProduct);
 
     const mapping = await context.env.DB.prepare(
-      `SELECT * FROM supplier_product_map
-       WHERE tenant_id = ? AND supplier_id = ? AND coa_product_name_key = ?`
+      `SELECT m.*, p.name AS order_product_name
+       FROM supplier_product_map m
+       LEFT JOIN products p ON p.id = m.order_product_id
+       WHERE m.tenant_id = ? AND m.supplier_id = ? AND m.coa_product_name_key = ?`
     )
       .bind(tenantId, supplierId, key)
       .first<ProductMapEntry>();
