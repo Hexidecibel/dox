@@ -4,6 +4,46 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-06-24 COUNTRY MORNING MATCHING SHIPPED — lot_scheme + product bridge (LIVE on prod)
+
+Root cause = TWO per-supplier gaps (the PRODUCT one was the deeper blocker, the lot one the
+obvious symptom). See memory `project_country_morning_lot_and_product_bridge`:
+1. **Lot suffix:** CMF COA lots = `MMDDYY`+3char (`061626WHO`); their WMS strips to bare date
+   (`061626`) → lot_keys never matched.
+2. **Two-catalog product gap:** COA products are manufacturer names scoped to the supplier
+   ("Milk - Whole"); orders use distributor SKUs (`0417` / "MS WHOLE 5 GL BAG") in SEPARATE
+   product rows with no shared key → matcher's strong paths (lot+product / lot+code) all failed.
+
+**Shipped to prod** (supdox.com; commits `96cdb0a`/`e0c487d`/`d9cc1e7`, pushed; deploy `470e70be`;
+migration **0075** applied surgically + stamped in `_migrations`):
+- `suppliers.lot_scheme` (auto|date_code|lims_combined|plain, default auto = no-op) + `applyLotScheme`
+  at produce time = steady-state strip (NEW COAs need no backfill).
+- `supplier_product_map` bridge (keyed by normalized COA product NAME); matcher substitutes the
+  mapped `order_product_id` → strong `lot+product` (0.85). Inert when no map row.
+- **Standalone "Product Mapping" tab** on SupplierDetail (teach maps for single-product COAs +
+  existing data; the review-tile picker only covered multi-record COAs, which CMF's aren't).
+- `bin/rectify-lot-scheme` (re-key existing lots; fixed unquoted-id bug), `bin/clone-org --from-prod`,
+  `bin/{seed,verify,reprocess}-cmf-{bridge,files}` test harnesses.
+
+**Prod result:** CMF `lot_scheme=date_code`, 88 lots re-keyed to bare dates, user taught 3 maps
+(Milk-Whole→30417, Half-and-Half→0708, Heavy-Whipping→0801), rematch → 7 strong links →
+tenant **1 → 8 matched**. Hands-off going forward. Validated 3 ways pre-prod (synthetic 13/13,
+prod clone 1→8, full pipeline on real PDFs 15/15). Mid-flight bug fixed + regression-tested:
+`produceCoa` now falls back fields→approvedFields→`ai_fields.product_name` for the
+`document_products` link (single-product COAs were silently unlinked, breaking the bridge).
+
+**LOOSE ENDS:**
+- **WHY are CMF "Milk - Whole" + "Half-and-Half" products `active=0`?** Highest-volume items;
+  likely an old dedupe deactivated them. Matching keys on name so it works, but investigate +
+  consider reactivating / merging the active dup rows (e.g. "Half & Half" NULL-supplier active=1).
+- Minor: the Product Mapping tab fires one idempotent redundant PUT (bumps `updated_at` only) on
+  view because `ProductBridgeControl` calls onChange on prefill — suppress prefill-echo writes.
+- The 9 still-unmatched CMF-tenant lines = genuine no-COA-on-file gaps + correct cross-product
+  date-collision holds. Real lever now = **COA coverage**; they auto-match as COAs arrive.
+- Worker NOT restarted (feature is Pages + migration only).
+- Backlog (`backlog.md`): generalize `lot_scheme` beyond date_code (preset/regex escape-hatch) +
+  **fuzzy-match auto-suggest** in the product picker (cut teach from search→confirm).
+
 ## 2026-06-11 SUBLOT GRAIN DECIDED — Option B (per-sublot) — PLAN LOCKED, NOT BUILT
 
 **Decision (user + buddy, 2026-06-11): OPTION B.** Each sublot → its own `documents` row +
