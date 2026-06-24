@@ -53,6 +53,8 @@ import { EmptyState } from '../../components/EmptyState';
 import { helpContent } from '../../lib/helpContent';
 import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
 import LotSchemeSelect from '../../components/LotSchemeSelect';
+import SupplierProductMapPanel from '../../components/SupplierProductMapPanel';
+import { useAuth } from '../../contexts/AuthContext';
 import type { LotScheme } from '../../lib/types';
 
 interface TabPanelProps {
@@ -231,6 +233,7 @@ function detectLotSchemeFromSample(lotNumbers: string[]): LotScheme | null {
 export function SupplierDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { isAdmin } = useAuth();
   const [supplier, setSupplier] = useState<ApiSupplier | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -784,6 +787,7 @@ export function SupplierDetail() {
           <Tab label={`Documents${documentsTotal ? ` (${documentsTotal})` : ''}`} />
           <Tab label="Extraction Instructions" />
           <Tab label="Document Types" />
+          <Tab label="Product Mapping" />
         </Tabs>
       </Box>
 
@@ -1445,6 +1449,22 @@ export function SupplierDetail() {
             </Button>
           </DialogActions>
         </Dialog>
+      </TabPanel>
+
+      {/* Product Mapping Tab — standalone editor for the COA-product ->        */}
+      {/* distributor-SKU bridge (supplier_product_map). Needed because the     */}
+      {/* teach-at-review picker only appears for multi-record COAs; this lets  */}
+      {/* an admin author maps for single-product suppliers too. Self-loads the */}
+      {/* supplier's COA products and persists each pick via PUT /product-map.  */}
+      <TabPanel value={tab} index={5}>
+        {tab === 5 && (
+          <SupplierProductMapPanel
+            tenantId={supplier.tenant_id}
+            supplierId={supplier.id}
+            supplierName={supplier.name}
+            canEdit={isAdmin}
+          />
+        )}
       </TabPanel>
     </Box>
   );
