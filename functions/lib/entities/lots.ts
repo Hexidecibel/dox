@@ -67,6 +67,83 @@ export function normalizeSubLotCode(raw: string | null | undefined): string {
   return /^[0-9]$/.test(s) ? `0${s}` : s;
 }
 
+/**
+ * Per-supplier lot numbering scheme (migration 0075). Decides how a raw lot
+ * key + sublot code combine into the stored `lot_key`:
+ *   - 'auto'  : no transform (default; today's behavior). Sublot concat if present.
+ *   - 'plain' : identity (+ sublot concat if extracted). Same as 'auto' at storage.
+ *   - 'lims_combined' : baseLotKey + normalizeSubLotCode(subLotCode) (Darigold-style).
+ *   - 'date_code'     : strip to the leading MMDDYY (6-digit) date; drop any
+ *                       trailing alpha item-code, and force subLotCode='' (the
+ *                       suffix is the item, NOT a 2-digit sublot). e.g. CMF
+ *                       '061626WHO' → '061626'. Non-conforming keys (no leading
+ *                       6 digits) keep the full key — defensive, never drop.
+ */
+export type LotScheme = 'auto' | 'date_code' | 'lims_combined' | 'plain';
+
+/**
+ * Combine a normalized base lot key + sublot code into the stored `lot_key`,
+ * per the supplier's scheme. Pure; runs AFTER normalizeLotNumber /
+ * normalizeSubLotCode. Returns the final { lotKey, subLotCode } — date_code may
+ * rewrite both (it forces subLotCode='').
+ */
+export function applyLotScheme(
+  scheme: LotScheme | null | undefined,
+  baseLotKey: string,
+  subLotCode: string
+): { lotKey: string; subLotCode: string } {
+  switch (scheme) {
+    case 'date_code': {
+      // Strip to the leading 6-digit date; trailing alpha code is the item, not
+      // a sublot. Non-conforming (no leading 6 digits) → keep full key.
+      const m = /^(\d{6})/.exec(baseLotKey);
+      return { lotKey: m ? m[1] : baseLotKey, subLotCode: '' };
+    }
+    case 'lims_combined':
+      return { lotKey: baseLotKey + subLotCode, subLotCode };
+    case 'plain':
+    case 'auto':
+    default:
+      // Identity, plus the sublot concat when a sublot was extracted.
+      return { lotKey: baseLotKey + subLotCode, subLotCode };
+  }
+}
+
+/**
+ * Suggest a LotScheme from a sample of raw/normalized lot keys. SUGGESTION
+ * ONLY — consumed by the supplier UI prefill and the backfill report; nothing
+ * writes it automatically (a human pins the real scheme). Returns 'date_code'
+ * when a clear majority of non-empty samples look like MMDDYY + a trailing
+ * alpha code (the Country-Morning shape); otherwise 'auto'.
+ */
+export function detectLotScheme(samples: string[]): LotScheme {
+  const keys = (samples ?? [])
+    .map((s) => normalizeLotNumber(s))
+    .filter((s) => s.length > 0);
+  if (keys.length === 0) return 'auto';
+  // date_code shape: 6 leading digits then at least one alpha char.
+  const dateCodeLike = keys.filter((k) => /^\d{6}[A-Z]/.test(k)).length;
+  return dateCodeLike / keys.length >= 0.6 ? 'date_code' : 'auto';
+}
+
+/**
+ * Normalize a product name into a stable map key for `supplier_product_map`
+ * (migration 0075). Uppercase, trim, collapse every run of non-alphanumeric
+ * characters to a single space, then trim again. Durable across re-extraction
+ * (punctuation/spacing drift does not change the key).
+ *
+ * "Cream - Heavy Whipping 40%" → "CREAM HEAVY WHIPPING 40"
+ */
+export function normalizeProductNameKey(
+  name: string | null | undefined
+): string {
+  if (!name) return '';
+  return String(name)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim();
+}
+
 export interface FindOrCreateLotOpts {
   lotNumber: string | null | undefined;
   /**
@@ -82,6 +159,12 @@ export interface FindOrCreateLotOpts {
   mfgDate?: string | null;
   metadata?: string | null;
   source?: string | null;
+  /**
+   * Per-supplier lot numbering scheme (migration 0075). Decides how baseLotKey
+   * + subLotCode combine into the stored lot_key. Omitted/null → 'auto'
+   * (today's behavior). See applyLotScheme.
+   */
+  lotScheme?: LotScheme | null;
 }
 
 export interface FindOrCreateLotResult {
@@ -112,8 +195,13 @@ export async function findOrCreateLot(
   // Option B: sublot is verbatim-concatenated onto the normalized lot number.
   // sub_lot_code is the 2-digit code ('' when none); lot_key embeds it so the
   // matcher anchor (product_code + lot_key) lines up with the WMS combined lot.
-  const subLotCode = normalizeSubLotCode(opts.subLotCode);
-  const lotKey = baseLotKey + subLotCode;
+  // The supplier's lot_scheme (0075) decides the combine — 'auto'/'plain' keep
+  // the historical concat; 'date_code' strips to the bare MMDDYY date and
+  // forces sub_lot_code=''.
+  const rawSubLotCode = normalizeSubLotCode(opts.subLotCode);
+  const scheme = applyLotScheme(opts.lotScheme, baseLotKey, rawSubLotCode);
+  const lotKey = scheme.lotKey;
+  const subLotCode = scheme.subLotCode;
 
   const rawLot = String(opts.lotNumber).trim();
   const supplierId = opts.supplierId ?? null;

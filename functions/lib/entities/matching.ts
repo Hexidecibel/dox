@@ -23,7 +23,12 @@
 
 import type { D1Database } from '@cloudflare/workers-types';
 import { generateId } from '../db';
-import { findOrCreateLot, normalizeLotNumber } from './lots';
+import {
+  findOrCreateLot,
+  normalizeLotNumber,
+  normalizeProductNameKey,
+  type LotScheme,
+} from './lots';
 
 // Confidence thresholds. "Strong" requires the product OR the distributor code
 // to agree (basis includes product or code). "Weak" is lot_only.
@@ -206,6 +211,38 @@ async function recordSuggestion(
     .run();
 }
 
+interface ProductMapRow {
+  order_product_id: string;
+  distributor_sku: string | null;
+}
+
+/**
+ * Look up the teachable COA-product → order-product bridge
+ * (`supplier_product_map`, migration 0075) for a COA product NAME. Keyed on
+ * the normalized product-name key (durable across re-extraction), scoped to
+ * (tenant, supplier). Returns null when supplier/name is unknown or no row
+ * exists — callers then behave exactly as before the map existed.
+ */
+async function lookupProductMap(
+  db: D1Database,
+  tenantId: string,
+  supplierId: string | null,
+  coaProductName: string | null | undefined
+): Promise<ProductMapRow | null> {
+  if (!supplierId) return null;
+  const nameKey = normalizeProductNameKey(coaProductName);
+  if (!nameKey) return null;
+  const row = await db
+    .prepare(
+      `SELECT order_product_id, distributor_sku
+         FROM supplier_product_map
+        WHERE tenant_id = ? AND supplier_id = ? AND coa_product_name_key = ?`
+    )
+    .bind(tenantId, supplierId, nameKey)
+    .first<ProductMapRow>();
+  return row ?? null;
+}
+
 interface OrderItemCandidate {
   id: string;
   order_id: string;
@@ -232,9 +269,17 @@ export async function linkCoaToOrders(
     lotId: string;
     productId: string | null;
     supplierId: string | null;
+    /**
+     * The COA's product name (for the supplier_product_map bridge, 0075). When
+     * a map row exists for (tenant, supplier, normalized name), the mapped
+     * order_product_id / distributor_sku are substituted into classifyMatch so
+     * a name-divergent supplier (e.g. Country Morning) strong-links on
+     * lot+product. Omitted/unmapped → identical to pre-0075 behavior.
+     */
+    coaProductName?: string | null;
   }
 ): Promise<void> {
-  const { documentId, lotId, productId, supplierId } = args;
+  const { documentId, lotId, productId, supplierId, coaProductName } = args;
 
   // Resolve the COA lot's key + supplier so we can compare against candidates.
   const lot = await db
@@ -251,7 +296,15 @@ export async function linkCoaToOrders(
     .prepare('SELECT title FROM documents WHERE id = ? AND tenant_id = ?')
     .bind(documentId, tenantId)
     .first<{ title: string | null }>();
-  const coaProductCode = parseDistributorCode(doc?.title);
+  const titleProductCode = parseDistributorCode(doc?.title);
+
+  // supplier_product_map bridge (0075): if a reviewer has taught the COA-side
+  // product name → an order-side product (and optionally a distributor SKU),
+  // substitute the mapped ids into classifyMatch. No map row → null → behavior
+  // identical to pre-0075.
+  const mapped = await lookupProductMap(db, tenantId, coaSupplierId, coaProductName);
+  const effectiveProductId = mapped?.order_product_id ?? productId;
+  const coaProductCode = titleProductCode ?? mapped?.distributor_sku ?? null;
 
   // Candidate order_items in this tenant: either already lot-resolved to the
   // same key, or carrying a raw lot_number we still need to normalize.
@@ -274,7 +327,7 @@ export async function linkCoaToOrders(
     }
 
     const cls = classifyMatch({
-      coaProductId: productId,
+      coaProductId: effectiveProductId,
       orderProductId: oi.product_id,
       coaSupplierId,
       orderSupplierId: null, // order side rarely knows the supplier
@@ -349,6 +402,14 @@ export async function attachLotToCoaDocument(
     expirationDate?: string | null;
     mfgDate?: string | null;
     source?: string;
+    /**
+     * Supplier's lot numbering scheme (0075). Resolved by the caller from the
+     * supplier row. Threaded into findOrCreateLot so the stored lot_key matches
+     * the order side. Omitted/null → 'auto' (today's behavior).
+     */
+    lotScheme?: LotScheme | null;
+    /** COA product name → supplier_product_map bridge (0075). */
+    coaProductName?: string | null;
   }
 ): Promise<string | null> {
   try {
@@ -361,6 +422,7 @@ export async function attachLotToCoaDocument(
       expirationDate: args.expirationDate ?? null,
       mfgDate: args.mfgDate ?? null,
       source: args.source ?? 'coa',
+      lotScheme: args.lotScheme ?? null,
     });
     if (!lot) return null;
 
@@ -378,6 +440,7 @@ export async function attachLotToCoaDocument(
       lotId: lot.id,
       productId: args.productId,
       supplierId: args.supplierId,
+      coaProductName: args.coaProductName ?? null,
     });
 
     return lot.id;
@@ -396,6 +459,7 @@ interface CoaCandidate {
   product_id: string | null;
   supplier_id: string | null;
   title: string | null;
+  coa_product_name: string | null;
 }
 
 /**
@@ -430,9 +494,16 @@ export async function linkOrderToCoas(
 
   // COA documents whose linked lot shares the same key in this tenant. Join
   // documents to read each candidate's title (carries the distributor code).
+  // Pull the COA candidate's product NAME (for the supplier_product_map bridge)
+  // via document_products → products. A doc may carry several product links;
+  // MIN keeps the result deterministic. Null when the doc has no product link.
   const rows = await db
     .prepare(
-      `SELECT dl.document_id, l.id AS lot_id, l.product_id, l.supplier_id, d.title
+      `SELECT dl.document_id, l.id AS lot_id, l.product_id, l.supplier_id, d.title,
+              (SELECT MIN(p.name)
+                 FROM document_products dp
+                 JOIN products p ON p.id = dp.product_id
+                WHERE dp.document_id = dl.document_id) AS coa_product_name
        FROM document_lots dl
        JOIN lots l ON l.id = dl.lot_id
        JOIN documents d ON d.id = dl.document_id
@@ -442,12 +513,21 @@ export async function linkOrderToCoas(
     .all<CoaCandidate>();
 
   for (const coa of rows.results ?? []) {
+    // supplier_product_map bridge (0075): substitute the mapped order-side
+    // product id / SKU for this COA candidate before classifying. No row →
+    // null → behavior identical to pre-0075.
+    const mapped = await lookupProductMap(
+      db,
+      tenantId,
+      coa.supplier_id,
+      coa.coa_product_name
+    );
     const cls = classifyMatch({
-      coaProductId: coa.product_id,
+      coaProductId: mapped?.order_product_id ?? coa.product_id,
       orderProductId: productId,
       coaSupplierId: coa.supplier_id,
       orderSupplierId: null,
-      coaProductCode: parseDistributorCode(coa.title),
+      coaProductCode: parseDistributorCode(coa.title) ?? mapped?.distributor_sku ?? null,
       orderProductCode,
     });
 

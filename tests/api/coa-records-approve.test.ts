@@ -236,6 +236,49 @@ describe('produceCoaRecords', () => {
     ]);
   });
 
+  it('date_code supplier (0075): stored lot_key + external_ref are stripped to the bare MMDDYY date', async () => {
+    // A Country-Morning-style supplier pinned to date_code: COA lot "061626WHO"
+    // must store as bare "061626" so it collides with the bare-date WMS line,
+    // and external_ref = queue-{id}-061626 must agree with the lots row.
+    const supplierId = generateTestId();
+    await db
+      .prepare(
+        "INSERT INTO suppliers (id, tenant_id, name, slug, lot_scheme) VALUES (?, ?, ?, ?, 'date_code')"
+      )
+      .bind(supplierId, seed.tenantId, 'Country Morning Farms', `cmf-${supplierId.slice(0, 6)}`)
+      .run();
+
+    const payload: CoaRecordsPayload = {
+      record_cardinality: 'single',
+      record_key_basis: 'lot',
+      page_metadata: { manufacturer: 'Country Morning Farms' },
+      records: [
+        { record_index: 0, fields: { lot_code: '061626WHO', product_name: 'Milk - Whole' } },
+      ],
+    };
+    const item = await makeCoaQueueItem(payload);
+    const result = await produceCoaRecords(db, files, item, {
+      payload,
+      userId: seed.userId,
+      supplierId,
+    });
+
+    expect(result.documents).toHaveLength(1);
+    // lot_key stripped to the bare date; sublot forced to ''.
+    expect(result.documents[0].lotKey).toBe('061626');
+    expect(result.documents[0].subLotCode).toBe('');
+    // external_ref agrees with the stripped lot_key (not the suffixed raw).
+    expect(result.documents[0].externalRef).toBe(`queue-${item.id}-061626`);
+
+    // The stored lots row is bare-date too.
+    const lots = await getLotsForKey('061626');
+    expect(lots).toHaveLength(1);
+    expect(lots[0].lot_key).toBe('061626');
+    expect(lots[0].sub_lot_code).toBe('');
+    // No suffixed lot row was created.
+    expect(await getLotsForKey('061626WHO')).toHaveLength(0);
+  });
+
   it('produces a "" sub_lot_code lot for a single-lot record with no sublot', async () => {
     const payload: CoaRecordsPayload = {
       record_cardinality: 'single',

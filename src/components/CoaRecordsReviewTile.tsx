@@ -44,6 +44,7 @@ import type {
   ExtractedTable,
 } from '../lib/types';
 import SupplierAutocomplete, { type SupplierValue } from './SupplierAutocomplete';
+import ProductBridgeControl, { type ProductBridgeValue } from './ProductBridgeControl';
 
 /**
  * Review tile for records-shaped COA queue items (Option B / sublot split).
@@ -223,6 +224,10 @@ export default function CoaRecordsReviewTile({
   // Per-record decision keyed by array index; defaults to 'approve' when absent.
   const [decisions, setDecisions] = useState<Record<number, CoaRecordDecision>>({});
 
+  // Per-record taught COA-product -> order-product bridge, keyed by array index.
+  // Written into the approve body as `product_maps` for approved records.
+  const [productMaps, setProductMaps] = useState<Record<number, ProductBridgeValue | null>>({});
+
   // Page grouping: records bucketed by their source PDF page. Drives the page
   // navigator; the records column shows only the active page's records.
   const pageGroups = useMemo(() => groupRecordsByPage(records), [records]);
@@ -247,6 +252,10 @@ export default function CoaRecordsReviewTile({
   const supplierVerified = supplier.verified && !!supplier.supplierName.trim();
 
   const decisionFor = (idx: number): CoaRecordDecision => decisions[idx] ?? 'approve';
+
+  /** The COA product name for a record (record field, falling back to shared). */
+  const coaProductNameFor = (r: CoaRecord): string =>
+    (r.fields?.product_name || pageMetadata.product_name || '').trim();
 
   const setDecision = (idx: number, val: CoaRecordDecision) => {
     setDecisions((prev) => ({ ...prev, [idx]: val }));
@@ -367,10 +376,30 @@ export default function CoaRecordsReviewTile({
         ? { supplier_id: supplier.supplierId }
         : { supplier_name: supplier.supplierName.trim() };
 
+      // Taught product bridges for APPROVED records only. The server writes each
+      // entry to supplier_product_map AFTER resolving the supplier_id, keying on
+      // the record's COA product name.
+      const productMapsBody: Record<
+        string,
+        { coa_product: string; order_product_id: string; distributor_sku?: string | null }
+      > = {};
+      records.forEach((r, i) => {
+        if (decisionFor(i) !== 'approve') return;
+        const map = productMaps[i];
+        const coaProduct = coaProductNameFor(r);
+        if (!map || !coaProduct) return;
+        productMapsBody[String(i)] = {
+          coa_product: coaProduct,
+          order_product_id: map.order_product_id,
+          distributor_sku: map.distributor_sku ?? undefined,
+        };
+      });
+
       const res = await api.queue.approve(item.id, {
         ...supplierPayload,
         records: payload,
         record_decisions: recordDecisions,
+        ...(Object.keys(productMapsBody).length > 0 ? { product_maps: productMapsBody } : {}),
         selected_source: 'text',
       });
       setSuccess(
@@ -507,6 +536,27 @@ export default function CoaRecordsReviewTile({
             Add field
           </Button>
         )}
+
+        {/* Teach the COA-product -> order-product bridge for this record. Only
+            available once the supplier is saved (we need its id to key the map).
+            Disabled until the supplier is verified. */}
+        <Box sx={{ mt: 1.5, mb: groupEntries.length || record.tables?.length ? 2 : 0 }}>
+          {supplier.supplierId ? (
+            <ProductBridgeControl
+              tenantId={item.tenant_id}
+              supplierId={supplier.supplierId}
+              supplierName={supplier.supplierName}
+              coaProductName={coaProductNameFor(record)}
+              disabled={readOnly || submitting || !supplierVerified}
+              value={productMaps[idx] ?? null}
+              onChange={(v) => setProductMaps((prev) => ({ ...prev, [idx]: v }))}
+            />
+          ) : (
+            <Typography variant="caption" color="text.secondary">
+              Map products after the supplier is saved.
+            </Typography>
+          )}
+        </Box>
 
         {/* Structured groups (read-only verbatim). */}
         {groupEntries.length > 0 && (

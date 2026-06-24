@@ -40,6 +40,10 @@ import type {
   SupplierLookupOrCreateResponse,
   SupplierDuplicatesResponse,
   SupplierMergeResponse,
+  LotScheme,
+  ProductMapGetResponse,
+  ProductMapPutResponse,
+  OrderProductListResponse,
   ExtractionTemplate,
   TemplateFieldMapping,
   SupplierExtractionInstructionsGetResponse,
@@ -785,7 +789,7 @@ export const api = {
      * PUT /api/suppliers/:id
      * Returns: { supplier: ApiSupplier }
      */
-    update: (id: string, data: { name?: string; aliases?: string[]; active?: boolean }) =>
+    update: (id: string, data: { name?: string; aliases?: string[]; active?: boolean; lot_scheme?: LotScheme }) =>
       fetchApi<{ supplier: ApiSupplier }>(`/suppliers/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -825,6 +829,56 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ winner_id: winnerId, loser_ids: loserIds }),
       }),
+  },
+
+  /**
+   * Teachable COA-product -> order-product bridge (supplier_product_map).
+   * The primary write path is the COA approve body (`product_maps`); these
+   * helpers cover prefill (get) and editing an existing mapping (put).
+   */
+  productMap: {
+    /**
+     * GET /api/product-map?supplier_id=&coa_product=
+     * Returns: { mapping | null } (prefill for the bridge control).
+     */
+    get: (params: { supplier_id: string; coa_product: string }) => {
+      const query = new URLSearchParams();
+      query.set('supplier_id', params.supplier_id);
+      query.set('coa_product', params.coa_product);
+      return fetchApi<ProductMapGetResponse>(`/product-map?${query.toString()}`);
+    },
+
+    /**
+     * PUT /api/product-map
+     * Upsert a mapping outside of review. Returns: { mapping }.
+     */
+    put: (data: {
+      supplier_id: string;
+      coa_product: string;
+      order_product_id: string;
+      distributor_sku?: string | null;
+      coa_product_id?: string | null;
+    }) =>
+      fetchApi<ProductMapPutResponse>('/product-map', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+  },
+
+  orderProducts: {
+    /**
+     * GET /api/order-products?search=&limit=
+     * Distinct products appearing on order_items for the tenant (the
+     * distributor catalog) for the bridge picker. Returns { products }.
+     */
+    list: (params?: { search?: string; limit?: number; tenant_id?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.search) query.set('search', params.search);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      const qs = query.toString();
+      return fetchApi<OrderProductListResponse>(`/order-products${qs ? `?${qs}` : ''}`);
+    },
   },
 
   documentTypes: {
@@ -1178,6 +1232,19 @@ export const api = {
        * flips it to approved.
        */
       record_decisions?: Record<string, CoaRecordDecision>;
+      /**
+       * COA teach-at-review product bridge: per-approved-record COA-product ->
+       * order-product mapping, keyed by `record_index` (as a string). The server
+       * writes each entry to supplier_product_map AFTER it resolves/creates the
+       * supplier_id (the primary write path for the bridge). Only entries for
+       * `approve`-decision records are honored.
+       */
+      product_maps?: Record<string, {
+        coa_product: string;
+        order_product_id: string;
+        distributor_sku?: string | null;
+        coa_product_id?: string | null;
+      }>;
     }) =>
       fetchApi<{ document?: any; documents?: any[]; summary?: string; item?: any }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     reject: (id: string) =>

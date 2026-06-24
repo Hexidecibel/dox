@@ -14,6 +14,18 @@ import type { Env, User } from '../../lib/types';
 import { parseCoaRecords } from '../../../shared/types';
 import type { TemplateFieldMapping, CoaRecordsPayload } from '../../../shared/types';
 import { produceCoaRecords, type CoaRecordDecision } from '../../lib/kinds/coa';
+import { normalizeProductNameKey } from '../../lib/entities/lots';
+import { upsertProductMap } from '../product-map';
+
+type ProductMapInput = Record<
+  string,
+  {
+    coa_product: string;
+    order_product_id: string;
+    distributor_sku?: string | null;
+    coa_product_id?: string | null;
+  }
+>;
 
 /**
  * GET /api/queue/:id
@@ -141,6 +153,23 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
        * pending and only the approved records produce documents.
        */
       record_decisions?: Record<string, CoaRecordDecision>;
+      /**
+       * COA product-bridge teaching (plan Part B): per-record COA-product ->
+       * order-product mapping keyed by record_index. For each record whose
+       * decision resolves to 'approve', a supplier_product_map row is upserted
+       * AFTER the supplier_id is resolved/created. This is the PRIMARY write
+       * path for the bridge — a brand-new supplier has no id until approve.
+       * Failures here warn but never fail the approval.
+       */
+      product_maps?: Record<
+        string,
+        {
+          coa_product: string;
+          order_product_id: string;
+          distributor_sku?: string | null;
+          coa_product_id?: string | null;
+        }
+      >;
     };
 
     if (!body.status || !['approved', 'rejected'].includes(body.status)) {
@@ -203,7 +232,8 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
             coaPayload,
             body.record_decisions,
             selectedSource,
-            { supplierId: body.supplier_id, supplierName: body.supplier_name }
+            { supplierId: body.supplier_id, supplierName: body.supplier_name },
+            body.product_maps
           );
         }
       }
@@ -665,7 +695,8 @@ async function handleCoaRecordsApprove(
   payload: CoaRecordsPayload,
   rawDecisions: Record<string, CoaRecordDecision> | undefined,
   selectedSource: 'text' | 'vlm',
-  supplierOverride: { supplierId?: string; supplierName?: string }
+  supplierOverride: { supplierId?: string; supplierName?: string },
+  productMaps?: ProductMapInput
 ): Promise<Response> {
   const decisions = normalizeRecordDecisions(rawDecisions);
 
@@ -684,6 +715,42 @@ async function handleCoaRecordsApprove(
     throw new BadRequestError(
       `Failed to produce COA records: ${err instanceof Error ? err.message : String(err)}`
     );
+  }
+
+  // Product-bridge teaching (plan Part B). PRIMARY write path: the supplier_id
+  // is resolved/created by produceCoaRecords, so we have it here even for a
+  // brand-new supplier. Write one supplier_product_map row per APPROVED record
+  // (i.e. each record that actually produced a document) for which the reviewer
+  // supplied a mapping. Best-effort: any failure warns, never breaks approval.
+  if (productMaps && result.supplierId) {
+    const supplierId = result.supplierId;
+    const approvedIndexes = new Set(result.documents.map((d) => d.recordIndex));
+    for (const [rawIdx, entry] of Object.entries(productMaps)) {
+      const recordIndex = Number(rawIdx);
+      if (!Number.isFinite(recordIndex) || !approvedIndexes.has(recordIndex)) {
+        continue; // held/rejected/unknown record — don't teach it
+      }
+      if (!entry || !entry.coa_product || !entry.order_product_id) {
+        continue;
+      }
+      try {
+        await upsertProductMap(context.env.DB, {
+          id: generateId(),
+          tenantId: item.tenant_id,
+          supplierId,
+          coaProductNameKey: normalizeProductNameKey(entry.coa_product),
+          coaProductId: entry.coa_product_id ?? null,
+          orderProductId: entry.order_product_id,
+          distributorSku: entry.distributor_sku ?? null,
+          createdBy: user.id,
+        });
+      } catch (err) {
+        console.warn(
+          `[queue-approve] product_map upsert failed for record ${recordIndex}:`,
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    }
   }
 
   const heldCount = result.heldRecordIndexes.length;

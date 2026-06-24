@@ -289,6 +289,14 @@ export interface DocumentRow {
   expiration_date?: string | null;
 }
 
+/**
+ * Per-supplier lot numbering scheme (migration 0075).
+ * - 'auto'/'plain'  → no transform at storage time (today's behavior)
+ * - 'date_code'     → strip a trailing alpha item-code, keep leading MMDDYY
+ * - 'lims_combined' → concat base lot key + normalized 2-digit sublot code
+ */
+export type LotScheme = 'auto' | 'date_code' | 'lims_combined' | 'plain';
+
 export interface SupplierRow {
   id: string;
   tenant_id: string;
@@ -296,11 +304,55 @@ export interface SupplierRow {
   slug: string;
   aliases: string | null;
   active: number;
+  /** Lot numbering scheme; defaults to 'auto'. Null on legacy rows pre-0075. */
+  lot_scheme: LotScheme | null;
   created_at: string;
   updated_at: string;
 }
 
 export interface ApiSupplier extends SupplierRow {}
+
+/**
+ * A teachable COA-product → order-product bridge row (supplier_product_map).
+ * Keyed on the normalized COA product name so it survives re-extraction.
+ */
+export interface ProductMapEntry {
+  id: string;
+  tenant_id: string;
+  supplier_id: string;
+  coa_product_name_key: string;
+  coa_product_id: string | null;
+  order_product_id: string;
+  distributor_sku: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A distributor-catalog product that appears on order_items, for the
+ * order-product picker in the product-bridge teach control.
+ */
+export interface OrderProductOption {
+  product_id: string;
+  product_code: string | null;
+  product_name: string | null;
+}
+
+/** GET /api/product-map?supplier_id=&coa_product= */
+export interface ProductMapGetResponse {
+  mapping: ProductMapEntry | null;
+}
+
+/** PUT /api/product-map */
+export interface ProductMapPutResponse {
+  mapping: ProductMapEntry;
+}
+
+/** GET /api/order-products?search=&limit= */
+export interface OrderProductListResponse {
+  products: OrderProductOption[];
+}
 
 export interface SupplierListResponse {
   suppliers: ApiSupplier[];

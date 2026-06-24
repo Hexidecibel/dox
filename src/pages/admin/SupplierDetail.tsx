@@ -52,6 +52,8 @@ import { HelpWell } from '../../components/HelpWell';
 import { EmptyState } from '../../components/EmptyState';
 import { helpContent } from '../../lib/helpContent';
 import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
+import LotSchemeSelect from '../../components/LotSchemeSelect';
+import type { LotScheme } from '../../lib/types';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -211,6 +213,21 @@ function ProductLotsRow({
   );
 }
 
+/**
+ * Pure-frontend lot-scheme suggestion from a sample of lot numbers, using the
+ * same leading-6-digit heuristic the backend uses: if most lots are a 6-digit
+ * date followed by a trailing alpha item code (e.g. 061626WHO), suggest
+ * 'date_code'. Returns null when there's no confident signal.
+ */
+function detectLotSchemeFromSample(lotNumbers: string[]): LotScheme | null {
+  const samples = lotNumbers.map((s) => (s || '').trim()).filter(Boolean);
+  if (samples.length < 3) return null;
+  // date + trailing alpha code, e.g. 061626WHO / 052926LC3
+  const dateCodeRe = /^\d{6}[A-Za-z][A-Za-z0-9]{0,3}$/;
+  const hits = samples.filter((s) => dateCodeRe.test(s)).length;
+  return hits / samples.length >= 0.6 ? 'date_code' : null;
+}
+
 export function SupplierDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -223,7 +240,11 @@ export function SupplierDetail() {
   const [editingHeader, setEditingHeader] = useState(false);
   const [headerName, setHeaderName] = useState('');
   const [headerAliases, setHeaderAliases] = useState('');
+  const [headerLotScheme, setHeaderLotScheme] = useState<LotScheme>('auto');
   const [savingHeader, setSavingHeader] = useState(false);
+  // Client-side suggestion from a sample of this supplier's lots (leading-6-digit
+  // heuristic). Null when no confident suggestion or it already matches.
+  const [detectedScheme, setDetectedScheme] = useState<LotScheme | null>(null);
 
   // Products state
   const [products, setProducts] = useState<ApiProduct[]>([]);
@@ -291,12 +312,36 @@ export function SupplierDetail() {
       setSupplier(result.supplier);
       setHeaderName(result.supplier.name);
       setHeaderAliases(parseAliases(result.supplier.aliases).join(', '));
+      setHeaderLotScheme((result.supplier.lot_scheme as LotScheme | null) ?? 'auto');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load supplier');
     } finally {
       setLoading(false);
     }
   }, [id]);
+
+  // When the header edit opens, sample this supplier's lots and suggest a scheme
+  // (pure-frontend). Only surface the chip when it differs from the current pick.
+  useEffect(() => {
+    if (!editingHeader || !id) {
+      setDetectedScheme(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.lots.list({ supplier_id: id, limit: 20 });
+        if (cancelled) return;
+        const detected = detectLotSchemeFromSample(res.lots.map((l) => l.lot_number));
+        setDetectedScheme(detected);
+      } catch {
+        if (!cancelled) setDetectedScheme(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [editingHeader, id]);
 
   const loadProducts = useCallback(async () => {
     if (!id) return;
@@ -459,6 +504,7 @@ export function SupplierDetail() {
       const result = await api.suppliers.update(id, {
         name: headerName.trim(),
         aliases: aliasArray,
+        lot_scheme: headerLotScheme,
       });
       setSupplier(result.supplier);
       setEditingHeader(false);
@@ -636,6 +682,24 @@ export function SupplierDetail() {
               helperText="Comma-separated alternate names"
               sx={{ mb: 2 }}
             />
+            <Box sx={{ mb: 2 }}>
+              <LotSchemeSelect
+                value={headerLotScheme}
+                onChange={setHeaderLotScheme}
+                disabled={savingHeader}
+              />
+              {detectedScheme && detectedScheme !== headerLotScheme && (
+                <Chip
+                  size="small"
+                  color="info"
+                  variant="outlined"
+                  clickable
+                  onClick={() => setHeaderLotScheme(detectedScheme)}
+                  label={`Detected: ${detectedScheme} — apply?`}
+                  sx={{ mt: 1 }}
+                />
+              )}
+            </Box>
             <Box sx={{ display: 'flex', gap: 1 }}>
               <Button
                 variant="contained"
@@ -651,6 +715,7 @@ export function SupplierDetail() {
                   setEditingHeader(false);
                   setHeaderName(supplier.name);
                   setHeaderAliases(parseAliases(supplier.aliases).join(', '));
+                  setHeaderLotScheme((supplier.lot_scheme as LotScheme | null) ?? 'auto');
                 }}
                 disabled={savingHeader}
               >

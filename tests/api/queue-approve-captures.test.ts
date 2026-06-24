@@ -287,4 +287,63 @@ describe('PUT /api/queue/:id — Phase 2 reviewer-decision capture', () => {
     expect(rows.results).toHaveLength(1);
     expect(rows.results[0].table_idx).toBe(1);
   });
+
+  it('links product from ai_fields.product_name when the approve body omits it (bridge regression)', async () => {
+    // Single-product COA whose product name lives ONLY in ai_fields (the common
+    // Country Morning shape). A bare approve must still create the
+    // document_products link so the supplier_product_map bridge can resolve it.
+    const queueId = generateTestId();
+    const r2Key = `queue/${queueId}/cmf.pdf`;
+    const docTypeId = await ensureDocumentType(seed.tenantId);
+    await env.FILES.put(r2Key, new TextEncoder().encode('%PDF-1.4 fake'), {
+      httpMetadata: { contentType: 'application/pdf' },
+    });
+    await db
+      .prepare(
+        `INSERT INTO processing_queue
+         (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type,
+          processing_status, status, created_by, extracted_text, ai_fields, ai_confidence, confidence_score)
+         VALUES (?, ?, ?, ?, 'cmf.pdf', 12, 'application/pdf',
+                 'ready', 'pending', ?, 'text', ?, 'high', 0.9)`
+      )
+      .bind(
+        queueId,
+        seed.tenantId,
+        docTypeId,
+        r2Key,
+        seed.orgAdminId,
+        JSON.stringify({ supplier_name: 'Country Morning Farms', product_name: 'Milk - Whole', lot_number: '061626WHO' })
+      )
+      .run();
+
+    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
+    const response = await updateQueueItem(
+      makePutContext(
+        queueId,
+        {
+          status: 'approved',
+          // NOTE: deliberately NO product_name in the body — only in ai_fields.
+          fields: { supplier_name: 'Country Morning Farms', lot_number: '061626WHO' },
+        },
+        user
+      )
+    );
+    expect(response.status).toBe(200);
+
+    const doc = await db
+      .prepare('SELECT id FROM documents WHERE tenant_id = ? AND external_ref = ?')
+      .bind(seed.tenantId, `queue-${queueId}`)
+      .first<{ id: string }>();
+    expect(doc).toBeTruthy();
+
+    const link = await db
+      .prepare(
+        `SELECT p.name AS name FROM document_products dp
+         JOIN products p ON p.id = dp.product_id
+         WHERE dp.document_id = ?`
+      )
+      .bind(doc!.id)
+      .first<{ name: string }>();
+    expect(link?.name).toBe('Milk - Whole');
+  });
 });

@@ -9,12 +9,23 @@
 # Usage:
 #   ./bin/clone-org --source <tenant_id|name> --name "<new tenant name>" [flags]
 #
-# Target selection (where the NEW tenant is written; source is read from there):
+# Target selection (where the NEW tenant is WRITTEN):
 #   (default)        LOCAL D1   (doc-upload-db, no --remote)
 #   --staging        STAGING D1 (doc-upload-db-staging --remote; needs .dev.vars)
 #   --prod-insert    PROD D1    (doc-upload-db --remote) -- INSERT-ONLY of a NEW
 #                    tenant. The source org is NEVER mutated. Requires the extra
 #                    --i-understand-prod flag and a typed confirmation.
+#
+# Source selection (where the org is READ from):
+#   (default)              same DB as the target (LOCAL reads LOCAL, etc.).
+#   --source-remote        Read the SOURCE org from PROD (doc-upload-db --remote)
+#   (alias: --from-prod)   while WRITING to the chosen target (default LOCAL).
+#                          Needs .dev.vars for prod creds. This is the
+#                          "rehearse prod data in local (new code)" mode: source
+#                          SELECTs hit prod (read-only), every INSERT lands local.
+#                          TARGET schema is introspected (so only columns the
+#                          target actually has are written -- e.g. local's new
+#                          lot_scheme / supplier_product_map that prod lacks).
 #
 # Other flags:
 #   --source <id|name>   REQUIRED. Source tenant id, or its exact name.
@@ -66,19 +77,22 @@
 #
 # NOTE on user FKs: created_by / uploaded_by / reviewed_by / updated_by /
 #   created_by_user_id point at users. Users are NOT tenant-scoped here and are
-#   NOT cloned; the clone REUSES the original user ids verbatim. That keeps the
-#   FKs valid (the users still exist) and is fine for a throwaway rehearsal. If
-#   a target DB lacks those users (e.g. a fresh staging), pass --null-user-fks
-#   to NULL out nullable user FK columns instead (NOT NULL ones keep the id).
+#   NOT cloned; the clone REUSES the original user ids verbatim WHEN the target
+#   has them. When a source user id is absent from the TARGET (typical in
+#   --from-prod: prod user ids don't exist locally), it is remapped to a fallback
+#   target user (a super_admin if one exists) so NOT NULL user FKs
+#   (documents.created_by, document_versions.uploaded_by) still resolve. Pass
+#   --null-user-fks to additionally NULL out nullable user FK columns.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROD_DB="doc-upload-db"
 STAGING_DB="doc-upload-db-staging"
 
-TARGET="local"          # local | staging | prod
+TARGET="local"          # local | staging | prod  (where WRITES go)
 DB="$PROD_DB"
 REMOTE_FLAG=""
+SOURCE_REMOTE=0         # 1 = read SOURCE from prod (--source-remote / --from-prod)
 SOURCE=""
 NEW_NAME=""
 NEW_SLUG=""
@@ -94,11 +108,12 @@ while [ $# -gt 0 ]; do
     --slug) NEW_SLUG="${2:-}"; shift 2 ;;
     --staging) TARGET="staging"; shift ;;
     --prod-insert) TARGET="prod"; shift ;;
+    --source-remote|--from-prod) SOURCE_REMOTE=1; shift ;;
     --i-understand-prod) PROD_OK=1; shift ;;
     --null-user-fks) NULL_USER_FKS=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes|-y) SKIP_CONFIRM=1; shift ;;
-    -h|--help) sed -n '2,90p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,99p' "$0"; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -106,11 +121,12 @@ done
 if [ -z "$SOURCE" ]; then echo "ERROR: --source <tenant_id|name> is required." >&2; exit 2; fi
 if [ -z "$NEW_NAME" ]; then echo "ERROR: --name \"<new tenant name>\" is required." >&2; exit 2; fi
 
+# --- TARGET (DST) selection: where the INSERTs land + which schema is introspected ---
 case "$TARGET" in
-  local)   DB="$PROD_DB"; REMOTE_FLAG=""; TARGET_LABEL="LOCAL D1 ($DB)" ;;
-  staging) DB="$STAGING_DB"; REMOTE_FLAG="--remote"; TARGET_LABEL="STAGING D1 ($DB, remote)" ;;
+  local)   DST_DB="$PROD_DB"; DST_REMOTE=""; TARGET_LABEL="LOCAL D1 ($DST_DB)" ;;
+  staging) DST_DB="$STAGING_DB"; DST_REMOTE="--remote"; TARGET_LABEL="STAGING D1 ($DST_DB, remote)" ;;
   prod)
-    DB="$PROD_DB"; REMOTE_FLAG="--remote"; TARGET_LABEL="PROD D1 ($DB, remote) [INSERT-ONLY]"
+    DST_DB="$PROD_DB"; DST_REMOTE="--remote"; TARGET_LABEL="PROD D1 ($DST_DB, remote) [INSERT-ONLY]"
     if [ "$PROD_OK" != "1" ]; then
       echo "ERROR: --prod-insert requires --i-understand-prod as well." >&2
       echo "       It will INSERT a new tenant into PROD (source is never mutated)." >&2
@@ -119,8 +135,20 @@ case "$TARGET" in
     ;;
 esac
 
-# Staging + prod (remote) need CF creds from .dev.vars.
-if [ -n "$REMOTE_FLAG" ]; then
+# --- SOURCE (SRC) selection: where the org's rows are READ from (read-only) ---
+if [ "$SOURCE_REMOTE" = "1" ]; then
+  # Read the source org from PROD regardless of the (usually LOCAL) target.
+  SRC_DB="$PROD_DB"; SRC_REMOTE="--remote"; SOURCE_LABEL="PROD D1 ($SRC_DB, remote) [READ-ONLY]"
+else
+  # Read the source from the same DB the clone is written to (legacy behavior).
+  SRC_DB="$DST_DB"; SRC_REMOTE="$DST_REMOTE"; SOURCE_LABEL="$TARGET_LABEL [READ-ONLY]"
+fi
+
+# Back-compat: legacy single-DB vars still used by the final write step.
+DB="$DST_DB"; REMOTE_FLAG="$DST_REMOTE"
+
+# Any remote leg (source OR target) needs CF creds from .dev.vars.
+if [ -n "$SRC_REMOTE" ] || [ -n "$DST_REMOTE" ]; then
   if [ ! -f .dev.vars ]; then
     echo "ERROR: .dev.vars not found (needed for remote D1 creds)." >&2
     exit 1
@@ -132,15 +160,15 @@ if [ -n "$REMOTE_FLAG" ]; then
 fi
 
 echo "clone-org"
+echo "  source : $SOURCE  <- $SOURCE_LABEL"
 echo "  target : $TARGET_LABEL"
-echo "  source : $SOURCE"
 echo "  newname: $NEW_NAME"
 [ "$DRY_RUN" = "1" ] && echo "  mode   : DRY-RUN (no writes)"
 echo
 
-# --- helper: run a SELECT and return D1 --json output on stdout ---
+# --- helper: run a SELECT against the SOURCE and return D1 --json on stdout ---
 d1_json() {
-  npx wrangler d1 execute "$DB" $REMOTE_FLAG --json --command "$1" 2>/dev/null
+  npx wrangler d1 execute "$SRC_DB" $SRC_REMOTE --json --command "$1" 2>/dev/null
 }
 
 # --- resolve the source tenant id (accept id OR exact name) ---
@@ -173,16 +201,19 @@ CLONE_SQL=$(mktemp)
 COUNTS=$(mktemp)
 trap 'rm -f "$CLONE_SQL" "$COUNTS"' EXIT
 
-# Export config for the node program.
-export DB REMOTE_FLAG SRC_ID NEW_NAME NEW_SLUG DRY_RUN NULL_USER_FKS COUNTS
+# Export config for the node program. SRC_* drives source-row reads; DST_*
+# drives target-schema introspection (which tables/columns exist to write).
+export SRC_DB SRC_REMOTE DST_DB DST_REMOTE SRC_ID NEW_NAME NEW_SLUG DRY_RUN NULL_USER_FKS COUNTS
 
 node <<'NODE' > "$CLONE_SQL"
 const { execFileSync } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 
-const DB = process.env.DB;
-const REMOTE = process.env.REMOTE_FLAG ? ['--remote'] : [];
+const SRC_DB = process.env.SRC_DB;
+const SRC_REMOTE = process.env.SRC_REMOTE ? ['--remote'] : [];
+const DST_DB = process.env.DST_DB;
+const DST_REMOTE = process.env.DST_REMOTE ? ['--remote'] : [];
 const SRC_ID = process.env.SRC_ID;
 const NEW_NAME = process.env.NEW_NAME;
 const NEW_SLUG = process.env.NEW_SLUG;
@@ -194,22 +225,29 @@ const newId = () => crypto.randomUUID().replace(/-/g, '');
 const sqlStr = v =>
   v === null || v === undefined ? 'NULL' : "'" + String(v).replace(/'/g, "''") + "'";
 
-function d1(command) {
+function runD1(db, remote, command) {
   const out = execFileSync(
     'npx',
-    ['wrangler', 'd1', 'execute', DB, ...REMOTE, '--json', '--command', command],
+    ['wrangler', 'd1', 'execute', db, ...remote, '--json', '--command', command],
     { encoding: 'utf8', maxBuffer: 1 << 30 }
   );
   try { return (JSON.parse(out)[0] || {}).results || []; } catch { return []; }
 }
 
+// SOURCE read: the org's actual rows (read-only; may be prod).
+const d1 = command => runD1(SRC_DB, SRC_REMOTE, command);
+// TARGET read: schema introspection only. We must write ONLY the tables/columns
+// the TARGET has -- the local target carries new columns (lot_scheme,
+// supplier_product_map) that the prod source lacks, and vice-versa.
+const d1dst = command => runD1(DST_DB, DST_REMOTE, command);
+
 function tableExists(name) {
-  const r = d1(`SELECT name FROM sqlite_master WHERE type='table' AND name='${name}';`);
+  const r = d1dst(`SELECT name FROM sqlite_master WHERE type='table' AND name='${name}';`);
   return r.length > 0;
 }
 function columnsOf(name) {
-  // PRAGMA via SELECT so --json returns rows.
-  const r = d1(`SELECT name, "notnull" AS nn FROM pragma_table_info('${name}');`);
+  // PRAGMA via SELECT so --json returns rows. TARGET schema (what we can write).
+  const r = d1dst(`SELECT name, "notnull" AS nn FROM pragma_table_info('${name}');`);
   return r.map(c => ({ name: c.name, notnull: Number(c.nn) === 1 }));
 }
 
@@ -222,6 +260,38 @@ const USER_FK_COLS = new Set([
   'created_by_user_id', 'reviewer_id', 'author_id', 'actor_id', 'default_user_id',
   'owner_user_id', 'triggered_by_user_id',
 ]);
+
+// Users are NOT cloned -- user FK values are reused verbatim. That works only if
+// the TARGET has those users. In cross-DB mode (--from-prod) the source's users
+// (e.g. a prod user id) typically DON'T exist in the local target, which would
+// fail NOT NULL user FKs (documents.created_by, document_versions.uploaded_by).
+// So we read the TARGET's user ids and, for any source user id absent there,
+// substitute a fallback target user (prefer a super_admin). NULLable columns are
+// still NULLed first if --null-user-fks. If the target has NO users at all,
+// there's no fallback -- we keep the original id (will fail, as before).
+const TARGET_USER_IDS = new Set(
+  d1dst('SELECT id FROM users;').map(r => r.id)
+);
+const USER_FALLBACK =
+  (d1dst("SELECT id FROM users WHERE role='super_admin' ORDER BY id LIMIT 1;")[0] || {}).id ||
+  (d1dst('SELECT id FROM users ORDER BY id LIMIT 1;')[0] || {}).id ||
+  null;
+function resolveUserFk(v) {
+  if (v == null) return v;
+  if (TARGET_USER_IDS.has(v)) return v;       // exists in target -> keep
+  if (USER_FALLBACK) return USER_FALLBACK;    // missing -> remap to a target user
+  return v;                                   // no users in target -> keep (will fail)
+}
+
+// Per-table: FK columns that reference tables we deliberately DON'T clone
+// (connectors / connector_runs -- intake plumbing, see header). Their source
+// values dangle in the target, so NULL them when the column is nullable. If a
+// dropped FK were NOT NULL we'd keep the id (and fail loudly) rather than guess.
+const DROP_FK = {
+  orders: new Set(['connector_id', 'connector_run_id', 'source_id']),
+  documents: new Set(['source_id']),
+  processing_queue: new Set(['source_id', 'connector_id']),
+};
 
 // Per-table: map of FK-column -> source remap-table key.
 const FK = {
@@ -301,7 +371,12 @@ const newTenantId = newId();
 const tcols = tableExists('tenants') ? columnsOf('tenants') : [];
 const srcTenant = d1(`SELECT * FROM tenants WHERE id='${SRC_ID.replace(/'/g, "''")}' LIMIT 1;`)[0] || {};
 {
-  const colNames = tcols.map(c => c.name);
+  // Always write id/name/slug; for other target columns, only write what the
+  // source tenant row actually has (target-only columns keep their DEFAULT).
+  const SYNTH_T = new Set(['id', 'name', 'slug', 'created_at', 'updated_at']);
+  const colNames = tcols
+    .map(c => c.name)
+    .filter(c => SYNTH_T.has(c) || Object.prototype.hasOwnProperty.call(srcTenant, c));
   const vals = colNames.map(c => {
     if (c === 'id') return sqlStr(newTenantId);
     if (c === 'name') return sqlStr(NEW_NAME);
@@ -348,20 +423,36 @@ for (const table of TABLE_ORDER) {
   for (const r of rows) remap[table].set(r.id, newId());
 
   const fkMap = FK[table] || {};
+  const dropFk = DROP_FK[table] || new Set();
+  // The target may carry columns the SOURCE row lacks (e.g. local's new
+  // lot_scheme / supplier_product_map that prod doesn't have). For those, OMIT
+  // the column from the INSERT so the TARGET's own DEFAULT (e.g. lot_scheme
+  // NOT NULL DEFAULT 'auto') applies, instead of writing NULL. Always emit the
+  // synthesized columns (id / tenant_id) even if absent in the source.
+  const SYNTH = new Set(['id', 'tenant_id']);
   for (const r of rows) {
-    const vals = colNames.map(c => {
+    const writeCols = colNames.filter(c => SYNTH.has(c) || Object.prototype.hasOwnProperty.call(r, c));
+    const vals = writeCols.map(c => {
       if (c === 'id') return sqlStr(remap[table].get(r.id));
       if (c === 'tenant_id') return sqlStr(newTenantId);
       if (c === 'created_at' || c === 'updated_at') {
         return r[c] == null ? 'NULL' : sqlStr(r[c]);
       }
-      // user FK columns: reuse id, or NULL nullable ones if requested.
+      // FK columns referencing un-cloned tables (connectors etc.): NULL them
+      // when nullable so they don't dangle. NOT NULL -> keep id (will fail loud).
+      if (dropFk.has(c)) {
+        const col = cols.find(x => x.name === c);
+        if (!col || !col.notnull) return 'NULL';
+        return sqlStr(r[c]);
+      }
+      // user FK columns: reuse id, or NULL nullable ones if requested, or remap
+      // to a target user when the source id is absent from the target.
       if (USER_FK_COLS.has(c)) {
         if (NULL_USER_FKS) {
           const col = cols.find(x => x.name === c);
           if (col && !col.notnull) return 'NULL';
         }
-        return sqlStr(r[c]);
+        return sqlStr(resolveUserFk(r[c]));
       }
       // mapped FK columns -> look up the remapped id (fall back to original if
       // the referenced row wasn't in our scope, e.g. a cross-table value we
@@ -375,7 +466,7 @@ for (const table of TABLE_ORDER) {
       }
       return sqlStr(r[c]);
     });
-    sqlLines.push(`INSERT INTO ${table} (${colNames.map(n => '"' + n + '"').join(', ')}) VALUES (${vals.join(', ')});`);
+    sqlLines.push(`INSERT INTO ${table} (${writeCols.map(n => '"' + n + '"').join(', ')}) VALUES (${vals.join(', ')});`);
   }
 }
 

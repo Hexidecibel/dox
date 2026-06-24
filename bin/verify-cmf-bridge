@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+# Headless end-to-end verifier for the CMF lot_scheme + product-map bridge.
+#
+# Drives the REAL feature code over HTTP against the local dev server
+# (wrangler pages dev on :8788, local D1 + R2). Re-runnable and idempotent: it
+# resets + re-seeds the fixture itself, so it never depends on prior state.
+#
+# Flow (mirrors the human review workflow):
+#   1. Reset + reseed the fixture (bin/seed-cmf-bridge).
+#   2. Wait for the dev server, log in as a@a.a/a, capture the JWT.
+#   3. For each CMF COA (C1-C3) approve it WITH the taught product_map, so a
+#      supplier_product_map row is written server-side. Approve C4 (no order
+#      line), C5 (non-date lot), C6 (Willamette, no map). This exercises the
+#      real produceCoaRecords + lot_scheme stripping + map-write path.
+#   4. POST /api/admin/rematch-lots for the tenant (applies the bridge to the
+#      lot-bound order lines).
+#   5. Assert order_items.coa_match_status (+ confidence/coa_document_id) for
+#      TEST-1 against the expected table, plus the COA-side invariants
+#      (C4 produced an unmatched COA lot; C5 lot_key NOT stripped).
+#   6. Print a PASS/FAIL line per assertion + an overall result + a "startup
+#      cost" report (config actions vs match coverage; before vs after).
+#
+# Usage: ./bin/verify-cmf-bridge
+# Exit code 0 on all-pass, 1 on any failure.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+DB="doc-upload-db"
+BASE="${DOX_BASE_URL:-http://localhost:8788}"
+TENANT_ID="cmftest_tenant"
+ADMIN_EMAIL="a@a.a"
+ADMIN_PASSWORD="a"
+
+# Queue item ids (must match bin/seed-cmf-bridge).
+Q_WHOLE="cmftest_q_whole"
+Q_HH="cmftest_q_hh"
+Q_WHIP="cmftest_q_whip"
+Q_BUTTERMILK="cmftest_q_buttermilk"
+Q_LIGHT="cmftest_q_light"
+Q_WILL="cmftest_q_will"
+
+# Order-side product ids (the map targets).
+PROD_SKU_WHOLE="cmftest_prod_sku_whole"
+PROD_SKU_HH="cmftest_prod_sku_hh"
+PROD_SKU_WHIP="cmftest_prod_sku_whip"
+
+PASS=0
+FAIL=0
+declare -a RESULTS
+
+assert_eq() {
+  # assert_eq "label" "expected" "actual"
+  local label="$1" expected="$2" actual="$3"
+  if [ "$expected" = "$actual" ]; then
+    RESULTS+=("PASS  ${label}  (= ${actual})")
+    PASS=$((PASS + 1))
+  else
+    RESULTS+=("FAIL  ${label}  expected=[${expected}] actual=[${actual}]")
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+# ---- D1 query helper: returns the first column of the first row (or '') ----
+d1_scalar() {
+  npx wrangler d1 execute "$DB" --command="$1" --json 2>/dev/null | node -e "
+    let d=''; process.stdin.on('data',c=>d+=c).on('end',()=>{
+      try {
+        const j = JSON.parse(d);
+        const rows = j[0].results;
+        if (!rows || rows.length === 0) { process.stdout.write(''); return; }
+        const v = Object.values(rows[0])[0];
+        process.stdout.write(v == null ? '' : String(v));
+      } catch (e) { process.stdout.write('__D1_ERR__'); }
+    });
+  "
+}
+
+# ===========================================================================
+echo "==> [1/5] Reset + reseed fixture"
+./bin/seed-cmf-bridge --reset -y >/dev/null 2>&1 || true
+if ! ./bin/seed-cmf-bridge -y >/dev/null 2>&1; then
+  echo "FATAL: seed failed. Run ./bin/seed-cmf-bridge -y to see the error." >&2
+  exit 1
+fi
+
+# ===========================================================================
+echo "==> [2/5] Locate dev server + login"
+
+# A dox dev server answers /api/auth/login with JSON (not the SPA HTML and not
+# some other app's 200). We probe THAT, not bare "/", because an unrelated
+# service (e.g. a Plausible install on the default 8788) also returns 200 on /.
+is_dox_server() {
+  # 200 (ok) or 400/401 (bad creds) with a JSON content-type == a dox API.
+  local url="$1"
+  curl -s -m 4 -o /dev/null -w '%{content_type}' -X POST "$url/api/auth/login" \
+    -H 'Content-Type: application/json' -d '{}' 2>/dev/null | grep -qi 'application/json'
+}
+
+# Candidate bases: explicit DOX_BASE_URL first, then the project's usual ports.
+if [ -n "${DOX_BASE_URL:-}" ]; then
+  CANDIDATES=("$DOX_BASE_URL")
+else
+  CANDIDATES=("http://localhost:8788" "http://localhost:9788" "http://localhost:8789" "http://localhost:8787")
+fi
+
+BASE=""
+DEADLINE=$(( $(date +%s) + 60 ))
+while [ -z "$BASE" ]; do
+  for c in "${CANDIDATES[@]}"; do
+    if is_dox_server "$c"; then BASE="$c"; break; fi
+  done
+  [ -n "$BASE" ] && break
+  if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+    echo "FATAL: no dox dev server found on: ${CANDIDATES[*]} (60s)." >&2
+    echo "       Start it with 'npm run dev', or set DOX_BASE_URL=http://localhost:PORT." >&2
+    exit 1
+  fi
+  sleep 2
+done
+echo "    dox dev server: $BASE"
+
+LOGIN_JSON=$(curl -s -X POST "$BASE/api/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
+JWT=$(printf '%s' "$LOGIN_JSON" | node -e "
+  let d=''; process.stdin.on('data',c=>d+=c).on('end',()=>{
+    try { process.stdout.write(JSON.parse(d).token || ''); } catch(e) { process.stdout.write(''); }
+  });
+")
+if [ -z "$JWT" ]; then
+  echo "FATAL: login failed. Response: $LOGIN_JSON" >&2
+  exit 1
+fi
+echo "    logged in, JWT captured."
+
+# ---- Snapshot BEFORE: how many order lines are matched (should be 0). ----
+MATCHED_BEFORE=$(d1_scalar "SELECT COUNT(*) FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.tenant_id='${TENANT_ID}' AND oi.coa_match_status='matched'")
+
+# ===========================================================================
+echo "==> [3/5] Approve COAs (C1-C3 carry the taught product_map)"
+
+# approve_with_map QUEUE_ID COA_PRODUCT ORDER_PRODUCT_ID DISTRIBUTOR_SKU
+# Builds the records-shaped approve body straight from the queue item's stored
+# ai_records (so the producer runs against the same payload the reviewer saw),
+# attaches product_maps[0] for the bridge, approves record 0.
+approve_with_map() {
+  local qid="$1" coa_product="$2" order_product_id="$3" sku="$4"
+  local ai_records
+  ai_records=$(d1_scalar "SELECT ai_records FROM processing_queue WHERE id='${qid}'")
+  local body
+  body=$(AIR="$ai_records" CP="$coa_product" OPID="$order_product_id" SKU="$sku" node -e "
+    const records = JSON.parse(process.env.AIR);
+    const body = {
+      status: 'approved',
+      records,
+      record_decisions: { '0': 'approve' },
+    };
+    if (process.env.OPID) {
+      body.product_maps = {
+        '0': {
+          coa_product: process.env.CP,
+          order_product_id: process.env.OPID,
+          distributor_sku: process.env.SKU || null,
+        },
+      };
+    }
+    process.stdout.write(JSON.stringify(body));
+  ")
+  curl -s -X PUT "$BASE/api/queue/${qid}" \
+    -H "Authorization: Bearer $JWT" \
+    -H 'Content-Type: application/json' \
+    -d "$body"
+}
+
+R1=$(approve_with_map "$Q_WHOLE"      "Milk - Whole"               "$PROD_SKU_WHOLE" "0417")
+R2=$(approve_with_map "$Q_HH"         "Half-and-Half"              "$PROD_SKU_HH"    "0708")
+R3=$(approve_with_map "$Q_WHIP"       "Cream - Heavy Whipping 40%" "$PROD_SKU_WHIP"  "0801")
+R4=$(approve_with_map "$Q_BUTTERMILK" ""                           ""               "")
+R5=$(approve_with_map "$Q_LIGHT"      ""                           ""               "")
+R6=$(approve_with_map "$Q_WILL"       ""                           ""               "")
+
+# Surface any approve that did not return an 'approved' status (helps debugging).
+for pair in "C1:$R1" "C2:$R2" "C3:$R3" "C4:$R4" "C5:$R5" "C6:$R6"; do
+  name="${pair%%:*}"; resp="${pair#*:}"
+  st=$(printf '%s' "$resp" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);process.stdout.write((j.item&&j.item.status)||j.error||'?')}catch(e){process.stdout.write('parse-err')}})")
+  if [ "$st" != "approved" ]; then
+    echo "    WARN ${name} approve returned status='${st}': ${resp}"
+  fi
+done
+
+# ===========================================================================
+echo "==> [4/5] Rematch lots for tenant"
+REMATCH=$(curl -s -X POST "$BASE/api/admin/rematch-lots?tenant_id=${TENANT_ID}" \
+  -H "Authorization: Bearer $JWT")
+echo "    rematch response: $REMATCH"
+
+# ===========================================================================
+echo "==> [5/5] Assertions"
+
+# Helper: read coa_match_status for an order line by product_code+lot.
+oi_status() {
+  d1_scalar "SELECT coa_match_status FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.tenant_id='${TENANT_ID}' AND oi.product_code='$1' AND oi.lot_number='$2'"
+}
+oi_has_coa() {
+  local v
+  v=$(d1_scalar "SELECT CASE WHEN coa_document_id IS NOT NULL THEN 'yes' ELSE 'no' END FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.tenant_id='${TENANT_ID}' AND oi.product_code='$1' AND oi.lot_number='$2'")
+  echo "$v"
+}
+
+# --- Order-line match outcomes (the expected table) ---
+assert_eq "L1 0417/061626 -> matched (map bridge)"  "matched"   "$(oi_status 0417 061626)"
+assert_eq "L2 30417/061626 -> matched (2 SKUs, 1 product)" "matched" "$(oi_status 30417 061626)"
+assert_eq "L3 0708/061626 -> matched (product disambiguates same date)" "matched" "$(oi_status 0708 061626)"
+assert_eq "L4 0801/060926 -> matched (map bridge)"  "matched"   "$(oi_status 0801 060926)"
+assert_eq "L5 0829/062226 -> unmatched (no COA on file; collectible gap)" "unmatched" "$(oi_status 0829 062226)"
+assert_eq "L6 1167/6141 -> matched (code-in-title, NO map)" "matched" "$(oi_status 1167 6141)"
+
+# --- Each matched line actually carries a coa_document_id ---
+assert_eq "L1 has coa_document_id" "yes" "$(oi_has_coa 0417 061626)"
+assert_eq "L6 has coa_document_id" "yes" "$(oi_has_coa 1167 6141)"
+
+# --- COA-side invariants ---
+# C1 produced a lots row with the STRIPPED key 061626 (date_code worked).
+C1_LOTKEY=$(d1_scalar "SELECT l.lot_key FROM lots l JOIN document_lots dl ON dl.lot_id=l.id JOIN documents d ON d.id=dl.document_id WHERE d.tenant_id='${TENANT_ID}' AND d.external_ref='queue-${Q_WHOLE}-061626'")
+assert_eq "C1 COA lot_key stripped to bare date (date_code)" "061626" "$C1_LOTKEY"
+
+# C4 (buttermilk) produced a COA lot 061226, but NO order line references it ->
+# that lot must NOT be matched to any order_item (no false positive).
+C4_DOC=$(d1_scalar "SELECT id FROM documents WHERE tenant_id='${TENANT_ID}' AND external_ref='queue-${Q_BUTTERMILK}-061226'")
+C4_FALSEPOS=$(d1_scalar "SELECT COUNT(*) FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.tenant_id='${TENANT_ID}' AND oi.coa_document_id='${C4_DOC}'")
+assert_eq "C4 COA produced (buttermilk doc exists)" "$( [ -n "$C4_DOC" ] && echo present || echo missing )" "present"
+assert_eq "C4 COA NOT linked to any order (no false positive)" "0" "$C4_FALSEPOS"
+
+# C5 (light cream) non-date lot LC3-2026 -> normalizeLotNumber -> 'LC32026',
+# date_code regex fails -> lot_key kept UNCHANGED (no stripping, no match).
+C5_LOTKEY=$(d1_scalar "SELECT l.lot_key FROM lots l JOIN document_lots dl ON dl.lot_id=l.id JOIN documents d ON d.id=dl.document_id WHERE d.tenant_id='${TENANT_ID}' AND d.external_ref='queue-${Q_LIGHT}-LC32026'")
+assert_eq "C5 non-date lot NOT stripped (date_code fall-through)" "LC32026" "$C5_LOTKEY"
+
+# --- The map write itself happened (3 rows for CMF supplier) ---
+MAP_ROWS=$(d1_scalar "SELECT COUNT(*) FROM supplier_product_map WHERE tenant_id='${TENANT_ID}'")
+assert_eq "3 supplier_product_map rows written (the teach actions)" "3" "$MAP_ROWS"
+
+# ===========================================================================
+# Results table
+echo ""
+echo "============================ ASSERTIONS ============================"
+for r in "${RESULTS[@]}"; do echo "  $r"; done
+echo "==================================================================="
+echo "  PASS: $PASS    FAIL: $FAIL"
+echo ""
+
+# ===========================================================================
+# Startup-cost report
+MATCHED_AFTER=$(d1_scalar "SELECT COUNT(*) FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.tenant_id='${TENANT_ID}' AND oi.coa_match_status='matched'")
+# Matchable = order lines that HAVE a COA on file (exclude the genuine no-COA gap L5).
+# In this fixture: L1,L2,L3,L4,L6 are matchable (5); L5 is a real gap.
+MATCHABLE=5
+echo "========================= STARTUP COST ============================"
+echo "  What a human had to configure to reach full coverage:"
+echo "    - 1 lot_scheme setting        (Country Morning Farms = date_code)"
+echo "    - 3 product maps              (Milk-Whole, Half-and-Half, Cream-Heavy-Whipping)"
+echo "    => 4 config actions total for the CMF supplier."
+echo ""
+echo "  Contrast: Willamette needed 0 config (code-in-title (1167) path)."
+echo ""
+echo "  Coverage (matched / matchable order lines, excluding no-COA gaps):"
+echo "    BEFORE (pre-approve):  ${MATCHED_BEFORE} / ${MATCHABLE} matched"
+echo "    AFTER  (post-rematch): ${MATCHED_AFTER} / ${MATCHABLE} matched"
+echo "    (L5 0829 sour cream is a genuine collectible gap: no COA on file.)"
+echo "==================================================================="
+echo ""
+
+if [ "$FAIL" -eq 0 ] && [ "$MATCHED_AFTER" = "$MATCHABLE" ]; then
+  echo "OVERALL: PASS"
+  exit 0
+else
+  echo "OVERALL: FAIL"
+  exit 1
+fi

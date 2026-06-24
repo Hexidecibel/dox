@@ -71,6 +71,7 @@ import m0071 from '../../migrations/0071_assignments.sql?raw';
 import m0072 from '../../migrations/0072_tenant_extraction_context.sql?raw';
 import m0073 from '../../migrations/0073_lots_sublot.sql?raw';
 import m0074 from '../../migrations/0074_documents_fts_lot.sql?raw';
+import m0075 from '../../migrations/0075_supplier_lot_scheme_and_product_map.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -80,7 +81,7 @@ const migrations: string[] = [
   m0046, m0047, m0048, m0049, m0050, m0051, m0052, m0053, m0054, m0055,
   m0056, m0057, m0058, m0059, m0060, m0061, m0062, m0063,
   m0064, m0065, m0066, m0067, m0068, m0069, m0070, m0071,
-  m0072, m0073, m0074,
+  m0072, m0073, m0074, m0075,
 ];
 
 /**
@@ -323,7 +324,7 @@ export async function cleanTables(db: D1Database): Promise<void> {
     'document_types', 'naming_templates', 'email_domain_mappings',
     'bundle_documents', 'bundles', 'api_keys', 'sessions',
     'password_resets', 'rate_limits', 'users', 'lots', 'products',
-    'product_suppliers', 'tenant_products', 'suppliers', 'tenants', 'site_settings',
+    'supplier_product_map', 'product_suppliers', 'tenant_products', 'suppliers', 'tenants', 'site_settings',
   ];
   for (const table of tables) {
     try {

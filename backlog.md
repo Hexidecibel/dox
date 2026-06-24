@@ -2,6 +2,33 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## IDEA: Generalize lot_scheme beyond date_code — configurable WMS canonicalization (2026-06-23)
+
+Floated 2026-06-23 while shipping the Country Morning Farms fix. The new per-supplier
+`lot_scheme` field (`auto|date_code|lims_combined|plain`, migration 0075) currently has
+`date_code` as the only truncating preset (keeps leading 6-digit `MMDDYY`). But the real job
+is **"reproduce whatever the WMS does to the lot"** — and that rule isn't always date-based:
+strip a trailing plant/batch token with no date (`A4592-PLANT3` → `A4592`), keep first N
+chars, strip a known `LOT-`/`BATCH-` prefix, keep a middle segment, etc.
+
+**Why it's a clean extension, not a rework:** the whole transform is isolated in one pure
+function `applyLotScheme` in `functions/lib/entities/lots.ts`. Growth is localized:
+- **Presets first** — add `strip_trailing_alpha`, `prefix_n`, etc. as enum values (a few
+  lines in `applyLotScheme` + a `MenuItem` in `LotSchemeSelect`).
+- **Regex escape-hatch only if needed** — optional `lot_pattern` column where canonical key
+  = capture group 1 (`date_code` becomes the preset `^(\d{6})`). Power, but a footgun in
+  non-engineer hands — gate behind presets.
+
+**Two principles to carry forward (same lessons as CMF):**
+- Every truncation discards info → pulls matching down to the WMS's granularity (correct),
+  so a new truncating supplier almost always needs a **product map** too, not just a scheme.
+  See [[project_country_morning_lot_and_product_bridge]].
+- **Calibration is the safety net:** the surest validation is comparing COA-derived canonical
+  keys against the *actual* WMS lot values for the same shipments. Long-term, auto-detect
+  could sample both sides and propose the rule that makes them line up.
+
+Revisit when a second truncating supplier appears whose WMS rule isn't date-based.
+
 ## IDEA: Industry profiles (dairy / meat / etc.) as selectable tenant bases (2026-06-05)
 
 Floated 2026-06-05. Today the tenant extraction-prompt layer (`tenants.extraction_context`,
@@ -20,6 +47,60 @@ editable `extraction_context`. **Not a rewrite** — additive:
 **For now: dairy is the only base.** Cush Co's tenant context was seeded with the dairy
 brain on prod 2026-06-05 and is editable in Settings → Extraction Context — refine it
 there. See [[project_two_layer_prompts]]. Revisit profiles when a non-dairy tenant appears.
+
+## REDESIGN: Shared format/LIMS profiles — minimize per-supplier config (2026-06-12)
+
+**Goal (user, 2026-06-12):** "as little as possible in supplier instructions" so two
+companies on the same dox platform receiving the SAME source format (e.g. a Darigold/LIMS
+COA) don't each repeat the same back-and-forth teaching. Deferred — Option B finally works;
+don't rip it apart now. Revisit as a redesign.
+
+**The problem:** extraction knowledge today lives in (1) the universal worker prompt (code,
+shared), (2) `tenants.extraction_context` (per-tenant), (3) `supplier_extraction_instructions`
+(per **tenant×supplier×doctype**). There is NO layer for *format* knowledge that's reusable
+across tenants — so the same LIMS-template know-how gets re-taught per tenant in layer 3.
+
+**Reframe:** separate "how to read this FORMAT" (reusable — keyed on the LIMS/template, which
+many manufacturers share) from "what this COMPANY wants" (genuinely per-tenant). Format
+knowledge is the asset to teach ONCE.
+
+**Proposed 4-layer resolution (merge in order at extraction time):**
+1. Universal rules (code prompt) — dairy/COA semantics + structural patterns (sublot split,
+   transposed-column matrices, specs-verbatim, the `(NNNN)` distributor-code-in-title
+   convention). Default home for anything format-general. (The transposed-column fix landed
+   here — the model proved this works with zero per-supplier config.)
+2. **Shared format profiles (NEW, cross-tenant library)** — keyed on a **format fingerprint**
+   (issuer markers like "Darigold, Inc." text, the `Sub Lot Number` row, header geometry),
+   with **global-supplier identity as a fallback key**. Platform-curated; inherited read-only
+   by all tenants. A new tenant's first Darigold COA extracts with ZERO local teaching.
+3. Per-tenant `supplier_extraction_instructions` — shrinks to a thin DELTA (true company
+   overrides only).
+4. Tenant preferences (naming/normalization/doctype mapping).
+
+**Key decisions to settle:**
+- *Keying:* fingerprint (strongest — one profile covers every manufacturer on that LIMS) →
+  fall back to global-supplier → tenant delta. Detection = cheap signature match or
+  model-assisted "which known template is this?".
+- *Curation:* shared layer is **platform-owned**, never auto-written by a tenant. Tenants
+  teach locally (layer 3); a human **promotes** format-general learnings up to layer 2. That
+  promotion gate IS the privacy boundary.
+- *Privacy:* shared profiles hold FORMAT knowledge only — no tenant data; few-shot examples
+  scrubbed/synthetic.
+- *Representation:* structured descriptors (field mappings, layout hints, fingerprint
+  signature, scrubbed examples) — NOT free prose — so layers compose deterministically.
+
+**Two levers that make "as little as possible" real even before layer 2 exists:**
+- Discipline: when teaching, ask "format-general or company-specific?" General → universal
+  prompt; specific → thin tenant delta. Keeps layer 3 from bloating.
+- A capable model (Q8) + universal rules absorb most layout handling (transposed-columns is
+  the proof). Reserve teaching for the residual the model can't infer.
+
+Precedent for global-vs-tenant layering already exists: `document_types` hybrid (NULL
+supplier = shared) and products went global→tenant in 0017. This is the same idea applied to
+extraction profiles, sitting above [[project_two_layer_prompts]] and the owned-review
+(supplier,doctype) profiles. Related: the "Industry profiles" idea above (that's the tenant
+BASE layer; this is the shared FORMAT/supplier layer). See [[feedback_never_auto_confirm]] —
+shared profiles change extraction config, NOT the human-confirm match/ingest gates.
 
 ## DIRECTION: Owned Review Flow + Profile Lifecycle (multi-user maintenance)
 

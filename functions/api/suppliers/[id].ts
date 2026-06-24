@@ -7,6 +7,9 @@ import {
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import type { Env, User } from '../../lib/types';
+import type { LotScheme } from '../../../shared/types';
+
+const LOT_SCHEMES: readonly LotScheme[] = ['auto', 'date_code', 'lims_combined', 'plain'];
 
 /**
  * GET /api/suppliers/:id
@@ -93,6 +96,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       name?: string;
       aliases?: string[];
       active?: number | boolean;
+      lot_scheme?: LotScheme;
     };
 
     const updates: string[] = [];
@@ -131,6 +135,19 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }
       updates.push('active = ?');
       params.push(activeVal);
+    }
+
+    if (body.lot_scheme !== undefined) {
+      if (!LOT_SCHEMES.includes(body.lot_scheme)) {
+        return new Response(
+          JSON.stringify({
+            error: `lot_scheme must be one of: ${LOT_SCHEMES.join(', ')}`,
+          }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      updates.push('lot_scheme = ?');
+      params.push(body.lot_scheme);
     }
 
     if (updates.length === 0) {

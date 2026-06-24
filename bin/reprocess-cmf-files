@@ -1,0 +1,497 @@
+#!/usr/bin/env bash
+# reprocess-cmf-files — FULL-PIPELINE rerun of real Country Morning Farms (CMF)
+# COA PDFs through the ACTUAL dox extraction worker into a fresh LOCAL tenant.
+#
+# This is the FILE-BASED sibling of bin/seed-cmf-bridge. seed-cmf-bridge fakes
+# the ai_records in D1; THIS script downloads real prod CMF PDFs and drives them
+# through the real path: upload API -> processing_queue (queued) -> bin/process-
+# worker (Qwen extraction) -> ai_records -> approve (PUT /api/queue/:id with a
+# product_maps bridge block) -> produceCoaRecords -> rematch. The point is to
+# validate the STEADY-STATE lot_scheme=date_code path: lots stored STRIPPED to
+# bare MMDDYY at PRODUCE time (no rectify/backfill), the supplier_product_map
+# bridge, and matching against a real prod-derived order side.
+#
+# NOTHING writes to prod. Prod R2/D1 are READ-ONLY sources for the corpus +
+# order-side rows. All writes land in LOCAL D1 (doc-upload-db) + LOCAL R2.
+#
+# ---------------------------------------------------------------------------
+# THE FLOW (subcommands)
+# ---------------------------------------------------------------------------
+#   1. ./bin/reprocess-cmf-files --reset            # tear down the test tenant
+#   2. ./bin/reprocess-cmf-files --download         # pull ~20 CMF PDFs from prod R2
+#   3. ./bin/reprocess-cmf-files --prep             # tenant+admin+apikey+supplier
+#                                                   #  (date_code UP FRONT)+doctype
+#                                                   #  +order side, then UPLOAD each
+#                                                   #  PDF via POST /api/documents/
+#                                                   #  process (lands as queued)
+#   4. ./bin/reprocess-cmf-files --worker-cmd       # prints the env+cmd to run the
+#                                                   #  real worker against local
+#      (run that in a second terminal; let the queue drain, ~10 min cap)
+#   5. ./bin/reprocess-cmf-files --status           # per-doc extraction outcome
+#   6. ./bin/reprocess-cmf-files --approve          # approve each ready COA WITH
+#                                                   #  the 3 product_maps mappings;
+#                                                   #  then SHOW produced lot_keys
+#                                                   #  (must be bare 6-digit)
+#   7. ./bin/reprocess-cmf-files --rematch          # POST rematch-lots; before/after
+#
+#   ./bin/reprocess-cmf-files --all                 # reset+download+prep (stops so
+#                                                   #  you can run the worker), then
+#                                                   #  finish with --approve --rematch
+#
+# Flags: -y/--yes skip prompts. DOX_BASE overrides the dev server URL
+#        (default http://localhost:9788).
+#
+# ---------------------------------------------------------------------------
+# SCALE TO ALL 152 FILES LATER: set BATCH_LIMIT=152 (or unset the slice in the
+# selection node block) — the download/prep/approve loops are all corpus-driven
+# off the manifest, so a bigger manifest just works. The worker run-time and
+# Qwen success rate are the only scaling costs.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# --- config ---
+DB="doc-upload-db"
+R2_BUCKET="doc-upload-files"
+DOX_BASE="${DOX_BASE:-http://localhost:9788}"
+
+# Prod source coordinates (READ-ONLY).
+PROD_TENANT="1f03c3e73add44bfafb33bb16508b78b"
+PROD_CMF_SUPPLIER="c773ac2ff1c247ac84a4a16cfac4a3cb"
+
+# Fixed local ids (idempotent re-runs).
+TENANT_ID="cmffile_tenant"
+TENANT_SLUG="cmf-file-rerun"
+ADMIN_ID="cmffile_admin"
+ADMIN_EMAIL="cmffile@a.a"
+ADMIN_PASSWORD="a"
+SUP_CMF="cmffile_sup_cmf"
+DT_ID="cmffile_dt_coa"
+ORDER_ID="cmffile_order"
+APIKEY_ID="cmffile_apikey"
+
+# Order-side product rows (supplier_id NULL — the WMS side), keyed by SKU.
+PROD_SKU_WHOLE="cmffile_prod_sku_whole"   # 0417 + 30417
+PROD_SKU_HH="cmffile_prod_sku_hh"         # 0708
+PROD_SKU_WHIP="cmffile_prod_sku_whip"     # 0801
+PROD_SKU_SOUR="cmffile_prod_sku_sour"     # 0829 (no COA on file -> gap)
+
+# CMF (supplier-scoped) COA-side products — names match what the COA body says.
+# These are the supplier_product_map "from" side. Created so the bridge has a
+# coa_product_id to record (provenance); the bridge keys on the normalized name.
+PROD_CMF_WHOLE="cmffile_prod_cmf_whole"
+PROD_CMF_HH="cmffile_prod_cmf_hh"
+PROD_CMF_WHIP="cmffile_prod_cmf_whip"
+
+# Scratch corpus dir.
+CORPUS="/tmp/claude-1000/-home-hexi-local-src-doc-upload-site/46e4d5db-f921-45eb-b5d6-bc9f1bd76547/scratchpad/cmf_corpus"
+MANIFEST="$CORPUS/manifest.json"
+KEYFILE="$CORPUS/.apikey"
+
+ASSUME_YES=0
+ACTION=""
+for arg in "$@"; do
+  case "$arg" in
+    --reset)       ACTION="reset" ;;
+    --download)    ACTION="download" ;;
+    --prep)        ACTION="prep" ;;
+    --worker-cmd)  ACTION="worker-cmd" ;;
+    --status)      ACTION="status" ;;
+    --approve)     ACTION="approve" ;;
+    --rematch)     ACTION="rematch" ;;
+    --all)         ACTION="all" ;;
+    -y|--yes)      ASSUME_YES=1 ;;
+    -h|--help)     sed -n '2,60p' "$0"; exit 0 ;;
+    *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+[ -n "$ACTION" ] || { sed -n '2,60p' "$0"; exit 0; }
+
+d1_local() { npx wrangler d1 execute "$DB" --command="$1"; }
+d1_local_file() { npx wrangler d1 execute "$DB" --file="$1"; }
+d1_local_json() { npx wrangler d1 execute "$DB" --json --command="$1" 2>/dev/null; }
+d1_prod_json() { npx wrangler d1 execute "$DB" --remote --json --command="$1" 2>/dev/null; }
+
+# Load prod creds for --remote queries (D1 + R2 source pulls).
+load_remote_env() {
+  if [ -f .dev.vars ]; then set -a; . ./.dev.vars; set +a; fi
+}
+
+# ======================================================================== RESET
+do_reset() {
+  echo "Target: LOCAL D1 ($DB). DELETES tenant '$TENANT_ID' + all child rows."
+  if [ "$ASSUME_YES" != "1" ]; then
+    read -r -p "Proceed? [y/N] " a; [ "$a" = y ] || [ "$a" = Y ] || { echo Aborted; exit 1; }
+  fi
+  local SQL; SQL=$(mktemp); trap 'rm -f "$SQL"' RETURN
+  cat > "$SQL" <<SQL
+DELETE FROM search_reindex_jobs WHERE tenant_id='${TENANT_ID}';
+DELETE FROM lot_match_suggestions WHERE tenant_id='${TENANT_ID}';
+DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE tenant_id='${TENANT_ID}');
+DELETE FROM orders WHERE tenant_id='${TENANT_ID}';
+DELETE FROM document_lots WHERE lot_id IN (SELECT id FROM lots WHERE tenant_id='${TENANT_ID}');
+DELETE FROM document_lots WHERE document_id IN (SELECT id FROM documents WHERE tenant_id='${TENANT_ID}');
+DELETE FROM lots WHERE tenant_id='${TENANT_ID}';
+DELETE FROM supplier_product_map WHERE tenant_id='${TENANT_ID}';
+DELETE FROM product_suppliers WHERE tenant_id='${TENANT_ID}';
+DELETE FROM document_products WHERE document_id IN (SELECT id FROM documents WHERE tenant_id='${TENANT_ID}');
+DELETE FROM document_versions WHERE document_id IN (SELECT id FROM documents WHERE tenant_id='${TENANT_ID}');
+DELETE FROM documents WHERE tenant_id='${TENANT_ID}';
+DELETE FROM reviewer_field_picks WHERE tenant_id='${TENANT_ID}';
+DELETE FROM reviewer_field_dismissals WHERE tenant_id='${TENANT_ID}';
+DELETE FROM reviewer_table_edits WHERE tenant_id='${TENANT_ID}';
+DELETE FROM extraction_examples WHERE tenant_id='${TENANT_ID}';
+DELETE FROM extraction_templates WHERE tenant_id='${TENANT_ID}';
+DELETE FROM supplier_extraction_instructions WHERE tenant_id='${TENANT_ID}';
+DELETE FROM processing_queue WHERE tenant_id='${TENANT_ID}';
+DELETE FROM products WHERE tenant_id='${TENANT_ID}';
+DELETE FROM document_types WHERE tenant_id='${TENANT_ID}';
+DELETE FROM suppliers WHERE tenant_id='${TENANT_ID}';
+DELETE FROM api_keys WHERE tenant_id='${TENANT_ID}' OR user_id='${ADMIN_ID}';
+DELETE FROM audit_log WHERE tenant_id='${TENANT_ID}' OR user_id='${ADMIN_ID}';
+DELETE FROM sessions WHERE user_id='${ADMIN_ID}';
+DELETE FROM users WHERE tenant_id='${TENANT_ID}';
+DELETE FROM tenants WHERE id='${TENANT_ID}';
+SQL
+  d1_local_file "$SQL"
+  echo "Reset complete."
+}
+
+# ===================================================================== DOWNLOAD
+# Query prod for the CMF corpus, pick a representative ~20 across products,
+# write the manifest, and pull each PDF from prod R2 (remote, read-only).
+do_download() {
+  load_remote_env
+  mkdir -p "$CORPUS"
+  echo "Querying prod for CMF documents (read-only)..."
+  local RAW
+  RAW=$(d1_prod_json "
+    SELECT d.id AS doc_id, d.title, dv.r2_key, dv.file_name
+    FROM documents d
+    JOIN document_versions dv ON dv.document_id=d.id AND dv.version_number=d.current_version
+    WHERE d.tenant_id='${PROD_TENANT}' AND d.supplier_id='${PROD_CMF_SUPPLIER}' AND d.status='active'
+    ORDER BY d.created_at DESC;")
+
+  # Select a representative batch covering each product family.
+  printf '%s' "$RAW" | BATCH_LIMIT="${BATCH_LIMIT:-20}" node -e '
+    let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+      const arr=(JSON.parse(d)[0]||{}).results||[];
+      const pick=(re,n)=>arr.filter(r=>re.test(r.title)).slice(0,n);
+      const sel=[
+        ...pick(/\(0801\).*WHIP/i,2),
+        ...pick(/Whole/i,4),
+        ...pick(/Half and Half|H&H/i,3),
+        ...pick(/Heavy Cream/i,3),
+        ...pick(/Buttermilk/i,2),
+        ...pick(/Light Cream/i,2),
+        ...pick(/Ice ?cream/i,2),
+        ...pick(/Whole/i,8),           // backfill to ~20 with extra whole/h&h
+        ...pick(/Half and Half/i,8),
+      ];
+      const seen=new Set(); const out=[];
+      const lim=parseInt(process.env.BATCH_LIMIT||"20",10);
+      for(const r of sel){ if(out.length>=lim) break; if(!seen.has(r.doc_id)){seen.add(r.doc_id); out.push(r);} }
+      process.stdout.write(JSON.stringify(out,null,2));
+    });
+  ' > "$MANIFEST"
+
+  local N; N=$(node -e "console.log(require('$MANIFEST').length)")
+  echo "Selected $N files. Downloading from prod R2 -> $CORPUS"
+  local i=0 ok=0
+  while IFS=$'\t' read -r DOCID KEY FNAME; do
+    i=$((i+1))
+    local DEST="$CORPUS/$DOCID.pdf"
+    if [ -f "$DEST" ] && [ -s "$DEST" ]; then ok=$((ok+1)); printf '  [%02d] cached  %s\n' "$i" "$FNAME"; continue; fi
+    if npx wrangler r2 object get "${R2_BUCKET}/${KEY}" --remote --file="$DEST" >/dev/null 2>&1 && [ -s "$DEST" ]; then
+      ok=$((ok+1)); printf '  [%02d] OK      %s (%s bytes)\n' "$i" "$FNAME" "$(stat -c%s "$DEST")"
+    else
+      printf '  [%02d] FAIL    %s\n' "$i" "$FNAME"; rm -f "$DEST"
+    fi
+  done < <(node -e '
+    for(const r of require("'"$MANIFEST"'")) process.stdout.write(r.doc_id+"\t"+r.r2_key+"\t"+r.file_name+"\n");
+  ')
+  echo "Downloaded $ok/$N files to $CORPUS"
+}
+
+# ========================================================================= PREP
+# Seed the tenant/admin/apikey/supplier(date_code)/doctype + the prod-derived
+# order side, then UPLOAD each corpus PDF via the real import API so they land
+# in processing_queue as queued.
+do_prep() {
+  [ -f "$MANIFEST" ] || { echo "No manifest. Run --download first." >&2; exit 1; }
+  echo "Seeding LOCAL tenant '$TENANT_ID' (supplier CMF lot_scheme=date_code UP FRONT)."
+
+  local PWHASH; PWHASH=$(PW="$ADMIN_PASSWORD" node -e "
+    const c=require('crypto');const s=c.randomBytes(16);
+    const dk=c.pbkdf2Sync(process.env.PW,s,100000,32,'sha256');
+    console.log(s.toString('hex')+':'+dk.toString('hex'));")
+
+  # Generate the worker API key (dox_sk_) + its SHA-256 hash. Store the raw key
+  # in the corpus dir so --worker-cmd / --approve can reuse it.
+  local APIKEY APIHASH
+  APIKEY=$(node -e "const c=require('crypto');console.log('dox_sk_'+c.randomBytes(32).toString('hex'))")
+  APIHASH=$(KEY="$APIKEY" node -e "const c=require('crypto');console.log(c.createHash('sha256').update(process.env.KEY).digest('hex'))")
+  printf '%s' "$APIKEY" > "$KEYFILE"
+
+  local SQL; SQL=$(mktemp); trap 'rm -f "$SQL"' RETURN
+  cat > "$SQL" <<SQL
+INSERT INTO tenants (id,name,slug,description) VALUES
+  ('${TENANT_ID}','CMF File Rerun','${TENANT_SLUG}','full-pipeline file rerun: lot_scheme date_code steady-state')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,description=excluded.description;
+
+INSERT INTO users (id,email,password_hash,name,role,tenant_id) VALUES
+  ('${ADMIN_ID}','${ADMIN_EMAIL}','${PWHASH}','CMF Rerun Admin','super_admin','${TENANT_ID}')
+ON CONFLICT(id) DO UPDATE SET email=excluded.email,password_hash=excluded.password_hash,role=excluded.role,tenant_id=excluded.tenant_id;
+
+INSERT INTO api_keys (id,name,key_hash,key_prefix,user_id,tenant_id,permissions) VALUES
+  ('${APIKEY_ID}','cmf-rerun-worker','${APIHASH}','${APIKEY:0:12}','${ADMIN_ID}','${TENANT_ID}','["*"]')
+ON CONFLICT(id) DO UPDATE SET key_hash=excluded.key_hash,key_prefix=excluded.key_prefix,revoked=0;
+
+-- Supplier CMF with lot_scheme=date_code SET UP FRONT (the whole point).
+INSERT INTO suppliers (id,tenant_id,name,slug,lot_scheme) VALUES
+  ('${SUP_CMF}','${TENANT_ID}','Country Morning Farms','country-morning-farms','date_code')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name,lot_scheme=excluded.lot_scheme;
+
+INSERT INTO document_types (id,tenant_id,name,slug,description) VALUES
+  ('${DT_ID}','${TENANT_ID}','Certificate of Analysis','coa','COA')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug;
+
+-- CMF (supplier-scoped) COA-side products (bridge "from" side, provenance).
+INSERT INTO products (id,tenant_id,name,slug,supplier_id) VALUES
+  ('${PROD_CMF_WHOLE}','${TENANT_ID}','Milk - Whole','cmf-milk-whole','${SUP_CMF}'),
+  ('${PROD_CMF_HH}','${TENANT_ID}','Half-and-Half','cmf-half-and-half','${SUP_CMF}'),
+  ('${PROD_CMF_WHIP}','${TENANT_ID}','Cream - Heavy Whipping 40%','cmf-cream-heavy-whipping-40','${SUP_CMF}')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name,supplier_id=excluded.supplier_id;
+
+-- Order-SKU products (supplier_id NULL — the WMS side). 0417/30417 collapse.
+INSERT INTO products (id,tenant_id,name,slug,supplier_id) VALUES
+  ('${PROD_SKU_WHOLE}','${TENANT_ID}','MS WHOLE 5 GL BAG','ms-whole-5-gl-bag',NULL),
+  ('${PROD_SKU_HH}','${TENANT_ID}','H&H 5 GL DISP','hh-5-gl-disp',NULL),
+  ('${PROD_SKU_WHIP}','${TENANT_ID}','WHIP 5 GL BAG','whip-5-gl-bag',NULL),
+  ('${PROD_SKU_SOUR}','${TENANT_ID}','MS NATURAL SOUR CREAM','ms-natural-sour-cream',NULL)
+ON CONFLICT(id) DO UPDATE SET name=excluded.name;
+
+-- ---- Order side, copied from REAL prod CMF order_items (bare-date lots) ----
+INSERT INTO orders (id,tenant_id,order_number,status) VALUES
+  ('${ORDER_ID}','${TENANT_ID}','CMF-RERUN','pending')
+ON CONFLICT(id) DO UPDATE SET order_number=excluded.order_number;
+
+-- Order-side lots (bare keys, sub_lot_code=''). Two GROUPS:
+--   (A) original prod-derived lots — real shipped lots whose COAs are NOT among
+--       these 15 files -> they correctly STAY a coverage gap (the prod reality:
+--       "the bottleneck is COA lot coverage, not matching").
+--   (B) COA-ALIGNED lots — bare dates equal to what the real CMF COAs in this
+--       batch strip to (060926/062626/061126 whole; 070326/062626 h&h;
+--       062626/051926 whip) -> these SHOULD flip to matched after produce.
+INSERT INTO lots (id,tenant_id,supplier_id,product_id,lot_number,lot_key,sub_lot_code,first_seen_source) VALUES
+  -- (A) prod-derived (gap)
+  ('cmffile_lot_w_060526','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_WHOLE}','060526','060526','','order'),
+  ('cmffile_lot_w_061026','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_WHOLE}','061026','061026','','order'),
+  ('cmffile_lot_hh_061226','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_HH}','061226','061226','','order'),
+  ('cmffile_lot_sour_062226','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_SOUR}','062226','062226','','order'),
+  -- (B) COA-aligned (expected to match after produce)
+  ('cmffile_lot_w_060926','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_WHOLE}','060926','060926','','order'),
+  ('cmffile_lot_w_062626','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_WHOLE}','062626','062626','','order'),
+  ('cmffile_lot_w_061126','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_WHOLE}','061126','061126','','order'),
+  ('cmffile_lot_hh_070326','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_HH}','070326','070326','','order'),
+  ('cmffile_lot_hh_062626','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_HH}','062626','062626','','order'),
+  ('cmffile_lot_whip_062626','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_WHIP}','062626','062626','','order'),
+  ('cmffile_lot_whip_051926','${TENANT_ID}','${SUP_CMF}','${PROD_SKU_WHIP}','051926','051926','','order')
+ON CONFLICT(id) DO UPDATE SET lot_key=excluded.lot_key,lot_number=excluded.lot_number;
+
+-- Order items (product_code + bare lot), all start coa_match_status='unmatched'.
+INSERT INTO order_items (id,order_id,product_id,product_name,product_code,lot_number,lot_id,coa_match_status) VALUES
+  -- (A) gap lines (no COA on file for these lots)
+  ('cmffile_oi_1','${ORDER_ID}','${PROD_SKU_WHOLE}','MS WHOLE 5 GL BAG','0417','060526','cmffile_lot_w_060526','unmatched'),
+  ('cmffile_oi_2','${ORDER_ID}','${PROD_SKU_WHOLE}','MS WHOLE 5 GL BAG','0417','061026','cmffile_lot_w_061026','unmatched'),
+  ('cmffile_oi_5','${ORDER_ID}','${PROD_SKU_HH}','H&H 5 GL DISP','0708','061226','cmffile_lot_hh_061226','unmatched'),
+  ('cmffile_oi_9','${ORDER_ID}','${PROD_SKU_SOUR}','MS NATURAL SOUR CREAM','0829','062226','cmffile_lot_sour_062226','unmatched'),
+  -- (B) COA-aligned lines (expected MATCH via supplier_product_map bridge + date_code)
+  ('cmffile_oi_b1','${ORDER_ID}','${PROD_SKU_WHOLE}','MS WHOLE 5 GL BAG','0417','060926','cmffile_lot_w_060926','unmatched'),
+  ('cmffile_oi_b2','${ORDER_ID}','${PROD_SKU_WHOLE}','MS WHOLE 5 GL BAG','30417','062626','cmffile_lot_w_062626','unmatched'),
+  ('cmffile_oi_b3','${ORDER_ID}','${PROD_SKU_WHOLE}','MS WHOLE 5 GL BAG','0417','061126','cmffile_lot_w_061126','unmatched'),
+  ('cmffile_oi_b4','${ORDER_ID}','${PROD_SKU_HH}','H&H 5 GL DISP','0708','070326','cmffile_lot_hh_070326','unmatched'),
+  ('cmffile_oi_b5','${ORDER_ID}','${PROD_SKU_HH}','H&H 5 GL DISP','0708','062626','cmffile_lot_hh_062626','unmatched'),
+  ('cmffile_oi_b6','${ORDER_ID}','${PROD_SKU_WHIP}','WHIP 5 GL BAG','0801','062626','cmffile_lot_whip_062626','unmatched'),
+  ('cmffile_oi_b7','${ORDER_ID}','${PROD_SKU_WHIP}','WHIP 5 GL BAG','0801','051926','cmffile_lot_whip_051926','unmatched')
+ON CONFLICT(id) DO UPDATE SET product_id=excluded.product_id,product_code=excluded.product_code,
+  lot_number=excluded.lot_number,lot_id=excluded.lot_id,coa_match_status='unmatched',
+  coa_document_id=NULL,match_confidence=NULL,coa_matched_at=NULL;
+SQL
+  d1_local_file "$SQL"
+  echo "Tenant/order side seeded. Worker API key stored at $KEYFILE"
+
+  # Upload each corpus PDF via the real import endpoint -> queued.
+  echo ""
+  echo "Uploading ${MANIFEST##*/} corpus to ${DOX_BASE}/api/documents/process (output_kind=coa)..."
+  local up=0 fail=0
+  while IFS=$'\t' read -r DOCID FNAME; do
+    local SRC="$CORPUS/$DOCID.pdf"
+    [ -s "$SRC" ] || { echo "  skip (no file): $FNAME"; continue; }
+    local RESP
+    RESP=$(curl -s -X POST "${DOX_BASE}/api/documents/process" \
+      -H "X-API-Key: ${APIKEY}" \
+      -F "tenant_id=${TENANT_ID}" \
+      -F "output_kind=coa" \
+      -F "document_type_id=${DT_ID}" \
+      -F "files=@${SRC};type=application/pdf;filename=${FNAME}" 2>&1)
+    if printf '%s' "$RESP" | grep -q '"queue_id"\|"queued"\|"id"'; then
+      up=$((up+1)); printf '  OK    %s\n' "$FNAME"
+    else
+      fail=$((fail+1)); printf '  FAIL  %s -> %s\n' "$FNAME" "$(printf '%s' "$RESP" | head -c 160)"
+    fi
+  done < <(node -e 'for(const r of require("'"$MANIFEST"'")) process.stdout.write(r.doc_id+"\t"+r.file_name+"\n");')
+  echo "Uploaded $up (fail $fail). They are now queued for the worker."
+  echo ""
+  do_worker_cmd
+}
+
+# =================================================================== WORKER CMD
+do_worker_cmd() {
+  [ -f "$KEYFILE" ] || { echo "No API key yet. Run --prep first." >&2; exit 1; }
+  local APIKEY; APIKEY=$(cat "$KEYFILE")
+  local QU QS
+  if [ -f .dev.vars ]; then QU=$(grep -E '^QWEN_URL=' .dev.vars | cut -d= -f2-); QS=$(grep -E '^QWEN_SECRET=' .dev.vars | cut -d= -f2-); fi
+  cat <<EOF
+Run the REAL extraction worker against local (in a SECOND terminal). COA_RECORDS_MODE=on
+is REQUIRED so the worker posts ai_records (produceCoaRecords consumes them on approve):
+
+  cd $(pwd)
+  DOX_API_URL='${DOX_BASE}' \\
+  DOX_API_KEY='${APIKEY}' \\
+  QWEN_URL='${QU:-https://qwen.cush.rocks}' \\
+  QWEN_SECRET='${QS:-<from .dev.vars>}' \\
+  COA_RECORDS_MODE=on \\
+  POLL_INTERVAL=3000 \\
+  node bin/process-worker
+
+Watch it drain (cap ~10 min). Then:  ./bin/reprocess-cmf-files --status
+EOF
+}
+
+# ======================================================================= STATUS
+do_status() {
+  echo "Per-doc queue outcome (tenant ${TENANT_ID}):"
+  d1_local "SELECT
+      substr(file_name,1,40) AS file,
+      processing_status AS pstatus,
+      CASE WHEN ai_records IS NOT NULL THEN 'yes' ELSE 'no' END AS has_records,
+      supplier_id,
+      substr(COALESCE(error_message,''),1,50) AS err
+    FROM processing_queue WHERE tenant_id='${TENANT_ID}' ORDER BY processing_status, file_name;"
+  echo ""
+  echo "Tally:"
+  d1_local "SELECT processing_status, COUNT(*) n,
+      SUM(CASE WHEN ai_records IS NOT NULL THEN 1 ELSE 0 END) with_records
+    FROM processing_queue WHERE tenant_id='${TENANT_ID}' GROUP BY processing_status;"
+}
+
+# ====================================================================== APPROVE
+# Approve every READY COA via PUT /api/queue/:id with supplier_id=CMF (so the
+# date_code scheme applies at produce). Real single-product CMF COAs come back
+# FLAT (no ai_records, since the worker only emits ai_records for >=2-record
+# docs) -> they take the flat approve path (produceCoa), which ALSO resolves the
+# supplier lot_scheme and strips the lot at produce time. The flat path has no
+# product_maps body param, so the 3 known bridges are pre-seeded directly into
+# supplier_product_map (the "taught" state); linkCoaToOrders reads that table.
+# Records-shaped items (if any) still get the per-record-index product_maps body.
+do_approve() {
+  [ -f "$KEYFILE" ] || { echo "No API key. Run --prep first." >&2; exit 1; }
+  local APIKEY; APIKEY=$(cat "$KEYFILE")
+
+  echo "Order lines BEFORE approve:"
+  d1_local "SELECT coa_match_status, COUNT(*) FROM order_items
+    WHERE order_id='${ORDER_ID}' GROUP BY coa_match_status;"
+
+  # Pre-seed the 3 teach mappings (normalized COA product name -> order SKU
+  # product + distributor_sku). MUST mirror normalizeProductNameKey EXACTLY
+  # (functions/lib/entities/lots.ts): UPPERCASE, collapse non-[A-Z0-9] to a
+  # single space, trim. e.g. "Milk - Whole" -> "MILK WHOLE".
+  echo ""
+  echo "Seeding supplier_product_map bridges (Milk-Whole->0417, Half-and-Half->0708, Heavy-Whipping->0801)..."
+  local NK; NK() { node -e 'process.stdout.write(process.argv[1].toUpperCase().replace(/[^A-Z0-9]+/g," ").trim())' "$1"; }
+  local NKW NKH NKWP
+  NKW=$(NK "Milk - Whole")
+  NKH=$(NK "Half-and-Half")
+  NKWP=$(NK "Cream - Heavy Whipping 40%")
+  d1_local "INSERT INTO supplier_product_map
+      (id,tenant_id,supplier_id,coa_product_name_key,coa_product_id,order_product_id,distributor_sku,created_by,created_at,updated_at)
+    VALUES
+      ('cmffile_map_whole','${TENANT_ID}','${SUP_CMF}','${NKW}','${PROD_CMF_WHOLE}','${PROD_SKU_WHOLE}','0417','${ADMIN_ID}',datetime('now'),datetime('now')),
+      ('cmffile_map_hh','${TENANT_ID}','${SUP_CMF}','${NKH}','${PROD_CMF_HH}','${PROD_SKU_HH}','0708','${ADMIN_ID}',datetime('now'),datetime('now')),
+      ('cmffile_map_whip','${TENANT_ID}','${SUP_CMF}','${NKWP}','${PROD_CMF_WHIP}','${PROD_SKU_WHIP}','0801','${ADMIN_ID}',datetime('now'),datetime('now'))
+    ON CONFLICT(tenant_id,supplier_id,coa_product_name_key) DO UPDATE SET
+      order_product_id=excluded.order_product_id,distributor_sku=excluded.distributor_sku,updated_at=datetime('now');"
+
+  # All ready COA items (id + ai_fields.product_name). The flat approve path
+  # only creates the document_products link when `product_name` is in the body
+  # (it does NOT fall back to ai_fields.product_name), and that link is what the
+  # supplier_product_map bridge resolves against in linkOrderToCoas. So we MUST
+  # pass product_name explicitly — otherwise non-title-coded COAs (plain CMF
+  # titles like "261475- Whole") get no product link and the bridge can't fire.
+  local ITEMS
+  ITEMS=$(d1_local_json "SELECT id, ai_fields FROM processing_queue
+    WHERE tenant_id='${TENANT_ID}' AND processing_status='ready';")
+  local IDS
+  IDS=$(printf '%s' "$ITEMS" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+      const rows=(JSON.parse(d)[0]||{}).results||[];process.stdout.write(rows.map(r=>r.id).join("\n"));})')
+  [ -n "$IDS" ] || { echo "No ready COA items to approve. Did the worker run?"; exit 1; }
+
+  echo ""
+  echo "Approving $(printf '%s\n' "$IDS" | grep -c . ) ready COA item(s) (flat path, supplier_id=${SUP_CMF}, product_name from ai_fields)..."
+  local ok=0 fail=0
+  while read -r QID; do
+    [ -n "$QID" ] || continue
+    local PN BODY RESP
+    PN=$(printf '%s' "$ITEMS" | QID="$QID" node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+        const rows=(JSON.parse(d)[0]||{}).results||[];
+        const r=rows.find(x=>x.id===process.env.QID);
+        let pn=""; try{const f=JSON.parse(r.ai_fields||"{}"); pn=f.product_name||f.product||"";}catch{}
+        process.stdout.write(pn);})')
+    BODY=$(SID="$SUP_CMF" PN="$PN" node -e 'process.stdout.write(JSON.stringify({status:"approved",supplier_id:process.env.SID,product_name:process.env.PN||undefined}));')
+    RESP=$(curl -s -X PUT "${DOX_BASE}/api/queue/${QID}" \
+      -H "X-API-Key: ${APIKEY}" -H "Content-Type: application/json" -d "$BODY" 2>&1)
+    if printf '%s' "$RESP" | grep -qi '"error"'; then
+      fail=$((fail+1)); printf '  FAIL %s -> %s\n' "${QID:0:8}" "$(printf '%s' "$RESP" | head -c 140)"
+    else
+      ok=$((ok+1))
+    fi
+  done <<< "$IDS"
+  echo "Approved $ok (fail $fail)."
+
+  echo ""
+  echo "=== CRITICAL: produced CMF lot_keys (must be bare 6-digit at PRODUCE time, NO backfill) ==="
+  d1_local "SELECT lot_key, sub_lot_code, lot_number,
+      (SELECT name FROM products p WHERE p.id=l.product_id) AS product
+    FROM lots l WHERE tenant_id='${TENANT_ID}' AND first_seen_source='coa'
+    ORDER BY lot_key;"
+}
+
+# ====================================================================== REMATCH
+do_rematch() {
+  [ -f "$KEYFILE" ] || { echo "No API key. Run --prep first." >&2; exit 1; }
+  local APIKEY; APIKEY=$(cat "$KEYFILE")
+  echo "Order lines BEFORE rematch:"
+  d1_local "SELECT coa_match_status, COUNT(*) FROM order_items WHERE order_id='${ORDER_ID}' GROUP BY coa_match_status;"
+  echo ""
+  echo "POST /api/admin/rematch-lots?tenant_id=${TENANT_ID}"
+  curl -s -X POST "${DOX_BASE}/api/admin/rematch-lots?tenant_id=${TENANT_ID}" \
+    -H "X-API-Key: ${APIKEY}" -H "Content-Type: application/json" -d '{}' ; echo
+  echo ""
+  echo "Order lines AFTER rematch (with match detail):"
+  d1_local "SELECT product_code, lot_number, coa_match_status,
+      ROUND(match_confidence,2) AS conf,
+      CASE WHEN coa_document_id IS NOT NULL THEN 'linked' ELSE '-' END AS doc
+    FROM order_items WHERE order_id='${ORDER_ID}' ORDER BY product_code, lot_number;"
+}
+
+case "$ACTION" in
+  reset)      do_reset ;;
+  download)   do_download ;;
+  prep)       do_prep ;;
+  worker-cmd) do_worker_cmd ;;
+  status)     do_status ;;
+  approve)    do_approve ;;
+  rematch)    do_rematch ;;
+  all)        do_reset; do_download; do_prep ;;
+esac

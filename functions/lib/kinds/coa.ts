@@ -5,7 +5,7 @@ import { findOrCreateSupplier } from '../suppliers';
 import { findOrCreateProduct } from '../entities/products';
 import { extractRecordPdf } from './coaPageScope';
 import { attachLotToCoaDocument, extractLotNumber } from '../entities/matching';
-import { normalizeLotNumber, normalizeSubLotCode } from '../entities/lots';
+import { normalizeLotNumber, normalizeSubLotCode, applyLotScheme, type LotScheme } from '../entities/lots';
 import { getLearnedPreferences } from '../learnedPreferences';
 import type { CoaRecordsPayload } from '../../../shared/types';
 import type {
@@ -392,12 +392,22 @@ export async function produceCoa(
     )
     .run();
 
-  // Link product if productName provided. The shared resolver handles
-  // lookup/create, legacy supplier_id backfill, and the product_suppliers
-  // provenance link (Model B).
+  // Link product if a product name is available. Fall back through the approved
+  // fields and then the raw extracted ai_fields — when the reviewer approves
+  // with `fields` that omit product_name, approvedFields won't carry it, so we
+  // must reach into ai_fields directly. Without this, single-product COAs get
+  // NO document_products link, leaving linkCoaToOrders without a product name
+  // and silently breaking the supplier_product_map bridge during matching.
+  let aiProductName: string | null = null;
+  try {
+    aiProductName = item.ai_fields ? (JSON.parse(item.ai_fields).product_name ?? null) : null;
+  } catch {
+    aiProductName = null;
+  }
+  const effectiveProductName = productName || approvedFields.product_name || aiProductName || null;
   let linkedProductId: string | null = null;
-  if (productName) {
-    const product = await findOrCreateProduct(db, item.tenant_id, productName, { supplierId });
+  if (effectiveProductName) {
+    const product = await findOrCreateProduct(db, item.tenant_id, effectiveProductName, { supplierId });
     linkedProductId = product.id;
 
     // Link document to product
@@ -417,6 +427,7 @@ export async function produceCoa(
     const lotNumber =
       extractLotNumber(approvedFields) ?? extractLotNumber(primaryMetadata);
     if (lotNumber) {
+      const lotScheme = await resolveLotScheme(db, item.tenant_id, supplierId);
       await attachLotToCoaDocument(db, item.tenant_id, {
         documentId: docId,
         lotNumber,
@@ -426,6 +437,8 @@ export async function produceCoa(
         expirationDate: approvedFields.expiration_date || null,
         mfgDate: approvedFields.mfg_date || null,
         source: 'coa',
+        lotScheme,
+        coaProductName: effectiveProductName,
       });
     }
   }
@@ -668,6 +681,7 @@ export async function produceMultiProductCoa(
     {
       const lotNumber = extractLotNumber(mergedFields);
       if (lotNumber) {
+        const lotScheme = await resolveLotScheme(db, item.tenant_id, supplierId);
         await attachLotToCoaDocument(db, item.tenant_id, {
           documentId: docId,
           lotNumber,
@@ -677,6 +691,8 @@ export async function produceMultiProductCoa(
           expirationDate: mergedFields.expiration_date || null,
           mfgDate: mergedFields.mfg_date || null,
           source: 'coa',
+          lotScheme,
+          coaProductName: product.productName ?? null,
         });
       }
     }
@@ -789,21 +805,53 @@ function firstField(
 }
 
 /**
- * Compute the combined lot_key for a record per the Option B rule:
- *   lot_key = norm(lot_number) + sub_lot_code   (sublot present)
- *           = norm(lot_number)                  (no sublot)
+ * Compute the combined lot_key for a record per the Option B rule, refined by
+ * the supplier's lot_scheme (0075):
+ *   - 'auto'/'plain'/undefined: lot_key = norm(lot_number) + sub_lot_code.
+ *   - 'lims_combined': same concat (Darigold).
+ *   - 'date_code': strip to the bare MMDDYY date, sub_lot_code forced to ''.
  * Returns { lotNumber, subLotCode, lotKey } with subLotCode='' when absent, or
- * null when the record has no usable lot number.
+ * null when the record has no usable lot number. The lot_key returned here MUST
+ * match what attachLotToCoaDocument (→ findOrCreateLot with the same scheme)
+ * stores, so external_ref = queue-{id}-{lot_key} agrees with the lots row.
  */
 export function computeRecordLotKey(
-  fields: Record<string, string | null>
+  fields: Record<string, string | null>,
+  scheme?: LotScheme | null
 ): { lotNumber: string; subLotCode: string; lotKey: string } | null {
   const lotNumber = firstField(fields, COA_RECORD_LOT_KEYS);
   if (!lotNumber) return null;
   const base = normalizeLotNumber(lotNumber);
   if (!base) return null;
-  const subLotCode = normalizeSubLotCode(firstField(fields, COA_RECORD_SUBLOT_KEYS));
-  return { lotNumber, subLotCode, lotKey: base + subLotCode };
+  const rawSubLotCode = normalizeSubLotCode(firstField(fields, COA_RECORD_SUBLOT_KEYS));
+  const combined = applyLotScheme(scheme, base, rawSubLotCode);
+  return { lotNumber, subLotCode: combined.subLotCode, lotKey: combined.lotKey };
+}
+
+/**
+ * Resolve a supplier's lot_scheme (0075). Returns 'auto' when supplierId is
+ * null, the row is missing, or the column is empty — so callers can pass the
+ * result straight through with no behavior change for unconfigured suppliers.
+ */
+async function resolveLotScheme(
+  db: D1Database,
+  tenantId: string,
+  supplierId: string | null
+): Promise<LotScheme> {
+  if (!supplierId) return 'auto';
+  try {
+    const row = await db
+      .prepare('SELECT lot_scheme FROM suppliers WHERE id = ? AND tenant_id = ?')
+      .bind(supplierId, tenantId)
+      .first<{ lot_scheme: string | null }>();
+    const s = (row?.lot_scheme ?? '').trim();
+    if (s === 'date_code' || s === 'lims_combined' || s === 'plain' || s === 'auto') {
+      return s;
+    }
+    return 'auto';
+  } catch {
+    return 'auto';
+  }
 }
 
 /** Per-record decision from the reviewer (partial approval). */
@@ -908,6 +956,11 @@ export async function produceCoaRecords(
     }
   }
 
+  // Resolve the supplier's lot_scheme ONCE (0075). Threaded into both
+  // computeRecordLotKey (for external_ref) and attachLotToCoaDocument (for the
+  // stored lots row) so the two agree. 'auto' for unconfigured suppliers.
+  const lotScheme = await resolveLotScheme(db, item.tenant_id, supplierId);
+
   const results: CoaRecordsApproveResult['documents'] = [];
   const heldRecordIndexes: number[] = [];
 
@@ -928,7 +981,7 @@ export async function produceCoaRecords(
     // Use mergedFields, not record.fields: the lot_code is frequently hoisted
     // into page_metadata (constant across a page's sublot records), so reading
     // record.fields alone would drop the lot and yield no combined lot_key.
-    const lot = computeRecordLotKey(mergedFields);
+    const lot = computeRecordLotKey(mergedFields, lotScheme);
 
     // Idempotent external_ref keyed on SUBLOT IDENTITY (lot_key), not record
     // index — re-running the same approval upserts the same document rather
@@ -1074,6 +1127,8 @@ export async function produceCoaRecords(
         expirationDate: (mergedFields.expiration_date as string) || null,
         mfgDate: (mergedFields.mfg_date as string) || null,
         source: 'coa',
+        lotScheme,
+        coaProductName: productName,
       });
     }
 

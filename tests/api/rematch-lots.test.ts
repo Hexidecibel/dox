@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { env } from 'cloudflare:test';
-import { seedTestData, generateTestId, cleanTables } from '../helpers/db';
+import { runMigrations, seedTestData, generateTestId, cleanTables } from '../helpers/db';
 import { findOrCreateLot } from '../../functions/lib/entities/lots';
 import { onRequestPost as rematchPost } from '../../functions/api/admin/rematch-lots';
 
@@ -19,9 +19,10 @@ const db = env.DB;
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 
 beforeEach(async () => {
+  await runMigrations(db);
   await cleanTables(db);
   seed = await seedTestData(db);
-});
+}, 30_000);
 
 interface RematchResult {
   order_items_processed: number;
@@ -135,6 +136,72 @@ describe('POST /api/admin/rematch-lots', () => {
     const body = (await res.json()) as RematchResult;
 
     expect(body.order_items_processed).toBe(1);
+    expect(body.strong_links_made).toBe(1);
+
+    const oi = await getOrderItem(orderItemId);
+    expect(oi!.coa_document_id).toBe(docId);
+    expect(oi!.coa_match_status).toBe('matched');
+  });
+
+  it('flips a date_code + product-map CMF pair from unmatched to matched (0075)', async () => {
+    const supplierId = generateTestId();
+    await db
+      .prepare(
+        "INSERT INTO suppliers (id, tenant_id, name, slug, lot_scheme) VALUES (?, ?, ?, ?, 'date_code')"
+      )
+      .bind(supplierId, seed.tenantId, 'Country Morning Farms', `cmf-${supplierId.slice(0, 6)}`)
+      .run();
+
+    const coaProductId = await makeProduct(seed.tenantId, 'Milk - Whole');
+    const orderProductId = await makeProduct(seed.tenantId, '0417 MS WHOLE 5 GL BAG');
+
+    // Teach the bridge: COA name → order product.
+    await db
+      .prepare(
+        `INSERT INTO supplier_product_map
+           (id, tenant_id, supplier_id, coa_product_name_key, order_product_id)
+         VALUES (?, ?, ?, 'MILK WHOLE', ?)`
+      )
+      .bind(generateTestId(), seed.tenantId, supplierId, orderProductId)
+      .run();
+
+    // COA already in the graph: bare-date lot (stripped), doc + product link.
+    const docId = await makeCoaDoc(seed.tenantId, 'CMF Whole Milk COA');
+    const coaLot = await findOrCreateLot(db, seed.tenantId, {
+      lotNumber: '061626WHO',
+      productId: coaProductId,
+      supplierId,
+      lotScheme: 'date_code',
+    });
+    await db
+      .prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)')
+      .bind(generateTestId(), docId, coaLot!.id)
+      .run();
+    await db
+      .prepare('INSERT INTO document_products (id, document_id, product_id) VALUES (?, ?, ?)')
+      .bind(generateTestId(), docId, coaProductId)
+      .run();
+
+    // Order line: bare-date lot, order product, NO link yet.
+    const orderLot = await findOrCreateLot(db, seed.tenantId, {
+      lotNumber: '061626',
+      productId: orderProductId,
+    });
+    const orderItemId = await makeOrderItem(seed.tenantId, {
+      productId: orderProductId,
+      productCode: null,
+      lotId: orderLot!.id,
+    });
+
+    // Both lots share the bare-date lot_key "061626" (the date_code scheme
+    // stripped the COA suffix); they are distinct rows only because the COA and
+    // order products differ — the map bridges them at classify time. The
+    // matcher keys on lot_key, so the candidate join still finds the COA.
+    expect((await getOrderItem(orderItemId))!.coa_document_id).toBeNull();
+
+    const res = await rematchPost(makeContext(superUser()));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as RematchResult;
     expect(body.strong_links_made).toBe(1);
 
     const oi = await getOrderItem(orderItemId);

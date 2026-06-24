@@ -294,6 +294,10 @@ export async function ingestOrders(
           }
           if (item.lot_number) {
             try {
+              // TODO (0075, deferred): thread the supplier's lot_scheme here for
+              // suppliers whose ORDER side also carries the item code. CMF's WMS
+              // is already bare-date (date_code is a no-op on this side), so
+              // order-side scheme plumbing is intentionally skipped for now.
               const lot = await findOrCreateLot(db, tenantId, {
                 lotNumber: item.lot_number,
                 productId: lineProductId,

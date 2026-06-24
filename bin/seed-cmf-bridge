@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# Seed a REALISTIC, prod-derived LOCAL test fixture for the per-supplier
+# `lot_scheme` (migration 0075) + the teach-at-review `supplier_product_map`
+# bridge that links COA records to order lines whose product names diverge.
+#
+# This fixture mirrors ACTUAL production patterns from the real distributor
+# tenant (Country Morning Farms COAs + the WMS order side), so a green
+# `bin/verify-cmf-bridge` is a real signal the feature works end to end.
+#
+# ---------------------------------------------------------------------------
+# THE PROD PATTERNS THIS REPRODUCES
+# ---------------------------------------------------------------------------
+# - Supplier "Country Morning Farms" (CMF) sends COA lots as MMDDYY + a 3-char
+#   alpha item code (e.g. 061626WHO, 061626HAH, 060926WHC, 061226BUO). Its WMS
+#   strips to the bare date (061626). lot_scheme='date_code' does exactly this:
+#   normalizeLotNumber('061626WHO') -> '061626WHO'; applyLotScheme(date_code)
+#   keeps the leading /^(\d{6})/ -> '061626'. A NON-date lot like 'LC3-2026'
+#   normalizes to 'LC32026', fails the 6-digit prefix, and is kept unchanged
+#   (defensive fall-through, no false match).
+# - CMF COA product names are MANUFACTURER language: "Milk - Whole",
+#   "Half-and-Half", "Cream - Heavy Whipping 40%", "Cream - Light 23%",
+#   "Buttermilk - 1%".
+# - The distributor's WMS order lines use SEPARATE products keyed by a numeric
+#   SKU on order_items.product_code (the products table has NO code column):
+#     0417 / 30417 -> "MS WHOLE 5 GL BAG"   (BOTH SKUs are the SAME product row)
+#     0708         -> "H&H 5 GL DISP"
+#     0801         -> "WHIP 5 GL BAG"
+#     0829         -> "MS NATURAL SOUR CREAM"
+#   So the ONLY path from a CMF COA product to a WMS order product is the taught
+#   supplier_product_map bridge (names diverge; no shared code in the COA body).
+# - A DIFFERENT supplier (Willamette) needs NO map: its COA TITLE carries the
+#   distributor code "(1167) ... LOT 6141", the order line has product_code 1167
+#   lot 6141, and classifyMatch strong-links on lot+code via the (NNNN) prefix.
+#
+# ---------------------------------------------------------------------------
+# THE SCENARIO SUITE (all under FIXED tenant id `cmftest_tenant`)
+# ---------------------------------------------------------------------------
+# COA queue items (needs-review, status=pending/processing_status=ready,
+# output_kind=coa, valid ai_records -> render in CoaRecordsReviewTile, a minimal
+# PDF in LOCAL R2 at each file_r2_key):
+#   C1 "Milk - Whole"               lot 061626WHO   (CMF)
+#   C2 "Half-and-Half"              lot 061626HAH   (CMF; SAME date as C1 ->
+#                                                    ambiguity resolved by PRODUCT)
+#   C3 "Cream - Heavy Whipping 40%" lot 060926WHC   (CMF)
+#   C4 "Buttermilk - 1%"            lot 061226BUO   (CMF; COA exists, NO order
+#                                                    line -> stays unmatched COA)
+#   C5 "Cream - Light 23%"          lot LC3-2026    (CMF; NON-date lot -> date_code
+#                                                    falls through, no match)
+#   C6 "(1167) WILL CAGE FREE WHOLE LIQ LOT 6141" / product
+#      "WILL CAGE FREE WHOLE LIQ"   lot 6141        (Willamette control; NO map)
+#
+# Order TEST-1 (all order_items start coa_match_status='unmatched', each bound
+# to an order-side lots row with the bare lot_key):
+#   L1 0417  "MS WHOLE 5 GL BAG"        lot 061626 -> expect MATCH C1 (after map)
+#   L2 30417 "MS WHOLE 5 GL BAG"        lot 061626 -> expect MATCH C1 (2 SKUs, 1 product)
+#   L3 0708  "H&H 5 GL DISP"            lot 061626 -> expect MATCH C2 (product disambiguates)
+#   L4 0801  "WHIP 5 GL BAG"            lot 060926 -> expect MATCH C3
+#   L5 0829  "MS NATURAL SOUR CREAM"    lot 062226 -> expect UNMATCHED (no COA -> gap)
+#   L6 1167  "WILL CAGE FREE WHOLE LIQ" lot 6141   -> expect MATCH C6 via code, NO map
+#
+# L1 and L2 share ONE products row (mirrors prod's 0417/30417 collapse).
+# Order-side products have supplier_id NULL. CMF COA products are CMF-scoped.
+#
+# THE 3 TEACH MAPPINGS the verify harness applies on approve:
+#   Milk - Whole               -> MS WHOLE 5 GL BAG  (SKU 0417)
+#   Half-and-Half              -> H&H 5 GL DISP      (SKU 0708)
+#   Cream - Heavy Whipping 40% -> WHIP 5 GL BAG      (SKU 0801)
+# Willamette/C6 gets NO map (code-in-title path).
+#
+# ---------------------------------------------------------------------------
+# Usage:
+#   ./bin/seed-cmf-bridge            # seed LOCAL D1 (interactive confirm)
+#   ./bin/seed-cmf-bridge -y         # seed LOCAL D1, no prompt
+#   ./bin/seed-cmf-bridge --reset    # delete the seeded tenant + all child rows
+#   ./bin/seed-cmf-bridge --reset -y # ...without prompt
+#
+# Target is ALWAYS local D1 (doc-upload-db, no --remote) — dev fixture, never prod.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DB="doc-upload-db"
+R2_BUCKET="doc-upload-files"
+
+RESET=0
+ASSUME_YES=0
+for arg in "$@"; do
+  case "$arg" in
+    --reset) RESET=1 ;;
+    -y|--yes) ASSUME_YES=1 ;;
+    -h|--help) sed -n '2,120p' "$0"; exit 0 ;;
+    *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
+# ---- Fixed, readable ids (deterministic re-runs + teardown) ----
+TENANT_ID="cmftest_tenant"
+TENANT_SLUG="cmf-bridge-test"
+ADMIN_ID="cmftest_admin"
+ADMIN_EMAIL="a@a.a"
+ADMIN_PASSWORD="a"
+SUP_CMF="cmftest_sup_cmf"
+SUP_WILL="cmftest_sup_will"
+DT_ID="cmftest_dt_coa"
+
+# CMF (supplier-scoped) products — names exactly as they appear on the COAs.
+PROD_CMF_WHOLE="cmftest_prod_cmf_whole"
+PROD_CMF_HH="cmftest_prod_cmf_hh"
+PROD_CMF_WHIP="cmftest_prod_cmf_whip"
+PROD_CMF_BUTTERMILK="cmftest_prod_cmf_buttermilk"
+PROD_CMF_LIGHT="cmftest_prod_cmf_light"
+# Willamette (supplier-scoped) product — the COA product name.
+PROD_WILL="cmftest_prod_will"
+
+# Order-SKU products (supplier_id NULL — the order/WMS side).
+PROD_SKU_WHOLE="cmftest_prod_sku_whole"   # 0417 + 30417 BOTH map here
+PROD_SKU_HH="cmftest_prod_sku_hh"         # 0708
+PROD_SKU_WHIP="cmftest_prod_sku_whip"     # 0801
+PROD_SKU_SOUR="cmftest_prod_sku_sour"     # 0829 (no COA -> gap)
+PROD_SKU_WILL="cmftest_prod_sku_will"     # 1167 (order side; code path)
+
+# COA queue items.
+Q_WHOLE="cmftest_q_whole"
+Q_HH="cmftest_q_hh"
+Q_WHIP="cmftest_q_whip"
+Q_BUTTERMILK="cmftest_q_buttermilk"
+Q_LIGHT="cmftest_q_light"
+Q_WILL="cmftest_q_will"
+
+# Order + order items.
+ORDER_ID="cmftest_order_test1"
+OI_L1="cmftest_oi_l1"
+OI_L2="cmftest_oi_l2"
+OI_L3="cmftest_oi_l3"
+OI_L4="cmftest_oi_l4"
+OI_L5="cmftest_oi_l5"
+OI_L6="cmftest_oi_l6"
+
+# Order-side lots (bare-date / bare keys). Each order_item binds to one so the
+# rematcher (iterates order_items WHERE lot_id IS NOT NULL) picks them up.
+LOT_061626="cmftest_lot_061626"   # shared by L1/L2/L3 (whole + h&h, same date)
+LOT_060926="cmftest_lot_060926"   # L4 (whip)
+LOT_062226="cmftest_lot_062226"   # L5 (sour cream, no COA)
+LOT_6141="cmftest_lot_6141"       # L6 (willamette, code path)
+
+d1_exec_cmd() { npx wrangler d1 execute "$DB" --command="$1"; }
+d1_exec_file() { npx wrangler d1 execute "$DB" --file="$1"; }
+
+# ----------------------------- RESET ---------------------------------------
+if [ "$RESET" = "1" ]; then
+  echo "Target: LOCAL D1 ($DB)"
+  echo "This DELETES tenant '$TENANT_ID' and ALL of its child rows."
+  if [ "$ASSUME_YES" != "1" ]; then
+    read -r -p "Proceed? [y/N] " ans
+    [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Aborted."; exit 1; }
+  fi
+  RESET_SQL=$(mktemp)
+  trap 'rm -f "$RESET_SQL"' EXIT
+  # Children-first deletion order. FK enforcement is ON when the dev server
+  # shares this local D1, and a per-statement `PRAGMA foreign_keys=OFF` does NOT
+  # persist across D1 statements — so every referencing row must be removed
+  # before its parent. The approve + login flows write audit_log / sessions /
+  # product_suppliers / extraction_examples / reviewer_* / search_reindex_jobs
+  # rows that reference this tenant or its admin; all are cleared here so the
+  # seed → verify loop is cleanly re-runnable.
+  cat > "$RESET_SQL" <<SQL
+DELETE FROM search_reindex_jobs WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM lot_match_suggestions WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE tenant_id = '${TENANT_ID}');
+DELETE FROM orders WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM document_lots WHERE lot_id IN (SELECT id FROM lots WHERE tenant_id = '${TENANT_ID}');
+DELETE FROM document_lots WHERE document_id IN (SELECT id FROM documents WHERE tenant_id = '${TENANT_ID}');
+DELETE FROM lots WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM supplier_product_map WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM product_suppliers WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM document_products WHERE document_id IN (SELECT id FROM documents WHERE tenant_id = '${TENANT_ID}');
+DELETE FROM document_versions WHERE document_id IN (SELECT id FROM documents WHERE tenant_id = '${TENANT_ID}');
+DELETE FROM documents WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM reviewer_field_picks WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM reviewer_field_dismissals WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM reviewer_table_edits WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM extraction_examples WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM extraction_templates WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM supplier_extraction_instructions WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM processing_queue WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM products WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM document_types WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM suppliers WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM audit_log WHERE tenant_id = '${TENANT_ID}' OR user_id = '${ADMIN_ID}';
+DELETE FROM sessions WHERE user_id = '${ADMIN_ID}';
+DELETE FROM users WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM tenants WHERE id = '${TENANT_ID}';
+SQL
+  d1_exec_file "$RESET_SQL"
+  echo "Reset complete: tenant '$TENANT_ID' and child rows removed."
+  exit 0
+fi
+
+# ----------------------------- SEED ----------------------------------------
+echo "Target: LOCAL D1 ($DB)"
+echo "Seeding CMF bridge test fixture (tenant '$TENANT_ID')."
+if [ "$ASSUME_YES" != "1" ]; then
+  read -r -p "Proceed? [y/N] " ans
+  [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Aborted."; exit 1; }
+fi
+
+# PBKDF2 hash (format hex(salt):hex(derived)) — matches functions/lib/auth.ts.
+ADMIN_PASSWORD_HASH=$(PW="$ADMIN_PASSWORD" node -e "
+  const crypto = require('crypto');
+  const salt = crypto.randomBytes(16);
+  const derived = crypto.pbkdf2Sync(process.env.PW, salt, 100000, 32, 'sha256');
+  console.log(salt.toString('hex') + ':' + derived.toString('hex'));
+")
+
+# ai_records payload (one COA record). Shape per shared/types.ts parseCoaRecords:
+# object with record_cardinality + records[]; each record has `fields`
+# (product_name + lot_code) and source_pages. Built with node for valid JSON and
+# safe single-quote escaping for SQL.
+build_records() {
+  PRODUCT="$1" LOT="$2" SUPPLIER="$3" node -e "
+    const payload = {
+      record_cardinality: 'single',
+      record_key_basis: 'lot',
+      page_metadata: { supplier_name: process.env.SUPPLIER },
+      records: [
+        {
+          record_index: 0,
+          fields: {
+            product_name: process.env.PRODUCT,
+            lot_code: process.env.LOT,
+            lot_number: process.env.LOT,
+          },
+          source_pages: [1],
+          _confidence: 0.95,
+        },
+      ],
+    };
+    process.stdout.write(JSON.stringify(payload).replace(/'/g, \"''\"));
+  "
+}
+
+AIR_WHOLE=$(build_records "Milk - Whole" "061626WHO" "Country Morning Farms")
+AIR_HH=$(build_records "Half-and-Half" "061626HAH" "Country Morning Farms")
+AIR_WHIP=$(build_records "Cream - Heavy Whipping 40%" "060926WHC" "Country Morning Farms")
+AIR_BUTTERMILK=$(build_records "Buttermilk - 1%" "061226BUO" "Country Morning Farms")
+AIR_LIGHT=$(build_records "Cream - Light 23%" "LC3-2026" "Country Morning Farms")
+# Willamette: COA title carries the (1167) distributor-code prefix; product name
+# is the manufacturer language. The title is what classifyMatch reads.
+AIR_WILL=$(PRODUCT="WILL CAGE FREE WHOLE LIQ" LOT="6141" node -e "
+  const payload = {
+    record_cardinality: 'single',
+    record_key_basis: 'lot',
+    page_metadata: { supplier_name: 'Willamette Egg Farms',
+                     title: '(1167) WILL CAGE FREE WHOLE LIQ LOT 6141' },
+    records: [
+      {
+        record_index: 0,
+        fields: {
+          title: '(1167) WILL CAGE FREE WHOLE LIQ LOT 6141',
+          product_name: process.env.PRODUCT,
+          lot_code: process.env.LOT,
+          lot_number: process.env.LOT,
+        },
+        source_pages: [1],
+        _confidence: 0.95,
+      },
+    ],
+  };
+  process.stdout.write(JSON.stringify(payload).replace(/'/g, \"''\"));
+")
+
+SEED_SQL=$(mktemp)
+trap 'rm -f "$SEED_SQL"' EXIT
+
+cat > "$SEED_SQL" <<SQL
+-- ---- Tenant ----
+INSERT INTO tenants (id, name, slug, description)
+VALUES ('${TENANT_ID}', 'CMF Bridge Test', '${TENANT_SLUG}', 'lot_scheme + product-map bridge test fixture')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, description=excluded.description;
+
+-- ---- Admin (super_admin so it can hit /api/admin/rematch-lots for any tenant) ----
+INSERT INTO users (id, email, password_hash, name, role, tenant_id)
+VALUES ('${ADMIN_ID}', '${ADMIN_EMAIL}', '${ADMIN_PASSWORD_HASH}', 'CMF Test Admin', 'super_admin', '${TENANT_ID}')
+ON CONFLICT(id) DO UPDATE SET
+  email=excluded.email, password_hash=excluded.password_hash, name=excluded.name,
+  role=excluded.role, tenant_id=excluded.tenant_id;
+
+-- ---- Suppliers ----
+-- CMF: date_code scheme (strips MMDDYY+alpha COA lots to the bare date).
+-- Willamette: 'auto' (no scheme transform); matches on the (NNNN) title code.
+INSERT INTO suppliers (id, tenant_id, name, slug, lot_scheme) VALUES
+  ('${SUP_CMF}',  '${TENANT_ID}', 'Country Morning Farms', 'country-morning-farms', 'date_code'),
+  ('${SUP_WILL}', '${TENANT_ID}', 'Willamette Egg Farms',  'willamette-egg-farms',  'auto')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, lot_scheme=excluded.lot_scheme;
+
+-- ---- COA document type ----
+INSERT INTO document_types (id, tenant_id, name, slug, description)
+VALUES ('${DT_ID}', '${TENANT_ID}', 'Certificate of Analysis', 'coa', 'COA')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug;
+
+-- ---- CMF (supplier-scoped) products — names match the COA records ----
+INSERT INTO products (id, tenant_id, name, slug, supplier_id) VALUES
+  ('${PROD_CMF_WHOLE}',      '${TENANT_ID}', 'Milk - Whole', 'milk-whole', '${SUP_CMF}'),
+  ('${PROD_CMF_HH}',         '${TENANT_ID}', 'Half-and-Half', 'half-and-half', '${SUP_CMF}'),
+  ('${PROD_CMF_WHIP}',       '${TENANT_ID}', 'Cream - Heavy Whipping 40%', 'cream-heavy-whipping-40', '${SUP_CMF}'),
+  ('${PROD_CMF_BUTTERMILK}', '${TENANT_ID}', 'Buttermilk - 1%', 'buttermilk-1', '${SUP_CMF}'),
+  ('${PROD_CMF_LIGHT}',      '${TENANT_ID}', 'Cream - Light 23%', 'cream-light-23', '${SUP_CMF}'),
+  ('${PROD_WILL}',           '${TENANT_ID}', 'WILL CAGE FREE WHOLE LIQ', 'will-cage-free-whole-liq', '${SUP_WILL}')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, supplier_id=excluded.supplier_id;
+
+-- ---- Order-SKU products (supplier_id NULL — the order/WMS side) ----
+-- NOTE: 0417 and 30417 BOTH point at PROD_SKU_WHOLE (one product, two SKUs),
+-- mirroring prod's collapse. The order_items carry the differing product_code.
+INSERT INTO products (id, tenant_id, name, slug, supplier_id) VALUES
+  ('${PROD_SKU_WHOLE}', '${TENANT_ID}', 'MS WHOLE 5 GL BAG', 'ms-whole-5-gl-bag', NULL),
+  ('${PROD_SKU_HH}',    '${TENANT_ID}', 'H&H 5 GL DISP', 'hh-5-gl-disp', NULL),
+  ('${PROD_SKU_WHIP}',  '${TENANT_ID}', 'WHIP 5 GL BAG', 'whip-5-gl-bag', NULL),
+  ('${PROD_SKU_SOUR}',  '${TENANT_ID}', 'MS NATURAL SOUR CREAM', 'ms-natural-sour-cream', NULL),
+  ('${PROD_SKU_WILL}',  '${TENANT_ID}', 'WILL CAGE FREE WHOLE LIQ', 'will-cage-free-whole-liq-order', NULL)
+ON CONFLICT(id) DO UPDATE SET name=excluded.name;
+
+-- ---- COA queue items (needs-review) ----
+-- status=pending + processing_status=ready -> appears in the review list.
+-- output_kind=coa + valid ai_records -> records-shaped COA approve path.
+-- supplier_id set so approve resolves lot_scheme from the supplier row.
+INSERT INTO processing_queue
+  (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type,
+   status, processing_status, output_kind, origin_kind, supplier, supplier_id,
+   product_names, ai_records, created_by)
+VALUES
+  ('${Q_WHOLE}', '${TENANT_ID}', '${DT_ID}',
+   'pending/${TENANT_SLUG}/${Q_WHOLE}/coa-whole.pdf', 'coa-whole.pdf', 1024, 'application/pdf',
+   'pending', 'ready', 'coa', 'supplier', 'Country Morning Farms', '${SUP_CMF}',
+   'Milk - Whole', '${AIR_WHOLE}', '${ADMIN_ID}'),
+  ('${Q_HH}', '${TENANT_ID}', '${DT_ID}',
+   'pending/${TENANT_SLUG}/${Q_HH}/coa-hh.pdf', 'coa-hh.pdf', 1024, 'application/pdf',
+   'pending', 'ready', 'coa', 'supplier', 'Country Morning Farms', '${SUP_CMF}',
+   'Half-and-Half', '${AIR_HH}', '${ADMIN_ID}'),
+  ('${Q_WHIP}', '${TENANT_ID}', '${DT_ID}',
+   'pending/${TENANT_SLUG}/${Q_WHIP}/coa-whip.pdf', 'coa-whip.pdf', 1024, 'application/pdf',
+   'pending', 'ready', 'coa', 'supplier', 'Country Morning Farms', '${SUP_CMF}',
+   'Cream - Heavy Whipping 40%', '${AIR_WHIP}', '${ADMIN_ID}'),
+  ('${Q_BUTTERMILK}', '${TENANT_ID}', '${DT_ID}',
+   'pending/${TENANT_SLUG}/${Q_BUTTERMILK}/coa-buttermilk.pdf', 'coa-buttermilk.pdf', 1024, 'application/pdf',
+   'pending', 'ready', 'coa', 'supplier', 'Country Morning Farms', '${SUP_CMF}',
+   'Buttermilk - 1%', '${AIR_BUTTERMILK}', '${ADMIN_ID}'),
+  ('${Q_LIGHT}', '${TENANT_ID}', '${DT_ID}',
+   'pending/${TENANT_SLUG}/${Q_LIGHT}/coa-light.pdf', 'coa-light.pdf', 1024, 'application/pdf',
+   'pending', 'ready', 'coa', 'supplier', 'Country Morning Farms', '${SUP_CMF}',
+   'Cream - Light 23%', '${AIR_LIGHT}', '${ADMIN_ID}'),
+  ('${Q_WILL}', '${TENANT_ID}', '${DT_ID}',
+   'pending/${TENANT_SLUG}/${Q_WILL}/coa-will.pdf', 'coa-will.pdf', 1024, 'application/pdf',
+   'pending', 'ready', 'coa', 'supplier', 'Willamette Egg Farms', '${SUP_WILL}',
+   'WILL CAGE FREE WHOLE LIQ', '${AIR_WILL}', '${ADMIN_ID}')
+ON CONFLICT(id) DO UPDATE SET
+  ai_records=excluded.ai_records, status=excluded.status,
+  processing_status=excluded.processing_status, output_kind=excluded.output_kind,
+  supplier=excluded.supplier, supplier_id=excluded.supplier_id,
+  product_names=excluded.product_names;
+
+-- ---- Order-side lots (the keys the COA approve will produce after stripping).
+--      sub_lot_code='' (main-lot-only). ----
+INSERT INTO lots (id, tenant_id, supplier_id, product_id, lot_number, lot_key, sub_lot_code, first_seen_source)
+VALUES
+  ('${LOT_061626}', '${TENANT_ID}', '${SUP_CMF}',  '${PROD_SKU_WHOLE}', '061626', '061626', '', 'order'),
+  ('${LOT_060926}', '${TENANT_ID}', '${SUP_CMF}',  '${PROD_SKU_WHIP}',  '060926', '060926', '', 'order'),
+  ('${LOT_062226}', '${TENANT_ID}', '${SUP_CMF}',  '${PROD_SKU_SOUR}',  '062226', '062226', '', 'order'),
+  ('${LOT_6141}',   '${TENANT_ID}', '${SUP_WILL}', '${PROD_SKU_WILL}',  '6141',   '6141',   '', 'order')
+ON CONFLICT(id) DO UPDATE SET lot_key=excluded.lot_key, lot_number=excluded.lot_number;
+
+-- ---- Order TEST-1 ----
+INSERT INTO orders (id, tenant_id, order_number, status)
+VALUES ('${ORDER_ID}', '${TENANT_ID}', 'TEST-1', 'pending')
+ON CONFLICT(id) DO UPDATE SET order_number=excluded.order_number;
+
+-- ---- Order items (all coa_match_status='unmatched'; each lot-bound so the
+--      rematcher picks them up). The COA side uses a DIFFERENT product (CMF
+--      supplier-scoped) so the ONLY strong-link path for CMF lines is the taught
+--      supplier_product_map bridge. Willamette (L6) strong-links on the (1167)
+--      title code with NO map. L5 has NO COA on file -> stays unmatched (a real
+--      collectible gap, not a failure). ----
+INSERT INTO order_items
+  (id, order_id, product_id, product_name, product_code, lot_number, lot_id, coa_match_status)
+VALUES
+  ('${OI_L1}', '${ORDER_ID}', '${PROD_SKU_WHOLE}', 'MS WHOLE 5 GL BAG',     '0417',  '061626', '${LOT_061626}', 'unmatched'),
+  ('${OI_L2}', '${ORDER_ID}', '${PROD_SKU_WHOLE}', 'MS WHOLE 5 GL BAG',     '30417', '061626', '${LOT_061626}', 'unmatched'),
+  ('${OI_L3}', '${ORDER_ID}', '${PROD_SKU_HH}',    'H&H 5 GL DISP',         '0708',  '061626', '${LOT_061626}', 'unmatched'),
+  ('${OI_L4}', '${ORDER_ID}', '${PROD_SKU_WHIP}',  'WHIP 5 GL BAG',         '0801',  '060926', '${LOT_060926}', 'unmatched'),
+  ('${OI_L5}', '${ORDER_ID}', '${PROD_SKU_SOUR}',  'MS NATURAL SOUR CREAM', '0829',  '062226', '${LOT_062226}', 'unmatched'),
+  ('${OI_L6}', '${ORDER_ID}', '${PROD_SKU_WILL}',  'WILL CAGE FREE WHOLE LIQ', '1167', '6141', '${LOT_6141}',   'unmatched')
+ON CONFLICT(id) DO UPDATE SET
+  product_id=excluded.product_id, product_name=excluded.product_name,
+  product_code=excluded.product_code, lot_number=excluded.lot_number,
+  lot_id=excluded.lot_id, coa_match_status=excluded.coa_match_status,
+  coa_document_id=NULL, match_confidence=NULL, coa_matched_at=NULL;
+SQL
+
+d1_exec_file "$SEED_SQL"
+
+# ---- Put a tiny placeholder PDF into LOCAL R2 at each queue item's key so the
+#      COA approve step can download it. extractRecordPdf falls back to the whole
+#      binary (scoped=false) if pdf-lib can't parse it, so a minimal PDF is fine
+#      and never blocks approve. ----
+PDF_TMP=$(mktemp --suffix=.pdf)
+trap 'rm -f "$SEED_SQL" "$PDF_TMP"' EXIT
+printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\nxref\n0 4\n0000000000 65535 f \ntrailer<</Root 1 0 R/Size 4>>\nstartxref\n0\n%%%%EOF\n' > "$PDF_TMP"
+
+for KEY in \
+  "pending/${TENANT_SLUG}/${Q_WHOLE}/coa-whole.pdf" \
+  "pending/${TENANT_SLUG}/${Q_HH}/coa-hh.pdf" \
+  "pending/${TENANT_SLUG}/${Q_WHIP}/coa-whip.pdf" \
+  "pending/${TENANT_SLUG}/${Q_BUTTERMILK}/coa-buttermilk.pdf" \
+  "pending/${TENANT_SLUG}/${Q_LIGHT}/coa-light.pdf" \
+  "pending/${TENANT_SLUG}/${Q_WILL}/coa-will.pdf"; do
+  npx wrangler r2 object put "${R2_BUCKET}/${KEY}" --file="$PDF_TMP" --content-type="application/pdf" --local >/dev/null
+done
+
+echo ""
+echo "Seed complete."
+echo "  Login:    ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}  (super_admin)"
+echo "  Tenant:   ${TENANT_ID}  (CMF Bridge Test)"
+echo "  COA queue (6): C1 whole, C2 h&h, C3 whip, C4 buttermilk(no order),"
+echo "                 C5 light(non-date lot), C6 willamette(code path)."
+echo "  Order TEST-1 (6 lines): L1 0417, L2 30417, L3 0708, L4 0801,"
+echo "                 L5 0829(no COA), L6 1167(code path)."
+echo ""
+echo "Run the headless verifier:  ./bin/verify-cmf-bridge"

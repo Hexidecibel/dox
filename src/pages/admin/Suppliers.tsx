@@ -36,6 +36,7 @@ import {
   CheckCircle as ActiveIcon,
   Close as CloseIcon,
   Search as SearchIcon,
+  MergeType as MergeIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type { ApiSupplier } from '../../lib/types';
@@ -45,6 +46,7 @@ import { HelpWell } from '../../components/HelpWell';
 import { InfoTooltip } from '../../components/InfoTooltip';
 import { EmptyState } from '../../components/EmptyState';
 import { SupplierDuplicatesPanel } from '../../components/SupplierDuplicatesPanel';
+import { SupplierManualMergeDialog } from '../../components/SupplierManualMergeDialog';
 import { helpContent } from '../../lib/helpContent';
 
 const ITEMS_PER_PAGE = 20;
@@ -66,6 +68,9 @@ export function Suppliers() {
 
   // Bump to force the duplicates panel to re-fetch after a supplier change.
   const [duplicatesKey, setDuplicatesKey] = useState(0);
+
+  // Manual "merge any two suppliers" dialog.
+  const [manualMergeOpen, setManualMergeOpen] = useState(false);
 
   // Dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -193,9 +198,20 @@ export function Suppliers() {
         <Typography variant="h4" fontWeight={700}>
           Suppliers
         </Typography>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={openCreate}>
-          Add Supplier
-        </Button>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+          {isAdmin && (
+            <Button
+              variant="outlined"
+              startIcon={<MergeIcon />}
+              onClick={() => setManualMergeOpen(true)}
+            >
+              Merge suppliers…
+            </Button>
+          )}
+          <Button variant="contained" startIcon={<AddIcon />} onClick={openCreate}>
+            Add Supplier
+          </Button>
+        </Box>
       </Box>
 
       <HelpWell id="suppliers.list" title={helpContent.suppliers.list?.headline ?? 'Suppliers'}>
@@ -207,6 +223,17 @@ export function Suppliers() {
           {error}
         </Alert>
       )}
+
+      <SupplierManualMergeDialog
+        open={manualMergeOpen}
+        onClose={() => setManualMergeOpen(false)}
+        tenantId={tenantId}
+        canMerge={isAdmin}
+        onMerged={() => {
+          loadSuppliers();
+          setDuplicatesKey((k) => k + 1);
+        }}
+      />
 
       <SupplierDuplicatesPanel
         key={duplicatesKey}

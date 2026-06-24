@@ -40,9 +40,58 @@ combined → exact) — migration + FTS reindex.
 skip ~11 R2-404s). **Clone-rehearse: YES** — new `bin/clone-org` copies a prod org → test
 tenant; rehearse Option B + reprocess there before prod.
 
-**STATUS 2026-06-11: core built + committed on branch `feat/coa-sublot-split`
-(commit `2ec5542`). Build clean; 141 tests passing (coa/queue/lots/search). NOT deployed,
-migrations 0073/0074 NOT applied to any D1.** Done in that commit:
+**STATUS 2026-06-11 (pm): SHIPPED TO PROD.** Merged to `master` (`3ec395f`, pushed to
+origin). Migrations **0073 + 0074 applied surgically to prod D1 + stamped** (direct
+`wrangler d1 execute` + INSERT into `_migrations` — NOT bulk migrate; prod still has the
+untracked 0059–0067 gap, left as-is). FTS verified healthy post-rebuild (470 rows, lot
+search `lot_text:6141` → 3 COAs). **Pages deployed `ad49beb2`** (supdox.com). Option B is
+LIVE. Worker unchanged (still `COA_RECORDS_MODE=shadow`, already emitting ai_records for
+multi-record COAs — the deployed Pages dispatch picks those up, so multi-record COAs now
+route to the new per-sublot tile + produceCoaRecords on approve).
+
+**WMS premise: CONFIRMED by user** (Darigold/LIMS = combined lot + 2-digit sublot). Reason
+prod shows zero combined-lot order lines: no Darigold orders have flowed yet (corpus orders
+were Medosweet/Willamette w/ date-code or short lots — see `~/drops/dox-linkage/GROUND_TRUTH.md`).
+
+**VALIDATED 2026-06-11 pm (throwaway prod tenant, since cleaned up):** the deployed
+producer/Pages half is CORRECT on real prod — per-sublot docs, combined lot_keys
+(`1042601017` etc.), composite lot identity, real page-scoped 1-page PDFs (59KB vs 79KB
+7-page original). BUT found the worker (q4) does NOT emit sublot grain — it page-splits but
+leaves `sub_lot_code=null` (sublots stuck in result-table columns).
+
+**BAKE-OFF 2026-06-11 pm — Q4 vs Q8 RESOLVES THE GAP (PASS):** on EDI169211 p5 (butter
+310347, 4 lot/sublot combos): OLD 4090 **Q4** (`UD-Q4_K_M`) → 0 records, sublots trapped in
+column headers (the bug). NEW Mac **Q8** (`UD-Q8_K_XL`) → **4 per-sublot records**,
+`sub_lot_code` 18/17/15/10, `record_cardinality=multi_lot`, `record_key_basis=lot+sublot`.
+Quant bump ALONE fixes it, no prompt change needed. Q8 field naming (`sub_lot_number`/
+`lot_number`) already aliased by `bin/lib/coaRecords.js`. **Live router cut over to Mac/Q8**,
+so the worker now emits sublot grain in prod → Option B auto-works end-to-end.
+- **CAVEAT (act on):** Q8 ~9x slower (99s vs 10s/page) + verbose (echoes test table per
+  record) → worker COA `max_tokens:4096` can CLIP a many-sublot page mid-`records`. FIX:
+  bump COA max_tokens (and/or stop echoing the table per record). Small worker change, do
+  before heavy reliance.
+- **REAL MATCH DEMO PENDING:** buddy's two flat (q4) Darigold COAs in prod tenant
+  1f03c3e7 (`2235 - 1042611009.pdf`, `2235 - 1042611014 & 1042611012 & 1042611013.pdf`,
+  supplier "Darigold, Inc.") cover order 1797062's sublots 09+13. Reprocess them under Q8
+  (`bin/reprocess-multisublot`) → per-sublot docs → should auto-match order 1797062 per
+  sublot via combined lot_key. That's the real end-to-end match proof. (WMS premise CONFIRMED
+  on real data: audit #9 order 1797062 lots `1042611009`/`1042611013`.)
+
+**OPEN FOLLOW-UPS:**
+- **LIMS lot-scheme generalization (user-raised):** combined lot+sublot is a LIMS-standard
+  format (common across suppliers), not Darigold-specific. Plan: per-supplier `lot_scheme`
+  field (auto|lims_combined|date_code|plain; lims_combined carries sublot_digits=2/separator
+  defaults) on the supplier/extraction-profile, auto-detect by pattern as pre-fill, supplier
+  config pins it. Current combine rule is HARDCODED (mainlot+2-digit) — correct for Darigold,
+  harmless for non-sublot suppliers (combine only fires when sublots extracted). DECISION
+  PENDING: build now vs backlog.
+- `rematch-lots` after real Darigold COAs/orders land (relink combined-key lines).
+- bin/clone-org --prod-insert still not exercised (the e2e agent uses a fresh test tenant).
+- Deferred minor: NL search (natural.ts) lot-aware; Lots-page search separator normalize;
+  legacy isMultiProduct() retirement; clone-org R2 copy-vs-reuse.
+
+Originally built + committed on branch `feat/coa-sublot-split` (`2ec5542`); build clean,
+141 tests passing (coa/queue/lots/search). That commit:
 - (1) FOUNDATION: migration **0073** (`sub_lot_code` on lots, composite identity, `''`
   sentinel), `produceCoaRecords` (`external_ref=queue-{id}-{lot_key}`),
   `handleCoaRecordsApprove` (partial per-record approve/hold/reject), entities/lots+matching.
@@ -55,6 +104,60 @@ migrations 0073/0074 NOT applied to any D1.** Done in that commit:
 **IN PROGRESS (bg agent 2026-06-11):** page-scoped per-record PDF in `produceCoaRecords`
 (currently whole-binary w/ P4 TODO) — extract `record.source_pages` via **pdf-lib** at
 approve time, fallbacks for non-PDF/missing pages. Last code piece.
+
+## 2026-06-12 (pm) COA GRADING PASS + Q8 WENT OFFLINE — report at ~/drops/dox-wms/COA_GRADING_REPORT.md
+
+Graded all 19 COA rows in test tenant `a2bc46e6` vs source ground truth.
+- **Q8 (mac-mini) went OFFLINE mid-pass (verified: endpoint times out).** Router failed over
+  to **Q4** (`UD-Q4_K_M` on buddy/windows); live worker now on Q4. So the grading reflects
+  **Q4 + the fixed prompt**, NOT Q8.
+- **Prompt is CORRECT + instructions decisively load-bearing** (A/B, same model/seed): FULL
+  prompt → 3 per-sublot records (14/13/12) even on Q4; MINIMAL (no tenant ctx / no Darigold
+  instructions) → 0 records, sublots trapped as table headers. So per-supplier transposed-
+  matrix instruction is what breaks the matrix. Single-page transposed COAs extract perfectly
+  even on Q4. The first-match doc (2235) graded PASS.
+- **Grades:** PASS 4 · SINGLE-OK 2(+1*) · PARTIAL-sub 6 (all lots present, single-sublot
+  pages dropped `sub_lot_code` → lot_key would be bare main-lot) · PARTIAL 3 (whole-lot drops)
+  · FAIL 2 (Andersen) · ERROR 1. Re-queue on Q4 did NOT fix drops (one regressed to a 502).
+- **HONEST NUANCE (vs agent's "restore Q8 = the fix"):** that's an UNPROVEN hypothesis — Q8
+  was offline so the multi-page bundle drops were never tested on Q8. At least two failure
+  layouts are PROMPT-COVERAGE GAPS regardless of quant: (a) Andersen single-page inline
+  `lot exp lot exp lot exp` triple → needs an Andersen instructions row OR a BASE rule; (b)
+  "one product, TWO distinct main lots sharing a sublot column" (the 310202 pages of
+  EDI169211/EDI175738) → records prompt drops the 2nd lot. Also: single-sublot pages losing
+  `sub_lot_code` (PARTIAL-sub) is a recall nudge worth a prompt tweak.
+- **Data hygiene:** 2 duplicate uploads (EDI169211, 2235-1042611009), 1 non-COA order-summary
+  mis-filed in the COA queue.
+- **NEXT (deferred, user reviewing):** 1) restore mac-mini Q8 (AJ's box — user/AJ must wake;
+  I can't SSH it) then re-grade the droppers on Q8 to separate quant-vs-prompt; 2) prompt
+  fixes for the 2 uncovered layouts + the single-sublot-code drop (independent of Q8);
+  3) clean dupes/mis-filed. No code changed this pass — graded only.
+
+## 2026-06-12 FIRST REAL PER-SUBLOT MATCH LANDED (full flow, test tenant)
+
+Order **1797062** line **`1042611013`** → MATCHED to its own sublot-13 COA (doc 9b265226),
+end-to-end on real data, in test tenant `a2bc46e6` ("Q8 Darigold Review", login
+`q8@q8.q8`/`q8`). Line `1042611009` correctly unmatched (no COA — file gone). What it took
+(all shipped + deployed to prod):
+1. **Q8 (UD-Q8_K_XL on Mac)** via router — replaces q4 turbo. Fixes per-sublot recall.
+2. **Worker prompt fix** (`cb6149c`): taught the TRANSPOSED sublot-COLUMN layout (a
+   "Sub Lot Number 14 13 12" row + per-column test values → one record per column) +
+   tightened the "omit records" caveat (multi-sublot-same-lot must NOT flatten). Without
+   this, q4 AND q8 collapsed the matrix to one flat record. COA max_tokens 4096→16384.
+3. **Producer fix** (`9973ec9`, deployed): `produceCoaRecords` now computes lot_key from
+   `mergedFields` (page_metadata ∪ record.fields), not record.fields — lot_code is hoisted
+   to page_metadata, so reading record.fields dropped the lot → null lot_key → no lots row.
+4. Match path: COA approve → `linkCoaToOrders` → lot match → **lot_only suggestion** (conf
+   0.5) → accepted via `POST /api/lot-matches/:id {action:accept}` → order line matched.
+
+**OPEN — auto-confirm gap (next):** the match was lot_only/WEAK (needed human accept) because
+the COA doc TITLE has no `(NNNN)` distributor-code prefix → `classifyMatch` can't strong-link
+(needs order product_code `2235` === COA title `(2235)`). The distributor code lives only in
+the FILENAME ("2235 - ..."), not the COA body. FIX for hands-off strong matching:
+`produceCoaRecords` should derive the distributor code (from filename / source) into the doc
+title as `(NNNN) ...`. Then lot+code → strong auto-confirm, no manual accept. Also: `rematch-lots`
+only processes `lot_id`-bound order_items; raw-lot_number lines rely on the COA-side
+`linkCoaToOrders` at approve (worked here).
 
 **REMAINING after page-scoping (deploy/validation sequence):**
 - a. Apply 0073+0074 surgically (check prod `_migrations` first — chain not re-runnable;
