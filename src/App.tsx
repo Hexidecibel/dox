@@ -40,6 +40,7 @@ import { Orders } from './pages/Orders';
 import { OrderDetail } from './pages/OrderDetail';
 import { Lots } from './pages/Lots';
 import { Reports } from './pages/Reports';
+import { Expirations } from './pages/Expirations';
 import { Activity } from './pages/Activity';
 import { Sheets } from './pages/records/Sheets';
 import { SheetDetail } from './pages/records/SheetDetail';
@@ -111,6 +112,7 @@ function App() {
               <Route path="/lots" element={<Lots />} />
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin', 'user']} />}>
                 <Route path="/reports" element={<Reports />} />
+                <Route path="/expirations" element={<Expirations />} />
               </Route>
               <Route path="/records" element={<Sheets />} />
               <Route path="/records/:sheetId" element={<SheetDetail />} />

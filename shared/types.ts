@@ -3217,6 +3217,55 @@ export interface CoaFulfillmentResponse {
   summary: CoaFulfillmentSummary;
 }
 
+// === Renewal engine (Phase 4 — IDP Document Registry) ===
+// RenewalType is defined above (registry document fields).
+
+/** Computed renewal status for a document, against a look-ahead window. */
+export type ExpirationStatus =
+  | 'current'
+  | 'expiring'
+  | 'expired'
+  | 'overdue'
+  | 'stale';
+
+/** One classified registry document in GET /api/expirations. */
+export interface ExpirationRow {
+  id: string;
+  title: string;
+  primary_category_name: string | null;
+  owner: string | null;
+  /** Bucketed renewal_type; 'unknown' for rows with a bare expiry + no type. */
+  renewal_type: RenewalType | 'unknown';
+  /** Resolved canonical next-action date (YYYY-MM-DD). */
+  renewal_due_date: string | null;
+  status: ExpirationStatus;
+  /** Whole days from as_of to the due date; negative = past. */
+  days_until: number | null;
+}
+
+export interface ExpirationSummary {
+  total: number;
+  by_status: Record<ExpirationStatus, number>;
+  by_renewal_type: Record<RenewalType | 'unknown', number>;
+  /** Count of rows in the alert set (expiring + expired + overdue). */
+  alerting: number;
+}
+
+export interface ExpirationListResponse {
+  rows: ExpirationRow[];
+  summary: ExpirationSummary;
+  window_days: number;
+  as_of: string;
+}
+
+export interface ExpirationNotifyResponse {
+  sent: boolean;
+  recipients: string[];
+  document_count: number;
+  /** Present when nothing was sent: no_documents | no_recipients | email_not_configured. */
+  reason?: 'no_documents' | 'no_recipients' | 'email_not_configured';
+}
+
 // === Review Queue v2: weak COA→lot match suggestions ===
 
 /**

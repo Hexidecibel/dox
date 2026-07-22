@@ -69,6 +69,8 @@ import type {
   LotListResponse,
   LotDetail,
   CoaFulfillmentResponse,
+  ExpirationListResponse,
+  ExpirationNotifyResponse,
   LotMatchListResponse,
   CoaRecordsPayload,
   CoaRecordDecision,
@@ -1092,6 +1094,46 @@ export const api = {
       if (params?.offset !== undefined) query.set('offset', String(params.offset));
       const qs = query.toString();
       return fetchApi<CoaFulfillmentResponse>(`/reports/coa-fulfillment${qs ? `?${qs}` : ''}`);
+    },
+  },
+
+  expirations: {
+    /**
+     * GET /api/expirations
+     * Renewal dashboard feed: active registry docs with a resolvable
+     * next-action date, classified into a renewal_type-aware status.
+     */
+    list: (params?: {
+      tenantId?: string;
+      windowDays?: number;
+      asOf?: string;
+    }): Promise<ExpirationListResponse> => {
+      const query = new URLSearchParams();
+      if (params?.tenantId) query.set('tenant_id', params.tenantId);
+      if (params?.windowDays !== undefined) query.set('window_days', String(params.windowDays));
+      if (params?.asOf) query.set('as_of', params.asOf);
+      const qs = query.toString();
+      return fetchApi<ExpirationListResponse>(`/expirations${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * POST /api/expirations/notify
+     * Sends ONE summary alert email to org_admins + super_admins for the
+     * expiring/expired/overdue set. Returns the send result.
+     */
+    notify: (params?: {
+      tenantId?: string;
+      windowDays?: number;
+      asOf?: string;
+    }): Promise<ExpirationNotifyResponse> => {
+      return fetchApi<ExpirationNotifyResponse>(`/expirations/notify`, {
+        method: 'POST',
+        body: JSON.stringify({
+          tenant_id: params?.tenantId,
+          window_days: params?.windowDays,
+          as_of: params?.asOf,
+        }),
+      });
     },
   },
 

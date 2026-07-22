@@ -1,5 +1,8 @@
+import type { ExpirationRow, ExpirationStatus } from './expirations';
+
 interface SendEmailOptions {
-  to: string;
+  /** A single address or a list — a list sends one email to all recipients. */
+  to: string | string[];
   subject: string;
   html: string;
 }
@@ -14,7 +17,7 @@ export async function sendEmail(apiKey: string, options: SendEmailOptions): Prom
       },
       body: JSON.stringify({
         from: 'SupDox <noreply@supdox.com>',
-        to: [options.to],
+        to: Array.isArray(options.to) ? options.to : [options.to],
         subject: options.subject,
         html: options.html,
       }),
@@ -387,6 +390,110 @@ export function buildAdminResetEmail(params: {
 </html>`;
 
   return { subject, html };
+}
+
+/**
+ * Build the renewal-alert summary email (Phase-4 renewal engine). Lists each
+ * expiring/expired/overdue registry document with its due date, owner, category
+ * and status. Matches the visual style of the other builders. Returns a plain-
+ * text alternative alongside the HTML.
+ */
+export function buildRenewalAlertEmail(
+  docs: ExpirationRow[],
+  tenantName: string,
+): { subject: string; html: string; text: string } {
+  const count = docs.length;
+  const subject = `SupDox: ${count} document${count === 1 ? '' : 's'} need${count === 1 ? 's' : ''} renewal attention`;
+
+  const statusLabel = (s: ExpirationStatus): string => {
+    switch (s) {
+      case 'expired': return 'Expired';
+      case 'overdue': return 'Overdue';
+      case 'expiring': return 'Expiring soon';
+      case 'stale': return 'Stale';
+      default: return 'Current';
+    }
+  };
+  const statusColor = (s: ExpirationStatus): string => {
+    switch (s) {
+      case 'expired': return '#d32f2f';
+      case 'overdue': return '#d32f2f';
+      case 'expiring': return '#ed6c02';
+      default: return '#666';
+    }
+  };
+  const daysText = (d: number | null): string => {
+    if (d == null) return '';
+    if (d < 0) return `${Math.abs(d)} day${Math.abs(d) === 1 ? '' : 's'} ago`;
+    if (d === 0) return 'today';
+    return `in ${d} day${d === 1 ? '' : 's'}`;
+  };
+
+  const rows = docs.map((d) => {
+    return `<tr>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${escapeHtml(d.title)}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#666;font-size:13px;">${escapeHtml(d.primary_category_name || '—')}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#666;font-size:13px;">${escapeHtml(d.owner || '—')}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${escapeHtml(d.renewal_due_date || '—')}<br><span style="color:#999;font-size:12px;">${escapeHtml(daysText(d.days_until))}</span></td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;font-weight:600;color:${statusColor(d.status)};">${statusLabel(d.status)}</td>
+            </tr>`;
+  }).join('\n');
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr>
+      <td style="background:#1A365D;padding:24px 32px;">
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox</h1>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:32px;">
+        <h2 style="margin:0 0 16px;color:#333;font-size:18px;">Renewal attention needed</h2>
+        <p style="margin:0 0 24px;color:#555;line-height:1.6;">
+          ${count} document${count === 1 ? '' : 's'} for <strong>${escapeHtml(tenantName)}</strong> ${count === 1 ? 'is' : 'are'} expiring, overdue, or already expired. Review and renew as needed.
+        </p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #eee;border-radius:6px;overflow:hidden;margin:0 0 24px;">
+          <tr style="background:#f8f9fa;">
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Document</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Category</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Owner</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Due</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Status</th>
+          </tr>
+          ${rows}
+        </table>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
+        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+          Automated renewal alert from SupDox for ${escapeHtml(tenantName)}.
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  const textLines = docs.map((d) => {
+    const parts = [
+      d.title,
+      d.primary_category_name ? `[${d.primary_category_name}]` : '',
+      d.owner ? `owner: ${d.owner}` : '',
+      `due ${d.renewal_due_date || '—'} (${daysText(d.days_until)})`,
+      statusLabel(d.status).toUpperCase(),
+    ].filter(Boolean);
+    return `- ${parts.join(' · ')}`;
+  });
+  const text = `Renewal attention needed for ${tenantName}\n\n${count} document${count === 1 ? '' : 's'} expiring, overdue, or expired:\n\n${textLines.join('\n')}\n`;
+
+  return { subject, html, text };
 }
 
 export function buildEmailIngestSummaryEmail(params: {
