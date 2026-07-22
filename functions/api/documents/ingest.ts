@@ -11,6 +11,13 @@ import { buildR2Key, uploadFile, computeChecksum } from '../../lib/r2';
 import { sanitizeString } from '../../lib/validation';
 import { extractText } from '../../lib/extract';
 import { attachLotToCoaDocument } from '../../lib/entities/matching';
+import {
+  parseStringArray,
+  validateCategoryIds,
+  resolvePrimaryCategoryId,
+  syncDocumentCategories,
+  isValidRenewalType,
+} from '../../lib/registry';
 import type { Env, User, Document } from '../../lib/types';
 
 const ALLOWED_TYPES = [
@@ -78,21 +85,71 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const codeDate = formData.get('code_date') as string | null;
     const expirationDate = formData.get('expiration_date') as string | null;
     const productIdsRaw = formData.get('product_ids') as string | null;
+    // IDP Document Registry fields (migrations 0076/0077).
+    const categoriesRaw = formData.get('categories') as string | null;
+    const primaryCategoryId = formData.get('primary_category_id') as string | null;
+    const aliasesRaw = formData.get('aliases') as string | null;
+    const criteriaRaw = formData.get('criteria') as string | null;
+    const appliesToRaw = formData.get('applies_to') as string | null;
+    const owner = formData.get('owner') as string | null;
+    const renewalType = formData.get('renewal_type') as string | null;
+    const renewalIntervalMonthsRaw = formData.get('renewal_interval_months') as string | null;
+    const renewalDueDate = formData.get('renewal_due_date') as string | null;
+
+    // external_ref is OPTIONAL on the manual registry path. When the caller
+    // supplies one (e.g. a QFD doc_id) we keep the idempotent upsert; when it
+    // is absent we mint `reg-<random>` so each manual upload creates a new doc.
+    const effectiveExternalRef = externalRef && externalRef.trim()
+      ? externalRef
+      : `reg-${generateId()}`;
 
     partialTenantId = tenantId;
     partialFileName = file?.name ?? null;
-    partialExternalRef = externalRef;
+    partialExternalRef = effectiveExternalRef;
 
     // Validate required fields
     if (!file) {
       throw new BadRequestError('file is required');
     }
-    if (!externalRef) {
-      throw new BadRequestError('external_ref is required');
-    }
     if (!tenantId) {
       throw new BadRequestError('tenant_id is required');
     }
+
+    // Parse + validate registry fields up front.
+    const categoryIds = parseStringArray(categoriesRaw, 'categories');
+    const aliases = parseStringArray(aliasesRaw, 'aliases');
+    const criteria = parseStringArray(criteriaRaw, 'criteria');
+    const appliesTo = parseStringArray(appliesToRaw, 'applies_to');
+
+    if (renewalType && !isValidRenewalType(renewalType)) {
+      throw new BadRequestError(
+        'renewal_type must be one of: renewal_application, hard_expiry, keep_current, review_cycle',
+      );
+    }
+
+    let renewalIntervalMonths: number | null = null;
+    if (renewalIntervalMonthsRaw != null && renewalIntervalMonthsRaw !== '') {
+      const parsed = parseInt(renewalIntervalMonthsRaw, 10);
+      if (Number.isNaN(parsed) || parsed < 0) {
+        throw new BadRequestError('renewal_interval_months must be a non-negative integer');
+      }
+      renewalIntervalMonths = parsed;
+    }
+
+    // The primary category also becomes documents.document_type_id (denormalized
+    // pointer). Fall back to an explicit document_type_id form field when no
+    // categories are given.
+    const primaryCatId = resolvePrimaryCategoryId(categoryIds, primaryCategoryId);
+    const effectiveDocTypeId = primaryCatId || documentTypeId || null;
+
+    // Serialize the JSON-array columns (null when empty so we don't clobber the
+    // '[]' default needlessly on update).
+    const aliasesStr = aliases.length > 0 ? JSON.stringify(aliases) : null;
+    const criteriaStr = criteria.length > 0 ? JSON.stringify(criteria) : null;
+    const appliesToStr = appliesTo.length > 0 ? JSON.stringify(appliesTo) : null;
+    const ownerVal = owner && owner.trim() ? sanitizeString(owner) : null;
+    const renewalTypeVal = renewalType || null;
+    const renewalDueDateVal = renewalDueDate && renewalDueDate.trim() ? renewalDueDate.trim() : null;
 
     // Validate file type
     const mimeType = file.type || 'application/octet-stream';
@@ -176,6 +233,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // Check tenant access
     requireTenantAccess(user, tenantId);
 
+    // Validate registry categories + the standalone document_type_id belong to
+    // this tenant (rejects cross-tenant leakage).
+    await validateCategoryIds(context.env.DB, tenantId, categoryIds);
+    if (documentTypeId) {
+      await validateCategoryIds(context.env.DB, tenantId, [documentTypeId]);
+    }
+
     // Validate product_ids belong to this tenant
     if (productLinks.length > 0) {
       const productIds = productLinks.map(l => l.product_id);
@@ -201,7 +265,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const checksum = await computeChecksum(fileData);
     const extractedText = await extractText(fileData.slice(0), mimeType, fileName);
-    const sanitizedRef = sanitizeString(externalRef);
+    const sanitizedRef = sanitizeString(effectiveExternalRef);
     const sanitizedNotes = changeNotes ? sanitizeString(changeNotes) : null;
     const sanitizedTitle = title ? sanitizeString(title) : fileName.replace(/\.[^/.]+$/, '');
 
@@ -272,9 +336,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         updateFields.push('source_metadata = ?');
         updateBindings.push(sourceMetadata);
       }
-      if (documentTypeId) {
+      if (effectiveDocTypeId) {
         updateFields.push('document_type_id = ?');
-        updateBindings.push(documentTypeId);
+        updateBindings.push(effectiveDocTypeId);
       }
       if (supplierId) {
         updateFields.push('supplier_id = ?');
@@ -288,6 +352,35 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         updateFields.push('extended_metadata = ?');
         updateBindings.push(extendedMetadataStr);
       }
+      // Registry fields — only overwrite when the caller sent the field.
+      if (aliasesRaw != null) {
+        updateFields.push('aliases = ?');
+        updateBindings.push(aliasesStr ?? '[]');
+      }
+      if (criteriaRaw != null) {
+        updateFields.push('criteria = ?');
+        updateBindings.push(criteriaStr ?? '[]');
+      }
+      if (appliesToRaw != null) {
+        updateFields.push('applies_to = ?');
+        updateBindings.push(appliesToStr ?? '[]');
+      }
+      if (owner != null) {
+        updateFields.push('owner = ?');
+        updateBindings.push(ownerVal);
+      }
+      if (renewalType != null) {
+        updateFields.push('renewal_type = ?');
+        updateBindings.push(renewalTypeVal);
+      }
+      if (renewalIntervalMonthsRaw != null) {
+        updateFields.push('renewal_interval_months = ?');
+        updateBindings.push(renewalIntervalMonths);
+      }
+      if (renewalDueDate != null) {
+        updateFields.push('renewal_due_date = ?');
+        updateBindings.push(renewalDueDateVal);
+      }
 
       updateBindings.push(existingDoc.id);
 
@@ -296,6 +389,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       )
         .bind(...updateBindings)
         .run();
+
+      // REPLACE the category set when categories were sent (multi-category
+      // "one doc, many mappings"). FTS category_text refreshes via triggers.
+      if (categoriesRaw != null) {
+        await syncDocumentCategories(
+          context.env.DB,
+          existingDoc.id,
+          categoryIds,
+          primaryCatId,
+        );
+      }
 
       // Link products if provided (update flow)
       if (productLinks.length > 0) {
@@ -385,7 +489,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             updated_at: new Date().toISOString(),
             external_ref: existingDoc.external_ref,
             source_metadata: sourceMetadata || existingDoc.source_metadata,
-            document_type_id: documentTypeId || existingDoc.document_type_id || null,
+            document_type_id: effectiveDocTypeId || existingDoc.document_type_id || null,
             supplier_id: supplierId || existingDoc.supplier_id || null,
             primary_metadata: primaryMetadataStr || existingDoc.primary_metadata || null,
             extended_metadata: extendedMetadataStr || existingDoc.extended_metadata || null,
@@ -414,8 +518,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
       // Insert document
       await context.env.DB.prepare(
-        `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, source_metadata, document_type_id, supplier_id, primary_metadata, extended_metadata)
-         VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, source_metadata, document_type_id, supplier_id, primary_metadata, extended_metadata, aliases, criteria, applies_to, owner, renewal_type, renewal_interval_months, renewal_due_date)
+         VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
         .bind(
           docId,
@@ -427,12 +531,25 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           user.id,
           sanitizedRef,
           sourceMetadata || null,
-          documentTypeId || null,
+          effectiveDocTypeId,
           supplierId || null,
           primaryMetadataStr,
-          extendedMetadataStr
+          extendedMetadataStr,
+          aliasesStr ?? '[]',
+          criteriaStr ?? '[]',
+          appliesToStr ?? '[]',
+          ownerVal,
+          renewalTypeVal,
+          renewalIntervalMonths,
+          renewalDueDateVal
         )
         .run();
+
+      // Category set (multi-category). The document row exists now, so the
+      // document_categories FTS triggers refresh category_text.
+      if (categoryIds.length > 0) {
+        await syncDocumentCategories(context.env.DB, docId, categoryIds, primaryCatId);
+      }
 
       // Insert version
       const versionId = generateId();
@@ -540,7 +657,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             updated_at: now,
             external_ref: sanitizedRef,
             source_metadata: sourceMetadata || null,
-            document_type_id: documentTypeId || null,
+            document_type_id: effectiveDocTypeId,
             supplier_id: supplierId || null,
             primary_metadata: primaryMetadataStr,
             extended_metadata: extendedMetadataStr,

@@ -185,11 +185,14 @@ describe('POST /api/documents/ingest — upsert flow', () => {
     expect(status).toBe(400);
   });
 
-  it('returns 400 when external_ref is missing', async () => {
-    const { status } = await callIngest({
+  it('creates a doc with a generated reg-* ref when external_ref is absent (manual registry path)', async () => {
+    const { status, body } = await callIngest({
       externalRef: null,
     });
-    expect(status).toBe(400);
+    expect(status).toBe(201);
+    expect(body.action).toBe('created');
+    expect(typeof body.document.external_ref).toBe('string');
+    expect(body.document.external_ref).toMatch(/^reg-/);
   });
 
   it('returns 400 when tenant_id is missing', async () => {

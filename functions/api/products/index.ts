@@ -121,6 +121,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       description?: string;
       tenant_id?: string;
       supplier_id?: string;
+      // Dual-attribution / traceability (migration 0078).
+      brand_owner?: string | null;
+      producer?: string | null;
+      plant_code?: string | null;
     };
 
     // Determine tenant_id
@@ -176,10 +180,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const id = generateId();
 
     await context.env.DB.prepare(
-      `INSERT INTO products (id, tenant_id, name, slug, description, active, supplier_id)
-       VALUES (?, ?, ?, ?, ?, 1, ?)`
+      `INSERT INTO products (id, tenant_id, name, slug, description, active, supplier_id, brand_owner, producer, plant_code)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`
     )
-      .bind(id, tenantId, body.name, slug, body.description || null, body.supplier_id || null)
+      .bind(
+        id,
+        tenantId,
+        body.name,
+        slug,
+        body.description || null,
+        body.supplier_id || null,
+        body.brand_owner ? sanitizeString(body.brand_owner) : null,
+        body.producer ? sanitizeString(body.producer) : null,
+        body.plant_code ? sanitizeString(body.plant_code) : null,
+      )
       .run();
 
     await logAudit(

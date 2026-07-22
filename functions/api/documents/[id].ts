@@ -8,7 +8,14 @@ import {
 import { sanitizeString } from '../../lib/validation';
 import { computeDiff } from '../../lib/diff';
 import { findOrCreateSupplier } from '../../lib/suppliers';
+import {
+  validateCategoryIds,
+  resolvePrimaryCategoryId,
+  syncDocumentCategories,
+  isValidRenewalType,
+} from '../../lib/registry';
 import type { Env, User, Document } from '../../lib/types';
+import type { RenewalType } from '../../../shared/types';
 
 /**
  * GET /api/documents/:id
@@ -38,6 +45,20 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     requireTenantAccess(user, doc.tenant_id as string);
+
+    // Full multi-category set (migration 0076), primary first. Attached to the
+    // document so the registry editor can render + edit every mapping.
+    const categories = await context.env.DB.prepare(
+      `SELECT dc.id, dc.document_id, dc.document_type_id, dc.is_primary, dc.created_at,
+              dt.name AS document_type_name, dt.slug AS document_type_slug
+       FROM document_categories dc
+       JOIN document_types dt ON dt.id = dc.document_type_id
+       WHERE dc.document_id = ?
+       ORDER BY dc.is_primary DESC, dt.name ASC`
+    )
+      .bind(docId)
+      .all();
+    (doc as Record<string, unknown>).categories = categories.results;
 
     // Get current version info if one exists
     let currentVersion = null;
@@ -141,7 +162,40 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       supplier_name?: string;
       primary_metadata?: Record<string, string | null> | null;
       extended_metadata?: Record<string, string | null> | null;
+      // IDP Document Registry fields (migrations 0076/0077).
+      categories?: string[];
+      primary_category_id?: string | null;
+      aliases?: string[];
+      criteria?: string[];
+      applies_to?: string[];
+      owner?: string | null;
+      renewal_type?: RenewalType | null;
+      renewal_interval_months?: number | null;
+      renewal_due_date?: string | null;
     };
+
+    // Validate renewal_type up front against the CHECK set.
+    if (
+      body.renewal_type !== undefined &&
+      body.renewal_type !== null &&
+      !isValidRenewalType(body.renewal_type)
+    ) {
+      return new Response(
+        JSON.stringify({
+          error:
+            'renewal_type must be one of: renewal_application, hard_expiry, keep_current, review_cycle',
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
+    // When a category set is provided it REPLACES the doc's mappings and its
+    // primary becomes document_type_id. Validate tenant ownership first.
+    let primaryCatId: string | null | undefined;
+    if (body.categories !== undefined) {
+      await validateCategoryIds(context.env.DB, doc.tenant_id, body.categories);
+      primaryCatId = resolvePrimaryCategoryId(body.categories, body.primary_category_id);
+    }
 
     // Resolve a typed supplier name into a supplier_id when no explicit id was
     // given. Mutates the local body so the existing supplier_id update + audit
@@ -159,7 +213,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     }
 
     const updates: string[] = [];
-    const params: (string | null)[] = [];
+    const params: (string | number | null)[] = [];
 
     if (body.title !== undefined) {
       updates.push('title = ?');
@@ -203,6 +257,40 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       updates.push('extended_metadata = ?');
       params.push(body.extended_metadata ? JSON.stringify(body.extended_metadata) : null);
     }
+    // Registry fields.
+    if (body.aliases !== undefined) {
+      updates.push('aliases = ?');
+      params.push(JSON.stringify(body.aliases));
+    }
+    if (body.criteria !== undefined) {
+      updates.push('criteria = ?');
+      params.push(JSON.stringify(body.criteria));
+    }
+    if (body.applies_to !== undefined) {
+      updates.push('applies_to = ?');
+      params.push(JSON.stringify(body.applies_to));
+    }
+    if (body.owner !== undefined) {
+      updates.push('owner = ?');
+      params.push(body.owner ? sanitizeString(body.owner) : null);
+    }
+    if (body.renewal_type !== undefined) {
+      updates.push('renewal_type = ?');
+      params.push(body.renewal_type ?? null);
+    }
+    if (body.renewal_interval_months !== undefined) {
+      updates.push('renewal_interval_months = ?');
+      params.push(body.renewal_interval_months ?? null);
+    }
+    if (body.renewal_due_date !== undefined) {
+      updates.push('renewal_due_date = ?');
+      params.push(body.renewal_due_date ?? null);
+    }
+    // When categories is provided, keep document_type_id = the primary.
+    if (body.categories !== undefined) {
+      updates.push('document_type_id = ?');
+      params.push(primaryCatId ?? null);
+    }
 
     if (updates.length === 0) {
       return new Response(
@@ -242,6 +330,17 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       .bind(...params)
       .run();
 
+    // REPLACE the category set when provided. FTS category_text refreshes via
+    // the document_categories triggers.
+    if (body.categories !== undefined) {
+      await syncDocumentCategories(
+        context.env.DB,
+        docId,
+        body.categories,
+        primaryCatId ?? null,
+      );
+    }
+
     await logAudit(
       context.env.DB,
       user.id,
@@ -253,12 +352,26 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       getClientIp(context.request)
     );
 
-    // Fetch updated document
+    // Fetch updated document + its category set (mirrors the GET shape).
     const updated = await context.env.DB.prepare(
       'SELECT * FROM documents WHERE id = ?'
     )
       .bind(docId)
       .first();
+
+    if (updated) {
+      const cats = await context.env.DB.prepare(
+        `SELECT dc.id, dc.document_id, dc.document_type_id, dc.is_primary, dc.created_at,
+                dt.name AS document_type_name, dt.slug AS document_type_slug
+         FROM document_categories dc
+         JOIN document_types dt ON dt.id = dc.document_type_id
+         WHERE dc.document_id = ?
+         ORDER BY dc.is_primary DESC, dt.name ASC`
+      )
+        .bind(docId)
+        .all();
+      (updated as Record<string, unknown>).categories = cats.results;
+    }
 
     return new Response(
       JSON.stringify({ document: updated }),

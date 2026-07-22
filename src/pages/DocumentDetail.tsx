@@ -32,6 +32,7 @@ import {
   InputLabel,
   FormControl,
   Tooltip,
+  Autocomplete,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -46,7 +47,7 @@ import {
   Save as SaveIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
-import type { Document, DocumentVersion, ApiDocumentType, DocumentLinkedLot } from '../lib/types';
+import type { Document, DocumentVersion, ApiDocumentType, DocumentLinkedLot, RenewalType } from '../lib/types';
 import { VersionHistory } from '../components/VersionHistory';
 import { UploadDialog } from '../components/UploadDialog';
 import { RoleGuard } from '../components/RoleGuard';
@@ -64,6 +65,17 @@ const statusColors: Record<string, 'success' | 'warning' | 'error'> = {
   archived: 'warning',
   deleted: 'error',
 };
+
+const RENEWAL_OPTIONS: { value: RenewalType; label: string; hasInterval: boolean }[] = [
+  { value: 'renewal_application', label: 'Renewal application', hasInterval: true },
+  { value: 'hard_expiry', label: 'Hard expiry', hasInterval: false },
+  { value: 'keep_current', label: 'Keep current', hasInterval: false },
+  { value: 'review_cycle', label: 'Review cycle', hasInterval: true },
+];
+
+function renewalLabel(t: RenewalType | null | undefined): string {
+  return RENEWAL_OPTIONS.find((o) => o.value === t)?.label || '';
+}
 
 export function DocumentDetail() {
   const { id } = useParams<{ id: string }>();
@@ -108,6 +120,20 @@ export function DocumentDetail() {
 
   // Document types for dropdown
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
+
+  // Registry edit (categories multi, aliases, criteria, applies_to, owner, renewal)
+  const [tenantDocTypes, setTenantDocTypes] = useState<ApiDocumentType[]>([]);
+  const [registryEditing, setRegistryEditing] = useState(false);
+  const [registrySaving, setRegistrySaving] = useState(false);
+  const [regCategoryIds, setRegCategoryIds] = useState<string[]>([]);
+  const [regPrimaryId, setRegPrimaryId] = useState('');
+  const [regAliases, setRegAliases] = useState<string[]>([]);
+  const [regCriteria, setRegCriteria] = useState<string[]>([]);
+  const [regAppliesTo, setRegAppliesTo] = useState<string[]>([]);
+  const [regOwner, setRegOwner] = useState('');
+  const [regRenewalType, setRegRenewalType] = useState<RenewalType | ''>('');
+  const [regRenewalInterval, setRegRenewalInterval] = useState('');
+  const [regRenewalDue, setRegRenewalDue] = useState('');
 
   // Linked lots (one per sublot under Option B). Best-effort; empty for docs
   // with no lot linkage.
@@ -174,6 +200,71 @@ export function DocumentDetail() {
     };
     if (doc?.tenant_id) loadDocTypes();
   }, [doc?.tenant_id, doc?.supplierId]);
+
+  // Full tenant document-type list for the multi-category registry picker.
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const result = await api.documentTypes.list({ tenant_id: doc?.tenant_id || undefined, active: 1 });
+        setTenantDocTypes(result.documentTypes || []);
+      } catch { /* non-critical */ }
+    };
+    if (doc?.tenant_id) load();
+  }, [doc?.tenant_id]);
+
+  const openRegistryEdit = () => {
+    if (!doc) return;
+    const cats = (doc.categories || []).map((c) => c.document_type_id);
+    setRegCategoryIds(cats);
+    setRegPrimaryId((doc.categories || []).find((c) => c.is_primary)?.document_type_id || cats[0] || '');
+    setRegAliases(doc.aliases || []);
+    setRegCriteria(doc.criteria || []);
+    setRegAppliesTo(doc.appliesTo || []);
+    setRegOwner(doc.owner || '');
+    setRegRenewalType(doc.renewalType || '');
+    setRegRenewalInterval(doc.renewalIntervalMonths != null ? String(doc.renewalIntervalMonths) : '');
+    setRegRenewalDue(doc.renewalDueDate || '');
+    setRegistryEditing(true);
+  };
+
+  const toggleRegCategory = (id: string, checked: boolean) => {
+    setRegCategoryIds((prev) => {
+      const next = checked ? [...prev, id] : prev.filter((c) => c !== id);
+      setRegPrimaryId((cur) => {
+        if (next.length === 0) return '';
+        if (!cur || !next.includes(cur)) return next[0];
+        return cur;
+      });
+      return next;
+    });
+  };
+
+  const regRenewalHasInterval = RENEWAL_OPTIONS.find((o) => o.value === regRenewalType)?.hasInterval;
+
+  const handleSaveRegistry = async () => {
+    if (!doc || !id) return;
+    setRegistrySaving(true);
+    try {
+      await api.documents.update(id, {
+        categories: regCategoryIds,
+        primary_category_id: regPrimaryId || null,
+        aliases: regAliases,
+        criteria: regCriteria,
+        applies_to: regAppliesTo,
+        owner: regOwner.trim() || null,
+        renewal_type: regRenewalType || null,
+        renewal_interval_months:
+          regRenewalHasInterval && regRenewalInterval ? parseInt(regRenewalInterval, 10) : null,
+        renewal_due_date: regRenewalDue || null,
+      });
+      setRegistryEditing(false);
+      loadDocument();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update registry fields');
+    } finally {
+      setRegistrySaving(false);
+    }
+  };
 
   const handleUploadSuccess = () => {
     setUploadOpen(false);
@@ -726,6 +817,157 @@ export function DocumentDetail() {
             return null;
           }
         })()}
+      </Paper>
+
+      {/* Registry fields (categories multi, aliases, criteria, applies_to,
+          owner, renewal). Viewable by all; editable by non-readers. */}
+      <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, mb: 3 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+          <Typography variant="h6" fontWeight={600}>Registry</Typography>
+          {!isReader && !registryEditing && (
+            <IconButton size="small" onClick={openRegistryEdit} aria-label="Edit registry fields">
+              <EditIcon fontSize="small" />
+            </IconButton>
+          )}
+        </Box>
+
+        {registryEditing ? (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {/* Categories */}
+            <Box>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                Categories (star the primary)
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                {tenantDocTypes.map((dt) => {
+                  const selected = regCategoryIds.includes(dt.id);
+                  const isPrimary = regPrimaryId === dt.id;
+                  return (
+                    <Chip
+                      key={dt.id}
+                      label={isPrimary ? `★ ${dt.name}` : dt.name}
+                      color={selected ? 'primary' : 'default'}
+                      variant={selected ? 'filled' : 'outlined'}
+                      onClick={() => (selected ? setRegPrimaryId(dt.id) : toggleRegCategory(dt.id, true))}
+                      onDelete={selected ? () => toggleRegCategory(dt.id, false) : undefined}
+                    />
+                  );
+                })}
+                {tenantDocTypes.length === 0 && (
+                  <Typography variant="body2" color="text.secondary">No document types defined.</Typography>
+                )}
+              </Box>
+            </Box>
+            <Autocomplete
+              multiple freeSolo options={[]} value={regAliases}
+              onChange={(_, v) => setRegAliases(v as string[])}
+              renderInput={(params) => <TextField {...params} label="Aliases" size="small" helperText="Names staff might ask for — powers natural-language search." />}
+            />
+            <Autocomplete
+              multiple freeSolo options={[]} value={regCriteria}
+              onChange={(_, v) => setRegCriteria(v as string[])}
+              renderInput={(params) => <TextField {...params} label="Criteria" size="small" helperText="Regulatory references." />}
+            />
+            <Autocomplete
+              multiple freeSolo options={['Kent', 'Portland', 'company']} value={regAppliesTo}
+              onChange={(_, v) => setRegAppliesTo(v as string[])}
+              renderInput={(params) => <TextField {...params} label="Applies to" size="small" />}
+            />
+            <TextField
+              label="Owner" size="small" value={regOwner}
+              onChange={(e) => setRegOwner(e.target.value)}
+            />
+            <FormControl size="small" fullWidth>
+              <InputLabel>Renewal type</InputLabel>
+              <Select
+                value={regRenewalType}
+                label="Renewal type"
+                onChange={(e) => setRegRenewalType(e.target.value as RenewalType | '')}
+              >
+                <MenuItem value=""><em>None</em></MenuItem>
+                {RENEWAL_OPTIONS.map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
+              </Select>
+            </FormControl>
+            {regRenewalHasInterval && (
+              <TextField
+                label="Renewal interval (months)" type="number" size="small"
+                value={regRenewalInterval} onChange={(e) => setRegRenewalInterval(e.target.value)}
+              />
+            )}
+            <TextField
+              label="Renewal due date" type="date" size="small"
+              value={regRenewalDue} onChange={(e) => setRegRenewalDue(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+            />
+            <Box sx={{ display: 'flex', gap: 1 }}>
+              <Button size="small" variant="contained" startIcon={<SaveIcon />} onClick={handleSaveRegistry} disabled={registrySaving}>
+                {registrySaving ? 'Saving...' : 'Save'}
+              </Button>
+              <Button size="small" onClick={() => setRegistryEditing(false)} disabled={registrySaving}>Cancel</Button>
+            </Box>
+          </Box>
+        ) : (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+            <Box>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>Categories</Typography>
+              {doc.categories && doc.categories.length > 0 ? (
+                <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                  {doc.categories.map((c) => (
+                    <Chip
+                      key={c.id}
+                      label={c.is_primary ? `★ ${c.document_type_name || c.document_type_id}` : (c.document_type_name || c.document_type_id)}
+                      size="small"
+                      color={c.is_primary ? 'primary' : 'default'}
+                      variant="outlined"
+                    />
+                  ))}
+                </Box>
+              ) : (
+                <Typography variant="body2" color="text.secondary">No categories</Typography>
+              )}
+            </Box>
+            {doc.aliases && doc.aliases.length > 0 && (
+              <Box>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>Aliases</Typography>
+                <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                  {doc.aliases.map((a) => <Chip key={a} label={a} size="small" variant="outlined" />)}
+                </Box>
+              </Box>
+            )}
+            {doc.criteria && doc.criteria.length > 0 && (
+              <Box>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>Criteria</Typography>
+                <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                  {doc.criteria.map((c) => <Chip key={c} label={c} size="small" variant="outlined" />)}
+                </Box>
+              </Box>
+            )}
+            {doc.appliesTo && doc.appliesTo.length > 0 && (
+              <Box>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>Applies to</Typography>
+                <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                  {doc.appliesTo.map((a) => <Chip key={a} label={a} size="small" variant="outlined" />)}
+                </Box>
+              </Box>
+            )}
+            {doc.owner && (
+              <Box>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>Owner</Typography>
+                <Typography variant="body2">{doc.owner}</Typography>
+              </Box>
+            )}
+            {doc.renewalType && (
+              <Box>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>Renewal</Typography>
+                <Typography variant="body2">
+                  {renewalLabel(doc.renewalType)}
+                  {doc.renewalIntervalMonths ? ` · every ${doc.renewalIntervalMonths} mo` : ''}
+                  {doc.renewalDueDate ? ` · due ${formatDate(doc.renewalDueDate)}` : ''}
+                </Typography>
+              </Box>
+            )}
+          </Box>
+        )}
       </Paper>
 
       {/* Linked Products */}

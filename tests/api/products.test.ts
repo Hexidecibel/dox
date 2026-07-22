@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
+import { onRequestPost as productsPost } from '../../functions/api/products/index';
+import { onRequestPut as productPut } from '../../functions/api/products/[id]';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;
@@ -8,6 +10,45 @@ const db = env.DB;
 beforeAll(async () => {
   seed = await seedTestData(db);
 }, 30_000);
+
+describe('Products - Dual attribution (brand_owner / producer / plant_code)', () => {
+  const orgAdmin = () => ({ id: seed.orgAdminId, role: 'org_admin' as const, tenant_id: seed.tenantId });
+
+  it('POST persists attribution fields, PUT edits them', async () => {
+    const name = `Attributed ${generateTestId()}`;
+    const postRes = await productsPost({
+      request: new Request('http://localhost/api/products', {
+        method: 'POST',
+        body: JSON.stringify({ name, brand_owner: 'BrandCo', producer: 'PlantCo', plant_code: 'P-42' }),
+        headers: { 'Content-Type': 'application/json' },
+      }),
+      env,
+      data: { user: orgAdmin() },
+      params: {},
+    } as any);
+    expect(postRes.status).toBe(201);
+    const { product } = await postRes.json() as any;
+    expect(product.brand_owner).toBe('BrandCo');
+    expect(product.producer).toBe('PlantCo');
+    expect(product.plant_code).toBe('P-42');
+
+    const putRes = await productPut({
+      request: new Request(`http://localhost/api/products/${product.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ producer: 'NewPlant', plant_code: 'P-99' }),
+        headers: { 'Content-Type': 'application/json' },
+      }),
+      env,
+      data: { user: orgAdmin() },
+      params: { id: product.id },
+    } as any);
+    expect(putRes.status).toBe(200);
+    const updated = (await putRes.json() as any).product;
+    expect(updated.brand_owner).toBe('BrandCo'); // untouched
+    expect(updated.producer).toBe('NewPlant');
+    expect(updated.plant_code).toBe('P-99');
+  });
+});
 
 describe('Products - Create', () => {
   it('should create a product with name and slug', async () => {

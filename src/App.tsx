@@ -12,6 +12,7 @@ import { ResetPassword } from './pages/ResetPassword';
 import { Dashboard } from './pages/Dashboard';
 import { Documents } from './pages/Documents';
 import { DocumentDetail } from './pages/DocumentDetail';
+import { DocumentCreate } from './pages/DocumentCreate';
 import { Search } from './pages/Search';
 import { Profile } from './pages/Profile';
 import { Users } from './pages/admin/Users';
@@ -93,6 +94,9 @@ function App() {
             <Route element={<Layout />}>
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/documents" element={<Documents />} />
+              <Route element={<ProtectedRoute roles={['super_admin', 'org_admin', 'user']} />}>
+                <Route path="/documents/new" element={<DocumentCreate />} />
+              </Route>
               <Route path="/documents/:id" element={<DocumentDetail />} />
               <Route path="/search" element={<Search />} />
               <Route path="/profile" element={<Profile />} />

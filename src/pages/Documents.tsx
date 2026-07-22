@@ -1,5 +1,8 @@
-import { Box, Typography } from '@mui/material';
+import { Box, Typography, Button } from '@mui/material';
+import { Add as AddIcon } from '@mui/icons-material';
+import { useNavigate } from 'react-router-dom';
 import { DocumentSearchPanel } from '../components/search/DocumentSearchPanel';
+import { RoleGuard } from '../components/RoleGuard';
 import { useTenant } from '../contexts/TenantContext';
 import { HelpWell } from '../components/HelpWell';
 import { helpContent } from '../lib/helpContent';
@@ -15,6 +18,7 @@ import { helpContent } from '../lib/helpContent';
  */
 export function Documents() {
   const { selectedTenantId } = useTenant();
+  const navigate = useNavigate();
 
   return (
     <Box>
@@ -31,6 +35,15 @@ export function Documents() {
         <Typography variant="h4" fontWeight={700}>
           Documents
         </Typography>
+        <RoleGuard roles={['super_admin', 'org_admin', 'user']}>
+          <Button
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={() => navigate('/documents/new')}
+          >
+            Add Document
+          </Button>
+        </RoleGuard>
       </Box>
 
       <HelpWell

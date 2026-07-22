@@ -79,6 +79,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       description?: string;
       active?: number | boolean;
       supplier_id?: string | null;
+      // Dual-attribution / traceability (migration 0078).
+      brand_owner?: string | null;
+      producer?: string | null;
+      plant_code?: string | null;
     };
 
     const updates: string[] = [];
@@ -119,6 +123,21 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.supplier_id !== undefined) {
       updates.push('supplier_id = ?');
       params.push(body.supplier_id);
+    }
+
+    if (body.brand_owner !== undefined) {
+      updates.push('brand_owner = ?');
+      params.push(body.brand_owner ? sanitizeString(body.brand_owner) : null);
+    }
+
+    if (body.producer !== undefined) {
+      updates.push('producer = ?');
+      params.push(body.producer ? sanitizeString(body.producer) : null);
+    }
+
+    if (body.plant_code !== undefined) {
+      updates.push('plant_code = ?');
+      params.push(body.plant_code ? sanitizeString(body.plant_code) : null);
     }
 
     if (updates.length === 0) {

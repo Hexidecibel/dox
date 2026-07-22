@@ -113,6 +113,18 @@ function parseDocument(doc: any): Document {
     } catch { extendedMetadata = null; }
   }
 
+  // Registry JSON-array columns (migrations 0076/0077) arrive as JSON strings.
+  const parseArr = (v: unknown): string[] => {
+    if (Array.isArray(v)) return v as string[];
+    if (typeof v === 'string' && v.trim()) {
+      try {
+        const p = JSON.parse(v);
+        return Array.isArray(p) ? p : [];
+      } catch { return []; }
+    }
+    return [];
+  };
+
   return {
     ...doc,
     tags,
@@ -123,6 +135,14 @@ function parseDocument(doc: any): Document {
     supplierName: doc.supplier_name,
     primaryMetadata,
     extendedMetadata,
+    aliases: parseArr(doc.aliases),
+    criteria: parseArr(doc.criteria),
+    appliesTo: parseArr(doc.applies_to),
+    owner: doc.owner ?? null,
+    renewalType: doc.renewal_type ?? null,
+    renewalIntervalMonths: doc.renewal_interval_months ?? null,
+    renewalDueDate: doc.renewal_due_date ?? null,
+    categories: doc.categories ?? [],
   };
 }
 
@@ -371,7 +391,7 @@ export const api = {
      * Returns: { document: ApiDocument }
      * The updated document has tags as JSON string.
      */
-    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; supplier_name: string; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null }>): Promise<Document> => {
+    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; supplier_name: string; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null; categories: string[]; primary_category_id: string | null; aliases: string[]; criteria: string[]; applies_to: string[]; owner: string | null; renewal_type: string | null; renewal_interval_months: number | null; renewal_due_date: string | null }>): Promise<Document> => {
       const response = await fetchApi<DocumentUpdateResponse>(`/documents/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -430,7 +450,8 @@ export const api = {
      */
     ingest: async (data: {
       file: File;
-      externalRef: string;
+      /** Optional on the manual registry path — omit to mint `reg-<random>`. */
+      externalRef?: string;
       tenantId: string;
       title?: string;
       description?: string;
@@ -438,10 +459,25 @@ export const api = {
       tags?: string[];
       changeNotes?: string;
       sourceMetadata?: Record<string, any>;
+      documentTypeId?: string | null;
+      supplierId?: string | null;
+      productIds?: Array<{ product_id: string; expires_at?: string; notes?: string }>;
+      primaryMetadata?: Record<string, string | null>;
+      extendedMetadata?: Record<string, string | null>;
+      // IDP Document Registry fields (migrations 0076/0077).
+      categories?: string[];
+      primaryCategoryId?: string | null;
+      aliases?: string[];
+      criteria?: string[];
+      appliesTo?: string[];
+      owner?: string | null;
+      renewalType?: string | null;
+      renewalIntervalMonths?: number | null;
+      renewalDueDate?: string | null;
     }): Promise<IngestResponse> => {
       const form = new FormData();
       form.append('file', data.file);
-      form.append('external_ref', data.externalRef);
+      if (data.externalRef) form.append('external_ref', data.externalRef);
       form.append('tenant_id', data.tenantId);
       if (data.title) form.append('title', data.title);
       if (data.description) form.append('description', data.description);
@@ -449,6 +485,20 @@ export const api = {
       if (data.tags) form.append('tags', JSON.stringify(data.tags));
       if (data.changeNotes) form.append('changeNotes', data.changeNotes);
       if (data.sourceMetadata) form.append('source_metadata', JSON.stringify(data.sourceMetadata));
+      if (data.documentTypeId) form.append('document_type_id', data.documentTypeId);
+      if (data.supplierId) form.append('supplier_id', data.supplierId);
+      if (data.productIds && data.productIds.length > 0) form.append('product_ids', JSON.stringify(data.productIds));
+      if (data.primaryMetadata) form.append('primary_metadata', JSON.stringify(data.primaryMetadata));
+      if (data.extendedMetadata) form.append('extended_metadata', JSON.stringify(data.extendedMetadata));
+      if (data.categories) form.append('categories', JSON.stringify(data.categories));
+      if (data.primaryCategoryId) form.append('primary_category_id', data.primaryCategoryId);
+      if (data.aliases) form.append('aliases', JSON.stringify(data.aliases));
+      if (data.criteria) form.append('criteria', JSON.stringify(data.criteria));
+      if (data.appliesTo) form.append('applies_to', JSON.stringify(data.appliesTo));
+      if (data.owner) form.append('owner', data.owner);
+      if (data.renewalType) form.append('renewal_type', data.renewalType);
+      if (data.renewalIntervalMonths != null) form.append('renewal_interval_months', String(data.renewalIntervalMonths));
+      if (data.renewalDueDate) form.append('renewal_due_date', data.renewalDueDate);
       return fetchApi<IngestResponse>('/documents/ingest', {
         method: 'POST',
         body: form,
@@ -694,7 +744,7 @@ export const api = {
      * POST /api/products
      * Returns: { product: ApiProduct }
      */
-    create: (data: { name: string; description?: string; tenant_id: string; supplier_id?: string }) =>
+    create: (data: { name: string; description?: string; tenant_id: string; supplier_id?: string; brand_owner?: string | null; producer?: string | null; plant_code?: string | null }) =>
       fetchApi<{ product: ApiProduct }>('/products', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -704,7 +754,7 @@ export const api = {
      * PUT /api/products/:id
      * Returns: { product: ApiProduct }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; brand_owner?: string | null; producer?: string | null; plant_code?: string | null }) =>
       fetchApi<{ product: ApiProduct }>(`/products/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
