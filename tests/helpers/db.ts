@@ -72,6 +72,10 @@ import m0072 from '../../migrations/0072_tenant_extraction_context.sql?raw';
 import m0073 from '../../migrations/0073_lots_sublot.sql?raw';
 import m0074 from '../../migrations/0074_documents_fts_lot.sql?raw';
 import m0075 from '../../migrations/0075_supplier_lot_scheme_and_product_map.sql?raw';
+import m0076 from '../../migrations/0076_document_categories.sql?raw';
+import m0077 from '../../migrations/0077_registry_fields.sql?raw';
+import m0078 from '../../migrations/0078_product_attribution.sql?raw';
+import m0079 from '../../migrations/0079_fts_registry.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -82,6 +86,7 @@ const migrations: string[] = [
   m0056, m0057, m0058, m0059, m0060, m0061, m0062, m0063,
   m0064, m0065, m0066, m0067, m0068, m0069, m0070, m0071,
   m0072, m0073, m0074, m0075,
+  m0076, m0077, m0078, m0079,
 ];
 
 /**
@@ -320,6 +325,7 @@ export function generateTestId(): string {
 export async function cleanTables(db: D1Database): Promise<void> {
   const tables = [
     'audit_log', 'assignments', 'lot_match_suggestions', 'document_lots',
+    'document_categories',
     'order_items', 'orders', 'document_versions', 'document_products', 'documents',
     'document_types', 'naming_templates', 'email_domain_mappings',
     'bundle_documents', 'bundles', 'api_keys', 'sessions',

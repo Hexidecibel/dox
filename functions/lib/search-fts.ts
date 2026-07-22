@@ -47,6 +47,16 @@ export const DOCUMENTS_FTS_COLS = {
   // Added in migration 0074 (COA sublot split / lot search). Flattens the
   // doc's linked lots: lot_number, norm(lot_number), sub_lot_code, lot_key.
   lot_text: 10,
+  // Added in migration 0079 (IDP Document Registry). All kept LAST so the
+  // indexes above (used by snippet() calls) are unchanged.
+  //   category_text   — all category doctype names via document_categories.
+  //   aliases_text    — documents.aliases JSON, flattened.
+  //   criteria_text   — documents.criteria JSON, flattened.
+  //   applies_to_text — documents.applies_to JSON, flattened.
+  category_text: 11,
+  aliases_text: 12,
+  criteria_text: 13,
+  applies_to_text: 14,
 } as const;
 
 /**

@@ -39,6 +39,11 @@ export interface ProductRow {
   active: number;
   created_at: string;
   updated_at: string;
+  // Attribution / traceability (migration 0078). plant_code is the soft
+  // CoA join key (no FK) tying a product to the plant that produced it.
+  brand_owner?: string | null;
+  producer?: string | null;
+  plant_code?: string | null;
 }
 
 export interface DocumentProductRow {
@@ -266,6 +271,19 @@ export interface DocumentTypeRow {
   updated_at: string;
 }
 
+/**
+ * How a registry document's renewal / next-action is modeled (migration 0077).
+ *   - renewal_application → must file a renewal before it lapses
+ *   - hard_expiry         → simply expires on a date, no renewal path
+ *   - keep_current        → keep the latest version on file, no fixed cadence
+ *   - review_cycle        → periodic review on an interval
+ */
+export type RenewalType =
+  | 'renewal_application'
+  | 'hard_expiry'
+  | 'keep_current'
+  | 'review_cycle';
+
 export interface DocumentRow {
   id: string;
   tenant_id: string;
@@ -278,15 +296,42 @@ export interface DocumentRow {
   created_by: string;
   created_at: string;
   updated_at: string;
-  document_type_id: string | null;
+  document_type_id: string | null; // denormalized "primary category" pointer
   supplier_id: string | null;
   primary_metadata: string | null; // JSON string
   extended_metadata: string | null; // JSON string
+  // IDP Document Registry fields (migration 0077). JSON-array columns are
+  // stored as JSON strings in D1 (default '[]').
+  aliases?: string; // JSON string<string[]>
+  criteria?: string; // JSON string<string[]>
+  applies_to?: string; // JSON string<string[]>
+  owner?: string | null;
+  renewal_type?: RenewalType | null;
+  renewal_interval_months?: number | null;
+  renewal_due_date?: string | null;
   // Deprecated: old hardcoded fields, still in DB but unused
   lot_number?: string | null;
   po_number?: string | null;
   code_date?: string | null;
   expiration_date?: string | null;
+}
+
+/**
+ * A row of the document_categories junction (migration 0076) — the
+ * multi-category ("one doc, many mappings") source of truth. is_primary
+ * marks the row mirrored into documents.document_type_id.
+ */
+export interface DocumentCategoryRow {
+  id: string;
+  document_id: string;
+  document_type_id: string;
+  is_primary: number; // 0 or 1
+  created_at: string;
+}
+
+export interface ApiDocumentCategory extends DocumentCategoryRow {
+  document_type_name?: string; // joined from document_types on read
+  document_type_slug?: string;
 }
 
 /**
@@ -662,6 +707,16 @@ export interface Document {
   supplierName?: string;
   primaryMetadata: Record<string, string | null> | null;
   extendedMetadata: Record<string, string | null> | null;
+  // IDP Document Registry fields (migrations 0076/0077). JSON-array columns
+  // are PARSED to arrays for the API surface.
+  aliases?: string[];
+  criteria?: string[];
+  appliesTo?: string[];
+  owner?: string | null;
+  renewalType?: RenewalType | null;
+  renewalIntervalMonths?: number | null;
+  renewalDueDate?: string | null;
+  categories?: ApiDocumentCategory[]; // full multi-category set (0076)
 }
 
 export interface DocumentVersion {
