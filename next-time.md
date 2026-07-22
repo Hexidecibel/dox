@@ -4,6 +4,58 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-07-22 IDP DOCUMENT REGISTRY — LEG ONE SHIPPED TO PROD (new workstream)
+
+Huge session. Built + shipped the **IDP Document Registry** end-to-end to prod — the
+DCN-replacement / "one doc, many mappings" + **alias-driven NL retrieval** track for
+Medosweet/AJ (independent of COA-fulfillment). See memory `project_idp_document_registry`
++ plan `~/.claude/plans/parsed-soaring-panda.md`.
+
+**LIVE on supdox.com** (prod deployment `2bc192f`; 6 commits `4523639`→`2bc192f` on master,
+pushed to origin):
+- Migrations **0076–0079** applied to prod D1 **surgically + stamped** in d1_migrations
+  (prod chain was frozen at 0063; 0064–0075 applied-but-unstamped = the known gap).
+  `document_categories` junction (multi-category); `documents` += aliases/criteria/applies_to/
+  owner/renewal_type/renewal_interval_months/renewal_due_date; `products` += brand_owner/
+  producer/plant_code; FTS rebuilt (+category/aliases/criteria/applies_to_text; 546 rows).
+- **Single-doc upload path** (`DocumentCreate.tsx`, "Add Document") — manual metadata, NO AI
+  extraction, NO bulk importer (archive/old-version handling is a one-time concern, never in
+  the product path — deliberate).
+- **NL retrieval hardened** (the moat): bm25 weights (title 10/aliases 8/category 6),
+  `natural.ts` loosen-and-retry (never returns 0), inline expiry+version, multi-category filter.
+- **Renewal engine** (`functions/lib/expirations.ts`, `/api/expirations` + `/notify`, Renewals
+  dashboard): renewal_type-aware status, one-click alert email to org_admins + super_admins.
+  MINIMAL — no cron, no per-owner routing yet.
+- **Clean Medosweet tenant** on prod (`tenant_medosweet`) + 27 starter categories (manual
+  sections 100–126) via new `bin/create-tenant`. **AJ = existing super_admin**
+  (`ajconner@gmail.com`) — scopes in via the tenant selector (that was his whole blocker; the
+  tenant just didn't exist yet). Decided: he uses super_admin, no dedicated org_admin.
+
+**Validated:** 200+ tests green per phase; live 10/10 verify locally (`bin/dev-demo` :8790,
+a@a.a/a) incl. alias retrieval + inline expiry + multi-category. Every prod step verified.
+
+**Corpus** at `~/drops/fsqa-seed/`: workbook (`Food_Safety_Manual___Document_Registry.xlsx`,
+~101 rows) + full manual (`manual/`, 430 files). Two taxonomies surfaced: doc *class*
+(SOP/Form/Log, QFD prefix, single) vs compliance *category* (sections 100–126, multi).
+
+**Docs sent to AJ** (md/zip via cush-tools): reply (`~/drops/reply-to-aj-legone.md`),
+clarifications (`~/drops/aj-clarifications.md` — AWAITING his answers), how-to
+(`~/drops/medosweet-registry-howto.md`).
+
+**OPEN / NEXT (mostly gated on AJ's clarification answers):**
+- The richer **167-row catalog with aliases** if it exists (the moat fuel) — else build an
+  **alias-derivation** feature (title+class+section → candidate aliases). This workbook has none.
+- **Class-vs-category split** — add a single-valued doc-*class* facet alongside multi-category.
+- Renewal intervals (review_cycle default; 113.2 "biannual" = 24 vs 6mo); facilities set; owner
+  values beyond QA.
+- Renewal fast-follows: **scheduled cron** worker + **per-owner routing** (`assignments` is the
+  hook; today emails all org_admins/super_admins).
+- Deferred UI: search result "vN · expires …" chip; Expirations CSV export / per-owner filter.
+- `document_type_id` kept as denormalized primary-category pointer (back-compat). `bin/dev-demo`
+  local D1 now has 0076–0079 applied. `dropserver.py` MAX_FILE_SIZE bumped to 2GB (for the manual).
+
+---
+
 ## 2026-06-24 COUNTRY MORNING MATCHING SHIPPED — lot_scheme + product bridge (LIVE on prod)
 
 Root cause = TWO per-supplier gaps (the PRODUCT one was the deeper blocker, the lot one the
