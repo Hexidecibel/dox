@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Launch the LOCAL dox dev server for the Medosweet demo.
+#
+# Why this script (and not plain `npm run dev`): `npm run dev` binds D1 as
+# `--d1 DB` (binding name only). On this machine that resolves to a DIFFERENT,
+# empty local sqlite than the one `wrangler d1 execute doc-upload-db --local`
+# (and therefore `bin/seed-medosweet-demo` + `bin/migrate`) writes to. Binding
+# the DB to the explicit database_id from wrangler.toml makes the dev server
+# open the SAME local database that holds the seeded data.
+#
+# Port 8788 is often taken by an unrelated local service, so this defaults to
+# 8790. Override with:  PORT=9788 ./bin/dev-demo
+#
+# LOCAL ONLY — never touches remote/prod.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PORT="${PORT:-8790}"
+# database_id for binding "DB" (doc-upload-db) — see wrangler.toml.
+DB_ID="a89907f9-5f15-4cdb-9a7a-bd273feaf159"
+
+echo "Starting dox dev server on http://localhost:${PORT} (local D1 + R2)…"
+echo "Login: a@a.a / a   Tenant: Medosweet Farms (medosweet_demo)"
+exec npx wrangler pages dev dist --d1 "DB=${DB_ID}" --r2 FILES --port "${PORT}"

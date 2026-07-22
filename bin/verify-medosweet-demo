@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# Headless verifier for the Medosweet demo fixture (bin/seed-medosweet-demo).
+#
+# Drives the REAL, EXISTING search over HTTP against the local dev server:
+#   - 4 keyword queries via the INSTANT FTS endpoint
+#     (GET /api/documents/search — the same endpoint the Documents page UI
+#     uses). Each must return exactly the expected document.
+#   - 1 expiration query via the natural-language endpoint
+#     (POST /api/documents/search/natural — LLM-parsed). Must return the two
+#     end-of-2026 docs and NOT the 2027 ones.
+#
+# Checks (default, all INSTANT — no LLM):
+#   Q1  "audit certificate"  -> cGDP Audit Certificate #18320
+#   Q2  "organic cert"       -> WSDA Organic Handler Certificate #3959
+#   Q4  "Gossner insurance"  -> Gossner Foods COI #725168094
+#   Q4b "COI"                -> Gossner Foods COI #725168094
+#   Q5  "cream spec 10286"   -> 40% Heavy Whipping Cream Spec
+#   EXP  each result carries its expiration_date in primary_metadata.
+#   ALIAS  "proof of insurance" (first-class aliases column ONLY) -> COI #725168094.
+#   INLINE "audit certificate" result carries computed `expiration` (2027-03-24,
+#          from renewal_due_date) + `current_version` inline.
+#   MULTICAT the multi-category audit cert (#18320) is found via category_id
+#          under BOTH its primary and secondary category doctype ids.
+#
+# Pass --llm to ALSO exercise the natural-language endpoint
+# (POST .../search/natural). It calls the local Qwen router and is SLOW (tens
+# of seconds to minutes) when the fast turbo upstream is down. It asserts the
+# parser (a) retrieves a keyword query and (b) correctly extracts the
+# expiration_filter for a plain-English expiry question AND that the cross-doc
+# "what expires before X" query now RETURNS the matching docs — the prior
+# zero-result case is fixed by natural.ts's soft-filter loosen-and-retry.
+#
+# Usage:
+#   ./bin/verify-medosweet-demo            # instant checks (needs dev server up)
+#   ./bin/verify-medosweet-demo --llm      # + slow natural-language parse checks
+#   DOX_BASE_URL=http://localhost:8790 ./bin/verify-medosweet-demo
+#
+# Exit 0 on all-pass, 1 on any failure. LOCAL ONLY.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+TID="medosweet_demo"
+ADMIN_EMAIL="a@a.a"
+ADMIN_PASSWORD="a"
+# Deterministic doctype ids from bin/seed-medosweet-demo (used for the
+# multi-category filter checks).
+DT_AUDIT_CERT="medo_dt_audit_cert"
+DT_AUDIT_REPORT="medo_dt_audit_report"
+RUN_LLM=0
+for arg in "$@"; do case "$arg" in --llm) RUN_LLM=1 ;; esac; done
+
+# ---- Locate the dev server (a dox server answers /api/auth/login w/ JSON) ----
+is_dox() { curl -s -m4 -o /dev/null -w '%{content_type}' -X POST "$1/api/auth/login" -H 'Content-Type: application/json' -d '{}' 2>/dev/null | grep -qi 'application/json'; }
+if [ -n "${DOX_BASE_URL:-}" ]; then CANDS=("$DOX_BASE_URL"); else CANDS=("http://localhost:8790" "http://localhost:8788" "http://localhost:9788" "http://localhost:8791"); fi
+BASE=""
+for c in "${CANDS[@]}"; do if is_dox "$c"; then BASE="$c"; break; fi; done
+if [ -z "$BASE" ]; then echo "FATAL: no dox dev server found on: ${CANDS[*]}. Start it with ./bin/dev-demo" >&2; exit 1; fi
+echo "dev server: $BASE"
+
+JWT=$(curl -s -m8 -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(JSON.parse(d).token||'')}catch(e){process.stdout.write('')}})")
+[ -z "$JWT" ] && { echo "FATAL: login failed for $ADMIN_EMAIL" >&2; exit 1; }
+echo "logged in as $ADMIN_EMAIL"
+
+PASS=0; FAIL=0; declare -a RESULTS
+ok()  { RESULTS+=("PASS  $1"); PASS=$((PASS+1)); }
+bad() { RESULTS+=("FAIL  $1"); FAIL=$((FAIL+1)); }
+
+# fts_titles "query" -> newline-joined result titles from the instant endpoint
+fts_titles() {
+  curl -s -m12 -G "$BASE/api/documents/search" --data-urlencode "q=$1" --data-urlencode "tenant_id=$TID" \
+    -H "Authorization: Bearer $JWT" \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);process.stdout.write((j.documents||[]).map(r=>r.title).join('\n'))}catch(e){process.stdout.write('')}})"
+}
+
+check_fts_single() { # label query expected_substring
+  local label="$1" q="$2" needle="$3" titles n
+  titles=$(fts_titles "$q"); n=$(printf '%s' "$titles" | grep -c . || true)
+  if [ "$n" = "1" ] && printf '%s' "$titles" | grep -qi -- "$needle"; then
+    ok "$label  ('$q' -> $titles)"
+  else
+    bad "$label  ('$q' -> total=$n :: $(printf '%s' "$titles" | tr '\n' '|'))"
+  fi
+}
+
+# fts_titles_by_cat category_id -> newline-joined titles filtered by the
+# multi-category document_categories junction (the new category_id param).
+fts_titles_by_cat() {
+  curl -s -m12 -G "$BASE/api/documents/search" --data-urlencode "category_id=$1" --data-urlencode "tenant_id=$TID" \
+    -H "Authorization: Bearer $JWT" \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);process.stdout.write((j.documents||[]).map(r=>r.title).join('\n'))}catch(e){process.stdout.write('')}})"
+}
+
+# result_expiry_version "query" "title_needle" -> "<expiration>|<current_version>"
+# for the first result whose title contains title_needle. Proves the inline
+# expiry + current-version ride-along on instant-search rows.
+result_expiry_version() {
+  curl -s -m12 -G "$BASE/api/documents/search" --data-urlencode "q=$1" --data-urlencode "tenant_id=$TID" \
+    -H "Authorization: Bearer $JWT" \
+  | NEEDLE="$2" node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);const r=(j.documents||[]).find(x=>String(x.title).includes(process.env.NEEDLE))||{};process.stdout.write(String(r.expiration||'')+'|'+String(r.current_version||''))}catch(e){process.stdout.write('')}})"
+}
+
+echo "== instant FTS keyword queries =="
+check_fts_single "Q1 audit certificate -> cert #18320"   "audit certificate" "18320"
+check_fts_single "Q2 organic cert -> WSDA #3959"          "organic cert"      "3959"
+check_fts_single "Q4 Gossner insurance -> COI #725168094" "Gossner insurance" "725168094"
+check_fts_single "Q4b COI -> COI #725168094"              "COI"               "725168094"
+check_fts_single "Q5 cream spec 10286 -> spec sheet"      "cream spec 10286"  "10286"
+
+echo "== per-document expiry rides along (instant) =="
+# The FDA registration result must carry its expiration_date in primary_metadata.
+FDA_EXP=$(curl -s -m10 -G "$BASE/api/documents/search" --data-urlencode "q=FDA registration" \
+  --data-urlencode "tenant_id=$TID" -H "Authorization: Bearer $JWT" \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);const r=(j.documents||[])[0]||{};let m={};try{m=JSON.parse(r.primary_metadata||'{}')}catch(e){};process.stdout.write(m.expiration_date||'')}catch(e){process.stdout.write('')}})")
+if [ "$FDA_EXP" = "2026-12-31" ]; then
+  ok "EXP FDA registration result carries expiration_date (= $FDA_EXP)"
+else
+  bad "EXP FDA registration expiration_date (got '$FDA_EXP', expected 2026-12-31)"
+fi
+
+echo "== first-class ALIAS retrieval (documents.aliases -> aliases_text) =="
+# "proof of insurance" appears ONLY in D6's first-class aliases column — not in
+# any title/description/metadata — so a hit proves alias-column retrieval.
+check_fts_single "ALIAS 'proof of insurance' -> Gossner COI #725168094" "proof of insurance" "725168094"
+
+echo "== inline expiry + current version ride along on the result row =="
+# The audit certificate (D3) carries renewal_due_date 2027-03-24; the computed
+# `expiration` field must COALESCE to it, and `current_version` must be present,
+# so the result reads "..., v1, expires 2027-03-24" without a second lookup.
+EV=$(result_expiry_version "audit certificate" "18320")
+if [ "$EV" = "2027-03-24|1" ]; then
+  ok "INLINE audit certificate result carries expiration+version (= $EV)"
+else
+  bad "INLINE audit certificate expiration|current_version (got '$EV', expected 2027-03-24|1)"
+fi
+
+echo "== multi-category doc found under BOTH of its categories =="
+# D3 is mapped to '3rd Party Audit Certificate' (primary) AND '3rd Party Food
+# Safety Audit Report' (secondary). The category_id filter must return it under
+# either doctype id.
+CAT_PRIMARY=$(fts_titles_by_cat "$DT_AUDIT_CERT")
+CAT_SECONDARY=$(fts_titles_by_cat "$DT_AUDIT_REPORT")
+if printf '%s' "$CAT_PRIMARY" | grep -qi -- "18320"; then
+  ok "MULTICAT #18320 found under primary category (3rd Party Audit Certificate)"
+else
+  bad "MULTICAT #18320 under primary category :: $(printf '%s' "$CAT_PRIMARY" | tr '\n' '|')"
+fi
+if printf '%s' "$CAT_SECONDARY" | grep -qi -- "18320"; then
+  ok "MULTICAT #18320 ALSO found under secondary category (3rd Party Food Safety Audit Report)"
+else
+  bad "MULTICAT #18320 under secondary category :: $(printf '%s' "$CAT_SECONDARY" | tr '\n' '|')"
+fi
+
+if [ "$RUN_LLM" = "1" ]; then
+  echo "== natural-language endpoint (LLM; slow when fast Qwen upstream is down) =="
+  # (a) Plain-English keyword query retrieves the right doc.
+  NJSON=$(curl -s -m 290 -X POST "$BASE/api/documents/search/natural" \
+    -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
+    -d "{\"query\":\"get me the audit certificate\",\"tenant_id\":\"$TID\"}")
+  if printf '%s' "$NJSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);process.exit((j.results||[]).some(r=>r.title.includes('18320'))?0:1)}catch(e){process.exit(1)}})"; then
+    ok "LLM 'get me the audit certificate' -> cert #18320"
+  else
+    bad "LLM 'get me the audit certificate' :: $(printf '%s' "$NJSON" | head -c 160)"
+  fi
+  # (b) Expiry question: the PREVIOUS zero-result case. natural.ts now applies
+  #     the expiration_filter as a SOFT structured predicate with loosen-and-
+  #     retry (and a structured-only fallback when the LLM's leftover keywords
+  #     match no FTS token), so this cross-doc query now RETURNS the two
+  #     end-of-2026 docs (FDA registration + business license, both exp
+  #     2026-12-31) instead of 0. We assert both the parse AND a non-empty,
+  #     correctly-scoped result set.
+  PJSON=$(curl -s -m 290 -X POST "$BASE/api/documents/search/natural" \
+    -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
+    -d "{\"query\":\"which documents expire before the end of 2026\",\"tenant_id\":\"$TID\"}")
+  PF=$(printf '%s' "$PJSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const ef=JSON.parse(d).parsed_query.expiration_filter||{};process.stdout.write((ef.operator||'')+'|'+(ef.date1||''))}catch(e){process.stdout.write('')}})")
+  if [ "$PF" = "before|2026-12-31" ]; then
+    ok "LLM parses 'expire before end of 2026' -> expiration_filter before 2026-12-31"
+  else
+    bad "LLM expiration_filter parse (got '$PF', expected before|2026-12-31)"
+  fi
+  # The prior zero-result case now returns results (loosen-and-retry).
+  ETOT=$(printf '%s' "$PJSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);process.stdout.write(String((j.results||[]).length))}catch(e){process.stdout.write('0')}})")
+  ETITLES=$(printf '%s' "$PJSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);process.stdout.write((j.results||[]).map(r=>r.title).join('|'))}catch(e){process.stdout.write('')}})")
+  if [ "${ETOT:-0}" -gt 0 ] 2>/dev/null && printf '%s' "$ETITLES" | grep -qi -- "9713714"; then
+    ok "LLM 'expire before end of 2026' now RETURNS results (n=$ETOT :: $ETITLES) — prior zero-result case fixed"
+  else
+    bad "LLM 'expire before end of 2026' result set (n=${ETOT:-0} :: $ETITLES; expected >0 incl. business license #9713714)"
+  fi
+fi
+
+echo ""; echo "===================== RESULTS ====================="
+for r in "${RESULTS[@]}"; do echo "  $r"; done
+echo "==================================================="
+echo "  PASS: $PASS   FAIL: $FAIL"
+[ "$FAIL" -eq 0 ] && { echo "OVERALL: PASS"; exit 0; } || { echo "OVERALL: FAIL"; exit 1; }

@@ -31,6 +31,7 @@ let productButterId: string;
 let docDarigoldCoaId: string; // tenant A — supplier Darigold5, doc_type COA, product Butter
 let docAcmeSdsId: string;     // tenant A — supplier Acme5,    doc_type SDS, no products
 let docCrossTenantId: string; // tenant B — supplier "Darigold5" too
+let docExpiringId: string;    // tenant A — supplier Darigold5, renewal_due_date 2026-12-31
 
 function makeContext(
   body: Record<string, unknown>,
@@ -203,6 +204,30 @@ beforeAll(async () => {
     `INSERT INTO document_products (id, document_id, product_id, created_at, updated_at)
      VALUES (?, ?, ?, datetime('now'), datetime('now'))`,
   ).bind(generateTestId(), docDarigoldCoaId, productButterId).run();
+
+  // Expiring doc: supplier Darigold5 (so a 'darigold5' keyword hits it via
+  // supplier_text) + first-class renewal fields so the inline expiry + the
+  // structured-only expiry fallback have a target.
+  docExpiringId = `srch4nat-docExp-${generateTestId().slice(0, 8)}`;
+  await db.prepare(
+    `INSERT INTO documents
+       (id, tenant_id, title, tags, current_version, status, created_by,
+        supplier_id, document_type_id, primary_metadata,
+        renewal_type, renewal_due_date, created_at, updated_at)
+     VALUES (?, ?, ?, '[]', 1, 'active', ?, ?, ?, '{}',
+             'hard_expiry', '2026-12-31', datetime('now'), datetime('now'))`,
+  ).bind(
+    docExpiringId,
+    seed.tenantId,
+    'Darigold5 Guarantee Letter',
+    seed.userId,
+    supplierDarigoldId,
+    docTypeCoaId,
+  ).run();
+  await db.prepare(
+    `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, uploaded_by)
+     VALUES (?, ?, 1, 'darigold5-guarantee.pdf', 1024, 'application/pdf', ?, 'deadbeef', ?)`,
+  ).bind(generateTestId(), docExpiringId, `tenant/${docExpiringId}/1/guarantee.pdf`, seed.userId).run();
 }, 60_000);
 
 beforeEach(() => {
@@ -364,6 +389,100 @@ describe('POST /api/documents/search/natural — FTS5', () => {
       (d: any) => typeof d.snippet === 'string' && d.snippet.includes('<mark>'),
     );
     expect(hasMark).toBe(true);
+  });
+
+  // ------------------------------------------------------------------
+  // Loosen-and-retry: soft structured filters + inline expiry/version.
+  // ------------------------------------------------------------------
+  it('loosen-and-retry: keyword match survives an over-constraining supplier the old hard-AND would have zeroed', async () => {
+    // keywords match docDarigoldCoaId (via supplier_text), but the parsed
+    // supplier_name points at a supplier NO doc is linked to. The OLD handler
+    // hard-ANDed the supplier predicate -> 0 rows. The new handler drops the
+    // supplier group on retry and returns the keyword hit.
+    installLlmMock({
+      ...DEFAULT_PARSED,
+      keywords: ['darigold5'],
+      supplier_name: 'nonexistentsupplierxyz',
+      intent_summary: 'darigold5 from a wrong supplier',
+    });
+    const res = await naturalSearch(
+      makeContext({ query: 'get me the darigold5 report', tenant_id: seed.tenantId }, orgAdmin),
+    );
+    const body = (await res.json()) as { results: Array<{ id: string }>; total: number };
+    const ids = body.results.map((r) => r.id);
+    expect(ids).toContain(docDarigoldCoaId);
+    expect(body.total).toBeGreaterThan(0);
+  });
+
+  it('loosen-and-retry: drops multiple over-constraining predicates (doc_type + product) before giving up', async () => {
+    installLlmMock({
+      ...DEFAULT_PARSED,
+      keywords: ['darigold5'],
+      document_type_slug: 'a-slug-that-does-not-exist',
+      product_names: ['a-product-that-does-not-exist'],
+      intent_summary: 'over-constrained on every axis',
+    });
+    const res = await naturalSearch(
+      makeContext({ query: 'darigold5 anything', tenant_id: seed.tenantId }, orgAdmin),
+    );
+    const body = (await res.json()) as { results: Array<{ id: string }> };
+    const ids = body.results.map((r) => r.id);
+    expect(ids).toContain(docDarigoldCoaId);
+  });
+
+  it('never dumps the whole corpus when a keyword genuinely matches nothing (no structured filters)', async () => {
+    installLlmMock({
+      ...DEFAULT_PARSED,
+      keywords: ['zzznotokenmatchesthisxyz'],
+      intent_summary: 'unmatched keyword, no filters',
+    });
+    const res = await naturalSearch(
+      makeContext({ query: 'zzznotokenmatchesthisxyz', tenant_id: seed.tenantId }, orgAdmin),
+    );
+    const body = (await res.json()) as { results: Array<{ id: string }>; total: number };
+    // A pure keyword miss with no structured anchor must return 0, NOT the
+    // whole tenant corpus.
+    expect(body.total).toBe(0);
+    expect(body.results).toHaveLength(0);
+  });
+
+  it('result rows carry inline current_version + computed expiration + renewal fields', async () => {
+    installLlmMock({
+      ...DEFAULT_PARSED,
+      keywords: ['darigold5'],
+      intent_summary: 'darigold5 with inline expiry',
+    });
+    const res = await naturalSearch(
+      makeContext({ query: 'darigold5', tenant_id: seed.tenantId }, orgAdmin),
+    );
+    const body = (await res.json()) as { results: Array<Record<string, unknown>> };
+    const row = body.results.find((r) => r.id === docExpiringId);
+    expect(row).toBeTruthy();
+    expect(row!.current_version).toBe(1);
+    expect(row!.renewal_type).toBe('hard_expiry');
+    expect(row!.renewal_due_date).toBe('2026-12-31');
+    expect(row!.expiration).toBe('2026-12-31');
+    expect(row).toHaveProperty('primary_category_name');
+  });
+
+  it('structured-only fallback: an expiry ask returns results even when the leftover keywords match no FTS token (the prior zero-result case)', async () => {
+    // "which documents expire before 2027" -> the LLM leaves noise keywords
+    // that match nothing in FTS, but the real intent is the expiration_filter.
+    // OLD behavior ANDed the noise into MATCH -> 0. NEW: MATCH ladder empties
+    // out, then the structured-only ladder applies the expiration filter.
+    installLlmMock({
+      ...DEFAULT_PARSED,
+      keywords: ['zzznofTStokenmatch'],
+      expiration_filter: { operator: 'before', date1: '2027-01-01' },
+      intent_summary: 'docs expiring before 2027',
+    });
+    const res = await naturalSearch(
+      makeContext({ query: 'which documents expire before 2027', tenant_id: seed.tenantId }, orgAdmin),
+    );
+    const body = (await res.json()) as { results: Array<{ id: string }>; total: number };
+    const ids = body.results.map((r) => r.id);
+    expect(body.total).toBeGreaterThan(0);
+    expect(ids).toContain(docExpiringId);
   });
 
   it('gracefully degrades when LLM is unavailable (503)', async () => {

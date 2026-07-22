@@ -60,6 +60,68 @@ export const DOCUMENTS_FTS_COLS = {
 } as const;
 
 /**
+ * Per-column bm25 weights for `documents_fts`, in the SAME order as the
+ * columns are declared in migration 0079 (and mirrored by
+ * DOCUMENTS_FTS_COLS above). Passed as the trailing args to FTS5's
+ * `bm25(documents_fts, w0, w1, …)`.
+ *
+ * Rationale (the IDP Document Registry "ask in plain English" moat): a
+ * non-technical user asks for "the letter of guarantee" and expects the
+ * doc whose TITLE / ALIAS / CATEGORY is that thing — not some unrelated
+ * COA that merely mentions the phrase deep in its extracted body text.
+ * So retrieval-surface columns (title, aliases, category, and the
+ * supplier/doctype/product identity columns) are weighted well above the
+ * bulk-text columns (extracted_text, metadata blobs, criteria/applies_to).
+ *
+ * bm25() returns NEGATIVE scores (more negative = better) and every query
+ * ranks with `ORDER BY rank` ascending, so a larger weight makes a hit in
+ * that column pull the row further toward the top.
+ *
+ * The array length MUST equal the number of INDEXED columns (15). The two
+ * trailing UNINDEXED columns (doc_id, tenant_id) take no weight and are
+ * not counted here.
+ */
+export const DOCUMENTS_FTS_BM25_WEIGHTS: readonly number[] = [
+  10, // 0  title           — the canonical name
+  3,  // 1  description
+  2,  // 2  tags_text
+  2,  // 3  file_name
+  1,  // 4  extracted_text  — bulk OCR/body text
+  1,  // 5  primary_metadata_text
+  1,  // 6  extended_metadata_text
+  4,  // 7  supplier_text
+  4,  // 8  document_type_text
+  4,  // 9  product_text
+  1,  // 10 lot_text        — exact-ID matching, no ranking lift needed
+  6,  // 11 category_text   — "show me the allergen statement"
+  8,  // 12 aliases_text    — NL-retrieval alternate names
+  1,  // 13 criteria_text
+  1,  // 14 applies_to_text
+] as const;
+
+// Compile-time-ish guard: the weight vector must line up 1:1 with the
+// indexed FTS columns. Keep this next to the constant so a future column
+// add (which must also extend the weights) trips the check immediately.
+if (DOCUMENTS_FTS_BM25_WEIGHTS.length !== Object.keys(DOCUMENTS_FTS_COLS).length) {
+  throw new Error(
+    `DOCUMENTS_FTS_BM25_WEIGHTS length (${DOCUMENTS_FTS_BM25_WEIGHTS.length}) ` +
+      `must equal the indexed documents_fts column count ` +
+      `(${Object.keys(DOCUMENTS_FTS_COLS).length}).`,
+  );
+}
+
+/**
+ * Build a weighted `bm25(<table>, w0, w1, …)` SQL expression string using
+ * DOCUMENTS_FTS_BM25_WEIGHTS. Centralized so every documents_fts ranker
+ * (instant search, NL search, universal search) applies the SAME weights.
+ *
+ * @param table  the FTS table name/alias to rank (default 'documents_fts').
+ */
+export function documentsBm25Expr(table = 'documents_fts'): string {
+  return `bm25(${table}, ${DOCUMENTS_FTS_BM25_WEIGHTS.map((w) => w.toFixed(1)).join(', ')})`;
+}
+
+/**
  * Normalize a user-typed lot term for matching against `documents_fts.lot_text`.
  *
  * Mirrors functions/lib/entities/lots.ts#normalizeLotNumber so the term lines

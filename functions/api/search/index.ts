@@ -40,7 +40,7 @@
  */
 
 import { errorToResponse, BadRequestError } from '../../lib/permissions';
-import { buildMatchExpr, buildMatchExprWithLot, DOCUMENTS_FTS_COLS } from '../../lib/search-fts';
+import { buildMatchExpr, buildMatchExprWithLot, DOCUMENTS_FTS_COLS, documentsBm25Expr } from '../../lib/search-fts';
 import type { Env, User } from '../../lib/types';
 
 const DEFAULT_LIMIT_PER_TYPE = 5;
@@ -267,7 +267,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         `WITH matches AS (
            SELECT
              f.doc_id,
-             bm25(documents_fts) AS rank,
+             ${documentsBm25Expr()} AS rank,
              snippet(documents_fts, -1, '<mark>', '</mark>', '…', 12) AS snippet,
              snippet(documents_fts, ${DOCUMENTS_FTS_COLS.extracted_text}, '<mark>', '</mark>', '…', 12) AS snippet_extracted,
              snippet(documents_fts, ${DOCUMENTS_FTS_COLS.supplier_text}, '<mark>', '</mark>', '…', 8) AS snippet_supplier
@@ -280,7 +280,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
            u.name AS creator_name,
            dt.name AS document_type_name,
            dt.slug AS document_type_slug,
+           dt.name AS primary_category_name,
            s.name AS supplier_name,
+           COALESCE(d.renewal_due_date, json_extract(d.primary_metadata, '$.expiration_date')) AS expiration,
            m.rank AS rank,
            m.snippet AS snippet,
            m.snippet_extracted AS snippet_extracted,

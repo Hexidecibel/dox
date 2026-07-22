@@ -451,6 +451,161 @@ describe('GET /api/documents/search — FTS5 backbone', () => {
     });
   });
 
+  describe('bm25 column weighting (IDP registry retrieval)', () => {
+    // Two docs both mention the SAME distinctive term. In one it is only an
+    // ALIAS; in the other it is buried in extracted_text. The alias hit must
+    // outrank the body-text hit because aliases_text carries a heavier bm25
+    // weight than extracted_text.
+    let aliasDocId: string;
+    let bodyDocId: string;
+    const term = `letterofguarantee${generateTestId().slice(0, 6)}`;
+
+    beforeAll(async () => {
+      aliasDocId = `srch4-walias-${generateTestId().slice(0, 8)}`;
+      bodyDocId = `srch4-wbody-${generateTestId().slice(0, 8)}`;
+
+      // Alias doc: term lives ONLY in documents.aliases (aliases_text col).
+      await db
+        .prepare(
+          `INSERT INTO documents
+             (id, tenant_id, title, aliases, tags, current_version, status, created_by, primary_metadata, created_at, updated_at)
+           VALUES (?, ?, ?, ?, '[]', 1, 'active', ?, '{}', '2024-05-01T00:00:00Z', '2024-05-01T00:00:00Z')`,
+        )
+        .bind(aliasDocId, seed.tenantId, 'Vendor Compliance Packet', JSON.stringify([term, 'guarantee letter']), seed.userId)
+        .run();
+
+      // Body doc: term appears only deep in extracted_text (bulk column).
+      await db
+        .prepare(
+          `INSERT INTO documents
+             (id, tenant_id, title, aliases, tags, current_version, status, created_by, primary_metadata, created_at, updated_at)
+           VALUES (?, ?, ?, '[]', '[]', 1, 'active', ?, '{}', '2024-05-02T00:00:00Z', '2024-05-02T00:00:00Z')`,
+        )
+        .bind(bodyDocId, seed.tenantId, 'Unrelated Report', seed.userId)
+        .run();
+      await db
+        .prepare(
+          `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, extracted_text, uploaded_by)
+           VALUES (?, ?, 1, 'body.pdf', 1024, 'application/pdf', ?, 'deadbeef', ?, ?)`,
+        )
+        .bind(generateTestId(), bodyDocId, `tenant/${bodyDocId}/1/body.pdf`,
+          `Lorem ipsum boilerplate text. Somewhere in here the phrase ${term} appears once inside a long body. More filler.`,
+          seed.userId)
+        .run();
+      // Alias doc also needs a version so the FTS row is complete.
+      await db
+        .prepare(
+          `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, uploaded_by)
+           VALUES (?, ?, 1, 'alias.pdf', 1024, 'application/pdf', ?, 'deadbeef', ?)`,
+        )
+        .bind(generateTestId(), aliasDocId, `tenant/${aliasDocId}/1/alias.pdf`, seed.userId)
+        .run();
+    }, 30_000);
+
+    it('ranks an alias-hit doc above a body-text-only hit', async () => {
+      const { body } = await search(
+        `q=${term}&tenant_id=${seed.tenantId}`,
+        superAdmin,
+      );
+      const ids = body.documents.map((d: { id: string }) => d.id);
+      expect(ids).toContain(aliasDocId);
+      expect(ids).toContain(bodyDocId);
+      // Alias hit must sort strictly before the body-text hit.
+      expect(ids.indexOf(aliasDocId)).toBeLessThan(ids.indexOf(bodyDocId));
+    });
+  });
+
+  describe('inline expiry + version on result rows', () => {
+    let expDocId: string;
+    beforeAll(async () => {
+      expDocId = `srch4-exp-${generateTestId().slice(0, 8)}`;
+      await db
+        .prepare(
+          `INSERT INTO documents
+             (id, tenant_id, title, tags, current_version, status, created_by, primary_metadata,
+              renewal_type, renewal_due_date, created_at, updated_at)
+           VALUES (?, ?, ?, '[]', 3, 'active', ?, ?, 'hard_expiry', '2027-03-24',
+                   '2024-06-01T00:00:00Z', '2024-06-01T00:00:00Z')`,
+        )
+        .bind(expDocId, seed.tenantId, 'Renewal4 Guarantee Letter', seed.userId,
+          JSON.stringify({ expiration_date: '2099-01-01' }))
+        .run();
+    }, 30_000);
+
+    it('carries current_version, renewal_due_date, renewal_type and a computed expiration', async () => {
+      const { body } = await search(
+        `q=Renewal4&tenant_id=${seed.tenantId}`,
+        superAdmin,
+      );
+      const row = body.documents.find((d: { id: string }) => d.id === expDocId);
+      expect(row).toBeTruthy();
+      expect(row.current_version).toBe(3);
+      expect(row.renewal_due_date).toBe('2027-03-24');
+      expect(row.renewal_type).toBe('hard_expiry');
+      // expiration COALESCEs renewal_due_date first (it wins over metadata).
+      expect(row.expiration).toBe('2027-03-24');
+      expect(row).toHaveProperty('primary_category_name');
+    });
+  });
+
+  describe('multi-category filter (document_categories)', () => {
+    let allergenTypeId: string;
+    let multiDocId: string;
+    beforeAll(async () => {
+      allergenTypeId = `srch4-dtAllergen-${generateTestId().slice(0, 8)}`;
+      multiDocId = `srch4-docMulti-${generateTestId().slice(0, 8)}`;
+      await db
+        .prepare(
+          `INSERT INTO document_types (id, tenant_id, name, slug, active, created_at, updated_at)
+           VALUES (?, ?, 'Allergen4', ?, 1, datetime('now'), datetime('now'))`,
+        )
+        .bind(allergenTypeId, seed.tenantId, `allergen4-${allergenTypeId}`)
+        .run();
+      // Doc whose PRIMARY doctype is COA, but ALSO mapped to Allergen4 via
+      // the multi-category junction (secondary). category_id must still find it.
+      await db
+        .prepare(
+          `INSERT INTO documents
+             (id, tenant_id, title, tags, current_version, status, created_by, document_type_id, primary_metadata, created_at, updated_at)
+           VALUES (?, ?, 'Spec With Allergen Statement', '[]', 1, 'active', ?, ?, '{}', datetime('now'), datetime('now'))`,
+        )
+        .bind(multiDocId, seed.tenantId, seed.userId, docTypeCoaId)
+        .run();
+      await db
+        .prepare(
+          `INSERT INTO document_categories (id, document_id, document_type_id, is_primary, created_at)
+           VALUES (?, ?, ?, 1, datetime('now'))`,
+        )
+        .bind(generateTestId(), multiDocId, docTypeCoaId)
+        .run();
+      await db
+        .prepare(
+          `INSERT INTO document_categories (id, document_id, document_type_id, is_primary, created_at)
+           VALUES (?, ?, ?, 0, datetime('now'))`,
+        )
+        .bind(generateTestId(), multiDocId, allergenTypeId)
+        .run();
+    }, 30_000);
+
+    it('category_id matches a doc mapped to that category as a SECONDARY category', async () => {
+      const { body } = await search(
+        `category_id=${allergenTypeId}&tenant_id=${seed.tenantId}`,
+        superAdmin,
+      );
+      const ids = body.documents.map((d: { id: string }) => d.id);
+      expect(ids).toContain(multiDocId);
+    });
+
+    it('category_id also matches when it is the PRIMARY category', async () => {
+      const { body } = await search(
+        `category_id=${docTypeCoaId}&tenant_id=${seed.tenantId}`,
+        superAdmin,
+      );
+      const ids = body.documents.map((d: { id: string }) => d.id);
+      expect(ids).toContain(multiDocId);
+    });
+  });
+
   describe('snippets', () => {
     it('returns a snippet field with <mark> tags around matched text', async () => {
       const { body } = await search(

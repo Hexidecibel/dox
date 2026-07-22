@@ -49,7 +49,7 @@
  *     filter does the work.
  */
 
-import { buildMatchExprWithLot, DOCUMENTS_FTS_COLS } from '../../../lib/search-fts';
+import { buildMatchExprWithLot, DOCUMENTS_FTS_COLS, documentsBm25Expr } from '../../../lib/search-fts';
 import type { Env, User } from '../../../lib/types';
 
 type SortMode = 'relevance' | 'newest' | 'oldest' | 'name';
@@ -94,6 +94,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     let tenantId = url.searchParams.get('tenant_id');
     const category = url.searchParams.get('category');
     const documentTypeId = url.searchParams.get('document_type_id');
+    // Multi-category aware filter (migration 0076 document_categories): a
+    // doctype id that matches ANY of a doc's category mappings, not just the
+    // denormalized primary document_type_id. Enables "show all Allergen docs"
+    // across docs mapped to multiple categories.
+    const categoryId = url.searchParams.get('category_id');
     const supplierId = url.searchParams.get('supplier_id');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
@@ -132,6 +137,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
     if (documentTypeId) {
       filters.doc_type = { sql: 'd.document_type_id = ?', params: [documentTypeId] };
+    }
+    if (categoryId) {
+      // EXISTS against the multi-category junction — matches docs mapped to
+      // this category as EITHER their primary or a secondary category.
+      filters.category_multi = {
+        sql: 'EXISTS (SELECT 1 FROM document_categories dc WHERE dc.document_id = d.id AND dc.document_type_id = ?)',
+        params: [categoryId],
+      };
     }
     if (supplierId) {
       filters.supplier = { sql: 'd.supplier_id = ?', params: [supplierId] };
@@ -200,7 +213,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // `documents` table side only needs status + category + doc_type +
     // supplier. We KEEP the tenant filter on `d` as well — defense in
     // depth — but it's a no-op join filter.
-    for (const k of ['status', 'tenant', 'category', 'doc_type', 'supplier']) {
+    for (const k of ['status', 'tenant', 'category', 'category_multi', 'doc_type', 'supplier']) {
       const f = filters[k];
       if (!f) continue;
       whereParts.push(f.sql);
@@ -231,7 +244,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         WITH matches AS (
           SELECT
             f.doc_id,
-            bm25(documents_fts) AS rank,
+            ${documentsBm25Expr()} AS rank,
             snippet(documents_fts, -1, '<mark>', '</mark>', '…', 12) AS snippet,
             snippet(documents_fts, ${DOCUMENTS_FTS_COLS.extracted_text}, '<mark>', '</mark>', '…', 12) AS snippet_extracted,
             snippet(documents_fts, ${DOCUMENTS_FTS_COLS.supplier_text}, '<mark>', '</mark>', '…', 8) AS snippet_supplier
@@ -248,7 +261,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
           t.name as tenant_name,
           dt.name as document_type_name,
           dt.slug as document_type_slug,
+          dt.name as primary_category_name,
           s.name as supplier_name,
+          COALESCE(d.renewal_due_date, json_extract(d.primary_metadata, '$.expiration_date')) AS expiration,
           COUNT(*) OVER () AS total_count
         FROM matches m
         JOIN documents d ON d.id = m.doc_id
@@ -266,7 +281,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
           t.name as tenant_name,
           dt.name as document_type_name,
           dt.slug as document_type_slug,
+          dt.name as primary_category_name,
           s.name as supplier_name,
+          COALESCE(d.renewal_due_date, json_extract(d.primary_metadata, '$.expiration_date')) AS expiration,
           COUNT(*) OVER () AS total_count
         FROM documents d
         ${joins.join('\n')}

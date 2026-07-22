@@ -717,6 +717,13 @@ export interface Document {
   renewalIntervalMonths?: number | null;
   renewalDueDate?: string | null;
   categories?: ApiDocumentCategory[]; // full multi-category set (0076)
+  // Search-result convenience fields inlined by the search endpoints
+  // (GET /api/documents/search, POST /api/documents/search/natural,
+  // GET /api/search) so a result renders "Letter of Guarantee, v2, expires
+  // 2027-03-24" without a follow-up fetch. Snake-cased because parseDocument
+  // spreads the raw row through unchanged. current_version already exists above.
+  expiration?: string | null; // COALESCE(renewal_due_date, primary_metadata.$.expiration_date)
+  primary_category_name?: string | null; // name of the doc's primary category (document_type_id)
 }
 
 export interface DocumentVersion {

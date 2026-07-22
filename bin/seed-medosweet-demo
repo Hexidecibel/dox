@@ -1,0 +1,360 @@
+#!/usr/bin/env bash
+# Seed a LOCAL, demo-only fixture for the tenant "Medosweet Farms" so the
+# EXISTING natural-language search + expiry features answer plain-English
+# questions against real compliance records.
+#
+# This is a DATA/SEED fixture only — it adds NO features. It seeds one tenant,
+# a handful of suppliers + document types, and 7 real-world compliance
+# documents (each with a minimal placeholder PDF in LOCAL R2 and rich
+# primary_metadata). Retrieval terms/aliases now live in the FIRST-CLASS
+# documents.aliases JSON column (migration 0077, indexed into
+# documents_fts.aliases_text by 0079). Multi-category mappings live in
+# document_categories (0076) — D3 is mapped to TWO categories. A couple docs
+# (D3, D6 hard_expiry; D5 renewal_application) carry the registry
+# renewal_type + renewal_due_date next-action fields.
+#
+# ---------------------------------------------------------------------------
+# WHAT GETS SEEDED (tenant `medosweet_demo`, slug `medosweet`)
+# ---------------------------------------------------------------------------
+# Suppliers: "Medosweet Farms" (self), "Gossner Foods, Inc.",
+#            "CMF (Country Morning Farms)".
+# Document types (the category taxonomy): FDA Registration Number,
+#   3rd Party Food Safety Audit Report, 3rd Party Audit Certificate,
+#   Business License, Organic Certificate, Certificate of Liability Insurance,
+#   Specification Sheet.
+# Documents (7):
+#   D1 FDA Facility Registration — Kent          (exp 2026-12-31)
+#   D2 cGDP Storage & Distribution Audit (A152)  (exp 2027-02-24)
+#   D3 cGDP Audit Certificate #18320             (exp 2027-03-24)
+#   D4 Business License #9713714                 (exp 2026-12-31)
+#   D5 WSDA Organic Handler Certificate #3959    (NO expiration — renewal-driven)
+#   D6 Gossner Foods COI #725168094              (exp 2027-07-01)
+#   D7 40% Heavy Whipping Cream Spec (item 10286)(NO expiration; brand vs producer)
+#
+# Login for the demo: a@a.a / a (shared dev super_admin; can view any tenant).
+# The fixture also owns an internal org_admin (medo_admin) used as the
+# document author, so --reset removes only Medosweet rows and never disturbs
+# the shared admin or the cmftest fixture.
+#
+# Usage:
+#   ./bin/seed-medosweet-demo            # seed LOCAL D1 (interactive confirm)
+#   ./bin/seed-medosweet-demo -y         # seed LOCAL D1, no prompt
+#   ./bin/seed-medosweet-demo --reset    # delete the seeded tenant + child rows
+#   ./bin/seed-medosweet-demo --reset -y # ...without prompt
+#
+# Target is ALWAYS local D1 (doc-upload-db, no --remote) — dev fixture, never prod.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DB="doc-upload-db"
+R2_BUCKET="doc-upload-files"
+
+RESET=0
+ASSUME_YES=0
+for arg in "$@"; do
+  case "$arg" in
+    --reset) RESET=1 ;;
+    -y|--yes) ASSUME_YES=1 ;;
+    -h|--help) sed -n '2,60p' "$0"; exit 0 ;;
+    *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
+# ---- Fixed, readable ids (deterministic re-runs + teardown) ----
+TENANT_ID="medosweet_demo"
+TENANT_SLUG="medosweet"
+ADMIN_ID="medo_admin"                 # fixture-owned doc author (org_admin)
+ADMIN_EMAIL_OWNER="owner@medosweet.demo"
+LOGIN_EMAIL="a@a.a"                   # shared dev super_admin (login)
+LOGIN_PASSWORD="a"
+
+SUP_SELF="medo_sup_self"              # Medosweet Farms (self)
+SUP_GOSSNER="medo_sup_gossner"        # Gossner Foods, Inc.
+SUP_CMF="medo_sup_cmf"                # CMF (Country Morning Farms)
+
+DT_FDA="medo_dt_fda"
+DT_AUDIT_REPORT="medo_dt_audit_report"
+DT_AUDIT_CERT="medo_dt_audit_cert"
+DT_BIZLIC="medo_dt_bizlic"
+DT_ORGANIC="medo_dt_organic"
+DT_COI="medo_dt_coi"
+DT_SPEC="medo_dt_spec"
+
+PROD_CREAM="medo_prod_10286"          # 40% Heavy Whipping Cream, item 10286
+
+# Document + version ids.
+D1="medo_doc1"; V1="medo_ver1"
+D2="medo_doc2"; V2="medo_ver2"
+D3="medo_doc3"; V3="medo_ver3"
+D4="medo_doc4"; V4="medo_ver4"
+D5="medo_doc5"; V5="medo_ver5"
+D6="medo_doc6"; V6="medo_ver6"
+D7="medo_doc7"; V7="medo_ver7"
+DP7="medo_dp7"                        # document_products link for the spec sheet
+
+d1_exec_file() { npx wrangler d1 execute "$DB" --local --file="$1"; }
+
+# ----------------------------- RESET ---------------------------------------
+if [ "$RESET" = "1" ]; then
+  echo "Target: LOCAL D1 ($DB)"
+  echo "This DELETES tenant '$TENANT_ID' and ALL of its child rows (NOT the shared a@a.a admin)."
+  if [ "$ASSUME_YES" != "1" ]; then
+    read -r -p "Proceed? [y/N] " ans
+    [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Aborted."; exit 1; }
+  fi
+  RESET_SQL=$(mktemp)
+  trap 'rm -f "$RESET_SQL"' EXIT
+  # Children-first deletion order (FK enforcement is ON when the dev server
+  # shares this local D1). The FTS rows are removed automatically by the
+  # AFTER DELETE triggers on documents.
+  cat > "$RESET_SQL" <<SQL
+DELETE FROM search_reindex_jobs WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM document_categories WHERE document_id IN (SELECT id FROM documents WHERE tenant_id = '${TENANT_ID}');
+DELETE FROM document_products WHERE document_id IN (SELECT id FROM documents WHERE tenant_id = '${TENANT_ID}');
+DELETE FROM document_versions WHERE document_id IN (SELECT id FROM documents WHERE tenant_id = '${TENANT_ID}');
+DELETE FROM documents WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM products WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM document_types WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM suppliers WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM audit_log WHERE tenant_id = '${TENANT_ID}' OR user_id = '${ADMIN_ID}';
+DELETE FROM sessions WHERE user_id = '${ADMIN_ID}';
+DELETE FROM users WHERE id = '${ADMIN_ID}';
+DELETE FROM tenants WHERE id = '${TENANT_ID}';
+SQL
+  d1_exec_file "$RESET_SQL"
+  echo "Reset complete: tenant '$TENANT_ID' and child rows removed (shared a@a.a admin left intact)."
+  exit 0
+fi
+
+# ----------------------------- SEED ----------------------------------------
+echo "Target: LOCAL D1 ($DB)"
+echo "Seeding Medosweet demo fixture (tenant '$TENANT_ID')."
+if [ "$ASSUME_YES" != "1" ]; then
+  read -r -p "Proceed? [y/N] " ans
+  [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Aborted."; exit 1; }
+fi
+
+# PBKDF2 hash (format hex(salt):hex(derived)) — matches functions/lib/auth.ts.
+gen_hash() {
+  PW="$1" node -e "
+    const crypto = require('crypto');
+    const salt = crypto.randomBytes(16);
+    const derived = crypto.pbkdf2Sync(process.env.PW, salt, 100000, 32, 'sha256');
+    console.log(salt.toString('hex') + ':' + derived.toString('hex'));
+  "
+}
+OWNER_HASH=$(gen_hash "$LOGIN_PASSWORD")
+LOGIN_HASH=$(gen_hash "$LOGIN_PASSWORD")
+
+# Build a primary_metadata JSON blob (SQL-single-quote-escaped) from KEY=VALUE
+# pairs passed as args. Values are plain strings.
+build_meta() {
+  node -e "
+    const kv = {};
+    for (const a of process.argv.slice(1)) {
+      const i = a.indexOf('=');
+      kv[a.slice(0, i)] = a.slice(i + 1);
+    }
+    process.stdout.write(JSON.stringify(kv).replace(/'/g, \"''\"));
+  " "$@"
+}
+
+# NOTE: retrieval aliases now live in the FIRST-CLASS documents.aliases JSON
+# column (migration 0077, indexed into documents_fts.aliases_text by 0079),
+# NOT stuffed into primary_metadata. See ALIASES_D* below. primary_metadata
+# now carries ONLY structured fields.
+META_D1=$(build_meta facility=Kent fda_reg_last4=4552 expiration_date=2026-12-31 renewal=biennial)
+META_D2=$(build_meta facility=Kent certifier="Kiwa-ASI, LLC" auditor="Clement Harvey" audit_date=2026-02-24 \
+  score=99.00% rating=EXCELLENT expiration_date=2027-02-24)
+META_D3=$(build_meta certifier="Kiwa-ASI, LLC" cert_no=18320 effective_date=2026-02-24 expiration_date=2027-03-24 rating=EXCELLENT)
+META_D4=$(build_meta license_no=9713714 expiration_date=2026-12-31)
+META_D5=$(build_meta certifier="WSDA Organic Program" cert_no=3959 nop_id=2780003959 \
+  scope="Butter, Cream, Eggs, Milk" facility=Kent renewal_application_due=2027-03-01)
+META_D6=$(build_meta cert_no=725168094 cert_date=2026-06-18 expiration_date=2027-07-01 \
+  certificate_holder="Medosweet Farms" carriers="Zurich American; Travelers; Nationwide Agribusiness")
+META_D7=$(build_meta item=10286 brand_owner="Medosweet Farms" actual_manufacturer=CMF co_packer_code="CMF# 30904" \
+  plant_code=53-140 allergens=milk pack="300-gal tote")
+
+# ---- First-class retrieval aliases (documents.aliases JSON column) ----
+# Each is a JSON array literal. "proof of insurance" (D6) is a DELIBERATELY
+# UNIQUE term that appears ONLY here (not in any title/description/metadata),
+# so the verifier can prove alias-column retrieval specifically.
+ALIASES_D1='["FDA reg","FFR number","facility registration","FDA facility registration number"]'
+ALIASES_D2='["audit report","cGDP audit","ASI report","A152","storage and distribution audit"]'
+ALIASES_D3='["audit cert","audit certificate","cGDP cert","ASI certificate","certificate of compliance"]'
+ALIASES_D4='["business license"]'
+ALIASES_D5='["organic cert","NOP cert","OSP","organic handler certification","WSDA","OTCO","organic certificate"]'
+ALIASES_D6='["COI","liability insurance","proof of insurance","insurance certificate","Gossner COI","certificate of liability insurance"]'
+ALIASES_D7='["spec sheet","product spec","PIF","10286 spec","cream spec","specification sheet","heavy whipping cream"]'
+
+SEED_SQL=$(mktemp)
+trap 'rm -f "$SEED_SQL"' EXIT
+
+cat > "$SEED_SQL" <<SQL
+-- ---- Tenant ----
+INSERT INTO tenants (id, name, slug, description)
+VALUES ('${TENANT_ID}', 'Medosweet Farms', '${TENANT_SLUG}', 'Demo tenant: dairy distributor compliance records')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, description=excluded.description;
+
+-- ---- Fixture-owned document author (org_admin scoped to the tenant) ----
+INSERT INTO users (id, email, password_hash, name, role, tenant_id)
+VALUES ('${ADMIN_ID}', '${ADMIN_EMAIL_OWNER}', '${OWNER_HASH}', 'Medosweet Admin', 'org_admin', '${TENANT_ID}')
+ON CONFLICT(id) DO UPDATE SET
+  email=excluded.email, password_hash=excluded.password_hash, name=excluded.name,
+  role=excluded.role, tenant_id=excluded.tenant_id;
+
+-- ---- Shared dev login: a@a.a / a as super_admin (can view any tenant). ----
+-- Keyed on email so it upserts whatever row currently holds a@a.a WITHOUT
+-- repointing its home tenant (keeps the cmftest fixture's reset clean). On a
+-- fresh DB it is created with a NULL home tenant.
+INSERT INTO users (id, email, password_hash, name, role, tenant_id)
+VALUES ('medo_login_admin', '${LOGIN_EMAIL}', '${LOGIN_HASH}', 'Dev Admin', 'super_admin', NULL)
+ON CONFLICT(email) DO UPDATE SET
+  password_hash=excluded.password_hash, role='super_admin', active=1;
+
+-- ---- Suppliers ----
+INSERT INTO suppliers (id, tenant_id, name, slug, aliases) VALUES
+  ('${SUP_SELF}',    '${TENANT_ID}', 'Medosweet Farms',           'medosweet-farms',          '["Medosweet","Medosweet Farms Inc"]'),
+  ('${SUP_GOSSNER}', '${TENANT_ID}', 'Gossner Foods, Inc.',       'gossner-foods',            '["Gossner","Gossner Foods"]'),
+  ('${SUP_CMF}',     '${TENANT_ID}', 'CMF (Country Morning Farms)','cmf-country-morning-farms','["CMF","Country Morning Farms"]')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, aliases=excluded.aliases;
+
+-- ---- Document types (the category taxonomy; verbatim names) ----
+INSERT INTO document_types (id, tenant_id, name, slug, description) VALUES
+  ('${DT_FDA}',          '${TENANT_ID}', 'FDA Registration Number',              'fda-registration-number',              'FDA food facility registration'),
+  ('${DT_AUDIT_REPORT}', '${TENANT_ID}', '3rd Party Food Safety Audit Report',   '3rd-party-food-safety-audit-report',   'Third-party food safety audit report'),
+  ('${DT_AUDIT_CERT}',   '${TENANT_ID}', '3rd Party Audit Certificate',          '3rd-party-audit-certificate',          'Third-party audit certificate'),
+  ('${DT_BIZLIC}',       '${TENANT_ID}', 'Business License',                     'business-license',                     'Business license'),
+  ('${DT_ORGANIC}',      '${TENANT_ID}', 'Organic Certificate',                  'organic-certificate',                  'Organic handler certificate'),
+  ('${DT_COI}',          '${TENANT_ID}', 'Certificate of Liability Insurance',   'certificate-of-liability-insurance',   'Certificate of liability insurance'),
+  ('${DT_SPEC}',         '${TENANT_ID}', 'Specification Sheet',                  'specification-sheet',                  'Product specification sheet')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, description=excluded.description;
+
+-- ---- Product (for the spec sheet brand-vs-producer bridge) ----
+INSERT INTO products (id, tenant_id, name, slug, description) VALUES
+  ('${PROD_CREAM}', '${TENANT_ID}', '40% Heavy Whipping Cream (item 10286)', 'heavy-whipping-cream-10286', 'Item 10286; brand Medosweet, produced by CMF')
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description;
+
+-- ---- Documents. Retrieval aliases now ride in the FIRST-CLASS aliases JSON
+--      column (indexed into documents_fts.aliases_text). A couple docs carry
+--      renewal_type + renewal_due_date (the registry next-action model): D3
+--      hard-expires 2027-03-24; D5 (no hard expiry) is renewal-application
+--      driven, due 2027-03-01. document_categories rows (below) supply the
+--      multi-category mappings — D3 is intentionally mapped to TWO categories.
+INSERT INTO documents
+  (id, tenant_id, title, description, category, tags, current_version, status,
+   created_by, document_type_id, supplier_id, primary_metadata,
+   aliases, renewal_type, renewal_due_date)
+VALUES
+  ('${D1}', '${TENANT_ID}',
+   'FDA Facility Registration — Kent',
+   'FDA food facility registration (FFR) number for the Kent facility.',
+   'FDA Registration Number', '[]', 1, 'active',
+   '${ADMIN_ID}', '${DT_FDA}', '${SUP_SELF}', '${META_D1}',
+   '${ALIASES_D1}', NULL, NULL),
+  ('${D2}', '${TENANT_ID}',
+   'cGDP Storage & Distribution Audit Report (A152)',
+   'Third-party cGDP storage and distribution audit report, checklist A152.',
+   '3rd Party Food Safety Audit Report', '[]', 1, 'active',
+   '${ADMIN_ID}', '${DT_AUDIT_REPORT}', '${SUP_SELF}', '${META_D2}',
+   '${ALIASES_D2}', NULL, NULL),
+  ('${D3}', '${TENANT_ID}',
+   'cGDP Audit Certificate #18320',
+   'Third-party cGDP audit certificate of compliance, certificate #18320, rating EXCELLENT.',
+   '3rd Party Audit Certificate', '[]', 1, 'active',
+   '${ADMIN_ID}', '${DT_AUDIT_CERT}', '${SUP_SELF}', '${META_D3}',
+   '${ALIASES_D3}', 'hard_expiry', '2027-03-24'),
+  ('${D4}', '${TENANT_ID}',
+   'Business License #9713714',
+   'Business license number 9713714.',
+   'Business License', '[]', 1, 'active',
+   '${ADMIN_ID}', '${DT_BIZLIC}', '${SUP_SELF}', '${META_D4}',
+   '${ALIASES_D4}', NULL, NULL),
+  ('${D5}', '${TENANT_ID}',
+   'WSDA Organic Handler Certificate #3959',
+   'WSDA Organic Program handler certificate #3959 (NOP). Scope: Butter, Cream, Eggs, Milk.',
+   'Organic Certificate', '[]', 1, 'active',
+   '${ADMIN_ID}', '${DT_ORGANIC}', '${SUP_SELF}', '${META_D5}',
+   '${ALIASES_D5}', 'renewal_application', '2027-03-01'),
+  ('${D6}', '${TENANT_ID}',
+   'Gossner Foods COI #725168094',
+   'Gossner Foods certificate of liability insurance #725168094; certificate holder Medosweet Farms.',
+   'Certificate of Liability Insurance', '[]', 1, 'active',
+   '${ADMIN_ID}', '${DT_COI}', '${SUP_GOSSNER}', '${META_D6}',
+   '${ALIASES_D6}', 'hard_expiry', '2027-07-01'),
+  ('${D7}', '${TENANT_ID}',
+   '40% Heavy Whipping Cream — Product Specification (item 10286)',
+   'Product specification sheet for 40% Heavy Whipping Cream, item 10286. Brand owner Medosweet Farms; actual manufacturer CMF (co-packer CMF# 30904), plant code 53-140.',
+   'Specification Sheet', '[]', 1, 'active',
+   '${ADMIN_ID}', '${DT_SPEC}', '${SUP_SELF}', '${META_D7}',
+   '${ALIASES_D7}', NULL, NULL)
+ON CONFLICT(id) DO UPDATE SET
+  title=excluded.title, description=excluded.description, category=excluded.category,
+  document_type_id=excluded.document_type_id, supplier_id=excluded.supplier_id,
+  primary_metadata=excluded.primary_metadata, aliases=excluded.aliases,
+  renewal_type=excluded.renewal_type, renewal_due_date=excluded.renewal_due_date,
+  status='active';
+
+-- ---- Multi-category mappings (migration 0076 document_categories). Every doc
+--      gets a PRIMARY row mirroring its document_type_id; D3 additionally gets
+--      a SECONDARY row so it is findable under BOTH "3rd Party Audit
+--      Certificate" (primary) AND "3rd Party Food Safety Audit Report"
+--      (secondary) — the multi-category example. Deterministic ids for
+--      idempotent re-runs; the 0079 trigger refreshes category_text on insert.
+INSERT INTO document_categories (id, document_id, document_type_id, is_primary) VALUES
+  ('medo_dc1',      '${D1}', '${DT_FDA}',          1),
+  ('medo_dc2',      '${D2}', '${DT_AUDIT_REPORT}', 1),
+  ('medo_dc3',      '${D3}', '${DT_AUDIT_CERT}',   1),
+  ('medo_dc3_sec',  '${D3}', '${DT_AUDIT_REPORT}', 0),
+  ('medo_dc4',      '${D4}', '${DT_BIZLIC}',       1),
+  ('medo_dc5',      '${D5}', '${DT_ORGANIC}',      1),
+  ('medo_dc6',      '${D6}', '${DT_COI}',          1),
+  ('medo_dc7',      '${D7}', '${DT_SPEC}',         1)
+ON CONFLICT(id) DO UPDATE SET
+  document_type_id=excluded.document_type_id, is_primary=excluded.is_primary;
+
+-- ---- Document versions (v1 each; fires the FTS re-emit with file_name). ----
+INSERT INTO document_versions
+  (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by)
+VALUES
+  ('${V1}', '${D1}', 1, 'fda-facility-registration-kent.pdf',        2048, 'application/pdf', 'medosweet/${D1}/fda-facility-registration.pdf',        '${ADMIN_ID}'),
+  ('${V2}', '${D2}', 1, 'cgdp-storage-distribution-audit-a152.pdf',  2048, 'application/pdf', 'medosweet/${D2}/cgdp-audit-report-a152.pdf',           '${ADMIN_ID}'),
+  ('${V3}', '${D3}', 1, 'cgdp-audit-certificate-18320.pdf',          2048, 'application/pdf', 'medosweet/${D3}/cgdp-audit-certificate-18320.pdf',     '${ADMIN_ID}'),
+  ('${V4}', '${D4}', 1, 'business-license-9713714.pdf',              2048, 'application/pdf', 'medosweet/${D4}/business-license-9713714.pdf',         '${ADMIN_ID}'),
+  ('${V5}', '${D5}', 1, 'wsda-organic-handler-certificate-3959.pdf', 2048, 'application/pdf', 'medosweet/${D5}/wsda-organic-certificate-3959.pdf',    '${ADMIN_ID}'),
+  ('${V6}', '${D6}', 1, 'gossner-coi-725168094.pdf',                 2048, 'application/pdf', 'medosweet/${D6}/gossner-coi-725168094.pdf',            '${ADMIN_ID}'),
+  ('${V7}', '${D7}', 1, 'heavy-whipping-cream-spec-10286.pdf',       2048, 'application/pdf', 'medosweet/${D7}/heavy-whipping-cream-spec-10286.pdf',  '${ADMIN_ID}')
+ON CONFLICT(id) DO UPDATE SET file_name=excluded.file_name, r2_key=excluded.r2_key;
+
+-- ---- Link the spec sheet to product 10286 (no expiry — specs don't expire).
+INSERT INTO document_products (id, document_id, product_id, expires_at, notes)
+VALUES ('${DP7}', '${D7}', '${PROD_CREAM}', NULL, 'Brand Medosweet; produced by CMF (plant 53-140)')
+ON CONFLICT(id) DO UPDATE SET product_id=excluded.product_id, notes=excluded.notes;
+SQL
+
+d1_exec_file "$SEED_SQL"
+
+# ---- Put a tiny placeholder PDF into LOCAL R2 at each version's key. ----
+PDF_TMP=$(mktemp --suffix=.pdf)
+trap 'rm -f "$SEED_SQL" "$PDF_TMP"' EXIT
+printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\nxref\n0 4\n0000000000 65535 f \ntrailer<</Root 1 0 R/Size 4>>\nstartxref\n0\n%%%%EOF\n' > "$PDF_TMP"
+
+for KEY in \
+  "medosweet/${D1}/fda-facility-registration.pdf" \
+  "medosweet/${D2}/cgdp-audit-report-a152.pdf" \
+  "medosweet/${D3}/cgdp-audit-certificate-18320.pdf" \
+  "medosweet/${D4}/business-license-9713714.pdf" \
+  "medosweet/${D5}/wsda-organic-certificate-3959.pdf" \
+  "medosweet/${D6}/gossner-coi-725168094.pdf" \
+  "medosweet/${D7}/heavy-whipping-cream-spec-10286.pdf"; do
+  npx wrangler r2 object put "${R2_BUCKET}/${KEY}" --file="$PDF_TMP" --content-type="application/pdf" --local >/dev/null
+done
+
+echo ""
+echo "Seed complete."
+echo "  Login:   ${LOGIN_EMAIL} / ${LOGIN_PASSWORD}  (super_admin — can view any tenant)"
+echo "  Tenant:  ${TENANT_ID}  (Medosweet Farms)"
+echo "  Docs:    7 (FDA reg, audit report A152, audit cert 18320, business license,"
+echo "              organic cert 3959, Gossner COI, cream spec 10286)."
+echo ""
+echo "Verify:  ./bin/verify-medosweet-demo   (dev server must be running: npm run dev)"
