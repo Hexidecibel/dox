@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Create a tenant + a starter category taxonomy (and optionally an org_admin
+# user) in the dox D1 database. Idempotent. LOCAL by default; pass --remote to
+# target production (doc-upload-db --remote).
+#
+# The starter taxonomy = the Medosweet FSQA manual's section topics (100-126)
+# seeded as global (supplier_id NULL) document_types so a fresh tenant has
+# categories to pick from in the upload form. Refine/replace once the verbatim
+# SOP 102.2 Document-Type Template is available.
+#
+# Usage:
+#   ./bin/create-tenant --name "Medosweet Farms" --slug medosweet [--id <id>]
+#   ./bin/create-tenant --remote --name "Medosweet Farms" --slug medosweet
+#   ./bin/create-tenant --remote --name "Medosweet Farms" --slug medosweet \
+#       --admin-email ajconner@example.com --admin-name "AJ Conner"   # + org_admin
+#
+# --admin-* creates an org_admin scoped to the tenant with a generated temp
+# password (printed ONCE) and force_password_change=1. Omit to create tenant
+# + taxonomy only (e.g. when an existing super_admin will scope into it).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DB="doc-upload-db"
+REMOTE=""            # "" = local, "--remote" = prod
+NAME=""; SLUG=""; TID=""
+ADMIN_EMAIL=""; ADMIN_NAME=""; ADMIN_ROLE="org_admin"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --remote) REMOTE="--remote" ;;
+    --name) NAME="$2"; shift ;;
+    --slug) SLUG="$2"; shift ;;
+    --id) TID="$2"; shift ;;
+    --admin-email) ADMIN_EMAIL="$2"; shift ;;
+    --admin-name) ADMIN_NAME="$2"; shift ;;
+    --admin-role) ADMIN_ROLE="$2"; shift ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -z "$NAME" ] && { echo "--name required" >&2; exit 2; }
+[ -z "$SLUG" ] && { echo "--slug required" >&2; exit 2; }
+# Deterministic id from slug when not given (stable across re-runs).
+[ -z "$TID" ] && TID="tenant_$(printf '%s' "$SLUG" | tr -c 'a-z0-9' '_' )"
+
+TARGET="LOCAL"; [ -n "$REMOTE" ] && TARGET="PROD (--remote)"
+echo "Target: $TARGET   Tenant: $NAME ($SLUG) id=$TID"
+if [ -n "$REMOTE" ]; then
+  read -r -p "This writes to PRODUCTION. Proceed? [y/N] " ans
+  [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Aborted."; exit 1; }
+fi
+
+d1() { npx wrangler d1 execute "$DB" $REMOTE --command "$1"; }
+d1_file() { npx wrangler d1 execute "$DB" $REMOTE --file="$1"; }
+
+sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+# ---- Tenant ----
+d1 "INSERT INTO tenants (id, name, slug, description)
+    VALUES ('$TID', '$(sql_escape "$NAME")', '$(sql_escape "$SLUG")', 'FSQA document registry')
+    ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug;" >/dev/null
+echo "  tenant upserted"
+
+# ---- Starter category taxonomy (manual sections 100-126) ----
+CATS=(
+  "Leadership Sign Off" "Records Management" "Supplier Approval" "GMP Self Audit"
+  "HACCP Hazard Analysis" "Food Defense Plan" "Allergen" "Foreign Material"
+  "Bloodborne" "Food Adulteration" "Hold & Release" "Pest Control" "Sanitation"
+  "Traceability & Recall" "Receiving" "Shipping" "Storage" "Chemical"
+  "Water Quality" "Corrective Action" "Training" "Verification & Validations"
+  "Complaint Tracking" "Temperature Monitoring" "Business Continuity"
+  "Organic Program" "Food Safety Plan"
+)
+CAT_SQL=$(mktemp); trap 'rm -f "$CAT_SQL"' EXIT
+for c in "${CATS[@]}"; do
+  slug=$(printf '%s' "$c" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '-' | sed 's/-\{2,\}/-/g; s/^-//; s/-$//')
+  id="dt_${SLUG}_${slug}"
+  echo "INSERT OR IGNORE INTO document_types (id, tenant_id, name, slug) VALUES ('$id','$TID','$(sql_escape "$c")','$slug');" >> "$CAT_SQL"
+done
+d1_file "$CAT_SQL" >/dev/null
+echo "  ${#CATS[@]} starter categories seeded (INSERT OR IGNORE)"
+
+# ---- Optional org_admin user ----
+if [ -n "$ADMIN_EMAIL" ]; then
+  [ -z "$ADMIN_NAME" ] && ADMIN_NAME="$ADMIN_EMAIL"
+  TMP_PW=$(node -e "console.log(require('crypto').randomBytes(9).toString('base64url'))")
+  HASH=$(PW="$TMP_PW" node -e "
+    const c=require('crypto');const s=c.randomBytes(16);
+    const d=c.pbkdf2Sync(process.env.PW,s,100000,32,'sha256');
+    console.log(s.toString('hex')+':'+d.toString('hex'));")
+  UID="user_$(printf '%s' "$ADMIN_EMAIL" | tr -c 'a-z0-9' '_')"
+  d1 "INSERT INTO users (id, email, password_hash, name, role, tenant_id, force_password_change)
+      VALUES ('$UID','$(sql_escape "$ADMIN_EMAIL")','$HASH','$(sql_escape "$ADMIN_NAME")','$ADMIN_ROLE','$TID',1)
+      ON CONFLICT(email) DO UPDATE SET role=excluded.role, tenant_id=excluded.tenant_id;" >/dev/null
+  echo ""
+  echo "  admin: $ADMIN_EMAIL ($ADMIN_ROLE)  TEMP PASSWORD: $TMP_PW"
+  echo "  (force_password_change=1 — share out of band; they set their own on first login)"
+fi
+
+echo ""
+echo "Done. Tenant '$NAME' ready on $TARGET."
