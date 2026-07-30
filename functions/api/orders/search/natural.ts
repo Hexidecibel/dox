@@ -4,7 +4,7 @@ import {
   BadRequestError,
   errorToResponse,
 } from '../../../lib/permissions';
-import { modelFor } from '../../../lib/models';
+import { resolveModel, noteServedModel, invalidateModelCache } from '../../../lib/models';
 import type { Env, User } from '../../../lib/types';
 
 interface ParsedOrderQuery {
@@ -78,6 +78,8 @@ async function parseOrderQuery(
     '5. Don\'t force matches - if nothing matches, leave fields null/absent.',
   ].join('\n');
 
+  const resolution = await resolveModel('best', env);
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300_000);
 
@@ -91,7 +93,7 @@ async function parseOrderQuery(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: modelFor('best', env),
+        model: resolution.model,
         temperature: 0,
         max_tokens: 500,
         messages: [
@@ -105,6 +107,7 @@ async function parseOrderQuery(
     });
   } catch (err: unknown) {
     clearTimeout(timeout);
+    invalidateModelCache(env);
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error('LLM request timed out after 300 seconds');
     }
@@ -115,7 +118,10 @@ async function parseOrderQuery(
 
   const data = (await response.json()) as {
     choices: { message: { content: string } }[];
+    model?: string;
   };
+
+  noteServedModel('best', resolution.model, data.model);
 
   let content = data.choices?.[0]?.message?.content || '';
 

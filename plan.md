@@ -46,6 +46,79 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Model resiliency — remaining follow-ups (core SHIPPED, uncommitted)
+
+**Status:** in-progress (2026-07-30). Core landed: `MODEL_CHAINS` preference chains +
+health-aware `resolveModel()` in `functions/lib/models.ts` and its `bin/lib/models.js`
+mirror; all 7 `modelFor` call sites converted; degradation logged, never silent; worker
+preflight banner; `text_model` (served id incl. quantization) on the result body.
+36 unit tests, 247 green across affected files.
+
+**Why the chain order is what it is (do NOT "optimize" it back):** `best` is ordered by
+QUANTIZATION, not speed. The `-turbo` backend (RTX 4090) serves **Q4_K_M** — the quant
+that returned ZERO per-sublot records in the bake-off where Q8 returned four. 24GB
+cannot hold this model at Q8, so turbo is permanently the FAST tier and the availability
+floor for `best`. `fast` leads with turbo because a human is waiting on those paths.
+
+#### Remaining, in priority order:
+- **Persist `text_model`.** The worker posts it; `functions/api/queue/[id]/results.ts`
+  allowlists fields and there is no column, so it is accepted-and-dropped. Needs
+  `ALTER TABLE processing_queue ADD COLUMN text_model TEXT` + a passthrough beside the
+  `vlm_model` block (~`results.ts:192`). Until then extraction provenance lives only in
+  logs — which is exactly how the June grading pass got scored against the wrong quant.
+- **Route the VLM path through chain resolution.** `QWEN_VLM_MODEL`
+  (`bin/process-worker:82`) is still a hardcoded default bypassing the `vision` chain.
+  Preflight prints it so a mismatch is visible, but it should resolve like the others.
+- **Surface degradation in the app.** `/api/admin/processing-status` already returns
+  `advertisedModels`; add the resolved tag→model mapping + a degraded flag so flapping
+  is visible in the UI, not just worker logs.
+- **Q8 on the always-on host.** Q5_K_M is what it serves today — neither the Q4 that
+  failed nor the Q8 that passed. Register a Q8 backend and add its router name at the
+  HEAD of the `best` chain; the resolver auto-promotes it with no other change.
+
+### Deployment portability — cloud (Cloudflare) AND on-prem appliance
+
+**Status:** planned (2026-07-30). Motivation: both targets must be supported. Cloud is
+what we run today; on-prem is the answer for customers whose PII cannot sit with a
+third-party processor (see `~/drops/dox-data-handling-and-roadmap.md` §4). A DGX Spark
+has been purchased, so this has real hardware behind it and is no longer hypothetical.
+
+**Key insight:** the stack is unusually portable and mostly by luck. **D1 IS SQLite** and
+FTS5 is SQLite-native, so the database and the entire search layer move unchanged.
+`bin/process-worker` is already plain Node. Inference is already self-hosted. The
+genuinely Cloudflare-shaped surface is the Pages Functions runtime and its bindings
+(`env.DB`, `env.FILES`) — one port, not a rewrite. A Spark's 128GB comfortably holds the
+model AND the application, making "one box, drop it in the network, nothing leaves" a
+real product rather than a slide.
+
+**The honest cost is not the port — it is that two targets = two test matrices, two
+release paths, and a support surface for patching boxes we cannot SSH into.** That is
+what kills these efforts. Sequence accordingly and do not start until a customer is real.
+
+**Approach:** the SharePoint entry's P1 `StorageProvider` seam is the same seam local
+object storage needs — build it once, get a third implementation nearly free. Until this
+workstream starts in earnest, the standing rule is **portability-preserving**: no NEW
+Cloudflare-only bindings, and anything touching storage goes through the provider seam.
+
+#### P1 — Portability audit ships when:
+- Every Cloudflare-specific dependency is inventoried (bindings, Pages middleware,
+  wrangler-isms, Workers runtime APIs) with a portable substitute named for each
+- The result says plainly how big the runtime port actually is, in days
+
+#### P2 — Local target ships when:
+- Functions run under a portable runtime (workerd or a Node adapter — P1 decides)
+- SQLite + local object storage via the StorageProvider seam; FTS5 unchanged
+- `bin/` scripts and the worker run against the local target
+- One command stands up the whole application on a single box
+
+#### P3 — Appliance packaging ships when:
+- Reproducible install onto Spark-class hardware incl. the model
+- Backup/restore, update path, and remote support story for a box we do not control
+- SMTP option (Resend is a third party and may be unacceptable to the same customers)
+
+**Open:** single-tenant simplifications on an appliance; how updates reach a customer
+box; whether the appliance ships the full Records module or a subset.
+
 ### Registry taxonomy — four facets, per-tenant config (AJ correction + vertical readiness)
 
 **Status:** planned (2026-07-29). Motivation: AJ's schema correction. The shipped

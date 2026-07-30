@@ -32,7 +32,7 @@ import {
   defaultFieldMappings,
 } from '../../../shared/fieldMappings';
 import { parseCSVText } from '../../../shared/orderParse';
-import { modelFor } from '../models';
+import { resolveModel, noteServedModel, invalidateModelCache, type ModelResolution } from '../models';
 
 export type DetectedFieldType = 'string' | 'number' | 'date' | 'id' | 'email' | 'phone';
 
@@ -1048,6 +1048,16 @@ async function callQwenForDiscovery(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (qwenConfig.secret) headers['Authorization'] = `Bearer ${qwenConfig.secret}`;
 
+  // Health-aware resolution. Discovery is best-effort: if no model in the
+  // `fast` chain is up we surface that as a clean reason, not a throw.
+  const modelEnv = { QWEN_URL: qwenConfig.url, QWEN_SECRET: qwenConfig.secret };
+  let resolution: ModelResolution;
+  try {
+    resolution = await resolveModel('fast', modelEnv);
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DISCOVERY_TIMEOUT_MS);
 
@@ -1058,7 +1068,7 @@ async function callQwenForDiscovery(
       headers,
       signal: controller.signal,
       body: JSON.stringify({
-        model: modelFor('fast'),
+        model: resolution.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMessage },
@@ -1070,6 +1080,7 @@ async function callQwenForDiscovery(
     });
   } catch (err) {
     clearTimeout(timer);
+    invalidateModelCache(modelEnv);
     if (err instanceof Error && err.name === 'AbortError') {
       return { ok: false, reason: `Schema discovery AI timed out after ${DISCOVERY_TIMEOUT_MS / 1000}s` };
     }
@@ -1085,12 +1096,14 @@ async function callQwenForDiscovery(
     return { ok: false, reason: `Schema discovery AI returned HTTP ${response.status}${body ? `: ${body}` : ''}` };
   }
 
-  let result: { choices?: Array<{ message?: { content?: string } }> };
+  let result: { choices?: Array<{ message?: { content?: string } }>; model?: string };
   try {
     result = await response.json();
   } catch {
     return { ok: false, reason: 'Schema discovery AI returned a non-JSON response' };
   }
+
+  noteServedModel('fast', resolution.model, result.model);
 
   const content = result.choices?.[0]?.message?.content;
   if (!content) {

@@ -19,7 +19,7 @@
  * graceful fallbacks on malformed output).
  */
 
-import { modelFor } from '../models';
+import { resolveModel, noteServedModel, invalidateModelCache } from '../models';
 import type { UncertaintyIssue } from './uncertainty';
 
 export interface QwenEnv {
@@ -55,6 +55,9 @@ export async function callQwenChat(
   const baseUrl = (env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
   const timeoutMs = opts.timeoutMs ?? 300_000;
 
+  const tag = opts.model ?? 'best';
+  const resolution = await resolveModel(tag, env);
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -68,7 +71,7 @@ export async function callQwenChat(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: modelFor(opts.model ?? 'best', env),
+        model: resolution.model,
         temperature: opts.temperature ?? 0.2,
         max_tokens: opts.maxTokens ?? 2048,
         messages,
@@ -76,6 +79,7 @@ export async function callQwenChat(
     });
   } catch (err: unknown) {
     clearTimeout(timeout);
+    invalidateModelCache(env);
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`Qwen request timed out after ${Math.round(timeoutMs / 1000)}s`);
     }
@@ -90,7 +94,9 @@ export async function callQwenChat(
 
   const data = (await response.json()) as {
     choices?: { message?: { content?: string } }[];
+    model?: string;
   };
+  noteServedModel(tag, resolution.model, data.model);
   return stripModelArtifacts(data.choices?.[0]?.message?.content || '');
 }
 

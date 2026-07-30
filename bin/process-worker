@@ -20,7 +20,13 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { Agent } = require('undici');
-const { modelFor } = require('./lib/models');
+const {
+  chainFor,
+  resolveModel,
+  invalidateModelCache,
+  noteServedModel,
+  isModelUnavailableError,
+} = require('./lib/models');
 // Shared order/shipment extraction prompt + parse logic. This is a CJS bundle
 // transpiled from shared/orderPrompt.ts (+ its pure deps fieldMappings.ts /
 // connectorOutput.ts) by `npm run build:worker-shared` — the SAME source the
@@ -1191,6 +1197,35 @@ async function loadExtractionProfile(item) {
 // Order / shipment text-path Qwen caller (shared by both new kinds)
 // =============================================================================
 
+// The model id the router ACTUALLY served on the most recent order/shipment
+// text call, including quantization (e.g.
+// "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q5_K_M"). Mirrors the vlm_model convention:
+// every extraction should be self-describing so a later grading/parity run can
+// prove which model produced it. A past grading pass was scored against the
+// wrong quantization because a backend swapped underneath us.
+let lastServedTextModel = null;
+
+/**
+ * Choose the model to send for `tag` on this attempt.
+ *
+ * Normal case: the resolver returns the best entry of the tag's preference
+ * chain that GET /v1/models says has a healthy upstream. Once a call has
+ * failed we (a) force a re-probe rather than waiting out the ~60s health TTL,
+ * and (b) skip past any model this document already saw fail — which is what
+ * makes the chain get WALKED IN ORDER even when the health endpoint is lying
+ * or unreachable but /v1/chat/completions still works.
+ *
+ * Throws only when nothing in the chain is available (message names the chain).
+ */
+async function pickModel(tag, failedModels) {
+  const res = await resolveModel(tag, process.env, { force: failedModels.size > 0 });
+  const list = res.candidates && res.candidates.length ? res.candidates : [res.model];
+  const next = list.find((m) => !failedModels.has(m));
+  // Everything in the chain has failed at least once — retry the best
+  // available rather than giving up outright (it may have been transient).
+  return next || res.model;
+}
+
 /**
  * Call the text-path Qwen model with a single chunk and a fully-composed
  * system prompt, returning the RAW parsed JSON object (or null on parse
@@ -1201,8 +1236,11 @@ async function loadExtractionProfile(item) {
  */
 async function runRecordsQwen(systemPrompt, userText, fileName) {
   let qwenData;
+  const failedModels = new Set();
+  let requestedModel = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
+      requestedModel = await pickModel('best', failedModels);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 1_800_000); // 30 min
       const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
@@ -1214,7 +1252,7 @@ async function runRecordsQwen(systemPrompt, userText, fileName) {
         signal: controller.signal,
         dispatcher: llmDispatcher,
         body: JSON.stringify({
-          model: modelFor('best', process.env),
+          model: requestedModel,
           temperature: 0,
           max_tokens: 8192,
           response_format: { type: 'json_object' },
@@ -1232,12 +1270,25 @@ async function runRecordsQwen(systemPrompt, userText, fileName) {
       qwenData = await qwenRes.json();
       break;
     } catch (err) {
+      // Drop the cached health snapshot so the retry re-resolves immediately
+      // instead of waiting out the TTL, and blacklist the model we just tried
+      // so the retry walks DOWN the preference chain.
+      invalidateModelCache(process.env);
+      if (requestedModel) failedModels.add(requestedModel);
       if (attempt === 2) throw new Error(`Qwen call failed: ${err.message}`);
       console.warn(`  Qwen retry ${attempt}/2 for ${fileName}: ${err.message}`);
-      console.warn('  Waiting 60s for model to load...');
-      await new Promise(r => setTimeout(r, 60_000));
+      if (isModelUnavailableError(err.message)) {
+        // The router rejected the model outright — a reload wait buys nothing,
+        // go straight at the next chain entry.
+        console.warn(`  Model "${requestedModel}" unavailable; trying the next in the chain`);
+      } else {
+        console.warn('  Waiting 60s for model to load...');
+        await new Promise(r => setTimeout(r, 60_000));
+      }
     }
   }
+  // Record the TRUE served id (includes quantization) for the result body.
+  lastServedTextModel = noteServedModel('best', requestedModel, qwenData.model);
   let content = qwenData.choices?.[0]?.message?.content || '';
   console.log(`  Qwen response (${content.length} chars): ${content.substring(0, 200)}...`);
   // Strip thinking blocks / code fences the same way parseExtraction does.
@@ -1469,6 +1520,9 @@ async function processOrderItem(item) {
       ai_records: JSON.stringify({ orders, customers }),
       confidence,
       summary: `Extracted ${orders.length} order(s), ${customers.length} customer(s)`,
+      // Which text model actually served this run (null when the deterministic
+      // CSV mapping path handled it and no LLM call was made).
+      text_model: lastServedTextModel,
     });
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -1619,6 +1673,8 @@ async function processShipmentItem(item) {
       ai_records: JSON.stringify({ shipments }),
       confidence,
       summary: `Extracted ${shipments.length} shipment line(s)`,
+      // Which text model actually served this run (see text_model above).
+      text_model: lastServedTextModel,
     });
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -1864,6 +1920,10 @@ async function processCoaItem(item) {
     let reviewerInstructions = '';
     let learnedPreferences = null;
     let resolvedSupplierIdForLearning = null;
+    // The model id the router ACTUALLY served for this document's text path
+    // (set by runTextQwen). Posted as result_body.text_model — the text-path
+    // mirror of the existing vlm_model column.
+    let servedTextModel = null;
     // Tenant-level extraction context (the editable "industry layer"). Fetched
     // once per item; when null the prompt builders fall back to the hardcoded
     // dairy default. Combo reviewer instructions still stack on top of this.
@@ -1913,12 +1973,16 @@ async function processCoaItem(item) {
       console.warn(`  Reviewer instructions: lookup failed (non-critical): ${err.message}`);
     }
 
-    // Helper: call the text-path Qwen3-8B model with a single chunk of
-    // document text. Returns a `parsed` object or throws.
+    // Helper: call the text-path model with a single chunk of document text.
+    // Returns a `parsed` object or throws. The model is resolved per call from
+    // the `best` preference chain against what the router says is healthy.
     async function runTextQwen(llmText) {
       let qwenData;
+      const failedModels = new Set();
+      let requestedModel = null;
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
+          requestedModel = await pickModel('best', failedModels);
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 1_800_000); // 30 min
           const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
@@ -1930,7 +1994,7 @@ async function processCoaItem(item) {
             signal: controller.signal,
             dispatcher: llmDispatcher,
             body: JSON.stringify({
-              model: modelFor('best', process.env),
+              model: requestedModel,
               temperature: 0,
               max_tokens: 16384,
               messages: [
@@ -1959,12 +2023,21 @@ async function processCoaItem(item) {
           qwenData = await qwenRes.json();
           break;
         } catch (err) {
+          invalidateModelCache(process.env);
+          if (requestedModel) failedModels.add(requestedModel);
           if (attempt === 2) throw new Error(`Qwen call failed: ${err.message}`);
           console.warn(`  Qwen retry ${attempt}/2 for ${item.file_name}: ${err.message}`);
-          console.warn('  Waiting 60s for model to load...');
-          await new Promise(r => setTimeout(r, 60_000));
+          if (isModelUnavailableError(err.message)) {
+            console.warn(`  Model "${requestedModel}" unavailable; trying the next in the chain`);
+          } else {
+            console.warn('  Waiting 60s for model to load...');
+            await new Promise(r => setTimeout(r, 60_000));
+          }
         }
       }
+      // Capture what actually served this chunk — persisted as text_model.
+      servedTextModel = noteServedModel('best', requestedModel, qwenData.model);
+      lastServedTextModel = servedTextModel;
       const content = qwenData.choices?.[0]?.message?.content || '';
       console.log(`  Qwen response (${content.length} chars): ${content.substring(0, 200)}...`);
       return parseExtraction(content);
@@ -2270,6 +2343,14 @@ async function processCoaItem(item) {
 
     if (resolvedDocTypeId && !item.document_type_id) {
       resultBody.document_type_id = resolvedDocTypeId;
+    }
+
+    // Anti-silent-degradation: record WHICH text model actually produced this
+    // extraction, including quantization. Mirrors resultBody.vlm_model below.
+    // Backends flap and quantization materially changes correctness, so every
+    // extraction must be self-describing for later grading / parity runs.
+    if (servedTextModel) {
+      resultBody.text_model = servedTextModel;
     }
 
     // Attach VLM columns when VLM ran (success or failure).
@@ -3179,8 +3260,11 @@ async function runParityMode() {
       // shared helpers).
       const runTextQwen = async (llmText) => {
         let qwenData;
+        const failedModels = new Set();
+        let requestedModel = null;
         for (let attempt = 1; attempt <= 2; attempt++) {
           try {
+            requestedModel = await pickModel('best', failedModels);
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 1_800_000);
             const qwenRes = await fetch(`${QWEN_URL}/v1/chat/completions`, {
@@ -3192,7 +3276,7 @@ async function runParityMode() {
               signal: controller.signal,
               dispatcher: llmDispatcher,
               body: JSON.stringify({
-                model: modelFor('best', process.env),
+                model: requestedModel,
                 temperature: 0,
                 max_tokens: 16384,
                 messages: [
@@ -3221,10 +3305,15 @@ async function runParityMode() {
             qwenData = await qwenRes.json();
             break;
           } catch (err) {
+            invalidateModelCache(process.env);
+            if (requestedModel) failedModels.add(requestedModel);
             if (attempt === 2) throw new Error(`Qwen call failed: ${err.message}`);
-            await new Promise(r => setTimeout(r, 60_000));
+            if (!isModelUnavailableError(err.message)) {
+              await new Promise(r => setTimeout(r, 60_000));
+            }
           }
         }
+        lastServedTextModel = noteServedModel('best', requestedModel, qwenData.model);
         const content = qwenData.choices?.[0]?.message?.content || '';
         return parseExtraction(content);
       };
@@ -3322,6 +3411,9 @@ async function runParityMode() {
       process.stdout.write(JSON.stringify({
         id,
         extracted_fields: parsed.fields || {},
+        // Which model + quantization actually produced this parity result, so
+        // a grading pass can never be silently scored against the wrong one.
+        text_model: lastServedTextModel,
       }) + '\n');
     } catch (err) {
       process.stdout.write(JSON.stringify({
@@ -3347,12 +3439,74 @@ if (process.env.PARITY_ITEM_IDS) {
   return;
 }
 
+
+// =============================================================================
+// Model preflight
+// =============================================================================
+
+/**
+ * Resolve every model tag this worker will use and log the outcome plainly:
+ * which model each tag landed on, and whether that was a downgrade from the
+ * chain's first choice.
+ *
+ * Policy: NEVER abort just because we are on a lower tier — a degraded model
+ * beats no processing. Abort only when a chain is ENTIRELY unavailable (the
+ * router answered and none of the chain's entries have a healthy upstream),
+ * because then every extraction would fail one at a time anyway.
+ *
+ * If the router itself is unreachable the probe result is "unknown", not
+ * "empty": we log that and start anyway, since per-call resolution will pick
+ * the right model as soon as the router answers.
+ */
+async function preflightModels() {
+  // 'vision' only matters when the VLM path can run.
+  const tags = ['best'];
+  if (QWEN_VLM_MODE !== 'off') tags.push('vision');
+
+  console.log('  Models:');
+  const failures = [];
+  for (const tag of tags) {
+    const chain = chainFor(tag, process.env);
+    try {
+      const res = await resolveModel(tag, process.env, { force: true });
+      if (res.source === 'override') {
+        console.log(`    ${tag}: ${res.model}  (PINNED via QWEN_MODEL_${tag.toUpperCase()})`);
+      } else if (res.source === 'unverified') {
+        console.warn(
+          `    ${tag}: ${res.model}  (UNVERIFIED — ${QWEN_URL}/v1/models did not answer; ` +
+          `will attempt chain ${chain.join(' > ')})`
+        );
+      } else if (res.degraded) {
+        console.warn(
+          `    ${tag}: ${res.model}  (DEGRADED — wanted ${res.preferred}; ` +
+          `chain ${chain.join(' > ')})`
+        );
+      } else {
+        console.log(`    ${tag}: ${res.model}  (best available)`);
+      }
+    } catch (err) {
+      failures.push(`${tag}: ${err.message}`);
+      console.error(`    ${tag}: UNAVAILABLE — ${err.message}`);
+    }
+  }
+  if (QWEN_VLM_MODE !== 'off') {
+    // QWEN_VLM_MODEL is a separate explicit knob (not chain-resolved); report
+    // it so a mismatch with the vision chain is visible instead of surprising.
+    console.log(`    vlm (explicit QWEN_VLM_MODEL): ${QWEN_VLM_MODEL}`);
+  }
+  if (failures.length > 0) {
+    console.error('');
+    console.error('Error: no usable model for tag(s) — refusing to start.');
+    for (const f of failures) console.error(`  ${f}`);
+    process.exit(1);
+  }
+}
+
 console.log(`Dox process worker started`);
 console.log(`  API: ${DOX_API_URL}`);
 console.log(`  Qwen: ${QWEN_URL}`);
 console.log(`  VLM mode: ${QWEN_VLM_MODE}${QWEN_VLM_MODE !== 'off' ? ` (model=${QWEN_VLM_MODEL}, max_pages=${QWEN_VLM_MAX_PAGES})` : ''}`);
 console.log(`  Poll interval: ${POLL_INTERVAL / 1000}s`);
-console.log('');
 
 // Self-scheduling loop with exponential backoff on consecutive failures.
 // Backoff doubles on each failure (POLL_INTERVAL, 2x, 4x, ...) capped at 5
@@ -3384,4 +3538,16 @@ async function loop() {
   }
   setTimeout(loop, backoff);
 }
-loop();
+
+// Preflight the model tags BEFORE the first poll so a degraded (or entirely
+// missing) backend is visible in the startup banner rather than discovered one
+// failed extraction at a time.
+preflightModels()
+  .then(() => {
+    console.log('');
+    loop();
+  })
+  .catch((err) => {
+    console.error('[worker] model preflight crashed:', err && err.message ? err.message : err);
+    process.exit(1);
+  });

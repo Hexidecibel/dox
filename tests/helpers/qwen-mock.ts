@@ -23,6 +23,7 @@
  */
 
 import { vi, type MockInstance } from 'vitest';
+import { MODEL_CHAINS, invalidateModelCache } from '../../functions/lib/models';
 
 // -----------------------------------------------------------------------------
 // Public types
@@ -243,6 +244,19 @@ export function buildKeywordHandler(overrides: Partial<{
 }
 
 /**
+ * Model ids the mocked router advertises on GET /v1/models. Defaults to every
+ * entry of every preference chain (the "all backends healthy" case). Tests
+ * that want to exercise degradation can narrow this via setHealthyModels().
+ */
+let healthyModelIds: string[] = Object.values(MODEL_CHAINS).flat();
+
+/** Narrow (or restore) what the mocked router reports as healthy. */
+export function setHealthyModels(ids?: string[]): void {
+  healthyModelIds = ids ?? Object.values(MODEL_CHAINS).flat();
+  invalidateModelCache();
+}
+
+/**
  * Install the Qwen mock. If called with no handler, the keyword-matching
  * handler is used with the default canned responses.
  */
@@ -261,6 +275,19 @@ export function installQwenMock(handler: QwenHandler = buildKeywordHandler()): v
     const url = typeof input === 'string'
       ? input
       : (input instanceof URL ? input.toString() : (input as Request).url);
+
+    // The router's health endpoint. functions/lib/models.ts probes this before
+    // every chat call to pick the best AVAILABLE model in a tag's preference
+    // chain, so the mock has to answer it or resolution falls back to the
+    // "unverified" path. Advertise every model the chains know about, which is
+    // the "everything is up" case — resolution then lands on each chain's
+    // first choice, exactly as the pre-chain code behaved.
+    if (url.includes('/v1/models')) {
+      return new Response(
+        JSON.stringify({ object: 'list', data: healthyModelIds.map(id => ({ id, object: 'model' })) }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
 
     if (url.includes('/v1/chat/completions')) {
       // Extract the body text for matching. It's always a JSON string with
@@ -337,6 +364,7 @@ export function uninstallQwenMock(): void {
   originalFetch = null;
   currentHandler = null;
   callLog = [];
+  setHealthyModels();
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { ParsedQuery } from '../../shared/types';
-import { modelFor } from './models';
+import { resolveModel, noteServedModel, invalidateModelCache } from './models';
 
 export interface ExtractionResult {
   fields: Record<string, string | null>;    // ALL key-value pairs found
@@ -9,6 +9,12 @@ export interface ExtractionResult {
   confidence: 'high' | 'medium' | 'low';
   documentType: string | null;
   raw_response?: string;
+  /**
+   * The model id the router ACTUALLY served, including quantization
+   * (e.g. "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q5_K_M"). Recorded so any grading
+   * or parity run can prove which model produced a result.
+   */
+  served_model?: string;
 }
 
 const BASE_PROMPT = `You are a document data extraction assistant specializing in supply chain and compliance documents including Certificates of Analysis (COAs), Bills of Lading, Spec Sheets, Safety Data Sheets, and invoices.
@@ -211,6 +217,9 @@ export async function extractFields(
   const baseUrl = (env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
   const systemPrompt = buildPrompt(options);
 
+  // Health-aware resolution: best available model in the `best` chain.
+  const resolution = await resolveModel('best', env);
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300_000);
 
@@ -224,7 +233,7 @@ export async function extractFields(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: modelFor('best', env),
+        model: resolution.model,
         temperature: 0,
         max_tokens: 2048,
         messages: [
@@ -238,6 +247,10 @@ export async function extractFields(
     });
   } catch (err: unknown) {
     clearTimeout(timeout);
+    // The request failed — the cached health snapshot may be stale (a backend
+    // just went away). Drop it so the next call re-resolves immediately
+    // instead of waiting out the TTL.
+    invalidateModelCache(env);
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error('LLM request timed out after 300 seconds');
     }
@@ -248,7 +261,11 @@ export async function extractFields(
 
   const data = await response.json() as {
     choices: { message: { content: string } }[];
+    model?: string;
   };
+
+  // Record what actually served us — the true id including quantization.
+  const servedModel = noteServedModel('best', resolution.model, data.model);
 
   let content = data.choices?.[0]?.message?.content || '';
 
@@ -266,7 +283,7 @@ export async function extractFields(
   try {
     parsed = JSON.parse(content);
   } catch {
-    return { fields: {}, tables: [], products: [], summary: '', confidence: 'low', documentType: null, raw_response: content };
+    return { fields: {}, tables: [], products: [], summary: '', confidence: 'low', documentType: null, raw_response: content, served_model: servedModel };
   }
 
   const products = Array.isArray(parsed.products)
@@ -319,7 +336,7 @@ export async function extractFields(
   if (canonicalized.supplier_name && isLikelyAddress(canonicalized.supplier_name)) {
     canonicalized.supplier_name = null;
   }
-  return { fields: canonicalized, tables, products, summary, confidence, documentType };
+  return { fields: canonicalized, tables, products, summary, confidence, documentType, served_model: servedModel };
 }
 
 export async function parseNaturalQuery(
@@ -397,6 +414,8 @@ export async function parseNaturalQuery(
     '8. Don\'t force matches — if nothing matches a field, leave it null/empty.',
   ].join('\n');
 
+  const resolution = await resolveModel('best', env);
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300_000);
 
@@ -410,7 +429,7 @@ export async function parseNaturalQuery(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: modelFor('best', env),
+        model: resolution.model,
         temperature: 0,
         max_tokens: 1024,
         messages: [
@@ -424,6 +443,7 @@ export async function parseNaturalQuery(
     });
   } catch (err: unknown) {
     clearTimeout(timeout);
+    invalidateModelCache(env);
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error('LLM request timed out after 300 seconds');
     }
@@ -434,7 +454,10 @@ export async function parseNaturalQuery(
 
   const data = await response.json() as {
     choices: { message: { content: string } }[];
+    model?: string;
   };
+
+  noteServedModel('best', resolution.model, data.model);
 
   let content = data.choices?.[0]?.message?.content || '';
 
