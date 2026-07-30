@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# Dump the CURRENT D1 schema to markdown, grouped by subsystem.
+#
+# SCHEMA.md is generated, never hand-edited. Regenerate it after every
+# migration so the repo always documents the live shape of the database
+# instead of forcing a reader through 79 migration files.
+#
+# Usage:
+#   ./bin/schema-doc                    # local D1 -> SCHEMA.md
+#   ./bin/schema-doc --remote           # PROD D1  -> SCHEMA.md
+#   ./bin/schema-doc --out /tmp/s.md    # custom output path
+#   ./bin/schema-doc --stdout           # print instead of writing
+#
+# How it works:
+#   - Reads sqlite_master (tables, views, indexes, triggers) from the target
+#     D1 via `wrangler d1 execute --json`.
+#   - Groups objects by subsystem (see GROUPS in the node formatter below).
+#   - Collapses FTS5 shadow tables (documents_fts_*, orders_fts_*) into a
+#     single line each; they are engine internals, not schema anyone edits.
+#   - Emits column definitions per table, plus index/trigger names.
+#
+# Note: --remote reads production. It is read-only (SELECT on sqlite_master),
+# but prod's `_migrations` tracking is known-drifted, so a --remote dump may
+# differ from what migrations/ implies. That difference is the point.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DB="doc-upload-db"
+REMOTE=""            # "" = local, "--remote" = prod
+OUT="SCHEMA.md"
+TO_STDOUT=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --remote|-r) REMOTE="--remote" ;;
+    --out) OUT="$2"; shift ;;
+    --stdout) TO_STDOUT=1 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+TARGET="LOCAL"; [ -n "$REMOTE" ] && TARGET="PROD (--remote)"
+echo "Target: $TARGET" >&2
+
+# One query for every schema object. `type` distinguishes table/view/index/trigger.
+SCHEMA_JSON="$(npx wrangler d1 execute "$DB" $REMOTE --json --command \
+  "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name;" 2>/dev/null || echo '[]')"
+
+if [ -z "$SCHEMA_JSON" ] || [ "$SCHEMA_JSON" = "[]" ]; then
+  echo "ERROR: no schema returned from $TARGET D1." >&2
+  echo "For local, run ./bin/migrate first so a local D1 exists." >&2
+  exit 1
+fi
+
+MD="$(TARGET="$TARGET" node -e '
+const raw = process.argv[1] || "[]";
+let data; try { data = JSON.parse(raw); } catch { data = []; }
+
+// wrangler emits an array of statement results; flatten to rows.
+const rows = [];
+const visit = (v) => {
+  if (!v) return;
+  if (Array.isArray(v)) return v.forEach(visit);
+  if (typeof v === "object") {
+    if (Array.isArray(v.results)) return v.results.forEach(visit);
+    if (typeof v.name === "string" && typeof v.type === "string") return rows.push(v);
+    Object.values(v).forEach(visit);
+  }
+};
+visit(data);
+
+// Subsystem grouping. First matching pattern wins, so order matters.
+const GROUPS = [
+  ["Core documents & versions",
+   "The document record itself plus its version chain and file metadata.",
+   [/^documents$/, /^document_versions$/, /^document_bundles?$/, /^document_bundle_items$/]],
+  ["Taxonomy & registry",
+   "Document classification and the IDP Document Registry fields (migrations 0076-0079). NOTE: document_categories is a junction onto document_types — one vocabulary currently serves both what-it-is and what-it-satisfies.",
+   [/^document_types$/, /^document_categories$/, /^naming_templates$/]],
+  ["Suppliers, products & lots",
+   "Supply-chain entities documents attach to. All links are optional per document.",
+   [/^suppliers$/, /^products/, /^tenant_products$/, /^product_suppliers$/, /^supplier_/, /^lots$/, /^document_lots$/, /^document_products$/]],
+  ["Intake, queue & sources",
+   "Every ingest door funnels into processing_queue, then to the extraction worker, then to human review.",
+   [/^processing_queue/, /^connectors?$/, /^connector_/, /^email_/, /^extraction_/, /^reviewer_/, /^teach_/, /^assignments$/]],
+  ["Orders, shipments & matching",
+   "The COA-fulfillment track: order lines, lot binding, and COA match suggestions.",
+   [/^orders/, /^order_items$/, /^customers$/, /^customer_contacts$/, /^lot_match_suggestions$/]],
+  ["Records module",
+   "Smartsheet-class configurable surface (migrations 0040-0045): per-tenant sheets with typed columns, views, forms, and workflows. Domain-neutral.",
+   [/^records_/]],
+  ["Auth & tenancy",
+   "Tenants, users, sessions, API keys, and the audit trail.",
+   [/^tenants$/, /^users$/, /^sessions$/, /^api_keys$/, /^password_resets$/, /^audit_log$/, /^rate_limits$/, /^site_settings$/]],
+  ["Search & FTS",
+   "FTS5 full-text index over documents (and orders), its id map, and reindex jobs.",
+   [/_fts/, /^saved_searches$/, /^search_reindex_jobs$/]],
+];
+
+const isShadow = (n) => /_fts_(data|idx|content|docsize|config)$/.test(n);
+const groupFor = (name) => {
+  for (const [title, , pats] of GROUPS) if (pats.some((p) => p.test(name))) return title;
+  return "Misc";
+};
+
+const tables = rows.filter((r) => r.type === "table" && !r.name.startsWith("sqlite_"));
+const views = rows.filter((r) => r.type === "view");
+const indexes = rows.filter((r) => r.type === "index" && r.sql);
+const triggers = rows.filter((r) => r.type === "trigger");
+
+// Pull column definitions out of a CREATE TABLE body. Depth-aware split so
+// CHECK(...) and DEFAULT (...) with commas inside stay on one line.
+const columnsOf = (sql) => {
+  if (!sql) return [];
+  const open = sql.indexOf("(");
+  const close = sql.lastIndexOf(")");
+  if (open < 0 || close <= open) return [];
+  const body = sql.slice(open + 1, close);
+  const parts = [];
+  let depth = 0, cur = "";
+  for (const ch of body) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (ch === "," && depth === 0) { parts.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts.map((p) => p.trim().replace(/\s+/g, " ")).filter(Boolean);
+};
+
+const byGroup = new Map();
+for (const t of tables) {
+  const g = groupFor(t.name);
+  if (!byGroup.has(g)) byGroup.set(g, []);
+  byGroup.get(g).push(t);
+}
+
+const out = [];
+out.push("# dox — current D1 schema");
+out.push("");
+out.push("<!-- GENERATED by bin/schema-doc — do not hand-edit. Regenerate: ./bin/schema-doc -->");
+out.push("");
+out.push(`Source: live \`sqlite_master\` read from ${process.env.TARGET} D1.`);
+out.push("");
+out.push("Migration history lives in `CLAUDE.md`; this file is the *current state*.");
+out.push("Regenerate after every migration: `./bin/schema-doc`");
+out.push("");
+out.push(`Objects: ${tables.length} tables, ${views.length} views, ${indexes.length} indexes, ${triggers.length} triggers.`);
+out.push("");
+
+const order = [...GROUPS.map((g) => g[0]), "Misc"];
+for (const title of order) {
+  const items = byGroup.get(title);
+  if (!items || !items.length) continue;
+  const blurb = (GROUPS.find((g) => g[0] === title) || [])[1];
+  out.push(`## ${title}`);
+  out.push("");
+  if (blurb) { out.push(blurb); out.push(""); }
+
+  const shadows = items.filter((t) => isShadow(t.name)).map((t) => t.name).sort();
+  const real = items.filter((t) => !isShadow(t.name)).sort((a, b) => a.name.localeCompare(b.name));
+
+  for (const t of real) {
+    out.push(`### \`${t.name}\``);
+    out.push("");
+    const cols = columnsOf(t.sql);
+    if (cols.length) {
+      out.push("```sql");
+      cols.forEach((c) => out.push("  " + c));
+      out.push("```");
+    } else {
+      out.push("_(virtual table — see migration for the full definition)_");
+    }
+    const idx = indexes.filter((i) => i.tbl_name === t.name).map((i) => i.name).sort();
+    const trg = triggers.filter((g) => g.tbl_name === t.name).map((g) => g.name).sort();
+    if (idx.length) out.push(`\nIndexes: ${idx.map((n) => "`" + n + "`").join(", ")}`);
+    if (trg.length) out.push(`\nTriggers: ${trg.map((n) => "`" + n + "`").join(", ")}`);
+    out.push("");
+  }
+  if (shadows.length) {
+    out.push(`_FTS5 shadow tables (engine internals): ${shadows.map((n) => "`" + n + "`").join(", ")}_`);
+    out.push("");
+  }
+}
+
+if (views.length) {
+  out.push("## Views");
+  out.push("");
+  for (const v of views.sort((a, b) => a.name.localeCompare(b.name))) {
+    out.push(`### \`${v.name}\``);
+    out.push("");
+    out.push("```sql");
+    out.push((v.sql || "").trim());
+    out.push("```");
+    out.push("");
+  }
+}
+
+console.log(out.join("\n"));
+' "$SCHEMA_JSON")"
+
+if [ "$TO_STDOUT" = "1" ]; then
+  printf '%s\n' "$MD"
+else
+  printf '%s\n' "$MD" > "$OUT"
+  echo "Wrote $OUT ($(printf '%s' "$MD" | wc -l) lines)" >&2
+fi

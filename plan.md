@@ -46,6 +46,121 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Registry taxonomy — four facets, per-tenant config (AJ correction + vertical readiness)
+
+**Status:** planned (2026-07-29). Motivation: AJ's schema correction. The shipped
+registry collapses three different questions into ONE vocabulary. `document_types`
+serves as both "what it is" and "what it satisfies" (via the 0076 `document_categories`
+junction, which points at `document_types`), and `bin/create-tenant:67-75` seeds it
+with 27 Food Safety Manual *program folders* ("Allergen", "Organic Program") — which
+are a third thing again. Our own UI copy shows the collision:
+`DocumentCreate.tsx:294` reads "Pick every document type this satisfies" — layer-2
+semantics on a layer-1 field holding layer-0 data.
+
+**The model AJ actually needs — three questions per document:**
+1. **What it is** — the document type. ONE value. Specification Sheet, Kosher
+   Certificate, 3rd Party Audit Report.
+2. **What it satisfies** — which checklist (SOP 102.2) line items this file closes.
+   MANY. One spec sheet typically closes seven (Spec Sheet, Micro Limits, Pack Size,
+   100g Nutritionals, Allergen Matrix, Country of Origin, GTIN). Seven things to
+   know, one file answering all of them — this is what "one doc, many mappings"
+   actually meant.
+3. **What it triggers** — claims the document asserts that require a DIFFERENT
+   document to prove. A spec sheet saying "Organic, Kosher" is not an organic
+   document; it makes two other documents newly applicable and missing.
+
+**Key insight:** layer 2 CLOSES checklist items, layer 3 OPENS them. Layer 3 is
+entirely absent today (grep for claim/trigger/requirement/checklist across
+functions/, shared/, src/, migrations/ → zero scaffolding) and it carries most of
+the product value: "this spec sheet claims organic and the organic certificate is
+missing." Layer 2 is ~80% built — the junction, `is_primary`, the FTS `category_text`
+column and its refresh triggers (0079 §5b) all work; it is mis-vocabularied, not
+missing. Layer 1 is already single-valued (`documents.document_type_id`). Layer 3
+also needs a piece AJ did not name: a **claim → required-document mapping**, or a
+detected claim cannot resolve to "which document is missing." That config lives in
+his "conditional triggers" — we need it from him.
+
+**Second driver — the finance vertical.** Medosweet wants a finance module (historical
+financial records). It is the first non-food domain and the proof that the platform
+is aimed by configuration, not rebuilt per vertical. Every facet below is therefore
+built as **per-tenant rows, never code**. Audited what is already domain-neutral:
+ingest/R2/versioning/FTS/NL-retrieval/RBAC/multi-tenancy/audit log are clean;
+`primary_metadata`/`extended_metadata` are free-form JSON (no hardcoded field list);
+`INDUSTRY_PROMPTS` (`functions/lib/llm.ts:71`) is already a keyed map with one entry
+(`DAIRY_FOOD`) overridable per tenant via `tenants.extraction_context` (0072). The
+one real blocker is `output_kind` — no CHECK constraint (data-cheap) but dispatch is
+spread across ~28 files, so a new kind is a code change in N places. That is P6.
+
+**GREENFIELD** — no production registry data to migrate. Clean rebuild, no backfill
+compromises, no dual-read period.
+
+**Approach:** four independent facets, each a per-tenant vocabulary table + a
+junction. Layer 1 stays on `documents.document_type_id` (already single-valued,
+already tenant+supplier scoped) with the program folders evicted from that table.
+New: `program_sections` (layer 0, the manual's 100-126 structure / a finance
+equivalent), `requirements` (layer 2 checklist items), `claim_types` +
+`claim_type_requirements` (layer 3 + what each claim opens). Junctions:
+`document_program_sections`, `document_requirements`, `document_claims`.
+`document_claims` carries an optional subject (product_id) so a claim resolves to a
+specific gap, not just a tenant-wide one. Gap detection is then a query, not an
+engine. Repurpose or drop 0076's `document_categories` — decide in P1.
+
+#### P1 — Facet schema + vocabularies ships when:
+- Migrations 0080+ create `program_sections`, `requirements`, `claim_types`,
+  `claim_type_requirements` + the three junctions, all tenant-scoped
+- 0076 `document_categories` disposition decided and executed (repurpose to the
+  program-section facet vs drop) — **open decision, needs a call**
+- `documents.classification_status` ('unclassified' default | 'classified') so an
+  untyped doc is countable, not silently blank (AJ's explicit ask); distinguishes
+  "never touched" from "reviewed, genuinely unclassifiable"
+- New migrations added to `tests/helpers/db.ts` (chain is not re-runnable)
+- `shared/types.ts` carries the facet types; `functions/lib/registry.ts` generalized
+  from category-sync to facet-sync
+
+#### P2 — Vocabulary CRUD + tenant provisioning ships when:
+- API + admin UI to manage each facet's vocabulary per tenant
+- `bin/create-tenant` seeds facets from a **named starter pack**, not a hardcoded
+  array — an `fsqa` pack (types + 102.2 requirements + claims) and a `finance` pack.
+  This is the file that currently makes us look food-specific
+- 3rd Party Food Safety Audit **Report** and 3rd Party Audit **Certificate** are two
+  distinct types with their own metadata + expiry behavior (AJ's standing item).
+  Note `document_types` uniqueness is `(tenant_id, slug)` tenant-wide — distinct
+  slugs, no constraint change needed
+
+#### P3 — Document editing + upload across facets ships when:
+- `DocumentCreate.tsx` and document-detail editing expose all four facets with
+  correct labels ("What it is" single-select, "What it satisfies" multi-select,
+  "Claims" multi-select) — and the misleading line 294 copy is gone
+- Ingest API accepts facet arrays; claims land as **suggestions a human confirms**,
+  never auto-applied (consistent with no-auto-ingest — a wrong AI claim read would
+  manufacture a false missing-document alert)
+- FTS rebuilt with `requirements_text` / `claims_text` / `program_text` (0079-style
+  DROP+recreate, new columns appended LAST to preserve snippet() indexes) + reindex
+
+#### P4 — Gap detection ships when:
+- A gap view answers, per scope (product / supplier / facility / tenant): which
+  requirements are closed, which are open, and which claims have no proving document
+- Unclassified count surfaced as its own countable bucket
+- The claim→requirement mapping is loaded from AJ's conditional-trigger config
+
+**Sequencing:** P1-P3 are startable NOW — greenfield, no external dependency, needed
+regardless of the finance bid. **P4 is blocked** on AJ supplying his conditional-trigger
+config (claim → which document proves it); without it a detected claim cannot resolve to
+a named missing document. Build P1-P3, then P4 lands the moment that config arrives.
+
+The retention direction and the kind-dispatch registry were originally P5/P6 here; both
+are finance-vertical prerequisites rather than part of AJ's correction, and are parked in
+`backlog.md` under "GATED: Registry taxonomy P5/P6".
+
+**Open decisions needing a call:**
+- 0076 `document_categories`: repurpose to program-sections or drop outright?
+- Is the layer-0 program-section facet needed in v1, or is it AJ's filing habit that the
+  other three facets make redundant? (= his manual's folders 100-126. The other three
+  facets already record what a doc IS, what it SATISFIES, and what it TRIGGERS, so the
+  folder number only preserves his binder's shelf layout. Ask him before building it —
+  dropping it saves a table, a junction, an FTS column, and a picker.)
+- Claim subject grain: product only, or also supplier/facility?
+
 ### Multi-product / multi-lot / multi-page COAs (make COA a records-kind)
 
 **Status:** planned (2026-06-05). Motivation: a multi-page COA (Darigold

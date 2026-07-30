@@ -2,6 +2,140 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## GATED: SharePoint / Microsoft Graph storage provider (customer-tenant custody) (2026-07-29)
+
+**Blocked on the customer, not on us:** whether Medosweet IT grants scoped
+(`Sites.Selected`) access to a designated site collection, and whether the Food Safety
+Manual already lives in SharePoint. Both questions are in
+`~/drops/dox-data-handling-and-roadmap.md` §7. P2 (read-only source) is the cheapest
+standalone win the moment the answer is yes — it indexes their existing library in
+place instead of asking them to maintain a duplicate. Do NOT build the P1 storage
+seam speculatively; it is only worth it once SharePoint is actually going ahead.
+
+
+**Status:** planned (2026-07-29). Motivation: the Medosweet finance bid includes
+records with employee pay + personal data, and their AI Use Policy keeps that out of
+AI tools. Our answer needs to be architectural, not contractual. If documents live in
+the customer's own SharePoint and inference runs on their hardware, the objection
+mostly dissolves — and "we don't take custody of your documents, we make your existing
+repository intelligent" is a materially stronger enterprise pitch than "upload
+everything to our portal." Applies to the FSQA side too: AJ's Food Safety Manual is
+very likely already in SharePoint, in which case we are currently asking him to
+maintain a duplicate of his own repository.
+
+**Key insight:** the storage seam is already small. `functions/lib/r2.ts` is FIVE
+functions (`buildR2Key`, `uploadFile`, `downloadFile`, `deleteFile`,
+`computeChecksum`). The cost is not the abstraction, it is that ~26 files reach
+`env.FILES` directly and bypass the lib — so P1 is a mechanical funnel-through, not a
+redesign. Zero Microsoft/Graph/Entra/OAuth scaffolding exists today. Note
+`DocumentCreate.tsx:100,500` ALREADY has a SharePoint URL field stored as
+`source_metadata.sharepoint_url` — a pointer with no integration behind it, and
+evidence the customer already thinks in SharePoint terms.
+
+**Three custody questions — SharePoint only answers ONE.** Do not conflate these:
+1. **Files at rest** (R2 today) → SharePoint solves this completely.
+2. **Extracted text + FTS index** (D1 today) → SharePoint does NOT solve this, BUT
+   the exposure is far smaller than it looks. `extracted_text` is 1 of 15
+   `documents_fts` columns and carries bm25 weight **1** — the lowest tier
+   (`DOCUMENTS_FTS_BM25_WEIGHTS`, `functions/lib/search-fts.ts:84`; title 10 /
+   aliases 8 / category 6 / supplier+product 4). The NL-retrieval moat is
+   deliberately metadata-weighted, so dropping body text for a record class costs
+   only body-phrase search — which for payroll is arguably desirable. Descriptive-
+   only indexing is therefore a cheap, good default, NOT a painful concession.
+   (Earlier framing of this as "search breaks" was wrong.)
+3. **Inference** (bytes reach the Qwen host) → SharePoint does NOT solve this either.
+
+**Approach:** a `StorageProvider` interface (the r2.ts five functions, generalized)
+with `r2` and `graph` implementations, selected per tenant. Graph provider uses
+app-only auth against Entra ID with **certificate credentials** and
+**`Sites.Selected`** scope — one designated site collection, granted per-site by the
+customer's admin. Requesting `Sites.Read.All` is how vendors get rejected; this is the
+detail that signals competence. Files >4MB need chunked upload sessions. SharePoint
+owns the FILE and its version history; we own the RECORD — do not build a second
+version-truth. Purview already does retention labels: where in use, WRITE retention
+outcomes into Purview rather than operating a competing engine (see the retention
+phase P5 of the taxonomy entry).
+
+**Staged so stage 1 has standalone value:**
+
+#### P1 — StorageProvider seam ships when:
+- `functions/lib/storage/` exposes a provider interface; `r2` provider is the
+  behavior-identical default
+- All ~26 direct `env.FILES` call sites routed through it (download, upload, ingest,
+  ingest-url, bundles ZIP, queue file, forms attachments, records attachments, sources
+  run/drop/test/sample/retry, email-ingest webhooks, pollR2, graphql context)
+- `bin/process-worker` fetches bytes through the same abstraction (it currently pulls
+  from the API — confirm the path)
+- Full suite green with zero behavior change; provider selection defaults to r2
+
+#### P2 — SharePoint as a SOURCE (read-only) ships when:
+- Graph app-only auth (cert-based, `Sites.Selected`) + token handling in Workers
+- A Sources door that lists/pulls from a designated SharePoint library into the normal
+  intake→review pipeline; Graph 429/Retry-After backoff
+- Delta-query or webhook subscription so moves/renames/deletes don't orphan pointers
+- **Proven by indexing AJ's real Food Safety Manual library in place** — no
+  re-uploading, no duplicate copy. This is the standalone win; ship it first.
+
+#### P3 — SharePoint as the STORAGE BACKEND ships when:
+- `graph` StorageProvider implements the full interface incl. chunked upload sessions
+  for >4MB and range reads for page-scoped PDF extraction
+- Per-tenant storage strategy config (FSQA tenant can stay on r2 while a finance
+  tenant goes SharePoint — the same config-not-code thesis as the taxonomy work)
+- Documents written to SharePoint never land in R2; D1 holds record + pointer only
+- Drift handling: a file removed in SharePoint surfaces as a broken-pointer state, not
+  a 500
+
+#### P4 — Indexing posture for sensitive classes ships when:
+- Per-document-type indexing policy, default full / `descriptive_only` opt-in. The
+  cheap path: skip the `extracted_text` column in the FTS source projection for
+  flagged types — the other 14 columns (and all the heavily-weighted ones) still
+  populate, so retrieval quality barely moves
+- Descriptive-only records remain cataloged, retrievable, retention-tracked, and
+  NL-searchable by identity; search UI notes that body-phrase coverage is excluded
+- Self-hosted-index option NOT built unless IT rejects even descriptive metadata in
+  D1 — do not build speculatively
+
+#### P5 — Purview write-back ships when:
+- Retention outcomes from the taxonomy P5 retention engine write to Purview labels
+- Report-only; destruction execution stays out of scope
+
+**Open decisions:** delegated vs app-only auth (app-only assumed);
+whether extracted text ever gets written back to SharePoint columns; whether
+self-hosted storage (not SharePoint) is needed for any customer who is not on M365.
+
+**Customer-facing writeup:** `~/drops/dox-data-handling-and-roadmap.md` §4.
+
+---
+
+## GATED: Registry taxonomy P5/P6 — retention direction + kind-dispatch registry (2026-07-29)
+
+**Blocked on the finance bid.** Both phases are finance-vertical prerequisites, not
+part of the AJ taxonomy correction. P5 needs the retention rules Medosweet actually
+works to (and whether Purview already owns retention); P6 is worth doing on its own
+merits as hygiene, but its justification is "adding a vertical should be config" —
+which only pays off when a second vertical is real. Parent entry: the active
+"Registry taxonomy" entry in plan.md (P1-P4).
+
+#### P5 — Retention direction on the date engine ships when:
+- `functions/lib/expirations.ts` supports a retention rule: same anchor+interval math
+  `review_cycle` already does, inverted output ("retention satisfied, eligible for
+  destruction") instead of ("expiring, go chase it")
+- `renewal_type` CHECK extended (migration) + new statuses; alert semantics inverted
+  (retention does not nag — it reports what became destroyable)
+- Report-only scope; destruction-with-certificate is explicitly OUT (different
+  liability profile, price separately)
+
+#### P6 — Kind-dispatch registry (vertical readiness) ships when:
+- The ~28-file `output_kind` switch surface collapses to ONE registry where a kind
+  declares its producer, its review tile, and its field expectations
+- Adding a kind is a registry entry, not edits across `functions/lib/kinds/*`,
+  `functions/api/queue/[id]/results.ts`, and `src/pages/ReviewQueue.tsx`
+- The mandatory supplier-verification gate becomes kind-scoped, not global (a finance
+  document has no supplier) — verify current scoping first
+- supplier/product/lot links confirmed optional on every path a non-food doc touches
+
+---
+
 ## IDEA: Generalize lot_scheme beyond date_code — configurable WMS canonicalization (2026-06-23)
 
 Floated 2026-06-23 while shipping the Country Morning Farms fix. The new per-supplier
