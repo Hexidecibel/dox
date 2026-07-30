@@ -46,6 +46,48 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Extraction defects confirmed by the Q4/Q8 A/B — two named, quant-proof gaps
+
+**Status:** planned (2026-07-30). Evidence:
+`~/drops/dox-wms/COA_ACCURACY_Q4_vs_Q8_2026-07-30.md` (raw per-doc outputs + harness patch
+archived alongside). Both arms served-gguf verified on every call; 15/19 docs on both arms.
+
+**Headline:** fixing the router hostname ([[project_qwen_fleet_q8_hostname_trap]]) took record
+accuracy **30.4% → 75.0%** (112 expected lot/sublot records); lot-level 68.8% → 89.3%. Paired
+2×2: Q8-only fixes **52 records (46.4%)**, wrong-on-both **26 (23.2%)**. So Q8 recovers ~2/3 of
+known failures with no code change — but a ~23% floor remains and it is OURS, not the model's.
+
+#### D1 — sublot has no slot in the flat schema (the bigger, cheaper win)
+`sub_lot_code` exists ONLY inside the `records[]` array, while the prompt explicitly licenses
+omitting `records[]` when a page has one lot and one sublot. So a *compliant* output has nowhere
+to put the sublot — it is a schema defect, not a weights problem. **17/28 affected pages lose it
+on BOTH arms** (Q4 loses 28/28). Affects `5a844c7b`, `7707e264`, `9b1c0e97`, `49fd0028`,
+`0cfb0cc3`, `0ca1a067`, `5df1ae2f`, `3eba3197`.
+Ships when: a single-lot/single-sublot page can express `sub_lot_code` without being forced into
+`records[]` (or the omit-records licence is withdrawn); `lot_key` becomes lot+sublot rather than
+bare main lot for those pages; regression test per affected doc.
+
+#### D2 — Andersen inline `lot exp lot exp lot exp` triple
+CONFIRMED prompt-coverage gap, byte-identical failure on both arms (2nd lot `346PXN` lands in
+`product_code`). 7/9 records lost. Docs `51918e9c`, `98d5da57`, `4dc7f13d`.
+Ships when: a per-supplier instruction row (or a BASE rule) teaches the single-row multi-lot
+layout; those three docs extract all lots on the CURRENT model.
+
+#### D3 — measurement hygiene (do before claiming any per-doc number)
+- **Q4 is unstable, not reproducibly wrong**: this run's Q4 grades differ from the June Q4-era
+  grades on **5 of 15 docs**, and *which* lots it drops moves between runs at temp 0 / seed 42.
+  Per-doc grades carry ~±1 grade noise; only aggregates are defensible. Multi-trial before any
+  per-doc claim.
+- **Q8 regressions exist** — do not oversell: 4 FAILs vs Q4's 3. `3eba3197` (trivial 1-lot COA)
+  Q4 got lot `22026110`, Q8 returned none; 2 records on `5a844c7b` p1 Q4 got and Q8 lost.
+  "Two main lots sharing a sublot column" is REFUTED as a hard gap but fragile (Q8 29/31).
+- **4 docs unrunnable — source PDFs 404 from R2**: `dd37a5ca`, `fe2f07b7`, `66724a88`,
+  `e578ae9d`. Three were easy singles, so the covered set skews hard and BOTH arms read
+  pessimistically. Same class as the known 11 R2-404s. Clean up or re-upload.
+- Throughput measured, not assumed: **Q8 ≈ 3× Q4 wall clock** (35 min vs 12.3 min / 15 docs) —
+  not the 9× previously assumed. Budget accordingly.
+- VLM was OFF for this run; it is still the expected fix for image-letterhead + scanned layouts.
+
 ### Model resiliency — remaining follow-ups (core SHIPPED, uncommitted)
 
 **Status:** in-progress (2026-07-30). Core landed: `MODEL_CHAINS` preference chains +

@@ -47,7 +47,17 @@ const asString = (v) => (v == null ? null : String(v));
 // canonical names (lot_number, product_name, product_code) but the record
 // schema prefers lot_code / sub_lot_code. We accept either when keying.
 const LOT_KEYS = ['lot_code', 'lot_number'];
-const SUBLOT_KEYS = ['sub_lot_code', 'sub_lot_number', 'sublot_code', 'sublot'];
+// Keep in sync with SUBLOT_FIELD_KEYS (functions/lib/entities/matching.ts) and
+// COA_RECORD_SUBLOT_KEYS (functions/lib/kinds/coa.ts).
+const SUBLOT_KEYS = [
+  'sub_lot_code',
+  'sub_lot_number',
+  'sub_lot',
+  'sub_lot_no',
+  'sublot_code',
+  'sublot_number',
+  'sublot',
+];
 const PRODUCT_NAME_KEYS = ['product_name', 'product'];
 const PRODUCT_CODE_KEYS = ['product_code', 'item_code', 'item_number', 'sku'];
 

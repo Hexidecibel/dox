@@ -10,7 +10,7 @@ import {
 import { buildR2Key, uploadFile, computeChecksum } from '../../lib/r2';
 import { sanitizeString } from '../../lib/validation';
 import { extractText } from '../../lib/extract';
-import { attachLotToCoaDocument } from '../../lib/entities/matching';
+import { attachLotToCoaDocument, extractSubLotCode } from '../../lib/entities/matching';
 import {
   parseStringArray,
   validateCategoryIds,
@@ -435,6 +435,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       {
         const ingestLot =
           (primaryMetadata.lot_number as string | null) || lotNumber || null;
+        // D1: honour a sub_lot_code supplied in primary_metadata so an ingested
+        // COA keys on the same combined lot_key (norm(lot) + sublot) the
+        // review/approve path produces. Absent → '' (unchanged behavior).
+        const ingestSubLot = extractSubLotCode(primaryMetadata);
         if (ingestLot) {
           const targets = productLinks.length > 0
             ? productLinks.map((l) => l.product_id)
@@ -443,6 +447,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await attachLotToCoaDocument(context.env.DB, tenantId, {
               documentId: existingDoc.id,
               lotNumber: ingestLot,
+              subLotCode: ingestSubLot,
               productId: pid,
               supplierId: supplierId || null,
               codeDate: (primaryMetadata.code_date as string | null) || codeDate || null,
@@ -601,6 +606,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       {
         const ingestLot =
           (primaryMetadata.lot_number as string | null) || lotNumber || null;
+        // D1: honour a sub_lot_code supplied in primary_metadata so an ingested
+        // COA keys on the same combined lot_key (norm(lot) + sublot) the
+        // review/approve path produces. Absent → '' (unchanged behavior).
+        const ingestSubLot = extractSubLotCode(primaryMetadata);
         if (ingestLot) {
           const targets = productLinks.length > 0
             ? productLinks.map((l) => l.product_id)
@@ -609,6 +618,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await attachLotToCoaDocument(context.env.DB, tenantId, {
               documentId: docId,
               lotNumber: ingestLot,
+              subLotCode: ingestSubLot,
               productId: pid,
               supplierId: supplierId || null,
               codeDate: (primaryMetadata.code_date as string | null) || codeDate || null,

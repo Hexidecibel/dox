@@ -4,7 +4,7 @@ import { buildR2Key, uploadFile, downloadFile, deleteFile, computeChecksum } fro
 import { findOrCreateSupplier } from '../suppliers';
 import { findOrCreateProduct } from '../entities/products';
 import { extractRecordPdf } from './coaPageScope';
-import { attachLotToCoaDocument, extractLotNumber } from '../entities/matching';
+import { attachLotToCoaDocument, extractLotNumber, extractSubLotCode } from '../entities/matching';
 import { normalizeLotNumber, normalizeSubLotCode, applyLotScheme, type LotScheme } from '../entities/lots';
 import { getLearnedPreferences } from '../learnedPreferences';
 import type { CoaRecordsPayload } from '../../../shared/types';
@@ -426,11 +426,17 @@ export async function produceCoa(
   {
     const lotNumber =
       extractLotNumber(approvedFields) ?? extractLotNumber(primaryMetadata);
+    // D1: the flat schema carries sub_lot_code, so a single-lot/single-sublot
+    // page keys on the SAME combined lot_key (norm(lot) + sublot) the records
+    // path produces. Absent → '' (main-lot-only), i.e. unchanged behavior.
+    const subLotCode =
+      extractSubLotCode(approvedFields) ?? extractSubLotCode(primaryMetadata);
     if (lotNumber) {
       const lotScheme = await resolveLotScheme(db, item.tenant_id, supplierId);
       await attachLotToCoaDocument(db, item.tenant_id, {
         documentId: docId,
         lotNumber,
+        subLotCode,
         productId: linkedProductId,
         supplierId,
         codeDate: approvedFields.code_date || null,
@@ -680,11 +686,14 @@ export async function produceMultiProductCoa(
     // both). Best-effort.
     {
       const lotNumber = extractLotNumber(mergedFields);
+      // D1: same combined-key rule as produceCoa / produceCoaRecords.
+      const subLotCode = extractSubLotCode(mergedFields);
       if (lotNumber) {
         const lotScheme = await resolveLotScheme(db, item.tenant_id, supplierId);
         await attachLotToCoaDocument(db, item.tenant_id, {
           documentId: docId,
           lotNumber,
+          subLotCode,
           productId: perProductId,
           supplierId,
           codeDate: mergedFields.code_date || null,
@@ -787,8 +796,21 @@ export async function produceMultiProductCoa(
 
 /** Field keys a record may carry the lot number under. */
 const COA_RECORD_LOT_KEYS = ['lot_code', 'lot_number', 'lot', 'lot_no'];
-/** Field keys a record may carry the sublot code under. */
-const COA_RECORD_SUBLOT_KEYS = ['sub_lot_code', 'sublot', 'sub_lot'];
+/**
+ * Field keys a record may carry the sublot code under. Kept in sync with
+ * SUBLOT_FIELD_KEYS (entities/matching.ts) and SUBLOT_KEYS
+ * (bin/lib/coaRecords.js) — record fields are RAW model output (they are not
+ * run through the worker's canonicalizeFields), so every spelling must resolve.
+ */
+const COA_RECORD_SUBLOT_KEYS = [
+  'sub_lot_code',
+  'sub_lot_number',
+  'sub_lot',
+  'sub_lot_no',
+  'sublot_code',
+  'sublot_number',
+  'sublot',
+];
 
 function firstField(
   fields: Record<string, string | null>,

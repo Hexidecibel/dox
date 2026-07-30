@@ -2444,6 +2444,10 @@ const FIELD_ALIASES = {
   supplier_name: ['supplier', 'vendor', 'manufacturer', 'company', 'from', 'shipped_by'],
   customer_name: ['customer', 'sold_to', 'ship_to', 'buyer', 'consignee'],
   lot_number: ['lot_no', 'lot_num', 'lot', 'batch_number', 'batch_no', 'batch', 'run_number', 'lot_code'],
+  // D1: the sublot qualifies the lot and is its own field. Every spelling the
+  // model emits must land on the single canonical `sub_lot_code` so the flat
+  // path can carry it (and so recordsFromPage / computeRecordLotKey see it).
+  sub_lot_code: ['sub_lot_number', 'sub_lot_no', 'sub_lot', 'sublot', 'sublot_code', 'sublot_number', 'sub_lot_num'],
   po_number: ['po', 'purchase_order', 'purchase_order_number', 'po_no'],
   product_name: ['product', 'item', 'material', 'description', 'item_description'],
   product_code: ['item_code', 'sku', 'material_code', 'item_number', 'item_no'],
@@ -2574,6 +2578,7 @@ FIELD EXTRACTION RULES:
    - product_name — full product name (e.g., "Unsalted Sweet Cream Butter 68#")
    - product_code — supplier's internal product/item code or SKU
    - lot_number — lot, batch, or run number
+   - sub_lot_code — the sub-lot code that QUALIFIES lot_number (labels: "Sub Lot Number", "Sub Lot", "Sublot", "SL"). Usually 2 digits. It is a SEPARATE field: never concatenate it into lot_number and never drop it. Extract it whenever the page prints one — INCLUDING when the page has only ONE lot and ONE sublot. A lot number without its sublot does not identify the material.
    - po_number — purchase order number
    - code_date — production/pack/code date
    - expiration_date — expiration, best-by, use-by, or sell-by date
@@ -2590,6 +2595,12 @@ FIELD EXTRACTION RULES:
 4. FILENAME CONTEXT: The filename hint (<filename_hint> in the system prompt) is provided ONLY for supplier identification context. NEVER extract lot_number, code_date, production_date, expiration_date, product_code, or sub_lot_number from the filename. If those values aren't in the document body, return null.
 
 5. SUPPLIER vs CUSTOMER: A common error is confusing supplier and customer. The supplier PRODUCES the product; the customer RECEIVES it. If "MEDOSWEET FARMS" appears after "Ship To:", it is the customer_name, not the supplier_name. The company at the TOP of the document (letterhead, header) is usually the supplier.
+
+6. ORPHANED LABEL BLOCKS (PDF text flattening). Extracting text from a PDF often splits a boxed form into TWO runs that land far apart: a run of LABELS with nothing after them, and — elsewhere on the same page — the run of VALUES that belongs to them. Before you assign any loose value, scan the WHOLE page for an empty label run, e.g. "CC LOT#: CC EXP: AC LOT#: AC EXP: BUFFER LOT#: BUFFER EXP:". If one exists and an unlabeled run of matching shape appears elsewhere — e.g. an inline "code date code date code date" sequence like "418325187C 01/04/'27 346PXN 03/24/'27 151262C 09/01/'27" — the two runs are ONE block. Re-pair them POSITIONALLY (1st label ← 1st value, 2nd label ← 2nd value, ...) and give every value to the label that owns it.
+   - Values whose labels were separated from them are NOT product data. Never promote them to lot_number, sub_lot_code, product_code, po_number, expiration_date or plant_number just because they arrived unlabeled.
+   - On a lab COA the most common orphaned block is the LAB CONSUMABLE / reagent block: plate-count and buffer lot numbers with their expirations (CC / AC / BUFFER LOT# + EXP). Emit it as its own table named "reagent_lots" with headers ["item", "lot_number", "expiration_date"], and leave the product's lot_number and expiration_date null unless the PRODUCT's own lot/expiry is separately printed.
+   - If a page's ONLY lot-shaped codes are reagent lots, the product has NO lot number of its own. Fall back to the printed code date / date code as the lot; never borrow a reagent lot.
+   - The same discipline applies to any other orphaned run: a bare day-of-year number sitting near a "JULIAN DATE:" label is a date, not a plant_number; a bare phone number is never a product_code.
 
 TABLE EXTRACTION RULES:
 1. Extract ALL tabular data found in the document. Preserve every column present — do not drop columns.
@@ -2650,7 +2661,7 @@ RULES for records:
 - Put fields that vary between this page's lots/sublots in each record's "fields"; put fields constant across them (including this page's product) in "page_metadata". Do not duplicate constant fields into every record.
 - This is ONE page of what may be a larger PO/EDI bundle of single-page COAs — extract ONLY this page's product. The assembler concatenates pages; it NEVER merges your records with another page's, so do not worry about other pages.
 - Specs verbatim, never derive pass/fail, lab consumables are never product data — the same domain rules as above apply inside each record.
-- Omit "records" ONLY when the page has exactly ONE lot AND ONE sublot (a single result). If there are MULTIPLE sublots — even all under the same lot number — you MUST emit one record per sublot; never collapse multiple sublots into flat fields.`;
+- Omit "records" ONLY when the page has exactly ONE lot AND ONE sublot (a single result). In THAT case you MUST still report the sublot in the FLAT "sub_lot_code" field — the flat field set has a sub_lot_code slot precisely so a single-sublot page never loses it. A printed sublot code is NEVER optional: it goes in records[].fields.sub_lot_code when you emit records, and in the flat sub_lot_code when you do not. If there are MULTIPLE sublots — even all under the same lot number — you MUST emit one record per sublot; never collapse multiple sublots into flat fields.`;
 
 const DAIRY_FOOD_INDUSTRY_PROMPT = `
 ORG CONTEXT:
@@ -2819,6 +2830,7 @@ FIELD EXTRACTION RULES:
    - product_name — full product name (e.g., "Unsalted Sweet Cream Butter 68#")
    - product_code — supplier's internal product/item code or SKU
    - lot_number — lot, batch, or run number
+   - sub_lot_code — the sub-lot code that QUALIFIES lot_number (labels: "Sub Lot Number", "Sub Lot", "Sublot", "SL"). Usually 2 digits. It is a SEPARATE field: never concatenate it into lot_number and never drop it. Extract it whenever the page prints one — INCLUDING when the page has only ONE lot and ONE sublot.
    - po_number — purchase order number. ONLY populate if an explicit "PO", "P.O.", or "Purchase Order" label is visible in the image. Do NOT infer or fabricate from adjacent columns.
    - code_date — production/pack/code date
    - expiration_date — expiration, best-by, use-by, or sell-by date
@@ -3028,18 +3040,47 @@ function parseExtraction(content) {
       ? parsed.page_metadata
       : null;
 
-  // Build fields
+  // Build fields.
+  //
+  // Three shapes arrive here:
+  //   1. { fields: {...} }            — the documented shape; use it verbatim.
+  //   2. { records: [...], page_metadata: {...} } with NO flat `fields` block —
+  //      a records-only response. Reconstruct the flat view the SAME way the
+  //      records producer does (page_metadata ∪ record.fields, record wins) so
+  //      ai_fields is not empty. A single-record page gives a faithful flat
+  //      view; a multi-record page contributes page_metadata only, because a
+  //      flat view of several different lots would be a lie.
+  //   3. anything else                — legacy: treat the top level as fields.
+  //
+  // The records keys are RESERVED in every branch: before this they fell into
+  // case 3 and were stringified into ai_fields as literal "[object Object]".
   const fields = {};
-  const rawFields =
-    typeof parsed.fields === 'object' && parsed.fields !== null && !Array.isArray(parsed.fields)
-      ? parsed.fields
-      : parsed;
-  const reservedKeys = new Set(['fields', 'tables', 'products', 'summary', '_confidence', 'document_type']);
+  const reservedKeys = new Set([
+    'fields', 'tables', 'products', 'summary', '_confidence', 'document_type',
+    'records', 'record_cardinality', 'record_key_basis', 'page_metadata',
+  ]);
+  let rawFields;
+  if (typeof parsed.fields === 'object' && parsed.fields !== null && !Array.isArray(parsed.fields)) {
+    rawFields = parsed.fields;
+  } else if (pageMetadata || (records && records.length > 0)) {
+    const soleRecordFields =
+      records && records.length === 1 && records[0] &&
+      typeof records[0].fields === 'object' && records[0].fields !== null &&
+      !Array.isArray(records[0].fields)
+        ? records[0].fields
+        : {};
+    rawFields = { ...(pageMetadata || {}), ...soleRecordFields };
+  } else {
+    rawFields = parsed;
+  }
 
   for (const [key, value] of Object.entries(rawFields)) {
-    if (!key.startsWith('_') && !reservedKeys.has(key)) {
-      fields[key] = value === null || value === undefined ? null : String(value);
-    }
+    if (key.startsWith('_') || reservedKeys.has(key)) continue;
+    // Never stringify a nested object/array into a scalar field — that is what
+    // produced "[object Object]" values. Structured data belongs in tables /
+    // records, not in the flat field map.
+    if (typeof value === 'object' && value !== null) continue;
+    fields[key] = value === undefined || value === null ? null : String(value);
   }
 
   return {

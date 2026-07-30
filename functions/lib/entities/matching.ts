@@ -381,6 +381,46 @@ export function extractLotNumber(
 }
 
 /**
+ * Keys we accept as a SUBLOT code from a fields map / metadata blob, in
+ * priority order. Mirrors SUBLOT_KEYS in bin/lib/coaRecords.js and
+ * COA_RECORD_SUBLOT_KEYS in kinds/coa.ts — keep the three in sync.
+ */
+const SUBLOT_FIELD_KEYS = [
+  'sub_lot_code',
+  'sub_lot_number',
+  'sub_lot',
+  'sub_lot_no',
+  'sublot_code',
+  'sublot_number',
+  'sublot',
+];
+
+/**
+ * Pull the first non-empty SUBLOT code out of a loose key/value map (approved
+ * fields, primary_metadata, per-product fields). Returns null when none found.
+ *
+ * D1: the flat extraction schema now carries `sub_lot_code`, so the flat
+ * (single-record) approve path can build the SAME combined lot_key
+ * (norm(lot_number) + sub_lot_code) that the records path already builds via
+ * computeRecordLotKey. Without this the sublot was extracted and then dropped
+ * at storage time, keying order⇄COA matching on the bare main lot.
+ */
+export function extractSubLotCode(
+  source: Record<string, unknown> | null | undefined
+): string | null {
+  if (!source) return null;
+  for (const key of SUBLOT_FIELD_KEYS) {
+    // Case-insensitive lookup against the source keys.
+    for (const [k, v] of Object.entries(source)) {
+      if (k.toLowerCase() === key && v != null && String(v).trim() !== '') {
+        return String(v).trim();
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * High-level COA-side wiring used by both queue-approve and ingest. For a
  * resolved lot number it: findOrCreateLot → links document_lots → runs the
  * matching engine. Best-effort; swallows its own errors so it can never block
