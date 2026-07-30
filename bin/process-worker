@@ -2596,12 +2596,6 @@ FIELD EXTRACTION RULES:
 
 5. SUPPLIER vs CUSTOMER: A common error is confusing supplier and customer. The supplier PRODUCES the product; the customer RECEIVES it. If "MEDOSWEET FARMS" appears after "Ship To:", it is the customer_name, not the supplier_name. The company at the TOP of the document (letterhead, header) is usually the supplier.
 
-6. ORPHANED LABEL BLOCKS (PDF text flattening). Extracting text from a PDF often splits a boxed form into TWO runs that land far apart: a run of LABELS with nothing after them, and — elsewhere on the same page — the run of VALUES that belongs to them. Before you assign any loose value, scan the WHOLE page for an empty label run, e.g. "CC LOT#: CC EXP: AC LOT#: AC EXP: BUFFER LOT#: BUFFER EXP:". If one exists and an unlabeled run of matching shape appears elsewhere — e.g. an inline "code date code date code date" sequence like "418325187C 01/04/'27 346PXN 03/24/'27 151262C 09/01/'27" — the two runs are ONE block. Re-pair them POSITIONALLY (1st label ← 1st value, 2nd label ← 2nd value, ...) and give every value to the label that owns it.
-   - Values whose labels were separated from them are NOT product data. Never promote them to lot_number, sub_lot_code, product_code, po_number, expiration_date or plant_number just because they arrived unlabeled.
-   - On a lab COA the most common orphaned block is the LAB CONSUMABLE / reagent block: plate-count and buffer lot numbers with their expirations (CC / AC / BUFFER LOT# + EXP). Emit it as its own table named "reagent_lots" with headers ["item", "lot_number", "expiration_date"], and leave the product's lot_number and expiration_date null unless the PRODUCT's own lot/expiry is separately printed.
-   - If a page's ONLY lot-shaped codes are reagent lots, the product has NO lot number of its own. Fall back to the printed code date / date code as the lot; never borrow a reagent lot.
-   - The same discipline applies to any other orphaned run: a bare day-of-year number sitting near a "JULIAN DATE:" label is a date, not a plant_number; a bare phone number is never a product_code.
-
 TABLE EXTRACTION RULES:
 1. Extract ALL tabular data found in the document. Preserve every column present — do not drop columns.
 2. Name tables descriptively: "test_results", "line_items", "physical_properties", "microbiological_analysis", "sensory_analysis", etc.

@@ -67,11 +67,27 @@ Ships when: a single-lot/single-sublot page can express `sub_lot_code` without b
 `records[]` (or the omit-records licence is withdrawn); `lot_key` becomes lot+sublot rather than
 bare main lot for those pages; regression test per affected doc.
 
-#### D2 — Andersen inline `lot exp lot exp lot exp` triple
-CONFIRMED prompt-coverage gap, byte-identical failure on both arms (2nd lot `346PXN` lands in
-`product_code`). 7/9 records lost. Docs `51918e9c`, `98d5da57`, `4dc7f13d`.
-Ships when: a per-supplier instruction row (or a BASE rule) teaches the single-row multi-lot
-layout; those three docs extract all lots on the CURRENT model.
+#### D2 — Andersen reagent-lot misread — CLOSED as WONTFIX 2026-07-30
+Original framing was wrong twice over, and the record is worth keeping.
+1. Those codes (`418325187C` / `346PXN` / `151262C`) are **lab consumable lots** (CC plates / AC
+   plates / BUFFER), not product lots — verified against the source PDF. Ground truth was wrong;
+   two docs were graded FAIL for correctly declining them and one PASS for extracting them. See
+   the correction block atop `~/drops/dox-wms/COA_GRADING_REPORT.md`.
+2. **Andersen has since moved to a NEW COA format**, so this is a legacy-corpus problem. The old
+   docs are disposable.
+
+A BASE-prompt rule was written and then **REVERTED**. Two lessons, both load-bearing:
+- **Wrong layer.** A single supplier's quirk belongs in `supplier_extraction_instructions`
+  (migration 0035, applied via `fetchReviewerInstructions`/`prependReviewerInstructions` — the
+  two-layer design, [[project_two_layer_prompts]]). Putting it in the BASE prompt applied one
+  supplier's legacy quirk to every document from every supplier.
+- **It caused collateral damage.** `2a74acd6` lost **6 of 11 table columns** against the prompt's
+  own "do not drop columns" instruction — prompt growth crowding out other behavior. That
+  generalizes badly beyond this corpus and is the real reason not to grow the base prompt.
+- The rule was also mechanically WRONG: it prescribed positional label↔value re-pairing, but the
+  flattened value run starts at the AC lot, so positional pairing inverts CC/AC on 3/3.
+
+If this ever matters again: supplier-specific instructions row, not the base prompt.
 
 #### D3 — measurement hygiene (do before claiming any per-doc number)
 - **Q4 is unstable, not reproducibly wrong**: this run's Q4 grades differ from the June Q4-era
