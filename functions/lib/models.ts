@@ -37,22 +37,29 @@ export type ModelEnv = { [k: string]: string | undefined } | undefined;
 export const MODEL_CHAINS: Record<ModelTag, string[]> = {
   // Ordered best-first. Every entry must be a name the router knows; the
   // resolver picks the first one with a healthy upstream.
-  // `best` = ACCURACY-first (batch extraction; a human reviews every result, so
-  // fidelity beats latency). Ordered by QUANTIZATION, not by speed. The Q4-vs-Q8
-  // bake-off is why: on the same COA page with the same prompt, Q4 returned ZERO
-  // per-sublot records (sublots trapped in table headers) while Q8 returned all
-  // four. Quantization is correctness here, not a tuning knob.
+  // ⚠️ INTERIM ORDER — blocked on a model-router fix. See qwen-llm/model-router.yaml.
   //
-  // NOTE the '-turbo' backend (RTX 4090) serves Q4_K_M — it is the FAST tier, not
-  // the good one; 24GB cannot hold this model at Q8. It sits LAST so extraction
-  // never silently lands on the quant that failed the bake-off.
+  // We CANNOT currently express "give me Q8" from here, because one router model
+  // name maps to several hosts at DIFFERENT quantizations:
+  //   Qwen3-6-35B-A3B-turbo -> [mac, buddy, windows]
+  //        mac (M4 Pro)  serves Qwen3.6-35B-A3B-UD-Q8_K_XL   <- the bake-off winner
+  //        buddy (4090)  serves Qwen3.6-35B-A3B-UD-Q4_K_M    <- the bake-off loser
+  //   Qwen3-6-35B-A3B       -> [local] = Hexinas, **CPU ONLY, no GPU**
   //
-  // When a Q8 backend is registered on the always-on host, add its router name at
-  // the HEAD of this chain — the resolver will auto-promote it the moment it is
-  // advertised, with no other change.
+  // So `turbo` is a coin-flip on fidelity, and the non-turbo name is a CPU box the
+  // router config explicitly warns off (the local 35B "pinned 38GB RAM + all cores
+  // and starved the Plex transcoder"). Preferring it on quantization grounds — as
+  // this chain briefly did — routes every extraction onto that CPU. Do not.
+  //
+  // THE FIX IS IN THE ROUTER: give each (host, quant) a DISTINCT model name, then
+  // this chain becomes meaningful and can pin fidelity — put the Q8 name at the
+  // HEAD and the resolver auto-promotes it with no other change here.
+  //
+  // Until then: prefer the GPU pool (may be Q8, may be Q4) over a CPU that takes
+  // the media server down with it. Availability and not-wrecking-the-box win.
   best: [
-    'Qwen3-6-35B-A3B',        // Q5_K_M on the always-on host — best fidelity served today.
-    'Qwen3-6-35B-A3B-turbo',  // Q4_K_M on the RTX 4090 — availability floor only.
+    'Qwen3-6-35B-A3B-turbo',  // GPU pool (mac=Q8 / buddy=Q4) — nondeterministic fidelity.
+    'Qwen3-6-35B-A3B',        // CPU on Hexinas, Q5 — LAST RESORT, starves Plex.
   ],
   // `fast` = LATENCY-first (teach interview, NL search — a human is waiting).
   // The 4090 is genuinely excellent here, which is what it should be used for.

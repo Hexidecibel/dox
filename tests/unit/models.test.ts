@@ -78,15 +78,16 @@ const PREFERRED = MODEL_CHAINS.best[0];
 const FALLBACK = MODEL_CHAINS.best[1];
 
 describe('preference chains', () => {
-  it('orders `best` by QUANTIZATION (accuracy-first), not by speed', () => {
-    // Extraction is batch + human-reviewed, so fidelity beats latency. The
-    // Q4-vs-Q8 bake-off is the evidence: same page, same prompt, Q4 returned
-    // ZERO per-sublot records and Q8 returned all four. The '-turbo' backend
-    // (RTX 4090) serves Q4_K_M and must therefore sit LAST — it is the
-    // availability floor, never the preferred extraction model.
+  it('keeps `best` on the GPU pool and the CPU box LAST', () => {
+    // INTERIM, blocked on a model-router fix. Fidelity cannot be expressed from
+    // here yet: `-turbo` maps to [mac, buddy, windows] serving Q8, Q4 and ? —
+    // one name, three quantizations. The non-turbo name maps to [local] =
+    // Hexinas, CPU-only, which the router config warns starves the Plex
+    // transcoder. So the CPU stays LAST until the router gives each
+    // (host, quant) a distinct name; then the Q8 name goes at the HEAD.
     expect(MODEL_CHAINS.best.length).toBeGreaterThanOrEqual(2);
-    expect(MODEL_CHAINS.best[0]).toBe('Qwen3-6-35B-A3B');
-    expect(MODEL_CHAINS.best.at(-1)).toBe('Qwen3-6-35B-A3B-turbo');
+    expect(MODEL_CHAINS.best[0]).toBe('Qwen3-6-35B-A3B-turbo');
+    expect(MODEL_CHAINS.best.at(-1)).toBe('Qwen3-6-35B-A3B');
   });
 
   it('orders `fast` by LATENCY — the 4090 leads where a human is waiting', () => {
