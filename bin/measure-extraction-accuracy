@@ -1,0 +1,536 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/measure-extraction-accuracy — READ-ONLY corpus-scale extraction accuracy
+ * from REVIEWER DECISIONS, using the human as ground truth.
+ *
+ * Every approval through the review queue persists what the model proposed and
+ * what the human actually kept (migration 0038: reviewer_field_picks,
+ * reviewer_field_dismissals, reviewer_table_edits). That is thousands of
+ * labelled judgements on real documents from real suppliers, free, with no
+ * hand-grading pass required. A field the reviewer kept verbatim is a labelled
+ * success; a field they retyped is a labelled error.
+ *
+ * WHAT IS ACTUALLY MEASURED (read this before quoting a number):
+ *
+ *   The headline rate is a PRECISION-style figure over values the model
+ *   PRODUCED — "when the extractor put a value in a field, how often did the
+ *   reviewer keep it exactly?" Values the model never produced cannot be
+ *   accepted or corrected, so reviewer-added fields are reported SEPARATELY as
+ *   an omission count and are NOT folded into the accept rate. Merging them
+ *   would be dishonest in either direction depending on which denominator you
+ *   picked, so the script prints both and merges neither.
+ *
+ *   The buckets:
+ *     accepted   chosen_source='text'|'vlm' and final_value matches that
+ *                source verbatim (whitespace/case normalized)
+ *     corrected  chosen_source='edited' and the model HAD a value → wrong value
+ *     blanked    chosen_source='edited', model had a value, reviewer left it
+ *                empty → false-positive field
+ *     added      chosen_source='edited', model had NO value, reviewer typed one
+ *                → omission (recall miss), excluded from the accept rate
+ *     dismissed  reviewer removed the field (reviewer_field_dismissals, or the
+ *                rare chosen_source='dismissed')
+ *
+ *   accept rate (strict)   = accepted / (accepted + corrected + blanked)
+ *   accept rate (w/ dismissals) = accepted / (accepted + corrected + blanked
+ *                                             + dismissed)
+ *   A dismissal is not proof the value was WRONG — the reviewer may simply not
+ *   want that field on the document — so both rates are printed and the strict
+ *   one is the upper bound.
+ *
+ *   TEXT and VLM paths are reported SEPARATELY and never merged into one rate.
+ *
+ * SELECTION BIAS — the script prints this in its own output too:
+ *   Picks are written ONLY on APPROVE. Rejected queue items produce zero rows,
+ *   and rejected items are disproportionately the ones the extractor did worst
+ *   on. Capture also only started when migration 0038 landed, so approvals
+ *   before that date contribute nothing. The measured population is therefore
+ *   "documents good enough that a human approved them, after capture went
+ *   live" — the resulting rate reads HIGH relative to the full corpus. The
+ *   coverage block quantifies exactly how much of the corpus is excluded.
+ *
+ *   What is NOT a bias here (a common misreading): within a captured item the
+ *   capture is COMPLETE, not selective. src/pages/reviewCaptureBuilder.ts
+ *   #buildFieldPicks emits one row per key in the union of the edited, text and
+ *   VLM payloads — not just the fields the reviewer touched. So per-item field
+ *   coverage is total; the bias lives entirely at the item level.
+ *
+ * READ-ONLY GUARANTEE: every statement goes through bin/lib/d1.js#query, which
+ * refuses anything that is not SELECT/WITH. No writes, ever.
+ *
+ * Usage:
+ *   bin/measure-extraction-accuracy                  # LOCAL D1
+ *   bin/measure-extraction-accuracy --remote         # PRODUCTION D1 (read-only)
+ *   bin/measure-extraction-accuracy --remote --json > out.json
+ *   bin/measure-extraction-accuracy --remote --min-n 20
+ *
+ * Flags:
+ *   --remote, -r      query production D1 instead of local
+ *   --json            emit the full result structure as JSON (no text report)
+ *   --min-n N         hide field/supplier slices with fewer than N judgements
+ *                     from the TEXT report (default 5). Nothing is dropped
+ *                     from --json, and the text report prints how many slices
+ *                     were hidden and how many judgements they hold.
+ *   --page-size N     D1 paging size (default 500)
+ *   -h, --help        this help
+ */
+
+const { query, queryPaged } = require('./lib/d1');
+
+// ---------------------------------------------------------------------------
+// Comparison
+// ---------------------------------------------------------------------------
+
+/** Whitespace-collapsed, case-folded compare key. */
+function norm(v) {
+  if (v == null) return '';
+  return String(v).replace(/\s+/g, ' ').trim().toUpperCase();
+}
+
+const BUCKETS = ['accepted', 'corrected', 'blanked', 'added', 'dismissed', 'unclassified'];
+
+/**
+ * Classify one reviewer_field_picks row.
+ * Returns { path: 'text'|'vlm'|'none', bucket }.
+ */
+function classify(row) {
+  const text = norm(row.text_value);
+  const vlm = norm(row.vlm_value);
+  const final = norm(row.final_value);
+  const src = row.chosen_source;
+
+  // Which extraction path proposed something for this field?
+  const path = text ? 'text' : vlm ? 'vlm' : 'none';
+
+  if (src === 'dismissed') return { path, bucket: 'dismissed' };
+
+  if (src === 'text') {
+    // Guard: trust the recorded value comparison over the recorded label.
+    if (text && final === text) return { path: 'text', bucket: 'accepted' };
+    if (!final && text) return { path: 'text', bucket: 'blanked' };
+    return { path: 'text', bucket: 'corrected' };
+  }
+
+  if (src === 'vlm') {
+    if (vlm && final === vlm) return { path: 'vlm', bucket: 'accepted' };
+    if (!final && vlm) return { path: 'vlm', bucket: 'blanked' };
+    return { path: 'vlm', bucket: 'corrected' };
+  }
+
+  if (src === 'edited') {
+    // The reviewer's value matches neither proposal — unless it silently does,
+    // in which case score the match rather than the label.
+    if (text && final === text) return { path: 'text', bucket: 'accepted' };
+    if (vlm && final === vlm) return { path: 'vlm', bucket: 'accepted' };
+    if (!text && !vlm) {
+      // Model proposed nothing on either path: an omission the human filled in.
+      return { path: 'none', bucket: final ? 'added' : 'unclassified' };
+    }
+    if (!final) return { path, bucket: 'blanked' };
+    return { path, bucket: 'corrected' };
+  }
+
+  return { path, bucket: 'unclassified' };
+}
+
+// ---------------------------------------------------------------------------
+// Aggregation
+// ---------------------------------------------------------------------------
+
+function newAgg() {
+  const a = { total: 0 };
+  for (const b of BUCKETS) a[b] = 0;
+  a.text = Object.fromEntries(BUCKETS.map((b) => [b, 0]));
+  a.vlm = Object.fromEntries(BUCKETS.map((b) => [b, 0]));
+  return a;
+}
+
+function addTo(a, path, bucket) {
+  a.total += 1;
+  a[bucket] += 1;
+  if (path === 'text') a.text[bucket] += 1;
+  else if (path === 'vlm') a.vlm[bucket] += 1;
+}
+
+/** Strict accept rate over PRODUCED values (added excluded). */
+function acceptRate(a) {
+  const denom = a.accepted + a.corrected + a.blanked;
+  return denom > 0 ? a.accepted / denom : null;
+}
+
+/** Accept rate with dismissals counted as errors (lower bound). */
+function acceptRateWithDismissals(a) {
+  const denom = a.accepted + a.corrected + a.blanked + a.dismissed;
+  return denom > 0 ? a.accepted / denom : null;
+}
+
+function fmtPct(r) {
+  return r == null ? '   n/a' : `${(r * 100).toFixed(1).padStart(5)}%`;
+}
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+function parseArgs(argv) {
+  const opts = { remote: false, json: false, minN: 5, pageSize: 500 };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--remote':
+      case '-r':
+        opts.remote = true;
+        break;
+      case '--json':
+        opts.json = true;
+        break;
+      case '--min-n':
+        opts.minN = Number(argv[++i]);
+        break;
+      case '--page-size':
+        opts.pageSize = Number(argv[++i]);
+        break;
+      case '-h':
+      case '--help':
+        printHelp();
+        process.exit(0);
+        break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  return opts;
+}
+
+function printHelp() {
+  const src = require('fs').readFileSync(__filename, 'utf8');
+  const end = src.indexOf(' */');
+  console.log(src.slice(0, end).replace(/^\/\*\*?/, '').replace(/^ ?\* ?/gm, ''));
+}
+
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+
+  if (!opts.json) {
+    console.log('bin/measure-extraction-accuracy — READ-ONLY');
+    console.log(`Data source: ${opts.remote ? 'PRODUCTION (--remote)' : 'local D1'}\n`);
+  }
+
+  // --- load -----------------------------------------------------------------
+  const { rows: picks, pages: pickPages } = queryPaged(
+    (limit, offset) => `
+      SELECT p.id, p.queue_item_id, p.field_key, p.text_value, p.vlm_value,
+             p.chosen_source, p.final_value, p.created_at,
+             COALESCE(s.name, '(no supplier)') AS supplier,
+             COALESCE(dt.name, '(no doc type)') AS doc_type
+      FROM reviewer_field_picks p
+      LEFT JOIN suppliers s ON s.id = p.supplier_id
+      LEFT JOIN document_types dt ON dt.id = p.document_type_id
+      ORDER BY p.id
+      LIMIT ${limit} OFFSET ${offset}`,
+    opts
+  );
+
+  const { rows: dismissals } = queryPaged(
+    (limit, offset) => `
+      SELECT d.id, d.queue_item_id, d.field_key, d.action, d.created_at,
+             COALESCE(s.name, '(no supplier)') AS supplier,
+             COALESCE(dt.name, '(no doc type)') AS doc_type
+      FROM reviewer_field_dismissals d
+      LEFT JOIN suppliers s ON s.id = d.supplier_id
+      LEFT JOIN document_types dt ON dt.id = d.document_type_id
+      ORDER BY d.id
+      LIMIT ${limit} OFFSET ${offset}`,
+    opts
+  );
+
+  const tableEdits = query(
+    `SELECT operation, COUNT(*) AS n, COUNT(DISTINCT queue_item_id) AS items
+     FROM reviewer_table_edits GROUP BY operation ORDER BY n DESC`,
+    opts
+  );
+
+  const queueStats = query(
+    `SELECT status, COUNT(*) AS n FROM processing_queue GROUP BY status`,
+    opts
+  );
+  const coverageRow = query(
+    `SELECT
+       (SELECT COUNT(*) FROM processing_queue) AS queue_total,
+       (SELECT COUNT(*) FROM documents) AS documents_total,
+       (SELECT COUNT(DISTINCT queue_item_id) FROM reviewer_field_picks) AS items_with_picks,
+       (SELECT COUNT(*) FROM processing_queue q WHERE q.status = 'approved'
+          AND NOT EXISTS (SELECT 1 FROM reviewer_field_picks p WHERE p.queue_item_id = q.id))
+         AS approved_without_picks,
+       (SELECT MIN(created_at) FROM reviewer_field_picks) AS first_capture,
+       (SELECT MAX(created_at) FROM reviewer_field_picks) AS last_capture,
+       (SELECT COUNT(DISTINCT created_by) FROM reviewer_field_picks) AS reviewers`,
+    opts
+  )[0] || {};
+
+  // --- aggregate ------------------------------------------------------------
+  const overall = newAgg();
+  const byField = new Map();
+  const bySupplier = new Map();
+  const byDocType = new Map();
+  const byMonth = new Map();
+  const worstExamples = [];
+
+  const get = (m, k) => {
+    if (!m.has(k)) m.set(k, newAgg());
+    return m.get(k);
+  };
+
+  for (const row of picks) {
+    const { path, bucket } = classify(row);
+    const month = String(row.created_at || '').slice(0, 7) || '(unknown)';
+    addTo(overall, path, bucket);
+    addTo(get(byField, row.field_key), path, bucket);
+    addTo(get(bySupplier, row.supplier), path, bucket);
+    addTo(get(byDocType, row.doc_type), path, bucket);
+    addTo(get(byMonth, month), path, bucket);
+    if (bucket === 'corrected') {
+      worstExamples.push({
+        queue_item_id: row.queue_item_id,
+        supplier: row.supplier,
+        field_key: row.field_key,
+        model_value: String(row.text_value ?? row.vlm_value ?? '').slice(0, 80),
+        reviewer_value: String(row.final_value ?? '').slice(0, 80),
+      });
+    }
+  }
+
+  // Dismissals live in their own table and are DISJOINT from picks
+  // (buildFieldPicks skips dismissed keys), so they are added, not merged.
+  for (const row of dismissals) {
+    const month = String(row.created_at || '').slice(0, 7) || '(unknown)';
+    addTo(overall, 'none', 'dismissed');
+    addTo(get(byField, row.field_key), 'none', 'dismissed');
+    addTo(get(bySupplier, row.supplier), 'none', 'dismissed');
+    addTo(get(byDocType, row.doc_type), 'none', 'dismissed');
+    addTo(get(byMonth, month), 'none', 'dismissed');
+  }
+
+  const sliceOut = (m) =>
+    [...m.entries()]
+      .map(([key, a]) => ({
+        key,
+        judgements: a.total,
+        accepted: a.accepted,
+        corrected: a.corrected,
+        blanked: a.blanked,
+        added: a.added,
+        dismissed: a.dismissed,
+        unclassified: a.unclassified,
+        accept_rate: acceptRate(a),
+        accept_rate_with_dismissals: acceptRateWithDismissals(a),
+        text: a.text,
+        vlm: a.vlm,
+      }))
+      .sort((x, y) => y.judgements - x.judgements);
+
+  const statusMap = Object.fromEntries(queueStats.map((r) => [r.status, Number(r.n)]));
+  const itemsWithPicks = Number(coverageRow.items_with_picks || 0);
+  const queueTotal = Number(coverageRow.queue_total || 0);
+
+  const result = {
+    generated_at: new Date().toISOString(),
+    data_source: opts.remote ? 'remote' : 'local',
+    coverage: {
+      queue_items_total: queueTotal,
+      documents_total: Number(coverageRow.documents_total || 0),
+      queue_by_status: statusMap,
+      queue_items_with_reviewer_capture: itemsWithPicks,
+      capture_coverage_of_queue: queueTotal ? itemsWithPicks / queueTotal : null,
+      approved_items_without_capture: Number(coverageRow.approved_without_picks || 0),
+      rejected_items_excluded: statusMap.rejected || 0,
+      pending_items_excluded: statusMap.pending || 0,
+      first_capture: coverageRow.first_capture,
+      last_capture: coverageRow.last_capture,
+      distinct_reviewers: Number(coverageRow.reviewers || 0),
+      d1_pages: pickPages,
+    },
+    judgements: {
+      picks: picks.length,
+      dismissals: dismissals.length,
+      total: picks.length + dismissals.length,
+    },
+    overall: {
+      ...Object.fromEntries(BUCKETS.map((b) => [b, overall[b]])),
+      accept_rate: acceptRate(overall),
+      accept_rate_with_dismissals: acceptRateWithDismissals(overall),
+      text: { ...overall.text, accept_rate: acceptRate(overall.text) },
+      vlm: { ...overall.vlm, accept_rate: acceptRate(overall.vlm) },
+    },
+    by_field: sliceOut(byField),
+    by_supplier: sliceOut(bySupplier),
+    by_document_type: sliceOut(byDocType),
+    by_month: sliceOut(byMonth).sort((a, b) => a.key.localeCompare(b.key)),
+    table_edits: tableEdits,
+    correction_examples: worstExamples.slice(0, 50),
+    caveats: caveatText(coverageRow, statusMap, queueTotal, itemsWithPicks),
+  };
+
+  if (opts.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  report(result, opts);
+}
+
+/**
+ * The honesty block. Printed in the script's own output AND carried in --json,
+ * so a number cannot travel without its caveat attached.
+ */
+function caveatText(coverageRow, statusMap, queueTotal, itemsWithPicks) {
+  const excluded = queueTotal - itemsWithPicks;
+  return [
+    `MEASURED POPULATION: ${itemsWithPicks} of ${queueTotal} queue items (${((itemsWithPicks / (queueTotal || 1)) * 100).toFixed(1)}%). ` +
+      `${excluded} items contribute NOTHING to this number.`,
+    `UPWARD BIAS — picks are written only on APPROVE. All ${statusMap.rejected || 0} rejected items are excluded, ` +
+      `and rejected items are disproportionately the extractor's worst output. ` +
+      `${Number(coverageRow.approved_without_picks || 0)} approved items also predate capture ` +
+      `(capture starts ${String(coverageRow.first_capture || '').slice(0, 10)}). The true corpus rate is LOWER than this figure.`,
+    'NOT a per-item bias: within a captured item, coverage is complete. buildFieldPicks emits one row per key in the union of the edited/text/VLM payloads, not just fields the reviewer touched.',
+    'PRECISION, NOT RECALL: the accept rate is over values the model PRODUCED. Fields the model omitted and the reviewer typed in are counted separately as "added" and are not in the denominator.',
+    'VERBATIM EQUALITY: an "accept" means the reviewer kept the string exactly (whitespace/case normalized). A semantically-correct value in a different format scores as a correction, so the rate is conservative on formatting.',
+    'A DISMISSAL IS NOT PROOF OF ERROR: the reviewer may simply not want that field. The strict accept rate excludes dismissals (upper bound); the with-dismissals rate treats every one as an error (lower bound).',
+    `REVIEWERS: ${Number(coverageRow.reviewers || 0)} distinct human(s) produced every judgement here. This is not an independent multi-annotator ground truth and has no inter-rater agreement measure.`,
+  ];
+}
+
+function report(r, opts) {
+  const c = r.coverage;
+  const o = r.overall;
+
+  console.log('COVERAGE');
+  console.log('-'.repeat(78));
+  console.log(`Queue items total:                  ${c.queue_items_total}   (documents: ${c.documents_total})`);
+  console.log(
+    `  by status:                        ` +
+      Object.entries(c.queue_by_status).map(([k, v]) => `${k}=${v}`).join('  ')
+  );
+  console.log(`Queue items with reviewer capture:  ${c.queue_items_with_reviewer_capture}  (${((c.capture_coverage_of_queue || 0) * 100).toFixed(1)}% of the queue)`);
+  console.log(`Approved items with NO capture:     ${c.approved_items_without_capture}  (predate migration 0038)`);
+  console.log(`Rejected items excluded entirely:   ${c.rejected_items_excluded}`);
+  console.log(`Pending items excluded entirely:    ${c.pending_items_excluded}`);
+  console.log(`Capture window:                     ${String(c.first_capture).slice(0, 10)} .. ${String(c.last_capture).slice(0, 10)}   (${c.distinct_reviewers} reviewer(s))`);
+  console.log(`Judgements loaded:                  ${r.judgements.picks} picks + ${r.judgements.dismissals} dismissals = ${r.judgements.total}  (${c.d1_pages} D1 pages)\n`);
+
+  console.log('OVERALL');
+  console.log('-'.repeat(78));
+  console.log(`  accepted   ${String(o.accepted).padStart(6)}   reviewer kept the model's value verbatim`);
+  console.log(`  corrected  ${String(o.corrected).padStart(6)}   model had a value, reviewer changed it`);
+  console.log(`  blanked    ${String(o.blanked).padStart(6)}   model had a value, reviewer emptied it`);
+  console.log(`  dismissed  ${String(o.dismissed).padStart(6)}   reviewer removed the field`);
+  console.log(`  added      ${String(o.added).padStart(6)}   model had NOTHING, reviewer typed it in (omission)`);
+  if (o.unclassified) console.log(`  unclassified ${String(o.unclassified).padStart(4)}   could not be bucketed`);
+  console.log();
+  console.log(`  ACCEPT RATE (strict, over produced values)   ${fmtPct(o.accept_rate)}   = ${o.accepted}/${o.accepted + o.corrected + o.blanked}`);
+  console.log(`  ACCEPT RATE (dismissals counted as errors)   ${fmtPct(o.accept_rate_with_dismissals)}   = ${o.accepted}/${o.accepted + o.corrected + o.blanked + o.dismissed}`);
+  console.log();
+  console.log(`  TEXT path:  ${o.text.accepted} accepted / ${o.text.accepted + o.text.corrected + o.text.blanked} produced  →  ${fmtPct(o.text.accept_rate)}`);
+  const vlmProduced = o.vlm.accepted + o.vlm.corrected + o.vlm.blanked;
+  if (vlmProduced === 0) {
+    console.log('  VLM path:   NO DATA — not one captured pick carries a vlm_value.');
+    console.log('              The VLM path was off for every reviewed item in this window, so');
+    console.log('              this dataset says NOTHING about VLM accuracy. Do not infer one.');
+  } else {
+    console.log(`  VLM path:   ${o.vlm.accepted} accepted / ${vlmProduced} produced  →  ${fmtPct(o.vlm.accept_rate)}`);
+  }
+  console.log();
+
+  const hidden = { fields: 0, fieldJ: 0, suppliers: 0, supplierJ: 0 };
+
+  console.log(`BY FIELD (min-n ${opts.minN}; worst accept rate last)`);
+  console.log('-'.repeat(94));
+  console.log('FIELD                        judg   accept   corr   blank    add   dism   accept%   w/dism%');
+  const fields = r.by_field.filter((f) => {
+    if (f.judgements >= opts.minN) return true;
+    hidden.fields += 1;
+    hidden.fieldJ += f.judgements;
+    return false;
+  });
+  fields
+    .sort((a, b) => (b.accept_rate ?? -1) - (a.accept_rate ?? -1))
+    .forEach((f) => {
+      console.log(
+        `${f.key.slice(0, 26).padEnd(27)} ${String(f.judgements).padStart(5)} ${String(f.accepted).padStart(8)} ` +
+          `${String(f.corrected).padStart(6)} ${String(f.blanked).padStart(7)} ${String(f.added).padStart(6)} ${String(f.dismissed).padStart(6)}  ` +
+          `${fmtPct(f.accept_rate)}    ${fmtPct(f.accept_rate_with_dismissals)}`
+      );
+    });
+  console.log(`  (${hidden.fields} field(s) below min-n hidden, holding ${hidden.fieldJ} judgement(s) — all present in --json)\n`);
+
+  console.log(`BY SUPPLIER (min-n ${opts.minN}; worst accept rate last)`);
+  console.log('-'.repeat(94));
+  console.log('SUPPLIER                     judg   accept   corr   blank    add   dism   accept%   w/dism%');
+  const sups = r.by_supplier.filter((s) => {
+    if (s.judgements >= opts.minN) return true;
+    hidden.suppliers += 1;
+    hidden.supplierJ += s.judgements;
+    return false;
+  });
+  sups
+    .sort((a, b) => (b.accept_rate ?? -1) - (a.accept_rate ?? -1))
+    .forEach((s) => {
+      console.log(
+        `${s.key.slice(0, 26).padEnd(27)} ${String(s.judgements).padStart(5)} ${String(s.accepted).padStart(8)} ` +
+          `${String(s.corrected).padStart(6)} ${String(s.blanked).padStart(7)} ${String(s.added).padStart(6)} ${String(s.dismissed).padStart(6)}  ` +
+          `${fmtPct(s.accept_rate)}    ${fmtPct(s.accept_rate_with_dismissals)}`
+      );
+    });
+  console.log(`  (${hidden.suppliers} supplier(s) below min-n hidden, holding ${hidden.supplierJ} judgement(s) — all present in --json)\n`);
+
+  console.log('BY DOCUMENT TYPE');
+  console.log('-'.repeat(94));
+  console.log('DOC TYPE                     judg   accept   corr   blank    add   dism   accept%   w/dism%');
+  r.by_document_type.forEach((d) => {
+    console.log(
+      `${d.key.slice(0, 26).padEnd(27)} ${String(d.judgements).padStart(5)} ${String(d.accepted).padStart(8)} ` +
+        `${String(d.corrected).padStart(6)} ${String(d.blanked).padStart(7)} ${String(d.added).padStart(6)} ${String(d.dismissed).padStart(6)}  ` +
+        `${fmtPct(d.accept_rate)}    ${fmtPct(d.accept_rate_with_dismissals)}`
+    );
+  });
+  console.log();
+
+  console.log('OVER TIME (by capture month)');
+  console.log('-'.repeat(94));
+  console.log('MONTH        judg   accept   corr   blank    add   dism   accept%   w/dism%');
+  r.by_month.forEach((m) => {
+    console.log(
+      `${m.key.padEnd(12)} ${String(m.judgements).padStart(4)} ${String(m.accepted).padStart(8)} ` +
+        `${String(m.corrected).padStart(6)} ${String(m.blanked).padStart(7)} ${String(m.added).padStart(6)} ${String(m.dismissed).padStart(6)}  ` +
+        `${fmtPct(m.accept_rate)}    ${fmtPct(m.accept_rate_with_dismissals)}`
+    );
+  });
+  console.log();
+
+  console.log('TABLE EDITS (reviewer changes to extracted tables — not in the rate above)');
+  console.log('-'.repeat(78));
+  if (r.table_edits.length === 0) console.log('  (none)');
+  r.table_edits.forEach((t) => console.log(`  ${String(t.n).padStart(5)}  ${t.operation}  (across ${t.items} items)`));
+  console.log();
+
+  console.log('SAMPLE CORRECTIONS (model value → reviewer value)');
+  console.log('-'.repeat(94));
+  r.correction_examples.slice(0, 15).forEach((e) => {
+    console.log(`  ${e.queue_item_id.slice(0, 8)}  ${e.supplier.slice(0, 22).padEnd(23)} ${e.field_key.padEnd(18)} "${e.model_value}" -> "${e.reviewer_value}"`);
+  });
+  console.log();
+
+  console.log('!! READ BEFORE QUOTING ANY NUMBER ABOVE !!');
+  console.log('='.repeat(78));
+  r.caveats.forEach((c) => console.log(`  * ${c}`));
+  console.log('='.repeat(78));
+}
+
+main().catch((err) => {
+  console.error(err.stack || String(err));
+  process.exit(1);
+});
