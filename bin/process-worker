@@ -109,13 +109,22 @@ async function pickVlmModel(opts) {
 }
 
 // === Multi-record COA mode (first-class multi-product / multi-lot / multi-page) ===
-//   off    — never compute/post ai_records on the COA path (byte-identical to
-//            pre-feature behavior). Default.
-//   shadow — ALSO compute mergeCoaRecords() and post ai_records ALONGSIDE the
-//            flat ai_fields when the doc genuinely carries >= 2 records, so we
-//            can eyeball splits on real docs without any review/approve change.
-//   on     — same posting behavior as shadow in P1 (the review/approve wiring
-//            that consumes ai_records is P3/P4).
+//   off              — never compute/post ai_records on the COA path
+//                      (byte-identical to pre-feature behavior). Default.
+//   shadow | on      — compute mergeCoaRecords() and post ai_records ALONGSIDE
+//                      the flat ai_fields when the doc genuinely carries >= 2
+//                      records.
+//
+// IMPORTANT — 'shadow' and 'on' are the SAME behavior, everywhere. The only
+// live distinction this variable makes is off vs not-off (see the single test
+// `COA_RECORDS_MODE !== 'off'` below; nothing else in the worker, the API, or
+// the UI reads it). 'shadow' was named for a P1 stage in which records were
+// posted but ignored downstream — that stage is over: the review UI routes any
+// item whose ai_records parses as a CoaRecordsPayload to CoaRecordsReviewTile,
+// and approve routes it to produceCoaRecords. So on prod (currently 'shadow')
+// records ARE already driving review and approval. Flipping shadow -> on would
+// change nothing; only off -> shadow/on is a real change.
+//
 // In all modes, single-record COAs post EXACTLY as today (flat ai_fields, no
 // ai_records) so the common case is unchanged.
 const COA_RECORDS_MODE = (process.env.COA_RECORDS_MODE || 'off').toLowerCase();
@@ -762,13 +771,16 @@ function buildPageChunks(pages) {
  * Build ONE chunk per PAGE for the COA path. Unlike buildPageChunks (which
  * GROUPS pages into ≤TEXT_CHUNK_CHAR_LIMIT chunks — the v1 collapse bug), this
  * never merges pages: each page becomes its own Qwen call so the model sees
- * exactly one single-page COA = one product.
+ * exactly one self-contained page of a COA. (Note the model is asked for one
+ * record per printed result on that page — a page is usually one product, but
+ * a tabular COA can print several on one page; see the records contract in
+ * BASE_PROMPT.)
  *
  * Each returned entry is `{ chunk, page }` where `page` is the 1-based page
  * number. A page whose text exceeds TEXT_CHUNK_CHAR_LIMIT is sub-chunked
  * row-by-row, but EVERY sub-chunk is tagged with the SAME page number so the
- * assembler recombines them into that one page's product (a page is never split
- * into two products). Whitespace-only pages are dropped.
+ * assembler recombines them into that one page. Whitespace-only pages are
+ * dropped.
  *
  * Returns an array of { chunk: string, page: number }.
  */
@@ -2446,6 +2458,52 @@ async function processCoaItem(item) {
             `  COA records (${COA_RECORDS_MODE}): ${recordsPayload.records.length} records ` +
             `(${recordsPayload.record_cardinality}/${recordsPayload.record_key_basis}) — posting ai_records`
           );
+
+          // Reconcile the FLAT ai_fields with record 1.
+          //
+          // On a genuinely multi-record document the flat field set has no
+          // honest single answer, and historically it got one of two bad ones:
+          //   - comma-crammed ("lot_number": "081426, 082026, 110426") — a
+          //     value nothing downstream can match a lot against, and the
+          //     loudest form of multi-record collapse; or
+          //   - empty, once the model moved everything into records[].
+          // Neither is what a reviewer or the lot matcher wants. Record 1 is a
+          // real, whole, matchable answer, so:
+          //   - backfill any key the flat set is MISSING, and
+          //   - replace any flat value that is comma-crammed.
+          // We never touch a flat value that is already a clean single value —
+          // this only ever runs on the >= 2 record docs, so single-record COAs
+          // (the common case) are byte-identical to before.
+          try {
+            const flat = { ...(parsed.fields || {}) };
+            const recordOne = {
+              ...(recordsPayload.page_metadata || {}),
+              ...(recordsPayload.records[0].fields || {}),
+            };
+            const isCrammed = (v) => typeof v === 'string' && /,\s/.test(v);
+            let changed = false;
+            for (const [k, v] of Object.entries(recordOne)) {
+              if (v == null || String(v).trim() === '') continue;
+              const cur = flat[k];
+              const missing = cur == null || String(cur).trim() === '';
+              if (missing || isCrammed(cur)) {
+                flat[k] = String(v);
+                changed = true;
+              }
+            }
+            // The record schema prefers lot_code/sub_lot_code; the flat schema
+            // uses lot_number. Mirror across so the flat set keeps its canonical
+            // key populated.
+            if (isCrammed(flat.lot_number) || flat.lot_number == null || String(flat.lot_number).trim() === '') {
+              if (recordOne.lot_code) { flat.lot_number = String(recordOne.lot_code); changed = true; }
+            }
+            if (changed) {
+              resultBody.ai_fields = JSON.stringify(compactFields(flat));
+              console.log('  COA records: flat ai_fields reconciled with record 1 (no comma-crammed values)');
+            }
+          } catch (flatErr) {
+            console.warn(`  COA records flat reconcile failed (non-critical): ${flatErr.message}`);
+          }
         }
       } catch (recErr) {
         // Shadow assembly must NEVER fail the post. Fall through with flat-only.
@@ -2663,8 +2721,8 @@ Return JSON with:
   "document_type": "Certificate of Analysis" | "Bill of Lading" | etc.
 }
 
-SINGLE-PAGE COA — ONE PRODUCT (records, additive — keep emitting the flat fields/tables/products/_confidence above for back-compat):
-The input you are given is ONE complete single-page COA for ONE product (it has its own full header: supplier, item#, lot#, plant, date). Extract that one product and ALL of its lots/sublots as a "records" array — ONE record per lot/sublot. A single lot → exactly one record. Do NOT invent more than one product; there is only one product on this page.
+THIS PAGE'S COA RECORDS (records, additive — keep emitting the flat fields/tables/products/_confidence above for back-compat):
+The input you are given is ONE page of a COA. Emit a "records" array with ONE record per DISTINCT CERTIFIED RESULT printed on this page — that is, one record per (product x lot x sublot) combination the page actually shows. Most pages certify exactly one product with one lot: that is exactly one record. Some pages are a TABLE (one row per lot, often several DIFFERENT products in the same table) or a transposed sublot MATRIX (one column per sublot): those pages get one record per row / per column. NEVER invent a record the page does not print, and NEVER fold two printed results into one record.
 {
   "records": [
     {
@@ -2673,17 +2731,19 @@ The input you are given is ONE complete single-page COA for ONE product (it has 
       "groups": { "yeast_mold": { ... }, "sensory": { ... } }
     }
   ],
-  "record_cardinality": "single" | "multi_lot",
-  "record_key_basis": "lot" | "lot+sublot",
-  "page_metadata": { ...fields CONSTANT across every record on THIS page (e.g. supplier_name, product_name, product_code, coa_number, manufacturer)... }
+  "record_cardinality": "single" | "multi_lot" | "multi_product",
+  "record_key_basis": "lot" | "lot+sublot" | "product",
+  "page_metadata": { ...fields CONSTANT across every record on THIS page (e.g. supplier_name, coa_number, manufacturer, the PO number — and product_name/product_code ONLY when every record on the page shares them)... }
 }
 RULES for records:
-- This page is ONE product. Emit ONE record PER LOT and PER SUBLOT of that product. If the product has 4 sublots, that is 4 records (record_key_basis "lot+sublot"). If it has exactly one lot, that is one record (record_cardinality "single").
+- COUNT THE PRINTED RESULTS FIRST, THEN EMIT THAT MANY RECORDS. Before writing anything, count the distinct certified results on this page: each row of a product/lot table, each column of a sublot matrix, each separate lot block. That count IS the number of records. Emitting fewer records than there are printed results is a WRONG extraction.
+- TABULAR COA — ONE ROW PER LOT. Many COAs print a single table whose header is like "Product Code | Product | Prod. Date | Exp. Date | Lot Code | %Fat | %Moisture | pH | ..." and whose rows are the individual lots — frequently with SEVERAL DIFFERENT product codes in the same table. Emit ONE record PER ROW, carrying that row's own product_code, product_name, lot_code and dates. Two rows sharing a product code but printing different lot codes are still TWO records (record_cardinality "multi_lot"); rows with different product codes make it "multi_product".
+- NEVER COMMA-JOIN VALUES FROM DIFFERENT RESULTS INTO ONE FIELD. "38292, 38295" as a product_code or "081426, 082026, 110426" as a lot_number is always a bug — those are separate records. This applies to the flat top-level "fields" too: when this page carries more than one record, the flat "fields" object must describe the FIRST record only (plus the page-wide fields); the complete set lives in "records".
 - SUBLOTS ARE OFTEN COLUMNS IN A TRANSPOSED MATRIX. A "Sub Lot Number" (or "Sublot") row lists the sublot codes left-to-right, e.g. "Sub Lot Number 14 13 12", and each following test/attribute row (Butterfat, Moisture, pH, Weight, Quantity, Production Date, ...) gives that row's value for each sublot in the SAME left-to-right column order. When you see this, emit ONE record PER SUBLOT COLUMN: read DOWN each column to collect that sublot's value for every test. The lot_code is usually shared across all columns; each column's "Sub Lot Number" value is that record's sub_lot_code. Do NOT collapse a multi-column sublot matrix into one flat record.
-- Put fields that vary between this page's lots/sublots in each record's "fields"; put fields constant across them (including this page's product) in "page_metadata". Do not duplicate constant fields into every record.
-- This is ONE page of what may be a larger PO/EDI bundle of single-page COAs — extract ONLY this page's product. The assembler concatenates pages; it NEVER merges your records with another page's, so do not worry about other pages.
+- Put fields that VARY between this page's records in each record's "fields"; put fields constant across every record on this page in "page_metadata". Do not duplicate constant fields into every record. When the page's rows carry different products, product_name/product_code VARY — they belong in each record's "fields", never in page_metadata.
+- This is ONE page of what may be a larger PO/EDI bundle of COAs — extract ONLY what is printed on THIS page. The assembler concatenates pages; it NEVER merges your records with another page's, so do not worry about other pages.
 - Specs verbatim, never derive pass/fail, lab consumables are never product data — the same domain rules as above apply inside each record.
-- Omit "records" ONLY when the page has exactly ONE lot AND ONE sublot (a single result). In THAT case you MUST still report the sublot in the FLAT "sub_lot_code" field — the flat field set has a sub_lot_code slot precisely so a single-sublot page never loses it. A printed sublot code is NEVER optional: it goes in records[].fields.sub_lot_code when you emit records, and in the flat sub_lot_code when you do not. If there are MULTIPLE sublots — even all under the same lot number — you MUST emit one record per sublot; never collapse multiple sublots into flat fields.`;
+- Omit "records" ONLY when the page certifies exactly ONE product with ONE lot AND ONE sublot (a single result). In THAT case you MUST still report the sublot in the FLAT "sub_lot_code" field — the flat field set has a sub_lot_code slot precisely so a single-sublot page never loses it. A printed sublot code is NEVER optional: it goes in records[].fields.sub_lot_code when you emit records, and in the flat sub_lot_code when you do not. If there are MULTIPLE sublots — even all under the same lot number — you MUST emit one record per sublot; never collapse multiple sublots into flat fields. Likewise, if the page prints MULTIPLE lots or MULTIPLE products, you MUST emit one record each; never collapse them into flat fields.`;
 
 const DAIRY_FOOD_INDUSTRY_PROMPT = `
 ORG CONTEXT:
@@ -3391,17 +3451,48 @@ async function runParityMode() {
         return parseExtraction(content);
       };
 
-      // ---- Text-path dispatcher: same chunking branches as runTextPath ----
+      // ---- Text-path dispatcher: same chunking branches as processCoaItem's
+      // runTextPath. This MUST mirror the PAGE-FIRST chunker (buildPerPageChunks),
+      // not the legacy page-GROUPING buildPageChunks — otherwise a parity run
+      // measures a code path production no longer takes (and can never observe
+      // the multi-record split at all). It also captures the per-page parses so
+      // the parity output can report mergeCoaRecords()' record count. ----
+      let coaRecordsCapture = { parsedChunks: [], chunkPageRanges: [], truncated: false };
       const runTextPath = async () => {
-        if (pages.length <= 1) return await runTextQwen(text.substring(0, 6000));
-        const chunks = buildPageChunks(pages);
-        if (chunks.length === 0) return await runTextQwen(text.substring(0, 6000));
-        if (chunks.length > TEXT_MAX_CHUNKS) return await runTextQwen(text.substring(0, 6000));
-        if (chunks.length === 1) return await runTextQwen(chunks[0]);
-        const parsedChunks = [];
-        for (let i = 0; i < chunks.length; i++) {
-          parsedChunks.push(await runTextQwen(chunks[i]));
+        if (pages.length <= 1) {
+          const parsed1 = await runTextQwen(text.substring(0, 6000));
+          coaRecordsCapture = { parsedChunks: [parsed1], chunkPageRanges: [[1]], truncated: false };
+          return parsed1;
         }
+        let pageChunks = buildPerPageChunks(pages);
+        if (pageChunks.length === 0) {
+          const parsed0 = await runTextQwen(text.substring(0, 6000));
+          coaRecordsCapture = { parsedChunks: [parsed0], chunkPageRanges: [[1]], truncated: false };
+          return parsed0;
+        }
+        const distinctPages = [...new Set(pageChunks.map((c) => c.page))];
+        if (distinctPages.length > TEXT_MAX_PAGES_COA) {
+          const keptPages = new Set(distinctPages.slice(0, TEXT_MAX_PAGES_COA));
+          pageChunks = pageChunks.filter((c) => keptPages.has(c.page));
+        }
+        if (pageChunks.length === 1) {
+          const parsedS = await runTextQwen(pageChunks[0].chunk);
+          coaRecordsCapture = {
+            parsedChunks: [parsedS],
+            chunkPageRanges: [[pageChunks[0].page]],
+            truncated: false,
+          };
+          return parsedS;
+        }
+        const parsedChunks = [];
+        for (let i = 0; i < pageChunks.length; i++) {
+          parsedChunks.push(await runTextQwen(pageChunks[i].chunk));
+        }
+        coaRecordsCapture = {
+          parsedChunks,
+          chunkPageRanges: pageChunks.map((c) => [c.page]),
+          truncated: false,
+        };
         return mergeTextExtractions(parsedChunks);
       };
 
@@ -3479,11 +3570,60 @@ async function runParityMode() {
         } catch { /* non-critical */ }
       }
 
+      // ---- Records assembly (mirrors processCoaItem's shadow/on block). The
+      // parity run reports what mergeCoaRecords WOULD produce so a multi-record
+      // regression is observable; it still never posts anything. ----
+      let recordsSummary = null;
+      let flatFields = parsed.fields || {};
+      if (primaryPath === 'text' && coaRecordsCapture.parsedChunks.length > 0) {
+        try {
+          const rp = mergeCoaRecords(
+            coaRecordsCapture.parsedChunks,
+            coaRecordsCapture.chunkPageRanges,
+            { truncated: coaRecordsCapture.truncated }
+          );
+          // Mirror processCoaItem's flat/record-1 reconcile so parity shows the
+          // ai_fields the worker would actually post.
+          if (rp.records.length >= 2) {
+            const flat = { ...flatFields };
+            const recordOne = { ...(rp.page_metadata || {}), ...(rp.records[0].fields || {}) };
+            const isCrammed = (v) => typeof v === 'string' && /,\s/.test(v);
+            for (const [k, v] of Object.entries(recordOne)) {
+              if (v == null || String(v).trim() === '') continue;
+              const cur = flat[k];
+              if (cur == null || String(cur).trim() === '' || isCrammed(cur)) flat[k] = String(v);
+            }
+            if (isCrammed(flat.lot_number) || flat.lot_number == null || String(flat.lot_number).trim() === '') {
+              if (recordOne.lot_code) flat.lot_number = String(recordOne.lot_code);
+            }
+            flatFields = compactFields(flat);
+          }
+          recordsSummary = {
+            // would_post mirrors the worker's `records.length >= 2` gate.
+            would_post: rp.records.length >= 2,
+            count: rp.records.length,
+            cardinality: rp.record_cardinality,
+            key_basis: rp.record_key_basis,
+            page_metadata: rp.page_metadata,
+            records: rp.records.map((r) => ({
+              record_index: r.record_index,
+              source_pages: r.source_pages,
+              fields: r.fields,
+            })),
+          };
+        } catch (recErr) {
+          recordsSummary = { error: recErr.message };
+        }
+      }
+
       // ---- Print the fresh extraction. `extracted_fields` matches the object
       // processCoaItem posts as ai_fields (JSON.stringify(parsed.fields)). ----
       process.stdout.write(JSON.stringify({
         id,
-        extracted_fields: parsed.fields || {},
+        file_name: item.file_name,
+        page_count: pages.length,
+        extracted_fields: flatFields,
+        coa_records: recordsSummary,
         // Which model + quantization actually produced this parity result, so
         // a grading pass can never be silently scored against the wrong one.
         text_model: lastServedTextModel,

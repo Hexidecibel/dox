@@ -2,10 +2,16 @@
 # Toggle COA_RECORDS_MODE on the prod process-worker (systemd) via a drop-in.
 #
 # Controls the multi-record COA pipeline (see plan: make COA a records-kind):
-#   off    — no records emitted (default; pre-P1 behavior)
-#   shadow — worker posts ai_records ALONGSIDE ai_fields for multi-record COAs,
-#            but review/approve still use ai_fields (P1 — observe real splits)
-#   on     — records drive review + approval (P3/P4)
+#   off           — no records emitted (default; pre-P1 behavior)
+#   shadow | on   — worker posts ai_records ALONGSIDE ai_fields whenever a doc
+#                   yields >= 2 records
+#
+# NOTE: 'shadow' and 'on' are IDENTICAL today. The worker's only test is
+# `COA_RECORDS_MODE !== 'off'`, and the P3/P4 review wiring has since shipped —
+# ReviewQueue renders CoaRecordsReviewTile for any item whose ai_records parses,
+# and approve routes to produceCoaRecords. So a worker in 'shadow' is already
+# driving review and approval from records. The only meaningful switch is
+# off <-> (shadow|on).
 #
 # Usage:
 #   ./bin/coa-records-mode <off|shadow|on>

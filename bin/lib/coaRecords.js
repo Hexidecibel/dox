@@ -6,12 +6,16 @@
 // literally "Page 1 of 1" — a self-sufficient COA with its own full header
 // (supplier, item#, lot#, plant, date). So:
 //
-//   • Each page = exactly ONE product. We split per page, ALWAYS, and NEVER
-//     merge records across pages (the v1 bug stuffed all pages into one LLM
-//     call and dropped all-but-one product; the fix is per-page extraction +
-//     this page-first assembly).
-//   • Within a page, that one product may have multiple lots/sublots → the LLM
-//     emits one record per lot/sublot for that page. We keep them as-is.
+//   • We split per page, ALWAYS, and NEVER merge records across pages (the v1
+//     bug stuffed all pages into one LLM call and dropped all-but-one product;
+//     the fix is per-page extraction + this page-first assembly).
+//   • A page most often carries ONE product, but NOT always: a tabular COA
+//     prints one row per lot with several different product codes on a single
+//     page (Savencia/Alouette), and a transposed matrix prints one column per
+//     sublot. The LLM emits one record per printed result for that page — per
+//     (product x lot x sublot) — and we keep them all as-is. Assuming
+//     one-product-per-page is what made those documents collapse into a single
+//     comma-crammed record.
 //
 // The worker runs one LLM call per PAGE (see buildPerPageChunks in
 // bin/process-worker), so each parsed chunk here corresponds to exactly one
@@ -71,11 +75,12 @@ function firstNonEmpty(fields, keys) {
 /**
  * Normalize a single PAGE's parsed output into an array of record objects, each
  * tagged with this page's number as `source_pages`. A page that already carries
- * structured `records[]` (one per lot/sublot) contributes those directly; a
- * flat-only page synthesizes exactly ONE record from its fields/tables (a page
- * is one product → one or more lots, but if the model returned no records[] we
- * treat the whole page as a single record). We never synthesize multiple
- * records from a flat page's products[] — a page is one product.
+ * structured `records[]` (one per printed product/lot/sublot result)
+ * contributes those directly; a flat-only page synthesizes exactly ONE record
+ * from its fields/tables (if the model returned no records[] we have no
+ * defensible way to split, so we treat the whole page as a single record). We
+ * never synthesize multiple records from a flat page's products[] — inventing
+ * a split from an unstructured field set is worse than one honest record.
  *
  * @param {object} parsed   one parseExtraction() result for ONE page
  * @param {number[]} pages  the 1-based page number(s) this page-chunk covered
@@ -297,15 +302,23 @@ function mergeCoaRecords(parsedChunks, chunkPageRanges, opts = {}) {
   if (records.length <= 1) {
     cardinality = 'single';
   } else {
-    const productHoisted =
-      PRODUCT_NAME_KEYS.some((k) => !isEmpty(pageMetadata[k])) ||
-      PRODUCT_CODE_KEYS.some((k) => !isEmpty(pageMetadata[k]));
-    const distinctProducts = new Set(
-      records
-        .map((r) => firstNonEmpty(r.fields, PRODUCT_NAME_KEYS) || firstNonEmpty(r.fields, PRODUCT_CODE_KEYS) || '')
-        .filter((p) => p !== '')
-    );
-    const multiProduct = !productHoisted && distinctProducts.size > 1;
+    // A product identifier still sitting on the RECORDS is one that VARIES —
+    // hoistSharedFields already moved every doc-wide-constant key into
+    // page_metadata. So distinctness is decided purely on what is left per
+    // record. Note we must look at name and code SEPARATELY: a tabular
+    // single-page COA commonly prints one product NAME across several rows
+    // ("Alouette Pro Cream Cheese") while the product CODE differs per row
+    // (38292 / 38295). The name hoists, the code stays — and that is a
+    // genuine multi-product document. An earlier `productHoisted` veto keyed
+    // on "any product key present in page_metadata" mislabelled exactly that
+    // case as multi_lot.
+    const distinctBy = (keys) =>
+      new Set(
+        records
+          .map((r) => firstNonEmpty(r.fields, keys) || '')
+          .filter((p) => p !== '')
+      ).size;
+    const multiProduct = distinctBy(PRODUCT_CODE_KEYS) > 1 || distinctBy(PRODUCT_NAME_KEYS) > 1;
     cardinality = multiProduct ? 'multi_product' : 'multi_lot';
   }
 

@@ -252,6 +252,57 @@ describe('mergeCoaRecords (page-first)', () => {
     expect(payload.records[0].tables).toHaveLength(1);
   });
 
+  it('ONE page, tabular multi-product COA → one record per row, cardinality multi_product', () => {
+    // The Savencia/Alouette shape: a single page whose table prints one row per
+    // lot, with two different product CODES under one shared product NAME. The
+    // shared name hoists into page_metadata; the codes stay per-record. This is
+    // the multi-record-collapse case — it must NOT come back as one record, and
+    // it must NOT be mislabelled multi_lot just because the name hoisted.
+    const payload = mergeCoaRecords(
+      [
+        {
+          records: [
+            { fields: { product_code: '38292', product_name: 'Alouette Pro Cream Cheese', lot_code: '083126', expiration_date: '2026-08-31' } },
+            { fields: { product_code: '38295', product_name: 'Alouette Pro Cream Cheese', lot_code: '110926', expiration_date: '2026-11-09' } },
+            { fields: { product_code: '38295', product_name: 'Alouette Pro Cream Cheese', lot_code: '111126', expiration_date: '2026-11-11' } },
+          ],
+          page_metadata: { supplier_name: 'Savencia', po_number: 'K135095' },
+          confidenceNum: 0.9,
+        },
+      ],
+      [[1]]
+    );
+
+    expect(payload.records).toHaveLength(3);
+    expect(payload.record_cardinality).toBe('multi_product');
+    // Shared across all three rows → hoisted.
+    expect(payload.page_metadata.product_name).toBe('Alouette Pro Cream Cheese');
+    expect(payload.page_metadata.supplier_name).toBe('Savencia');
+    // Varying → stay per-record, never comma-joined.
+    expect((payload.records as Rec[]).map((r) => r.fields.product_code)).toEqual(['38292', '38295', '38295']);
+    expect((payload.records as Rec[]).map((r) => r.fields.lot_code)).toEqual(['083126', '110926', '111126']);
+    // All three came off the same page.
+    expect((payload.records as Rec[]).map((r) => r.source_pages[0])).toEqual([1, 1, 1]);
+  });
+
+  it('one product, several lots on one page → multi_lot (not multi_product)', () => {
+    const payload = mergeCoaRecords(
+      [
+        {
+          records: [
+            { fields: { product_code: '38292', product_name: 'Cream Cheese', lot_code: 'A1' } },
+            { fields: { product_code: '38292', product_name: 'Cream Cheese', lot_code: 'A2' } },
+          ],
+          confidenceNum: 0.9,
+        },
+      ],
+      [[1]]
+    );
+    expect(payload.records).toHaveLength(2);
+    expect(payload.record_cardinality).toBe('multi_lot');
+    expect(payload.page_metadata.product_code).toBe('38292');
+  });
+
   it('truncation fallback → single record flagged truncated_multipage', () => {
     const payload = mergeCoaRecords(
       [{ fields: { lot_number: 'L', supplier_name: 'Acme' }, products: [], confidenceNum: 0.3 }],
