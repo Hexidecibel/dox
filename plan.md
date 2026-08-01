@@ -89,6 +89,36 @@ A BASE-prompt rule was written and then **REVERTED**. Two lessons, both load-bea
 
 If this ever matters again: supplier-specific instructions row, not the base prompt.
 
+#### D4 — measure accuracy at CORPUS scale (the A/B sample was 15 of 552)
+
+**The gap:** every accuracy figure we have comes from the 19-doc (15 runnable) graded set in
+`COA_GRADING_REPORT.md`. Prod holds **552 documents / 674 COA queue items**. Worse, that set was
+built as a Darigold multi-sublot corpus — curated for the HARD cases — so it measures the
+difficult tail, not the library. Right sample for "did the fix work"; wrong basis for "what is our
+accuracy," which is what the client is actually asking. True corpus rate is very likely better.
+Do NOT quote subset figures as an overall rate (the note at `~/drops/aj-extraction-notes.md` now
+says so explicitly).
+
+**Two measures available now, neither needing new hand-grading:**
+
+- **Reviewer corrections as ground truth (the big one).** Migration 0038 persists every reviewer
+  decision and prod already holds **2,930 `reviewer_field_picks` + 175 dismissals + 115 table
+  edits** — ~3,200 labelled judgements on real documents from real suppliers. A correction is a
+  labelled model error; an accepted field is a labelled success. Free, corpus-scale, and it
+  measures the operationally meaningful quantity (reviewer correction load) rather than
+  first-pass perfection. This is the same data [[project_owned_review_flow_direction]] wants for
+  maturity/promotion — one pipeline serves both.
+- **Differential testing, no answer key needed.** Run two configurations over all 674 items and
+  keep only the docs where they DISAGREE; errors concentrate there. Hand-grade only the
+  disagreements → corpus coverage for a fraction of the effort. This is also the cheap way to
+  regression-test any future prompt change.
+- **Plus free invariants over all 552:** does the extracted lot string actually occur in the
+  document text? is `sub_lot_code` 2 digits? do dates parse? No model needed; catches a whole
+  class of fabrication.
+
+Ships when: an accuracy number exists that describes the real corpus, and any client-facing figure
+is sourced from it rather than from the 15-doc set.
+
 #### D3 — measurement hygiene (do before claiming any per-doc number)
 - **Q4 is unstable, not reproducibly wrong**: this run's Q4 grades differ from the June Q4-era
   grades on **5 of 15 docs**, and *which* lots it drops moves between runs at temp 0 / seed 42.
