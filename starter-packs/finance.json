@@ -1,0 +1,64 @@
+{
+  "pack": "finance",
+  "label": "Financial Records",
+  "description": "Minimal starter vocabulary for a financial-records tenant. Deliberately small and generic: it exists to prove the platform is aimed by configuration, not to guess at a client's retention schedule.",
+  "_editing": [
+    "This file is DATA. Edit it with a text editor — no code changes needed.",
+    "document_types = what a document IS. requirements = the checklist line items it CLOSES.",
+    "claim_types + claim_rules = what a document ASSERTS and which requirement that opens.",
+    "Seeding is additive (INSERT OR IGNORE) — re-running never overwrites edits made in the admin UI."
+  ],
+  "_deliberately_omitted": [
+    "Retention PERIODS (7 years, permanent, ...). We do not know this client's schedule and a wrong number in a compliance tool is worse than no number. Retention is a per-document field, not a vocabulary row, and is parked in backlog.md.",
+    "Jurisdiction- or framework-specific checklists (SOX, GAAP/IFRS, IRS publication cites). Those are a real deliverable, not a starter guess.",
+    "Expiry / renewal defaults per document type — document_types has no renewal columns today (renewal lives per document), so any default here would be fiction.",
+    "A large claim taxonomy. Only the two claims that unambiguously open a named document are seeded."
+  ],
+
+  "document_types": [
+    { "name": "Invoice", "description": "Vendor or customer invoice." },
+    { "name": "Purchase Order", "description": "Authorized purchase commitment." },
+    { "name": "Receipt", "description": "Proof of payment." },
+    { "name": "Bank Statement", "description": "Periodic statement from a financial institution." },
+    { "name": "Bank Reconciliation", "description": "Reconciliation of a bank statement to the ledger." },
+    { "name": "General Ledger Export", "description": "Ledger detail for a fiscal period." },
+    { "name": "Trial Balance", "description": "Period-end trial balance." },
+    { "name": "Journal Entry Support", "description": "Backup documentation for a manual journal entry." },
+    { "name": "Financial Statement", "description": "Balance sheet, income statement or cash-flow statement." },
+    { "name": "Tax Return", "description": "Filed return for a tax period." },
+    { "name": "Payroll Register", "description": "Per-period payroll detail." },
+    { "name": "Fixed Asset Register", "description": "Asset listing with cost and accumulated depreciation." },
+    { "name": "External Audit Report", "description": "Report issued by an outside auditor." },
+    { "name": "Contract", "description": "Executed agreement with a counterparty." },
+    { "name": "Insurance Policy", "description": "Policy document with coverage and term." },
+    { "name": "Board Minutes", "description": "Minutes recording board approvals." },
+    { "name": "W-9", "slug": "w-9", "description": "Counterparty tax identification form." },
+    { "name": "1099", "slug": "1099", "description": "Information return issued to a contractor." }
+  ],
+
+  "requirements": [
+    { "name": "Trial Balance on file", "slug": "trial-balance-on-file", "checklist": "Period Close" },
+    { "name": "General Ledger on file", "slug": "general-ledger-on-file", "checklist": "Period Close" },
+    { "name": "Bank Reconciliations on file", "slug": "bank-reconciliations-on-file", "checklist": "Period Close" },
+    { "name": "Financial Statements on file", "slug": "financial-statements-on-file", "checklist": "Period Close" },
+    { "name": "Payroll Register on file", "slug": "payroll-register-on-file", "checklist": "Period Close" },
+    { "name": "Fixed Asset Register on file", "slug": "fixed-asset-register-on-file", "checklist": "Period Close" },
+    { "name": "Journal Entry Support on file", "slug": "journal-entry-support-on-file", "checklist": "Period Close" },
+    { "name": "Board Approval on file", "slug": "board-approval-on-file", "checklist": "Period Close" },
+    { "name": "Tax Return on file", "slug": "tax-return-on-file", "checklist": "Tax & Audit" },
+    { "name": "External Audit Report on file", "slug": "external-audit-report-on-file", "checklist": "Tax & Audit" },
+    { "name": "Counterparty W-9 on file", "slug": "counterparty-w9-on-file", "checklist": "Counterparty" },
+    { "name": "Executed Contract on file", "slug": "executed-contract-on-file", "checklist": "Counterparty" },
+    { "name": "Insurance Certificate on file", "slug": "insurance-certificate-on-file", "checklist": "Counterparty" }
+  ],
+
+  "claim_types": [
+    { "name": "Externally Audited Period", "slug": "externally-audited", "subject_grain": "tenant", "description": "The document states the period was audited by an outside firm — the audit report itself then has to be on file." },
+    { "name": "Reportable Contractor Payment", "slug": "reportable-contractor-payment", "subject_grain": "supplier", "description": "The document records a payment to a contractor that triggers information reporting — the counterparty W-9 has to be on file." }
+  ],
+
+  "claim_rules": [
+    { "claim": "externally-audited", "requires": ["external-audit-report-on-file"] },
+    { "claim": "reportable-contractor-payment", "requires": ["counterparty-w9-on-file"], "recommends": ["executed-contract-on-file"] }
+  ]
+}

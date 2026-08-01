@@ -148,18 +148,22 @@ that returned ZERO per-sublot records in the bake-off where Q8 returned four. 24
 cannot hold this model at Q8, so turbo is permanently the FAST tier and the availability
 floor for `best`. `fast` leads with turbo because a human is waiting on those paths.
 
+#### Done 2026-08-01 (uncommitted):
+- **Persist `text_model`.** Migration `0082_processing_queue_text_model.sql` adds the
+  column; `functions/api/queue/[id]/results.ts` passes it through beside `vlm_model`.
+  Readable via `GET /api/queue` + `/api/queue/:id` (both select `pq.*`). Registered in
+  `tests/helpers/db.ts` and applied locally with `bin/migrate --only`. **Not on prod.**
+- **VLM path routed through chain resolution.** `bin/process-worker` resolves the
+  `vision` tag per call via `pickVlmModel()`; `QWEN_VLM_MODEL` still PINS (expressed as
+  the tag's standard `QWEN_MODEL_VISION` override, so preflight reports it as PINNED).
+  `vlm_model` now records what the router SERVED, not what we asked for.
+- **Degradation surfaced in the app.** `/api/admin/processing-status` returns
+  `models: { tags[], degraded }` (tag → resolved model, preferred, chain, source), and
+  the Processing Status page renders a "Model resolution" card that goes yellow on a
+  downgrade and red on a dead chain. Reuses the resolver's ~60s health cache — one
+  `/v1/models` lookup for all tags.
+
 #### Remaining, in priority order:
-- **Persist `text_model`.** The worker posts it; `functions/api/queue/[id]/results.ts`
-  allowlists fields and there is no column, so it is accepted-and-dropped. Needs
-  `ALTER TABLE processing_queue ADD COLUMN text_model TEXT` + a passthrough beside the
-  `vlm_model` block (~`results.ts:192`). Until then extraction provenance lives only in
-  logs — which is exactly how the June grading pass got scored against the wrong quant.
-- **Route the VLM path through chain resolution.** `QWEN_VLM_MODEL`
-  (`bin/process-worker:82`) is still a hardcoded default bypassing the `vision` chain.
-  Preflight prints it so a mismatch is visible, but it should resolve like the others.
-- **Surface degradation in the app.** `/api/admin/processing-status` already returns
-  `advertisedModels`; add the resolved tag→model mapping + a degraded flag so flapping
-  is visible in the UI, not just worker logs.
 - **Q8 on the always-on host.** Q5_K_M is what it serves today — neither the Q4 that
   failed nor the Q8 that passed. Register a Q8 backend and add its router name at the
   HEAD of the `best` chain; the resolver auto-promotes it with no other change.
@@ -312,15 +316,37 @@ re-running extraction pass resurrecting a link a human already turned down.
 `source` is an open set with no CHECK, validated in the lib, so a new pipeline
 never needs a SQLite table rebuild.
 
-#### P2 — Vocabulary CRUD + tenant provisioning ships when:
-- API + admin UI to manage each facet's vocabulary per tenant
-- `bin/create-tenant` seeds facets from a **named starter pack**, not a hardcoded
-  array — an `fsqa` pack (types + 102.2 requirements + claims) and a `finance` pack.
-  This is the file that currently makes us look food-specific
-- 3rd Party Food Safety Audit **Report** and 3rd Party Audit **Certificate** are two
-  distinct types with their own metadata + expiry behavior (AJ's standing item).
-  Note `document_types` uniqueness is `(tenant_id, slug)` tenant-wide — distinct
-  slugs, no constraint change needed
+#### P2 — Vocabulary CRUD + tenant provisioning — **DONE** (2026-08-01, local only, uncommitted)
+No schema changes; P1's tables carried it.
+- **REST** — `/api/requirements` + `/api/requirements/:id`, `/api/claim-types` +
+  `/api/claim-types/:id` (GET returns the claim AND its rules), and
+  `/api/claim-rules` (GET all rules joined / PUT replaces one claim's whole set).
+  Shape, role gate (`super_admin | org_admin`), tenant scoping and soft-delete
+  all copied from `/api/document-types` rather than reinvented.
+  `functions/lib/registry-vocab.ts` holds `syncClaimTypeRequirements` /
+  `listClaimTypeRequirements` / `parseClaimRules`, validating BOTH sides through
+  P1's `validateFacetIds` so a mapping can never straddle tenants.
+- **UI** — `admin/Requirements.tsx` ("Checklist"), `admin/ClaimTypes.tsx`
+  ("Claims"), `admin/ClaimRules.tsx` ("Claim Rules") + the shared
+  `components/ClaimRequirementsDialog.tsx`. Wired into Settings and
+  `/admin/{requirements,claim-types,claim-rules}`.
+- **Starter packs** — `starter-packs/{fsqa,finance}.json` (data a non-engineer
+  can edit) compiled by `bin/lib/starter-packs.mjs` + `bin/render-starter-pack`.
+  `bin/create-tenant` gained `--pack <name>` (default `fsqa`), `--no-pack`,
+  `--list-packs`; the 27-item bash array is gone. Ids are deterministic
+  (`req_<tenantslug>_<slug>`), statements are INSERT OR IGNORE, so re-running
+  adds nothing and preserves admin edits.
+- **The two audit documents** ship as distinct document types AND distinct
+  requirements in `fsqa`; the `gfsi-certified` claim opens both.
+- Tests: `tests/unit/starter-packs.test.ts` (29), `tests/api/registry-vocabulary.test.ts`
+  (40), `tests/api/starter-packs-seed.test.ts` (9).
+
+**Known gap for later:** per-document-type default expiry/renewal cannot be
+expressed — `document_types` has no renewal columns (renewal lives per
+document, migration 0077). The report-vs-certificate expiry difference is
+carried as row DESCRIPTION text only. A `document_types.default_renewal_type` +
+`default_renewal_interval_months` migration is the honest fix; deliberately not
+written here because P2 was scoped no-schema-change.
 
 #### P3 — Document editing + upload across facets ships when:
 - `DocumentCreate.tsx` and document-detail editing expose all four facets with

@@ -1,0 +1,113 @@
+#!/usr/bin/env node
+/**
+ * Render a starter pack (starter-packs/<name>.json) into idempotent SQL for a
+ * tenant, or list the packs available.
+ *
+ * Used by bin/create-tenant; also runnable on its own to inspect what a pack
+ * would do before it touches a database.
+ *
+ * Usage:
+ *   bin/render-starter-pack --list
+ *   bin/render-starter-pack --pack fsqa --tenant-id t_x --tenant-slug medosweet
+ *   bin/render-starter-pack --pack fsqa --tenant-id t_x --tenant-slug medosweet --summary
+ *   bin/render-starter-pack --validate            # validate every pack, exit 1 on error
+ */
+
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { dirname, join, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { packToSql, packSummary, normalizePack } from './lib/starter-packs.mjs';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PACK_DIR = join(__dirname, '..', 'starter-packs');
+
+function listPacks() {
+  if (!existsSync(PACK_DIR)) return [];
+  return readdirSync(PACK_DIR)
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => basename(f, '.json'))
+    .sort();
+}
+
+function loadPack(name) {
+  const file = join(PACK_DIR, `${name}.json`);
+  if (!existsSync(file)) {
+    const available = listPacks().join(', ') || '(none)';
+    throw new Error(`Unknown pack "${name}". Available: ${available}`);
+  }
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch (err) {
+    throw new Error(`${file}: ${err.message}`);
+  }
+}
+
+const args = process.argv.slice(2);
+const opts = {};
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--list') opts.list = true;
+  else if (a === '--validate') opts.validate = true;
+  else if (a === '--summary') opts.summary = true;
+  else if (a === '--pack') opts.pack = args[++i];
+  else if (a === '--tenant-id') opts.tenantId = args[++i];
+  else if (a === '--tenant-slug') opts.tenantSlug = args[++i];
+  else if (a === '-h' || a === '--help') opts.help = true;
+  else {
+    console.error(`Unknown arg: ${a}`);
+    process.exit(2);
+  }
+}
+
+try {
+  if (opts.help) {
+    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(2, 16).join('\n'));
+    process.exit(0);
+  }
+
+  if (opts.list) {
+    for (const name of listPacks()) {
+      const pack = normalizePack(loadPack(name));
+      const s = packSummary(loadPack(name));
+      console.log(
+        `${name.padEnd(10)} ${pack.label} — ${s.document_types} types, ${s.requirements} requirements, ` +
+          `${s.claim_types} claims, ${s.claim_rules} claim rules`,
+      );
+    }
+    process.exit(0);
+  }
+
+  if (opts.validate) {
+    let failed = false;
+    for (const name of listPacks()) {
+      try {
+        normalizePack(loadPack(name));
+        console.log(`ok   ${name}`);
+      } catch (err) {
+        failed = true;
+        console.error(`FAIL ${name}: ${err.message}`);
+      }
+    }
+    process.exit(failed ? 1 : 0);
+  }
+
+  if (!opts.pack) throw new Error('--pack is required (or --list / --validate)');
+  if (!opts.tenantId) throw new Error('--tenant-id is required');
+  if (!opts.tenantSlug) throw new Error('--tenant-slug is required');
+
+  const pack = loadPack(opts.pack);
+
+  if (opts.summary) {
+    const s = packSummary(pack);
+    console.log(
+      `${s.document_types} document types, ${s.requirements} requirements, ` +
+        `${s.claim_types} claim types, ${s.claim_rules} claim rules`,
+    );
+    process.exit(0);
+  }
+
+  process.stdout.write(packToSql(pack, { tenantId: opts.tenantId, tenantSlug: opts.tenantSlug }));
+} catch (err) {
+  console.error(`render-starter-pack: ${err.message}`);
+  process.exit(1);
+}

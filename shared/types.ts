@@ -490,6 +490,42 @@ export interface ApiDocumentClaim extends DocumentClaimRow {
 }
 
 /**
+ * A requirement as returned by the vocabulary admin API. The two counts are
+ * read-only usage signals so an admin can see what a row is doing before
+ * deactivating it: how many documents CLOSE it, how many claims OPEN it.
+ */
+export interface ApiRequirement extends RequirementRow {
+  tenant_name?: string;
+  document_count?: number;
+  claim_type_count?: number;
+}
+
+/**
+ * A claim type as returned by the vocabulary admin API.
+ * `requirement_count` 0 means the claim is detectable but INERT — nothing
+ * becomes missing when a document asserts it, which is precisely the state
+ * that blocks gap detection.
+ */
+export interface ApiClaimType extends ClaimTypeRow {
+  tenant_name?: string;
+  requirement_count?: number;
+  document_count?: number;
+}
+
+/**
+ * One claim -> requirement rule with both vocabularies joined in, as the
+ * mapping editor renders it: "claiming {claim_type_name} requires
+ * {requirement_name}".
+ */
+export interface ApiClaimRule extends ClaimTypeRequirementRow {
+  claim_type_name?: string;
+  claim_type_slug?: string;
+  requirement_name?: string;
+  requirement_slug?: string;
+  checklist?: string | null;
+}
+
+/**
  * Classification lifecycle of a document (migration 0081). Separating the two
  * ends matters: 'unclassified' is a backlog item, 'unclassifiable' is a
  * terminal human judgment that must NOT keep inflating the backlog count.
@@ -848,6 +884,36 @@ export interface DocumentTypeListResponse {
 
 export interface DocumentTypeGetResponse {
   documentType: ApiDocumentType;
+}
+
+// === Registry vocabulary admin (migration 0080) ===
+
+export interface RequirementListResponse {
+  requirements: ApiRequirement[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface RequirementGetResponse {
+  requirement: ApiRequirement;
+}
+
+export interface ClaimTypeListResponse {
+  claimTypes: ApiClaimType[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** GET /api/claim-types/:id returns the claim AND the rules it drives. */
+export interface ClaimTypeGetResponse {
+  claimType: ApiClaimType;
+  rules: ApiClaimRule[];
+}
+
+export interface ClaimRuleListResponse {
+  rules: ApiClaimRule[];
 }
 
 // === Frontend-friendly types (after parsing) ===
@@ -1284,6 +1350,14 @@ export interface ProcessingQueueItem {
   vlm_model: string | null;
   vlm_duration_ms: number | null;
   vlm_extracted_at: string | null;
+  /**
+   * The text model the router actually served for this extraction, including
+   * quantization (e.g. "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q5_K_M"). Null for
+   * rows extracted before migration 0082. Quantization materially changes
+   * correctness, so this is the provenance record that makes a grading or
+   * parity run trustworthy.
+   */
+  text_model: string | null;
   // Phase 3: per-field pre-fill hints derived from past reviewer picks.
   // JSON-stringified Record<field_key, LearnedFieldHint>; null when no signal.
   learned_field_hints: string | null;
@@ -3220,6 +3294,43 @@ export interface ProcessingStatusQwen {
   error: string | null;
 }
 
+/**
+ * What one semantic model tag resolves to RIGHT NOW.
+ *
+ * Backends flap and each tag is an ordered preference chain, so "the router is
+ * reachable" is not the same as "we are running on the model we wanted". A
+ * stale router hostname once made the accurate high-precision host unreachable
+ * and production silently ran on a lower-precision backend for an extended
+ * period — visible only in worker logs. This is that signal, in the UI.
+ */
+export interface ProcessingStatusModelTag {
+  /** Semantic tag: 'best' | 'fast' | 'vision'. */
+  tag: string;
+  /** Model the next request for this tag would use. Null when the whole
+   *  chain is unavailable (see `error`). */
+  model: string | null;
+  /** The chain's first choice — what we WANTED. */
+  preferred: string;
+  /** Full preference chain, best first. */
+  chain: string[];
+  /** True when `model` is not `preferred`. */
+  degraded: boolean;
+  /** How `model` was arrived at. 'unavailable' = nothing in the chain is up.
+   *  'unverified' = the health probe did not answer, so this is the top
+   *  preference attempted on faith. */
+  source: 'override' | 'health' | 'unverified' | 'unavailable';
+  /** Populated when source === 'unavailable'. */
+  error: string | null;
+}
+
+export interface ProcessingStatusModels {
+  /** One entry per tag, in chain-config order. */
+  tags: ProcessingStatusModelTag[];
+  /** True when ANY tag is degraded or entirely unavailable — the single flag
+   *  the UI turns red on. */
+  degraded: boolean;
+}
+
 export interface ProcessingStatusStale {
   /** Rows in 'processing' for > 15 min — indicates an orphaned worker
    *  claim (worker died mid-job, no reaper). */
@@ -3245,6 +3356,8 @@ export interface ProcessingStatusResponse {
   queue: ProcessingStatusQueue;
   worker: ProcessingStatusWorker;
   qwen: ProcessingStatusQwen;
+  /** Resolved tag -> model mapping + a degraded flag. */
+  models: ProcessingStatusModels;
   stale: ProcessingStatusStale;
   errors: ProcessingStatusErrors;
   checkedAt: string;

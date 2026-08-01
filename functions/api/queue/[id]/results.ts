@@ -49,6 +49,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       vlm_model?: string | null;
       vlm_duration_ms?: number | null;
       vlm_extracted_at?: string | null;
+      // The text model the router ACTUALLY served, including quantization
+      // (e.g. "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q5_K_M"). Mirrors vlm_model.
+      // See migration 0082 — without this the served model lived only in
+      // worker logs, which is how a grading pass got scored against the
+      // wrong quantization after a silent failover.
+      text_model?: string | null;
       // Phase 3 sidecars
       learned_field_hints?: string | null;
       uncertainty?: string | null;
@@ -202,6 +208,15 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.vlm_extracted_at !== undefined) {
       updates.push('vlm_extracted_at = ?');
       params.push(body.vlm_extracted_at);
+    }
+
+    // Text-path provenance — same accept-and-store contract as vlm_model.
+    // Anti-silent-degradation: every extraction records the model+quant that
+    // produced it, so a later grading run can never be scored against a
+    // backend that swapped underneath us (migration 0082).
+    if (body.text_model !== undefined) {
+      updates.push('text_model = ?');
+      params.push(body.text_model);
     }
 
     if (body.learned_field_hints !== undefined) {

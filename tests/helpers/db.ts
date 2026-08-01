@@ -78,6 +78,7 @@ import m0078 from '../../migrations/0078_product_attribution.sql?raw';
 import m0079 from '../../migrations/0079_fts_registry.sql?raw';
 import m0080 from '../../migrations/0080_registry_facets.sql?raw';
 import m0081 from '../../migrations/0081_documents_classification_status.sql?raw';
+import m0082 from '../../migrations/0082_processing_queue_text_model.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -88,7 +89,7 @@ const migrations: string[] = [
   m0056, m0057, m0058, m0059, m0060, m0061, m0062, m0063,
   m0064, m0065, m0066, m0067, m0068, m0069, m0070, m0071,
   m0072, m0073, m0074, m0075,
-  m0076, m0077, m0078, m0079, m0080, m0081,
+  m0076, m0077, m0078, m0079, m0080, m0081, m0082,
 ];
 
 /**

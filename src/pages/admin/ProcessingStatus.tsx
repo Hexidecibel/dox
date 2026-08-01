@@ -227,6 +227,65 @@ function QwenCard({ data }: { data: ProcessingStatusResponse['qwen'] }) {
   );
 }
 
+/**
+ * Which model each semantic tag ACTUALLY resolves to right now.
+ *
+ * "Router reachable" is not the same as "running on the model we wanted".
+ * A stale hostname once put production on a lower-precision backend for an
+ * extended period with nothing alerting — the drop was visible only in worker
+ * logs. Any tag not on its first choice turns this card yellow; a chain with
+ * nothing available turns it red.
+ */
+function ModelsCard({ data }: { data: ProcessingStatusResponse['models'] }) {
+  const anyUnavailable = data.tags.some((t) => t.source === 'unavailable');
+  const sev: Severity = anyUnavailable ? 'error' : data.degraded ? 'warn' : 'ok';
+
+  return (
+    <StatusCard title="Model resolution" severity={sev}>
+      {data.degraded && (
+        <Alert severity={anyUnavailable ? 'error' : 'warning'} sx={{ mb: 1, py: 0 }}>
+          {anyUnavailable
+            ? 'A preference chain has no healthy upstream — those requests will fail.'
+            : 'Running on a lower-preference model. Extraction quality may be degraded.'}
+        </Alert>
+      )}
+      <Stack spacing={1}>
+        {data.tags.map((t) => (
+          <Box key={t.tag}>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+              <Typography variant="body2" fontWeight={600} sx={{ minWidth: 56 }}>
+                {t.tag}
+              </Typography>
+              <Chip
+                size="small"
+                label={t.model ?? 'unavailable'}
+                color={t.source === 'unavailable' ? 'error' : t.degraded ? 'warning' : 'success'}
+                variant={t.degraded || t.source === 'unavailable' ? 'filled' : 'outlined'}
+              />
+              {t.source === 'override' && (
+                <Chip size="small" label="pinned" variant="outlined" />
+              )}
+              {t.source === 'unverified' && (
+                <Chip size="small" label="unverified" color="warning" variant="outlined" />
+              )}
+            </Stack>
+            {t.degraded && t.source !== 'unavailable' && (
+              <Typography variant="caption" color="warning.main" display="block">
+                wanted {t.preferred} — chain: {t.chain.join(' > ')}
+              </Typography>
+            )}
+            {t.error && (
+              <Typography variant="caption" color="error.main" display="block">
+                {t.error}
+              </Typography>
+            )}
+          </Box>
+        ))}
+      </Stack>
+    </StatusCard>
+  );
+}
+
 function StaleCard({ data }: { data: ProcessingStatusResponse['stale'] }) {
   const sev: Severity = data.orphanedClaims > 0 ? 'error' : 'ok';
   return (
@@ -619,6 +678,7 @@ export function ProcessingStatus() {
           <QueueCard data={data.queue} />
           <WorkerCard data={data.worker} />
           <QwenCard data={data.qwen} />
+          {data.models && <ModelsCard data={data.models} />}
           <StaleCard data={data.stale} />
           <Box sx={{ gridColumn: { xs: '1', md: '1 / -1' } }}>
             <ErrorsCard data={data.errors} onRefresh={() => load(true)} />

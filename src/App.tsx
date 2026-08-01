@@ -24,6 +24,9 @@ import { ProductDetail } from './pages/admin/ProductDetail';
 import { Suppliers } from './pages/admin/Suppliers';
 import { SupplierDetail } from './pages/admin/SupplierDetail';
 import { DocumentTypes } from './pages/admin/DocumentTypes';
+import { Requirements } from './pages/admin/Requirements';
+import { ClaimTypes } from './pages/admin/ClaimTypes';
+import { ClaimRules } from './pages/admin/ClaimRules';
 import { Bundles } from './pages/Bundles';
 import { BundleDetail } from './pages/BundleDetail';
 import { IngestHistory } from './pages/IngestHistory';
@@ -130,6 +133,10 @@ function App() {
                 <Route path="/admin/api-keys" element={<ApiKeys />} />
                 <Route path="/admin/audit" element={<AuditLog />} />
                 <Route path="/admin/document-types" element={<DocumentTypes />} />
+                {/* Registry taxonomy vocabularies (migration 0080) */}
+                <Route path="/admin/requirements" element={<Requirements />} />
+                <Route path="/admin/claim-types" element={<ClaimTypes />} />
+                <Route path="/admin/claim-rules" element={<ClaimRules />} />
                 <Route path="/admin/products" element={<Products />} />
                 <Route path="/admin/products/:id" element={<ProductDetail />} />
                 <Route path="/admin/suppliers" element={<Suppliers />} />

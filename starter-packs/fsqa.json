@@ -1,0 +1,120 @@
+{
+  "pack": "fsqa",
+  "label": "Food Safety & Quality Assurance",
+  "description": "Starter vocabulary for a food-safety supplier document registry: what a document IS, which checklist line items it CLOSES, and which claims OPEN new requirements.",
+  "_editing": [
+    "This file is DATA. Edit it with a text editor — no code changes needed.",
+    "document_types = what a document IS. One per document. (Layer 1)",
+    "requirements   = the checklist line items a document CLOSES. Many per document. (Layer 2)",
+    "claim_types    = what a document ASSERTS, which makes OTHER documents required. (Layer 3)",
+    "claim_rules    = which requirement(s) each claim opens. 'requires' = a gap when missing; 'recommends' = advisory only.",
+    "Every 'slug' is the stable id. Change a name freely; change a slug only if you mean to create a new row.",
+    "Seeding is additive (INSERT OR IGNORE) — re-running never overwrites edits made in the admin UI."
+  ],
+
+  "document_types": [
+    { "name": "Specification Sheet", "description": "Supplier product spec. Typically closes many checklist items at once (micro limits, pack size, nutritionals, allergens, origin, GTIN)." },
+    { "name": "Certificate of Analysis", "slug": "certificate-of-analysis", "description": "Lot-level test results for a specific shipment." },
+    { "name": "Safety Data Sheet", "slug": "safety-data-sheet", "description": "SDS for chemicals and sanitation products." },
+
+    { "name": "3rd Party Food Safety Audit Report", "slug": "3rd-party-food-safety-audit-report", "description": "The full audit REPORT — findings, non-conformances, corrective actions. A dated snapshot of an audit event: it does not 'expire', it is superseded by the next audit. Distinct from the certificate below." },
+    { "name": "3rd Party Audit Certificate", "slug": "3rd-party-audit-certificate", "description": "The one-page CERTIFICATE issued on passing the audit — scheme, grade, valid-through date. Hard expiry on that date, unlike the report it accompanies. Distinct from the report above." },
+
+    { "name": "Organic Certificate", "description": "USDA/NOP organic certification for a product or facility." },
+    { "name": "Kosher Certificate", "description": "Kosher certification letter." },
+    { "name": "Halal Certificate", "description": "Halal certification letter." },
+    { "name": "Gluten-Free Certificate", "description": "Gluten-free certification or attestation." },
+    { "name": "Non-GMO Certificate", "description": "Non-GMO Project verification or equivalent." },
+    { "name": "Animal Welfare Certificate", "description": "Certified Humane / Global Animal Partnership / equivalent." },
+    { "name": "Sustainability Certificate", "description": "Rainforest Alliance, Fair Trade, RSPO and similar." },
+
+    { "name": "Allergen Statement", "description": "Allergen declaration / matrix." },
+    { "name": "Nutritional Information", "description": "Nutrition panel data, typically per 100g." },
+    { "name": "Country of Origin Statement", "description": "Origin attestation for a product." },
+    { "name": "Product Label", "description": "Label artwork or a photo of the applied label." },
+    { "name": "Letter of Guarantee", "description": "Continuing guarantee of compliance from the supplier." },
+    { "name": "Certificate of Insurance", "description": "Supplier liability insurance, with limits and expiry." },
+    { "name": "W-9", "slug": "w-9", "description": "Supplier tax identification form." },
+
+    { "name": "HACCP Plan", "slug": "haccp-plan", "description": "Hazard analysis and critical control point plan." },
+    { "name": "Food Safety Plan", "description": "Preventive controls / FSMA food safety plan." },
+    { "name": "Food Defense Plan", "description": "Intentional adulteration / food defense plan." },
+    { "name": "Recall Program", "description": "Recall and traceability program, including mock recall results." },
+    { "name": "Pest Control Program", "description": "Pest control program and service records." },
+    { "name": "Sanitation Program", "description": "SSOPs and sanitation schedules." },
+    { "name": "GMP Self Audit", "description": "Internal good-manufacturing-practice self audit." },
+    { "name": "Process Flow Diagram", "description": "Production process flow for the supplied product." }
+  ],
+
+  "requirements": [
+    { "name": "Specification Sheet on file", "slug": "spec-sheet", "checklist": "SOP 102.2", "description": "A current product specification is on file." },
+    { "name": "Microbiological Limits", "slug": "micro-limits", "checklist": "SOP 102.2", "description": "Micro limits stated for the product." },
+    { "name": "Pack Size / Case Configuration", "slug": "pack-size", "checklist": "SOP 102.2" },
+    { "name": "100g Nutritionals", "slug": "nutritionals-100g", "checklist": "SOP 102.2", "description": "Nutrition values per 100g." },
+    { "name": "Allergen Matrix", "slug": "allergen-matrix", "checklist": "SOP 102.2", "description": "Allergen declaration covering the big-9." },
+    { "name": "Country of Origin", "slug": "country-of-origin", "checklist": "SOP 102.2" },
+    { "name": "GTIN / UPC", "slug": "gtin", "checklist": "SOP 102.2" },
+    { "name": "Shelf Life & Storage", "slug": "shelf-life", "checklist": "SOP 102.2" },
+    { "name": "Ingredient Statement", "slug": "ingredient-statement", "checklist": "SOP 102.2" },
+    { "name": "Certificate of Analysis on file", "slug": "coa-on-file", "checklist": "SOP 102.2" },
+    { "name": "Safety Data Sheet on file", "slug": "sds-on-file", "checklist": "SOP 102.2", "description": "Required for chemicals and sanitation products." },
+    { "name": "Letter of Guarantee on file", "slug": "letter-of-guarantee", "checklist": "SOP 102.2" },
+    { "name": "Certificate of Insurance on file", "slug": "certificate-of-insurance", "checklist": "SOP 102.2" },
+    { "name": "W-9 on file", "slug": "w9-on-file", "checklist": "SOP 102.2" },
+
+    { "name": "3rd Party Audit REPORT on file", "slug": "third-party-audit-report", "checklist": "SOP 102.2", "description": "The full audit report. Separate line item from the certificate — a supplier can send one without the other, and only having the certificate hides the findings." },
+    { "name": "3rd Party Audit CERTIFICATE on file", "slug": "third-party-audit-certificate", "checklist": "SOP 102.2", "description": "The valid-through certificate. Separate line item from the report, and the one that drives expiry tracking." },
+
+    { "name": "HACCP Plan on file", "slug": "haccp-plan", "checklist": "SOP 102.2" },
+    { "name": "Food Safety Plan on file", "slug": "food-safety-plan", "checklist": "SOP 102.2" },
+    { "name": "Food Defense Plan on file", "slug": "food-defense-plan", "checklist": "SOP 102.2" },
+    { "name": "Recall Program on file", "slug": "recall-program", "checklist": "SOP 102.2" },
+    { "name": "Pest Control Program on file", "slug": "pest-control-program", "checklist": "SOP 102.2" },
+    { "name": "Sanitation Program on file", "slug": "sanitation-program", "checklist": "SOP 102.2" },
+    { "name": "GMP Self Audit on file", "slug": "gmp-self-audit", "checklist": "SOP 102.2" },
+    { "name": "Process Flow Diagram on file", "slug": "process-flow-diagram", "checklist": "SOP 102.2" },
+    { "name": "Product Label on file", "slug": "product-label", "checklist": "SOP 102.2" },
+
+    { "name": "Organic Certificate on file", "slug": "organic-certificate", "checklist": "Claim Substantiation" },
+    { "name": "Kosher Certificate on file", "slug": "kosher-certificate", "checklist": "Claim Substantiation" },
+    { "name": "Halal Certificate on file", "slug": "halal-certificate", "checklist": "Claim Substantiation" },
+    { "name": "Gluten-Free Certificate on file", "slug": "gluten-free-certificate", "checklist": "Claim Substantiation" },
+    { "name": "Non-GMO Certificate on file", "slug": "non-gmo-certificate", "checklist": "Claim Substantiation" },
+    { "name": "Animal Welfare Certificate on file", "slug": "animal-welfare-certificate", "checklist": "Claim Substantiation" },
+    { "name": "Sustainability Certificate on file", "slug": "sustainability-certificate", "checklist": "Claim Substantiation" }
+  ],
+
+  "claim_types": [
+    { "name": "Organic", "slug": "organic", "subject_grain": "product", "description": "The document states the product is organic." },
+    { "name": "Kosher", "slug": "kosher", "subject_grain": "product" },
+    { "name": "Halal", "slug": "halal", "subject_grain": "product" },
+    { "name": "Gluten-Free", "slug": "gluten-free", "subject_grain": "product" },
+    { "name": "Non-GMO", "slug": "non-gmo", "subject_grain": "product" },
+    { "name": "Certified Humane / Animal Welfare", "slug": "animal-welfare", "subject_grain": "product" },
+    { "name": "Fair Trade / Rainforest Alliance", "slug": "sustainably-sourced", "subject_grain": "product" },
+    { "name": "Contains Major Allergens", "slug": "contains-allergens", "subject_grain": "product", "description": "The document names one or more of the big-9 allergens." },
+    { "name": "Made in USA", "slug": "made-in-usa", "subject_grain": "product" },
+    { "name": "rBST-Free", "slug": "rbst-free", "subject_grain": "product" },
+    { "name": "GFSI-Certified Facility", "slug": "gfsi-certified", "subject_grain": "supplier", "description": "SQF, BRCGS, FSSC 22000 or another GFSI-benchmarked scheme. Claimed about the SUPPLIER, not a product." },
+    { "name": "Chemical / Non-Food Product", "slug": "chemical-product", "subject_grain": "product", "description": "Sanitizer, lubricant or other non-food chemical — pulls in the SDS." }
+  ],
+
+  "claim_rules": [
+    { "claim": "organic", "requires": ["organic-certificate"] },
+    { "claim": "kosher", "requires": ["kosher-certificate"] },
+    { "claim": "halal", "requires": ["halal-certificate"] },
+    { "claim": "gluten-free", "requires": ["gluten-free-certificate"] },
+    { "claim": "non-gmo", "requires": ["non-gmo-certificate"] },
+    { "claim": "animal-welfare", "requires": ["animal-welfare-certificate"] },
+    { "claim": "sustainably-sourced", "requires": ["sustainability-certificate"] },
+    { "claim": "contains-allergens", "requires": ["allergen-matrix"], "recommends": ["product-label"] },
+    { "claim": "made-in-usa", "requires": ["country-of-origin"] },
+    { "claim": "rbst-free", "recommends": ["letter-of-guarantee"], "notes": "An rBST-free claim is normally substantiated by a supplier affidavit rather than a certificate — advisory until the client confirms." },
+    {
+      "claim": "gfsi-certified",
+      "requires": ["third-party-audit-report", "third-party-audit-certificate"],
+      "notes": "Both documents, not one: the certificate proves the scheme and its valid-through date, the report carries the findings and corrective actions."
+    },
+    { "claim": "chemical-product", "requires": ["sds-on-file"] }
+  ]
+}

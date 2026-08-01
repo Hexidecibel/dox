@@ -237,3 +237,92 @@ describe('PUT /api/queue/:id/results — VLM dual-run columns', () => {
     expect(row!.vlm_duration_ms).toBe(1000);
   });
 });
+
+/**
+ * text_model provenance (migration 0082).
+ *
+ * The worker has posted `text_model` on the result body for a while, but there
+ * was no column and the endpoint's typed allowlist dropped it silently — so
+ * "which model produced this extraction" survived only in worker logs. That is
+ * exactly how a grading pass got scored against the wrong quantization after a
+ * stale router hostname failed production over to a lower-precision backend.
+ * These tests pin the round trip: worker posts -> column stores -> readable.
+ */
+describe('PUT /api/queue/:id/results — text_model provenance', () => {
+  const SERVED = 'unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q5_K_M';
+
+  it('persists the served text model (quantization included)', async () => {
+    const queueId = await insertQueueItem(seed.tenantId, seed.userId);
+    const user = { id: seed.userId, role: 'user', tenant_id: seed.tenantId };
+
+    const response = await updateQueueResults(
+      makePutContext(
+        queueId,
+        {
+          processing_status: 'ready',
+          extracted_text: 'text path output',
+          ai_fields: JSON.stringify({ supplier_name: 'ACME' }),
+          text_model: SERVED,
+        },
+        user
+      )
+    );
+
+    expect(response.status).toBe(200);
+
+    const row = await db
+      .prepare('SELECT * FROM processing_queue WHERE id = ?')
+      .bind(queueId)
+      .first<Record<string, unknown>>();
+
+    expect(row!.text_model).toBe(SERVED);
+  });
+
+  it('leaves text_model null when the worker does not report one', async () => {
+    const queueId = await insertQueueItem(seed.tenantId, seed.userId);
+    const user = { id: seed.userId, role: 'user', tenant_id: seed.tenantId };
+
+    await updateQueueResults(
+      makePutContext(
+        queueId,
+        { processing_status: 'ready', extracted_text: 'no model reported' },
+        user
+      )
+    );
+
+    const row = await db
+      .prepare('SELECT * FROM processing_queue WHERE id = ?')
+      .bind(queueId)
+      .first<Record<string, unknown>>();
+
+    expect(row!.text_model).toBeNull();
+  });
+
+  it('does not clobber a recorded text_model when a later PUT omits it', async () => {
+    const queueId = await insertQueueItem(seed.tenantId, seed.userId);
+    const user = { id: seed.userId, role: 'user', tenant_id: seed.tenantId };
+
+    await updateQueueResults(
+      makePutContext(
+        queueId,
+        { processing_status: 'ready', extracted_text: 'first', text_model: SERVED },
+        user
+      )
+    );
+    await updateQueueResults(
+      makePutContext(
+        queueId,
+        { processing_status: 'ready', extracted_text: 'second' },
+        user
+      )
+    );
+
+    const row = await db
+      .prepare('SELECT * FROM processing_queue WHERE id = ?')
+      .bind(queueId)
+      .first<Record<string, unknown>>();
+
+    expect(row!.extracted_text).toBe('second');
+    expect(row!.text_model).toBe(SERVED);
+  });
+});

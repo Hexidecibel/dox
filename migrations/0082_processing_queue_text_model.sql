@@ -1,0 +1,15 @@
+-- Persist WHICH text model actually served each extraction.
+--
+-- The router's chat response carries the TRUE served id including quantization
+-- (e.g. "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q5_K_M"), and quantization materially
+-- changes extraction correctness: in the bake-off Q8 returned four per-sublot
+-- records where Q4 returned zero. On 2026-07 a stale router hostname made the
+-- Q8 host unreachable and production silently failed over to a Q4 backend for
+-- an extended period — a whole grading pass was scored against the wrong model
+-- before anyone noticed, because the served id lived only in worker logs.
+--
+-- bin/process-worker already posts `text_model` on the result body (mirroring
+-- the vlm_model convention); this column is where it lands, so every row is
+-- self-describing and a later grading/parity run can prove its provenance.
+-- Additive and nullable — rows extracted before this migration stay NULL.
+ALTER TABLE processing_queue ADD COLUMN text_model TEXT;

@@ -21,6 +21,9 @@ import {
   MonitorHeart as MonitorHeartIcon,
   Insights as InsightsIcon,
   Psychology as ExtractionContextIcon,
+  Checklist as ChecklistIcon,
+  LocalOffer as ClaimsIcon,
+  Rule as RuleIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import type { Role } from '../lib/types';
@@ -28,6 +31,9 @@ import type { Role } from '../lib/types';
 // Embedded page components — these already render their own content inside
 // the app Layout (no nested layout), so we just render them in the pane.
 import { DocumentTypes } from './admin/DocumentTypes';
+import { Requirements } from './admin/Requirements';
+import { ClaimTypes } from './admin/ClaimTypes';
+import { ClaimRules } from './admin/ClaimRules';
 import { Sources } from './admin/Sources';
 import { Users } from './admin/Users';
 import { Assignments } from './admin/Assignments';
@@ -60,6 +66,12 @@ const SECTIONS: SettingsSection[] = [
     items: [
       { key: 'extraction-context', label: 'Extraction Context', icon: <ExtractionContextIcon />, roles: ALL_ADMIN, component: TenantExtractionContextBox },
       { key: 'document-types', label: 'Document Types', icon: <DocTypesIcon />, roles: ALL_ADMIN, component: DocumentTypes },
+      // The three registry facets, in the order a tenant configures them:
+      // what a document IS (document types), what it SATISFIES (checklist),
+      // what it TRIGGERS (claims) and what each claim opens (claim rules).
+      { key: 'requirements', label: 'Checklist', icon: <ChecklistIcon />, roles: ALL_ADMIN, component: Requirements },
+      { key: 'claim-types', label: 'Claims', icon: <ClaimsIcon />, roles: ALL_ADMIN, component: ClaimTypes },
+      { key: 'claim-rules', label: 'Claim Rules', icon: <RuleIcon />, roles: ALL_ADMIN, component: ClaimRules },
       { key: 'sources', label: 'Sources', icon: <ConnectorsIcon />, roles: ALL_ADMIN, component: Sources },
     ],
   },

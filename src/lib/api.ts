@@ -26,6 +26,14 @@ import type {
   ProductGetResponse,
   DocumentTypeListResponse,
   DocumentTypeGetResponse,
+  ApiRequirement,
+  ApiClaimType,
+  ClaimSubjectGrain,
+  RequirementListResponse,
+  RequirementGetResponse,
+  ClaimTypeListResponse,
+  ClaimTypeGetResponse,
+  ClaimRuleListResponse,
   DocumentProductListResponse,
   ApiDocumentProduct,
   ApiBundle,
@@ -979,6 +987,146 @@ export const api = {
      */
     delete: (id: string) =>
       fetchApi<void>(`/document-types/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * Layer-2 vocabulary — the checklist line items a document CLOSES
+   * (migration 0080). Per-tenant rows, never code.
+   */
+  requirements: {
+    /** GET /api/requirements — Returns: { requirements, total, limit, offset } */
+    list: (params?: {
+      tenant_id?: string;
+      active?: number;
+      checklist?: string;
+      limit?: number;
+    }) => {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.active !== undefined) query.set('active', String(params.active));
+      if (params?.checklist) query.set('checklist', params.checklist);
+      if (params?.limit) query.set('limit', String(params.limit));
+      const qs = query.toString();
+      return fetchApi<RequirementListResponse>(`/requirements${qs ? `?${qs}` : ''}`);
+    },
+
+    /** GET /api/requirements/:id */
+    get: (id: string) => fetchApi<RequirementGetResponse>(`/requirements/${id}`),
+
+    /** POST /api/requirements */
+    create: (data: {
+      name: string;
+      slug?: string;
+      description?: string;
+      checklist?: string;
+      sort_order?: number;
+      tenant_id?: string;
+    }) =>
+      fetchApi<{ requirement: ApiRequirement }>('/requirements', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /** PUT /api/requirements/:id */
+    update: (
+      id: string,
+      data: {
+        name?: string;
+        slug?: string;
+        description?: string | null;
+        checklist?: string | null;
+        sort_order?: number;
+        active?: number;
+      },
+    ) =>
+      fetchApi<{ requirement: ApiRequirement }>(`/requirements/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /** DELETE /api/requirements/:id — soft-delete (active = 0) */
+    delete: (id: string) => fetchApi<{ success: boolean }>(`/requirements/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * Layer-3 vocabulary — the claims a document ASSERTS (migration 0080).
+   * A claim opens requirements; what it opens is configured via api.claimRules.
+   */
+  claimTypes: {
+    /** GET /api/claim-types — Returns: { claimTypes, total, limit, offset } */
+    list: (params?: { tenant_id?: string; active?: number; limit?: number }) => {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.active !== undefined) query.set('active', String(params.active));
+      if (params?.limit) query.set('limit', String(params.limit));
+      const qs = query.toString();
+      return fetchApi<ClaimTypeListResponse>(`/claim-types${qs ? `?${qs}` : ''}`);
+    },
+
+    /** GET /api/claim-types/:id — Returns: { claimType, rules } */
+    get: (id: string) => fetchApi<ClaimTypeGetResponse>(`/claim-types/${id}`),
+
+    /** POST /api/claim-types */
+    create: (data: {
+      name: string;
+      slug?: string;
+      description?: string;
+      subject_grain?: ClaimSubjectGrain;
+      sort_order?: number;
+      tenant_id?: string;
+    }) =>
+      fetchApi<{ claimType: ApiClaimType }>('/claim-types', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /** PUT /api/claim-types/:id */
+    update: (
+      id: string,
+      data: {
+        name?: string;
+        slug?: string;
+        description?: string | null;
+        subject_grain?: ClaimSubjectGrain;
+        sort_order?: number;
+        active?: number;
+      },
+    ) =>
+      fetchApi<{ claimType: ApiClaimType }>(`/claim-types/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /** DELETE /api/claim-types/:id — soft-delete (active = 0) */
+    delete: (id: string) => fetchApi<{ success: boolean }>(`/claim-types/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * The claim -> requirement mapping ("conditional triggers"): claiming
+   * Organic requires an Organic Certificate. Entered once per claim.
+   */
+  claimRules: {
+    /** GET /api/claim-rules[?claim_type_id=] — Returns: { rules } */
+    list: (params?: { claim_type_id?: string; tenant_id?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.claim_type_id) query.set('claim_type_id', params.claim_type_id);
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      const qs = query.toString();
+      return fetchApi<ClaimRuleListResponse>(`/claim-rules${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * PUT /api/claim-rules — replace the whole requirement set for one claim.
+     * An empty array clears the rule. Returns: { rules }.
+     */
+    save: (data: {
+      claim_type_id: string;
+      requirements: Array<string | { requirement_id: string; is_required?: number; notes?: string | null }>;
+    }) =>
+      fetchApi<ClaimRuleListResponse>('/claim-rules', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
   },
 
   documentProducts: {

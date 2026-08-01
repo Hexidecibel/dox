@@ -25,10 +25,35 @@ describe('process-worker — VLM config wiring', () => {
     );
   });
 
-  it('declares QWEN_VLM_MODEL defaulting to qwen2.5-vl-7b', () => {
+  // The VLM model used to be a hardcoded `process.env.QWEN_VLM_MODEL ||
+  // 'qwen2.5-vl-7b'` default — the last model name pinned outside the config,
+  // bypassing the `vision` preference chain entirely. The INTENT of that old
+  // assertion (a known, non-accidental vision model, overridable by env) is
+  // preserved below; only the mechanism moved to chain resolution.
+  it('takes the VLM model from the vision chain, not a hardcoded default', () => {
+    // No literal vision model name left in the worker.
+    expect(processWorkerSource).not.toMatch(/QWEN_VLM_MODEL \|\| 'qwen2\.5-vl-7b'/);
+    expect(processWorkerSource).not.toMatch(/model: 'qwen2\.5-vl-7b'/);
+    // Resolution goes through the shared resolver on the 'vision' tag.
+    expect(processWorkerSource).toMatch(/async function pickVlmModel\(/);
+    expect(processWorkerSource).toMatch(/resolveModel\('vision', VLM_ENV/);
+    // ...and the chat payload sends what was resolved.
+    expect(processWorkerSource).toMatch(/const vlmModel = await pickVlmModel\(\)/);
+    expect(processWorkerSource).toMatch(/model: vlmModel,/);
+  });
+
+  it('still lets QWEN_VLM_MODEL pin an exact model (documented override)', () => {
     expect(processWorkerSource).toMatch(
-      /const QWEN_VLM_MODEL = process\.env\.QWEN_VLM_MODEL \|\| 'qwen2\.5-vl-7b'/
+      /const QWEN_VLM_MODEL_PIN = \(process\.env\.QWEN_VLM_MODEL \|\| ''\)\.trim\(\)/
     );
+    // The pin is expressed as the tag's standard override so it bypasses
+    // chain resolution the same way QWEN_MODEL_<TAG> does everywhere else.
+    expect(processWorkerSource).toMatch(/QWEN_MODEL_VISION: QWEN_VLM_MODEL_PIN/);
+  });
+
+  it('reports the model the router ACTUALLY served as vlm_model', () => {
+    expect(processWorkerSource).toMatch(/noteServedModel\('vision', vlmModel/);
+    expect(processWorkerSource).toMatch(/resultBody\.vlm_model = lastVlmModel/);
   });
 
   it('declares QWEN_VLM_MAX_PAGES with a default of 5 (VRAM cap)', () => {

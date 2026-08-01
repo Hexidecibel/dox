@@ -22,11 +22,14 @@
 
 import { requireRole, errorToResponse } from '../../lib/permissions';
 import { logAudit, getClientIp } from '../../lib/db';
+import { MODEL_CHAINS, chainFor, resolveModel, type ModelTag } from '../../lib/models';
 import type { Env, User } from '../../lib/types';
 import type {
   ProcessingStatusResponse,
   ProcessingStatusErrorRow,
   ProcessingStatusQwen,
+  ProcessingStatusModels,
+  ProcessingStatusModelTag,
 } from '../../../shared/types';
 
 const QWEN_PROBE_TIMEOUT_MS = 5000;
@@ -157,6 +160,56 @@ async function probeQwen(env: Env): Promise<ProcessingStatusQwen> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Resolve every semantic model tag to what it would actually use right now.
+ *
+ * Why this is on the status page: `advertisedModels` tells you the router is
+ * up, not that we are running on the model we WANTED. Each tag is an ordered
+ * preference chain; dropping to a lower entry is a real quality event (the
+ * quantization difference between chain entries changes extraction
+ * correctness) and until now it was visible only in worker logs.
+ *
+ * Cost: this reuses the resolver's own ~60s health cache, so all three tags
+ * share ONE `/v1/models` lookup at most — this endpoint must not become a
+ * health-check storm. `force` is deliberately NOT passed.
+ *
+ * Never throws: a chain with nothing available is reported as
+ * source='unavailable' with the resolver's message, so a dead vision backend
+ * cannot 500 the whole status page.
+ */
+async function resolveModelTags(env: Env): Promise<ProcessingStatusModels> {
+  const tags = Object.keys(MODEL_CHAINS) as ModelTag[];
+  const out: ProcessingStatusModelTag[] = [];
+
+  for (const tag of tags) {
+    const chain = chainFor(tag, env);
+    try {
+      const res = await resolveModel(tag, env);
+      out.push({
+        tag,
+        model: res.model,
+        preferred: res.preferred,
+        chain: res.chain,
+        degraded: res.degraded,
+        source: res.source,
+        error: null,
+      });
+    } catch (err) {
+      out.push({
+        tag,
+        model: null,
+        preferred: chain[0],
+        chain,
+        degraded: true,
+        source: 'unavailable',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return { tags: out, degraded: out.some((t) => t.degraded) };
 }
 
 /**
@@ -324,6 +377,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // ---- Qwen probe (failure-isolated) ----
     const qwen = await probeQwen(context.env);
 
+    // ---- Resolved tag -> model mapping (failure-isolated, cached) ----
+    const models = await resolveModelTags(context.env);
+
     const body: ProcessingStatusResponse = {
       queue: { counts, oldestQueued, totalRows },
       worker: {
@@ -332,6 +388,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         healthy: workerHealthy,
       },
       qwen,
+      models,
       stale: { orphanedClaims, oldestOrphanAgeMinutes },
       errors: { recent: recentErrors, byPattern },
       checkedAt: nowIso,

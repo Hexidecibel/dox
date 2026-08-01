@@ -76,11 +76,37 @@ const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '30000', 10);
 //                      VLM result is saved to the vlm_ columns for comparison.
 //   'vlm'            — run ONLY the VLM path. VLM result is primary.
 //                      On VLM failure, fall back to text path.
-// VLM model defaults to qwen2.5-vl-7b which must be served at QWEN_URL
-// alongside the text model.
+// The VLM model is chosen by the `vision` PREFERENCE CHAIN (bin/lib/models.js
+// MODEL_CHAINS.vision), resolved against what the router actually advertises —
+// health-aware exactly like the text tags. This used to be a hardcoded default
+// and was the last place a model name was pinned outside the config.
+//
+// QWEN_VLM_MODEL still PINS an exact model and bypasses chain resolution (the
+// documented override behavior). It is expressed below as the tag's standard
+// QWEN_MODEL_VISION override so the resolver reports source='override' and the
+// preflight banner says PINNED, same as every other tag.
 const QWEN_VLM_MODE = (process.env.QWEN_VLM_MODE || 'off').toLowerCase();
-const QWEN_VLM_MODEL = process.env.QWEN_VLM_MODEL || 'qwen2.5-vl-7b';
+const QWEN_VLM_MODEL_PIN = (process.env.QWEN_VLM_MODEL || '').trim();
+const VLM_ENV = QWEN_VLM_MODEL_PIN
+  ? { ...process.env, QWEN_MODEL_VISION: QWEN_VLM_MODEL_PIN }
+  : process.env;
 const QWEN_VLM_MAX_PAGES = parseInt(process.env.QWEN_VLM_MAX_PAGES || '5', 10);
+
+// The vision model requested for — and, once the router answers, ACTUALLY
+// served on — the most recent VLM call, including quantization. Mirrors
+// lastServedTextModel; posted as result_body.vlm_model so every VLM run is
+// self-describing. Reset per call so a failure never reports a stale name.
+let lastVlmModel = null;
+
+/**
+ * Resolve the vision tag to a model that is up right now. Throws (loudly,
+ * naming the chain and the router) only when NOTHING in the vision chain has
+ * a healthy upstream — callers of the VLM path already fall back to text.
+ */
+async function pickVlmModel(opts) {
+  const res = await resolveModel('vision', VLM_ENV, opts);
+  return res.model;
+}
 
 // === Multi-record COA mode (first-class multi-product / multi-lot / multi-page) ===
 //   off    — never compute/post ai_records on the COA path (byte-identical to
@@ -2355,7 +2381,9 @@ async function processCoaItem(item) {
 
     // Attach VLM columns when VLM ran (success or failure).
     if (canRunVlm && (vlmResult || vlmError)) {
-      resultBody.vlm_model = QWEN_VLM_MODEL;
+      // Served model when the call got that far, otherwise the model we
+      // resolved and attempted; null only when resolution itself failed.
+      resultBody.vlm_model = lastVlmModel;
       resultBody.vlm_duration_ms = vlmDurationMs;
       resultBody.vlm_extracted_at = vlmStartedAt;
       if (vlmResult) {
@@ -2903,6 +2931,12 @@ Return JSON with:
  * Throws on any failure — callers handle fallback to the text path.
  */
 async function extractWithVLM(pdfBuffer, systemPrompt, userPrompt, fileName) {
+  // Resolve BEFORE rendering pages so a dead vision chain fails fast and the
+  // caller falls back to the text path without burning a PDF render.
+  lastVlmModel = null;
+  const vlmModel = await pickVlmModel();
+  lastVlmModel = vlmModel;
+
   const pages = await renderPdfPagesToPng(pdfBuffer, QWEN_VLM_MAX_PAGES);
 
   const userContent = [
@@ -2916,7 +2950,7 @@ async function extractWithVLM(pdfBuffer, systemPrompt, userPrompt, fileName) {
   }
 
   const payload = {
-    model: QWEN_VLM_MODEL,
+    model: vlmModel,
     temperature: 0.1,
     max_tokens: 8192,
     messages: [
@@ -2956,6 +2990,10 @@ async function extractWithVLM(pdfBuffer, systemPrompt, userPrompt, fileName) {
       await new Promise(r => setTimeout(r, 60_000));
     }
   }
+
+  // Record what the router ACTUALLY served (quantization included) rather than
+  // what we asked for — the whole point of the provenance columns.
+  lastVlmModel = noteServedModel('vision', vlmModel, qwenData && qwenData.model);
 
   const content = qwenData?.choices?.[0]?.message?.content || '';
   if (!content) {
@@ -3501,11 +3539,17 @@ async function preflightModels() {
   console.log('  Models:');
   const failures = [];
   for (const tag of tags) {
-    const chain = chainFor(tag, process.env);
+    // 'vision' resolves against VLM_ENV so a QWEN_VLM_MODEL pin is reported
+    // here exactly like any other override instead of as a separate knob.
+    const tagEnv = tag === 'vision' ? VLM_ENV : process.env;
+    const chain = chainFor(tag, tagEnv);
     try {
-      const res = await resolveModel(tag, process.env, { force: true });
+      const res = await resolveModel(tag, tagEnv, { force: true });
       if (res.source === 'override') {
-        console.log(`    ${tag}: ${res.model}  (PINNED via QWEN_MODEL_${tag.toUpperCase()})`);
+        const via = tag === 'vision' && QWEN_VLM_MODEL_PIN
+          ? 'QWEN_VLM_MODEL'
+          : `QWEN_MODEL_${tag.toUpperCase()}`;
+        console.log(`    ${tag}: ${res.model}  (PINNED via ${via})`);
       } else if (res.source === 'unverified') {
         console.warn(
           `    ${tag}: ${res.model}  (UNVERIFIED — ${QWEN_URL}/v1/models did not answer; ` +
@@ -3524,11 +3568,6 @@ async function preflightModels() {
       console.error(`    ${tag}: UNAVAILABLE — ${err.message}`);
     }
   }
-  if (QWEN_VLM_MODE !== 'off') {
-    // QWEN_VLM_MODEL is a separate explicit knob (not chain-resolved); report
-    // it so a mismatch with the vision chain is visible instead of surprising.
-    console.log(`    vlm (explicit QWEN_VLM_MODEL): ${QWEN_VLM_MODEL}`);
-  }
   if (failures.length > 0) {
     console.error('');
     console.error('Error: no usable model for tag(s) — refusing to start.');
@@ -3540,7 +3579,7 @@ async function preflightModels() {
 console.log(`Dox process worker started`);
 console.log(`  API: ${DOX_API_URL}`);
 console.log(`  Qwen: ${QWEN_URL}`);
-console.log(`  VLM mode: ${QWEN_VLM_MODE}${QWEN_VLM_MODE !== 'off' ? ` (model=${QWEN_VLM_MODEL}, max_pages=${QWEN_VLM_MAX_PAGES})` : ''}`);
+console.log(`  VLM mode: ${QWEN_VLM_MODE}${QWEN_VLM_MODE !== 'off' ? ` (model=${QWEN_VLM_MODEL_PIN || `vision chain: ${chainFor('vision', VLM_ENV).join(' > ')}`}, max_pages=${QWEN_VLM_MAX_PAGES})` : ''}`);
 console.log(`  Poll interval: ${POLL_INTERVAL / 1000}s`);
 
 // Self-scheduling loop with exponential backoff on consecutive failures.

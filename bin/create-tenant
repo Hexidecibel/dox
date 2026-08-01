@@ -1,28 +1,44 @@
 #!/usr/bin/env bash
-# Create a tenant + a starter category taxonomy (and optionally an org_admin
-# user) in the dox D1 database. Idempotent. LOCAL by default; pass --remote to
-# target production (doc-upload-db --remote).
+# Create a tenant + seed a starter registry vocabulary (and optionally an
+# org_admin user) in the dox D1 database. Idempotent. LOCAL by default; pass
+# --remote to target production (doc-upload-db --remote).
 #
-# The starter taxonomy = the Medosweet FSQA manual's section topics (100-126)
-# seeded as global (supplier_id NULL) document_types so a fresh tenant has
-# categories to pick from in the upload form. Refine/replace once the verbatim
-# SOP 102.2 Document-Type Template is available.
+# The starter vocabulary comes from a NAMED PACK in starter-packs/<name>.json —
+# data, not code. A pack seeds all three registry facets for the tenant:
+#   document_types           what a document IS         (layer 1)
+#   requirements             what it SATISFIES          (layer 2)
+#   claim_types              what it TRIGGERS           (layer 3)
+#   claim_type_requirements  which requirement a claim OPENS
+# Packs ship for `fsqa` (food safety) and `finance`. Adding a vertical is a new
+# JSON file — no change to this script. Run `--list-packs` to see them.
 #
 # Usage:
 #   ./bin/create-tenant --name "Medosweet Farms" --slug medosweet [--id <id>]
+#   ./bin/create-tenant --name "Acme Books" --slug acme --pack finance
+#   ./bin/create-tenant --name "Bare Tenant" --slug bare --no-pack
+#   ./bin/create-tenant --list-packs
 #   ./bin/create-tenant --remote --name "Medosweet Farms" --slug medosweet
 #   ./bin/create-tenant --remote --name "Medosweet Farms" --slug medosweet \
 #       --admin-email ajconner@example.com --admin-name "AJ Conner"   # + org_admin
 #
+# --pack <name>   starter pack to seed (default: fsqa)
+# --no-pack       create the tenant only, no vocabulary
+# --list-packs    print the available packs and exit
+#
 # --admin-* creates an org_admin scoped to the tenant with a generated temp
 # password (printed ONCE) and force_password_change=1. Omit to create tenant
-# + taxonomy only (e.g. when an existing super_admin will scope into it).
+# + vocabulary only (e.g. when an existing super_admin will scope into it).
+#
+# Re-running is safe: tenant rows upsert, and every pack statement is
+# INSERT OR IGNORE against a deterministic id derived from the tenant slug, so
+# nothing duplicates and admin edits to a seeded row are preserved.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DB="doc-upload-db"
 REMOTE=""            # "" = local, "--remote" = prod
 NAME=""; SLUG=""; TID=""
+PACK="fsqa"
 ADMIN_EMAIL=""; ADMIN_NAME=""; ADMIN_ROLE="org_admin"
 
 while [ $# -gt 0 ]; do
@@ -31,10 +47,13 @@ while [ $# -gt 0 ]; do
     --name) NAME="$2"; shift ;;
     --slug) SLUG="$2"; shift ;;
     --id) TID="$2"; shift ;;
+    --pack) PACK="$2"; shift ;;
+    --no-pack) PACK="" ;;
+    --list-packs) node bin/render-starter-pack --list; exit 0 ;;
     --admin-email) ADMIN_EMAIL="$2"; shift ;;
     --admin-name) ADMIN_NAME="$2"; shift ;;
     --admin-role) ADMIN_ROLE="$2"; shift ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
@@ -45,8 +64,20 @@ done
 # Deterministic id from slug when not given (stable across re-runs).
 [ -z "$TID" ] && TID="tenant_$(printf '%s' "$SLUG" | tr -c 'a-z0-9' '_' )"
 
+# Validate the pack BEFORE touching the database, so a typo in the pack name or
+# a bad edit to the JSON fails before a half-provisioned tenant exists.
+PACK_SUMMARY=""
+if [ -n "$PACK" ]; then
+  PACK_SUMMARY=$(node bin/render-starter-pack --pack "$PACK" --tenant-id "$TID" --tenant-slug "$SLUG" --summary)
+fi
+
 TARGET="LOCAL"; [ -n "$REMOTE" ] && TARGET="PROD (--remote)"
 echo "Target: $TARGET   Tenant: $NAME ($SLUG) id=$TID"
+if [ -n "$PACK" ]; then
+  echo "Pack:   $PACK — $PACK_SUMMARY"
+else
+  echo "Pack:   (none — --no-pack)"
+fi
 if [ -n "$REMOTE" ]; then
   read -r -p "This writes to PRODUCTION. Proceed? [y/N] " ans
   [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Aborted."; exit 1; }
@@ -59,28 +90,17 @@ sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 
 # ---- Tenant ----
 d1 "INSERT INTO tenants (id, name, slug, description)
-    VALUES ('$TID', '$(sql_escape "$NAME")', '$(sql_escape "$SLUG")', 'FSQA document registry')
+    VALUES ('$TID', '$(sql_escape "$NAME")', '$(sql_escape "$SLUG")', 'Document registry')
     ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug;" >/dev/null
 echo "  tenant upserted"
 
-# ---- Starter category taxonomy (manual sections 100-126) ----
-CATS=(
-  "Leadership Sign Off" "Records Management" "Supplier Approval" "GMP Self Audit"
-  "HACCP Hazard Analysis" "Food Defense Plan" "Allergen" "Foreign Material"
-  "Bloodborne" "Food Adulteration" "Hold & Release" "Pest Control" "Sanitation"
-  "Traceability & Recall" "Receiving" "Shipping" "Storage" "Chemical"
-  "Water Quality" "Corrective Action" "Training" "Verification & Validations"
-  "Complaint Tracking" "Temperature Monitoring" "Business Continuity"
-  "Organic Program" "Food Safety Plan"
-)
-CAT_SQL=$(mktemp); trap 'rm -f "$CAT_SQL"' EXIT
-for c in "${CATS[@]}"; do
-  slug=$(printf '%s' "$c" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '-' | sed 's/-\{2,\}/-/g; s/^-//; s/-$//')
-  id="dt_${SLUG}_${slug}"
-  echo "INSERT OR IGNORE INTO document_types (id, tenant_id, name, slug) VALUES ('$id','$TID','$(sql_escape "$c")','$slug');" >> "$CAT_SQL"
-done
-d1_file "$CAT_SQL" >/dev/null
-echo "  ${#CATS[@]} starter categories seeded (INSERT OR IGNORE)"
+# ---- Starter pack (document types + requirements + claims + claim rules) ----
+if [ -n "$PACK" ]; then
+  PACK_SQL=$(mktemp); trap 'rm -f "$PACK_SQL"' EXIT
+  node bin/render-starter-pack --pack "$PACK" --tenant-id "$TID" --tenant-slug "$SLUG" > "$PACK_SQL"
+  d1_file "$PACK_SQL" >/dev/null
+  echo "  '$PACK' pack seeded: $PACK_SUMMARY (INSERT OR IGNORE)"
+fi
 
 # ---- Optional org_admin user ----
 if [ -n "$ADMIN_EMAIL" ]; then
