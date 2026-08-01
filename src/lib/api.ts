@@ -82,6 +82,7 @@ import type {
   LotMatchListResponse,
   CoaRecordsPayload,
   CoaRecordDecision,
+  RejectionReason,
 } from './types';
 import type { ParsedCustomer, ParsedOrder, ParsedShipment } from '../../shared/connectorOutput';
 import { AUTH_TOKEN_KEY } from './types';
@@ -1487,8 +1488,17 @@ export const api = {
       }>;
     }) =>
       fetchApi<{ document?: any; documents?: any[]; summary?: string; item?: any }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
-    reject: (id: string) =>
-      fetchApi<void>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'rejected' }) }),
+    /**
+     * Reject a queue item. `reason` is a small closed enum (see
+     * REJECTION_REASONS) and should always be supplied — a rejection without a
+     * reason is a bare fact that no post-mortem can use. `note` is optional
+     * free text. Rejecting no longer deletes the source file from R2.
+     */
+    reject: (id: string, data?: { rejection_reason?: RejectionReason; rejection_note?: string }) =>
+      fetchApi<{ item: { id: string; status: 'rejected'; rejection_reason: RejectionReason | null } }>(
+        `/queue/${id}`,
+        { method: 'PUT', body: JSON.stringify({ status: 'rejected', ...(data || {}) }) }
+      ),
     postResults: (id: string, data: Record<string, unknown>) =>
       fetchApi<{ success: boolean }>(`/queue/${id}/results`, { method: 'PUT', body: JSON.stringify(data) }),
     reprocess: (id: string) =>

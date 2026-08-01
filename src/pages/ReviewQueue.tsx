@@ -82,6 +82,16 @@ import {
   buildTableEdits,
 } from './reviewCaptureBuilder';
 import { sortFieldsByUncertainty, bandFor } from './reviewFieldOrder';
+import {
+  FieldWarnings,
+  InvariantWarningBanner,
+  InvariantWarningChip,
+  warningsByField,
+  warnedFieldSx,
+} from '../components/InvariantWarnings';
+import RejectQueueItemDialog from '../components/RejectQueueItemDialog';
+import { REJECTION_REASON_LABELS } from '../lib/types';
+import type { RejectionReason } from '../lib/types';
 import type { LearnedFieldHint } from '../../shared/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -337,6 +347,11 @@ export default function ReviewQueue() {
       }
     }, 300);
   }, [isSuperAdmin, tenantFilter, selectedTenantId]);
+
+  // Item pending a rejection reason (null = dialog closed).
+  const [rejectTarget, setRejectTarget] = useState<ProcessingQueueItem | null>(null);
+  // Per-item set of dismissed invariant-warning keys.
+  const [dismissedWarnings, setDismissedWarnings] = useState<Record<string, Set<string>>>({});
 
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'info' }>({
     open: false,
@@ -860,17 +875,36 @@ export default function ReviewQueue() {
     });
   }, [items]);
 
-  const handleReject = async (id: string) => {
+  /**
+   * Rejecting always goes through the reason dialog. A rejection with no reason
+   * is a bare fact nobody can learn from later — see RejectQueueItemDialog.
+   */
+  const handleReject = async (id: string, reason: RejectionReason, note: string) => {
     setActionLoading(prev => ({ ...prev, [id]: true }));
     try {
-      await api.queue.reject(id);
+      await api.queue.reject(id, { rejection_reason: reason, rejection_note: note || undefined });
       setSnackbar({ open: true, message: 'Item rejected', severity: 'success' });
+      setRejectTarget(null);
       loadQueue();
     } catch (err) {
       setSnackbar({ open: true, message: err instanceof Error ? err.message : 'Rejection failed', severity: 'error' });
     } finally {
       setActionLoading(prev => ({ ...prev, [id]: false }));
     }
+  };
+
+  /**
+   * Warnings the reviewer explicitly waved off, keyed by item then by
+   * warningKey(). Local to the session: these checks are heuristics, so
+   * disagreeing must be cheap, but it is not a durable judgement about the
+   * document either.
+   */
+  const dismissWarning = (itemId: string, key: string) => {
+    setDismissedWarnings(prev => {
+      const next = new Set(prev[itemId] || []);
+      next.add(key);
+      return { ...prev, [itemId]: next };
+    });
   };
 
   const updateField = (itemId: string, fieldName: string, value: string) => {
@@ -1568,6 +1602,22 @@ export default function ReviewQueue() {
                         sx={{ textTransform: 'capitalize' }}
                       />
                     </Tooltip>
+                    {item.status === 'rejected' && item.rejection_reason && (
+                      <Tooltip title={item.rejection_note || ''} arrow>
+                        <Chip
+                          label={REJECTION_REASON_LABELS[item.rejection_reason].label}
+                          size="small"
+                          color="error"
+                          variant="outlined"
+                          sx={{ ml: 0.5 }}
+                        />
+                      </Tooltip>
+                    )}
+                    {/* One-glance signal on the COLLAPSED row: which items in a
+                        long queue deserve a careful look before opening any. */}
+                    {item.status === 'pending' && (
+                      <InvariantWarningChip warnings={item.invariant_warnings} />
+                    )}
                     {item.template_id && (
                       <Tooltip title={helpContent.review_queue.main.fieldTooltips.templateMatch} arrow>
                         <Chip label="Template matched" color="info" size="small" sx={{ ml: 0.5 }} />
@@ -2419,6 +2469,11 @@ export default function ReviewQueue() {
                         {(() => {
                           const itemUncertainty = uncertaintyByItem[item.id] || {};
                           const itemHints = learnedHints[item.id] || {};
+                          // Server-computed invariant warnings for the FLAT
+                          // extraction scope. Advisory: they annotate the field
+                          // and never disable Approve.
+                          const itemWarnings = warningsByField(item.invariant_warnings, 'ai_fields');
+                          const itemDismissed = dismissedWarnings[item.id];
                           const visibleEntries = Object.entries(fields).filter(([key]) => !dismissedFields[item.id]?.has(key));
                           const sortedKeys = sortFieldsByUncertainty(
                             visibleEntries.map(([k]) => k),
@@ -2429,6 +2484,10 @@ export default function ReviewQueue() {
                             const u = itemUncertainty[fieldName];
                             const band = bandFor(u);
                             const hint = itemHints[fieldName];
+                            const fieldWarnings = itemWarnings[fieldName];
+                            const liveWarnings = (fieldWarnings || []).filter(
+                              (w) => !itemDismissed?.has(`${w.scope}::${w.field}::${w.check}`)
+                            );
                             return (
                               <Box key={fieldName} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
                                 <Box sx={{ flex: 1 }}>
@@ -2476,8 +2535,14 @@ export default function ReviewQueue() {
                                       size="small"
                                       fullWidth
                                       disabled={item.status !== 'pending' || isActioning || isProcessing}
+                                      sx={liveWarnings.length > 0 ? warnedFieldSx : undefined}
                                     />
                                   )}
+                                  <FieldWarnings
+                                    warnings={fieldWarnings}
+                                    dismissed={itemDismissed}
+                                    onDismiss={(key) => dismissWarning(item.id, key)}
+                                  />
                                   {(band === 'high' || hint) && (
                                     <Box sx={{ display: 'flex', gap: 0.5, mt: 0.5, flexWrap: 'wrap' }}>
                                       {band === 'high' && (
@@ -2514,11 +2579,21 @@ export default function ReviewQueue() {
                             );
                           };
 
-                          const highMidKeys = sortedKeys.filter(e => e.band !== 'low').map(e => e.key);
-                          const lowKeys = sortedKeys.filter(e => e.band === 'low').map(e => e.key);
+                          // A warned field is NEVER collapsed into "looks good"
+                          // — the whole point is that it is seen.
+                          const warned = (k: string) =>
+                            (itemWarnings[k] || []).some(
+                              (w) => !itemDismissed?.has(`${w.scope}::${w.field}::${w.check}`)
+                            );
+                          const highMidKeys = sortedKeys.filter(e => e.band !== 'low' || warned(e.key)).map(e => e.key);
+                          const lowKeys = sortedKeys.filter(e => e.band === 'low' && !warned(e.key)).map(e => e.key);
 
                           return (
                             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                              <InvariantWarningBanner
+                                warnings={item.invariant_warnings}
+                                dismissed={itemDismissed}
+                              />
                               {highMidKeys.map(renderFieldRow)}
                               {lowKeys.length > 0 && (
                                 showLowConfident[item.id] ? (
@@ -2863,7 +2938,7 @@ export default function ReviewQueue() {
                           variant="outlined"
                           color="error"
                           size="small"
-                          onClick={(e) => { e.stopPropagation(); handleReject(item.id); }}
+                          onClick={(e) => { e.stopPropagation(); setRejectTarget(item); }}
                           disabled={isActioning || isProcessing}
                           startIcon={<CancelIcon />}
                         >
@@ -2882,7 +2957,7 @@ export default function ReviewQueue() {
                           variant="outlined"
                           color="error"
                           size="small"
-                          onClick={(e) => { e.stopPropagation(); handleReject(item.id); }}
+                          onClick={(e) => { e.stopPropagation(); setRejectTarget(item); }}
                           disabled={isActioning || isProcessing}
                           startIcon={<CancelIcon />}
                         >
@@ -2897,6 +2972,17 @@ export default function ReviewQueue() {
           })}
         </Box>
       )}
+
+      {/* Reject reason dialog — the ONLY path to a rejection. */}
+      <RejectQueueItemDialog
+        open={!!rejectTarget}
+        fileName={rejectTarget?.file_name}
+        submitting={!!rejectTarget && !!actionLoading[rejectTarget.id]}
+        onClose={() => setRejectTarget(null)}
+        onConfirm={(reason, note) => {
+          if (rejectTarget) handleReject(rejectTarget.id, reason, note);
+        }}
+      />
 
       {/* Snackbar */}
       <Snackbar

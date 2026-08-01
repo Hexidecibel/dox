@@ -7,7 +7,13 @@ import {
   BadRequestError,
   errorToResponse,
 } from '../../lib/permissions';
-import { deleteFile } from '../../lib/r2';
+// NOTE: `deleteFile` is deliberately NOT imported any more — rejecting a queue
+// item no longer destroys its R2 object. See handleReject's R2 RETENTION note.
+import { invariantWarningsFor, withInvariantWarnings } from '../../lib/queue-warnings';
+import {
+  REJECTION_REASONS,
+  type RejectionReason,
+} from '../../../shared/types';
 import { approveQueueItem, approveMultiProductQueueItem } from '../../lib/queue-approve';
 import type { QueueItem, FieldPickCapture, FieldDismissalCapture, TableEditCapture } from '../../lib/queue-approve';
 import type { Env, User } from '../../lib/types';
@@ -67,7 +73,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     requireTenantAccess(user, item.tenant_id as string);
 
     const { profile_exists, ...rest } = item as Record<string, unknown>;
-    const enriched = { ...rest, profile_exists: profile_exists === 1 };
+    const enriched = withInvariantWarnings({
+      ...rest,
+      profile_exists: profile_exists === 1,
+    });
 
     return new Response(
       JSON.stringify({ item: enriched }),
@@ -98,6 +107,17 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
     const body = (await context.request.json()) as {
       status?: 'approved' | 'rejected';
+      /**
+       * Why the reviewer rejected this item. Small closed enum mirroring the
+       * 2026-08-01 study's A/B/C taxonomy (see migration 0083). Optional for
+       * back-compat with older clients, but the UI always sends it — without a
+       * reason every rejection is a bare fact and every post-mortem is
+       * guesswork, which is what forced that study to reconstruct causes with
+       * an LLM grader at 29% precision.
+       */
+      rejection_reason?: RejectionReason;
+      /** Optional free text for what the enum cannot say. */
+      rejection_note?: string;
       // Legacy single-product
       fields?: Record<string, string>;
       product_name?: string;
@@ -180,7 +200,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     // columns the COA-only QueueItem type omits but the order/shipment approve
     // branch needs (present at runtime via pq.*).
     const item = await context.env.DB.prepare(
-      `SELECT pq.*, t.slug as tenant_slug
+      `SELECT pq.*, t.slug as tenant_slug, t.name as tenant_name
        FROM processing_queue pq
        LEFT JOIN tenants t ON pq.tenant_id = t.id
        WHERE pq.id = ?`
@@ -191,6 +211,8 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         ai_records: string | null;
         source_id: string | null;
         connector_run_id: string | null;
+        tenant_name: string | null;
+        extracted_text: string | null;
       }>();
 
     if (!item) {
@@ -203,7 +225,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       throw new BadRequestError(`Queue item is already ${item.status}`);
     }
 
-    if (body.status === 'approved') {
+    // Defined as a const arrow (not a hoisted declaration) so TypeScript keeps
+    // the non-null narrowing of `item` inside the closure.
+    const dispatchApprove = async (): Promise<Response> => {
       // Kind-aware approve. order/shipment items auto-ingest in results.ts on
       // the 'ready' callback; running the COA producer (approveQueueItem) on
       // them creates a junk COA document. For these kinds we instead re-run the
@@ -250,9 +274,55 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         return await handleMultiProductApprove(context, user, item, body.shared_fields, body.products, body.save_template, selectedSource, captures, supplierOverride);
       }
       return await handleApprove(context, user, item, body.fields, body.product_name, body.save_template, selectedSource, captures, supplierOverride);
-    } else {
-      return await handleReject(context, user, item);
+    };
+
+    if (body.status === 'approved') {
+      const response = await dispatchApprove();
+      // Record what the reviewer waved through. The warnings are recomputed
+      // against the values the human actually submitted, so an edit that FIXED
+      // the problem produces no row. This is the only way the "37% of corpus
+      // error sits inside approved documents" number ever becomes measurable
+      // going forward instead of requiring another retrospective study.
+      // Best-effort: never let audit logging break an approval.
+      if (response.ok) {
+        try {
+          const remaining = invariantWarningsFor({
+            ai_fields: body.products
+              ? JSON.stringify(Object.assign({}, body.shared_fields, ...body.products.map((p) => p.fields)))
+              : body.fields
+                ? JSON.stringify(body.fields)
+                : null,
+            ai_records: body.records ? JSON.stringify(body.records) : null,
+            extracted_text: item.extracted_text,
+            tenant_name: item.tenant_name,
+          });
+          if (remaining.length > 0) {
+            await logAudit(
+              context.env.DB,
+              user.id,
+              item.tenant_id,
+              'queue_item.approved_with_warnings',
+              'processing_queue',
+              item.id,
+              JSON.stringify({
+                file_name: item.file_name,
+                warning_count: remaining.length,
+                warnings: remaining.slice(0, 20),
+              }),
+              getClientIp(context.request)
+            );
+          }
+        } catch (err) {
+          console.error(
+            '[queue] approved_with_warnings audit failed:',
+            err instanceof Error ? err.message : String(err)
+          );
+        }
+      }
+      return response;
     }
+    return await handleReject(context, user, item, body.rejection_reason, body.rejection_note);
+
   } catch (err) {
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;
@@ -800,6 +870,12 @@ async function handleCoaRecordsApprove(
   );
 }
 
+/**
+ * How long a rejected item's source file is kept in R2 before a sweeper may
+ * reclaim it. See the R2 RETENTION note in handleReject.
+ */
+const REJECTED_FILE_RETENTION_DAYS = 90;
+
 async function handleReject(
   context: EventContext<Env, string, Record<string, unknown>>,
   user: User,
@@ -808,18 +884,51 @@ async function handleReject(
     tenant_id: string;
     file_r2_key: string;
     file_name: string;
-  }
+  },
+  rejectionReason?: RejectionReason,
+  rejectionNote?: string
 ): Promise<Response> {
-  // Update queue item status. Also force processing_status to a terminal
-  // value: rejecting deletes the R2 file, so if the worker were mid-flight
-  // (or still in `queued`/`processing`) it would otherwise spin forever on
-  // a 404. Only overwrite when not already terminal so we don't clobber a
-  // real extraction outcome with our generic message.
+  // Validate the reason against the closed enum. An unknown value is a client
+  // bug, not a reason to lose the rejection — coerce to 'other' and keep the
+  // raw string in the note so nothing is silently discarded.
+  let reason: RejectionReason | null = null;
+  let note = (rejectionNote || '').trim().slice(0, 2000) || null;
+  if (rejectionReason) {
+    if ((REJECTION_REASONS as readonly string[]).includes(rejectionReason)) {
+      reason = rejectionReason;
+    } else {
+      reason = 'other';
+      note = `[unrecognized reason "${String(rejectionReason).slice(0, 60)}"] ${note || ''}`.trim();
+    }
+  }
+
+  // R2 RETENTION — this path used to `deleteFile(...)` the source object.
+  //
+  // That destroyed the only evidence: in the 2026-08-01 study, 9 of 132
+  // rejected items could not be graded at all because the PDF was gone, so
+  // "the model extracted it wrongly" and "the OCR produced garbage" are
+  // permanently indistinguishable for them. A rejection without its source is
+  // also unreprocessable — you cannot re-run a fixed extractor over it.
+  //
+  // The file is therefore RETAINED and tombstoned with a reclaim date. The old
+  // comment justified deletion as a way to stop a mid-flight worker spinning,
+  // but that is actually handled by forcing processing_status to a terminal
+  // value below (which we still do) — deletion was never load-bearing for it.
+  //
+  // Retention is bounded rather than forever: a sweeper may drop objects past
+  // file_retain_until. That job is deliberately NOT built here; the column
+  // makes it a one-query script whenever storage justifies it, and until then
+  // a few hundred KB per rejected COA is far cheaper than another blind
+  // post-mortem. `/api/queue/:id/file` keeps working for rejected items, so a
+  // reviewer can now re-open what they threw away.
   await context.env.DB.prepare(
     `UPDATE processing_queue
      SET status = 'rejected',
          reviewed_by = ?,
          reviewed_at = datetime('now'),
+         rejection_reason = ?,
+         rejection_note = ?,
+         file_retain_until = datetime('now', ?),
          processing_status = CASE
            WHEN processing_status IN ('ready', 'error') THEN processing_status
            ELSE 'error'
@@ -830,13 +939,11 @@ async function handleReject(
          END
      WHERE id = ?`
   )
-    .bind(user.id, item.id)
+    .bind(user.id, reason, note, `+${REJECTED_FILE_RETENTION_DAYS} days`, item.id)
     .run();
 
-  // Delete pending R2 file
-  await deleteFile(context.env.FILES, item.file_r2_key);
-
-  // Audit log
+  // Audit log. The reason travels here too so the audit trail is self-contained
+  // even if the queue row is later pruned.
   await logAudit(
     context.env.DB,
     user.id,
@@ -844,13 +951,25 @@ async function handleReject(
     'queue_item.rejected',
     'processing_queue',
     item.id,
-    JSON.stringify({ file_name: item.file_name }),
+    JSON.stringify({
+      file_name: item.file_name,
+      rejection_reason: reason,
+      rejection_note: note,
+      file_retained: true,
+      file_retain_days: REJECTED_FILE_RETENTION_DAYS,
+    }),
     getClientIp(context.request)
   );
 
   return new Response(
     JSON.stringify({
-      item: { id: item.id, status: 'rejected', reviewed_by: user.id },
+      item: {
+        id: item.id,
+        status: 'rejected',
+        reviewed_by: user.id,
+        rejection_reason: reason,
+        rejection_note: note,
+      },
     }),
     { headers: { 'Content-Type': 'application/json' } }
   );

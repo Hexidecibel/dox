@@ -44,6 +44,13 @@ import type {
   ExtractedTable,
 } from '../lib/types';
 import SupplierAutocomplete, { type SupplierValue } from './SupplierAutocomplete';
+import {
+  FieldWarnings,
+  InvariantWarningBanner,
+  warningsByField,
+  warnedFieldSx,
+  warningKey,
+} from './InvariantWarnings';
 import ProductBridgeControl, { type ProductBridgeValue } from './ProductBridgeControl';
 
 /**
@@ -244,6 +251,20 @@ export default function CoaRecordsReviewTile({
     verified: !!item.supplier_id,
   }));
 
+  /**
+   * Server-computed invariant warnings, dismissible per reviewer session. Scope
+   * strings match the extraction shape: 'page_metadata' for the shared header,
+   * 'record[N]' for the Nth record — the same indices this tile renders, so a
+   * warning lands on the card it belongs to.
+   */
+  const [dismissedWarnings, setDismissedWarnings] = useState<Set<string>>(new Set());
+  const dismissWarning = (key: string) =>
+    setDismissedWarnings((prev) => new Set(prev).add(key));
+  const sharedWarnings = useMemo(
+    () => warningsByField(item.invariant_warnings, 'page_metadata'),
+    [item.invariant_warnings],
+  );
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -420,6 +441,7 @@ export default function CoaRecordsReviewTile({
   const renderRecordCard = (idx: number) => {
     const record = records[idx];
     if (!record) return null;
+    const recordWarnings = warningsByField(item.invariant_warnings, `record[${idx}]`);
     const lowConf = isLowConf(record._confidence);
     const decision = decisionFor(idx);
     const fieldEntries = Object.entries(record.fields || {});
@@ -502,28 +524,40 @@ export default function CoaRecordsReviewTile({
             mb: groupEntries.length || record.tables?.length ? 2 : 0,
           }}
         >
-          {fieldEntries.map(([key, value]) => (
-            <Box key={key} sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
-              <TextField
-                label={key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
-                value={value ?? ''}
-                onChange={(e) => updateRecordField(idx, key, e.target.value)}
-                size="small"
-                fullWidth
-                disabled={readOnly || submitting}
-              />
-              {!readOnly && (
-                <IconButton
-                  size="small"
-                  onClick={() => removeRecordField(idx, key)}
-                  disabled={submitting}
-                  title="Remove field"
-                >
-                  <DeleteIcon fontSize="small" />
-                </IconButton>
-              )}
-            </Box>
-          ))}
+          {fieldEntries.map(([key, value]) => {
+            const fieldWarnings = recordWarnings[key];
+            const live = (fieldWarnings || []).filter((w) => !dismissedWarnings.has(warningKey(w)));
+            return (
+              <Box key={key} sx={{ display: 'flex', gap: 0.5, alignItems: 'flex-start' }}>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <TextField
+                    label={key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
+                    value={value ?? ''}
+                    onChange={(e) => updateRecordField(idx, key, e.target.value)}
+                    size="small"
+                    fullWidth
+                    disabled={readOnly || submitting}
+                    sx={live.length > 0 ? warnedFieldSx : undefined}
+                  />
+                  <FieldWarnings
+                    warnings={fieldWarnings}
+                    dismissed={dismissedWarnings}
+                    onDismiss={dismissWarning}
+                  />
+                </Box>
+                {!readOnly && (
+                  <IconButton
+                    size="small"
+                    onClick={() => removeRecordField(idx, key)}
+                    disabled={submitting}
+                    title="Remove field"
+                  >
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
+                )}
+              </Box>
+            );
+          })}
         </Box>
         {!readOnly && (
           <Button
@@ -627,6 +661,9 @@ export default function CoaRecordsReviewTile({
         </Alert>
       )}
 
+      {/* Anything the document itself contradicts, before the reviewer scrolls. */}
+      <InvariantWarningBanner warnings={item.invariant_warnings} dismissed={dismissedWarnings} />
+
       {/* Supplier verification gate (shared with the flat COA path). */}
       <Paper variant="outlined" sx={{ p: 1.5, mb: 2, bgcolor: 'action.hover' }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
@@ -692,17 +729,28 @@ export default function CoaRecordsReviewTile({
                   gap: 1.5,
                 }}
               >
-                {pageMetaKeys.map((key) => (
-                  <TextField
-                    key={key}
-                    label={key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
-                    value={pageMetadata[key] ?? ''}
-                    onChange={(e) => updatePageMetaField(key, e.target.value)}
-                    size="small"
-                    fullWidth
-                    disabled={readOnly || submitting}
-                  />
-                ))}
+                {pageMetaKeys.map((key) => {
+                  const fieldWarnings = sharedWarnings[key];
+                  const live = (fieldWarnings || []).filter((w) => !dismissedWarnings.has(warningKey(w)));
+                  return (
+                    <Box key={key}>
+                      <TextField
+                        label={key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
+                        value={pageMetadata[key] ?? ''}
+                        onChange={(e) => updatePageMetaField(key, e.target.value)}
+                        size="small"
+                        fullWidth
+                        disabled={readOnly || submitting}
+                        sx={live.length > 0 ? warnedFieldSx : undefined}
+                      />
+                      <FieldWarnings
+                        warnings={fieldWarnings}
+                        dismissed={dismissedWarnings}
+                        onDismiss={dismissWarning}
+                      />
+                    </Box>
+                  );
+                })}
               </Box>
             )}
           </Box>

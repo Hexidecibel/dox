@@ -1,6 +1,12 @@
 // === Shared Types: Single source of truth for API shapes ===
 // Used by both backend (functions/) and frontend (src/)
 
+// Review-time extraction warnings. Defined in shared/extractionInvariants.ts
+// (which must stay dependency-free so it can be bundled for plain Node), and
+// re-exported here so the frontend gets it with the rest of the API shapes.
+export type { InvariantFailure, InvariantCheck } from './extractionInvariants';
+import type { InvariantFailure } from './extractionInvariants';
+
 // === Roles & Enums ===
 export type Role = 'super_admin' | 'org_admin' | 'user' | 'reader';
 export type DocumentStatus = 'active' | 'archived' | 'deleted';
@@ -1379,7 +1385,75 @@ export interface ProcessingQueueItem {
    * show whether the teach interview already has guidance for this supplier.
    */
   profile_exists?: boolean;
+  /**
+   * Why this item was rejected (migration 0083). NULL on pending/approved rows
+   * and on rows rejected before the column existed — never conflate NULL with
+   * 'other'.
+   */
+  rejection_reason?: RejectionReason | null;
+  /** Optional reviewer free text accompanying rejection_reason. */
+  rejection_note?: string | null;
+  /**
+   * Date after which a sweeper may reclaim this item's R2 object. Set on
+   * reject; the object itself is retained, not deleted. NULL otherwise.
+   */
+  file_retain_until?: string | null;
+  /**
+   * Machine-detectable defects in this item's extraction, computed server-side
+   * from the document's own text (no model, no answer key) by
+   * `shared/extractionInvariants.ts`. ADVISORY: the Review Queue renders these
+   * per-field so a reviewer sees them before approving, but they never block an
+   * approval — the checks have known false positives.
+   */
+  invariant_warnings?: InvariantFailure[];
 }
+
+/**
+ * Why a reviewer rejected a queue item. Mirrors the 2026-08-01 rejected-
+ * population study's A/B/C taxonomy so rejections are countable without a
+ * grader:
+ *   extraction_defect   (A) usable document, extracted wrongly
+ *   duplicate           (B) an already-approved twin exists
+ *   wrong_document_type (B) not a COA / not what this queue is for
+ *   unreadable          (B) scan/OCR unusable — no human could extract it
+ *   other               (C) a process reason; see rejection_note
+ */
+export const REJECTION_REASONS = [
+  'extraction_defect',
+  'duplicate',
+  'wrong_document_type',
+  'unreadable',
+  'other',
+] as const;
+
+export type RejectionReason = (typeof REJECTION_REASONS)[number];
+
+/** Reviewer-facing labels + one-line help for each rejection reason. */
+export const REJECTION_REASON_LABELS: Record<
+  RejectionReason,
+  { label: string; help: string }
+> = {
+  extraction_defect: {
+    label: 'Extraction is wrong',
+    help: 'The document is fine — we pulled the wrong values out of it.',
+  },
+  duplicate: {
+    label: 'Duplicate',
+    help: 'We already have this document.',
+  },
+  wrong_document_type: {
+    label: 'Not the right kind of document',
+    help: "It isn't a COA (or whatever this queue expects).",
+  },
+  unreadable: {
+    label: "Can't be read",
+    help: 'The scan or OCR is too poor for anyone to extract it.',
+  },
+  other: {
+    label: 'Something else',
+    help: 'Anything the options above do not cover — please say what.',
+  },
+};
 
 /**
  * Phase 3: per-field pre-fill hint derived from accumulated reviewer picks for

@@ -4,6 +4,7 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import type { Env, User } from '../../lib/types';
+import { withInvariantWarnings } from '../../lib/queue-warnings';
 
 /**
  * GET /api/queue
@@ -103,9 +104,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(...mineParam, ...params, limit, offset)
       .all();
 
+    // invariant_warnings: machine-detectable defects in the extraction, computed
+    // from the document's OWN text (no model, no answer key) so the Review Queue
+    // can put each one on the specific field a reviewer is about to wave
+    // through. Advisory only — see functions/lib/queue-warnings.ts.
     const items = (results.results ?? []).map((row) => {
       const { profile_exists, ...rest } = row as Record<string, unknown>;
-      return { ...rest, profile_exists: profile_exists === 1 };
+      return withInvariantWarnings({ ...rest, profile_exists: profile_exists === 1 });
     });
 
     return new Response(

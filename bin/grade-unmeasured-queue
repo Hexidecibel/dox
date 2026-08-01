@@ -15,16 +15,21 @@
  *   which biases the headline rate upward by an unknown amount.
  *
  *   This script closes that gap. It grades the unmeasured strata from the
- *   document's own stored `extracted_text` (rejecting deletes the R2 object, so
- *   the PDF is gone — stored text is the only surviving evidence) and reports a
- *   blended figure with the weighting shown.
+ *   document's own stored `extracted_text` and reports a blended figure with the
+ *   weighting shown. (For items rejected BEFORE migration 0083 the R2 object was
+ *   deleted on reject, so stored text is the only surviving evidence for them.
+ *   Rejections after 0083 retain the file — prefer the PDF where it still
+ *   exists.)
  *
  * THE CENTRAL DISTINCTION — a rejected document is NOT an extraction failure
  *
- *   There is NO rejection-reason column anywhere. functions/api/queue/[id].ts
- *   writes status='rejected' plus an audit row whose detail is only
- *   {file_name}; no free-text reason is captured at any layer. So the reason is
- *   INFERRED here, and the inference is reported as three classes:
+ *   Migration 0083 added processing_queue.rejection_reason / rejection_note, and
+ *   the reviewer now picks one at reject time — but only for rejections made
+ *   AFTER that shipped. Every historical rejection still has rejection_reason
+ *   NULL and an audit row whose detail is only {file_name}, so for those the
+ *   reason is INFERRED here, and the inference is reported as three classes:
+ *   (once enough post-0083 rejections accumulate, prefer the stored reason and
+ *   use this inference only to backfill the older ones):
  *
  *     A_extraction_defect  document was fine, we extracted it wrongly.
  *                          COUNTS AGAINST ACCURACY.
