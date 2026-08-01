@@ -1,0 +1,515 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/grade-unmeasured-queue — READ-ONLY. Grades the queue items that
+ * bin/measure-extraction-accuracy structurally CANNOT see, and blends them with
+ * the measured population into a corpus-wide estimate.
+ *
+ * WHY THIS EXISTS
+ *
+ *   bin/measure-extraction-accuracy is honest about its own blind spot: reviewer
+ *   picks are written only on APPROVE, so its rate covers only the items a human
+ *   approved after capture went live. Everything else — rejected items,
+ *   pre-capture approvals, and items still pending — contributes nothing. The
+ *   rejected set is the dangerous one, because it is excluded FOR BEING WORSE,
+ *   which biases the headline rate upward by an unknown amount.
+ *
+ *   This script closes that gap. It grades the unmeasured strata from the
+ *   document's own stored `extracted_text` (rejecting deletes the R2 object, so
+ *   the PDF is gone — stored text is the only surviving evidence) and reports a
+ *   blended figure with the weighting shown.
+ *
+ * THE CENTRAL DISTINCTION — a rejected document is NOT an extraction failure
+ *
+ *   There is NO rejection-reason column anywhere. functions/api/queue/[id].ts
+ *   writes status='rejected' plus an audit row whose detail is only
+ *   {file_name}; no free-text reason is captured at any layer. So the reason is
+ *   INFERRED here, and the inference is reported as three classes:
+ *
+ *     A_extraction_defect  document was fine, we extracted it wrongly.
+ *                          COUNTS AGAINST ACCURACY.
+ *     B_document           duplicate upload, not a COA, unreadable/blank scan,
+ *                          wrong file. NOT an extraction failure.
+ *     C_process / C_infra  superseded, test upload, bulk queue cleanup, or the
+ *                          file 404'd from R2 so extraction never ran.
+ *
+ *   Conflating these overstates the error rate as badly as excluding rejects
+ *   understates it. The split is printed explicitly, and because the precedence
+ *   rules can mask a defect behind a duplicate, the raw defect rate is ALSO
+ *   printed independently of class.
+ *
+ * GRADING, AND GRADING THE GRADER
+ *
+ *   Field verdicts come from an LLM pinned to the Q8 endpoint. An ungraded
+ *   grader is not evidence, so --calibrate re-grades a seeded sample of the
+ *   CAPTURED-approval items — the ones where real human reviewer decisions
+ *   exist — and prints the LLM-vs-human confusion matrix. Apply that as the
+ *   correction factor on every LLM-derived rate below; the blend does so.
+ *
+ *   The date-support check is deliberately date-AWARE. A naive substring test
+ *   scores nearly every date as ungrounded because the extractor emits ISO and
+ *   documents write 03-23-26 / 13APR26 / 15 DEC 2025. That is a grader artifact,
+ *   not an extraction error, and it is worth ~25 points of apparent accuracy.
+ *
+ * READ-ONLY GUARANTEE: every statement goes through bin/lib/d1.js#query, which
+ * refuses anything that is not SELECT/WITH. No writes, ever. Nothing is
+ * re-queued, approved or rejected.
+ *
+ * Usage:
+ *   bin/grade-unmeasured-queue --remote --census        # no LLM, structure only
+ *   bin/grade-unmeasured-queue --remote --population rejected --out /tmp/r.json
+ *   bin/grade-unmeasured-queue --remote --calibrate --n 60
+ *   bin/grade-unmeasured-queue --remote --blend /tmp/r.json /tmp/p.json ...
+ *
+ * Flags:
+ *   --remote, -r        query production D1 instead of local
+ *   --census            print the population census + structural signals only
+ *                       (no LLM calls at all) and exit
+ *   --population P      one of: rejected | precapture | pending
+ *   --calibrate         grade a seeded sample of CAPTURED approvals and print
+ *                       the LLM-vs-reviewer confusion matrix
+ *   --n N               sample size for --calibrate (default 60)
+ *   --seed S            PRNG seed for sampling (default 20260801)
+ *   --endpoint URL      LLM base URL (default the Q8 host below)
+ *   --conc N            concurrent LLM requests (default 4)
+ *   --out FILE          write per-item grades as JSON
+ *   --json              emit the result structure as JSON instead of a report
+ *   -h, --help          this help
+ *
+ * Exit code is always 0 on a successful run — findings are data, not failures.
+ */
+
+const fs = require('fs');
+const { query, queryPaged } = require('./lib/d1');
+
+const DEFAULT_ENDPOINT = 'http://ajs-mac-mini-2.tail162d1e.ts.net:9600';
+const MODEL = 'Qwen3-6-35B-A3B-turbo';
+
+// ---------------------------------------------------------------------------
+// Seeded sampling. Deterministic so any sample can be regenerated exactly.
+// ---------------------------------------------------------------------------
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function seededSample(ids, n, seed) {
+  const r = mulberry32(seed);
+  const a = [...ids].sort();            // sort first => deterministic base order
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(r() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, n);
+}
+
+// ---------------------------------------------------------------------------
+// Date-AWARE text-support check.
+//
+// KEEP IN SYNC with the normalization used by bin/check-extraction-invariants.
+// The point of the variant expansion: the extractor emits "2026-03-23" while
+// the document writes "03-23-26", "3/23/'26" or "23 MAR 2026". A plain
+// substring test marks all of those absent, which is a GRADER bug that reads as
+// an extraction failure.
+// ---------------------------------------------------------------------------
+const norm = (s) => String(s ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const loose = (s) => String(s ?? '').toUpperCase().replace(/\s+/g, ' ').trim();
+const MON = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+function dateVariants(v) {
+  const s = String(v).trim();
+  let y, m, d, mt;
+  if ((mt = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) { y = +mt[1]; m = +mt[2]; d = +mt[3]; }
+  else if ((mt = s.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/))) {
+    m = +mt[1]; d = +mt[2]; y = +mt[3]; if (y < 100) y += 2000;
+  }
+  if (!y) return null;
+  const yy = String(y % 100).padStart(2, '0'), Y = String(y);
+  const M = String(m), MM = String(m).padStart(2, '0');
+  const D = String(d), DD = String(d).padStart(2, '0');
+  const mon = MON[m - 1];
+  const out = new Set();
+  for (const [a, b, c] of [[MM, DD, yy], [M, D, yy], [MM, DD, Y], [M, D, Y], [MM, DD, ''], [M, D, '']])
+    for (const sep of ['', '/', '-', '.']) out.add(a + sep + b + (c ? sep + c : ''));
+  out.add(Y + MM + DD); out.add(yy + MM + DD); out.add(MM + DD + yy);
+  out.add(DD + mon + yy); out.add(DD + mon + Y); out.add(mon + DD + yy);
+  out.add(mon + D + yy); out.add(mon + DD); out.add(D + mon + yy); out.add(DD + MM + yy);
+  return [...out].map(norm).filter((x) => x.length >= 4);
+}
+const DATE_FIELD = /date|expir|exp_|_exp|ship|produc(ed|tion)|manufact/i;
+const looksDate = (v) =>
+  /^\d{4}-\d{1,2}-\d{1,2}/.test(String(v).trim()) ||
+  /^\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}$/.test(String(v).trim());
+function numVariants(v) {
+  const n = String(v).match(/\d[\d,]*\.?\d*/g);
+  return n ? n.map((x) => norm(x.replace(/,/g, ''))).filter((x) => x.length >= 2) : null;
+}
+
+/** 'exact' | 'variant' | 'partial' | 'absent' | 'skip' */
+function support(key, value, textNorm) {
+  if (value == null || typeof value === 'object') return 'skip';
+  const v = String(value).trim();
+  if (!v || /^(n\/?a|none|null|unknown|-)$/i.test(v)) return 'skip';
+  const nv = norm(v);
+  if (nv.length < 2) return 'skip';
+  if (textNorm.includes(nv)) return 'exact';
+  if (looksDate(v) || DATE_FIELD.test(key)) {
+    const dv = dateVariants(v);
+    if (dv && dv.some((x) => textNorm.includes(x))) return 'variant';
+    if (dv) return 'absent';
+  }
+  const numv = numVariants(v);
+  if (numv && numv.length && numv.every((x) => textNorm.includes(x))) return 'variant';
+  const toks = loose(v).split(/[^A-Z0-9]+/i).filter((t) => t.length >= 4).map(norm);
+  if (toks.length >= 2 && toks.every((t) => textNorm.includes(t))) return 'partial';
+  return 'absent';
+}
+
+// ---------------------------------------------------------------------------
+// LLM grader.
+//
+// The rule list is not decoration. A first-pass prompt that only asked "is this
+// value in the text" agreed with a human grader on just 68% of items, and it
+// erred DIRECTIONALLY — it under-called defects, because field-role confusion
+// (the expiry sitting in code_date, the customer sitting in supplier_name) is
+// invisible to a grounding check. Naming the error taxonomy explicitly is what
+// makes the grader usable as evidence.
+// ---------------------------------------------------------------------------
+const SYS = `You audit an automated document-extraction system for a dairy distributor.
+You get (1) raw text extracted from a source document and (2) the structured fields the extractor produced from it.
+
+Judge ONLY from the text shown.
+
+NOT ERRORS - never flag these:
+- Reformatted dates: "03-23-26"->"2026-03-23", "13APR26"->"2026-04-13", "15 DEC 2025"->"2025-12-15" are all CORRECT.
+- Case, whitespace, punctuation, unit notation ("40#" vs "40 lb").
+- Jumbled word order (the PDF parser scrambles reading order; scrambled text is still usable).
+- A null/empty/absent field. That is an OMISSION, not an error. Count it in n_empty and move on.
+
+ERRORS - check each explicitly:
+- role: FIELD-ROLE CONFUSION. The value is in the document but in the WRONG field. Check supplier_name vs customer_name (a COA titled "Certificate of Analysis - X", or X listed under "Customer Name and Address", means X is the CUSTOMER not the supplier); supplier_address vs customer_address; code_date/production date vs expiration/best-by; lot_number vs po_number vs order_number vs invoice/certificate number; plant_number (must be a plant/establishment number like "53-140" or "16-04" - a test method "SM 4500"/"AOAC 991.14", a street address, or a city is WRONG); net_weight vs package size.
+- cross: CROSS-RECORD. The value belongs to a DIFFERENT product/lot line in the same document.
+- fab: FABRICATED. The value is not in the document, or was assembled from unrelated digits.
+
+Also count records: how many distinct product/lot records the document contains (records_in_doc) and how many the extractor actually represented (records_captured).
+
+Return ONLY compact JSON, no prose, no markdown, no explanation outside the JSON:
+{"text_quality":"clean|garbled_but_readable|unusable","document_kind":"coa|order_or_invoice|shipping_doc|other_business_doc|not_a_business_document|indeterminate","doc_is_usable":true|false,"records_in_doc":<int>,"records_captured":<int>,"n_correct":<int>,"n_empty":<int>,"problems":[{"f":"<field>","t":"role|cross|fab","w":"<=8 words"}],"wrong":true|false,"conf":"high|medium|low"}
+
+n_correct = how many PRODUCED (non-empty) values are right. n_empty = how many keys carry no value. problems = one entry per produced value that is wrong; its length is the wrong count.
+doc_is_usable=false ONLY if the text is blank, OCR destroyed the data content (labels survive but values do not), or the document holds no COA/order/shipping data at all.
+wrong=true if problems is non-empty, OR records_captured < records_in_doc, OR the extractor emitted nothing usable from a usable document. Omissions alone do NOT set wrong.`;
+
+function userMsg(item) {
+  const txt = String(item.extracted_text || '');
+  return `FILE NAME: ${item.file_name}
+TEXT LENGTH: ${txt.length} chars
+--- EXTRACTED TEXT (verbatim from the PDF parser; may be jumbled) ---
+${txt.slice(0, 14000) || '(EMPTY - no text was extracted from this file)'}
+--- END TEXT ---
+
+--- EXTRACTOR OUTPUT ---
+${(item.ai_fields || '(none)').slice(0, 4000)}
+${item.ai_records && item.ai_records !== 'null' ? 'ai_records: ' + String(item.ai_records).slice(0, 2500) : ''}
+--- END OUTPUT ---`;
+}
+
+async function chat(endpoint, messages, { max_tokens = 900, timeoutMs = 120000 } = {}) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${endpoint}/v1/chat/completions`, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: MODEL, messages, temperature: 0, max_tokens, stream: false }),
+    });
+    if (!res.ok) throw new Error(`LLM ${res.status} ${(await res.text()).slice(0, 200)}`);
+    return (await res.json()).choices[0].message.content;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function parseJson(s) {
+  const t = String(s).replace(/```(?:json)?/g, '').trim();
+  const a = t.indexOf('{'), b = t.lastIndexOf('}');
+  if (a < 0 || b < 0) throw new Error(`no json: ${t.slice(0, 200)}`);
+  return JSON.parse(t.slice(a, b + 1));
+}
+
+/** Confirm the endpoint is really serving the gguf we think it is. */
+async function confirmModel(endpoint) {
+  try {
+    const res = await fetch(`${endpoint}/running`);
+    const j = await res.json();
+    const cmd = (j.running || []).map((r) => r.cmd || '').join(' ');
+    const m = cmd.match(/-m\s+(\S+\.gguf)/);
+    return { ok: true, gguf: m ? m[1] : '(not reported)', model: (j.running || [])[0]?.model };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 120) };
+  }
+}
+
+async function gradeAll(endpoint, items, conc, onProgress) {
+  const out = {};
+  let i = 0, done = 0;
+  const worker = async () => {
+    for (;;) {
+      const idx = i++;
+      if (idx >= items.length) return;
+      const it = items[idx];
+      for (let attempt = 1; ; attempt++) {
+        try {
+          out[it.id] = parseJson(await chat(endpoint, [
+            { role: 'system', content: SYS },
+            { role: 'user', content: userMsg(it) },
+          ]));
+          break;
+        } catch (e) {
+          if (attempt >= 3) { out[it.id] = { _error: String(e).slice(0, 200) }; break; }
+          await new Promise((r) => setTimeout(r, 1500 * attempt));
+        }
+      }
+      done++;
+      if (onProgress && done % 10 === 0) onProgress(done, items.length);
+    }
+  };
+  await Promise.all(Array.from({ length: conc }, worker));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// A/B/C classification — EXPLICIT RULES, never asked of the model.
+//
+// The model supplies only doc_is_usable / wrong. The DB supplies the rest.
+// Precedence, applied identically to every item:
+//   1. R2 404                       -> C_infra    (extraction never attempted)
+//   2. byte-identical twin APPROVED -> B_document (dedup; content already in)
+//   3. doc not usable               -> B_document
+//   4. extraction materially wrong  -> A_extraction_defect
+//   5. otherwise                    -> C_process
+//
+// Rule 2 sits ABOVE rule 4 on purpose: if a byte-identical copy was approved,
+// dedup explains THIS item's rejection whatever the extraction looked like.
+// That SUPPRESSES the A count, so `defect` is reported independently of class
+// and both numbers are published. Read them together or neither.
+// ---------------------------------------------------------------------------
+function classify(item, g) {
+  const defect = !!(g && g.wrong);
+  if (item.error_message === 'File download failed: 404')
+    return { cls: 'C_infra', sub: 'r2_404_extraction_never_ran', defect: null };
+  if (Number(item.dup_any_approved) > 0)
+    return { cls: 'B_document', sub: 'duplicate_of_an_approved_twin', defect };
+  if (g && g.doc_is_usable === false)
+    return { cls: 'B_document', sub: 'unusable_document', defect: false };
+  if (defect) return { cls: 'A_extraction_defect', sub: 'extraction_defect', defect: true };
+  return { cls: 'C_process', sub: 'clean_extraction_rejected_for_other_reason', defect: false };
+}
+
+/** Field tally on the SAME denominator bin/measure-extraction-accuracy uses:
+ *  values the model PRODUCED. Omissions are excluded, exactly as 'added' is. */
+function tally(g) {
+  if (!g || g._error) return null;
+  const bad = (g.problems || []).length;
+  const correct = Math.max(0, Number(g.n_correct) || 0);
+  return { correct, bad, produced: correct + bad, empty: Number(g.n_empty) || 0 };
+}
+
+function aggregate(pairs) {
+  const a = { items: 0, graded: 0, correct: 0, bad: 0, produced: 0, wrong_items: 0,
+              unusable: 0, undercapture: 0, modes: {}, fields: {}, classes: {} };
+  for (const { item, g } of pairs) {
+    a.items++;
+    const c = classify(item, g);
+    a.classes[c.cls] = (a.classes[c.cls] || 0) + 1;
+    const t = tally(g);
+    if (!t) continue;
+    a.graded++;
+    a.correct += t.correct; a.bad += t.bad; a.produced += t.produced;
+    if (g.wrong) a.wrong_items++;
+    if (g.doc_is_usable === false) a.unusable++;
+    if (Number(g.records_in_doc) > Number(g.records_captured)) a.undercapture++;
+    for (const p of g.problems || []) {
+      a.modes[p.t] = (a.modes[p.t] || 0) + 1;
+      a.fields[`${p.f}:${p.t}`] = (a.fields[`${p.f}:${p.t}`] || 0) + 1;
+    }
+  }
+  a.field_accuracy = a.produced ? a.correct / a.produced : null;
+  a.item_clean_rate = a.graded ? 1 - a.wrong_items / a.graded : null;
+  return a;
+}
+
+// ---------------------------------------------------------------------------
+// Data access
+// ---------------------------------------------------------------------------
+const ITEM_COLS = `q.id,q.file_name,q.status,q.processing_status,q.error_message,q.checksum,
+ q.output_kind,q.source,q.created_at,q.reviewed_at,q.confidence_score,
+ LENGTH(COALESCE(q.extracted_text,'')) text_len,q.extracted_text,q.ai_fields,q.ai_records,
+ (SELECT COUNT(*) FROM processing_queue x WHERE x.checksum=q.checksum AND x.id<>q.id) dup_total,
+ (SELECT COUNT(*) FROM processing_queue x WHERE x.checksum=q.checksum AND x.id<>q.id AND x.status='approved') dup_any_approved`;
+
+function fetchPopulation(pop, opts) {
+  const where = {
+    rejected: `q.status='rejected'`,
+    pending: `q.status='pending'`,
+    precapture: `q.status='approved' AND NOT EXISTS (SELECT 1 FROM reviewer_field_picks p WHERE p.queue_item_id=q.id)`,
+  }[pop];
+  if (!where) throw new Error(`unknown population: ${pop}`);
+  const { rows, pages } = queryPaged(
+    (l, off) => `SELECT ${ITEM_COLS} FROM processing_queue q WHERE ${where} ORDER BY q.id LIMIT ${l} OFFSET ${off}`,
+    { ...opts, pageSize: opts.pageSize || 12 }
+  );
+  return { rows, pages };
+}
+
+function census(opts) {
+  const byStatus = query(
+    `SELECT status, processing_status, COUNT(*) n FROM processing_queue GROUP BY 1,2 ORDER BY 1,3 DESC`, opts);
+  const cov = query(`SELECT
+      (SELECT COUNT(*) FROM processing_queue) queue_total,
+      (SELECT COUNT(DISTINCT queue_item_id) FROM reviewer_field_picks) captured,
+      (SELECT COUNT(*) FROM processing_queue q WHERE q.status='approved'
+         AND NOT EXISTS (SELECT 1 FROM reviewer_field_picks p WHERE p.queue_item_id=q.id)) precapture`, opts)[0];
+  // Behavioural signal: a reviewer cannot judge 30 documents in one minute.
+  // Bulk rejections are queue hygiene, not per-document extraction verdicts.
+  const bursts = query(`
+    SELECT COALESCE(u.email,'?') reviewer,
+      CASE WHEN burst>=10 THEN 'bulk (>=10/min)' WHEN burst>=3 THEN 'batch (3-9/min)'
+           ELSE 'individual (1-2/min)' END bucket, COUNT(*) n
+    FROM (SELECT q.id,q.reviewed_by,
+      (SELECT COUNT(*) FROM processing_queue y WHERE y.status='rejected'
+         AND substr(y.reviewed_at,1,16)=substr(q.reviewed_at,1,16)) burst
+      FROM processing_queue q WHERE q.status='rejected') b
+    LEFT JOIN users u ON u.id=b.reviewed_by GROUP BY 1,2 ORDER BY n DESC`, opts);
+  const dupFamilies = query(`
+    SELECT CASE
+       WHEN fam_app>0 THEN 'twin approved'
+       WHEN fam_pen>0 THEN 'twin pending'
+       WHEN fam_rej>1 THEN 'all twins rejected'
+       ELSE 'unique (no twin)' END composition, COUNT(*) n
+    FROM (SELECT r.id,
+      (SELECT COUNT(*) FROM processing_queue x WHERE x.checksum=r.checksum AND x.status='approved') fam_app,
+      (SELECT COUNT(*) FROM processing_queue x WHERE x.checksum=r.checksum AND x.status='pending') fam_pen,
+      (SELECT COUNT(*) FROM processing_queue x WHERE x.checksum=r.checksum AND x.status='rejected') fam_rej
+      FROM processing_queue r WHERE r.status='rejected') GROUP BY 1 ORDER BY n DESC`, opts);
+  const errs = query(
+    `SELECT COALESCE(error_message,'(none)') error_message, COUNT(*) n FROM processing_queue
+     WHERE status='rejected' GROUP BY 1 ORDER BY n DESC`, opts);
+  return { byStatus, cov, bursts, dupFamilies, errs };
+}
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+function parseArgs(argv) {
+  const o = { remote: false, json: false, census: false, calibrate: false,
+              n: 60, seed: 20260801, endpoint: DEFAULT_ENDPOINT, conc: 4,
+              population: null, out: null, blend: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--remote' || a === '-r') o.remote = true;
+    else if (a === '--json') o.json = true;
+    else if (a === '--census') o.census = true;
+    else if (a === '--calibrate') o.calibrate = true;
+    else if (a === '--n') o.n = Number(argv[++i]);
+    else if (a === '--seed') o.seed = Number(argv[++i]);
+    else if (a === '--endpoint') o.endpoint = argv[++i];
+    else if (a === '--conc') o.conc = Number(argv[++i]);
+    else if (a === '--population') o.population = argv[++i];
+    else if (a === '--out') o.out = argv[++i];
+    else if (a === '--blend') { while (argv[i + 1] && !argv[i + 1].startsWith('--')) o.blend.push(argv[++i]); }
+    else if (a === '-h' || a === '--help') { printHelp(); process.exit(0); }
+    else { console.error(`Unknown argument: ${a}`); process.exit(2); }
+  }
+  return o;
+}
+function printHelp() {
+  // Start at the doc comment, not at byte 0: the `/* eslint-disable */` line
+  // above it also ends in " */", and slicing to the FIRST one truncates the
+  // help to two lines. (bin/measure-extraction-accuracy has this bug; don't
+  // copy it.)
+  const src = fs.readFileSync(__filename, 'utf8');
+  const start = src.indexOf('/**');
+  const end = src.indexOf(' */', start);
+  console.log(src.slice(start, end).replace(/^\/\*\*?/, '').replace(/^ ?\* ?/gm, ''));
+}
+const pct = (r) => (r == null ? '  n/a' : `${(r * 100).toFixed(1)}%`);
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  console.error(`bin/grade-unmeasured-queue — READ-ONLY  (source: ${opts.remote ? 'PRODUCTION' : 'local'})`);
+
+  if (opts.census) {
+    const c = census(opts);
+    if (opts.json) { console.log(JSON.stringify(c, null, 2)); return; }
+    console.log('\nQUEUE CENSUS');
+    c.byStatus.forEach((r) => console.log(`  ${String(r.status).padEnd(10)} ${String(r.processing_status).padEnd(12)} ${r.n}`));
+    console.log(`\n  total=${c.cov.queue_total}  captured=${c.cov.captured}  pre-capture approvals=${c.cov.precapture}`);
+    console.log('\nREJECTION BURST PROFILE  (a human cannot judge 30 documents in one minute;');
+    console.log('bulk rows are queue hygiene, not per-document extraction verdicts)');
+    c.bursts.forEach((r) => console.log(`  ${r.reviewer.padEnd(26)} ${r.bucket.padEnd(22)} ${r.n}`));
+    console.log('\nREJECTED ITEMS BY CHECKSUM-FAMILY COMPOSITION');
+    c.dupFamilies.forEach((r) => console.log(`  ${r.composition.padEnd(24)} ${r.n}`));
+    console.log('\nERROR MESSAGES ON REJECTED ITEMS');
+    c.errs.forEach((r) => console.log(`  ${String(r.error_message).slice(0, 48).padEnd(50)} ${r.n}`));
+    return;
+  }
+
+  const mc = await confirmModel(opts.endpoint);
+  console.error(`  endpoint ${opts.endpoint}  served gguf: ${mc.ok ? mc.gguf : 'UNCONFIRMED — ' + mc.error}`);
+  if (!mc.ok) { console.error('  refusing to grade against an unconfirmed model'); process.exit(1); }
+
+  if (opts.calibrate) {
+    // Grade the grader against real reviewer decisions.
+    const ids = query(`SELECT DISTINCT queue_item_id id FROM reviewer_field_picks ORDER BY queue_item_id`, opts).map((r) => r.id);
+    const picked = seededSample(ids, opts.n, opts.seed);
+    const inList = picked.map((i) => `'${i}'`).join(',');
+    const { rows } = queryPaged((l, off) =>
+      `SELECT ${ITEM_COLS} FROM processing_queue q WHERE q.id IN (${inList}) ORDER BY q.id LIMIT ${l} OFFSET ${off}`,
+      { ...opts, pageSize: 12 });
+    const { rows: picks } = queryPaged((l, off) =>
+      `SELECT queue_item_id,field_key,text_value,vlm_value,chosen_source,final_value
+       FROM reviewer_field_picks WHERE queue_item_id IN (${inList}) ORDER BY id LIMIT ${l} OFFSET ${off}`,
+      { ...opts, pageSize: 400 });
+    const grades = await gradeAll(opts.endpoint, rows, opts.conc,
+      (d, t) => console.error(`  calibrate ${d}/${t}`));
+    if (opts.out) fs.writeFileSync(opts.out, JSON.stringify(grades, null, 2));
+    console.log(JSON.stringify({ sample: picked, grades, picks }, null, 2));
+    return;
+  }
+
+  if (!opts.population) { printHelp(); process.exit(2); }
+  const { rows, pages } = fetchPopulation(opts.population, opts);
+  console.error(`  ${opts.population}: ${rows.length} items (${pages} D1 pages)`);
+  const grades = await gradeAll(opts.endpoint, rows, opts.conc, (d, t) => console.error(`  ${d}/${t}`));
+  if (opts.out) fs.writeFileSync(opts.out, JSON.stringify(grades, null, 2));
+  const pairs = rows.map((item) => ({ item, g: grades[item.id] }));
+  const a = aggregate(pairs);
+  const result = { population: opts.population, served_gguf: mc.gguf, ...a };
+  if (opts.json) { console.log(JSON.stringify(result, null, 2)); return; }
+
+  console.log(`\nPOPULATION: ${opts.population}   items=${a.items}  graded=${a.graded}`);
+  console.log('\nA/B/C SPLIT');
+  Object.entries(a.classes).sort((x, y) => y[1] - x[1])
+    .forEach(([k, v]) => console.log(`  ${k.padEnd(22)} ${String(v).padStart(4)}  ${pct(v / a.items)}`));
+  console.log(`\nFIELD ACCURACY over produced values: ${a.correct}/${a.produced} = ${pct(a.field_accuracy)}`);
+  console.log(`ITEM clean rate:                     ${a.graded - a.wrong_items}/${a.graded} = ${pct(a.item_clean_rate)}`);
+  console.log(`items flagged multi-record under-capture: ${a.undercapture}`);
+  console.log('\nFAILURE MODES');
+  Object.entries(a.modes).sort((x, y) => y[1] - x[1]).forEach(([k, v]) => console.log(`  ${k.padEnd(8)} ${v}`));
+  console.log('\nTOP DEFECTIVE FIELDS');
+  Object.entries(a.fields).sort((x, y) => y[1] - x[1]).slice(0, 20)
+    .forEach(([k, v]) => console.log(`  ${k.padEnd(34)} ${v}`));
+  console.log('\n!! CAVEATS !!');
+  [
+    'NO rejection reason is stored anywhere. A/B/C is INFERRED from structure + an LLM read of the stored text, never read from a field.',
+    'Rejecting DELETES the R2 object, so grading uses processing_queue.extracted_text. Anything OCR lost is invisible to both the extractor and the grader.',
+    'Duplicate precedence suppresses the A count. Read the class split and the raw defect rate together.',
+    'The LLM grader carries its own error. Run --calibrate and apply the confusion matrix before quoting any number here.',
+  ].forEach((c) => console.log(`  * ${c}`));
+}
+
+main().catch((e) => { console.error(e.stack || String(e)); process.exit(1); });
