@@ -266,17 +266,51 @@ equivalent), `requirements` (layer 2 checklist items), `claim_types` +
 specific gap, not just a tenant-wide one. Gap detection is then a query, not an
 engine. Repurpose or drop 0076's `document_categories` — decide in P1.
 
-#### P1 — Facet schema + vocabularies ships when:
-- Migrations 0080+ create `program_sections`, `requirements`, `claim_types`,
-  `claim_type_requirements` + the three junctions, all tenant-scoped
-- 0076 `document_categories` disposition decided and executed (repurpose to the
-  program-section facet vs drop) — **open decision, needs a call**
-- `documents.classification_status` ('unclassified' default | 'classified') so an
-  untyped doc is countable, not silently blank (AJ's explicit ask); distinguishes
-  "never touched" from "reviewed, genuinely unclassifiable"
-- New migrations added to `tests/helpers/db.ts` (chain is not re-runnable)
-- `shared/types.ts` carries the facet types; `functions/lib/registry.ts` generalized
-  from category-sync to facet-sync
+#### P1 — Facet schema + vocabularies — **DONE** (2026-08-01, local only, uncommitted)
+- `migrations/0080_registry_facets.sql` — `requirements` + `document_requirements`
+  (layer 2), `claim_types` + `document_claims` (layer 3),
+  `claim_type_requirements` (claim → what proves it). All tenant-scoped rows.
+- `migrations/0081_documents_classification_status.sql` —
+  `classification_status` + `classification_reviewed_at/_by`, indexed
+  `(tenant_id, classification_status)`.
+- `shared/types.ts` — `RegistryFacet`, `RegistryLinkStatus`, `RegistryLinkSource`,
+  `ClaimSubjectType`/`Grain`, `ClassificationStatus`, the five row types and the
+  two Api* join shapes.
+- `functions/lib/registry.ts` — generalized to a `FACETS` descriptor table with
+  `validateFacetIds` / `validateClaimSubjects` / `syncDocumentFacet` /
+  `listDocumentFacet` / `parseFacetLinks` / `requirementsOpenedByClaims`. The
+  three `*Categor*` functions are `@deprecated`, still wired to the shipped
+  write path, and share the validation implementation.
+- `tests/unit/registry-facets.test.ts` (45 tests) + both migrations registered in
+  `tests/helpers/db.ts`.
+- `bin/migrate --only <file>` added: the chain is not re-runnable and local/prod
+  tracking has drifted, so a plain run aborts on an already-applied file. New
+  migrations are applied surgically. Used for 0080/0081 on local D1.
+
+**Decisions taken in P1:**
+1. **0076 `document_categories` — RETIRED, dropped in P3, not P1.** It cannot be
+   dropped in isolation: 0079's `documents_fts_source` VIEW selects from it to
+   build `category_text`, and every documents/versions/products/lots FTS trigger
+   writes through that view, so the DROP has to happen inside a view rebuild.
+   P1 leaves it functioning and unread by anything new.
+2. **Claim subject grain — polymorphic `(subject_type, subject_id)`,** plus a
+   `claim_types.subject_grain` declaring the expected grain per vocabulary row.
+   No CHECK on either, so a new grain is data. Concrete nullable
+   `products`/`suppliers` FKs were rejected: SQLite cannot FK a polymorphic
+   column, and an FK to `products(id)` would not have enforced tenant scoping
+   anyway — validation had to live in the lib regardless.
+3. **Layer-0 `program_sections` — NOT BUILT.** The manual's folders 100-126 are
+   AJ's binder shelf layout; what a doc IS / SATISFIES / TRIGGERS already covers
+   the information. Skipping it saves a table, a junction, an FTS column and a
+   picker. Build only if he asks for it by name.
+
+Also decided: `status` on both junctions is `suggested | confirmed | rejected`
+with the **column default 'suggested'** (fail-safe for any ungoverned insert)
+and the **lib default 'confirmed'** (the human editing path). `rejected` rows are
+retained, and `syncDocumentFacet(..., { preserveRejected: true })` stops a
+re-running extraction pass resurrecting a link a human already turned down.
+`source` is an open set with no CHECK, validated in the lib, so a new pipeline
+never needs a SQLite table rebuild.
 
 #### P2 — Vocabulary CRUD + tenant provisioning ships when:
 - API + admin UI to manage each facet's vocabulary per tenant
@@ -295,8 +329,27 @@ engine. Repurpose or drop 0076's `document_categories` — decide in P1.
 - Ingest API accepts facet arrays; claims land as **suggestions a human confirms**,
   never auto-applied (consistent with no-auto-ingest — a wrong AI claim read would
   manufacture a false missing-document alert)
-- FTS rebuilt with `requirements_text` / `claims_text` / `program_text` (0079-style
-  DROP+recreate, new columns appended LAST to preserve snippet() indexes) + reindex
+- FTS rebuilt with `requirements_text` / `claims_text` (no `program_text` — layer 0
+  is not built) (0079-style DROP+recreate, new columns appended LAST to preserve
+  snippet() indexes) + reindex
+- **`document_categories` physically dropped in that same migration.** P1 retired
+  it logically but could not drop it; the exact removal checklist is:
+  `DROP TRIGGER trg_document_categories_ai_fts` / `_ad_fts`; rebuild
+  `documents_fts_source` with `category_text` replaced by `requirements_text`
+  (+ `claims_text`) — it is the only reader that blocks the drop; add
+  INSERT/DELETE/UPDATE FTS triggers on `document_requirements` and
+  `document_claims` mirroring the old junction triggers; retarget
+  `functions/lib/search-fts.ts` (`category_text: 11` in the column map and its
+  weight at index 6); retarget the `category_id` filter in
+  `functions/api/documents/search/index.ts:141-146`; swap the category read
+  subqueries in `functions/api/documents/[id].ts:54` and `:366`; swap the
+  category write path in `functions/api/documents/ingest.ts` (imports at 16-18,
+  writes at 396 and 556) to `syncDocumentFacet('requirement', ...)`; drop
+  `DocumentCategoryRow` / `ApiDocumentCategory` and `Document.categories` from
+  `shared/types.ts`; delete the three `@deprecated` `*Categor*` functions in
+  `functions/lib/registry.ts`; update `tests/api/documents-registry.test.ts:107-137`
+  and `tests/api/documents-search.test.ts:551-590`; remove `document_categories`
+  from `tests/helpers/db.ts` cleanTables; finally `DROP TABLE document_categories`
 
 #### P4 — Gap detection ships when:
 - A gap view answers, per scope (product / supplier / facility / tenant): which
@@ -313,14 +366,14 @@ The retention direction and the kind-dispatch registry were originally P5/P6 her
 are finance-vertical prerequisites rather than part of AJ's correction, and are parked in
 `backlog.md` under "GATED: Registry taxonomy P5/P6".
 
-**Open decisions needing a call:**
-- 0076 `document_categories`: repurpose to program-sections or drop outright?
-- Is the layer-0 program-section facet needed in v1, or is it AJ's filing habit that the
-  other three facets make redundant? (= his manual's folders 100-126. The other three
-  facets already record what a doc IS, what it SATISFIES, and what it TRIGGERS, so the
-  folder number only preserves his binder's shelf layout. Ask him before building it —
-  dropping it saves a table, a junction, an FTS column, and a picker.)
-- Claim subject grain: product only, or also supplier/facility?
+**Open decisions — all three resolved in P1 (see the P1 block above).** The only
+one still needing AJ is confirmation that he does NOT want the layer-0
+program-section facet; the schema is built as if he does not, and adding it later
+is additive (a table + a junction + an FTS column), not a rework.
+
+**Still blocked on AJ:** his conditional-trigger config (claim → which document
+proves it). The table that holds it, `claim_type_requirements`, now exists and is
+empty; P4 is a query over it the moment the rows arrive.
 
 ### Multi-product / multi-lot / multi-page COAs (make COA a records-kind)
 

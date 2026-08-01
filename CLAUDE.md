@@ -173,10 +173,12 @@ be added to `tests/helpers/db.ts`.
 | 0073 | lots_sublot | COA sublot split (Option B): sub_lot_code on lots, composite identity |
 | 0074 | documents_fts_lot | Lot search in documents_fts (lot_text column + triggers) |
 | 0075 | supplier_lot_scheme_and_product_map | Per-supplier lot_scheme + supplier_product_map bridge |
-| 0076 | document_categories | Multi-category junction (document → document_types, is_primary flag) |
+| 0076 | document_categories | Multi-category junction (document → document_types, is_primary flag). **RETIRED by 0080** — superseded by `document_requirements`; physical DROP deferred to the P3 FTS rebuild because 0079's `documents_fts_source` view reads it |
 | 0077 | registry_fields | Registry fields on documents: aliases, criteria, applies_to, owner, renewal_* |
 | 0078 | product_attribution | brand_owner, producer, plant_code on products |
 | 0079 | fts_registry | Registry fields in documents_fts (category/aliases/criteria/applies_to) |
+| 0080 | registry_facets | Registry taxonomy P1: `requirements` + `document_requirements` (layer 2, what a doc SATISFIES), `claim_types` + `document_claims` (layer 3, what a doc TRIGGERS), `claim_type_requirements` (claim → what proves it). All per-tenant rows |
+| 0081 | documents_classification_status | `documents.classification_status` (unclassified / needs_review / classified / unclassifiable) + reviewed_at/by |
 
 ## Role Model (4 roles)
 

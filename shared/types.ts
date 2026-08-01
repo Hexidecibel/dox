@@ -309,6 +309,10 @@ export interface DocumentRow {
   renewal_type?: RenewalType | null;
   renewal_interval_months?: number | null;
   renewal_due_date?: string | null;
+  // Classification lifecycle (migration 0081).
+  classification_status?: ClassificationStatus;
+  classification_reviewed_at?: string | null;
+  classification_reviewed_by?: string | null;
   // Deprecated: old hardcoded fields, still in DB but unused
   lot_number?: string | null;
   po_number?: string | null;
@@ -333,6 +337,172 @@ export interface ApiDocumentCategory extends DocumentCategoryRow {
   document_type_name?: string; // joined from document_types on read
   document_type_slug?: string;
 }
+
+// === Registry facets (migrations 0080/0081) ===
+//
+// Three independent questions per document, deliberately kept in three
+// vocabularies instead of the one they used to share:
+//
+//   layer 1 — what it IS        documents.document_type_id (ONE value)
+//   layer 2 — what it SATISFIES requirements (MANY) — CLOSES checklist items
+//   layer 3 — what it TRIGGERS  claim_types (MANY)  — OPENS checklist items
+//
+// Every vocabulary is per-tenant ROWS, never code, so aiming the platform at a
+// new vertical is configuration rather than a rebuild.
+//
+// The layer-0 "program section" facet (a manual's folder numbering) is
+// deliberately NOT modeled — see migration 0080's header.
+
+/**
+ * The facets that carry a per-tenant vocabulary and a document junction.
+ * Layer 1 is excluded: it lives on documents.document_type_id, not a junction.
+ */
+export type RegistryFacet = 'requirement' | 'claim';
+
+/**
+ * Human-in-the-loop state of a document→facet link. Nothing auto-confirms:
+ * a machine-proposed link lands as 'suggested' and a human moves it. A
+ * 'rejected' row is kept rather than deleted so the same wrong suggestion is
+ * not re-proposed on the next pass.
+ */
+export type RegistryLinkStatus = 'suggested' | 'confirmed' | 'rejected';
+
+/**
+ * Where a document→facet link came from. Intentionally an OPEN set (no DB
+ * CHECK constraint) so a new pipeline does not require a SQLite table rebuild;
+ * the values below are the ones understood today.
+ */
+export type RegistryLinkSource = 'human' | 'extraction' | 'rule' | 'import';
+
+/**
+ * What a claim is ABOUT. Open set for the same reason as RegistryLinkSource:
+ * the product-vs-supplier/facility question is unresolved with the client and
+ * a finance vertical will want its own grain. 'tenant' means a claim with no
+ * narrower subject.
+ */
+export type ClaimSubjectType = 'tenant' | 'product' | 'supplier' | 'facility';
+
+/**
+ * Declared at the vocabulary level: what subject grain claims of this type
+ * are expected to carry. 'any' means the tenant has not pinned it down.
+ */
+export type ClaimSubjectGrain = ClaimSubjectType | 'any';
+
+/**
+ * Layer 2 vocabulary — one checklist line item ("Allergen Matrix", "100g
+ * Nutritionals"). A document CLOSES these; a claim OPENS them.
+ * `checklist` is an optional grouping label (e.g. 'SOP 102.2').
+ */
+export interface RequirementRow {
+  id: string;
+  tenant_id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  checklist: string | null;
+  sort_order: number;
+  active: number; // 0 or 1
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Layer 3 vocabulary — one assertable claim ("Organic", "Kosher"). Asserting
+ * it does not satisfy anything; it makes OTHER documents applicable.
+ */
+export interface ClaimTypeRow {
+  id: string;
+  tenant_id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  subject_grain: ClaimSubjectGrain;
+  sort_order: number;
+  active: number; // 0 or 1
+  created_at: string;
+  updated_at: string;
+}
+
+/** Junction row: this document CLOSES this requirement. */
+export interface DocumentRequirementRow {
+  id: string;
+  document_id: string;
+  requirement_id: string;
+  status: RegistryLinkStatus;
+  source: RegistryLinkSource | string;
+  confidence: number | null;
+  notes: string | null;
+  created_at: string;
+  created_by: string | null;
+  confirmed_at: string | null;
+  confirmed_by: string | null;
+}
+
+/**
+ * Junction row: this document ASSERTS this claim, optionally about a specific
+ * subject. (subject_type, subject_id) is polymorphic — see migration 0080.
+ * `evidence` is the snippet the claim was read from, for a reviewer to check.
+ */
+export interface DocumentClaimRow {
+  id: string;
+  document_id: string;
+  claim_type_id: string;
+  subject_type: ClaimSubjectType | string;
+  subject_id: string | null;
+  status: RegistryLinkStatus;
+  source: RegistryLinkSource | string;
+  confidence: number | null;
+  evidence: string | null;
+  notes: string | null;
+  created_at: string;
+  created_by: string | null;
+  confirmed_at: string | null;
+  confirmed_by: string | null;
+}
+
+/**
+ * Config row: asserting `claim_type_id` OPENS `requirement_id`. This is the
+ * client's "conditional triggers" as data — the piece that lets a detected
+ * claim resolve to a NAMED missing document. is_required 0 = advisory only.
+ */
+export interface ClaimTypeRequirementRow {
+  id: string;
+  tenant_id: string;
+  claim_type_id: string;
+  requirement_id: string;
+  is_required: number; // 0 or 1
+  notes: string | null;
+  created_at: string;
+}
+
+/** A requirement link as returned by the API, with the vocabulary joined in. */
+export interface ApiDocumentRequirement extends DocumentRequirementRow {
+  requirement_name?: string;
+  requirement_slug?: string;
+  checklist?: string | null;
+}
+
+/** A claim link as returned by the API, with the vocabulary joined in. */
+export interface ApiDocumentClaim extends DocumentClaimRow {
+  claim_type_name?: string;
+  claim_type_slug?: string;
+  subject_name?: string | null; // resolved product/supplier name on read
+}
+
+/**
+ * Classification lifecycle of a document (migration 0081). Separating the two
+ * ends matters: 'unclassified' is a backlog item, 'unclassifiable' is a
+ * terminal human judgment that must NOT keep inflating the backlog count.
+ *   unclassified   — never touched
+ *   needs_review   — machine-proposed, awaiting a human
+ *   classified     — human-affirmed
+ *   unclassifiable — human reviewed, genuinely fits no type
+ */
+export type ClassificationStatus =
+  | 'unclassified'
+  | 'needs_review'
+  | 'classified'
+  | 'unclassifiable';
 
 /**
  * Per-supplier lot numbering scheme (migration 0075).
@@ -716,7 +886,13 @@ export interface Document {
   renewalType?: RenewalType | null;
   renewalIntervalMonths?: number | null;
   renewalDueDate?: string | null;
-  categories?: ApiDocumentCategory[]; // full multi-category set (0076)
+  categories?: ApiDocumentCategory[]; // full multi-category set (0076) — RETIRED, superseded by requirements (P3 removes it)
+  // Registry facets (migration 0080). Populated by P3's read paths.
+  requirements?: ApiDocumentRequirement[]; // layer 2 — what this doc SATISFIES
+  claims?: ApiDocumentClaim[]; // layer 3 — what this doc TRIGGERS
+  classificationStatus?: ClassificationStatus;
+  classificationReviewedAt?: string | null;
+  classificationReviewedBy?: string | null;
   // Search-result convenience fields inlined by the search endpoints
   // (GET /api/documents/search, POST /api/documents/search/natural,
   // GET /api/search) so a result renders "Letter of Guarantee, v2, expires

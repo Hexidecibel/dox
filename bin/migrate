@@ -11,6 +11,19 @@
 #                                 # already had the older "run-everything"
 #                                 # script applied to it. Add --remote to
 #                                 # backfill the prod tracking table.
+#   ./bin/migrate --only 0080_x.sql [--only 0081_y.sql]
+#                                 # SURGICAL: apply exactly the named
+#                                 # migration(s), in the order given, then
+#                                 # stamp them. Nothing else runs.
+#
+# WHY --only EXISTS: the migration chain is NOT re-runnable from scratch and
+# the `_migrations` tracking table has drifted from the files in several
+# environments (prod notably). A plain `./bin/migrate` walks every unstamped
+# file and aborts on the first one that was already applied by hand ("duplicate
+# column name: ..."), which blocks the new migration you actually wanted. The
+# standing workflow for a NEW migration is therefore: apply it surgically with
+# --only, which touches nothing else and leaves the drift alone. Do not
+# "fix" the drift by bulk-running the chain.
 #
 # How it works:
 #   - Ensures a `_migrations (filename TEXT PRIMARY KEY, applied_at TEXT
@@ -30,24 +43,34 @@ cd "$(dirname "$0")/.."
 DB="doc-upload-db"
 REMOTE_FLAG=""
 MARK_APPLIED=0
+ONLY=()
 
-for arg in "$@"; do
-  case "$arg" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --remote|-r)
       REMOTE_FLAG="--remote"
       ;;
     --mark-applied)
       MARK_APPLIED=1
       ;;
+    --only)
+      shift
+      [ "$#" -gt 0 ] || { echo "--only requires a migration filename" >&2; exit 2; }
+      ONLY+=("$1")
+      ;;
+    --only=*)
+      ONLY+=("${1#--only=}")
+      ;;
     -h|--help)
-      sed -n '2,20p' "$0"
+      sed -n '2,34p' "$0"
       exit 0
       ;;
     *)
-      echo "Unknown argument: $arg" >&2
+      echo "Unknown argument: $1" >&2
       exit 2
       ;;
   esac
+  shift
 done
 
 if [ -n "$REMOTE_FLAG" ]; then
@@ -129,6 +152,33 @@ if [ "$MARK_APPLIED" = "1" ]; then
     fi
   done
   echo "Done. Marked $count new migration(s) as applied."
+  exit 0
+fi
+
+# 3b. Surgical mode: apply exactly the named migration(s) and stamp them.
+if [ "${#ONLY[@]}" -gt 0 ]; then
+  echo "Surgical mode: applying ${#ONLY[@]} named migration(s) only."
+  for name in "${ONLY[@]}"; do
+    name="$(basename "$name")"
+    path="migrations/$name"
+    if [ ! -f "$path" ]; then
+      echo "ERROR: no such migration: $path" >&2
+      exit 1
+    fi
+    if is_applied "$name"; then
+      echo "  already applied, skipping: $name"
+      continue
+    fi
+    echo "Applying: $name"
+    if ! d1_exec_file "$path"; then
+      echo "" >&2
+      echo "ERROR: migration $name failed. Aborting." >&2
+      echo "Tracking row NOT inserted; rerun after fixing the SQL." >&2
+      exit 1
+    fi
+    mark_applied "$name"
+  done
+  echo "Done."
   exit 0
 fi
 

@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 104 tables, 2 views, 146 indexes, 36 triggers.
+Objects: 109 tables, 2 views, 159 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -98,9 +98,12 @@ Triggers: `trg_document_versions_ai_fts`, `trg_document_versions_au_fts`
   renewal_type TEXT CHECK (renewal_type IN ('renewal_application','hard_expiry','keep_current','review_cycle'))
   renewal_interval_months INTEGER
   renewal_due_date TEXT
+  classification_status TEXT NOT NULL DEFAULT 'unclassified' CHECK (classification_status IN ('unclassified','needs_review','classified','unclassifiable'))
+  classification_reviewed_at TEXT
+  classification_reviewed_by TEXT
 ```
 
-Indexes: `idx_documents_category`, `idx_documents_document_type`, `idx_documents_lot_number`, `idx_documents_po_number`, `idx_documents_renewal_due_date`, `idx_documents_renewal_type`, `idx_documents_status`, `idx_documents_tenant`, `idx_documents_tenant_external_ref`
+Indexes: `idx_documents_category`, `idx_documents_classification_status`, `idx_documents_document_type`, `idx_documents_lot_number`, `idx_documents_po_number`, `idx_documents_renewal_due_date`, `idx_documents_renewal_type`, `idx_documents_status`, `idx_documents_tenant`, `idx_documents_tenant_external_ref`
 
 Triggers: `trg_documents_ad_fts`, `trg_documents_ai_fts`, `trg_documents_au_fts`
 
@@ -1273,6 +1276,97 @@ _FTS5 shadow tables (engine internals): `bundles_fts_config`, `bundles_fts_conte
   filename TEXT PRIMARY KEY
   applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 ```
+
+### `claim_type_requirements`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  claim_type_id TEXT NOT NULL REFERENCES claim_types(id) ON DELETE CASCADE
+  requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE
+  is_required INTEGER NOT NULL DEFAULT 1
+  notes TEXT
+  created_at TEXT DEFAULT (datetime('now'))
+  UNIQUE(claim_type_id, requirement_id)
+```
+
+Indexes: `idx_claim_type_requirements_claim`, `idx_claim_type_requirements_requirement`, `idx_claim_type_requirements_tenant`
+
+### `claim_types`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  slug TEXT NOT NULL
+  name TEXT NOT NULL
+  description TEXT
+  subject_grain TEXT NOT NULL DEFAULT 'any'
+  sort_order INTEGER NOT NULL DEFAULT 0
+  active INTEGER NOT NULL DEFAULT 1
+  created_at TEXT DEFAULT (datetime('now'))
+  updated_at TEXT DEFAULT (datetime('now'))
+  UNIQUE(tenant_id, slug)
+```
+
+Indexes: `idx_claim_types_tenant`
+
+### `document_claims`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE
+  claim_type_id TEXT NOT NULL REFERENCES claim_types(id) ON DELETE CASCADE
+  subject_type TEXT NOT NULL DEFAULT 'tenant'
+  subject_id TEXT
+  status TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN ('suggested','confirmed','rejected'))
+  source TEXT NOT NULL DEFAULT 'human'
+  confidence REAL
+  evidence TEXT
+  notes TEXT
+  created_at TEXT DEFAULT (datetime('now'))
+  created_by TEXT
+  confirmed_at TEXT
+  confirmed_by TEXT
+```
+
+Indexes: `idx_document_claims_document`, `idx_document_claims_subject`, `idx_document_claims_type`, `idx_document_claims_unique`
+
+### `document_requirements`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE
+  requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE
+  status TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN ('suggested','confirmed','rejected'))
+  source TEXT NOT NULL DEFAULT 'human'
+  confidence REAL
+  notes TEXT
+  created_at TEXT DEFAULT (datetime('now'))
+  created_by TEXT
+  confirmed_at TEXT
+  confirmed_by TEXT
+  UNIQUE(document_id, requirement_id)
+```
+
+Indexes: `idx_document_requirements_document`, `idx_document_requirements_requirement`
+
+### `requirements`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  slug TEXT NOT NULL
+  name TEXT NOT NULL
+  description TEXT
+  checklist TEXT
+  sort_order INTEGER NOT NULL DEFAULT 0
+  active INTEGER NOT NULL DEFAULT 1
+  created_at TEXT DEFAULT (datetime('now'))
+  updated_at TEXT DEFAULT (datetime('now'))
+  UNIQUE(tenant_id, slug)
+```
+
+Indexes: `idx_requirements_checklist`, `idx_requirements_tenant`
 
 ## Views
 
