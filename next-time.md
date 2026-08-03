@@ -4,6 +4,84 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-08-01/03 MEASUREMENT SESSION — extraction fixed + measured; taxonomy P1/P2 built
+
+Big session. Three threads: **fix the model fleet**, **actually measure extraction**, **start the
+taxonomy rework**. 13 commits, `3bc3338`..`c959d86`+. Read the two AJ briefs' outcomes in
+[[project_idp_document_registry]] and [[project_medosweet_finance_vertical]].
+
+### DEPLOYED TO PROD (worker only)
+- **The router hostname fix.** `qwen-llm/model-router.yaml` pointed at `ajs-mac-mini`; Tailscale had
+  renamed the box **`ajs-mac-mini-2`**. Router marked the Q8 primary dead and silently failed over to
+  the 4090's **Q4** — for months. Prod extraction ran on the quant that LOST the bake-off while the
+  Q8 Mac sat healthy and unreachable. Fixed + verified: router now serves `UD-Q8_K_XL`.
+  **Restart is `sudo -n systemctl restart qwen-llm.service`** (bare `systemctl` fails on polkit;
+  `sudo -n` DOES work on this box).
+- **Multi-record collapse fix** (`c959d86`) — worker restarted, verified live on 2 real prod items:
+  `d5253a4d` 1 collapsed record → **3**, `c46e1579` → **2**, no comma-crammed values.
+  `bin/process-worker` IS what systemd runs, so restart == deploy for worker-only changes.
+
+### COMMITTED BUT **NOT DEPLOYED** (Pages + 4 prod migrations)
+Prod schema gap, verified 2026-08-03:
+```
+0076 document_categories  : present      0080 facet tables        : NOT APPLIED
+0077 registry cols        : present      0081 classification_status: NOT APPLIED
+                                         0082 text_model          : NOT APPLIED
+                                         0083 rejection_reason    : NOT APPLIED
+```
+Apply with **`bin/migrate --only <file>`** (new surgical mode). **NEVER bulk-run the chain.**
+NOTE prod has TWO tracking tables that disagree — `_migrations` tops out at **0075**, and
+0076–0079 were stamped elsewhere. See [[project_migration_chain_fragility]].
+
+Not deployed: taxonomy P1+P2 UI, inline review warnings, rejection dialog, `text_model` persistence.
+
+### THE THREE CORRECTIONS THAT MATTER
+1. **`COA_RECORDS_MODE=shadow` is a NO-OP.** The worker's only gate is `!== 'off'` — shadow and on
+   are byte-identical, and the consumer wiring shipped long ago. **The long-standing "flip
+   shadow→on" task in earlier notes would have changed NOTHING.** Deleted as a task.
+2. **`bin/parity-coa`'s dry-run was stale** — it called the legacy page-GROUPING chunker (the v1
+   collapse bug's own chunker) and never ran `mergeCoaRecords`. Every parity run was grading a code
+   path production no longer takes. Fixed. Treat old parity output with suspicion.
+3. **Multi-record collapse was the PROMPT**, not config: it asserted "there is only one product on
+   this page" — true for Darigold page-bundles, false for tabular COAs. Rewritten to one record per
+   distinct certified result.
+
+### MEASUREMENT — we now have real numbers ([[project_extraction_accuracy_measured]])
+**Corpus accuracy 90.6% (85.1–93.5%)**, all 132 rejected + 140 pre-capture + 94 pending graded.
+Three read-only scripts: `bin/check-extraction-invariants`, `bin/measure-extraction-accuracy`,
+`bin/grade-unmeasured-queue`. Two findings redirected the roadmap:
+- **The metric was blind to the biggest defect** (multi-record collapse, 95/366) — now fixed.
+- **37% of error sits inside APPROVED docs** — the human gate leaks worse than the automation.
+  Inline invariant warnings built in response (built, not deployed).
+Selection bias was only ~2.5pts. Fabrication is RAREST (27); role confusion dominates (584).
+
+### OPEN / NEXT
+- **P3 is next and it is the risky one.** `document_categories` cannot be dropped in isolation —
+  0079's `documents_fts_source` VIEW reads it and every FTS trigger inserts through that view;
+  SQLite resolves views lazily so `DROP TABLE` would NOT error, it would silently make every
+  document write fail at runtime. **13-step removal checklist is in `plan.md`.**
+- **APPROVE STILL DELETES THE R2 OBJECT.** We stopped it on reject only (0083 `file_retain_until`,
+  90d tombstone, sweeper deliberately not built). This is why the 95 historically-collapsed docs
+  CANNOT be re-extracted. Fix before the next extractor improvement.
+- **Latent landmine:** VLM-primary mode never populates `coaRecordsCapture` — enabling it today
+  would silently re-break every multi-record COA. VLM is `off` in prod.
+- Deferred small wins: empty-extraction-over-nonempty-text should warn (3 items, confidence 0.25);
+  the `[object Object]` destroyed-payload case is skipped rather than flagged loudly.
+- Re-queue more pending items with the fixed prompt: `bin/reprocess-queue --item <id>` (new) or
+  `--tenant` (79 pending in `1f03c3e73add44bfafb33bb16508b78b`, hours of Q8 GPU).
+
+### BLOCKED ON AJ (see [[reference_aj_handoff_doc]])
+Conditional-trigger config (blocks P4 gap detection — **P2 now gives him a UI to enter it**);
+whether the manual's folders 100-126 need recording; claim subject grain; **Andersen new-format
+sample** (he confirmed they switched — the old-format work was correctly abandoned);
+SharePoint + Cloudflare-for-PII answers from their IT.
+
+**Two client docs drafted, UNPUBLISHED** — `~/drops/dox-data-handling-and-roadmap.md` (custody/PII
+for IT+Finance) and `~/drops/aj-extraction-notes.md` (accuracy, colleague-to-colleague).
+Publish via cush-tools and VERIFY the URL before sending.
+
+---
+
 ## 2026-07-22 IDP DOCUMENT REGISTRY — LEG ONE SHIPPED TO PROD (new workstream)
 
 Huge session. Built + shipped the **IDP Document Registry** end-to-end to prod — the
