@@ -7,6 +7,12 @@
 #
 # Usage:
 #   ./bin/reprocess-queue --tenant <tenant_id> [--remote] [--apply] [--yes]
+#   ./bin/reprocess-queue --item <queue_item_id> [--item <id> ...] [--remote] [--apply]
+#
+#   --item narrows to specific queue rows instead of a whole tenant. Use it to
+#   verify a pipeline change on a couple of known documents WITHOUT re-running
+#   the GPU over an entire tenant's backlog. Repeatable. The same 'pending'-only
+#   safety rule applies.
 #
 #   (no flags)   dry-run against LOCAL D1: show what WOULD be re-enqueued
 #   --remote     target PROD D1 (the queue the prod worker polls)
@@ -31,10 +37,12 @@ APPLY=0
 SKIP_CONFIRM=0
 ONLY_ERRORS=0
 TENANT=""
+ITEMS=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --tenant) TENANT="${2:-}"; shift 2 ;;
+    --item) ITEMS+=("${2:-}"); shift 2 ;;
     --remote|-r) REMOTE_FLAG="--remote"; shift ;;
     --apply) APPLY=1; shift ;;
     --yes|-y) SKIP_CONFIRM=1; shift ;;
@@ -44,19 +52,38 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -z "$TENANT" ]; then
-  echo "ERROR: --tenant <tenant_id> is required." >&2
+if [ -z "$TENANT" ] && [ ${#ITEMS[@]} -eq 0 ]; then
+  echo "ERROR: one of --tenant <tenant_id> or --item <queue_item_id> is required." >&2
   exit 2
 fi
 
-# Single-quote escaping for the tenant id (defensive; ids are hex but be safe).
-TENANT_ESC="${TENANT//\'/\'\'}"
-WHERE="tenant_id = '$TENANT_ESC' AND status = 'pending'"
+# status='pending' is the invariant in BOTH modes — approved/rejected rows are
+# terminal and must never be clobbered, however the caller narrows the set.
+WHERE="status = 'pending'"
+
+if [ -n "$TENANT" ]; then
+  # Single-quote escaping for the tenant id (defensive; ids are hex but be safe).
+  TENANT_ESC="${TENANT//\'/\'\'}"
+  WHERE="$WHERE AND tenant_id = '$TENANT_ESC'"
+fi
+
+if [ ${#ITEMS[@]} -gt 0 ]; then
+  id_list=""
+  for it in "${ITEMS[@]}"; do
+    it_esc="${it//\'/\'\'}"
+    [ -n "$id_list" ] && id_list="$id_list, "
+    id_list="$id_list'$it_esc'"
+  done
+  WHERE="$WHERE AND id IN ($id_list)"
+fi
+
 [ "$ONLY_ERRORS" = "1" ] && WHERE="$WHERE AND processing_status = 'error'"
 
 target_label="LOCAL D1"
 [ -n "$REMOTE_FLAG" ] && target_label="REMOTE (PROD) D1"
-echo "Target: $target_label   tenant: $TENANT"
+scope_label="tenant: $TENANT"
+[ ${#ITEMS[@]} -gt 0 ] && scope_label="items: ${ITEMS[*]}"
+echo "Target: $target_label   $scope_label"
 echo
 
 echo "Review-queue items that match (status='pending'):"
@@ -71,7 +98,7 @@ fi
 
 if [ "$SKIP_CONFIRM" != "1" ]; then
   echo
-  echo "This will re-enqueue ALL status='pending' items for tenant $TENANT on $target_label."
+  echo "This will re-enqueue the status='pending' items matched above ($scope_label) on $target_label."
   echo "Their AI extraction output will be OVERWRITTEN when the worker re-runs them."
   read -r -p "Type 'reprocess' to continue: " reply
   [ "$reply" = "reprocess" ] || { echo "Aborted."; exit 1; }
