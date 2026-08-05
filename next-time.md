@@ -4,6 +4,120 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-08-05 OVERNIGHT MEASUREMENT SESSION — model/box/text-layer answer, backed by real runs
+
+**Six controlled studies, all read-only against prod. Nothing was deployed.** Reports live in the
+session scratchpad (`ABLATION-REPORT.md`, `AB-REPORT.md`, `CHANDRA-REPORT.md`, `HYBRID-REPORT.md`,
+`HARDWARE-REPORT.md`, `SERIALIZATION-REPORT.md`). Memory notes: [[project_prompt_ablation_findings]],
+[[project_mac_vs_spark_ab]], [[project_chandra_ocr_candidate]], [[project_text_serialization_win]].
+
+### THE HEADLINE — the text layer was being destroyed, and fixing it is free
+Single-page docs feed `text.substring(0,6000)` of the **whitespace-collapsed** string, so **7 of 8
+corpus documents reach the model as ONE CONTINUOUS LINE**. Geometry-aware serialization (group
+pdfjs items into rows by y, order by x, `|` between columns, keep newlines) scores **44.5/47 —
+exactly tying Chandra OCR — for 0.1 ms/page instead of 100,400–163,400 ms/page.** On the scrambled
+Andersen it produces the identical repair OCR bought for 188.8 s, in **16.3 ms (~11,600×)**.
+
+### ALL ARMS (n=8 docs / 12 pages / 47 graded slots, same model + prompt unless noted)
+| arm | /47 | s/page | notes |
+|---|---|---|---|
+| baseline `macfresh` | 41.0 (87.2%) | 30.3 | current prod |
+| `serial-nl` (newlines only) | 43.0 | ~30 | **1 leak — NEVER ship alone** |
+| `serial-rcflat` (geometry, collapsed) | 43.5 | ~30 | full reformat gain, 1 hallucination |
+| **`serial-rc` (geometry + newlines)** | **44.5 (94.7%)** | **~30** | **ship this** |
+| hybrid (unpdf + OCR ×2) | 43.0 | ~44–54 | |
+| Chandra OCR everywhere | 44.5 | 130–194 | ties serial-rc at ~16,000× the cost |
+| Spark dense VL-32B | 44.0 | 274.5 | 1 hallucination |
+| **Spark 122B-A10B q5** | **44.0** | **75.6** | 0 leaks — best escalation tier |
+| Spark VLM | 43.5 flat | 107.5 | **records 0/8 + fabricated record** |
+
+### THE FOUR CORRECTIONS THAT MATTER
+1. **`/no_think` is INERT on the `best` chain** — same output, zero `reasoning_content`. Real switch
+   is `chat_template_kwargs:{enable_thinking:true}`. **But it is LIVE on the `fast` chain**
+   (Qwen3-8B), so `connectors/schemaDiscovery.ts` deliberately KEEPS it. Do not blanket-remove.
+   Reasoning genuinely ON = +4.3pp but **6.6× wall / 7.6× tokens AND it regresses structure**.
+2. **The Mac/Spark accuracy gap was 100% MODEL, 0% BOX.** Same weights on both: Spark is *faster*
+   (prefill 2.3×, decode 1.25×, e2e 1.11×), accuracy −0.5 (noise). The 9.1× gap was dense-vs-MoE.
+3. **The workload is DECODE-bound, not prefill-bound** — prefill-heavy in tokens (4.5:1) but
+   prefill runs 12–35× faster/token, so **81–89% of each call is decode in seconds**. Trimming the
+   19k-char system prompt buys far less than token counts imply.
+4. **The 122B never had a config bug — its 91.9 GB of shards were never downloaded.** Now staged.
+
+### VLM — CONFIRMED BROKEN, DO NOT ENABLE
+`coa_records` NULL **8/8**; lot coverage 1/10 vs 10/10. `coaRecordsCapture` fills only inside
+`runTextPath()`; a successful VLM call skips it. It also **fabricated** a record (`380678` /
+`20026127`) present on no page — and the grader gave that doc **full marks**. Third time the flat
+aggregate hid a real defect.
+
+### ACTION ORDER (do these in this order — later steps invalidate if you skip step 2)
+1. **Ship `serial-rc`.** Never `serial-nl` alone.
+2. **RE-MEASURE EVERYTHING after it lands** — the OCR studies, the router and the 90.6% corpus
+   figure were all measured against a needlessly destroyed text layer. The disorder signal flags
+   the very class serialization repairs (30.8% of prod); routing those to OCR afterwards pays
+   100 s/page for work already done.
+3. **Targeted OCR second, far narrower: ~4%** (masthead-void 1.9% + broken ToUnicode ~2%), not
+   31–38%. Image-only letterheads and PUA-glyph PDFs are genuinely OCR-only.
+4. **OCR-everywhere: no.** Dominated on every axis.
+5. Serve the default model on the **Spark** (faster box, same weights); keep the **122B as the
+   escalation tier** (44.0, 0 leaks, 75.6 s/page).
+
+### UNCOMMITTED IN THE TREE (9 files — reviewed, tested, NOT deployed)
+`/no_think` removal from 9 `best`-chain sites (+ an inverted trap test that fails if re-added);
+`stripUnfilledPlaceholders()` for the ORG CONTEXT placeholder; `FEWSHOT_MAX_CHARS=8000` bound.
+**vitest 1787 pass / 0 fail**, `tsc` clean, build clean, records payload byte-identical.
+Few-shot block was **deliberately NOT deleted** — it is the only consumer of `extraction_examples`
+(the reviewer-correction loop). Token saving is **−1.14%**, not the −7.1% the ablation projected.
+
+### FOUND, NOT FIXED
+- ~~581 of 686 queue PDFs 404 from prod R2 — approve-deletes-R2 eating the corpus~~
+  **RETRACTED 2026-08-05, verified against prod. See "THE R2 CORRECTION" below.**
+- `functions/lib/teach/uncertainty.ts` sends **literal `model:'best'`** instead of resolving the
+  chain tag; also skips `noteServedModel`/`invalidateModelCache`. Looks like a real bug.
+- `DAIRY_FOOD_INDUSTRY_PROMPT` (worker) vs `INDUSTRY_PROMPTS.DAIRY_FOOD` (Pages) are hand-copies
+  with **no mirror test** — `models.js` has exactly this hazard and *is* covered by one.
+- Graders `spark-grade.js:92` and `ablate-grade.js:153` score a MISSING records payload as
+  "1 record". Use `chandra-grade.js`.
+- Chandra licence: modified OpenRAIL-M, free under $2M revenue, "not competitively with our API".
+
+### THE R2 CORRECTION — "approve deletes the file" IS FALSE (verified against prod 2026-08-05)
+A claim repeated across several previous handoffs ("APPROVE STILL DELETES THE R2 OBJECT", "this is
+why the 95 collapsed docs CANNOT be re-extracted") is **wrong**. Read the code and the data:
+
+`functions/lib/kinds/coa.ts` **moves** the file — downloads from the queue key (286/576/937),
+uploads to a permanent `document_versions` key via `buildR2Key` (297-300 / 628-631 / 1040-1059),
+then deletes only the **staging** copy (540 / 777 / 1184). Deleting it is correct, not data loss.
+
+Prod join (`documents.external_ref LIKE 'queue-'||q.id||'%'`):
+| queue status | items | with document | **with live R2 version** |
+|---|---|---|---|
+| approved | 457 | 451 | **451** |
+| rejected | 132 | 3 | 3 |
+| pending | 106 | 3 | 3 |
+
+Spot-fetched the three OLDEST approved documents' R2 objects: 121,863 / 203,352 / 68,075 bytes.
+Real PDFs. **The corpus is intact.** The "581/686 404" finding was the harness fetching by
+**queue** `file_r2_key`, which is legitimately gone post-approve — "strictly by age" is just
+"old items are approved, new ones are still pending."
+
+**Consequences:**
+- **Nothing to fix in the approve path. Do not "fix" it.**
+- **Ground truth is NOT corpus-blocked.** ~451 approved documents with fetchable bytes are
+  available right now — n=8 can become n=hundreds today. The unlock is a **tooling** change:
+  reprocess/harness must resolve queue -> `documents.external_ref` -> `document_versions.r2_key`
+  instead of `processing_queue.file_r2_key`. That also un-blocks re-extracting the 95 collapsed COAs.
+- 0083's three columns ARE applied to prod (contradicting the earlier "NOT APPLIED" note). The
+  reject-retention *code* ships with the pending Pages deploy, but **no rejection has occurred
+  since 2026-06-24**, so nothing is actively leaking and this is not urgent.
+- The only genuine loss remains the 132 pre-0083 rejections (9 confirmed ungradeable).
+
+### METHOD FACTS WORTH KEEPING
+Graded run-to-run noise is **0.0** for byte-identical prompts (confirmed 5×) — but **ungraded
+slots drift 9–28% and are NOT signal** (nondeterminism alone turned `plant_number "16-04"` into
+`"USDA Plant: Trailer #:T27"`). Every accuracy number here is **n=8**, and `serial-rc`'s +3.5
+leans **+2.0 on one document**. The 9-record Schreiber shape is untested everywhere (R2 404).
+
+---
+
 ## 2026-08-04/05 HANDOFF — extraction root-cause fixed; TWO AGENTS WERE RUNNING
 
 ### DO THIS FIRST
