@@ -663,6 +663,28 @@ function prependReviewerInstructions(prompt, instructions) {
  * code_date / etc. that bleed in from the filename poison downstream data
  * (see Pacific Cheese smoking gun, Apr 2026 A/B eval).
  */
+/**
+ * DEBUG ONLY. When DUMP_PROMPT_DIR is set, write the fully-assembled prompt
+ * segment to a file so it can be diffed / replayed verbatim. Reconstructing the
+ * prompt by hand to chase an extraction bug is how you end up testing something
+ * the worker never sends — that mistake cost a long investigation, hence this.
+ * Returns its input unchanged, so it is inert when the env var is absent.
+ */
+function dumpPrompt(label, content) {
+  const dir = process.env.DUMP_PROMPT_DIR;
+  if (!dir) return content;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${label}.txt`), content);
+    // stderr, not stdout: parity dry-run mode writes JSONL to stdout and a
+    // stray log line there corrupts every downstream parse.
+    console.error(`  [dump] ${label}: ${content.length} chars -> ${dir}/${label}.txt`);
+  } catch (err) {
+    console.warn(`  [dump] failed for ${label}: ${err.message}`);
+  }
+  return content;
+}
+
 function prependFilenameHint(prompt, fileName) {
   if (!fileName) return prompt;
   const block = [
@@ -2038,13 +2060,13 @@ async function processCoaItem(item) {
               messages: [
                 {
                   role: 'system',
-                  content: prependFilenameHint(
+                  content: dumpPrompt('coa-system', prependFilenameHint(
                     prependAttentionBias(
                       prependReviewerInstructions(buildPrompt(examples, tenantContext), reviewerInstructions),
                       learnedPreferences
                     ),
                     item.file_name
-                  ),
+                  )),
                 },
                 {
                   role: 'user',
@@ -2538,7 +2560,13 @@ const FIELD_ALIASES = {
   product_name: ['product', 'item', 'material', 'description', 'item_description'],
   product_code: ['item_code', 'sku', 'material_code', 'item_number', 'item_no'],
   expiration_date: ['exp_date', 'best_by', 'use_by', 'best_before', 'sell_by', 'bb_date'],
-  code_date: ['production_date', 'pack_date', 'mfg_date', 'manufacture_date', 'date_of_manufacture'],
+  // production_date is NOT listed here. It used to be an alias of code_date,
+  // which made the two the SAME field — so a COA printing both (Andersen's
+  // 2026 layout: 'Production Date 7-31-26' and 'Code Date (Expiration)
+  // 8-22-26', three weeks apart) could not represent them separately and
+  // the reviewer saw the code date labelled as the production date.
+  code_date: ['pack_date', 'code_dt'],
+  production_date: ['mfg_date', 'manufacture_date', 'date_of_manufacture', 'prod_date'],
   ship_date: ['shipping_date', 'date_shipped'],
   net_weight: ['weight', 'net_wt'],
   order_number: ['order_no', 'sales_order', 'reference_number', 'ref_number'],
@@ -2666,7 +2694,8 @@ FIELD EXTRACTION RULES:
    - lot_number — lot, batch, or run number
    - sub_lot_code — the sub-lot code that QUALIFIES lot_number (labels: "Sub Lot Number", "Sub Lot", "Sublot", "SL"). Usually 2 digits. It is a SEPARATE field: never concatenate it into lot_number and never drop it. Extract it whenever the page prints one — INCLUDING when the page has only ONE lot and ONE sublot. A lot number without its sublot does not identify the material.
    - po_number — purchase order number
-   - code_date — production/pack/code date
+   - code_date — the code/pack date printed on the product. On many dairy COAs this IS the production date; when a COA prints BOTH a production date and a separate code date, they are DIFFERENT fields — do not copy one into the other.
+   - production_date — the date the product was actually made, when the document labels it separately (e.g. "Production Date"). Leave null if the COA prints only a code date.
    - expiration_date — expiration, best-by, use-by, or sell-by date
    - ship_date — date shipped
    - grade — quality grade (e.g., "Grade A", "Grade AA", "US Extra")
@@ -2914,7 +2943,8 @@ FIELD EXTRACTION RULES:
    - lot_number — lot, batch, or run number
    - sub_lot_code — the sub-lot code that QUALIFIES lot_number (labels: "Sub Lot Number", "Sub Lot", "Sublot", "SL"). Usually 2 digits. It is a SEPARATE field: never concatenate it into lot_number and never drop it. Extract it whenever the page prints one — INCLUDING when the page has only ONE lot and ONE sublot.
    - po_number — purchase order number. ONLY populate if an explicit "PO", "P.O.", or "Purchase Order" label is visible in the image. Do NOT infer or fabricate from adjacent columns.
-   - code_date — production/pack/code date
+   - code_date — the code/pack date printed on the product. On many dairy COAs this IS the production date; when a COA prints BOTH a production date and a separate code date, they are DIFFERENT fields — do not copy one into the other.
+   - production_date — the date the product was actually made, when the document labels it separately (e.g. "Production Date"). Leave null if the COA prints only a code date.
    - expiration_date — expiration, best-by, use-by, or sell-by date
    - ship_date — date shipped
    - grade — quality grade (e.g., "Grade A", "Grade AA", "US Extra")
@@ -3415,17 +3445,17 @@ async function runParityMode() {
                 messages: [
                   {
                     role: 'system',
-                    content: prependFilenameHint(
+                    content: dumpPrompt(`parity-${id}-system`, prependFilenameHint(
                       prependAttentionBias(
                         prependReviewerInstructions(buildPrompt(examples, tenantContext), reviewerInstructions),
                         learnedPreferences
                       ),
                       item.file_name
-                    ),
+                    )),
                   },
                   {
                     role: 'user',
-                    content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+                    content: dumpPrompt(`parity-${id}-user`, `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`),
                   },
                 ],
               }),

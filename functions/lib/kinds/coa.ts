@@ -439,7 +439,13 @@ export async function produceCoa(
         subLotCode,
         productId: linkedProductId,
         supplierId,
-        codeDate: approvedFields.code_date || null,
+        // production_date is a FALLBACK for code_date, never a replacement. Most dairy
+        // COAs print one date and it means both; only a document that prints BOTH (e.g.
+        // Andersen's 2026 layout) separates them. Before production_date became a
+        // first-class field it was an ALIAS of code_date, so single-date docs landed in
+        // code_date. Without this fallback those docs would now create lots with a null
+        // code date — a silent regression in lot identity.
+        codeDate: approvedFields.code_date || approvedFields.production_date || null,
         expirationDate: approvedFields.expiration_date || null,
         mfgDate: approvedFields.mfg_date || null,
         source: 'coa',
@@ -696,7 +702,7 @@ export async function produceMultiProductCoa(
           subLotCode,
           productId: perProductId,
           supplierId,
-          codeDate: mergedFields.code_date || null,
+          codeDate: mergedFields.code_date || mergedFields.production_date || null,
           expirationDate: mergedFields.expiration_date || null,
           mfgDate: mergedFields.mfg_date || null,
           source: 'coa',
@@ -1145,7 +1151,7 @@ export async function produceCoaRecords(
         subLotCode: lot.subLotCode,
         productId: perProductId,
         supplierId,
-        codeDate: (mergedFields.code_date as string) || null,
+        codeDate: (mergedFields.code_date as string) || (mergedFields.production_date as string) || null,
         expirationDate: (mergedFields.expiration_date as string) || null,
         mfgDate: (mergedFields.mfg_date as string) || null,
         source: 'coa',
