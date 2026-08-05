@@ -4,6 +4,61 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-08-04/05 HANDOFF — extraction root-cause fixed; TWO AGENTS WERE RUNNING
+
+### DO THIS FIRST
+1. **Two background agents were live when the last session ended.** Their work is NOT committed and
+   may be half-finished in the tree. `git status` first.
+   - **Base-prompt review** of `bin/process-worker` (glossary + FIELD_ALIASES audit, text-vs-VLM
+     duplication, `/no_think` measurement).
+   - **Spark vs Mac A/B** (throughput + real COA accuracy + the Spark VLM question).
+   Re-run either if the tree looks inconsistent; both were read-only against prod.
+2. **`bin/process-worker` is NOT deployed.** `dcff8e1` is committed but the systemd worker is still
+   running the pre-fix code. Deploy = `sudo -n systemctl restart dox-process-worker.service`
+   (bare `systemctl` fails on polkit; `sudo -n` works). Do this once the tree is settled.
+
+### THE ROOT CAUSE THAT WAS FIXED (`dcff8e1`)
+`production_date` was **never a field** — only an alias of `code_date`, with the glossary agreeing
+("code_date — production/pack/code date"). Andersen's 2026 layout prints BOTH, three weeks apart,
+so the schema could not represent them. The model read it right all along; `canonicalizeFields`
+collapsed them. Now first-class, with a downstream fallback in `kinds/coa.ts` so single-date docs
+still populate code_date (else lots get a null code date — silent lot-identity regression).
+
+**The template for finding siblings:** an alias or glossary line that quietly makes two distinct
+real-world things into one field. That is what the base-prompt review is hunting.
+
+### METHOD LESSONS (cost real time today)
+- **Hand-reconstructing the prompt gave FIVE consecutive false negatives.** Use `DUMP_PROMPT_DIR`
+  (new env var on the worker) — it writes the assembled prompt to disk.
+- **Always pull FULL 32-char queue ids from the DB.** Truncated prefixes match nothing and return
+  empty output that reads like a real answer. Made that mistake three times.
+- `NODE_ENV=production` in the shell makes the whole vitest suite fail (React act() in prod build,
+  109 phantom failures). Use `env -u NODE_ENV npx vitest run`. Worth pinning in vitest config.
+- Three separate bugs today were a **name**, not a machine: the router's stale `ajs-mac-mini`, the
+  truncated ids, and the SSH alias bare-name vs FQDN mismatch.
+
+### DGX SPARK — LIVE
+`spark-ba9b.tail162d1e.ts.net`, user `ajconner`, tag:aj-fleet. All 10 install phases green;
+`sm_121` compiles clean on aarch64 + CUDA 13. Serving `Qwen3-VL-32B-spark-q8` (vision tower ON GPU
+— this is what could finally enable `QWEN_VLM_MODE`, off in prod only because vision ran on a CPU)
+and `Qwen3.5-122B-A10B-spark-q5`. Onboarding scripts in `qwen-llm/` are UNCOMMITTED.
+NOT yet in `model-router.yaml` — `bin/spark-router-patch` stages a diff, review before applying.
+
+### OPEN / NEXT
+- **`/no_think`** — the worker disables Qwen's reasoning pass. In isolation it made
+  `production_date` vanish entirely. Global; likely costs accuracy on any inferred field. The
+  review agent was measuring it.
+- **Approve still deletes the R2 object** (reject no longer does, 0083). Blocks re-extraction of
+  historical docs after any extractor fix.
+- **Claims/checklist UI is live and AJ likes it** — but he needs real how-to DOCS, not page
+  headers, before we build further there. Taxonomy P3 (document-side facets + FTS rebuild) is the
+  next build; `plan.md` has the 13-step `document_categories` removal checklist — that table cannot
+  be dropped in isolation, a view reads it lazily and every doc write would fail at runtime.
+- Andersen learned data was cleared (71 examples, 334 picks); backup + rationale in
+  `~/drops/andersen-reset-2026-08-04/`. Re-teach from new-format docs only.
+
+---
+
 ## 2026-08-01/03 MEASUREMENT SESSION — extraction fixed + measured; taxonomy P1/P2 built
 
 Big session. Three threads: **fix the model fleet**, **actually measure extraction**, **start the
