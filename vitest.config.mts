@@ -5,6 +5,21 @@ import url from 'node:url';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
+// A `NODE_ENV=production` in the ambient shell makes React resolve to its
+// production build, where `act()` throws — every React Testing Library render
+// fails with "act(...) is not supported in production builds of React". That
+// is 109 phantom failures across 22 files, none of them real, and it takes the
+// `bin/deploy` e2e gate down with it because the gate inherits the shell env.
+//
+// This bit us twice: once as "the whole suite is broken", once as a blocked
+// deploy that looked like it needed SKIP_E2E. The documented workaround was
+// `env -u NODE_ENV npx vitest run`, which only helps whoever remembers it.
+//
+// A test run is a test run regardless of the ambient value, so pin it here
+// before Vite reads it. Set it explicitly rather than deleting it: some tools
+// treat an unset NODE_ENV as 'development' and change behaviour again.
+process.env.NODE_ENV = 'test';
+
 // Two projects share one Vitest invocation:
 //
 //   1. workers  — the existing backend pool. Runs every `tests/**/*.test.ts`
