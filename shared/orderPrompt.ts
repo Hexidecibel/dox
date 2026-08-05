@@ -471,9 +471,16 @@ Output:
 /**
  * Static preamble — describes the task without enumerating fields. The
  * dynamic field section is slotted in between this and STATIC_PROMPT_BODY.
+ *
+ * NOTE: this used to open with a `/no_think` line (added when the order path
+ * ran on Qwen3-8B). The order path now resolves the `best` tag, i.e.
+ * Qwen3.6-35B-A3B, whose chat template defaults thinking OFF and IGNORES the
+ * directive — measured by direct endpoint probing, identical output and zero
+ * `reasoning_content` with and without it. The real switch is a request-body
+ * field, `chat_template_kwargs: { enable_thinking: true }`. Do not re-add the
+ * string; it only creates the illusion that reasoning is being suppressed here.
  */
-const STATIC_PROMPT_PREAMBLE = `/no_think
-You are an ERP report parser. Extract order AND customer data from the input.
+const STATIC_PROMPT_PREAMBLE = `You are an ERP report parser. Extract order AND customer data from the input.
 The input may be an order email, a PDF order confirmation, or a customer-registry
 spreadsheet (one customer per block, followed by that customer's expected products).
 `;
@@ -508,7 +515,7 @@ export function prependConnectorInstructions(
  * Compose a full Qwen system prompt from a v2 field-mappings config.
  *
  * Structure:
- *   /no_think header + preamble
+ *   static preamble
  *   -> dynamic "Fields to extract" section (per-field with aliases + hints)
  *   -> dynamic "Return JSON in this exact format" block
  *   -> static rules block + few-shot examples A/B/C

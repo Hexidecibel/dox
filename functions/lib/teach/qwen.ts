@@ -55,6 +55,14 @@ export async function callQwenChat(
   const baseUrl = (env.QWEN_URL || 'http://127.0.0.1:9600').replace(/\/+$/, '');
   const timeoutMs = opts.timeoutMs ?? 300_000;
 
+  // The three prompt builders below deliberately do NOT end with a `/no_think`
+  // line any more. Every caller uses the default `best` tag (Qwen3.6-35B-A3B),
+  // whose chat template defaults thinking OFF and ignores the directive —
+  // verified by direct endpoint probing (identical output, zero
+  // `reasoning_content`, with and without). The real switch is a request-body
+  // field: `chat_template_kwargs: { enable_thinking: true }`. Do not re-add it.
+  // (The <think>-stripping below stays: it is cheap and covers a future model
+  // that does emit them.)
   const tag = opts.model ?? 'best';
   const resolution = await resolveModel(tag, env);
 
@@ -277,7 +285,6 @@ export function buildQuestionsPrompt(
     'Skip any issue already answered by the established context above; only ask',
     'about genuine remaining ambiguities.',
     'Do NOT number the questions like a form. Do NOT output JSON. Plain text only.',
-    '/no_think',
   ].join('\n');
 
   return [
@@ -368,7 +375,6 @@ export function buildFollowupPrompt(
     '- If NO, reply with ONE short, grounded follow-up question (plain text)',
     '  targeting the biggest remaining gap. Do not repeat earlier questions.',
     'Do not output JSON. Do not explain your choice.',
-    '/no_think',
   ].join('\n');
 
   return [
@@ -428,7 +434,6 @@ export function buildSynthesisPrompt(
     'Do not restate the established context; output only the supplier-specific',
     'deltas, and do not duplicate instructions already present above.',
     'Return ONLY that JSON object.',
-    '/no_think',
   ].join('\n');
 
   return [

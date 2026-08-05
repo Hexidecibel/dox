@@ -403,7 +403,10 @@ async function maybeQwenJudge(
           {
             role: 'system',
             content:
-              'You audit extracted document fields. Given a field name and sample values, decide if the values are plausible instances of that field. Reply with JSON only: {"plausible": true|false, "reason": "short"}. /no_think',
+              // No trailing ` /no_think`: inert on the Qwen3.6 chat template
+              // (which defaults thinking OFF); the real switch is
+              // chat_template_kwargs.enable_thinking in the request body.
+              'You audit extracted document fields. Given a field name and sample values, decide if the values are plausible instances of that field. Reply with JSON only: {"plausible": true|false, "reason": "short"}.',
           },
           {
             role: 'user',

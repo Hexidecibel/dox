@@ -137,13 +137,57 @@ Output:
  */
 export const DEFAULT_DAIRY_CONTEXT = INDUSTRY_PROMPTS.DAIRY_FOOD;
 
+/**
+ * Strip unfilled editor placeholders out of an industry-context block before it
+ * is sent to the model.
+ *
+ * The industry layer is a WHOLE BLOCK — either a tenant's editable
+ * `extraction_context` (migration 0072) or the DEFAULT_DAIRY_CONTEXT seed below.
+ * There is no per-tenant "org description" field that fills a slot in it, so the
+ * `ORG CONTEXT:` heading and its `[Describe your organization … edit this]` line
+ * are an instruction to the HUMAN editing the template (it is served verbatim as
+ * `default_template` so the editor UI can seed itself). Unedited — the current
+ * state for every tenant — that bracketed instruction ships straight to the
+ * model on every call. Keep the affordance in the template; drop it from the
+ * wire.
+ *
+ * DELIBERATELY CONSERVATIVE — it drops WHOLE paragraphs, never individual
+ * lines. A paragraph is removed only when every one of its lines is blank, a
+ * heading (`Something:`), or a prose placeholder, AND at least one line is a
+ * placeholder. Line-level deletion was tried first and was WRONG: the regex
+ * also matched `["Standard Plate Count", "AOAC 989.10", ...]` inside this
+ * file's own worked-example JSON and silently deleted a row of it.
+ *
+ * A "prose placeholder" is a whole line that is entirely `[ ... ]` whose body
+ * starts with a letter and reads as prose (>= 3 words). JSON array lines start
+ * with `"`, `{`, `[` or a digit and are therefore never candidates.
+ *
+ * KEEP IN SYNC with `stripUnfilledPlaceholders` in bin/process-worker.
+ */
+export function stripUnfilledPlaceholders(context: string): string {
+  if (!context) return context;
+  const isPlaceholder = (line: string): boolean => {
+    const m = line.trim().match(/^\[([A-Za-z][^\]]*)\]$/);
+    return !!m && m[1].trim().split(/\s+/).length >= 3;
+  };
+  const isHeading = (line: string): boolean => /:\s*$/.test(line.trim());
+  return context
+    .split(/\n{2,}/)
+    .filter((block) => {
+      const lines = block.split('\n');
+      if (!lines.some(isPlaceholder)) return true;                     // nothing to strip
+      return !lines.every((l) => !l.trim() || isHeading(l) || isPlaceholder(l));
+    })
+    .join('\n\n');
+}
+
 function buildPrompt(options?: { examples?: Array<{ text: string; result: string }>; industryPrompt?: string }): string {
   const { examples, industryPrompt = INDUSTRY_PROMPTS.DAIRY_FOOD } = options || {};
 
   let prompt = BASE_PROMPT;
 
   if (industryPrompt) {
-    prompt += '\n' + industryPrompt;
+    prompt += '\n' + stripUnfilledPlaceholders(industryPrompt);
   }
 
   if (examples && examples.length > 0) {
@@ -239,8 +283,13 @@ export async function extractFields(
         messages: [
           { role: 'system', content: systemPrompt },
           {
+            // NO ` /no_think` SUFFIX — do not re-add it. Measured INERT on the
+            // `best` chain (Qwen3.6-35B-A3B): identical output and zero
+            // `reasoning_content` with and without it, because that chat
+            // template defaults thinking OFF. The real switch is a request-body
+            // field: `chat_template_kwargs: { enable_thinking: true }`.
             role: 'user',
-            content: `${options?.fileName ? `<filename>${options.fileName}</filename>\n` : ''}<document>\n${text}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+            content: `${options?.fileName ? `<filename>${options.fileName}</filename>\n` : ''}<document>\n${text}\n</document>\n\nExtract ALL structured data from this document. Return JSON only.`,
           },
         ],
       }),
@@ -435,8 +484,10 @@ export async function parseNaturalQuery(
         messages: [
           { role: 'system', content: systemPrompt },
           {
+            // No ` /no_think` — inert on the `best` chain (Qwen3.6 defaults
+            // thinking OFF); the real switch is chat_template_kwargs.enable_thinking.
             role: 'user',
-            content: `Parse this search query: "${query}" /no_think`,
+            content: `Parse this search query: "${query}"`,
           },
         ],
       }),

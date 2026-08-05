@@ -984,6 +984,20 @@ export async function discoverFromEmail(
 // Qwen discovery prompt + caller
 // =============================================================================
 
+/**
+ * DELIBERATELY still opens with `/no_think` — the one place in the codebase
+ * that does.
+ *
+ * The directive was removed everywhere else because it is provably INERT on the
+ * `best` chain (Qwen3.6-35B-A3B ignores it; its template defaults thinking OFF,
+ * and the real switch is `chat_template_kwargs: { enable_thinking: true }` in
+ * the request body). This path is the exception: it resolves the **`fast`** tag,
+ * whose chain falls back to **Qwen3-8B** — a Qwen3-generation model that DOES
+ * honour the `/think` / `/no_think` soft switch. Dropping it here could turn
+ * reasoning on during a user-facing wizard call that runs under a tight
+ * gateway timeout, and that combination has never been measured. Cheap to keep,
+ * unmeasured to remove.
+ */
 export function getSchemaDiscoveryPrompt(): string {
   return `/no_think
 You are a data schema analyzer, NOT a data extractor. Given a sample of an

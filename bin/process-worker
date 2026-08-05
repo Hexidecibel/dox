@@ -670,11 +670,18 @@ function prependReviewerInstructions(prompt, instructions) {
  * the worker never sends — that mistake cost a long investigation, hence this.
  * Returns its input unchanged, so it is inert when the env var is absent.
  */
+const dumpPromptSeq = new Map();
 function dumpPrompt(label, content) {
   const dir = process.env.DUMP_PROMPT_DIR;
   if (!dir) return content;
   try {
     fs.mkdirSync(dir, { recursive: true });
+    // A multi-page COA calls the model once PER PAGE with the same label. Without
+    // a per-label counter the last page silently overwrites the earlier ones and
+    // a replay harness ends up testing page N while believing it tests page 1.
+    const n = (dumpPromptSeq.get(label) || 0) + 1;
+    dumpPromptSeq.set(label, n);
+    if (n > 1) label = `${label}.${n}`;
     fs.writeFileSync(path.join(dir, `${label}.txt`), content);
     // stderr, not stdout: parity dry-run mode writes JSONL to stdout and a
     // stray log line there corrupts every downstream parse.
@@ -1600,8 +1607,10 @@ async function processOrderItem(item) {
 // Shipment extraction path (Phase P3)
 // =============================================================================
 
-const SHIPMENT_PROMPT = `/no_think
-You are a shipment/fulfillment report parser. Extract shipment line records from the input.
+// No leading `/no_think`: this path resolves the `best` tag (Qwen3.6-35B-A3B),
+// whose chat template defaults thinking OFF and ignores the directive entirely.
+// The real switch is chat_template_kwargs.enable_thinking in the request body.
+const SHIPMENT_PROMPT = `You are a shipment/fulfillment report parser. Extract shipment line records from the input.
 The input may be a shipping manifest, fulfillment export, BOL detail, or a spreadsheet of shipped lots.
 
 Extract every shipment line into a "shipments" array. Each shipment object has:
@@ -2069,8 +2078,17 @@ async function processCoaItem(item) {
                   )),
                 },
                 {
+                  // NO ` /no_think` SUFFIX — do not re-add it. It was measured
+                  // INERT on the `best` chain (Qwen3.6-35B-A3B): with it and
+                  // without it the endpoint returns identical output and zero
+                  // `reasoning_content`, because that chat template defaults
+                  // thinking OFF already. The REAL switch is a request-body
+                  // field, not prompt text:
+                  //     chat_template_kwargs: { enable_thinking: true }
+                  // Believing the suffix was suppressing reasoning has cost two
+                  // separate multi-hour investigations. See $S/ABLATION-REPORT.md.
                   role: 'user',
-                  content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`,
+                  content: `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only.`,
                 },
               ],
             }),
@@ -2827,25 +2845,110 @@ Output:
   "document_type": "Certificate of Analysis"
 }`;
 
-function buildPrompt(examples = [], tenantContext = null) {
-  let prompt = BASE_PROMPT + '\n\n' + (tenantContext || DAIRY_FOOD_INDUSTRY_PROMPT);
+/**
+ * Strip unfilled editor placeholders out of an industry-context block before it
+ * is sent to the model.
+ *
+ * WHY: the "industry layer" of the system prompt is either the tenant's own
+ * editable `extraction_context` (migration 0072) or, when they have not written
+ * one, the hardcoded DAIRY_FOOD_INDUSTRY_PROMPT below. It is a WHOLE BLOCK that
+ * gets replaced — there is no per-tenant "org description" field that fills a
+ * slot in it. The `ORG CONTEXT:` heading plus its
+ * `[Describe your organization … edit this]` line are therefore an instruction
+ * to the HUMAN editing that template (it is served verbatim as
+ * `default_template` by GET /api/tenant-extraction-context so the editor UI can
+ * seed itself). Unedited — the current state for every tenant — that bracketed
+ * instruction-to-the-user ships straight to the model on every single call.
+ *
+ * So: keep the affordance in the template, drop it from the wire.
+ *
+ * DELIBERATELY CONSERVATIVE — it drops WHOLE paragraphs, never individual
+ * lines. A paragraph is removed only when every one of its lines is blank, a
+ * heading (`Something:`), or a prose placeholder, AND at least one line is a
+ * placeholder. Line-level deletion was tried first and was WRONG: the regex
+ * also matched `["Standard Plate Count", "AOAC 989.10", ...]` inside this
+ * file's own worked-example JSON and silently deleted a row of it. That was
+ * caught by diffing DUMP_PROMPT_DIR output against the previous arm's bytes —
+ * do that before trusting any change to this function.
+ *
+ * A "prose placeholder" is a whole line that is entirely `[ ... ]` whose body
+ * starts with a letter and reads as prose (>= 3 words). JSON array lines start
+ * with `"`, `{`, `[` or a digit and are therefore never candidates.
+ */
+function stripUnfilledPlaceholders(context) {
+  if (!context || typeof context !== 'string') return context;
+  const isPlaceholder = (line) => {
+    const m = line.trim().match(/^\[([A-Za-z][^\]]*)\]$/);
+    return !!m && m[1].trim().split(/\s+/).length >= 3;
+  };
+  const isHeading = (line) => /:\s*$/.test(line.trim());
+  return context
+    .split(/\n{2,}/)
+    .filter((block) => {
+      const lines = block.split('\n');
+      if (!lines.some(isPlaceholder)) return true;                     // nothing to strip
+      return !lines.every((l) => !l.trim() || isHeading(l) || isPlaceholder(l));
+    })
+    .join('\n\n');
+}
 
-  if (examples.length > 0) {
-    prompt += '\n\nPREVIOUS CORRECTIONS FOR THIS SUPPLIER/DOCUMENT TYPE:';
-    prompt += '\nLearn from these past corrections. The "corrected" output is what the human verified as correct.\n';
+/**
+ * Hard ceiling on the assembled `PREVIOUS CORRECTIONS` few-shot block.
+ *
+ * `fetchExtractionExamples` already caps the COUNT at 3 and truncates each
+ * example's INPUT to 500 chars — but the `corrected_output` side is spliced in
+ * whole, and that is a full extraction JSON including every test-results table.
+ * One multi-record COA correction can therefore be tens of KB on its own, with
+ * nothing in the path to stop it. Measured on the current corpus the whole block
+ * runs 2.1–3.8 KB, so this budget is a no-op today; it exists so a single fat
+ * correction cannot quietly eat the context window.
+ */
+const FEWSHOT_MAX_CHARS = 8000;
 
-    for (const ex of examples) {
-      const inputSnippet = (ex.input_text || '').substring(0, 500);
-      const corrected = ex.corrected_output || ex.ai_output || '{}';
+/**
+ * Render the shared `PREVIOUS CORRECTIONS FOR THIS SUPPLIER/DOCUMENT TYPE`
+ * few-shot block, bounded by FEWSHOT_MAX_CHARS. Returns '' when there is
+ * nothing to say. Used by both the text and VLM prompt builders so the two
+ * cannot drift.
+ */
+function buildFewShotBlock(examples = []) {
+  if (!examples.length) return '';
 
-      prompt += `\nExample input (truncated):\n${inputSnippet}\n`;
-      prompt += `Corrected extraction:\n${corrected}\n`;
+  const header =
+    '\n\nPREVIOUS CORRECTIONS FOR THIS SUPPLIER/DOCUMENT TYPE:' +
+    '\nLearn from these past corrections. The "corrected" output is what the human verified as correct.\n';
+  const footer =
+    '\nUse these examples to guide your extraction. Match the field names and formatting from the corrections.';
+
+  let body = '';
+  let dropped = 0;
+  for (const ex of examples) {
+    const inputSnippet = (ex.input_text || '').substring(0, 500);
+    const corrected = ex.corrected_output || ex.ai_output || '{}';
+    const chunk = `\nExample input (truncated):\n${inputSnippet}\nCorrected extraction:\n${corrected}\n`;
+    // Never truncate a correction mid-JSON — a malformed example is worse than
+    // no example. Skip whole examples that do not fit.
+    if (header.length + body.length + chunk.length + footer.length > FEWSHOT_MAX_CHARS) {
+      dropped++;
+      continue;
     }
-
-    prompt += '\nUse these examples to guide your extraction. Match the field names and formatting from the corrections.';
+    body += chunk;
   }
 
-  return prompt;
+  if (dropped) {
+    console.warn(`  Few-shot block: dropped ${dropped} oversized example(s) (>${FEWSHOT_MAX_CHARS} char budget)`);
+  }
+  if (!body) return '';
+  return header + body + footer;
+}
+
+function buildPrompt(examples = [], tenantContext = null) {
+  return (
+    BASE_PROMPT +
+    '\n\n' +
+    stripUnfilledPlaceholders(tenantContext || DAIRY_FOOD_INDUSTRY_PROMPT) +
+    buildFewShotBlock(examples)
+  );
 }
 
 // === VLM (Vision-Language Model) dual-run helpers ===
@@ -2994,21 +3097,13 @@ Return JSON with:
   "document_type": "Certificate of Analysis" | "Bill of Lading" | etc.
 }`;
 
-  let prompt = VLM_HEADER + '\n\n' + (tenantContext || DAIRY_FOOD_INDUSTRY_PROMPT);
-
-  if (examples.length > 0) {
-    prompt += '\n\nPREVIOUS CORRECTIONS FOR THIS SUPPLIER/DOCUMENT TYPE:';
-    prompt += '\nLearn from these past corrections. The "corrected" output is what the human verified as correct.\n';
-
-    for (const ex of examples) {
-      const inputSnippet = (ex.input_text || '').substring(0, 500);
-      const corrected = ex.corrected_output || ex.ai_output || '{}';
-      prompt += `\nExample input (truncated):\n${inputSnippet}\n`;
-      prompt += `Corrected extraction:\n${corrected}\n`;
-    }
-
-    prompt += '\nUse these examples to guide your extraction. Match the field names and formatting from the corrections.';
-  }
+  // Same industry-layer + few-shot assembly as the text path (buildPrompt) —
+  // shared helpers so the two prompt surfaces cannot drift apart.
+  const prompt =
+    VLM_HEADER +
+    '\n\n' +
+    stripUnfilledPlaceholders(tenantContext || DAIRY_FOOD_INDUSTRY_PROMPT) +
+    buildFewShotBlock(examples);
 
   return prompt;
 }
@@ -3455,7 +3550,10 @@ async function runParityMode() {
                   },
                   {
                     role: 'user',
-                    content: dumpPrompt(`parity-${id}-user`, `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only. /no_think`),
+                    // No ` /no_think` — inert on the `best` chain; the real
+                    // switch is chat_template_kwargs.enable_thinking. Must stay
+                    // byte-identical to the production path above or parity lies.
+                    content: dumpPrompt(`parity-${id}-user`, `<document>\n${llmText}\n</document>\n\nExtract ALL structured data from this document. Return JSON only.`),
                   },
                 ],
               }),

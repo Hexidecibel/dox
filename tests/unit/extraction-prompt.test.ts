@@ -8,8 +8,6 @@
  * lock in the hard rules that fixed real hallucinations observed in the
  * end-to-end PDF test run on 2026-04-09:
  *
- *   - `/no_think` directive: disables Qwen3-8B's reasoning preamble so the
- *     request completes under the 60s llama-swap gateway timeout.
  *   - "Do not fabricate fields" rule: prevents po_number from being filled
  *     with values from adjacent columns when the source has no PO column.
  *   - "Customer names never end in digits" rule: prevents weight/count
@@ -19,15 +17,22 @@
 
 import { describe, it, expect } from 'vitest';
 import { getDefaultParsingPrompt, sanitizeCustomerName } from '../../shared/orderPrompt';
+import { stripUnfilledPlaceholders, DEFAULT_DAIRY_CONTEXT } from '../../functions/lib/llm';
 
 describe('getDefaultParsingPrompt — hard rules', () => {
   const prompt = getDefaultParsingPrompt();
 
-  it('begins with the /no_think directive (Qwen3-8B reasoning suppression)', () => {
-    // The very first bytes of the system message must be `/no_think` so
-    // llama-swap's template handler picks it up before the model generates
-    // any thinking tokens.
-    expect(prompt.startsWith('/no_think')).toBe(true);
+  it('does NOT carry a /no_think directive (proven inert on the `best` chain)', () => {
+    // Inverted 2026-08-05. The order path resolves the `best` tag, i.e.
+    // Qwen3.6-35B-A3B, whose chat template defaults thinking OFF and IGNORES
+    // `/no_think` — direct endpoint probing showed byte-identical output and
+    // zero `reasoning_content` with and without the string. The real switch is
+    // a request-body field, `chat_template_kwargs: { enable_thinking: true }`.
+    // This assertion is now a TRAP GUARD: it fails if anyone re-adds the
+    // string believing it suppresses reasoning here. (The connector
+    // schema-discovery prompt legitimately keeps it — that path uses the
+    // `fast` chain, which can fall back to Qwen3-8B, which does honour it.)
+    expect(prompt).not.toContain('/no_think');
   });
 
   it('contains an explicit anti-hallucination rule for missing fields', () => {
@@ -150,5 +155,68 @@ describe('sanitizeCustomerName — post-parse safety net', () => {
     // ever needs to preserve a trailing year it must be attached without
     // whitespace ("BRAND2024").
     expect(sanitizeCustomerName('HERITAGE BRAND 2024')).toBe('HERITAGE BRAND');
+  });
+});
+
+describe('stripUnfilledPlaceholders — industry-context sanitizer', () => {
+  // The tenant "extraction context" (migration 0072) is a WHOLE editable block
+  // that replaces DEFAULT_DAIRY_CONTEXT; there is no per-tenant org-description
+  // field that fills a slot. `ORG CONTEXT:` + its `[Describe your organization
+  // … edit this]` line is an instruction to the human EDITING that template
+  // (served as `default_template` so the editor UI can seed itself) — and,
+  // unedited, it shipped verbatim to the model on every extraction call.
+  // These tests lock in: gone from the wire, still present in the template.
+
+  const stripped = stripUnfilledPlaceholders(DEFAULT_DAIRY_CONTEXT);
+
+  it('removes the unfilled ORG CONTEXT block from the assembled context', () => {
+    expect(DEFAULT_DAIRY_CONTEXT).toContain('ORG CONTEXT:');
+    expect(stripped).not.toContain('ORG CONTEXT:');
+    expect(stripped).not.toContain('[Describe your organization');
+  });
+
+  it('leaves the template itself intact (the editor affordance survives)', () => {
+    // Only the assembled prompt is sanitized. The seed the UI shows must still
+    // prompt the tenant to describe their org.
+    expect(DEFAULT_DAIRY_CONTEXT).toContain('[Describe your organization');
+  });
+
+  it('does NOT eat JSON rows from the worked example', () => {
+    // REGRESSION: the first implementation stripped any whole line matching
+    // /^\s*\[[^\]]*\]\s*$/, which also matched this row of the example
+    // extraction's `tables[].rows` and silently deleted it. Caught only by
+    // diffing real DUMP_PROMPT_DIR bytes. Never remove this assertion.
+    expect(stripped).toContain('["Standard Plate Count", "AOAC 989.10", "<20,000", "4,500", "CFU/g", "Pass"]');
+    expect(stripped).toContain('["Fat Content", "SMEDP 15.122", ">80%", "81.2", "%", "Pass"]');
+  });
+
+  it('keeps every substantive block of the dairy context', () => {
+    expect(stripped).toContain('INDUSTRY CONTEXT — Dairy & Food:');
+    expect(stripped).toContain('DAIRY COA DOMAIN RULES');
+    expect(stripped).toContain('EXAMPLE — Dairy COA extraction:');
+  });
+
+  it('drops only the placeholder paragraph, nothing else', () => {
+    const removed = DEFAULT_DAIRY_CONTEXT.length - stripped.length;
+    // heading + placeholder line + the blank line that separated them
+    expect(removed).toBeGreaterThan(200);
+    expect(removed).toBeLessThan(320);
+  });
+
+  it('preserves a block the tenant actually filled in', () => {
+    const filled = 'ORG CONTEXT:\nWe are a dairy distributor.\n\nOTHER:\n- rule';
+    expect(stripUnfilledPlaceholders(filled)).toBe(filled);
+  });
+
+  it('preserves a paragraph that mixes real prose with a leftover placeholder', () => {
+    // Conservative by design: if the tenant wrote anything real in the block we
+    // keep the whole block rather than guess which line they meant.
+    const mixed = 'ORG CONTEXT:\n[Describe your organization here please]\nWe are a dairy distributor.';
+    expect(stripUnfilledPlaceholders(mixed)).toBe(mixed);
+  });
+
+  it('is a no-op on empty / whitespace input', () => {
+    expect(stripUnfilledPlaceholders('')).toBe('');
+    expect(stripUnfilledPlaceholders('   ')).toBe('   ');
   });
 });

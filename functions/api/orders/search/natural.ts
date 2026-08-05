@@ -99,8 +99,10 @@ async function parseOrderQuery(
         messages: [
           { role: 'system', content: systemPrompt },
           {
+            // No ` /no_think` — inert on the `best` chain (Qwen3.6 defaults
+            // thinking OFF); the real switch is chat_template_kwargs.enable_thinking.
             role: 'user',
-            content: `Parse this search query: "${query}" /no_think`,
+            content: `Parse this search query: "${query}"`,
           },
         ],
       }),

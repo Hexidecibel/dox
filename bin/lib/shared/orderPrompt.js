@@ -484,8 +484,7 @@ Output:
   ],
   "customers": []
 }`;
-var STATIC_PROMPT_PREAMBLE = `/no_think
-You are an ERP report parser. Extract order AND customer data from the input.
+var STATIC_PROMPT_PREAMBLE = `You are an ERP report parser. Extract order AND customer data from the input.
 The input may be an order email, a PDF order confirmation, or a customer-registry
 spreadsheet (one customer per block, followed by that customer's expected products).
 `;
