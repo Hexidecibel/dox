@@ -54,6 +54,15 @@ const { parseCSVAttachment } = require('./lib/shared/orderParse');
 // CoaRecordsPayload across chunk boundaries (the LLM is blind across chunks).
 // Used in shadow mode by processCoaItem; gated by COA_RECORDS_MODE.
 const { mergeCoaRecords } = require('./lib/coaRecords');
+// Geometry-aware PDF text serialization + the broken-encoding guard. See
+// shared/pdfTextSerializer.ts for the measurement behind both, and
+// serializePdfGeometry() below for how they attach to the extraction path.
+const {
+  serializePages: serializePdfPages,
+  shouldUseSerializedPages,
+  looksLikeBrokenEncoding,
+  countLetters,
+} = require('./lib/shared/pdfTextSerializer');
 
 // Increase headers timeout for slow LLM inference (default is 300s, we need 15min)
 const llmDispatcher = new Agent({
@@ -1063,6 +1072,74 @@ async function docxToPages(fileBuffer) {
 }
 
 // =============================================================================
+// Geometry-aware PDF text serialization
+// =============================================================================
+
+/**
+ * Re-read a PDF's text layer WITH its geometry and return `{ text, pages }` in
+ * the same shape the collapsed path produces — or `null` to mean "keep what you
+ * already had".
+ *
+ * WHY IT EXISTS: `unpdf.extractText()` hands back per-page strings in
+ * content-stream order, and the pipeline then collapses all whitespace. For a
+ * single-page document (99% of the corpus) the model is fed
+ * `text.substring(0, 6000)` — the whole page as ONE LINE, with rows and columns
+ * gone. `page.getTextContent()` carries the x/y of every item, so the page can
+ * be rebuilt instead. Measured +6.2pp accuracy on documents with a text layer.
+ * The layout logic lives in shared/pdfTextSerializer.ts.
+ *
+ * COST: the layout maths is ~0.1 ms/document, but this re-parses the PDF, so
+ * the honest figure is the whole pass — ~11 ms/document measured over 25 corpus
+ * PDFs (vs ~15 ms for the extractText call already in the path). Against ~35 s
+ * of inference per document that is 0.03%. It is not free, it is just cheap.
+ *
+ * WHY IT RUNS LAST: this is applied ON TOP of the finished
+ * unpdf -> isTextGarbled -> OCR sequence, never in place of it. So the OCR
+ * routing decision is still made against the OLD text, byte for byte — and when
+ * the guard declines, this function is a complete no-op and behaviour is
+ * exactly what it was before.
+ *
+ * WHAT THE GUARD IS FOR: documents with a broken `ToUnicode` CMap emit
+ * Private-Use-Area codepoints. `extractText()` renders those as whitespace (so
+ * OCR fires and works); `getTextContent()` returns them raw, and serializing
+ * them produces ~1000 characters with zero letters — non-empty, so OCR would be
+ * silently suppressed and the model handed garbage. That destroyed 6 of 99
+ * documents in the scale A/B (9-11 fields -> `{}`). `shouldUseSerializedPages`
+ * is what stops it. Declining is always the status quo, never a failure.
+ *
+ * NOTE the missing `.replace(/\s+/g, ' ')`: preserving newlines is the point.
+ * The 100 000-char cap is kept so nothing downstream sees a longer string than
+ * it used to.
+ */
+async function serializePdfGeometry(fileBuffer, fileName) {
+  try {
+    const { getDocumentProxy } = await import('unpdf');
+    const doc = await getDocumentProxy(new Uint8Array(fileBuffer));
+    const pagesItems = [];
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const tc = await page.getTextContent();
+      pagesItems.push((tc && tc.items) || []);
+    }
+    const pages = serializePdfPages(pagesItems);
+    if (!shouldUseSerializedPages(pages)) {
+      const joined = pages.join('\n');
+      const reason = looksLikeBrokenEncoding(joined)
+        ? `broken encoding (${joined.length} chars, ${countLetters(joined)} letters) — leaving the OCR path alone`
+        : 'no text items (image-only PDF)';
+      console.log(`  [serialize] declined for ${fileName}: ${reason}`);
+      return null;
+    }
+    return { pages, text: pages.join('\n').substring(0, 100000) };
+  } catch (err) {
+    // Never let a layout failure cost us an extraction — the collapsed text
+    // layer the caller already has is a perfectly good fallback.
+    console.warn(`  [serialize] failed for ${fileName}: ${err.message} (keeping the collapsed text layer)`);
+    return null;
+  }
+}
+
+// =============================================================================
 // Shared text/format extraction (order + shipment paths)
 // =============================================================================
 
@@ -1082,6 +1159,9 @@ async function extractTextAndPages(item, fileBuffer, fileBufferCopy) {
   let pages = [];
 
   if (item.mime_type === 'application/pdf') {
+    // Copy the bytes BEFORE unpdf touches them — extractText detaches the
+    // ArrayBuffer it is given, and the geometry pass needs its own view.
+    const geomBuffer = fileBuffer.slice(0);
     try {
       const { extractText } = await import('unpdf');
       const result = await extractText(new Uint8Array(fileBuffer), { mergePages: false });
@@ -1105,6 +1185,15 @@ async function extractTextAndPages(item, fileBuffer, fileBufferCopy) {
         text = ocrText.substring(0, 100000);
         pages = [text];
       }
+    }
+
+    // Geometry-aware re-serialization, applied LAST so the OCR routing above is
+    // decided on the original text exactly as before. No-op when the guard
+    // declines. See serializePdfGeometry().
+    const geom = await serializePdfGeometry(geomBuffer, item.file_name);
+    if (geom) {
+      text = geom.text;
+      pages = geom.pages;
     }
   } else if (
     item.mime_type === 'text/plain' ||
@@ -1845,6 +1934,9 @@ async function processCoaItem(item) {
     const fileBufferForVlm = fileBuffer.slice(0);
 
     if (item.mime_type === 'application/pdf') {
+      // Copy the bytes BEFORE unpdf touches them — extractText detaches the
+      // ArrayBuffer it is given, and the geometry pass needs its own view.
+      const geomBuffer = fileBuffer.slice(0);
       try {
         const { extractText } = await import('unpdf');
         // mergePages: false → array of per-page strings so the chunker can
@@ -1889,6 +1981,20 @@ async function processCoaItem(item) {
           text = ocrText.substring(0, 100000);
           pages = [text];
         }
+      }
+
+      // Geometry-aware re-serialization, applied LAST so the isTextGarbled and
+      // OCR decisions above are made against the original text exactly as they
+      // were before. When the broken-encoding guard declines this is a complete
+      // no-op. See serializePdfGeometry().
+      const geom = await serializePdfGeometry(geomBuffer, item.file_name);
+      if (geom) {
+        console.log(
+          `  Geometry serialization applied: ${pages.length}p/${(text || '').length}ch ` +
+          `-> ${geom.pages.length}p/${geom.text.length}ch`
+        );
+        text = geom.text;
+        pages = geom.pages;
       }
     } else if (
       item.mime_type === 'text/plain' ||
