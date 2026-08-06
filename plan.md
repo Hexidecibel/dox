@@ -46,6 +46,84 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### COA extraction — deferred items after the 2026-08-04/05 measurement sessions
+
+**Status:** planned (2026-08-05). The extraction workstream is otherwise CLOSED — geometry
+serialization, the broken-encoding guard, `product_code` grounding, the Spark/Q8 router fix,
+the VLM startup guard and source-bundle retention are all shipped, deployed and verified on
+real documents. Evidence lives in the session reports: `SCALE-AB-REPORT.md` (n=99, the
+authoritative one), `PORT-REPORT.md`, `KINDS-FTS-REPORT.md`, `HARDWARE-REPORT.md`,
+`SERIALIZATION-REPORT.md`, `CHANDRA-REPORT.md`, `HYBRID-REPORT.md`, `ABLATION-REPORT.md`.
+Summary + numbers in `MODELS.md`.
+
+**1. The serializer smashes some real words together (KNOWN DEFECT, LIVE).**
+`WITHOUT PRIOR WRITTEN APPROVAL` -> `WRITTENAPPROVAL`; `IS REPRESENTATIVE OF` ->
+`REPRESENTATIVEOF`. The column-gap threshold reads those inter-word gaps as sub-word gaps.
+Measured rate: **2 genuine false joins in 70 documents against 209 genuine token repairs
+(~100:1 in favour)**, so the win holds — but this is a NEW failure mode in the OPPOSITE
+direction from the one serialization fixes, and it degrades what the MODEL reads, not just
+the search index. It appears in neither SERIALIZATION-REPORT nor PORT-REPORT; only the
+FTS/kinds validation caught it.
+*Likely fix:* scale the word-gap threshold by font size. The ROW tolerance in
+`shared/pdfTextSerializer.ts` already scales this way; the COLUMN gap does not.
+*Validation is cheap:* the 99-document arm already exists — re-run and diff.
+
+**2. One production order document carries a fabrication that serialization fixes.**
+The single order PDF in prod (8 of the 9 orders are `.docx` and never touch the serializer;
+there are 0 shipments) has `"customer_name": "PARTNERS 360"` stored — a Cube column welded
+onto a name by the OLD flattened text. Re-extraction produces 12/12 fully-correct records
+against 10/13. One `bin/reprocess-queue --item <id> --remote --apply` fixes it.
+
+**3. Watch record counts on the FIRST real shipment PDF.**
+There are ZERO shipment documents in production, so shipment extraction under serialization
+could only be probed synthetically (63 real COAs through `processShipmentItem`). Records went
+50 -> 37 with 8 items dropping to zero — but those inputs are COAs, so `{"shipments": []}` is
+arguably the CORRECT answer and the flattened arm was hallucinating shipment lines out of a
+COA. The mechanism was checked, not assumed: it is the multi-line layout making the model
+structure-aware, not header/table block separation. **Do not roll back on this.** But the same
+conservatism on a real bill of lading with a header PO could drop every line.
+
+**4. Two duplicate PDF extractors.** `extractTextAndPages()` and the inline extractor in
+`processCoaItem()` both do PDF text extraction; the COA path production actually runs is the
+inline one, and every one of the 99 validation documents went through the other. It was
+closed by a live smoke test rather than by unifying them. Unifying is the real fix.
+
+**5. The narrow OCR fallback (~4% of corpus) is designed but not built.** Serialization cannot
+help image-only letterheads (the `C2#` / Savencia class) or broken-ToUnicode PDFs — those
+pixels/letters are genuinely not in the file. Routing signals exist and were validated
+(`textqual3.js`: reading-order disorder + masthead void); Chandra OCR 2 ties the serializer on
+accuracy at ~100 s/page, so it is worth paying ONLY for that ~4%. **Licence needs a decision
+first:** modified OpenRAIL-M, free under $2M revenue, "not competitively with our API".
+
+**6. The measurement harness still lives in `/tmp` and will evaporate.** It found a dead prompt
+string, broke a hardware confound, caught a fabricated record and found the destroyed text
+layer. Per the scripts-first rule it belongs in `bin/`: the parity runner, the prompt-mutation
+hook, the text-override hook, the serializer bench, the quality detector — and ONE grader
+(`spark-grade.js` and `ablate-grade.js` both score a MISSING records payload as "1 record",
+which flatters a model that emitted nothing; `chandra-grade.js` is the fixed one).
+
+**7. Ground truth is 33 labelled documents; ~436 are now reachable.** The corpus unlock
+(queue -> `documents.external_ref` -> `document_versions.r2_key`) made the whole approved
+corpus fetchable. Stratify by SUPPLIER — text-layer quality is a property of the PDF
+generator, and cohorts are emphatically bimodal (Country Morning 0/37 vs Schreiber 5/5).
+Caveat: approved documents passed the human gate, so the sample is slightly optimistic
+(selection bias measured at ~2.5 pts previously).
+
+**8. Multi-page BUNDLES remain unmeasured across three studies.** 99.1% of the gradeable
+corpus is single-page. Source-bundle retention now ships, so the evidence ACCUMULATES from
+2026-08-05 forward instead of being destroyed at approve — but it needs real multi-page
+uploads before it can be measured. Worth asking AJ to send one deliberately.
+
+**9. Two fabrications are FLAGGED, not PREVENTED.** `product_code` copied from a few-shot
+example onto a document whose cell is blank (15/670 corpus-wide, 2.2% — the single largest
+failing invariant), and `lot_number` read out of the FILENAME. Both now surface as inline
+review warnings via `product_code_in_text` / `lot_in_text`. Prevention would mean retiring the
+few-shot block (which is the only consumer of `extraction_examples`, i.e. the reviewer-
+correction loop) or prompt-wrestling a behaviour the 122B shares identically — so catching at
+the gate was chosen deliberately. Note grounding is a FLOOR on the error rate, not accuracy:
+a value that IS on the page but belongs to a different line item passes every check.
+
+
 ### Extraction defects confirmed by the Q4/Q8 A/B — two named, quant-proof gaps
 
 **Status:** planned (2026-07-30). Evidence:

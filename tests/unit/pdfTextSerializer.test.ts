@@ -344,3 +344,52 @@ describe('bin/process-worker wiring', () => {
     );
   });
 });
+
+describe('word gap scales with LOCAL type size, not the page median', () => {
+  // THE FALSE-JOIN DEFECT. wordGap was measured against the PAGE's median glyph
+  // height, so every run of text SMALLER than the page's typical type got
+  // under-spaced: a genuine inter-word space in 6pt legal print is narrower than
+  // 0.12 x the median of a page whose body is 10pt. Production output showed
+  // `WITHOUT PRIOR WRITTEN APPROVAL` -> `WRITTENAPPROVAL` and
+  // `IS REPRESENTATIVE OF` -> `REPRESENTATIVEOF` — a new failure mode in the
+  // OPPOSITE direction from the smashing this module exists to fix, and one that
+  // degrades what the MODEL reads, not just the search index.
+
+  it('keeps small-print words apart on a page whose median type is larger', () => {
+    // Page median is driven to 20 by the body rows; the footer is 5pt.
+    // Footer word gap is 0.5pt = 0.10 x local height (spaced, > 0.12? no —
+    // use a gap that is clearly a word space locally but far below page-median
+    // scaling, which is exactly the failing case).
+    const page = serializePageItems([
+      item('BODY', 50, 700, 80, 20),
+      item('TEXT', 140, 700, 80, 20),
+      item('WRITTEN', 50, 600, 20, 5),
+      item('APPROVAL', 71.5, 600, 22, 5), // 1.5pt gap = 0.30 x 5pt local height
+    ]);
+    expect(page).toContain('WRITTEN APPROVAL');
+    expect(page).not.toContain('WRITTENAPPROVAL');
+  });
+
+  it('still joins genuine intra-word fragments in small print', () => {
+    // Kerning splits inside one word produce near-zero gaps; those must NOT
+    // become spaces or the fix would trade one smashing defect for another.
+    const page = serializePageItems([
+      item('BODY', 50, 700, 80, 20),
+      item('APPRO', 50, 600, 15, 5),
+      item('VAL', 65.1, 600, 9, 5), // 0.1pt gap = 0.02 x local height
+    ]);
+    expect(page).toContain('APPROVAL');
+  });
+
+  it('leaves COLUMN detection on the page median', () => {
+    // Whether two runs are separate columns is a property of the page layout,
+    // not of either run's type size — a small-print cell in a wide table is
+    // still its own column.
+    const page = serializePageItems([
+      item('BODY', 50, 700, 80, 20),
+      item('LEFT', 50, 600, 20, 5),
+      item('RIGHT', 100, 600, 20, 5), // 30pt gap: >> 0.9 x page median (20)
+    ]);
+    expect(page).toContain('|');
+  });
+});

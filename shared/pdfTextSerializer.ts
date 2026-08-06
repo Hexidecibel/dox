@@ -259,17 +259,39 @@ export function serializePageItems(
     r.items.sort((a, b) => a.x - b.x);
     let line = '';
     let prevEnd: number | null = null;
+    let prevH = 0;
     for (const it of r.items) {
       if (prevEnd === null) {
         line = it.s;
         prevEnd = it.x + it.w;
+        prevH = it.h;
         continue;
       }
       const gap = it.x - prevEnd;
+      // COLUMN detection stays on the PAGE median: whether two runs of text are
+      // separate columns is a property of the page's layout, not of the type
+      // size of either run.
+      //
+      // WORD spacing is the opposite — it is entirely local. Scaling it by the
+      // page median silently under-spaces every run of text SMALLER than the
+      // page's typical glyph, because a genuine inter-word space in 6pt legal
+      // print is narrower than 0.12 x the median of a page whose body text is
+      // 10pt. That produced real false joins in production output:
+      // `WITHOUT PRIOR WRITTEN APPROVAL` -> `WRITTENAPPROVAL`,
+      // `IS REPRESENTATIVE OF` -> `REPRESENTATIVEOF` — a NEW failure mode in the
+      // opposite direction from the smashing this serializer exists to fix, and
+      // one that degrades what the MODEL reads, not just the search index.
+      //
+      // So measure the word gap against the LOCAL type size: the smaller of the
+      // two adjacent glyph heights, which is the one whose spaces are narrower.
+      // Falls back to the page median for degenerate/rotated matrices, where
+      // the per-item height is already unreliable.
+      const localH = Math.min(prevH || mh, it.h || mh) || mh;
       if (gap > mh * cfg.colGap) line += cfg.colDelim + it.s;
-      else if (gap > mh * cfg.wordGap) line += ' ' + it.s;
+      else if (gap > localH * cfg.wordGap) line += ' ' + it.s;
       else line += it.s;
       prevEnd = it.x + it.w;
+      prevH = it.h;
     }
     lines.push({ y: r.y, text: line.trim() });
   }

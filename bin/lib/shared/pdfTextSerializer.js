@@ -86,17 +86,21 @@ function serializePageItems(items, config = DEFAULT_PDF_SERIALIZER_CONFIG) {
     r.items.sort((a, b) => a.x - b.x);
     let line = "";
     let prevEnd = null;
+    let prevH = 0;
     for (const it of r.items) {
       if (prevEnd === null) {
         line = it.s;
         prevEnd = it.x + it.w;
+        prevH = it.h;
         continue;
       }
       const gap = it.x - prevEnd;
+      const localH = Math.min(prevH || mh, it.h || mh) || mh;
       if (gap > mh * cfg.colGap) line += cfg.colDelim + it.s;
-      else if (gap > mh * cfg.wordGap) line += " " + it.s;
+      else if (gap > localH * cfg.wordGap) line += " " + it.s;
       else line += it.s;
       prevEnd = it.x + it.w;
+      prevH = it.h;
     }
     lines.push({ y: r.y, text: line.trim() });
   }
