@@ -486,7 +486,7 @@ export async function syncDocumentFacet(
   for (const raw of links) {
     const link: FacetLinkInput = typeof raw === 'string' ? { id: raw } : raw;
     if (!link.id) continue;
-    const key = `${link.id} ${link.subjectType ?? 'tenant'} ${link.subjectId ?? ''}`;
+    const key = `${link.id}\u0000${link.subjectType ?? 'tenant'}\u0000${link.subjectId ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     normalized.push(link);
