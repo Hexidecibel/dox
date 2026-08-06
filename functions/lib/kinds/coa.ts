@@ -4,6 +4,7 @@ import { buildR2Key, uploadFile, downloadFile, deleteFile, computeChecksum } fro
 import { findOrCreateSupplier } from '../suppliers';
 import { findOrCreateProduct } from '../entities/products';
 import { extractRecordPdf } from './coaPageScope';
+
 import { attachLotToCoaDocument, extractLotNumber, extractSubLotCode } from '../entities/matching';
 import { normalizeLotNumber, normalizeSubLotCode, applyLotScheme, type LotScheme } from '../entities/lots';
 import { getLearnedPreferences } from '../learnedPreferences';
@@ -18,6 +19,16 @@ import type {
   FieldDismissalCapture,
   TableEditCapture,
 } from '../queue-approve';
+
+/**
+ * How long the SOURCE BUNDLE survives after a per-record (page-scoped) approve.
+ *
+ * Mirrors REJECTED_FILE_RETENTION_DAYS in functions/api/queue/[id].ts — same
+ * tombstone column (migration 0083), same reasoning: a few hundred KB is far
+ * cheaper than a document shape we can never measure again. A sweeper may
+ * reclaim objects past file_retain_until; that job is deliberately not built.
+ */
+const SPLIT_SOURCE_RETENTION_DAYS = 90;
 
 /**
  * Producer for the `coa` doc-kind (Phase P2). Owns the canonical-entity
@@ -1180,8 +1191,33 @@ export async function produceCoaRecords(
       .bind(userId, item.id)
       .run();
 
-    // Delete pending R2 file only when the whole item is resolved.
-    await deleteFile(files, item.file_r2_key);
+    // RETAIN THE SOURCE BUNDLE — do NOT delete it on this path.
+    //
+    // The other two approve paths delete the staging object safely, because
+    // there the produced document IS the original bytes, re-uploaded under a
+    // permanent document_versions key. This path is different: it page-scopes,
+    // writing ONE PDF PER RECORD. Deleting the staging copy therefore destroys
+    // the only surviving copy of the multi-page BUNDLE — the produced documents
+    // are slices of it, not it.
+    //
+    // The cost of that is measured. Across three separate studies the bundle
+    // shape could not be graded even once: 99.1% of the eligible corpus is
+    // single-page, and every multi-page item resolves to page-scoped slices
+    // that would be graded as if they were originals — an error class that has
+    // already produced two wrong conclusions, so those items get excluded
+    // instead. The hardest document shape in the product is the one we can
+    // never measure, and every approval widened the gap.
+    //
+    // So stamp the same tombstone migration 0083 introduced for reject rather
+    // than deleting. `/api/queue/:id/file` prefers the staging object when it
+    // exists, so a retained bundle also stops that endpoint falling back to a
+    // slice and reporting X-File-Scoped: true.
+    await db
+      .prepare(
+        `UPDATE processing_queue SET file_retain_until = datetime('now', ?) WHERE id = ?`
+      )
+      .bind(`+${SPLIT_SOURCE_RETENTION_DAYS} days`, item.id)
+      .run();
   }
 
   await logAudit(

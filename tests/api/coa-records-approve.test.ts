@@ -197,6 +197,57 @@ describe('produceCoaRecords', () => {
     expect(q?.status).toBe('approved');
   });
 
+  it('RETAINS the source bundle instead of deleting it', async () => {
+    // This path page-scopes: it writes one PDF per record, so the produced
+    // documents are SLICES of the bundle, not the bundle. Deleting the staging
+    // object here destroys the only surviving copy of the multi-page shape.
+    //
+    // That cost is measured: across three studies the bundle shape could not be
+    // graded even once, because every multi-page item resolves to slices that
+    // would be graded as if they were originals. Every approval widened the gap.
+    // So this path stamps the migration-0083 tombstone instead of deleting.
+    const item = await makeCoaQueueItem(darigoldPayload());
+    await produceCoaRecords(db, files, item, {
+      payload: darigoldPayload(),
+      userId: seed.userId,
+    });
+
+    // The bytes are still there.
+    const obj = await files.get(item.file_r2_key);
+    expect(obj).not.toBeNull();
+
+    // ...and tombstoned rather than kept forever.
+    const row = await db
+      .prepare('SELECT file_retain_until FROM processing_queue WHERE id = ?')
+      .bind(item.id)
+      .first<{ file_retain_until: string | null }>();
+    expect(row?.file_retain_until).toBeTruthy();
+    // Roughly 90 days out — assert the window is in the future and not absurd.
+    const days = (Date.parse(row!.file_retain_until!.replace(' ', 'T') + 'Z') - Date.now()) / 86400000;
+    expect(days).toBeGreaterThan(80);
+    expect(days).toBeLessThan(100);
+  });
+
+  it('does NOT retain when records are held — the item is not resolved yet', async () => {
+    // Retention is stamped only when the whole item is resolved, matching where
+    // the delete used to live. A partially-approved item keeps its staging file
+    // for the ordinary reason: there is still work to do on it.
+    const payload = darigoldPayload();
+    const item = await makeCoaQueueItem(payload);
+    const result = await produceCoaRecords(db, files, item, {
+      payload,
+      userId: seed.userId,
+      decisions: { 0: 'hold' as const },
+    });
+    expect(result.heldRecordIndexes.length).toBeGreaterThan(0);
+    const row = await db
+      .prepare('SELECT status, file_retain_until FROM processing_queue WHERE id = ?')
+      .bind(item.id)
+      .first<{ status: string; file_retain_until: string | null }>();
+    expect(row?.status).not.toBe('approved');
+    expect(row?.file_retain_until).toBeNull();
+  });
+
   it('is idempotent on sublot identity — re-run reuses the same docs + lots, no dups', async () => {
     const item = await makeCoaQueueItem(darigoldPayload());
     const first = await produceCoaRecords(db, files, item, {

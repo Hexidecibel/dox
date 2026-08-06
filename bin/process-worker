@@ -101,6 +101,37 @@ const VLM_ENV = QWEN_VLM_MODEL_PIN
   : process.env;
 const QWEN_VLM_MAX_PAGES = parseInt(process.env.QWEN_VLM_MAX_PAGES || '5', 10);
 
+// THE LOADED GUN. Refuse to start rather than silently destroy records.
+//
+// A successful VLM call skips runTextPath() entirely — and coaRecordsCapture is
+// populated ONLY inside runTextPath(), with records assembly gated on
+// `parsedChunks.length > 0`. So turning VLM on does not degrade multi-record
+// COAs, it ERASES them: measured 2026-08-05, coa_records NULL on 8 of 8
+// documents, lot coverage 1/10 against 10/10 on both text arms, plus one
+// fabricated record that the flat field score gave FULL MARKS.
+//
+// That is one environment variable away at all times, and "it's off in prod" is
+// exactly the reasoning that let production run on the losing quant for months.
+// A config flag that silently destroys data is not a feature flag, it is a trap,
+// so the trap is disarmed here: the worker will not boot with VLM enabled until
+// coaRecordsCapture is populated on the VLM path.
+//
+// To work on the VLM path deliberately, set QWEN_VLM_ACK_RECORDS_LOSS=1. The
+// name is deliberately unpleasant — you are acknowledging data loss, not
+// enabling a feature.
+if (QWEN_VLM_MODE !== 'off' && process.env.QWEN_VLM_ACK_RECORDS_LOSS !== '1') {
+  console.error(
+    `FATAL: QWEN_VLM_MODE="${QWEN_VLM_MODE}" but the VLM path does not populate\n` +
+    `coaRecordsCapture, so ai_records is never assembled — every multi-record COA\n` +
+    `silently loses its records (measured: 0/8 documents kept a records payload).\n` +
+    `\n` +
+    `Fix the VLM path to fill coaRecordsCapture, or run with QWEN_VLM_MODE=off.\n` +
+    `To proceed anyway and ACCEPT that records will be destroyed, set\n` +
+    `QWEN_VLM_ACK_RECORDS_LOSS=1.`
+  );
+  process.exit(1);
+}
+
 // The vision model requested for — and, once the router answers, ACTUALLY
 // served on — the most recent VLM call, including quantization. Mirrors
 // lastServedTextModel; posted as result_body.vlm_model so every VLM run is
