@@ -30,6 +30,8 @@ import {
   healthyModels,
   invalidateModelCache,
   noteServedModel,
+  quantOf,
+  MIN_BEST_QUANT,
   isModelUnavailableError,
 } from '../../functions/lib/models';
 // Raw source of the CommonJS mirror — the workers pool cannot `require` CJS
@@ -78,16 +80,21 @@ const PREFERRED = MODEL_CHAINS.best[0];
 const FALLBACK = MODEL_CHAINS.best[1];
 
 describe('preference chains', () => {
-  it('keeps `best` on the GPU pool and the CPU box LAST', () => {
-    // INTERIM, blocked on a model-router fix. Fidelity cannot be expressed from
-    // here yet: `-turbo` maps to [mac, buddy, windows] serving Q8, Q4 and ? —
-    // one name, three quantizations. The non-turbo name maps to [local] =
-    // Hexinas, CPU-only, which the router config warns starves the Plex
-    // transcoder. So the CPU stays LAST until the router gives each
-    // (host, quant) a distinct name; then the Q8 name goes at the HEAD.
-    expect(MODEL_CHAINS.best.length).toBeGreaterThanOrEqual(2);
-    expect(MODEL_CHAINS.best[0]).toBe('Qwen3-6-35B-A3B-turbo');
+  it('heads `best` at a HOST-PINNED Q8 name and keeps the CPU box LAST', () => {
+    // The interim order this replaces could not express fidelity: `-turbo` maps
+    // to [mac, buddy, windows] serving Q8 and Q4 under ONE name. It is ordered
+    // failover, not a balancer, so a healthy Mac did serve Q8 — but a Mac
+    // outage moved everything to Q4 silently, which is how prod ran on the
+    // losing quant for months. The router now names each (host, quant), so the
+    // head pins both. `-turbo` stays as failover; the CPU box stays LAST
+    // because the local 35B starves the Plex transcoder on that machine.
+    expect(MODEL_CHAINS.best.length).toBeGreaterThanOrEqual(3);
+    expect(MODEL_CHAINS.best[0]).toBe('Qwen3-6-35B-A3B-spark-q8');
+    expect(MODEL_CHAINS.best).toContain('Qwen3-6-35B-A3B-turbo');
     expect(MODEL_CHAINS.best.at(-1)).toBe('Qwen3-6-35B-A3B');
+    // The pinned head must be strictly preferred to the ambiguous pool name.
+    expect(MODEL_CHAINS.best.indexOf('Qwen3-6-35B-A3B-spark-q8'))
+      .toBeLessThan(MODEL_CHAINS.best.indexOf('Qwen3-6-35B-A3B-turbo'));
   });
 
   it('orders `fast` by LATENCY — the 4090 leads where a human is waiting', () => {
@@ -170,7 +177,10 @@ describe('resolveModel — health-aware resolution', () => {
     const res = await resolveModel('best', ENV);
     expect(res.source).toBe('unverified');
     expect(res.model).toBe(PREFERRED);
-    expect(res.candidates).toEqual([PREFERRED, FALLBACK]);
+    // The WHOLE chain, whatever its length — asserting a fixed pair here made
+    // this test fail the moment a third entry was added, which is a chain-length
+    // change, not a resolver change.
+    expect(res.candidates).toEqual([...MODEL_CHAINS.best]);
     expect(res.degraded).toBe(false);
   });
 
@@ -362,5 +372,48 @@ describe('bin/process-worker — resolver wiring', () => {
     // Degrading is fine; a dead chain is not.
     expect(processWorkerSource).toMatch(/DEGRADED — wanted/);
     expect(processWorkerSource).toMatch(/refusing to start/);
+  });
+});
+
+describe('silent-degradation guard', () => {
+  // Production ran on Q4 for months and nothing said so, because the only
+  // ground truth about which weights answered — the served model string — was
+  // logged at info level and never judged. These pin the judging.
+
+  it('reads the quantization out of real served model names', () => {
+    expect(quantOf('Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf')).toBe(8);
+    expect(quantOf('Qwen3.6-35B-A3B-UD-Q4_K_M.gguf')).toBe(4);
+    expect(quantOf('Qwen3-6-35B-A3B-spark-q8')).toBe(8);
+  });
+
+  it('does not mistake the Q in Qwen for a quantization', () => {
+    expect(quantOf('Qwen3-VL-32B')).toBeNull();
+    expect(quantOf('Qwen3-8B')).toBeNull();
+  });
+
+  it('WARNS when `best` is served below the quantization floor', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    noteServedModel('best', 'Qwen3-6-35B-A3B-turbo', 'Qwen3.6-35B-A3B-UD-Q4_K_M.gguf');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/QUANT DEGRADED/);
+    warn.mockRestore();
+  });
+
+  it('stays quiet when `best` is served at or above the floor', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    noteServedModel('best', 'Qwen3-6-35B-A3B-spark-q8', 'Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf');
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('does not judge tags other than `best`', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    noteServedModel('fast', 'Qwen3-8B', 'some-Q4-model.gguf');
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('keeps the floor at Q8 — the quant that won the bake-off', () => {
+    expect(MIN_BEST_QUANT).toBe(8);
   });
 });

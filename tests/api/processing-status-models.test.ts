@@ -104,9 +104,13 @@ describe('processing-status — models block', () => {
     // below are about degradation, not unavailability) while making sure
     // best's top choice is not advertised — note the chains deliberately share
     // entries, so "advertise the other tags' tops" would smuggle it back in.
+    // Exclude EVERY higher best-chain entry, not just bestChain[0]: once `best`
+    // has three entries, `fast` still leads with a middle one and would smuggle
+    // it back in, resolving `best` to that instead of the intended last resort.
+    const higher = new Set(bestChain.filter((m) => m !== fallback));
     const others = Object.entries(MODEL_CHAINS)
       .filter(([tag]) => tag !== 'best')
-      .map(([, chain]) => chain.find((m) => m !== bestChain[0]))
+      .map(([, chain]) => chain.find((m) => !higher.has(m)))
       .filter((m): m is string => !!m);
     stubRouter([...new Set([fallback, ...others])]);
 

@@ -37,29 +37,30 @@ export type ModelEnv = { [k: string]: string | undefined } | undefined;
 export const MODEL_CHAINS: Record<ModelTag, string[]> = {
   // Ordered best-first. Every entry must be a name the router knows; the
   // resolver picks the first one with a healthy upstream.
-  // ⚠️ INTERIM ORDER — blocked on a model-router fix. See qwen-llm/model-router.yaml.
   //
-  // We CANNOT currently express "give me Q8" from here, because one router model
-  // name maps to several hosts at DIFFERENT quantizations:
+  // FIDELITY IS NOW EXPRESSIBLE — this used to be an interim order.
+  // The router offered ONE name per family:
   //   Qwen3-6-35B-A3B-turbo -> [mac, buddy, windows]
   //        mac (M4 Pro)  serves Qwen3.6-35B-A3B-UD-Q8_K_XL   <- the bake-off winner
   //        buddy (4090)  serves Qwen3.6-35B-A3B-UD-Q4_K_M    <- the bake-off loser
-  //   Qwen3-6-35B-A3B       -> [local] = Hexinas, **CPU ONLY, no GPU**
+  // so a caller could not say WHICH quant it wanted. That list is ordered
+  // failover (mac first), NOT a load balancer, so a healthy Mac did serve Q8 —
+  // but a Mac outage moved everything to Q4 SILENTLY, which is how production
+  // ran on the losing quant for months behind a stale Tailscale hostname.
   //
-  // So `turbo` is a coin-flip on fidelity, and the non-turbo name is a CPU box the
-  // router config explicitly warns off (the local 35B "pinned 38GB RAM + all cores
-  // and starved the Plex transcoder"). Preferring it on quantization grounds — as
-  // this chain briefly did — routes every extraction onto that CPU. Do not.
-  //
-  // THE FIX IS IN THE ROUTER: give each (host, quant) a DISTINCT model name, then
-  // this chain becomes meaningful and can pin fidelity — put the Q8 name at the
-  // HEAD and the resolver auto-promotes it with no other change here.
-  //
-  // Until then: prefer the GPU pool (may be Q8, may be Q4) over a CPU that takes
-  // the media server down with it. Availability and not-wrecking-the-box win.
+  // 2026-08-05: the router gained per-(host, quant) names, so the head of this
+  // chain now pins BOTH the weights and the box. `-spark-q8` is the
+  // byte-identical GGUF the Mac serves, on the DGX Spark, which measured faster
+  // at every stage on those same weights (prefill 2.3x, decode 1.25x, end-to-end
+  // 1.11x, accuracy within noise). `-turbo` stays behind it as failover: still
+  // mac-first, still Q8 while the Mac is up. The CPU box stays LAST — the local
+  // 35B "pinned 38GB RAM + all cores and starved the Plex transcoder", so
+  // preferring it on quantization grounds routes every extraction onto a machine
+  // that takes the media server down with it.
   best: [
-    'Qwen3-6-35B-A3B-turbo',  // GPU pool (mac=Q8 / buddy=Q4) — nondeterministic fidelity.
-    'Qwen3-6-35B-A3B',        // CPU on Hexinas, Q5 — LAST RESORT, starves Plex.
+    'Qwen3-6-35B-A3B-spark-q8',  // DGX Spark, Q8 — pins the weights AND the host.
+    'Qwen3-6-35B-A3B-turbo',     // GPU pool, mac-first (Q8), buddy (Q4) behind it.
+    'Qwen3-6-35B-A3B',           // CPU on Hexinas, Q5 — LAST RESORT, starves Plex.
   ],
   // `fast` = LATENCY-first (teach interview, NL search — a human is waiting).
   // The 4090 is genuinely excellent here, which is what it should be used for.
@@ -294,6 +295,25 @@ export async function resolveModel(
  * Returns the served id (or the requested one when the response omitted it),
  * which is what callers should store.
  */
+/**
+ * Lowest quantization the `best` tag may run on before we complain. Q8 won the
+ * fidelity bake-off; Q4 lost it.
+ */
+export const MIN_BEST_QUANT = 8;
+
+/**
+ * Pull the quantization out of a served model name, e.g.
+ * `Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf` -> 8, `...-UD-Q4_K_M.gguf` -> 4.
+ * Returns null when the name carries no quant marker (nothing to judge).
+ *
+ * Anchored on a non-letter so it cannot match the `Q` in `Qwen`.
+ */
+export function quantOf(model?: string | null): number | null {
+  if (!model) return null;
+  const m = /(?:^|[^a-z])q(\d+)/i.exec(String(model));
+  return m ? Number(m[1]) : null;
+}
+
 export function noteServedModel(tag: ModelTag, requested: string, served?: string | null): string {
   const actual = served && String(served).trim() ? String(served).trim() : requested;
   const key = `served:${tag}`;
@@ -302,6 +322,29 @@ export function noteServedModel(tag: ModelTag, requested: string, served?: strin
   if (prev && prev.key === actual && now - prev.at < WARN_REPEAT_MS) return actual;
   lastWarn.set(key, { key: actual, at: now });
   console.log(`[models] tag="${tag}" requested="${requested}" served="${actual}"`);
+
+  // THE SILENT-DEGRADATION GUARD.
+  //
+  // Production ran on Q4 for MONTHS and nothing said so. The chain resolver
+  // could not see it: it asked the router for a name the router reported
+  // healthy, and the router quietly served whichever upstream answered — after
+  // a stale Tailscale hostname took the Q8 Mac out of reach. Only the served
+  // model string ever knew, and we merely logged it at info level among
+  // thousands of other lines.
+  //
+  // The served name is the ONE piece of ground truth about which weights
+  // answered, so judge it here rather than trusting the requested name.
+  if (tag === 'best') {
+    const q = quantOf(actual);
+    if (q !== null && q < MIN_BEST_QUANT) {
+      console.warn(
+        `[models] QUANT DEGRADED: tag="best" requested="${requested}" served="${actual}" ` +
+        `(Q${q} < Q${MIN_BEST_QUANT}). Extraction is running on the quantization that LOST ` +
+        `the fidelity bake-off. The preferred upstream is probably unreachable — check the ` +
+        `router's health view and the served model, not the hostname.`
+      );
+    }
+  }
   return actual;
 }
 
