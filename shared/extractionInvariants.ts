@@ -83,6 +83,7 @@ export const CHECKS = [
   'dates_plausible',
   'date_ordering',
   'product_code_not_phone',
+  'product_code_in_text',
   'supplier_in_text',
   'field_label_mismatch',
   'supplier_not_self',
@@ -798,6 +799,51 @@ export function checkExtraction(item: ExtractionInput, opts: CheckOptions = {}):
       } else {
         bump(tally, 'product_code_not_phone', 'pass');
       }
+    }
+
+    // --- product_code_in_text ----------------------------------------------
+    //
+    // THE FABRICATION THIS EXISTS FOR. `lot_in_text` and `supplier_in_text`
+    // already ground their fields; product_code did not, and that is precisely
+    // why a fabricated code passed silently while the same class of defect was
+    // caught on lots.
+    //
+    // Observed on real documents: the model emitted product_code "64917" on
+    // Country Morning COAs whose ITEM # cell is BLANK. The value came out of
+    // the few-shot PREVIOUS CORRECTIONS block — an example from another
+    // document. The 122B fabricates the identical value, so this is not a
+    // capacity problem to be solved with a bigger model; it is an ungrounded
+    // value, and grounding is what catches it.
+    //
+    // Grounding also covers the other source of the same defect (a value
+    // lifted from the FILENAME, which is not part of extracted_text) without
+    // needing to know where the value came from. That is the point of checking
+    // the output rather than policing the input.
+    if (pc && hasText) {
+      const pcn = alnum(pc);
+      // Very short codes normalize to noise and would substring-match almost
+      // any document. Skip rather than false-accuse — as with supplier names.
+      if (pcn.length < 3) {
+        bump(tally, 'product_code_in_text', 'skip');
+      } else if (textAlnum.includes(pcn)) {
+        // Deliberately the LOOSE test, matching lot_in_text: a normalized
+        // needle can span two unrelated tokens, so this UNDER-reports
+        // fabrication and never accuses a value that merely differs in
+        // punctuation. A failure here is therefore a strong signal.
+        bump(tally, 'product_code_in_text', 'pass');
+      } else {
+        bump(tally, 'product_code_in_text', 'fail');
+        fail(
+          'product_code_in_text',
+          'product_code',
+          scope,
+          pc,
+          'code occurs nowhere in extracted_text',
+          `The product code "${pc}" does not appear anywhere in the document text — it may have been copied from a previous example rather than read off this document.`
+        );
+      }
+    } else if (pc) {
+      bump(tally, 'product_code_in_text', 'skip');
     }
 
     // --- supplier_in_text --------------------------------------------------

@@ -247,3 +247,56 @@ describe('records-mode scoping', () => {
     expect(find(fs, 'lot_in_text', 'lot_code')?.scope).toBe('record[1]');
   });
 });
+
+describe('product_code_in_text — the few-shot fabrication', () => {
+  // Real defect, seen on production Country Morning COAs: the model emitted
+  // product_code "64917" on documents whose ITEM # cell is BLANK. The value
+  // came out of the few-shot PREVIOUS CORRECTIONS block — an example from a
+  // DIFFERENT document. The 122B fabricates the identical value, so a bigger
+  // model is not the cure; grounding the output is.
+  //
+  // lot_in_text and supplier_in_text already grounded their fields. product_code
+  // did not, which is exactly why this one passed silently for so long.
+
+  it('flags a product code that appears nowhere in the document', () => {
+    const f = find(warn({ product_code: '64917' }), 'product_code_in_text', 'product_code');
+    expect(f).toBeDefined();
+    expect(f!.message).toContain('64917');
+    // The reviewer needs the WHY, not the check id.
+    expect(f!.message).toContain('previous example');
+    expect(f!.message).not.toContain('product_code_in_text');
+  });
+
+  it('passes a product code that is really on the page', () => {
+    // 40122 is the Item # in ANDERSEN_TEXT.
+    expect(find(warn({ product_code: '40122' }), 'product_code_in_text', 'product_code'))
+      .toBeUndefined();
+  });
+
+  it('ignores punctuation differences rather than false-accusing', () => {
+    expect(find(warn({ product_code: '40-122' }), 'product_code_in_text', 'product_code'))
+      .toBeUndefined();
+  });
+
+  it('skips codes too short to ground without matching noise', () => {
+    // A 1-2 char code substring-matches almost any document; skipping beats
+    // both a false pass and a false accusation.
+    expect(find(warn({ product_code: '7' }), 'product_code_in_text', 'product_code'))
+      .toBeUndefined();
+  });
+
+  it('skips when there is no extracted text to check against', () => {
+    const fs = checkExtraction({
+      ai_fields: JSON.stringify({ product_code: '64917' }),
+      extracted_text: null,
+    }).failures;
+    expect(find(fs, 'product_code_in_text', 'product_code')).toBeUndefined();
+  });
+
+  it('also catches a value lifted from the FILENAME, without knowing the source', () => {
+    // The other half of the same defect: filenames are not part of
+    // extracted_text, so a value copied from one is ungrounded by definition.
+    const f = find(warn({ product_code: '080126' }), 'product_code_in_text', 'product_code');
+    expect(f).toBeDefined();
+  });
+});

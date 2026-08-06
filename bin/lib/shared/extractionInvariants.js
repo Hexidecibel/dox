@@ -82,6 +82,7 @@ var CHECKS = [
   "dates_plausible",
   "date_ordering",
   "product_code_not_phone",
+  "product_code_in_text",
   "supplier_in_text",
   "field_label_mismatch",
   "supplier_not_self"
@@ -579,6 +580,26 @@ function checkExtraction(item, opts = {}) {
       } else {
         bump(tally, "product_code_not_phone", "pass");
       }
+    }
+    if (pc && hasText) {
+      const pcn = alnum(pc);
+      if (pcn.length < 3) {
+        bump(tally, "product_code_in_text", "skip");
+      } else if (textAlnum.includes(pcn)) {
+        bump(tally, "product_code_in_text", "pass");
+      } else {
+        bump(tally, "product_code_in_text", "fail");
+        fail(
+          "product_code_in_text",
+          "product_code",
+          scope,
+          pc,
+          "code occurs nowhere in extracted_text",
+          `The product code "${pc}" does not appear anywhere in the document text \u2014 it may have been copied from a previous example rather than read off this document.`
+        );
+      }
+    } else if (pc) {
+      bump(tally, "product_code_in_text", "skip");
     }
     const sup = placeholder.has("supplier_name") ? "" : asString(f.supplier_name);
     if (sup && hasText) {
