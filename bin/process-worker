@@ -770,8 +770,9 @@ function compactFields(rec) {
  * Split a block of text into chunks of at most `limit` chars, preserving
  * row (newline) boundaries. Any single row longer than `limit` is emitted
  * on its own — we don't break mid-row because that corrupts the model's
- * view of tabular data. Mirrors the helper in
- * functions/lib/connectors/email.ts.
+ * view of tabular data. This USED to mirror a twin in
+ * functions/lib/connectors/email.ts; that file was deleted, so this is now the
+ * only copy — there is nothing left to keep it in sync with.
  */
 function chunkByRows(text, limit) {
   const rows = text.split('\n');
@@ -1414,6 +1415,45 @@ async function pickModel(tag, failedModels) {
 }
 
 /**
+ * Throw when a completion stopped because it ran out of context instead of
+ * because it was finished.
+ *
+ * llama.cpp is built here with `ctx_shift = false`, so a generation that hits
+ * the context boundary simply STOPS and reports finish_reason: "length". What
+ * comes back is half a JSON object, and every parser on both sides of this repo
+ * (parseExtraction below, functions/lib/llm.ts) swallows the parse failure and
+ * returns an empty-but-valid `{ fields: {}, ... }`. That posts as a SUCCESSFUL
+ * extraction with zero fields: no error, no retry, no signal — the exact shape
+ * of defect MODELS.md says the flat field aggregate has been blind to four
+ * separate times. Nothing measured today gets near the ceiling (~44% of it at
+ * worst since the move to a 32K window); this is the alarm for when something
+ * does.
+ *
+ * Two deliberate choices:
+ *   - Called AFTER the retry loop, never inside it. Re-sending an identical
+ *     prompt to an identical model truncates identically, so a retry would only
+ *     burn the loop's 60s reload wait.
+ *   - The wording avoids the phrases isModelUnavailableError() matches
+ *     ("unknown model" / "no healthy upstream for model"), so this can never be
+ *     mistaken for a routing failure if it does end up near that branch.
+ */
+function assertCompletionNotTruncated(data, requestedModel, label) {
+  if (data?.choices?.[0]?.finish_reason !== 'length') return;
+  const usage = data.usage || {};
+  const counts = ['prompt_tokens', 'completion_tokens', 'total_tokens']
+    .filter((k) => Number.isFinite(usage[k]))
+    .map((k) => `${k}=${usage[k]}`)
+    .join(' ');
+  const served = data.model || requestedModel || '(not reported)';
+  throw new Error(
+    `${label} truncated at the context limit (finish_reason=length) from "${served}"` +
+    `${counts ? ` [${counts}]` : ''} — the returned JSON is incomplete, so this ` +
+    `extraction is being failed rather than parsed into an empty result. ` +
+    `Shrink the input (chunking) or raise the served context window; retrying as-is will truncate again.`
+  );
+}
+
+/**
  * Call the text-path Qwen model with a single chunk and a fully-composed
  * system prompt, returning the RAW parsed JSON object (or null on parse
  * failure). Same retry/timeout shape as the COA runTextQwen, but kind-agnostic:
@@ -1476,6 +1516,11 @@ async function runRecordsQwen(systemPrompt, userText, fileName) {
   }
   // Record the TRUE served id (includes quantization) for the result body.
   lastServedTextModel = noteServedModel('best', requestedModel, qwenData.model);
+  // Records/shipment share this caller, and both of their parsers return null
+  // on bad JSON — which mergeOutputs()/drainShipments() read as "this chunk had
+  // no orders", not as a failure. Catch the truncation before it can look like
+  // an empty page.
+  assertCompletionNotTruncated(qwenData, requestedModel, `Qwen records extraction for ${fileName}`);
   let content = qwenData.choices?.[0]?.message?.content || '';
   console.log(`  Qwen response (${content.length} chars): ${content.substring(0, 200)}...`);
   // Strip thinking blocks / code fences the same way parseExtraction does.
@@ -2253,6 +2298,9 @@ async function processCoaItem(item) {
       // Capture what actually served this chunk — persisted as text_model.
       servedTextModel = noteServedModel('best', requestedModel, qwenData.model);
       lastServedTextModel = servedTextModel;
+      // A truncated chunk here would parse to `{ fields: {} }` and merge in as a
+      // page that legitimately had nothing on it. Fail the item instead.
+      assertCompletionNotTruncated(qwenData, requestedModel, `Qwen text extraction for ${item.file_name}`);
       const content = qwenData.choices?.[0]?.message?.content || '';
       console.log(`  Qwen response (${content.length} chars): ${content.substring(0, 200)}...`);
       return parseExtraction(content);
@@ -3317,6 +3365,10 @@ async function extractWithVLM(pdfBuffer, systemPrompt, userPrompt, fileName) {
   // what we asked for — the whole point of the provenance columns.
   lastVlmModel = noteServedModel('vision', vlmModel, qwenData && qwenData.model);
 
+  // Same ceiling, same silent-empty parser — the empty-content throw below only
+  // catches a model that said NOTHING, not one cut off mid-JSON.
+  assertCompletionNotTruncated(qwenData, vlmModel, 'VLM extraction');
+
   const content = qwenData?.choices?.[0]?.message?.content || '';
   if (!content) {
     throw new Error(`VLM returned empty response${lastErr ? ` (last error: ${lastErr.message})` : ''}`);
@@ -3712,6 +3764,10 @@ async function runParityMode() {
           }
         }
         lastServedTextModel = noteServedModel('best', requestedModel, qwenData.model);
+        // Mirrors the guard in the production runTextQwen — a parity run that
+        // silently scored a truncated chunk as "0 fields" would report a model
+        // regression that never happened.
+        assertCompletionNotTruncated(qwenData, requestedModel, `Qwen text extraction (parity) for ${item.file_name}`);
         const content = qwenData.choices?.[0]?.message?.content || '';
         return parseExtraction(content);
       };

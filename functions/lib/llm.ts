@@ -309,12 +309,38 @@ export async function extractFields(
   }
 
   const data = await response.json() as {
-    choices: { message: { content: string } }[];
+    choices: { message: { content: string }; finish_reason?: string }[];
     model?: string;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   };
 
   // Record what actually served us — the true id including quantization.
   const servedModel = noteServedModel('best', resolution.model, data.model);
+
+  // llama.cpp runs with `ctx_shift = false`, so a generation that hits the
+  // context boundary just STOPS and reports finish_reason: "length". The JSON
+  // that comes back is truncated, and the catch below turns any parse failure
+  // into an empty-but-valid result — so a completion cut off at the ceiling
+  // posts as a SUCCESSFUL extraction with zero fields. That is the failure class
+  // MODELS.md says the flat field aggregate has been blind to four separate
+  // times, and it is invisible here because nothing throws. Raise a real error
+  // instead. Nothing measured today is close to the ceiling; this is insurance.
+  // (Deliberately worded to avoid "unknown model" / "no healthy upstream for
+  // model" so isModelUnavailableError() can never read it as a routing fault —
+  // retrying the same prompt against the same model would just truncate again.)
+  if (data.choices?.[0]?.finish_reason === 'length') {
+    const usage = data.usage || {};
+    const counts = (['prompt_tokens', 'completion_tokens', 'total_tokens'] as const)
+      .filter((k) => typeof usage[k] === 'number')
+      .map((k) => `${k}=${usage[k]}`)
+      .join(' ');
+    throw new Error(
+      `LLM completion truncated at the context limit (finish_reason=length) from ` +
+      `"${data.model || resolution.model}"${counts ? ` [${counts}]` : ''} — the returned ` +
+      `JSON is incomplete, so this extraction is being failed rather than parsed into an ` +
+      `empty result. Shrink the input or raise the served context window; retrying as-is will truncate again.`
+    );
+  }
 
   let content = data.choices?.[0]?.message?.content || '';
 

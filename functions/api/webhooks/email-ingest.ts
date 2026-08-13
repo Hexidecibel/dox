@@ -20,6 +20,21 @@ const ALLOWED_TYPES = [
   'image/jpeg',
 ];
 
+// === LLM input cap for this path ===
+// This is the one extraction path that never chunked. The worker bounds every
+// non-chunked call at `text.substring(0, 6000)` (bin/process-worker), but the
+// helper this file used to share that behavior with — functions/lib/connectors/
+// email.ts — was deleted, and the cap went with it. What was left was
+// extractText()'s 100,000-char storage cap, which is several times the whole
+// context window the `best` chain now runs on: a large attachment could push the
+// completion into the ceiling and come back as a "successful" extraction with
+// zero fields (see the finish_reason guard in lib/llm.ts).
+// Same number as the worker's single-page limit, on purpose — this is a CAP, not
+// a chunker, so it matches the worker's legacy single-call behavior rather than
+// its multi-page path. Full text is still stored (100K) below; only what the
+// model sees is bounded.
+const EMAIL_LLM_TEXT_CHAR_LIMIT = 6000;
+
 interface EmailIngestResult {
   fileName: string;
   status: 'ingested' | 'queued' | 'skipped' | 'error';
@@ -177,8 +192,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           // context (no regression).
           const tenantContext = mapping.extraction_context || undefined;
 
+          // Bounded copy for the model only — `text` stays whole for storage.
+          const llmText = text.substring(0, EMAIL_LLM_TEXT_CHAR_LIMIT);
+
           // Initial extraction (no few-shot — need supplier first)
-          const initialExtraction = await extractFields(text, context.env, {
+          const initialExtraction = await extractFields(llmText, context.env, {
             industryPrompt: tenantContext,
           });
 
@@ -217,7 +235,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
           // Re-extract with few-shot examples if available
           const extraction = fewShotExamples.length > 0
-            ? await extractFields(text, context.env, {
+            ? await extractFields(llmText, context.env, {
                 examples: fewShotExamples.map(e => ({ text: e.input_text, result: e.corrected_output })),
                 industryPrompt: tenantContext,
               })
