@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### Spec limits + out-of-parameter warnings
 
-**Status:** done (Phases 0–2 built, not deployed)
+**Status:** done — shipped to prod 2026-08-20 (migrations 0084/0085 applied surgically and stamped)
 
 **Summary:** The portal read COAs but never judged one — a 40 CFU/g coliform
 against a 10 CFU/g limit reached a reviewer looking exactly like a clean
