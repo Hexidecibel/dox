@@ -243,7 +243,7 @@ is sourced from it rather than from the 15-doc set.
   not the 9× previously assumed. Budget accordingly.
 - VLM was OFF for this run; it is still the expected fix for image-letterhead + scanned layouts.
 
-### Model resiliency — remaining follow-ups (core SHIPPED, uncommitted)
+### Model resiliency — remaining follow-ups (core SHIPPED + committed 2026-08-20)
 
 **Status:** in-progress (2026-07-30). Core landed: `MODEL_CHAINS` preference chains +
 health-aware `resolveModel()` in `functions/lib/models.ts` and its `bin/lib/models.js`
