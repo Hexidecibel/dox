@@ -1,0 +1,319 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/recheck-spec-limits — READ-ONLY: what would your spec limits catch?
+ *
+ * Runs the live spec engine over documents that are ALREADY APPROVED and
+ * reports what it finds. Nothing is written and nobody is emailed.
+ *
+ * WHY YOU WANT THIS BEFORE ANYONE SEES THE FEATURE
+ *
+ *  1. It is the honest way to size a new limit. Tighten coliform to 10 and this
+ *     tells you it would have flagged 34 of the last 300 COAs — which is either
+ *     a real finding or a sign the limit is wrong for this product. Finding that
+ *     out from a report beats finding out from 34 alert emails.
+ *  2. It surfaces the ALIAS GAP, which is the failure mode that matters most.
+ *     A limit whose analyte name never matches what suppliers print is a limit
+ *     that silently never runs, and the register cannot tell you about a check
+ *     that never happened. The `unmatched` list here is that blind spot, made
+ *     visible: every printed test name your configuration does not recognise.
+ *  3. It re-judges history after a threshold moves, without touching the record
+ *     of what was judged at the time (see document_spec_checks.limit_snapshot —
+ *     past verdicts are frozen deliberately and this script does not disturb
+ *     them).
+ *
+ * WHAT IT DOES NOT DO: backfill the register. Writing rows would mean bypassing
+ * the read-only guarantee in bin/lib/d1.js, and a retroactive alert nobody
+ * expected is worse than no alert. The register fills going forward, on every
+ * approval.
+ *
+ * Source: documents.extended_metadata, where the COA producer stores the
+ * approved `tables` and `groups` (functions/lib/kinds/coa.ts). The SAME engine
+ * the review queue uses is imported from bin/lib/shared/specCheck.js, so a
+ * finding here is byte-for-byte a finding there.
+ *
+ * Usage:
+ *   bin/recheck-spec-limits --tenant <id>            # LOCAL D1
+ *   bin/recheck-spec-limits --tenant <id> --remote   # PRODUCTION (read-only)
+ *   bin/recheck-spec-limits --tenant <id> --remote --json
+ *
+ * Flags:
+ *   --tenant ID       tenant to check (required)
+ *   --remote, -r      query production D1 instead of local
+ *   --json            emit the full result structure as JSON
+ *   --printed-only    ignore configured limits; report only what the COAs'
+ *                     own printed specs would flag (the Phase 0 view)
+ *   --limit N         cap documents examined (prints what was dropped)
+ *   --page-size N     D1 paging size (default 50)
+ *   -h, --help        this help
+ *
+ * Exit code is always 0 on a successful run — findings are data, not failures.
+ */
+
+const { query, queryPaged } = require('./lib/d1');
+const { checkPrintedSpecs, checkConfiguredLimits } = require('./lib/shared/specCheck');
+
+function parseArgs(argv) {
+  const opts = {
+    tenant: null,
+    remote: false,
+    json: false,
+    printedOnly: false,
+    limit: null,
+    pageSize: 50,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenant = argv[++i]; break;
+      case '--remote':
+      case '-r': opts.remote = true; break;
+      case '--json': opts.json = true; break;
+      case '--printed-only': opts.printedOnly = true; break;
+      case '--limit': opts.limit = Number(argv[++i]); break;
+      case '--page-size': opts.pageSize = Number(argv[++i]); break;
+      case '-h':
+      case '--help': printHelp(); process.exit(0); break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  if (!opts.tenant) {
+    console.error('--tenant <id> is required. Run with --help for usage.');
+    process.exit(2);
+  }
+  // The d1 helper takes a raw command string, so the one interpolated value
+  // gets a hard shape check rather than trust.
+  if (!/^[A-Za-z0-9_-]+$/.test(opts.tenant)) {
+    console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+    process.exit(2);
+  }
+  return opts;
+}
+
+function printHelp() {
+  const src = require('fs').readFileSync(__filename, 'utf8');
+  console.log(src.split('\n').slice(2, 51).join('\n').replace(/^ \* ?/gm, ''));
+}
+
+/**
+ * A query whose table may not exist yet. The spec tables arrive with migrations
+ * 0084/0085, and an environment that has not taken them should get a sentence,
+ * not a stack trace.
+ */
+function queryOrNull(sql, opts, what) {
+  try {
+    return query(sql, opts);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table/i.test(msg)) {
+      console.error(`This database has no ${what} table — apply migrations 0084/0085 first.`);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+function safeParse(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Rebuild the engine's source list from an approved document's metadata. */
+function sourcesFor(doc) {
+  const extended = safeParse(doc.extended_metadata);
+  if (!extended) return [];
+  const sources = [];
+  if (Array.isArray(extended.tables) && extended.tables.length > 0) {
+    sources.push({ scope: 'ai_fields', tables: extended.tables });
+  }
+  if (extended.groups && typeof extended.groups === 'object') {
+    sources.push({ scope: 'ai_fields', groups: extended.groups });
+  }
+  return sources;
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const remote = opts.remote;
+
+  const testRows = queryOrNull(
+    `SELECT id, name, aliases, default_unit FROM spec_tests WHERE tenant_id = '${opts.tenant}'`,
+    { remote },
+    'spec_tests'
+  );
+  const tests = (testRows || []).map((r) => {
+    let aliases = [];
+    try {
+      const parsed = JSON.parse(r.aliases || '[]');
+      if (Array.isArray(parsed)) aliases = parsed.map(String);
+    } catch { /* a corrupt blob costs this analyte its synonyms, nothing more */ }
+    return { id: r.id, name: r.name, aliases, default_unit: r.default_unit };
+  });
+
+  const limitRows = queryOrNull(
+    `SELECT id, spec_test_id, operator, value_min, value_max, unit, severity, active,
+            supplier_id, document_type_id, product_id, updated_at
+       FROM spec_limits WHERE tenant_id = '${opts.tenant}' AND active = 1`,
+    { remote },
+    'spec_limits'
+  );
+  const limits = (limitRows || []).map((r) => ({
+    ...r,
+    active: Number(r.active) === 1,
+    value_min: r.value_min == null ? null : Number(r.value_min),
+    value_max: r.value_max == null ? null : Number(r.value_max),
+  }));
+
+  if (!opts.printedOnly && limits.length === 0) {
+    console.log(
+      'No active spec limits for this tenant — nothing of ours to check.\n' +
+      'Run with --printed-only to see what the COAs\' own printed specs would flag.'
+    );
+  }
+
+  const { rows: docs } = queryPaged(
+    (pageSize, offset) =>
+      `SELECT d.id, d.title, d.supplier_id, d.document_type_id, d.extended_metadata,
+              s.name AS supplier_name
+         FROM documents d
+         LEFT JOIN suppliers s ON s.id = d.supplier_id
+        WHERE d.tenant_id = '${opts.tenant}'
+          AND d.status = 'active'
+          AND d.extended_metadata IS NOT NULL
+        ORDER BY d.created_at DESC
+        LIMIT ${pageSize} OFFSET ${offset}`,
+    { remote, pageSize: opts.pageSize, maxRows: opts.limit || undefined }
+  );
+
+  const findings = [];
+  const unmatched = new Map();
+  let examined = 0;
+  let withResults = 0;
+
+  for (const doc of docs) {
+    examined++;
+    const sources = sourcesFor(doc);
+    if (sources.length === 0) continue;
+    withResults++;
+
+    const printed = checkPrintedSpecs(sources);
+    let configured = { verdicts: [], unmatched: [] };
+    if (!opts.printedOnly) {
+      configured = checkConfiguredLimits(sources, tests, limits, {
+        supplier_id: doc.supplier_id || null,
+        document_type_id: doc.document_type_id || null,
+        product_ids: [],
+      });
+    }
+
+    for (const name of configured.unmatched) {
+      unmatched.set(name, (unmatched.get(name) || 0) + 1);
+    }
+
+    for (const v of [...printed, ...configured.verdicts]) {
+      if (v.verdict === 'in_spec') continue;
+      findings.push({
+        document_id: doc.id,
+        document_title: doc.title,
+        supplier: doc.supplier_name || null,
+        test: v.test_name_raw,
+        value: v.value_raw,
+        limit: v.limit_text,
+        verdict: v.verdict,
+        source: v.source,
+        message: v.message,
+      });
+    }
+  }
+
+  const outOfSpec = findings.filter((f) => f.verdict === 'out_of_spec');
+  const notChecked = findings.filter((f) => f.verdict === 'not_checked');
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          tenant: opts.tenant,
+          examined,
+          with_results: withResults,
+          analytes: tests.length,
+          active_limits: limits.length,
+          out_of_spec: outOfSpec,
+          not_checked: notChecked,
+          unmatched: [...unmatched.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([name, count]) => ({ name, count })),
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  console.log('');
+  console.log(`Spec re-check — tenant ${opts.tenant}${remote ? ' (PRODUCTION, read-only)' : ' (local)'}`);
+  console.log('='.repeat(72));
+  console.log(`Documents examined ....... ${examined}`);
+  console.log(`  with test results ...... ${withResults}`);
+  console.log(`Analytes configured ...... ${tests.length}`);
+  console.log(`Active limits ............ ${limits.length}`);
+  if (opts.limit && docs.length >= opts.limit) {
+    console.log(`NOTE: capped at --limit ${opts.limit}; more documents were not examined.`);
+  }
+  console.log('');
+  console.log(`OUT OF SPEC .............. ${outOfSpec.length}`);
+  console.log(`COULD NOT BE JUDGED ...... ${notChecked.length}`);
+  console.log('');
+
+  if (outOfSpec.length > 0) {
+    console.log('Out of spec');
+    console.log('-'.repeat(72));
+    for (const f of outOfSpec.slice(0, 50)) {
+      console.log(`  ${f.supplier || '—'} · ${f.document_title}`);
+      console.log(`     ${f.message}`);
+    }
+    if (outOfSpec.length > 50) console.log(`  … and ${outOfSpec.length - 50} more.`);
+    console.log('');
+  }
+
+  if (notChecked.length > 0) {
+    console.log('Could not be judged — these are NOT passes');
+    console.log('-'.repeat(72));
+    for (const f of notChecked.slice(0, 25)) {
+      console.log(`  ${f.document_title}: ${f.message}`);
+    }
+    if (notChecked.length > 25) console.log(`  … and ${notChecked.length - 25} more.`);
+    console.log('');
+  }
+
+  if (unmatched.size > 0) {
+    console.log('Printed test names with no configured limit');
+    console.log('-'.repeat(72));
+    console.log('  Each of these was skipped entirely. If one is a test you DO hold a');
+    console.log('  limit for, it is spelled differently here than in your analyte — add');
+    console.log('  it as an alias in Settings › Spec Limits, or that check never runs.');
+    console.log('');
+    for (const [name, count] of [...unmatched.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40)) {
+      console.log(`  ${String(count).padStart(5)}×  ${name}`);
+    }
+    console.log('');
+  }
+
+  console.log('Nothing was written and nobody was emailed.');
+  console.log('');
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+}

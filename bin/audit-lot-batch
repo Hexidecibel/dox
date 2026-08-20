@@ -1,0 +1,199 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/audit-lot-batch — READ-ONLY: how many COAs print a lot AND a batch, and
+ * where did the batch actually end up?
+ *
+ * WHY THIS EXISTS (2026-08-20). A Michael Foods COA prints both `Lot#: 6203G`
+ * and `Batch Number: 2586083`. The schema had no `batch_number` field and
+ * declared batch to be an ALIAS of lot, so the second identifier had nowhere
+ * true to go — the model filed it as `sub_lot_code`, and the record then
+ * identified itself by the batch instead of the lot.
+ *
+ * Before and after changing that, the question worth answering is how far it
+ * reaches: this is a class of document, not one supplier. The script reads the
+ * corpus's own extracted text to find which pages PRINT both labels, then reads
+ * the stored extraction to see what the model did with them.
+ *
+ * The interesting bucket is `batch_as_sublot` — a stored sublot that does not
+ * look like a sublot (sublots are 2 digits) on a page that also prints a batch.
+ * Those are the records currently keyed on the wrong identifier, which means
+ * they cannot match the WMS side.
+ *
+ * READ-ONLY: every statement goes through bin/lib/d1.js#query, which refuses
+ * anything that is not SELECT/WITH.
+ *
+ * NOTE ON THE FILTER: rows predating migration 0067 carry `output_kind = NULL`,
+ * not 'coa'. Filtering on `output_kind = 'coa'` alone hid 7 of the 11 affected
+ * Michael Foods documents on the first run of this script and made the problem
+ * look four times smaller than it is. NULL is included deliberately.
+ *
+ * Usage:
+ *   bin/audit-lot-batch                 # LOCAL D1
+ *   bin/audit-lot-batch --remote        # PRODUCTION D1 (read-only)
+ *   bin/audit-lot-batch --json
+ *   bin/audit-lot-batch --examples 10   # show N example items per bucket
+ *
+ * Exit code is always 0 — findings are data, not failures.
+ */
+
+const { queryPaged } = require('./lib/d1');
+
+function parseArgs(argv) {
+  const opts = { remote: false, json: false, examples: 5, pageSize: 40 };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--remote':
+      case '-r': opts.remote = true; break;
+      case '--json': opts.json = true; break;
+      case '--examples': opts.examples = Number(argv[++i]); break;
+      case '--page-size': opts.pageSize = Number(argv[++i]); break;
+      case '-h':
+      case '--help':
+        console.log(require('fs').readFileSync(__filename, 'utf8').split('\n').slice(2, 32).join('\n').replace(/^ \* ?/gm, ''));
+        process.exit(0);
+        break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  return opts;
+}
+
+// A label printed on the page, not a value. Anchored to a label-ish context so
+// the word "batch" inside prose does not count.
+const LOT_LABEL = /\bLOT\s*(?:#|NO\.?|NUMBER|CODE)?\s*[#:.\-]/i;
+const BATCH_LABEL = /\bBATCH\s*(?:#|NO\.?|NUMBER|CODE)?\s*[#:.\-]/i;
+const SUBLOT_LABEL = /\bSUB\s*-?\s*LOT\b/i;
+
+function safeParse(raw) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Every field map in an extraction: the flat one plus each record's. */
+function fieldMaps(row) {
+  const maps = [];
+  const flat = safeParse(row.ai_fields);
+  if (flat && typeof flat === 'object' && !Array.isArray(flat)) maps.push(flat);
+  const rec = safeParse(row.ai_records);
+  if (rec && Array.isArray(rec.records)) {
+    for (const r of rec.records) {
+      if (r && typeof r.fields === 'object' && r.fields) maps.push(r.fields);
+    }
+  }
+  return maps;
+}
+
+const SUBLOT_KEYS = ['sub_lot_code', 'sub_lot_number', 'sub_lot', 'sublot_code', 'sublot', 'sublot_number'];
+
+function firstOf(map, keys) {
+  for (const k of keys) {
+    const v = map[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+/** Real sublots are short numeric codes. Anything else in that slot is suspect. */
+function looksLikeSublot(v) {
+  return /^\d{1,3}$/.test(String(v).trim());
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const { rows } = queryPaged(
+    (pageSize, offset) =>
+      `SELECT id, file_name, supplier, ai_fields, ai_records, extracted_text
+         FROM processing_queue
+        WHERE (output_kind = 'coa' OR output_kind IS NULL)
+          AND extracted_text IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT ${pageSize} OFFSET ${offset}`,
+    { remote: opts.remote, pageSize: opts.pageSize }
+  );
+
+  const buckets = {
+    total: rows.length,
+    prints_lot_and_batch: [],
+    prints_batch_only: [],
+    prints_sublot_label: [],
+    batch_as_sublot: [],
+    suspect_sublot_any: [],
+  };
+
+  for (const row of rows) {
+    const text = String(row.extracted_text || '');
+    const hasLot = LOT_LABEL.test(text);
+    const hasBatch = BATCH_LABEL.test(text);
+    const hasSublotLabel = SUBLOT_LABEL.test(text);
+    const brief = { id: row.id, file: row.file_name, supplier: row.supplier };
+
+    if (hasSublotLabel) buckets.prints_sublot_label.push(brief);
+    if (hasBatch && hasLot) buckets.prints_lot_and_batch.push(brief);
+    else if (hasBatch) buckets.prints_batch_only.push(brief);
+
+    for (const map of fieldMaps(row)) {
+      const sub = firstOf(map, SUBLOT_KEYS);
+      if (!sub || looksLikeSublot(sub)) continue;
+      const entry = { ...brief, sub_lot: sub, lot: map.lot_number || map.lot_code || null };
+      buckets.suspect_sublot_any.push(entry);
+      // The specific defect: a non-sublot-shaped sublot on a page that prints a
+      // batch label and NO sublot label — i.e. the batch got filed as a sublot.
+      if (hasBatch && !hasSublotLabel) buckets.batch_as_sublot.push(entry);
+      break;
+    }
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify(buckets, null, 2));
+    return;
+  }
+
+  const n = (a) => String(a.length).padStart(5);
+  console.log('');
+  console.log(`Lot vs batch audit — ${opts.remote ? 'PRODUCTION (read-only)' : 'local'}`);
+  console.log('='.repeat(72));
+  console.log(`COA queue items with text .......... ${String(buckets.total).padStart(5)}`);
+  console.log('');
+  console.log('What the documents PRINT');
+  console.log(`  lot AND batch labels ............. ${n(buckets.prints_lot_and_batch)}   <- the changed case`);
+  console.log(`  batch label, no lot .............. ${n(buckets.prints_batch_only)}   <- batch IS the lot; unchanged`);
+  console.log(`  a real sub-lot label ............. ${n(buckets.prints_sublot_label)}`);
+  console.log('');
+  console.log('What the extraction DID');
+  console.log(`  sublot slot holds a non-sublot ... ${n(buckets.suspect_sublot_any)}`);
+  console.log(`  ...of those, batch-as-sublot ..... ${n(buckets.batch_as_sublot)}   <- keyed on the wrong identifier`);
+  console.log('');
+
+  const show = (title, list) => {
+    if (list.length === 0) return;
+    console.log(title);
+    console.log('-'.repeat(72));
+    for (const e of list.slice(0, opts.examples)) {
+      const extra = e.sub_lot ? `  sublot="${e.sub_lot}" lot="${e.lot ?? '—'}"` : '';
+      console.log(`  ${e.supplier || '—'} · ${e.file || e.id}${extra}`);
+    }
+    if (list.length > opts.examples) console.log(`  … and ${list.length - opts.examples} more.`);
+    console.log('');
+  };
+
+  show('Pages printing BOTH a lot and a batch', buckets.prints_lot_and_batch);
+  show('Batch filed as a sublot', buckets.batch_as_sublot);
+
+  console.log('Nothing was written.');
+  console.log('');
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+}

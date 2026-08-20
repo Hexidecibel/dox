@@ -32,7 +32,8 @@ FIELD EXTRACTION RULES:
    - customer_name — company RECEIVING the product. Often labeled "Ship To", "Customer", "Sold To", or "Attention". If a company name appears prominently but is clearly the recipient (e.g., appears after "Ship To:"), it is the customer, NOT the supplier.
    - product_name — full product name (e.g., "Unsalted Sweet Cream Butter 68#")
    - product_code — supplier's internal product/item code or SKU
-   - lot_number — lot, batch, or run number
+   - lot_number — the lot or run number. Also the batch number, but ONLY when the document prints no separate lot; if it prints both, this is the lot.
+   - batch_number — a batch identifier printed ALONGSIDE a separate lot ("Batch Number", "Batch", "Batch Code"). Null when the document prints only one of the two.
    - po_number — purchase order number
    - code_date — production/pack/code date
    - expiration_date — expiration, best-by, use-by, or sell-by date
@@ -203,7 +204,10 @@ function buildPrompt(options?: { examples?: Array<{ text: string; result: string
 const FIELD_ALIASES: Record<string, string[]> = {
   supplier_name: ['supplier', 'vendor', 'manufacturer', 'company', 'from', 'shipped_by'],
   customer_name: ['customer', 'sold_to', 'ship_to', 'buyer', 'consignee'],
-  lot_number: ['lot_no', 'lot_num', 'lot', 'batch_number', 'batch_no', 'batch', 'run_number', 'lot_code'],
+  // 'batch*' is deliberately NOT here — see batch_number below and the
+  // promotion step in canonicalizeFields.
+  lot_number: ['lot_no', 'lot_num', 'lot', 'run_number', 'lot_code'],
+  batch_number: ['batch', 'batch_no', 'batch_code'],
   po_number: ['po', 'purchase_order', 'purchase_order_number', 'po_no'],
   product_name: ['product', 'item', 'material', 'description', 'item_description'],
   product_code: ['item_code', 'sku', 'material_code', 'item_number', 'item_no'],
@@ -216,20 +220,47 @@ const FIELD_ALIASES: Record<string, string[]> = {
   plant_number: ['plant_no', 'facility_number', 'facility_id', 'plant_id'],
 };
 
-function canonicalizeFields(fields: Record<string, any>): Record<string, any> {
+/** Blank, null, or whitespace — the shape of "the model gave us nothing". */
+function isEmptyValue(v: unknown): boolean {
+  return v == null || (typeof v === 'string' && v.trim() === '');
+}
+
+/** Exported for tests — pure, and the behaviour it encodes is load-bearing. */
+export function canonicalizeFields(fields: Record<string, any>): Record<string, any> {
   const reverseMap: Record<string, string> = {};
   for (const [canonical, aliases] of Object.entries(FIELD_ALIASES)) {
     for (const alias of aliases) {
       reverseMap[alias] = canonical;
     }
   }
+
+  // TWO PASSES, AND THE ORDER MATTERS. Keep in sync with the identical function
+  // in bin/process-worker.
+  //
+  // One pass with first-writer-wins made the result depend on the order the
+  // MODEL happened to emit its keys. A COA printing both "Lot#: 6203G" and
+  // "Batch Number: 2586083" could have the batch land in `lot_number` purely
+  // because it came first, silently discarding the real lot. An EXACT canonical
+  // key is better evidence than an alias and wins regardless of order.
   const result: Record<string, any> = {};
   for (const [key, value] of Object.entries(fields)) {
-    const canonical = reverseMap[key] || key;
+    if (!(key in reverseMap)) result[key] = value;
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    const canonical = reverseMap[key];
+    if (!canonical) continue;
     if (!(canonical in result) || result[canonical] == null) {
       result[canonical] = value;
     }
   }
+
+  // A batch number IS the lot when the document prints no separate lot. It
+  // stops being true the moment a document prints both.
+  if (isEmptyValue(result.lot_number) && !isEmptyValue(result.batch_number)) {
+    result.lot_number = result.batch_number;
+    delete result.batch_number;
+  }
+
   return result;
 }
 

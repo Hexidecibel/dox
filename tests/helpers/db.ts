@@ -80,6 +80,8 @@ import m0080 from '../../migrations/0080_registry_facets.sql?raw';
 import m0081 from '../../migrations/0081_documents_classification_status.sql?raw';
 import m0082 from '../../migrations/0082_processing_queue_text_model.sql?raw';
 import m0083 from '../../migrations/0083_queue_rejection_reason.sql?raw';
+import m0084 from '../../migrations/0084_spec_limits.sql?raw';
+import m0085 from '../../migrations/0085_document_spec_checks.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -90,7 +92,7 @@ const migrations: string[] = [
   m0056, m0057, m0058, m0059, m0060, m0061, m0062, m0063,
   m0064, m0065, m0066, m0067, m0068, m0069, m0070, m0071,
   m0072, m0073, m0074, m0075,
-  m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083,
+  m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
 ];
 
 /**
@@ -330,6 +332,9 @@ export async function cleanTables(db: D1Database): Promise<void> {
   const tables = [
     'audit_log', 'assignments', 'lot_match_suggestions', 'document_lots',
     'document_categories',
+    // Spec checks before the limits they point at, limits before their analyte,
+    // and all of them before suppliers/products/documents.
+    'document_spec_checks', 'spec_limits', 'spec_tests',
     // Registry facets (0080): junctions before their vocabularies, and both
     // before documents, so FK cascades never fire against a missing parent.
     'document_requirements', 'document_claims', 'claim_type_requirements',

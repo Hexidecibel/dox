@@ -22,6 +22,7 @@ import {
   Insights as InsightsIcon,
   Psychology as ExtractionContextIcon,
   Checklist as ChecklistIcon,
+  Straighten as SpecLimitsIcon,
   LocalOffer as ClaimsIcon,
   Rule as RuleIcon,
 } from '@mui/icons-material';
@@ -32,6 +33,7 @@ import type { Role } from '../lib/types';
 // the app Layout (no nested layout), so we just render them in the pane.
 import { DocumentTypes } from './admin/DocumentTypes';
 import { Requirements } from './admin/Requirements';
+import { SpecLimits } from './admin/SpecLimits';
 import { ClaimTypes } from './admin/ClaimTypes';
 import { ClaimRules } from './admin/ClaimRules';
 import { Sources } from './admin/Sources';
@@ -72,6 +74,9 @@ const SECTIONS: SettingsSection[] = [
       { key: 'requirements', label: 'Checklist', icon: <ChecklistIcon />, roles: ALL_ADMIN, component: Requirements },
       { key: 'claim-types', label: 'Claims', icon: <ClaimsIcon />, roles: ALL_ADMIN, component: ClaimTypes },
       { key: 'claim-rules', label: 'Claim Rules', icon: <RuleIcon />, roles: ALL_ADMIN, component: ClaimRules },
+      // Acceptance criteria for the values inside a document, as opposed to
+      // the taxonomy above, which is about the document itself.
+      { key: 'spec-limits', label: 'Spec Limits', icon: <SpecLimitsIcon />, roles: ALL_ADMIN, component: SpecLimits },
       { key: 'sources', label: 'Sources', icon: <ConnectorsIcon />, roles: ALL_ADMIN, component: Sources },
     ],
   },

@@ -51,6 +51,19 @@ import {
   warnedFieldSx,
   warningKey,
 } from './InvariantWarnings';
+import {
+  SpecWarningBanner,
+  SpecRowMarker,
+  specVerdictsForTableRow,
+  specVerdictsForGroup,
+  outOfSpecRowSx,
+} from './SpecWarnings';
+import type { SpecVerdict } from '../lib/types';
+import {
+  COA_RECORD_LOT_KEYS,
+  COA_RECORD_SUBLOT_KEYS,
+  firstRecordField,
+} from '../../shared/types';
 import ProductBridgeControl, { type ProductBridgeValue } from './ProductBridgeControl';
 
 /**
@@ -138,7 +151,14 @@ function cloneRecord(r: CoaRecord): CoaRecord {
 }
 
 /** Cells inside a structured group, rendered read-only (verbatim specs). */
-function GroupCells({ cells }: { cells: Record<string, CoaResultCell> }) {
+function GroupCells({
+  cells,
+  verdicts,
+}: {
+  cells: Record<string, CoaResultCell>;
+  /** Spec verdicts for this group, keyed by cell name. */
+  verdicts?: Record<string, SpecVerdict[]>;
+}) {
   const entries = Object.entries(cells);
   if (entries.length === 0) return null;
   return (
@@ -153,14 +173,21 @@ function GroupCells({ cells }: { cells: Record<string, CoaResultCell> }) {
           </TableRow>
         </TableHead>
         <TableBody>
-          {entries.map(([key, cell]) => (
-            <TableRow key={key}>
-              <TableCell>{key.replace(/_/g, ' ')}</TableCell>
-              <TableCell>{cell.value ?? '—'}</TableCell>
-              <TableCell>{cell.unit ?? '—'}</TableCell>
-              <TableCell>{cell.spec ?? '—'}</TableCell>
-            </TableRow>
-          ))}
+          {entries.map(([key, cell]) => {
+            const cellVerdicts = verdicts?.[key];
+            const failed = (cellVerdicts || []).some((v) => v.verdict === 'out_of_spec');
+            return (
+              <TableRow key={key} sx={failed ? outOfSpecRowSx : undefined}>
+                <TableCell>{key.replace(/_/g, ' ')}</TableCell>
+                <TableCell sx={failed ? { fontWeight: 700 } : undefined}>{cell.value ?? '—'}</TableCell>
+                <TableCell>{cell.unit ?? '—'}</TableCell>
+                <TableCell>
+                  {cell.spec ?? '—'}
+                  <SpecRowMarker verdicts={cellVerdicts} />
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </TableContainer>
@@ -168,7 +195,14 @@ function GroupCells({ cells }: { cells: Record<string, CoaResultCell> }) {
 }
 
 /** A single extracted table, rendered read-only. */
-function RecordTable({ table }: { table: ExtractedTable }) {
+function RecordTable({
+  table,
+  verdicts,
+}: {
+  table: ExtractedTable;
+  /** Spec verdicts for this table, keyed by row index. */
+  verdicts?: Record<number, SpecVerdict[]>;
+}) {
   return (
     <Box sx={{ mb: 1.5 }}>
       {table.name && (
@@ -188,13 +222,20 @@ function RecordTable({ table }: { table: ExtractedTable }) {
             </TableRow>
           </TableHead>
           <TableBody>
-            {table.rows.map((row, ri) => (
-              <TableRow key={ri}>
-                {row.map((cell, ci) => (
-                  <TableCell key={ci}>{cell}</TableCell>
-                ))}
-              </TableRow>
-            ))}
+            {table.rows.map((row, ri) => {
+              const rowVerdicts = verdicts?.[ri];
+              const failed = (rowVerdicts || []).some((v) => v.verdict === 'out_of_spec');
+              return (
+                <TableRow key={ri} sx={failed ? outOfSpecRowSx : undefined}>
+                  {row.map((cell, ci) => (
+                    <TableCell key={ci} sx={failed ? { fontWeight: 700 } : undefined}>
+                      {cell}
+                      {ci === row.length - 1 && <SpecRowMarker verdicts={rowVerdicts} />}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              );
+            })}
           </TableBody>
         </Table>
       </TableContainer>
@@ -447,6 +488,10 @@ export default function CoaRecordsReviewTile({
     const fieldEntries = Object.entries(record.fields || {});
     const groupEntries = record.groups ? Object.entries(record.groups) : [];
     const dimmed = decision === 'reject';
+    // Resolved the same way the producer resolves them (kinds/coa.ts), so the
+    // chip shows the lot this record will actually be filed under.
+    const recordLot = firstRecordField(record.fields, COA_RECORD_LOT_KEYS);
+    const recordSubLot = firstRecordField(record.fields, COA_RECORD_SUBLOT_KEYS);
     return (
       <Paper
         key={idx}
@@ -460,14 +505,26 @@ export default function CoaRecordsReviewTile({
       >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5, flexWrap: 'wrap' }}>
           <Typography variant="subtitle2">Record {idx + 1}</Typography>
-          {record.fields?.lot_code && <Chip label={`lot ${record.fields.lot_code}`} size="small" />}
-          {record.fields?.sub_lot_code && (
+          {/* THE LOT IS THE RECORD'S IDENTITY, and it is resolved through every
+              spelling the model might have used — record fields are raw model
+              output, so a record storing its lot as `lot_number` used to render
+              no lot chip at all and be identified in the UI by its sublot
+              alone. The sublot QUALIFIES the lot; it never stands in for it. */}
+          {recordLot && <Chip label={`lot ${recordLot}`} size="small" color="primary" />}
+          {recordSubLot && (
             <Chip
-              label={`sublot ${record.fields.sub_lot_code}`}
+              label={`sublot ${recordSubLot}`}
               size="small"
-              color="primary"
               variant="outlined"
             />
+          )}
+          {!recordLot && (
+            <Tooltip
+              arrow
+              title="No lot number on this record. The lot is what matches to the WMS side, so this record cannot be matched until one is set."
+            >
+              <Chip label="no lot" size="small" color="warning" variant="outlined" />
+            </Tooltip>
           )}
           {record.source_pages && record.source_pages.length > 0 && (
             <Chip label={`p. ${record.source_pages.join(', ')}`} size="small" variant="outlined" />
@@ -601,7 +658,10 @@ export default function CoaRecordsReviewTile({
                 <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                   {groupName.replace(/_/g, ' ')}
                 </Typography>
-                <GroupCells cells={cells} />
+                <GroupCells
+                  cells={cells}
+                  verdicts={specVerdictsForGroup(item.spec_results, `record[${idx}]`, groupName)}
+                />
               </Box>
             ))}
           </>
@@ -612,7 +672,11 @@ export default function CoaRecordsReviewTile({
           <>
             <Divider sx={{ mb: 1 }} />
             {record.tables.map((t, ti) => (
-              <RecordTable key={ti} table={t} />
+              <RecordTable
+                key={ti}
+                table={t}
+                verdicts={specVerdictsForTableRow(item.spec_results, `record[${idx}]`, ti)}
+              />
             ))}
           </>
         )}
@@ -660,6 +724,10 @@ export default function CoaRecordsReviewTile({
           {success}
         </Alert>
       )}
+
+      {/* An out-of-spec RESULT outranks an extraction hint — it goes first, and
+          in error colour, so it is never read as one more yellow nag. */}
+      <SpecWarningBanner verdicts={item.spec_results} summary={item.spec_summary} />
 
       {/* Anything the document itself contradicts, before the reviewer scrolls. */}
       <InvariantWarningBanner warnings={item.invariant_warnings} dismissed={dismissedWarnings} />

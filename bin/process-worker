@@ -2754,7 +2754,13 @@ async function processCoaItem(item) {
 const FIELD_ALIASES = {
   supplier_name: ['supplier', 'vendor', 'manufacturer', 'company', 'from', 'shipped_by'],
   customer_name: ['customer', 'sold_to', 'ship_to', 'buyer', 'consignee'],
-  lot_number: ['lot_no', 'lot_num', 'lot', 'batch_number', 'batch_no', 'batch', 'run_number', 'lot_code'],
+  // 'batch*' is deliberately NOT here — see batch_number below and the
+  // promotion step in canonicalizeFields. A COA printing a Lot AND a Batch
+  // prints two different identifiers, and collapsing them loses one.
+  lot_number: ['lot_no', 'lot_num', 'lot', 'run_number', 'lot_code'],
+  // Its own field. Promoted to lot_number by canonicalizeFields when, and only
+  // when, the document printed no separate lot.
+  batch_number: ['batch', 'batch_no', 'batch_code'],
   // D1: the sublot qualifies the lot and is its own field. Every spelling the
   // model emits must land on the single canonical `sub_lot_code` so the flat
   // path can carry it (and so recordsFromPage / computeRecordLotKey see it).
@@ -2784,14 +2790,44 @@ function canonicalizeFields(fields) {
       reverseMap[alias] = canonical;
     }
   }
+
+  // TWO PASSES, AND THE ORDER MATTERS.
+  //
+  // This used to be one pass with first-writer-wins, which made the result
+  // depend on the order the MODEL happened to emit its keys in. A COA printing
+  // both "Lot#: 6203G" and "Batch Number: 2586083" (Michael Foods, 2026-08-20)
+  // could have the batch land in `lot_number` purely because it came first in
+  // the JSON, and the real lot was then silently discarded — no warning, no
+  // trace, just the wrong lot filed and a match that never happens.
+  //
+  // An EXACT canonical key is always the better evidence than an alias, so it
+  // wins regardless of emission order. Aliases only fill slots still empty.
   const result = {};
   for (const [key, value] of Object.entries(fields)) {
-    const canonical = reverseMap[key] || key;
+    if (!(key in reverseMap)) result[key] = value;
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    const canonical = reverseMap[key];
+    if (!canonical) continue;
     if (!(canonical in result) || result[canonical] == null) {
       result[canonical] = value;
     }
   }
+
+  // A batch number IS the lot when the document prints no separate lot — which
+  // is the common case, and why `batch` was an alias of `lot_number` for so
+  // long. It stops being true the moment a document prints both.
+  if (isEmptyValue(result.lot_number) && !isEmptyValue(result.batch_number)) {
+    result.lot_number = result.batch_number;
+    delete result.batch_number;
+  }
+
   return result;
+}
+
+/** Blank, null, or whitespace — the shape of "the model gave us nothing". */
+function isEmptyValue(v) {
+  return v == null || (typeof v === 'string' && v.trim() === '');
 }
 
 // === Address detection ===
@@ -2894,8 +2930,9 @@ FIELD EXTRACTION RULES:
    - customer_name — company RECEIVING the product. Often labeled "Ship To", "Customer", "Sold To", or "Attention". If a company name appears prominently but is clearly the recipient (e.g., appears after "Ship To:"), it is the customer, NOT the supplier.
    - product_name — full product name (e.g., "Unsalted Sweet Cream Butter 68#")
    - product_code — supplier's internal product/item code or SKU
-   - lot_number — lot, batch, or run number
-   - sub_lot_code — the sub-lot code that QUALIFIES lot_number (labels: "Sub Lot Number", "Sub Lot", "Sublot", "SL"). Usually 2 digits. It is a SEPARATE field: never concatenate it into lot_number and never drop it. Extract it whenever the page prints one — INCLUDING when the page has only ONE lot and ONE sublot. A lot number without its sublot does not identify the material.
+   - lot_number — the lot or run number. Also the batch number, but ONLY when the page prints no separate lot; if it prints both, this is the lot and the batch goes in batch_number.
+   - sub_lot_code — the sub-lot code that QUALIFIES lot_number. ONLY these labels are sublots: "Sub Lot Number", "Sub Lot", "Sublot", "SL". Usually 2 digits. It is a SEPARATE field: never concatenate it into lot_number and never drop it. Extract it whenever the page prints one — INCLUDING when the page has only ONE lot and ONE sublot. A lot number without its sublot does not identify the material. A "Batch Number", "Batch", or "Batch Code" is NOT a sublot — it goes in batch_number. If the page prints no label from that list, sub_lot_code is null; leaving it null is correct and expected, and is far better than putting some other identifier there.
+   - batch_number — a batch/run identifier printed ALONGSIDE a separate lot number (labels: "Batch Number", "Batch", "Batch Code"). Only use this field when the page prints BOTH a lot and a batch as different values. When the page prints a batch and no lot at all, the batch IS the lot: put it in lot_number and leave batch_number null.
    - po_number — purchase order number
    - code_date — the code/pack date printed on the product. On many dairy COAs this IS the production date; when a COA prints BOTH a production date and a separate code date, they are DIFFERENT fields — do not copy one into the other.
    - production_date — the date the product was actually made, when the document labels it separately (e.g. "Production Date"). Leave null if the COA prints only a code date.
@@ -3228,8 +3265,9 @@ FIELD EXTRACTION RULES:
    - customer_name — company RECEIVING the product. Often labeled "Ship To", "Customer", "Sold To", or "Attention". Strip trailing digits (see VLM rules above).
    - product_name — full product name (e.g., "Unsalted Sweet Cream Butter 68#")
    - product_code — supplier's internal product/item code or SKU
-   - lot_number — lot, batch, or run number
-   - sub_lot_code — the sub-lot code that QUALIFIES lot_number (labels: "Sub Lot Number", "Sub Lot", "Sublot", "SL"). Usually 2 digits. It is a SEPARATE field: never concatenate it into lot_number and never drop it. Extract it whenever the page prints one — INCLUDING when the page has only ONE lot and ONE sublot.
+   - lot_number — the lot or run number. Also the batch number, but ONLY when the page prints no separate lot; if it prints both, this is the lot and the batch goes in batch_number.
+   - sub_lot_code — the sub-lot code that QUALIFIES lot_number. ONLY these labels are sublots: "Sub Lot Number", "Sub Lot", "Sublot", "SL". Usually 2 digits. It is a SEPARATE field: never concatenate it into lot_number and never drop it. Extract it whenever the page prints one — INCLUDING when the page has only ONE lot and ONE sublot. A "Batch Number", "Batch", or "Batch Code" is NOT a sublot — it goes in batch_number.
+   - batch_number — a batch/run identifier printed ALONGSIDE a separate lot number (labels: "Batch Number", "Batch", "Batch Code"). Only when the page prints BOTH a lot and a batch as different values; when it prints a batch and no lot, the batch IS the lot and belongs in lot_number.
    - po_number — purchase order number. ONLY populate if an explicit "PO", "P.O.", or "Purchase Order" label is visible in the image. Do NOT infer or fabricate from adjacent columns.
    - code_date — the code/pack date printed on the product. On many dairy COAs this IS the production date; when a COA prints BOTH a production date and a separate code date, they are DIFFERENT fields — do not copy one into the other.
    - production_date — the date the product was actually made, when the document labels it separately (e.g. "Production Date"). Leave null if the COA prints only a code date.

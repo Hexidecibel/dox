@@ -46,6 +46,37 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Spec limits + out-of-parameter warnings
+
+**Status:** done (Phases 0–2 built, not deployed)
+
+**Summary:** The portal read COAs but never judged one — a 40 CFU/g coliform
+against a 10 CFU/g limit reached a reviewer looking exactly like a clean
+result. Three phases shipped together: the COA's own printed spec/pass-fail
+(no configuration, every supplier, day one), our configured limits
+(`spec_tests` + `spec_limits`, tenant → supplier/doctype → product, most
+specific wins), and the register + notify hop (`document_spec_checks`, one
+email per document routed by `assignments`). Engine is three-state on purpose:
+`not_checked` means we held a limit and could not honestly apply it, and is
+never a silent pass — the false negative is the failure mode that would
+discredit the feature, since extraction runs at ~90.6% and the results table is
+where its known defects live.
+
+**Full plan:** `/home/hexi/.claude/plans/dynamic-splashing-wreath.md`
+
+**Not included, deliberately:** product-scoped limits are stored but not
+offered in the admin UI — the review queue cannot resolve a document's products
+at review time, so such a limit would list as active and never fire.
+`bin/recheck-spec-limits` reports but does not backfill the register; writing
+would mean bypassing the read-only guarantee in `bin/lib/d1.js`, and the
+register fills going forward on every approval.
+
+**Still needed from AJ:** spec limits as five columns — test name **as the
+supplier prints it**, operator, value, unit, scope. The printed names are the
+load-bearing part; matching is exact, never fuzzy.
+
+
+
 ### COA extraction — deferred items after the 2026-08-04/05 measurement sessions
 
 **Status:** planned (2026-08-05). The extraction workstream is otherwise CLOSED — geometry

@@ -89,6 +89,7 @@ import {
   warningsByField,
   warnedFieldSx,
 } from '../components/InvariantWarnings';
+import { SpecAlertChip, SpecWarningBanner } from '../components/SpecWarnings';
 import RejectQueueItemDialog from '../components/RejectQueueItemDialog';
 import { REJECTION_REASON_LABELS } from '../lib/types';
 import type { RejectionReason } from '../lib/types';
@@ -1618,6 +1619,9 @@ export default function ReviewQueue() {
                     {item.status === 'pending' && (
                       <InvariantWarningChip warnings={item.invariant_warnings} />
                     )}
+                    {/* An out-of-spec RESULT is the one thing worth spotting
+                        from the collapsed list without opening anything. */}
+                    <SpecAlertChip verdicts={item.spec_results} />
                     {item.template_id && (
                       <Tooltip title={helpContent.review_queue.main.fieldTooltips.templateMatch} arrow>
                         <Chip label="Template matched" color="info" size="small" sx={{ ml: 0.5 }} />
@@ -2590,6 +2594,7 @@ export default function ReviewQueue() {
 
                           return (
                             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                              <SpecWarningBanner verdicts={item.spec_results} summary={item.spec_summary} />
                               <InvariantWarningBanner
                                 warnings={item.invariant_warnings}
                                 dismissed={itemDismissed}

@@ -40,6 +40,7 @@ import {
   Inventory2 as LotsIcon,
   Assessment as ReportsIcon,
   EventBusy as RenewalsIcon,
+  ErrorOutline as OutOfSpecIcon,
   ContactMail as CustomersIcon,
   TableView as RecordsIcon,
   HelpOutline as HelpIcon,
@@ -73,6 +74,7 @@ const navItems: NavItem[] = [
   { label: 'Customers', path: '/admin/customers', icon: <CustomersIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'COA Fulfillment', path: '/reports', icon: <ReportsIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Renewals', path: '/expirations', icon: <RenewalsIcon />, roles: ['super_admin', 'org_admin', 'user'] },
+  { label: 'Out of Spec', path: '/spec-alerts', icon: <OutOfSpecIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Activity', path: '/activity', icon: <ActivityIcon /> },
   { label: 'Records', path: '/records', icon: <RecordsIcon /> },
 ];

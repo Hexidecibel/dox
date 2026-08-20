@@ -2,6 +2,10 @@
 
 ## Upcoming
 
+- Spec limits — discovery for unmatched analytes. A printed test name that matches no configured analyte is counted per COA but there is no tenant-wide view of "tests we see often and hold no limit for". `bin/recheck-spec-limits` reports it; the Spec Limits admin page should too, so the alias gap is fixable without a CLI.
+- Spec limits — product-scoped limits. The column exists (mig 0084) but the admin UI does not offer it: the review queue cannot resolve a document's products at review time, so such a limit would list as active and never fire. Needs product resolution at review time first (supplier_product_map / ProductBridgeControl).
+- Spec limits — retroactive register backfill. `bin/recheck-spec-limits` reports over approved documents but does not write `document_spec_checks` rows; that would mean a write path outside `bin/lib/d1.js`'s read-only guarantee. Decide whether history is worth it, and whether a backfill should suppress alerts (it must).
+
 - Full-text content search — extract text from PDFs on upload, index with Cloudflare Vectorize for semantic search ("find docs about emissions compliance")
 - Auto-categorization — AI classifies uploaded docs into document types/tags automatically on upload (moved to plan.md — covered by Smarter Extraction Phase 1.3 doctype promotion)
 - Document summarization — AI-generated summary shown on each document detail page

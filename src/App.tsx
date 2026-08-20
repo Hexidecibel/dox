@@ -25,6 +25,7 @@ import { Suppliers } from './pages/admin/Suppliers';
 import { SupplierDetail } from './pages/admin/SupplierDetail';
 import { DocumentTypes } from './pages/admin/DocumentTypes';
 import { Requirements } from './pages/admin/Requirements';
+import { SpecAlerts } from './pages/SpecAlerts';
 import { ClaimTypes } from './pages/admin/ClaimTypes';
 import { ClaimRules } from './pages/admin/ClaimRules';
 import { Bundles } from './pages/Bundles';
@@ -129,6 +130,7 @@ function App() {
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/settings/:section" element={<Settings />} />
+                <Route path="/spec-alerts" element={<SpecAlerts />} />
                 <Route path="/admin/users" element={<Users />} />
                 <Route path="/admin/api-keys" element={<ApiKeys />} />
                 <Route path="/admin/audit" element={<AuditLog />} />

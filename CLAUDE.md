@@ -79,8 +79,9 @@ bin/                    # Operational scripts (deploy, migrate, seed)
 - **Email Ingest**: `POST /api/webhooks/email-ingest` for Mailgun/SendGrid inbound parse. Maps sender domain to tenant, extracts attachments.
 - **Expiration Dashboard**: Dashboard showing documents approaching expiration with summary cards, configurable look-ahead, and email alerts to org_admins.
 - **Document Bundles**: Named compliance packages grouping documents with version pinning. Download as ZIP. Draft/finalized workflow.
+- **Spec Limits + Out-of-Parameter Warnings**: Acceptance limits on COA test results (`spec_tests` + `spec_limits`, migration 0084). Two sources judge every result — the COA's own printed spec/pass-fail (no configuration, works on every supplier) and OUR configured limit, which is often tighter than what the supplier certifies against. **Three-state by design**: `in_spec` / `out_of_spec` / `not_checked`, where `not_checked` means we held a limit and could not honestly apply it (a censored `<50` against a ≤10 limit, a CFU/mL result against a CFU/g limit) and is never a silent pass. Engine is `shared/specCheck.ts` (pure); review-queue surfacing via `functions/lib/spec-warnings.ts`; register + alerts via `functions/lib/spec-register.ts` (one email per document, routed by `assignments` and falling back to org_admins). Warns, never blocks. Preview what a limit would catch with `bin/recheck-spec-limits --tenant <id>`.
 
-## Migrations (0001-0079)
+## Migrations (0001-0085)
 
 **Current schema state: `SCHEMA.md`** (generated — regenerate with `./bin/schema-doc`
 after every migration). This table is migration *history*; SCHEMA.md is what the
@@ -179,6 +180,10 @@ be added to `tests/helpers/db.ts`.
 | 0079 | fts_registry | Registry fields in documents_fts (category/aliases/criteria/applies_to) |
 | 0080 | registry_facets | Registry taxonomy P1: `requirements` + `document_requirements` (layer 2, what a doc SATISFIES), `claim_types` + `document_claims` (layer 3, what a doc TRIGGERS), `claim_type_requirements` (claim → what proves it). All per-tenant rows |
 | 0081 | documents_classification_status | `documents.classification_status` (unclassified / needs_review / classified / unclassifiable) + reviewed_at/by |
+| 0082 | processing_queue_text_model | Which text model produced an extraction |
+| 0083 | queue_rejection_reason | Reviewer rejection reason + note on processing_queue |
+| 0084 | spec_limits | `spec_tests` (analyte + the aliases suppliers print) and `spec_limits` (our acceptance thresholds). Scope columns are all nullable; most specific wins, all-NULL is a tenant-wide default |
+| 0085 | document_spec_checks | The out-of-spec register. One row per judged result with a FROZEN `limit_snapshot`, so moving a threshold cannot rewrite history. Stores `not_checked` too — a register of passes and failures only would imply everything absent from it was fine |
 
 ## Role Model (4 roles)
 

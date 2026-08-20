@@ -36,10 +36,11 @@ import {
   NotificationsNone as BellIcon,
   AccountTree as WorkflowIcon,
   RateReview as ReviewIcon,
+  ErrorOutline as OutOfSpecIcon,
 } from '@mui/icons-material';
 import { recordsApi } from '../lib/recordsApi';
 import { api } from '../lib/api';
-import type { WorkflowApprovalInboxItem, ProcessingQueueItem } from '../../shared/types';
+import type { WorkflowApprovalInboxItem, ProcessingQueueItem, ApiSpecCheck } from '../../shared/types';
 
 const POLL_MS = 3 * 60 * 1000; // 3 minutes
 const MAX_VISIBLE = 6;
@@ -47,7 +48,7 @@ const MAX_VISIBLE = 6;
 /** Generic tray item. Extend the union as new sources are added. */
 interface Notification {
   id: string;
-  type: 'approval' | 'review';
+  type: 'approval' | 'review' | 'spec';
   title: string;
   /** e.g. "Step name · Sheet name" */
   subtitle: string;
@@ -77,6 +78,22 @@ function reviewToNotification(item: ProcessingQueueItem): Notification {
   };
 }
 
+/**
+ * An out-of-spec result nobody has signed off on yet. Listed FIRST in the tray
+ * and counted in the badge: of the three feeds this is the only one where the
+ * cost of not looking is a food-safety event rather than a delayed task.
+ */
+function specToNotification(check: ApiSpecCheck): Notification {
+  const parts = [check.supplier_name, check.document_title].filter(Boolean);
+  return {
+    id: `spec:${check.id}`,
+    type: 'spec',
+    title: `${check.spec_test_name || check.test_name_raw} — ${check.value_raw ?? '?'}${check.unit_raw ? ` ${check.unit_raw}` : ''} out of spec`,
+    subtitle: parts.join(' · '),
+    dueAt: null,
+  };
+}
+
 function formatDue(iso: string | null): string | null {
   if (!iso) return null;
   const d = new Date(iso);
@@ -98,9 +115,10 @@ export function NotificationsBell() {
     inFlight.current = true;
     try {
       // Fetch both feeds in parallel; either may fail independently.
-      const [approvalsRes, reviewRes] = await Promise.allSettled([
+      const [approvalsRes, reviewRes, specRes] = await Promise.allSettled([
         recordsApi.workflowApprovals.inbox(),
         api.queue.list({ mine: true, status: 'pending', processing_status: 'ready', limit: MAX_VISIBLE }),
+        api.specChecks.list({ verdict: 'out_of_spec', acknowledged: '0', limit: MAX_VISIBLE }),
       ]);
 
       const approvals: Notification[] =
@@ -112,7 +130,12 @@ export function NotificationsBell() {
           ? (reviewRes.value.items ?? []).map(reviewToNotification)
           : [];
 
-      setNotifications([...approvals, ...reviews]);
+      const specs: Notification[] =
+        specRes.status === 'fulfilled'
+          ? (specRes.value.specChecks ?? []).map(specToNotification)
+          : [];
+
+      setNotifications([...specs, ...approvals, ...reviews]);
     } catch {
       // Swallow — show an empty tray rather than crashing the top bar.
       setNotifications([]);
@@ -141,13 +164,19 @@ export function NotificationsBell() {
     handleClose();
     navigate('/review');
   };
+  const goToSpecAlerts = () => {
+    handleClose();
+    navigate('/spec-alerts');
+  };
 
   const approvals = notifications.filter((n) => n.type === 'approval');
   const reviews = notifications.filter((n) => n.type === 'review');
-  // Badge = approvals + assigned-review count.
-  const count = approvals.length + reviews.length;
+  const specs = notifications.filter((n) => n.type === 'spec');
+  // Badge = out-of-spec + approvals + assigned-review count.
+  const count = specs.length + approvals.length + reviews.length;
   const visibleApprovals = approvals.slice(0, MAX_VISIBLE);
   const visibleReviews = reviews.slice(0, MAX_VISIBLE);
+  const visibleSpecs = specs.slice(0, MAX_VISIBLE);
 
   return (
     <>
@@ -182,6 +211,28 @@ export function NotificationsBell() {
           </Box>
         ) : (
           <Box>
+            {visibleSpecs.length > 0 && (
+              <>
+                <Typography
+                  variant="overline"
+                  sx={{ display: 'block', px: 2, pt: 1, color: 'error.main', fontSize: '0.65rem', fontWeight: 700 }}
+                >
+                  Out of spec
+                </Typography>
+                {visibleSpecs.map((n) => (
+                  <ListItemButton key={n.id} onClick={goToSpecAlerts} sx={{ alignItems: 'flex-start', py: 1 }}>
+                    <OutOfSpecIcon sx={{ fontSize: 18, color: 'error.main', mt: 0.3, mr: 1.25 }} />
+                    <ListItemText
+                      primary={n.title}
+                      secondary={n.subtitle}
+                      primaryTypographyProps={{ variant: 'body2', fontWeight: 700, noWrap: true, color: 'error.main' }}
+                      secondaryTypographyProps={{ variant: 'caption', noWrap: true }}
+                    />
+                  </ListItemButton>
+                ))}
+              </>
+            )}
+
             {visibleApprovals.length > 0 && (
               <>
                 <Typography

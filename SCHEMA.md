@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 109 tables, 2 views, 159 indexes, 36 triggers.
+Objects: 112 tables, 2 views, 168 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -536,9 +536,13 @@ Indexes: `idx_extraction_templates_lookup`
   connector_run_id TEXT
   supplier_id TEXT
   ai_records TEXT
+  text_model TEXT
+  rejection_reason TEXT
+  rejection_note TEXT
+  file_retain_until TEXT
 ```
 
-Indexes: `idx_pq_output_kind`, `idx_processing_queue_processing_status`, `idx_processing_queue_status`
+Indexes: `idx_pq_output_kind`, `idx_processing_queue_file_retain`, `idx_processing_queue_processing_status`, `idx_processing_queue_rejection`, `idx_processing_queue_status`
 
 ### `reviewer_field_dismissals`
 
@@ -1350,6 +1354,33 @@ Indexes: `idx_document_claims_document`, `idx_document_claims_subject`, `idx_doc
 
 Indexes: `idx_document_requirements_document`, `idx_document_requirements_requirement`
 
+### `document_spec_checks`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE
+  version_number INTEGER
+  queue_item_id TEXT
+  spec_test_id TEXT
+  test_name_raw TEXT NOT NULL
+  value_raw TEXT
+  value_num REAL
+  unit_raw TEXT
+  verdict TEXT NOT NULL CHECK (verdict IN ('in_spec', 'out_of_spec', 'not_checked'))
+  reason TEXT
+  source TEXT NOT NULL CHECK (source IN ('printed', 'limit'))
+  limit_id TEXT
+  limit_snapshot TEXT
+  acknowledged_by TEXT REFERENCES users(id)
+  acknowledged_at TEXT
+  acknowledgement_note TEXT
+  notified_at TEXT
+  created_at TEXT DEFAULT (datetime('now'))
+```
+
+Indexes: `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_tenant_verdict`
+
 ### `requirements`
 
 ```sql
@@ -1367,6 +1398,47 @@ Indexes: `idx_document_requirements_document`, `idx_document_requirements_requir
 ```
 
 Indexes: `idx_requirements_checklist`, `idx_requirements_tenant`
+
+### `spec_limits`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  spec_test_id TEXT NOT NULL REFERENCES spec_tests(id) ON DELETE CASCADE
+  supplier_id TEXT REFERENCES suppliers(id) ON DELETE CASCADE
+  document_type_id TEXT REFERENCES document_types(id) ON DELETE CASCADE
+  product_id TEXT REFERENCES products(id) ON DELETE CASCADE
+  operator TEXT NOT NULL CHECK (operator IN ('<', '<=', '>', '>=', 'between', '==', 'absent'))
+  value_min REAL
+  value_max REAL
+  unit TEXT
+  severity TEXT NOT NULL DEFAULT 'alert' CHECK (severity IN ('warn', 'alert'))
+  notes TEXT
+  active INTEGER NOT NULL DEFAULT 1
+  version INTEGER NOT NULL DEFAULT 1
+  created_at TEXT DEFAULT (datetime('now'))
+  updated_at TEXT DEFAULT (datetime('now'))
+  updated_by TEXT REFERENCES users(id)
+```
+
+Indexes: `idx_spec_limits_product`, `idx_spec_limits_supplier`, `idx_spec_limits_tenant_test`
+
+### `spec_tests`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  name TEXT NOT NULL
+  aliases TEXT NOT NULL DEFAULT '[]'
+  default_unit TEXT
+  notes TEXT
+  created_at TEXT DEFAULT (datetime('now'))
+  updated_at TEXT DEFAULT (datetime('now'))
+  updated_by TEXT REFERENCES users(id)
+  UNIQUE (tenant_id, name)
+```
+
+Indexes: `idx_spec_tests_tenant`
 
 ## Views
 

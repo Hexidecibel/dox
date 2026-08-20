@@ -578,3 +578,105 @@ export function buildEmailIngestSummaryEmail(params: {
 
   return { subject, html };
 }
+
+/**
+ * Out-of-spec alert — a COA arrived whose test result falls outside an
+ * acceptance limit.
+ *
+ * ONE EMAIL PER DOCUMENT, listing every failing result. A twelve-record COA
+ * with a failing analyte in each is one event; twelve emails is how a safety
+ * signal gets filtered to a folder nobody opens.
+ *
+ * The subject line names the analyte when there is only one, because that is
+ * the sentence a QA manager needs to read on a phone without opening anything.
+ */
+export function buildSpecAlertEmail(params: {
+  tenantName: string;
+  documentTitle: string;
+  documentId: string;
+  supplierName: string | null;
+  failures: Array<{
+    test: string;
+    value: string | null;
+    limit: string | null;
+    /** 'printed' = the COA's own stated limit; 'limit' = ours. */
+    source: 'printed' | 'limit';
+  }>;
+  appUrl?: string;
+}): { subject: string; html: string; text: string } {
+  const { tenantName, documentTitle, documentId, supplierName, failures } = params;
+  const n = failures.length;
+
+  const subject =
+    n === 1
+      ? `SupDox: out-of-spec ${failures[0].test} on ${documentTitle}`
+      : `SupDox: ${n} out-of-spec results on ${documentTitle}`;
+
+  const sourceLabel = (s: 'printed' | 'limit') =>
+    s === 'limit' ? 'our limit' : "the COA's own limit";
+
+  const rows = failures
+    .map(
+      (f) => `<tr>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;font-weight:600;">${escapeHtml(f.test)}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#d32f2f;font-weight:600;">${escapeHtml(f.value || '—')}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${escapeHtml(f.limit || '—')}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#666;font-size:13px;">${sourceLabel(f.source)}</td>
+            </tr>`
+    )
+    .join('\n');
+
+  const link = params.appUrl ? `${params.appUrl.replace(/\/$/, '')}/documents/${documentId}` : null;
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr>
+      <td style="background:#8B1A1A;padding:24px 32px;">
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox — out of spec</h1>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:32px;">
+        <h2 style="margin:0 0 16px;color:#333;font-size:18px;">${n === 1 ? 'A result is' : `${n} results are`} outside the acceptance limit</h2>
+        <p style="margin:0 0 24px;color:#555;line-height:1.6;">
+          <strong>${escapeHtml(documentTitle)}</strong>${supplierName ? ` from <strong>${escapeHtml(supplierName)}</strong>` : ''} came in with ${n === 1 ? 'a test result' : 'test results'} outside the limit${n === 1 ? '' : 's'} on file for ${escapeHtml(tenantName)}.
+        </p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #eee;border-radius:6px;overflow:hidden;margin:0 0 24px;">
+          <tr style="background:#f8f9fa;">
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Test</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Result</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Limit</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Against</th>
+          </tr>
+          ${rows}
+        </table>
+        ${link ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;">Open the document</a></p>` : ''}
+        <p style="margin:16px 0 0;color:#777;font-size:13px;line-height:1.6;">
+          These values were read from the document and compared against the limits on file. SupDox does not reject or hold anything on its own — this is for a person to look at.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
+        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+          Automated spec alert from SupDox for ${escapeHtml(tenantName)}.
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  const textLines = failures.map(
+    (f) => `- ${f.test}: ${f.value || '—'} (limit ${f.limit || '—'}, ${sourceLabel(f.source)})`
+  );
+  const text = `Out of spec — ${documentTitle}${supplierName ? ` from ${supplierName}` : ''}\n\n${textLines.join('\n')}\n${link ? `\n${link}\n` : ''}\nSupDox does not reject or hold anything on its own — this is for a person to look at.\n`;
+
+  return { subject, html, text };
+}

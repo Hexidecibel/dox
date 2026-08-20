@@ -119,18 +119,45 @@ export function InvariantWarningBanner({
 }) {
   const live = (warnings || []).filter((w) => !dismissed?.has(warningKey(w)));
   if (live.length === 0) return null;
-  const fields = [...new Set(live.map((w) => w.field))];
+
+  // COUNT FIELDS, NOT WARNINGS. Three checks tripping on one field is one field
+  // to go and look at, and saying "3 fields" sends a reviewer hunting for two
+  // that do not exist. This banner also spans EVERY record on a multi-record
+  // COA while the reviewer can only see one page at a time, so each field is
+  // labelled with the record it belongs to — otherwise the count looks wrong
+  // from wherever you happen to be standing.
+  const byField = new Map<string, { field: string; scopes: Set<string>; count: number }>();
+  for (const w of live) {
+    const entry = byField.get(w.field) ?? { field: w.field, scopes: new Set<string>(), count: 0 };
+    entry.count += 1;
+    entry.scopes.add(w.scope);
+    byField.set(w.field, entry);
+  }
+  const fieldCount = byField.size;
+
+  /** 'record[2]' → 'record 3'; anything else is already reviewer-readable. */
+  const scopeLabel = (scope: string): string => {
+    const m = /^record\[(\d+)\]$/.exec(scope);
+    return m ? `record ${Number(m[1]) + 1}` : scope.replace(/_/g, ' ');
+  };
+
+  const affected = [...byField.values()].map((e) => {
+    const name = e.field.replace(/_/g, ' ');
+    const where = [...e.scopes].map(scopeLabel).join(', ');
+    return e.scopes.size === 1 && e.scopes.has('ai_fields') ? name : `${name} (${where})`;
+  });
+
   return (
     <Alert severity="warning" sx={{ mb: 2 }}>
       <Typography variant="body2" sx={{ fontWeight: 600 }}>
-        {live.length === 1
+        {fieldCount === 1
           ? '1 field looks wrong against the document itself'
-          : `${live.length} fields look wrong against the document itself`}
+          : `${fieldCount} fields look wrong against the document itself`}
       </Typography>
       <Typography variant="caption" color="text.secondary">
         Checked against this document&apos;s own text — no AI, no guessing. These
         are hints, not blockers: read them, fix or dismiss, then approve as
-        normal. Affected: {fields.map((f) => f.replace(/_/g, ' ')).join(', ')}.
+        normal. Affected: {affected.join(', ')}.
       </Typography>
     </Alert>
   );

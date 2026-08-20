@@ -27,6 +27,9 @@ import type {
   DocumentTypeListResponse,
   DocumentTypeGetResponse,
   ApiRequirement,
+  ApiSpecTest,
+  ApiSpecLimit,
+  ApiSpecCheck,
   ApiClaimType,
   ClaimSubjectGrain,
   RequirementListResponse,
@@ -988,6 +991,144 @@ export const api = {
      */
     delete: (id: string) =>
       fetchApi<void>(`/document-types/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * The out-of-spec register (migration 0085) — every judged result, what it
+   * was judged against, and who accepted it. Read is any tenant user: this is
+   * evidence, not configuration.
+   */
+  specChecks: {
+    /** Defaults to unacknowledged failures, newest first. */
+    list: (params?: {
+      verdict?: 'out_of_spec' | 'not_checked' | 'in_spec' | 'all';
+      acknowledged?: '0' | '1';
+      document_id?: string;
+      supplier_id?: string;
+      spec_test_id?: string;
+      since?: string;
+      tenant_id?: string;
+      limit?: number;
+      offset?: number;
+    }) => {
+      const query = new URLSearchParams();
+      for (const [k, v] of Object.entries(params || {})) {
+        if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+      }
+      const qs = query.toString();
+      return fetchApi<{
+        specChecks: ApiSpecCheck[];
+        total: number;
+        limit: number;
+        offset: number;
+      }>(`/spec-checks${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * Acknowledge results. Never changes a verdict — a person can say "I have
+     * seen this and here is why it is acceptable", nobody can say "it was fine".
+     */
+    acknowledge: (ids: string[], note?: string) =>
+      fetchApi<{ success: boolean; acknowledged: number }>('/spec-checks', {
+        method: 'POST',
+        body: JSON.stringify({ ids, note }),
+      }),
+  },
+
+  /**
+   * Analytes a tenant holds acceptance limits for, plus the aliases suppliers
+   * print for them (migration 0084). The aliases are the load-bearing field:
+   * thresholds are one number, but "Coliform" / "Coliforms (MPN)" / "Total
+   * Coliform" are the same test and matching is exact, never fuzzy.
+   */
+  specTests: {
+    /** GET /api/spec-tests — Returns: { specTests } with aliases already parsed. */
+    list: (params?: { tenant_id?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      const qs = query.toString();
+      return fetchApi<{ specTests: ApiSpecTest[] }>(`/spec-tests${qs ? `?${qs}` : ''}`);
+    },
+
+    create: (data: {
+      name: string;
+      aliases?: string[];
+      default_unit?: string | null;
+      notes?: string | null;
+      tenant_id?: string;
+    }) =>
+      fetchApi<{ specTest: ApiSpecTest }>('/spec-tests', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    update: (
+      id: string,
+      data: { name?: string; aliases?: string[]; default_unit?: string | null; notes?: string | null }
+    ) =>
+      fetchApi<{ specTest: ApiSpecTest }>(`/spec-tests/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /** DELETE cascades to this analyte's limits; the count comes back. */
+    remove: (id: string) =>
+      fetchApi<{ success: boolean; limits_removed: number }>(`/spec-tests/${id}`, {
+        method: 'DELETE',
+      }),
+  },
+
+  /**
+   * Acceptance limits — OUR thresholds, as opposed to the one the supplier
+   * prints on the COA. Scope columns are all optional; most specific wins.
+   */
+  specLimits: {
+    list: (params?: { tenant_id?: string; spec_test_id?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.spec_test_id) query.set('spec_test_id', params.spec_test_id);
+      const qs = query.toString();
+      return fetchApi<{ specLimits: ApiSpecLimit[] }>(`/spec-limits${qs ? `?${qs}` : ''}`);
+    },
+
+    create: (data: {
+      spec_test_id: string;
+      operator: string;
+      value_min?: number | null;
+      value_max?: number | null;
+      unit?: string | null;
+      supplier_id?: string | null;
+      document_type_id?: string | null;
+      severity?: string;
+      notes?: string | null;
+      tenant_id?: string;
+    }) =>
+      fetchApi<{ specLimit: ApiSpecLimit }>('/spec-limits', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    update: (
+      id: string,
+      data: {
+        operator?: string;
+        value_min?: number | null;
+        value_max?: number | null;
+        unit?: string | null;
+        supplier_id?: string | null;
+        document_type_id?: string | null;
+        severity?: string;
+        notes?: string | null;
+        active?: boolean;
+      }
+    ) =>
+      fetchApi<{ specLimit: ApiSpecLimit }>(`/spec-limits/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    remove: (id: string) =>
+      fetchApi<{ success: boolean }>(`/spec-limits/${id}`, { method: 'DELETE' }),
   },
 
   /**

@@ -145,6 +145,12 @@ export type {
   CoaRecordDecision,
   InvariantFailure,
   InvariantCheck,
+  SpecVerdict,
+  SpecVerdictKind,
+  SpecTarget,
+  ApiSpecTest,
+  ApiSpecLimit,
+  ApiSpecCheck,
   RejectionReason,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';

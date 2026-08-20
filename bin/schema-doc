@@ -54,8 +54,15 @@ if [ -z "$SCHEMA_JSON" ] || [ "$SCHEMA_JSON" = "[]" ]; then
   exit 1
 fi
 
-MD="$(TARGET="$TARGET" node -e '
-const raw = process.argv[1] || "[]";
+# The schema JSON is read from a temp FILE, not passed as an argv string.
+# Past ~2 MB of DDL (which this database crossed) argv blows ARG_MAX and node
+# dies with "Argument list too long" — which reads like a node bug and is not.
+SCHEMA_TMP="$(mktemp -t dox-schema-XXXXXX.json)"
+trap 'rm -f "$SCHEMA_TMP"' EXIT
+printf '%s' "$SCHEMA_JSON" > "$SCHEMA_TMP"
+
+MD="$(TARGET="$TARGET" SCHEMA_FILE="$SCHEMA_TMP" node -e '
+const raw = require("fs").readFileSync(process.env.SCHEMA_FILE, "utf8") || "[]";
 let data; try { data = JSON.parse(raw); } catch { data = []; }
 
 // wrangler emits an array of statement results; flatten to rows.
@@ -199,7 +206,7 @@ if (views.length) {
 }
 
 console.log(out.join("\n"));
-' "$SCHEMA_JSON")"
+')"
 
 if [ "$TO_STDOUT" = "1" ]; then
   printf '%s\n' "$MD"

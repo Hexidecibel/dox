@@ -94,7 +94,11 @@ var SCALAR_KEYS = /* @__PURE__ */ new Set([
   "product_code",
   "supplier_name",
   "po_number",
-  "plant_number"
+  "plant_number",
+  // A batch printed alongside a separate lot (2026-08-20). Scalar like the
+  // rest, and just as capable of arriving as a placeholder or a comma-joined
+  // pair, so it gets the same checks.
+  "batch_number"
 ]);
 function safeParse(raw) {
   if (raw == null || raw === "") return null;

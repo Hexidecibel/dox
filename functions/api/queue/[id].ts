@@ -10,6 +10,8 @@ import {
 // NOTE: `deleteFile` is deliberately NOT imported any more — rejecting a queue
 // item no longer destroys its R2 object. See handleReject's R2 RETENTION note.
 import { invariantWarningsFor, withInvariantWarnings } from '../../lib/queue-warnings';
+import { loadSpecConfig, withSpecConfig, specResultsWithConfig } from '../../lib/spec-warnings';
+import { registerAndNotifyForApproval } from '../../lib/spec-register';
 import {
   REJECTION_REASONS,
   type RejectionReason,
@@ -73,10 +75,19 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     requireTenantAccess(user, item.tenant_id as string);
 
     const { profile_exists, ...rest } = item as Record<string, unknown>;
-    const enriched = withInvariantWarnings({
-      ...rest,
-      profile_exists: profile_exists === 1,
-    });
+    const specConfig = await loadSpecConfig(context.env.DB, String(item.tenant_id));
+    const enriched = withSpecConfig(
+      withInvariantWarnings({
+        ...rest,
+        profile_exists: profile_exists === 1,
+      }),
+      specConfig,
+      {
+        supplier_id: item.supplier_id == null ? null : String(item.supplier_id),
+        document_type_id: item.document_type_id == null ? null : String(item.document_type_id),
+        product_ids: [],
+      }
+    );
 
     return new Response(
       JSON.stringify({ item: enriched }),
@@ -312,9 +323,45 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
               getClientIp(context.request)
             );
           }
+
+          // Same idea, different question: what did the reviewer approve that
+          // the TEST RESULTS say is out of spec? Recomputed against the
+          // submitted values, so an edit that corrected a misread number
+          // produces no row. This audit entry is the durable record of a QA
+          // judgement — a human saw an out-of-spec result and approved anyway,
+          // which is a legitimate decision that must nonetheless be traceable.
+          const approveSpecConfig = await loadSpecConfig(context.env.DB, String(item.tenant_id));
+          const specFindings = specResultsWithConfig(
+            {
+              tables: body.tables ? JSON.stringify(body.tables) : item.tables,
+              ai_records: body.records ? JSON.stringify(body.records) : null,
+            },
+            approveSpecConfig,
+            {
+              supplier_id: item.supplier_id == null ? null : String(item.supplier_id),
+              document_type_id: item.document_type_id == null ? null : String(item.document_type_id),
+              product_ids: [],
+            }
+          ).results.filter((v) => v.verdict === 'out_of_spec');
+          if (specFindings.length > 0) {
+            await logAudit(
+              context.env.DB,
+              user.id,
+              item.tenant_id,
+              'queue_item.approved_out_of_spec',
+              'processing_queue',
+              item.id,
+              JSON.stringify({
+                file_name: item.file_name,
+                out_of_spec_count: specFindings.length,
+                findings: specFindings.slice(0, 20),
+              }),
+              getClientIp(context.request)
+            );
+          }
         } catch (err) {
           console.error(
-            '[queue] approved_with_warnings audit failed:',
+            '[queue] approve-time advisory audit failed:',
             err instanceof Error ? err.message : String(err)
           );
         }
@@ -373,6 +420,19 @@ async function handleApprove(
       supplierId: supplierOverride?.supplierId,
       supplierName: supplierOverride?.supplierName,
     }
+  );
+
+  await registerFlatApproveSpecChecks(
+    context,
+    user,
+    item,
+    result.supplierId,
+    supplierOverride?.supplierName ?? null,
+    [{ documentId: result.documentId, title: result.title }],
+    // The single-document path does not carry edited tables in its body —
+    // reviewer table edits arrive as `captures.tableEdits` — so the stored
+    // extraction is what was approved.
+    null
   );
 
   // Upsert extraction template if requested
@@ -488,6 +548,19 @@ async function handleMultiProductApprove(
       )
       .run();
   }
+
+  await registerFlatApproveSpecChecks(
+    context,
+    user,
+    item,
+    result.supplierId,
+    supplierOverride?.supplierName ?? null,
+    result.documents.map((d) => ({ documentId: d.documentId, title: d.title })),
+    // Each product carries the tables the reviewer assigned to it; judged
+    // together here because a verdict cannot be attributed to one product's
+    // document more precisely than the reviewer's own split already did.
+    products.flatMap((p) => p.tables ?? [])
+  );
 
   return new Response(
     JSON.stringify({
@@ -755,6 +828,61 @@ function normalizeRecordDecisions(
  * Held records are NOT produced; approved records each become their own
  * documents + lots row keyed on the combined lot_key.
  */
+/**
+ * Register + notify for a flat (non-records) approve. The records path has its
+ * own call with an exact record→document mapping; these paths produce documents
+ * from one flat extraction, so every verdict belongs to every produced document
+ * equally — which for the single path is one document, and for the
+ * multi-product path is the set the reviewer split it into.
+ *
+ * Best-effort throughout: the approval has already happened.
+ */
+async function registerFlatApproveSpecChecks(
+  context: EventContext<Env, string, Record<string, unknown>>,
+  user: User,
+  item: QueueItem & { tenant_name?: string | null },
+  supplierId: string | null,
+  supplierName: string | null,
+  documents: Array<{ documentId: string; title: string }>,
+  tables: unknown
+): Promise<void> {
+  try {
+    const specConfig = await loadSpecConfig(context.env.DB, String(item.tenant_id));
+    const { results } = specResultsWithConfig(
+      { tables: typeof tables === 'string' ? tables : tables ? JSON.stringify(tables) : item.tables },
+      specConfig,
+      {
+        supplier_id: supplierId,
+        document_type_id: item.document_type_id == null ? null : String(item.document_type_id),
+        product_ids: [],
+      },
+      { includePasses: true }
+    );
+    await registerAndNotifyForApproval(
+      context.env.DB,
+      context.env.RESEND_API_KEY,
+      {
+        tenantId: String(item.tenant_id),
+        tenantName: String(item.tenant_name ?? ''),
+        queueItemId: item.id,
+        supplierId,
+        supplierName,
+        documentTypeId: item.document_type_id == null ? null : String(item.document_type_id),
+        approvedBy: user.id,
+        appUrl: new URL(context.request.url).origin,
+      },
+      results,
+      specConfig.limits,
+      documents.map((d) => ({ documentId: d.documentId, title: d.title, recordIndex: null }))
+    );
+  } catch (err) {
+    console.error(
+      '[queue] flat spec register/notify failed:',
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+}
+
 async function handleCoaRecordsApprove(
   context: EventContext<Env, string, Record<string, unknown>>,
   user: User,
@@ -821,6 +949,53 @@ async function handleCoaRecordsApprove(
         );
       }
     }
+  }
+
+  // Judge the approved results against the limits on file, write them to the
+  // register, and tell the combo owner about any failure. Best-effort and
+  // deliberately after the documents exist: the approval stands regardless.
+  try {
+    const specConfig = await loadSpecConfig(context.env.DB, String(item.tenant_id));
+    const { results } = specResultsWithConfig(
+      { ai_records: JSON.stringify(payload) },
+      specConfig,
+      {
+        supplier_id: result.supplierId,
+        document_type_id: item.document_type_id == null ? null : String(item.document_type_id),
+        product_ids: [],
+      },
+      // The register keeps passes too — "we checked this and it was fine" is
+      // the record a QA buyer is actually paying for.
+      { includePasses: true }
+    );
+    await registerAndNotifyForApproval(
+      context.env.DB,
+      context.env.RESEND_API_KEY,
+      {
+        tenantId: String(item.tenant_id),
+        tenantName: String(item.tenant_name ?? ''),
+        queueItemId: item.id,
+        supplierId: result.supplierId,
+        supplierName: supplierOverride.supplierName ?? null,
+        documentTypeId: item.document_type_id == null ? null : String(item.document_type_id),
+        approvedBy: user.id,
+        // Same convention as the other transactional emails: derive the link
+        // base from the request rather than a binding that does not exist.
+        appUrl: new URL(context.request.url).origin,
+      },
+      results,
+      specConfig.limits,
+      result.documents.map((d) => ({
+        documentId: d.documentId,
+        title: d.title,
+        recordIndex: d.recordIndex,
+      }))
+    );
+  } catch (err) {
+    console.error(
+      '[queue] spec register/notify failed:',
+      err instanceof Error ? err.message : String(err)
+    );
   }
 
   const heldCount = result.heldRecordIndexes.length;

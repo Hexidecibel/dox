@@ -1,0 +1,233 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/stage-queue-files — copy prod R2 objects into LOCAL R2 so queue items can
+ * be re-extracted locally.
+ *
+ * WHY (2026-08-20). Local D1 carries the whole COA corpus but local R2 holds
+ * almost none of the PDFs, so `bin/process-worker` in PARITY_ITEM_IDS mode 404s
+ * on every download and no local re-extraction is possible. See
+ * [[project_local_reextraction_blocked]].
+ *
+ * THE KEY MAPPING IS THE WHOLE POINT. A queue item's `file_r2_key` points at
+ * `pending/<tenant>/<item>/<name>.pdf`. Once a reviewer APPROVES, the producer
+ * MOVES the object to `<tenant>/<doc_id>/<version>/<name>.pdf` — the pending key
+ * stops existing in prod while local D1 still names it. So this script:
+ *
+ *   1. reads the item's EXPECTED key from local D1,
+ *   2. finds the bytes in prod R2 by FILE NAME (wherever they now live),
+ *   3. writes them into local R2 under the key local D1 expects.
+ *
+ * Downloading to the prod key would leave the worker still 404ing.
+ *
+ * WRANGLER BUG WORKAROUND — SANITIZED LOCAL KEYS. `wrangler r2 object put
+ * --local` accepts a key containing spaces or commas and prints "Upload
+ * complete", but neither `r2 object get --local` nor the runtime R2 binding can
+ * read it back: the put and the get disagree about encoding, so the object is
+ * written somewhere nothing will ever look. Almost every COA file name has a
+ * space and most have a comma ("COA from MFI Inc., 5967980.pdf"), so staging
+ * appeared to work and every download 404'd.
+ *
+ * So the local key is SANITIZED (spaces/commas → dashes) and the local queue
+ * row is repointed at it. That rewrites `file_r2_key` in LOCAL D1 only — it is
+ * a local fixture either way, and the alternative is files that cannot be read.
+ * Prod is never touched.
+ *
+ * PROD ACCESS IS READ-ONLY. It lists and gets. It never writes to prod R2 — the
+ * only `put` is `--local`. Needs a Cloudflare API token with Workers R2 Storage
+ * READ; give it an expiry and revoke it after.
+ *
+ * Env:
+ *   CLOUDFLARE_API_TOKEN   R2 read token (required)
+ *   CLOUDFLARE_ACCOUNT_ID  account (falls back to .dev.vars)
+ *
+ * Usage:
+ *   bin/stage-queue-files --ids id1,id2,id3
+ *   bin/stage-queue-files --like 'COA from MFI%'
+ *   bin/stage-queue-files --like 'COA from MFI%' --dry-run
+ *
+ * Flags:
+ *   --ids LIST     comma-separated processing_queue ids
+ *   --like PATTERN SQL LIKE over file_name (use instead of --ids)
+ *   --bucket NAME  R2 bucket (default doc-upload-files)
+ *   --dry-run      report what would be staged; download nothing
+ *   --limit N      cap items (default 50)
+ *   -h, --help
+ */
+
+const { execFileSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { query } = require('./lib/d1');
+
+function parseArgs(argv) {
+  const o = { ids: null, like: null, bucket: 'doc-upload-files', dryRun: false, limit: 50 };
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
+      case '--ids': o.ids = argv[++i]; break;
+      case '--like': o.like = argv[++i]; break;
+      case '--bucket': o.bucket = argv[++i]; break;
+      case '--dry-run': o.dryRun = true; break;
+      case '--limit': o.limit = Number(argv[++i]); break;
+      case '-h':
+      case '--help':
+        console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(2, 45).join('\n').replace(/^ \* ?/gm, ''));
+        process.exit(0);
+        break;
+      default:
+        console.error(`Unknown argument: ${argv[i]}`);
+        process.exit(2);
+    }
+  }
+  if (!o.ids && !o.like) {
+    console.error('One of --ids or --like is required. See --help.');
+    process.exit(2);
+  }
+  return o;
+}
+
+function readDevVar(name) {
+  try {
+    const line = fs.readFileSync(path.join(__dirname, '..', '.dev.vars'), 'utf8')
+      .split('\n').find((l) => l.startsWith(`${name}=`));
+    return line ? line.slice(name.length + 1).replace(/^["']|["']$/g, '').trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+const TOKEN = process.env.CLOUDFLARE_API_TOKEN;
+const ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID || readDevVar('CLOUDFLARE_ACCOUNT_ID');
+
+/** Every object in the bucket, paged. Cached for the run. */
+async function listAll(bucket) {
+  const out = [];
+  let cursor = null;
+  for (;;) {
+    const url = new URL(`https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/r2/buckets/${bucket}/objects`);
+    url.searchParams.set('per_page', '1000');
+    if (cursor) url.searchParams.set('cursor', cursor);
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const body = await res.json();
+    if (!body.success) throw new Error(`R2 list failed: ${JSON.stringify(body.errors)}`);
+    out.push(...body.result.map((o) => o.key));
+    cursor = body.result_info && body.result_info.cursor;
+    if (!cursor || body.result.length === 0) break;
+  }
+  return out;
+}
+
+const baseName = (key) => String(key).split('/').pop();
+
+/**
+ * A key the local R2 implementation can actually read back. See the wrangler
+ * note above — spaces and commas make an object unreachable.
+ */
+function sanitizeKey(key) {
+  return String(key)
+    .split('/')
+    .map((seg) => seg.replace(/[\s,]+/g, '-'))
+    .join('/');
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (!TOKEN) {
+    console.error('CLOUDFLARE_API_TOKEN is required (Workers R2 Storage: Read).');
+    process.exit(2);
+  }
+  if (!ACCOUNT) {
+    console.error('CLOUDFLARE_ACCOUNT_ID not set and not found in .dev.vars.');
+    process.exit(2);
+  }
+
+  const where = opts.ids
+    ? `id IN (${opts.ids.split(',').map((s) => `'${s.trim().replace(/'/g, '')}'`).join(',')})`
+    : `file_name LIKE '${opts.like.replace(/'/g, "''")}'`;
+
+  const items = query(
+    `SELECT id, file_name, file_r2_key FROM processing_queue WHERE ${where} LIMIT ${opts.limit}`,
+    {}
+  );
+  if (items.length === 0) {
+    console.log('No matching queue items in local D1.');
+    return;
+  }
+  console.log(`${items.length} queue item(s) to stage.`);
+
+  console.log('Listing prod R2 (read-only)…');
+  const keys = await listAll(opts.bucket);
+  console.log(`  ${keys.length} objects in ${opts.bucket}.`);
+
+  // Index by file name — the stable identity across the pending → approved move.
+  const byName = new Map();
+  for (const k of keys) {
+    const n = baseName(k);
+    if (!byName.has(n)) byName.set(n, []);
+    byName.get(n).push(k);
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-queue-'));
+  let staged = 0;
+  let missing = 0;
+
+  for (const item of items) {
+    const localKey = sanitizeKey(item.file_r2_key);
+    const originalKey = item.file_r2_key;
+    const name = baseName(originalKey || item.file_name);
+    const candidates = byName.get(name) || byName.get(item.file_name) || [];
+
+    if (candidates.length === 0) {
+      console.log(`  MISSING  ${name}`);
+      missing++;
+      continue;
+    }
+    // Prefer the exact key when it still exists; otherwise the approved copy.
+    const prodKey = candidates.includes(originalKey) ? originalKey : candidates[0];
+
+    if (opts.dryRun) {
+      console.log(`  would stage  ${name}`);
+      console.log(`      from prod  ${prodKey}`);
+      console.log(`      to local   ${localKey}`);
+      staged++;
+      continue;
+    }
+
+    const tmpFile = path.join(tmpDir, `${item.id}.pdf`);
+    try {
+      execFileSync('npx', ['wrangler', 'r2', 'object', 'get', `${opts.bucket}/${prodKey}`,
+        '--remote', `--file=${tmpFile}`],
+        { cwd: path.join(__dirname, '..'), stdio: ['ignore', 'ignore', 'pipe'], env: process.env });
+      const size = fs.statSync(tmpFile).size;
+      if (size === 0) throw new Error('downloaded 0 bytes');
+
+      execFileSync('npx', ['wrangler', 'r2', 'object', 'put', `${opts.bucket}/${localKey}`,
+        '--local', `--file=${tmpFile}`, '--content-type=application/pdf'],
+        { cwd: path.join(__dirname, '..'), stdio: ['ignore', 'ignore', 'pipe'], env: process.env });
+
+      // Repoint the local row at the key we can actually read.
+      if (localKey !== originalKey) {
+        execFileSync('npx', ['wrangler', 'd1', 'execute', 'doc-upload-db', '--local', '--command',
+          `UPDATE processing_queue SET file_r2_key = '${localKey.replace(/'/g, "''")}' WHERE id = '${item.id}'`],
+          { cwd: path.join(__dirname, '..'), stdio: ['ignore', 'ignore', 'pipe'], env: process.env });
+      }
+
+      console.log(`  staged   ${name}  (${size} bytes)`);
+      staged++;
+    } catch (err) {
+      const msg = err.stderr ? err.stderr.toString().trim().split('\n').pop() : err.message;
+      console.log(`  FAILED   ${name}: ${msg}`);
+      missing++;
+    }
+  }
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  console.log('');
+  console.log(`Staged ${staged}, missing/failed ${missing}. Nothing was written to prod.`);
+}
+
+main().catch((err) => {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+});

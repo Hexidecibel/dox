@@ -6,6 +6,8 @@
 // re-exported here so the frontend gets it with the rest of the API shapes.
 export type { InvariantFailure, InvariantCheck } from './extractionInvariants';
 import type { InvariantFailure } from './extractionInvariants';
+export type { SpecVerdict, SpecVerdictKind, SpecTarget, SpecLimit, SpecOperator } from './specCheck';
+import type { SpecVerdict, SpecVerdictKind, SpecOperator } from './specCheck';
 
 // === Roles & Enums ===
 export type Role = 'super_admin' | 'org_admin' | 'user' | 'reader';
@@ -500,6 +502,88 @@ export interface ApiDocumentClaim extends DocumentClaimRow {
  * read-only usage signals so an admin can see what a row is doing before
  * deactivating it: how many documents CLOSE it, how many claims OPEN it.
  */
+/**
+ * An analyte a tenant holds spec limits for. `aliases` arrives PARSED from the
+ * list endpoint (the column stores JSON) — the names suppliers actually print,
+ * which are what make matching work at all.
+ */
+export interface ApiSpecTest {
+  id: string;
+  tenant_id: string;
+  name: string;
+  aliases: string[];
+  default_unit: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+  updated_by: string | null;
+  /** Active limits hanging off this analyte. */
+  limit_count?: number;
+}
+
+/**
+ * One acceptance limit. Every scope column is nullable and NULL means "any";
+ * the most specific applicable row wins at read time. All three NULL is a
+ * tenant-wide default, which is the row that makes this useful on day one.
+ */
+export interface ApiSpecLimit {
+  id: string;
+  tenant_id: string;
+  spec_test_id: string;
+  supplier_id: string | null;
+  document_type_id: string | null;
+  product_id: string | null;
+  operator: SpecOperator;
+  value_min: number | null;
+  value_max: number | null;
+  unit: string | null;
+  severity: 'warn' | 'alert';
+  notes: string | null;
+  active: number;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  /** Joined for display. */
+  test_name?: string;
+  test_default_unit?: string | null;
+  supplier_name?: string | null;
+  document_type_name?: string | null;
+  product_name?: string | null;
+}
+
+/**
+ * One judged test result in the register. `limit_snapshot` is the frozen copy of
+ * what it was judged against — the pointer in `limit_id` may since have moved.
+ */
+export interface ApiSpecCheck {
+  id: string;
+  tenant_id: string;
+  document_id: string;
+  version_number: number | null;
+  queue_item_id: string | null;
+  spec_test_id: string | null;
+  test_name_raw: string;
+  value_raw: string | null;
+  value_num: number | null;
+  unit_raw: string | null;
+  verdict: SpecVerdictKind;
+  reason: string | null;
+  source: 'printed' | 'limit';
+  limit_id: string | null;
+  limit_snapshot: string | null;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  acknowledgement_note: string | null;
+  notified_at: string | null;
+  created_at: string;
+  /** Joined for display. */
+  document_title?: string | null;
+  supplier_id?: string | null;
+  supplier_name?: string | null;
+  spec_test_name?: string | null;
+  acknowledged_by_name?: string | null;
+}
+
 export interface ApiRequirement extends RequirementRow {
   tenant_name?: string;
   document_count?: number;
@@ -1173,6 +1257,47 @@ export interface CoaResultCell {
 }
 
 /**
+ * Field keys a COA record may carry its LOT under, in resolution order.
+ *
+ * Record fields are RAW MODEL OUTPUT — they never pass through the worker's
+ * `canonicalizeFields`, so every spelling the model might emit has to resolve
+ * here. A consumer that reads only `lot_code` silently sees no lot at all on a
+ * record that stored it as `lot_number`, which is exactly how a Michael Foods
+ * COA came to be labelled by its batch number instead of its lot.
+ *
+ * Kept in sync with COA_RECORD_LOT_KEYS (functions/lib/kinds/coa.ts) and
+ * LOT_KEYS (bin/lib/coaRecords.js).
+ */
+export const COA_RECORD_LOT_KEYS = ['lot_code', 'lot_number', 'lot', 'lot_no'] as const;
+
+/**
+ * Field keys a COA record may carry its SUBLOT under, in resolution order.
+ * Same raw-model-output caveat as COA_RECORD_LOT_KEYS.
+ */
+export const COA_RECORD_SUBLOT_KEYS = [
+  'sub_lot_code',
+  'sub_lot_number',
+  'sub_lot',
+  'sub_lot_no',
+  'sublot_code',
+  'sublot_number',
+  'sublot',
+] as const;
+
+/** First non-empty value among `keys`, for a raw record field map. */
+export function firstRecordField(
+  fields: Record<string, string | null> | undefined,
+  keys: readonly string[]
+): string | null {
+  if (!fields) return null;
+  for (const k of keys) {
+    const v = fields[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+/**
  * A single COA record — one lot/sublot (or one product) with its own fields,
  * tables, structured groups, and the source page(s) that back it.
  * `page_metadata ∪ fields` reconstructs the flat field map (back-compat lever).
@@ -1406,6 +1531,26 @@ export interface ProcessingQueueItem {
    * approval — the checks have known false positives.
    */
   invariant_warnings?: InvariantFailure[];
+  /**
+   * Conformance verdicts on this item's TEST RESULTS, computed server-side by
+   * `shared/specCheck.ts`. Deliberately separate from `invariant_warnings`: an
+   * invariant says the extraction looks wrong (a data chore), a spec verdict
+   * says the RESULT looks wrong (a food-safety event), and the second must
+   * never be filed behind the first.
+   *
+   * Three-state by design — a `not_checked` verdict means we had a limit and
+   * could not honestly apply it, and is never a silent pass. ADVISORY: nothing
+   * here blocks an approval.
+   */
+  spec_results?: SpecVerdict[];
+  /**
+   * Counts behind `spec_results`, including the one thing the array cannot
+   * carry: `unmatched`, the number of tests printed on this COA that we hold no
+   * limit for. Those are NOT warnings — flagging each would drown a tenant with
+   * three limits under a fourteen-row COA — but the gap has to be discoverable,
+   * so it is rendered as a quiet count.
+   */
+  spec_summary?: { out_of_spec: number; not_checked: number; unmatched: number };
 }
 
 /**

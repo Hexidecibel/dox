@@ -5,6 +5,7 @@ import {
 } from '../../lib/permissions';
 import type { Env, User } from '../../lib/types';
 import { withInvariantWarnings } from '../../lib/queue-warnings';
+import { specConfigLoader, withSpecConfig } from '../../lib/spec-warnings';
 
 /**
  * GET /api/queue
@@ -104,14 +105,31 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(...mineParam, ...params, limit, offset)
       .all();
 
-    // invariant_warnings: machine-detectable defects in the extraction, computed
-    // from the document's OWN text (no model, no answer key) so the Review Queue
-    // can put each one on the specific field a reviewer is about to wave
-    // through. Advisory only — see functions/lib/queue-warnings.ts.
-    const items = (results.results ?? []).map((row) => {
-      const { profile_exists, ...rest } = row as Record<string, unknown>;
-      return withInvariantWarnings({ ...rest, profile_exists: profile_exists === 1 });
-    });
+    // Two independent advisory passes, both computed from the item's own data:
+    //   invariant_warnings — the extraction looks wrong (functions/lib/queue-warnings.ts)
+    //   spec_results       — the RESULT looks wrong (functions/lib/spec-warnings.ts)
+    // Neither blocks an approval; they are kept separate because an extraction
+    // defect is a data chore and an out-of-spec micro result is a safety event.
+    // One spec-config read per tenant per request, not per row.
+    const loadSpecConfigFor = specConfigLoader(context.env.DB);
+    const items = await Promise.all(
+      (results.results ?? []).map(async (row) => {
+        const { profile_exists, ...rest } = row as Record<string, unknown>;
+        const config = await loadSpecConfigFor(String(rest.tenant_id ?? ''));
+        return withSpecConfig(
+          withInvariantWarnings({ ...rest, profile_exists: profile_exists === 1 }),
+          config,
+          {
+            supplier_id: rest.supplier_id == null ? null : String(rest.supplier_id),
+            document_type_id: rest.document_type_id == null ? null : String(rest.document_type_id),
+            // Product-scoped limits resolve at approve time, once the document's
+            // products are actually linked. Nothing is silently skipped here:
+            // the admin UI does not offer product scoping yet.
+            product_ids: [],
+          }
+        );
+      })
+    );
 
     return new Response(
       JSON.stringify({
