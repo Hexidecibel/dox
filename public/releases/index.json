@@ -1,6 +1,11 @@
 {
-  "current": "2.6.0",
+  "current": "2.7.0",
   "versions": [
+    {
+      "version": "2.7.0",
+      "date": "2026-08-20",
+      "title": "The portal stops taking a document's word for it"
+    },
     {
       "version": "2.6.0",
       "date": "2026-04-28",
