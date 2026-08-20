@@ -80,26 +80,51 @@ const PREFERRED = MODEL_CHAINS.best[0];
 const FALLBACK = MODEL_CHAINS.best[1];
 
 describe('preference chains', () => {
-  it('heads `best` at a HOST-PINNED Q8 name and keeps the CPU box LAST', () => {
-    // The interim order this replaces could not express fidelity: `-turbo` maps
-    // to [mac, buddy, windows] serving Q8 and Q4 under ONE name. It is ordered
-    // failover, not a balancer, so a healthy Mac did serve Q8 — but a Mac
-    // outage moved everything to Q4 silently, which is how prod ran on the
-    // losing quant for months. The router now names each (host, quant), so the
-    // head pins both. `-turbo` stays as failover; the CPU box stays LAST
-    // because the local 35B starves the Plex transcoder on that machine.
-    expect(MODEL_CHAINS.best.length).toBeGreaterThanOrEqual(3);
-    expect(MODEL_CHAINS.best[0]).toBe('Qwen3-6-35B-A3B-spark-q8');
-    expect(MODEL_CHAINS.best).toContain('Qwen3-6-35B-A3B-turbo');
-    expect(MODEL_CHAINS.best.at(-1)).toBe('Qwen3-6-35B-A3B');
-    // The pinned head must be strictly preferred to the ambiguous pool name.
-    expect(MODEL_CHAINS.best.indexOf('Qwen3-6-35B-A3B-spark-q8'))
-      .toBeLessThan(MODEL_CHAINS.best.indexOf('Qwen3-6-35B-A3B-turbo'));
+  // 2026-08-13 policy: text work goes to the DGX Spark or AJ's Mac mini and
+  // NOWHERE else. The names removed to get there were not bad models, they were
+  // machines that vanish: `-turbo` now resolves to [windows], the owner's gaming
+  // PC (paused mid-game — 49,258 failed requests in 6 hours once), `Qwen3-8B` is
+  // the 3080 in that same box, and the bare `Qwen3-6-35B-A3B` is the local CPU
+  // 35B that starved the Plex transcoder on 2026-07-11.
+  //
+  // This is asserted as a DENYLIST over every chain rather than as a list of
+  // expected names, so that re-adding a forbidden host fails here even if
+  // someone appends it to a chain this suite never thought to name.
+  const FORBIDDEN = ['Qwen3-6-35B-A3B-turbo', 'Qwen3-8B', 'Qwen3-6-35B-A3B'];
+
+  it('keeps the gaming PC and the Plex-starving CPU 35B out of `best`/`fast`', () => {
+    for (const tag of ['best', 'fast'] as const) {
+      for (const bad of FORBIDDEN) {
+        expect(MODEL_CHAINS[tag], `${tag} must not route to ${bad}`).not.toContain(bad);
+      }
+      // Every remaining entry names its host explicitly, which is the whole
+      // point: `-turbo` could never say which weights answered, and that is how
+      // prod ran on the losing Q4 for months behind a stale Tailscale hostname.
+      for (const m of MODEL_CHAINS[tag]) {
+        expect(m, `${tag} entry ${m} must pin a host`).toMatch(/-(spark|mac)-q\d+$/);
+      }
+    }
   });
 
-  it('orders `fast` by LATENCY — the 4090 leads where a human is waiting', () => {
-    expect(MODEL_CHAINS.fast[0]).toBe('Qwen3-6-35B-A3B-turbo');
-    expect(MODEL_CHAINS.fast).toContain('Qwen3-8B');
+  it('heads `best` at the Spark and keeps the byte-identical Mac Q8 behind it', () => {
+    // Both hosts serve the SAME GGUF (Qwen3.6-35B-A3B-UD-Q8_K_XL, the bake-off
+    // winner), so fidelity cannot order them — both satisfy MIN_BEST_QUANT.
+    // Order is therefore pure latency: the Spark beat the Mac at every stage.
+    expect(MODEL_CHAINS.best).toEqual([
+      'Qwen3-6-35B-A3B-spark-q8',
+      'Qwen3-6-35B-A3B-mac-q8',
+    ]);
+    for (const m of MODEL_CHAINS.best) {
+      expect(quantOf(m), `${m} must clear the Q${MIN_BEST_QUANT} floor`)
+        .toBeGreaterThanOrEqual(MIN_BEST_QUANT);
+    }
+  });
+
+  it('orders `fast` by LATENCY — the Spark leads where a human is waiting', () => {
+    // Was [turbo, Qwen3-8B]: BOTH the gaming PC, so its two links failed
+    // together and `fast` only looked like it had a fallback.
+    expect(MODEL_CHAINS.fast[0]).toBe('Qwen3-6-35B-A3B-spark-q8');
+    expect(MODEL_CHAINS.fast).toContain('Qwen3-6-35B-A3B-mac-q8');
   });
 
   it('keeps vision working as a single-entry chain', () => {

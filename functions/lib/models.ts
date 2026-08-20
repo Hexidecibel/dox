@@ -38,36 +38,63 @@ export const MODEL_CHAINS: Record<ModelTag, string[]> = {
   // Ordered best-first. Every entry must be a name the router knows; the
   // resolver picks the first one with a healthy upstream.
   //
-  // FIDELITY IS NOW EXPRESSIBLE — this used to be an interim order.
-  // The router offered ONE name per family:
-  //   Qwen3-6-35B-A3B-turbo -> [mac, buddy, windows]
-  //        mac (M4 Pro)  serves Qwen3.6-35B-A3B-UD-Q8_K_XL   <- the bake-off winner
-  //        buddy (4090)  serves Qwen3.6-35B-A3B-UD-Q4_K_M    <- the bake-off loser
-  // so a caller could not say WHICH quant it wanted. That list is ordered
-  // failover (mac first), NOT a load balancer, so a healthy Mac did serve Q8 —
-  // but a Mac outage moved everything to Q4 SILENTLY, which is how production
-  // ran on the losing quant for months behind a stale Tailscale hostname.
+  // POLICY (2026-08-13): doc extraction runs on the DGX Spark or AJ's Mac mini
+  // and NOWHERE ELSE. Both chains below are exhaustively those two hosts. The
+  // three names that used to live here were dropped on OPERATIONAL grounds, not
+  // quality grounds -- each one was a machine that can disappear under you:
   //
-  // 2026-08-05: the router gained per-(host, quant) names, so the head of this
-  // chain now pins BOTH the weights and the box. `-spark-q8` is the
-  // byte-identical GGUF the Mac serves, on the DGX Spark, which measured faster
-  // at every stage on those same weights (prefill 2.3x, decode 1.25x, end-to-end
-  // 1.11x, accuracy within noise). `-turbo` stays behind it as failover: still
-  // mac-first, still Q8 while the Mac is up. The CPU box stays LAST — the local
-  // 35B "pinned 38GB RAM + all cores and starved the Plex transcoder", so
-  // preferring it on quantization grounds routes every extraction onto a machine
-  // that takes the media server down with it.
+  //   * `Qwen3-6-35B-A3B-turbo` -- the router narrowed turbo to [windows], and
+  //     `windows` is the owner's GAMING PC. It gets paused mid-game and powered
+  //     down at will. With it as turbo's only upstream, one client with no
+  //     backoff drew 49,258 failed requests in 6 hours. Whether an extraction
+  //     succeeds must not depend on whether somebody is playing a game.
+  //   * `Qwen3-8B` -- the 3080 in that same gaming PC. Same box, same problem;
+  //     it was never an independent fallback, just the first one wearing a hat.
+  //   * `Qwen3-6-35B-A3B` -- the local CPU 35B on Hexinas. It pins ~38GB of RAM
+  //     and every core, and on 2026-07-11 it starved the Plex transcoder badly
+  //     enough that Plex read as broken to everyone in the house. As the tail of
+  //     a chain that made the WORST case of a routine extraction "take down the
+  //     media server", which is not a fallback, it is an outage. Removed, not
+  //     demoted -- a last resort you must never reach is just a loaded gun.
+  //
+  // What remains is one family on two hosts running the SAME weights:
+  // Qwen3.6-35B-A3B-UD-Q8_K_XL, the fidelity bake-off winner, byte-identical on
+  // the Spark and the Mac. Fidelity therefore no longer discriminates between
+  // them -- both are Q8, either satisfies MIN_BEST_QUANT -- so ORDER IS PURE
+  // LATENCY. The Spark leads because it measured faster than the Mac at every
+  // stage on those same weights (prefill 2.3x, decode 1.25x, end-to-end 1.11x,
+  // accuracy within noise), and because it is dox's own machine.
+  //
+  // Host-pinned names are what make any of this sayable. `-turbo` could never
+  // express WHICH weights answered, which is how production ran on the losing Q4
+  // for months behind a stale Tailscale hostname. `-spark-q8` and `-mac-q8` each
+  // name exactly one box and one quantization, so a degradation shows up in the
+  // served model string instead of hiding inside a pool.
   best: [
-    'Qwen3-6-35B-A3B-spark-q8',  // DGX Spark, Q8 — pins the weights AND the host.
-    'Qwen3-6-35B-A3B-turbo',     // GPU pool, mac-first (Q8), buddy (Q4) behind it.
-    'Qwen3-6-35B-A3B',           // CPU on Hexinas, Q5 — LAST RESORT, starves Plex.
+    'Qwen3-6-35B-A3B-spark-q8',  // DGX Spark, Q8 - dox's own machine, fastest.
+    'Qwen3-6-35B-A3B-mac-q8',    // Mac mini, byte-identical Q8, kept warm.
   ],
-  // `fast` = LATENCY-first (teach interview, NL search — a human is waiting).
-  // The 4090 is genuinely excellent here, which is what it should be used for.
+  // `fast` = LATENCY-first (teach interview, NL search - a human is waiting).
+  // This chain used to be [turbo, Qwen3-8B], which is to say it was hosted
+  // ENTIRELY on the gaming PC: both entries were the same machine, so its two
+  // links failed together and `fast` had no fallback at all, only the look of
+  // one. It now leads with the Spark, which serves this same family and beat the
+  // Mac at every stage, so the latency-first tag gets the latency-best host.
+  //
+  // The Mac sits behind it rather than nothing: for a human staring at a
+  // spinner, a slower answer beats an error, and the Mac is configured ttl:0
+  // (never idle-unloads), so failing over to it has no ~38GB cold-load cliff.
   fast: [
-    'Qwen3-6-35B-A3B-turbo',  // ~100 tok/s on the RTX 4090 when it is up.
-    'Qwen3-8B',               // 3080 fallback.
+    'Qwen3-6-35B-A3B-spark-q8',  // DGX Spark - fastest measured host, Q8.
+    'Qwen3-6-35B-A3B-mac-q8',    // Mac mini, always warm - slower, but an answer.
   ],
+  // UNCHANGED, deliberately. This is the local CPU 7B, NOT the 35B that starved
+  // Plex, and the router's own comment defends its home: "Vision is small and
+  // infrequent; the CPU is the right home for it" -- on a GPU box a vision
+  // request would evict the resident 35B and the next text request would evict
+  // vision back, thrashing a model swap per image. It is the one path left in
+  // this file that is neither Spark nor Mac; flagged for the owner to override
+  // rather than changed unasked.
   vision: [
     'qwen2.5-vl-7b',          // image-aware extraction.
   ],
