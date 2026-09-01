@@ -27,7 +27,12 @@ import {
   StarBorder as StarBorderIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
-import type { ApiDocumentType, ApiProduct, RenewalType } from '../lib/types';
+import type { ApiDocumentType, ApiProduct, ApiRequirement, ApiClaimType, RenewalType } from '../lib/types';
+import {
+  DocumentFacetPicker,
+  linksFromDrafts,
+  type FacetLinkDraftMap,
+} from '../components/DocumentFacetPicker';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 import SupplierAutocomplete, { type SupplierValue } from '../components/SupplierAutocomplete';
@@ -72,6 +77,15 @@ export function DocumentCreate() {
   const [categoryIds, setCategoryIds] = useState<string[]>([]);
   const [primaryCategoryId, setPrimaryCategoryId] = useState<string>('');
 
+  // Registry facets (migration 0080): layer 2 (what this document SATISFIES)
+  // and layer 3 (what it TRIGGERS). Vocabulary is per-tenant and comes from the
+  // same endpoints the admin screens use — the picker never offers anything the
+  // API would reject as cross-tenant.
+  const [requirementVocab, setRequirementVocab] = useState<ApiRequirement[]>([]);
+  const [claimVocab, setClaimVocab] = useState<ApiClaimType[]>([]);
+  const [requirementLinks, setRequirementLinks] = useState<FacetLinkDraftMap>(new Map());
+  const [claimLinks, setClaimLinks] = useState<FacetLinkDraftMap>(new Map());
+
   // Registry list fields
   const [aliases, setAliases] = useState<string[]>([]);
   const [criteria, setCriteria] = useState<string[]>([]);
@@ -109,6 +123,25 @@ export function DocumentCreate() {
       .list({ tenant_id: effectiveTenantId, active: 1 })
       .then((r) => setDocumentTypes(r.documentTypes || []))
       .catch(() => setDocumentTypes([]));
+  }, [effectiveTenantId]);
+
+  // Load the tenant's facet vocabularies. Same call shape as
+  // admin/Requirements.tsx and admin/ClaimTypes.tsx; `active: 1` because a
+  // deactivated term must not be newly linkable.
+  useEffect(() => {
+    if (!effectiveTenantId) {
+      setRequirementVocab([]);
+      setClaimVocab([]);
+      return;
+    }
+    api.requirements
+      .list({ tenant_id: effectiveTenantId, active: 1 })
+      .then((r) => setRequirementVocab(r.requirements || []))
+      .catch(() => setRequirementVocab([]));
+    api.claimTypes
+      .list({ tenant_id: effectiveTenantId, active: 1 })
+      .then((r) => setClaimVocab(r.claimTypes || []))
+      .catch(() => setClaimVocab([]));
   }, [effectiveTenantId]);
 
   // Debounced product search.
@@ -184,6 +217,14 @@ export function DocumentCreate() {
         description: description.trim() || undefined,
         categories: categoryIds.length > 0 ? categoryIds : undefined,
         primaryCategoryId: primaryCategoryId || undefined,
+        // Ingest defaults facet links to 'suggested' because it is the
+        // machine-reachable path. This form is not that path — a person ticked
+        // these boxes by hand, so each link states 'confirmed' explicitly.
+        // Left as 'suggested' they would not count toward gap detection and the
+        // uploader would have to re-confirm, on the detail page, what they just
+        // said here.
+        requirements: requirementLinks.size > 0 ? linksFromDrafts(requirementLinks) : undefined,
+        claims: claimLinks.size > 0 ? linksFromDrafts(claimLinks) : undefined,
         aliases: aliases.length > 0 ? aliases : undefined,
         criteria: criteria.length > 0 ? criteria : undefined,
         appliesTo: appliesTo.length > 0 ? appliesTo : undefined,
@@ -331,6 +372,55 @@ export function DocumentCreate() {
             Primary: {documentTypes.find((d) => d.id === primaryCategoryId)?.name || '—'} (click the star to change)
           </FormHelperText>
         )}
+      </Paper>
+
+      {/* Registry facets (migration 0080). Additive: a user who skips this
+          section still creates a document exactly as before. */}
+      <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+        <Typography variant="subtitle1" fontWeight={600} gutterBottom>What this document satisfies</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          Tick every checklist item this document closes. This is what a gap report
+          subtracts against: anything left unticked stays outstanding for the supplier.
+        </Typography>
+        <DocumentFacetPicker
+          vocab={requirementVocab.map((r) => ({
+            id: r.id,
+            name: r.name,
+            description: r.description,
+            group: r.checklist,
+          }))}
+          value={requirementLinks}
+          onChange={setRequirementLinks}
+          disabled={saving}
+          searchPlaceholder="Search the checklist…"
+          emptyMessage={
+            <>
+              This tenant has no checklist items yet. Add them under Settings &rarr; Checklist,
+              then a document can say what it closes.
+            </>
+          }
+        />
+
+        <Divider sx={{ my: 2.5 }} />
+
+        <Typography variant="subtitle1" fontWeight={600} gutterBottom>What this document claims</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          Asserting a claim satisfies nothing by itself — it makes OTHER documents
+          required, via the rules configured against each claim.
+        </Typography>
+        <DocumentFacetPicker
+          vocab={claimVocab.map((c) => ({ id: c.id, name: c.name, description: c.description }))}
+          value={claimLinks}
+          onChange={setClaimLinks}
+          disabled={saving}
+          searchPlaceholder="Search claims…"
+          emptyMessage={
+            <>
+              This tenant has no claim types yet. Add them under Settings &rarr; Claims to
+              record what a document asserts.
+            </>
+          }
+        />
       </Paper>
 
       {/* Retrieval + regulatory */}

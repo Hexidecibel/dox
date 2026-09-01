@@ -54,6 +54,7 @@ import { helpContent } from '../../lib/helpContent';
 import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
 import LotSchemeSelect from '../../components/LotSchemeSelect';
 import SupplierProductMapPanel from '../../components/SupplierProductMapPanel';
+import SupplierRequirementGaps from '../../components/SupplierRequirementGaps';
 import { useAuth } from '../../contexts/AuthContext';
 import type { LotScheme } from '../../lib/types';
 
@@ -1120,7 +1121,16 @@ export function SupplierDetail() {
       </TabPanel>
 
       {/* Documents Tab */}
+      {/* Two questions, deliberately stacked. The gap panel answers the        */}
+      {/* reviewer's ("this supplier owes M, and N of their documents were     */}
+      {/* never classified"); the list below answers the retriever's ("we have */}
+      {/* N documents"). The list alone can never show a MISSING document, so  */}
+      {/* a supplier with an empty checklist used to read exactly like a       */}
+      {/* complete one. It renders above the empty-state branch on purpose:    */}
+      {/* a supplier with zero documents is the case most worth counting.      */}
       <TabPanel value={tab} index={2}>
+        <SupplierRequirementGaps supplierId={supplier.id} />
+
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
           <Typography variant="h6" fontWeight={600}>
             Documents{documentsTotal > 0 ? ` (${documentsTotal})` : ''}

@@ -33,6 +33,13 @@ export type {
   // Registry vocabulary admin (migration 0080)
   ApiRequirement,
   ApiClaimType,
+  // Registry facet links on a document (migration 0080)
+  ApiDocumentRequirement,
+  ApiDocumentClaim,
+  DocumentFacetLinkInput,
+  RegistryLinkStatus,
+  RegistryLinkSource,
+  ClaimSubjectType,
   ApiClaimRule,
   ClaimSubjectGrain,
   RequirementListResponse,
@@ -173,3 +180,19 @@ export interface ExtractionTemplate {
   supplier_name?: string;
   document_type_name?: string;
 }
+
+// Requirement gap detection (shared/requirementGap.ts). Re-exported here so
+// components import gap shapes the same way they import every other API type.
+export type {
+  GapOrigin,
+  GapCaveat,
+  GapCaveatCode,
+  GapRequirement,
+  GapRollup,
+  SupplierGap,
+  SupplierGapCounts,
+  SupplierGapStatus,
+  SupplierGapListResponse,
+  SupplierGapGetResponse,
+  ClassificationCounts,
+} from '../../shared/requirementGap';

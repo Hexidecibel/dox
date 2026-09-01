@@ -32,6 +32,7 @@ import type {
   ApiSpecCheck,
   ApiClaimType,
   ClaimSubjectGrain,
+  DocumentFacetLinkInput,
   RequirementListResponse,
   RequirementGetResponse,
   ClaimTypeListResponse,
@@ -157,6 +158,11 @@ function parseDocument(doc: any): Document {
     renewalIntervalMonths: doc.renewal_interval_months ?? null,
     renewalDueDate: doc.renewal_due_date ?? null,
     categories: doc.categories ?? [],
+    // Registry facets (migration 0080). GET/PUT /api/documents/:id join the
+    // vocabulary in, so these arrive render-ready; older responses that predate
+    // cfb1b5e carry neither key, hence the [] fallbacks.
+    requirements: doc.requirements ?? [],
+    claims: doc.claims ?? [],
   };
 }
 
@@ -404,8 +410,15 @@ export const api = {
      * PUT /api/documents/:id
      * Returns: { document: ApiDocument }
      * The updated document has tags as JSON string.
+     *
+     * `requirements` / `claims` are the registry facet links (migration 0080).
+     * OMITTING a key leaves that facet's links alone; sending an array —
+     * INCLUDING [] — replaces the whole set, so an editor that clears every
+     * box actually clears the rows. This endpoint is the human path: a link
+     * with no explicit `status` lands 'confirmed', which is the only status
+     * gap detection counts.
      */
-    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; supplier_name: string; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null; categories: string[]; primary_category_id: string | null; aliases: string[]; criteria: string[]; applies_to: string[]; owner: string | null; renewal_type: string | null; renewal_interval_months: number | null; renewal_due_date: string | null }>): Promise<Document> => {
+    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; supplier_name: string; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null; categories: string[]; primary_category_id: string | null; requirements: DocumentFacetLinkInput[]; claims: DocumentFacetLinkInput[]; aliases: string[]; criteria: string[]; applies_to: string[]; owner: string | null; renewal_type: string | null; renewal_interval_months: number | null; renewal_due_date: string | null }>): Promise<Document> => {
       const response = await fetchApi<DocumentUpdateResponse>(`/documents/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -481,6 +494,12 @@ export const api = {
       // IDP Document Registry fields (migrations 0076/0077).
       categories?: string[];
       primaryCategoryId?: string | null;
+      // Registry facets (migration 0080): what the document SATISFIES and what
+      // it TRIGGERS. Ingest is machine-reachable, so a link with no explicit
+      // `status` lands 'suggested' — a caller acting for a person (the Add
+      // Document form) states 'confirmed' per link.
+      requirements?: DocumentFacetLinkInput[];
+      claims?: DocumentFacetLinkInput[];
       aliases?: string[];
       criteria?: string[];
       appliesTo?: string[];
@@ -506,6 +525,8 @@ export const api = {
       if (data.extendedMetadata) form.append('extended_metadata', JSON.stringify(data.extendedMetadata));
       if (data.categories) form.append('categories', JSON.stringify(data.categories));
       if (data.primaryCategoryId) form.append('primary_category_id', data.primaryCategoryId);
+      if (data.requirements) form.append('requirements', JSON.stringify(data.requirements));
+      if (data.claims) form.append('claims', JSON.stringify(data.claims));
       if (data.aliases) form.append('aliases', JSON.stringify(data.aliases));
       if (data.criteria) form.append('criteria', JSON.stringify(data.criteria));
       if (data.appliesTo) form.append('applies_to', JSON.stringify(data.appliesTo));

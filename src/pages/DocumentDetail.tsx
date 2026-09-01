@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type ReactElement } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { formatDate } from '../utils/format';
 import {
@@ -45,9 +45,29 @@ import {
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
   Save as SaveIcon,
+  CheckCircle as ConfirmedIcon,
+  HelpOutline as SuggestedIcon,
+  Block as RejectedIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
-import type { Document, DocumentVersion, ApiDocumentType, DocumentLinkedLot, RenewalType } from '../lib/types';
+import type {
+  Document,
+  DocumentVersion,
+  ApiDocumentType,
+  ApiRequirement,
+  ApiClaimType,
+  ApiDocumentRequirement,
+  ApiDocumentClaim,
+  DocumentLinkedLot,
+  RenewalType,
+} from '../lib/types';
+import {
+  DocumentFacetPicker,
+  draftsFromLinks,
+  linksFromDrafts,
+  type FacetLinkDraft,
+  type FacetLinkDraftMap,
+} from '../components/DocumentFacetPicker';
 import { VersionHistory } from '../components/VersionHistory';
 import { UploadDialog } from '../components/UploadDialog';
 import { RoleGuard } from '../components/RoleGuard';
@@ -75,6 +95,45 @@ const RENEWAL_OPTIONS: { value: RenewalType; label: string; hasInterval: boolean
 
 function renewalLabel(t: RenewalType | null | undefined): string {
   return RENEWAL_OPTIONS.find((o) => o.value === t)?.label || '';
+}
+
+/**
+ * Split a facet's links into the three states a reviewer actually acts on.
+ * Anything that is not explicitly confirmed or rejected counts as awaiting
+ * review — an unknown status must never read as a pass.
+ */
+function splitByStatus<T extends { status: string }>(links: T[] | undefined) {
+  const confirmed: T[] = [];
+  const suggested: T[] = [];
+  const rejected: T[] = [];
+  for (const link of links ?? []) {
+    if (link.status === 'confirmed') confirmed.push(link);
+    else if (link.status === 'rejected') rejected.push(link);
+    else suggested.push(link);
+  }
+  return { confirmed, suggested, rejected };
+}
+
+/** Either facet's link row, as the document endpoints return it. */
+type FacetLinkView = ApiDocumentRequirement | ApiDocumentClaim;
+
+/** Vocabulary name for a facet link, whichever alias the endpoint emitted. */
+function facetLinkName(link: FacetLinkView): string {
+  const l = link as unknown as Record<string, unknown>;
+  return String(
+    l.vocab_name ?? l.requirement_name ?? l.claim_type_name ?? l.vocab_slug ?? '(unknown)',
+  );
+}
+
+/** Provenance line for a link's tooltip — where it came from, how sure. */
+function facetLinkProvenance(link: FacetLinkView): string {
+  const l = link as unknown as Record<string, unknown>;
+  const bits: string[] = [];
+  if (l.source) bits.push(`source: ${String(l.source)}`);
+  if (l.confidence != null) bits.push(`${Math.round(Number(l.confidence) * 100)}% confidence`);
+  if (l.confirmed_at) bits.push(`confirmed ${String(l.confirmed_at)}`);
+  if (l.evidence) bits.push(`evidence: “${String(l.evidence)}”`);
+  return bits.join(' · ');
 }
 
 export function DocumentDetail() {
@@ -134,6 +193,23 @@ export function DocumentDetail() {
   const [regRenewalType, setRegRenewalType] = useState<RenewalType | ''>('');
   const [regRenewalInterval, setRegRenewalInterval] = useState('');
   const [regRenewalDue, setRegRenewalDue] = useState('');
+
+  // Registry facets (migration 0080): layer 2 (what this document SATISFIES)
+  // and layer 3 (what it TRIGGERS). This page is where a machine's `suggested`
+  // link becomes a human's `confirmed` one — the only status gap detection
+  // counts — so the two are rendered as separate, labelled groups rather than
+  // one undifferentiated chip row.
+  const [requirementVocab, setRequirementVocab] = useState<ApiRequirement[]>([]);
+  const [claimVocab, setClaimVocab] = useState<ApiClaimType[]>([]);
+  const [facetsEditing, setFacetsEditing] = useState(false);
+  const [facetsSaving, setFacetsSaving] = useState(false);
+  const [reqLinks, setReqLinks] = useState<FacetLinkDraftMap>(new Map());
+  const [claimLinks, setClaimLinks] = useState<FacetLinkDraftMap>(new Map());
+  // Links the checkbox list cannot represent (a second link to the same claim
+  // type with a different subject). Carried through the save untouched, because
+  // PUT REPLACES the set and would otherwise delete them.
+  const [reqPassthrough, setReqPassthrough] = useState<FacetLinkDraft[]>([]);
+  const [claimPassthrough, setClaimPassthrough] = useState<FacetLinkDraft[]>([]);
 
   // Linked lots (one per sublot under Option B). Best-effort; empty for docs
   // with no lot linkage.
@@ -212,6 +288,23 @@ export function DocumentDetail() {
     if (doc?.tenant_id) load();
   }, [doc?.tenant_id]);
 
+  // The tenant's facet vocabularies, loaded the same way admin/Requirements.tsx
+  // and admin/ClaimTypes.tsx load them. Scoped to the document's tenant because
+  // the write path rejects cross-tenant ids outright.
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [reqs, claims] = await Promise.all([
+          api.requirements.list({ tenant_id: doc?.tenant_id || undefined, active: 1 }),
+          api.claimTypes.list({ tenant_id: doc?.tenant_id || undefined, active: 1 }),
+        ]);
+        setRequirementVocab(reqs.requirements || []);
+        setClaimVocab(claims.claimTypes || []);
+      } catch { /* non-critical: the section degrades to its empty state */ }
+    };
+    if (doc?.tenant_id) load();
+  }, [doc?.tenant_id]);
+
   const openRegistryEdit = () => {
     if (!doc) return;
     const cats = (doc.categories || []).map((c) => c.document_type_id);
@@ -263,6 +356,72 @@ export function DocumentDetail() {
       setError(err instanceof Error ? err.message : 'Failed to update registry fields');
     } finally {
       setRegistrySaving(false);
+    }
+  };
+
+  // --- Registry facets -----------------------------------------------------
+
+  const openFacetsEdit = () => {
+    if (!doc) return;
+    const reqs = draftsFromLinks(doc.requirements as unknown as Array<Record<string, unknown>>, 'requirement_id');
+    const claims = draftsFromLinks(doc.claims as unknown as Array<Record<string, unknown>>, 'claim_type_id');
+    setReqLinks(reqs.drafts);
+    setReqPassthrough(reqs.passthrough);
+    setClaimLinks(claims.drafts);
+    setClaimPassthrough(claims.passthrough);
+    setFacetsEditing(true);
+  };
+
+  /**
+   * Save both facet sets. PUT replaces each facet's whole set, so BOTH keys are
+   * always sent — including rejected rows, which would otherwise be deleted and
+   * re-suggested by the next ingest of the same document.
+   */
+  const handleSaveFacets = async () => {
+    if (!doc || !id) return;
+    setFacetsSaving(true);
+    try {
+      await api.documents.update(id, {
+        requirements: linksFromDrafts(reqLinks, reqPassthrough),
+        claims: linksFromDrafts(claimLinks, claimPassthrough),
+      });
+      setFacetsEditing(false);
+      loadDocument();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save requirements and claims');
+    } finally {
+      setFacetsSaving(false);
+    }
+  };
+
+  /**
+   * The one-click reviewer path: everything the pipeline proposed becomes a
+   * human decision. Confirmed and rejected links are resent unchanged so the
+   * REPLACE does not drop them.
+   */
+  const handleConfirmSuggestions = async () => {
+    if (!doc || !id) return;
+    setFacetsSaving(true);
+    try {
+      const promote = (links: Array<Record<string, unknown>> | undefined, key: string) => {
+        const { drafts, passthrough } = draftsFromLinks(links, key);
+        for (const [k, d] of drafts) {
+          if (d.status === 'suggested') drafts.set(k, { ...d, status: 'confirmed' });
+        }
+        const promoted = passthrough.map((d) =>
+          d.status === 'suggested' ? { ...d, status: 'confirmed' as const } : d,
+        );
+        return linksFromDrafts(drafts, promoted);
+      };
+      await api.documents.update(id, {
+        requirements: promote(doc.requirements as unknown as Array<Record<string, unknown>>, 'requirement_id'),
+        claims: promote(doc.claims as unknown as Array<Record<string, unknown>>, 'claim_type_id'),
+      });
+      loadDocument();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to confirm suggestions');
+    } finally {
+      setFacetsSaving(false);
     }
   };
 
@@ -968,6 +1127,195 @@ export function DocumentDetail() {
             )}
           </Box>
         )}
+      </Paper>
+
+      {/* Registry facets (migration 0080): what this document SATISFIES (layer 2)
+          and what it TRIGGERS (layer 3). Viewable by all; editable by
+          non-readers. Kept in its own Paper so a facet save sends only the
+          facet keys — an omitted key leaves that facet's links untouched, so
+          editing the Registry block above cannot disturb them. */}
+      <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, mb: 3 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1.5 }}>
+          <Typography variant="h6" fontWeight={600}>Requirements &amp; Claims</Typography>
+          <InfoTooltip text="What this document closes on the checklist, and what it asserts. Only CONFIRMED links count — a suggestion from the extraction pipeline leaves the requirement open until a person confirms it." />
+          {!isReader && !facetsEditing && (
+            <IconButton size="small" onClick={openFacetsEdit} aria-label="Edit requirements and claims">
+              <EditIcon fontSize="small" />
+            </IconButton>
+          )}
+        </Box>
+
+        {(() => {
+          const reqs = splitByStatus<ApiDocumentRequirement>(doc.requirements);
+          const claims = splitByStatus<ApiDocumentClaim>(doc.claims);
+          const pending = reqs.suggested.length + claims.suggested.length;
+
+          /** One state's chips, with the state named rather than only colour-coded. */
+          const group = (
+            heading: string,
+            caption: string,
+            links: FacetLinkView[],
+            color: 'success' | 'warning' | 'default',
+            icon: ReactElement,
+            faded = false,
+          ) =>
+            links.length === 0 ? null : (
+              <Box sx={{ mb: 1 }}>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                  {heading} — {caption}
+                </Typography>
+                <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 0.5, opacity: faded ? 0.6 : 1 }}>
+                  {links.map((link) => {
+                    const prov = facetLinkProvenance(link);
+                    const subjectName = (link as unknown as Record<string, unknown>).subject_name;
+                    const chip = (
+                      <Chip
+                        key={String(link.id)}
+                        size="small"
+                        icon={icon}
+                        color={color}
+                        variant="outlined"
+                        label={
+                          facetLinkName(link) +
+                          (subjectName ? ` · about ${String(subjectName)}` : '')
+                        }
+                      />
+                    );
+                    return prov ? (
+                      <Tooltip key={String(link.id)} title={prov}>
+                        <span>{chip}</span>
+                      </Tooltip>
+                    ) : (
+                      chip
+                    );
+                  })}
+                </Box>
+              </Box>
+            );
+
+          const facetView = (
+            label: string,
+            blurb: string,
+            split: { confirmed: FacetLinkView[]; suggested: FacetLinkView[]; rejected: FacetLinkView[] },
+            emptyText: string,
+          ) => (
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="subtitle2" color="text.secondary">{label}</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                {blurb}
+              </Typography>
+              {split.confirmed.length + split.suggested.length + split.rejected.length === 0 ? (
+                <Typography variant="body2" color="text.secondary">{emptyText}</Typography>
+              ) : (
+                <>
+                  {group('Confirmed', 'a person decided these; they count', split.confirmed, 'success', <ConfirmedIcon />)}
+                  {group('Awaiting review', 'proposed by the pipeline; they do NOT count yet', split.suggested, 'warning', <SuggestedIcon />)}
+                  {group('Rejected', 'turned down by a person; kept so it is not re-proposed', split.rejected, 'default', <RejectedIcon />, true)}
+                </>
+              )}
+            </Box>
+          );
+
+          return (
+            <>
+              {pending > 0 && (
+                <Alert
+                  severity="warning"
+                  sx={{ mb: 2 }}
+                  action={
+                    !isReader && !facetsEditing ? (
+                      <Button size="small" onClick={handleConfirmSuggestions} disabled={facetsSaving}>
+                        {facetsSaving ? 'Confirming…' : `Confirm all ${pending}`}
+                      </Button>
+                    ) : undefined
+                  }
+                >
+                  {pending} {pending === 1 ? 'link was' : 'links were'} proposed by the extraction
+                  pipeline and {pending === 1 ? 'is' : 'are'} awaiting review. Until a person confirms,
+                  {' '}{pending === 1 ? 'it does' : 'they do'} not count — a gap report still shows the
+                  requirement as open.
+                </Alert>
+              )}
+
+              {facetsEditing ? (
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <Box>
+                    <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                      Satisfies (checklist items this document closes)
+                    </Typography>
+                    <DocumentFacetPicker
+                      vocab={requirementVocab.map((r) => ({
+                        id: r.id,
+                        name: r.name,
+                        description: r.description,
+                        group: r.checklist,
+                      }))}
+                      value={reqLinks}
+                      onChange={setReqLinks}
+                      showStatus
+                      disabled={facetsSaving}
+                      searchPlaceholder="Search the checklist…"
+                      emptyMessage={
+                        <>
+                          This tenant has no checklist items yet. Add them under Settings &rarr;
+                          Checklist before a document can say what it closes.
+                        </>
+                      }
+                    />
+                  </Box>
+                  <Box>
+                    <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                      Claims (what asserting this makes required elsewhere)
+                    </Typography>
+                    <DocumentFacetPicker
+                      vocab={claimVocab.map((c) => ({ id: c.id, name: c.name, description: c.description }))}
+                      value={claimLinks}
+                      onChange={setClaimLinks}
+                      showStatus
+                      disabled={facetsSaving}
+                      searchPlaceholder="Search claims…"
+                      emptyMessage={
+                        <>
+                          This tenant has no claim types yet. Add them under Settings &rarr; Claims
+                          to record what a document asserts.
+                        </>
+                      }
+                    />
+                  </Box>
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Button size="small" variant="contained" startIcon={<SaveIcon />} onClick={handleSaveFacets} disabled={facetsSaving}>
+                      {facetsSaving ? 'Saving...' : 'Save'}
+                    </Button>
+                    <Button size="small" onClick={() => setFacetsEditing(false)} disabled={facetsSaving}>Cancel</Button>
+                  </Box>
+                  <Typography variant="caption" color="text.secondary">
+                    Ticking a box records a person's decision (confirmed). Unticking something the
+                    pipeline proposed records a rejection, so the same guess is not offered again.
+                  </Typography>
+                </Box>
+              ) : (
+                <>
+                  {facetView(
+                    'Satisfies',
+                    'Checklist items this document closes.',
+                    reqs,
+                    requirementVocab.length === 0
+                      ? 'No checklist items are configured for this tenant yet.'
+                      : 'Nothing linked.',
+                  )}
+                  {facetView(
+                    'Claims',
+                    'What this document asserts — each claim can make other documents required.',
+                    claims,
+                    claimVocab.length === 0
+                      ? 'No claim types are configured for this tenant yet.'
+                      : 'Nothing linked.',
+                  )}
+                </>
+              )}
+            </>
+          );
+        })()}
       </Paper>
 
       {/* Linked Products */}

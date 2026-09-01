@@ -508,6 +508,33 @@ export interface ApiDocumentClaim extends DocumentClaimRow {
 }
 
 /**
+ * What a document write path (POST /api/documents/ingest, PUT
+ * /api/documents/:id) accepts for ONE facet link — layer 2 `requirements` or
+ * layer 3 `claims`. Mirrors `FacetLinkInput` in functions/lib/registry.ts,
+ * which is what `parseFacetLinks` reads off the wire.
+ *
+ * `id` is the VOCABULARY row id (a requirement id or a claim_type id), not the
+ * junction row's. Omitting `status` takes the endpoint's default, and those
+ * differ on purpose: ingest proposes (`suggested`), the editor confirms
+ * (`confirmed`). A caller that knows better states it per link.
+ *
+ * Both endpoints also accept a bare id string in place of the object.
+ */
+export interface DocumentFacetLinkInput {
+  id: string;
+  status?: RegistryLinkStatus;
+  source?: RegistryLinkSource | string;
+  confidence?: number | null;
+  notes?: string | null;
+  /** claim facet only — the snippet the claim was read from. */
+  evidence?: string | null;
+  /** claim facet only. 'tenant' (the default) must carry NO subject_id;
+   *  every other subject type REQUIRES one. */
+  subject_type?: ClaimSubjectType | string;
+  subject_id?: string | null;
+}
+
+/**
  * Applicability tier on a supplier_requirements row (migration 0087).
  * 'required' counts as a gap when unsatisfied; 'recommended' is advisory and
  * is excluded from gap reports by default.
