@@ -83,6 +83,112 @@ measurement. Adding that spelling = 7 instant false alerts. AJ has been told to 
 of <10" — the reader wrote a coliform row's spec onto non-micro rows. **Both sides unitless, so no
 engine guard can catch it.** Fix is upstream only.
 
+### SESSION PART TWO — 2026-09-01 02:00. START HERE.
+
+**Prod is on `37511fa`.** Ten more commits after the entry below. Everything in
+this section is LIVE and VERIFIED against production, not projected.
+
+#### DOUBLE-CHECK THESE FIRST (the user asked to review in the morning)
+1. **`out_of_spec: 0` on the 13 reprocessed docs is a CLEAN result, not a PROVEN
+   one.** Those documents genuinely report low counts. The evidence the checker
+   CATCHES things is the Edaleen 29 + the 6 self-contradicting COAs from the
+   corpus run — not this batch. Do not let the two get conflated.
+2. **Only 13 of 99 pending items were reprocessed** — Andersen (7) + Schreiber (6),
+   the two suppliers where the prompt change is measured. **Country Morning is 38
+   of the remaining 86 and was deliberately left alone**: its lot_scheme +
+   product-bridge matching was a full session of tuning, and re-extraction could
+   disturb the lot keys matching depends on. Spot-check 2 CMF docs before/after
+   before widening.
+3. **The `(none)`-supplier bucket (10 docs) is probably safe to reprocess** — no
+   per-supplier instructions to regress.
+
+#### WHAT SHIPPED (all committed + deployed)
+- **`3ddbe63` scientific notation — the last silent pass.** `applyRowUnit`
+  appends the unit column and the sci-notation regex was end-anchored, so
+  `3.0x10^2 CFU/g` parsed as **3, not 300** → `in_spec` against a ≤100 limit.
+  Every form was affected and every one biased toward passing. A SECOND defect sat
+  behind it: `trailingUnit` claimed the exponent, so `1.2e3 CFU/g` got unit
+  `"e3 CFU/g"` — fixing only the magnitude would have turned a silent pass into a
+  not_checked. Both fixed by splitting magnitude+unit in one pass.
+- **`2947e44` rule 14.** ⚠️ **I caused this**: `git add -A` in `8ff4f35` split one
+  prompt change across a commit boundary and DEPLOYED rule 4 (which invites the
+  model to fill a `unit` column) without rule 14 (which forbids inventing one), to
+  the live email-ingest path. Lesson: never `git add -A` while agents are editing.
+- **`94492a3` audit export.** `GET /api/audit/export`, CSV, keyset-paginated (NOT
+  offset — `created_at` is second-resolution and non-unique, so an offset walk
+  duplicates/drops at batch boundaries). Snapshots MAX(id) so the export excludes
+  its own audit row. Shared `buildAuditFilters` means the export and the screen
+  cannot drift on tenant scope.
+- **`cfb1b5e` registry spine.** The ENTIRE parse→validate→sync half was unwired —
+  `parseFacetLinks`, `validateClaimSubjects`, `listDocumentFacet` AND
+  `syncDocumentFacet` all had zero callers. Ingest→`suggested`, PUT→`confirmed`
+  (deliberate: `requirements/index.ts:81` counts only `confirmed`, so two
+  suggesting paths would leave gap detection permanently empty). Migration **0087
+  `supplier_requirements`** (tier required|recommended) applied + stamped id 70.
+- **`37511fa` gap detection + facet UI.** `shared/requirementGap.ts` is pure.
+  **`not_configured` is a THIRD status**, never collapsed into `satisfied`,
+  carrying "this is not the same as compliant" — verified live: Andersen returns
+  `status: not_configured, configured: false`, NOT satisfied. Facet picker is
+  vocabulary-only, never free text.
+
+#### EXTRACTION — the chain works end to end, measured on prod
+Worker restarted onto rules 4+8-14 (was up 11 days on the old prompt), Andersen
+per-supplier instructions applied (backup:
+`~/drops/andersen-instructions-backup-20260901-0131.json`), 13 docs re-extracted.
+
+**Result: 60 judgements, 0 silent documents.** Before: Andersen had 4 never-judged
+and Schreiber produced NOTHING (its tables had no result column at all).
+
+Single-document proof (`6-17-26 HOMO 5G.pdf`): micro results went from **absent
+entirely** to `Coliform 0` / `Aerobic 120`; `product_code` `347DMK` (a Petrifilm
+plate lot) → `5G`; `expiration_date` `2027-05-20` (reagent expiry) → `2026-06-17`.
+The reagent values moved to a `reagent_lots` table — they didn't vanish, they
+went where they belong.
+
+**And a 47× misread was corrected.** `8-22-26 MEDOSWEET HOMO 5G.pdf` extracted
+Aerobic as **20**; the PDF says **950** (verified by pulling the actual file).
+Both pass a 20,000 limit, so no alert would ever have fired. Found by re-reading
+the document, not by checking the number. That is the single best argument in the
+demo and Beat 4 of the run-sheet now leads with it.
+
+⚠️ **BEAT 4 CHANGED.** The extractor now emits only the Product row in canonical
+form, so there is no Buffer row left for the engine to skip (`control_rows: []`).
+Better data, but you can no longer *show* the buffer being excluded. Run-sheet
+rewritten accordingly.
+
+#### CORRECTIONS TO EARLIER CLAIMS IN THIS FILE
+- **The extraction brief I wrote was measured against a STALE substrate.** 96 of
+  100 Andersen rows predate `df8d99b` (serialization). Defects 2/4/5 were ALREADY
+  0 in current code. The "re-measure everything after serial-rc lands" note from
+  August was never actioned and I inherited the old numbers.
+- **`spec_limits.version` IS bumped by the API** (`[id].ts:75`, since v2.7.0). An
+  earlier note said it never was — wrong. Real issue: the API bumps on EVERY edit,
+  the importer only when a threshold moves. Two audit stories for one action.
+- **`DAIRY_FOOD_INDUSTRY_PROMPT` is SHADOWED on prod.** Tenant Cush Co has a saved
+  `extraction_context` (a stale copy). Edits to that constant never reach this
+  tenant — it is effectively a THIRD hand-maintained copy, in the database. The
+  fixes went into `TABLE EXTRACTION RULES`, which is not overridable.
+- **Few-shot examples are fetched with NO supplier filter** — `guessedSupplier`
+  comes from a filename regex requiring `COA|BOL|SDS`, which Andersen filenames
+  never match, so ~4.5KB of a DIFFERENT supplier's COA sits before the user
+  message. Code fix in `fetchExtractionExamples`, not a prompt fix.
+
+#### DELIVERABLES FOR THE MEETING
+- Run-sheet: `~/drops/demo-runsheet-spec-limits.md` (5 beats, ~8 min, live prod)
+- Reply to AJ: `~/drops/reply-to-aj-october.md` + page
+  https://claude.ai/code/artifact/d3002b43-b0be-49cd-ae0f-1d98c5f57ae9
+- Assessment: https://claude.ai/code/artifact/c6de744d-88cf-487e-80b4-b0d0ff6749ef
+- AJ questions: `~/drops/aj-micro-limits-questions.md` (8 spellings / 515 results)
+
+#### AJ'S OCTOBER BRIEF — the read
+October is a **cutover against DCN licence expiry**, not a demo. His own estimate
+is ~8 weeks. **It holds only if the first two weeks go into schema he has not
+budgeted** — that was gap one and two above, and 0087 + `cfb1b5e` just closed
+both. Highest-risk unowned item on the whole brief: **getting data out of DCN** —
+no export capability, no date range, no owner, hard external date.
+
+---
+
 ### SHIPPED TO PROD 2026-09-01 (after the entry above was first written)
 - **Pages deploy `272cbb3b`** (Production / master / source `19fc759`). All engine fixes are LIVE.
   Verified against the live API: queue item `6b11616205…` returns `unmatched: 5`, matching the
