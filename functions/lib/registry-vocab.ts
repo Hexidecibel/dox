@@ -18,6 +18,27 @@ import { generateId } from './db';
 import { BadRequestError } from './permissions';
 import { validateFacetIds } from './registry';
 
+/**
+ * Applicability tiers on `supplier_requirements` (migration 0087) — WHICH
+ * requirements a given supplier owes.
+ *
+ * 'required'    counts as a gap when unsatisfied; gap reports default to this
+ *               tier alone.
+ * 'recommended' advisory only — surfaced, never counted as a gap by default.
+ *
+ * Lives here rather than in a route file so the list endpoint, the detail
+ * endpoint and any future gap query share ONE definition of the CHECK set.
+ */
+export const SUPPLIER_REQUIREMENT_TIERS = ['required', 'recommended'] as const;
+
+export type SupplierRequirementTier = (typeof SUPPLIER_REQUIREMENT_TIERS)[number];
+
+export function isValidSupplierRequirementTier(
+  value: string,
+): value is SupplierRequirementTier {
+  return (SUPPLIER_REQUIREMENT_TIERS as readonly string[]).includes(value);
+}
+
 /** Slugify a vocabulary name the same way document_types does. */
 export function slugifyVocab(text: string): string {
   return text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');

@@ -536,6 +536,66 @@ export async function syncDocumentFacet(
 }
 
 /**
+ * The facet link sets a document write path may carry.
+ *
+ * `undefined` means "the caller said nothing about this facet" — leave the
+ * document's existing links alone. An array (INCLUDING an empty one) means
+ * "this is the set now", and REPLACES what is stored. Same convention the
+ * shipped `categories` field already uses on ingest/PUT, so an editor that
+ * clears every checkbox actually clears the rows.
+ */
+export interface DocumentFacetInput {
+  requirements?: FacetLinkInput[];
+  claims?: FacetLinkInput[];
+}
+
+/**
+ * Validate every facet link on a write payload against ONE tenant, before the
+ * document row is touched.
+ *
+ * Split from `syncDocumentFacets` on purpose: the ingest path validates up
+ * front (alongside the category/product checks) and writes much later, so a
+ * cross-tenant requirement id must fail the request before any UPDATE, upload
+ * or version row has happened.
+ */
+export async function validateDocumentFacets(
+  db: D1Database,
+  tenantId: string,
+  input: DocumentFacetInput,
+): Promise<void> {
+  if (input.requirements) {
+    await validateFacetIds(db, 'requirement', tenantId, input.requirements);
+  }
+  if (input.claims) {
+    await validateFacetIds(db, 'claim', tenantId, input.claims);
+    await validateClaimSubjects(db, tenantId, input.claims);
+  }
+}
+
+/**
+ * Apply both facet link sets to a document. Call AFTER the documents row
+ * exists (the junctions carry FKs onto it) and AFTER
+ * `validateDocumentFacets`.
+ *
+ * Idempotent: `syncDocumentFacet` deletes then re-inserts under the junction's
+ * uniqueness guard, so re-saving the same payload converges on the same rows
+ * rather than accumulating duplicates.
+ */
+export async function syncDocumentFacets(
+  db: D1Database,
+  documentId: string,
+  input: DocumentFacetInput,
+  options: SyncFacetOptions = {},
+): Promise<void> {
+  if (input.requirements) {
+    await syncDocumentFacet(db, 'requirement', documentId, input.requirements, options);
+  }
+  if (input.claims) {
+    await syncDocumentFacet(db, 'claim', documentId, input.claims, options);
+  }
+}
+
+/**
  * Load a document's link set for one facet, vocabulary joined in and ordered
  * the way the tenant configured its vocabulary.
  */

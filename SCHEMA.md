@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 112 tables, 2 views, 169 indexes, 36 triggers.
+Objects: 113 tables, 2 views, 171 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -289,6 +289,24 @@ Indexes: `idx_sei_supplier_doctype`, `idx_sei_tenant`
 ```
 
 Indexes: `idx_supplier_product_map_lookup`
+
+### `supplier_requirements`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE
+  requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE
+  tier TEXT NOT NULL DEFAULT 'required' CHECK (tier IN ('required','recommended'))
+  notes TEXT
+  created_at TEXT DEFAULT (datetime('now'))
+  created_by TEXT
+  updated_at TEXT DEFAULT (datetime('now'))
+  updated_by TEXT
+  UNIQUE(tenant_id, supplier_id, requirement_id)
+```
+
+Indexes: `idx_supplier_requirements_requirement`, `idx_supplier_requirements_supplier`
 
 ### `suppliers`
 

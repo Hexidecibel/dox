@@ -483,8 +483,16 @@ export interface ClaimTypeRequirementRow {
   created_at: string;
 }
 
-/** A requirement link as returned by the API, with the vocabulary joined in. */
+/**
+ * A requirement link as returned by the API, with the vocabulary joined in.
+ *
+ * `vocab_name` / `vocab_slug` are what `listDocumentFacet` in
+ * functions/lib/registry.ts actually emits — the join is written once for BOTH
+ * facets, so the aliases are facet-neutral rather than requirement_ / claim_ prefixed.
+ */
 export interface ApiDocumentRequirement extends DocumentRequirementRow {
+  vocab_name?: string;
+  vocab_slug?: string;
   requirement_name?: string;
   requirement_slug?: string;
   checklist?: string | null;
@@ -492,9 +500,47 @@ export interface ApiDocumentRequirement extends DocumentRequirementRow {
 
 /** A claim link as returned by the API, with the vocabulary joined in. */
 export interface ApiDocumentClaim extends DocumentClaimRow {
+  vocab_name?: string;
+  vocab_slug?: string;
   claim_type_name?: string;
   claim_type_slug?: string;
   subject_name?: string | null; // resolved product/supplier name on read
+}
+
+/**
+ * Applicability tier on a supplier_requirements row (migration 0087).
+ * 'required' counts as a gap when unsatisfied; 'recommended' is advisory and
+ * is excluded from gap reports by default.
+ */
+export type SupplierRequirementTier = 'required' | 'recommended';
+
+/**
+ * Applicability row (migration 0087): requirement R applies to supplier S.
+ *
+ * The left-hand side of gap detection. `document_requirements` says what a
+ * supplier's documents CLOSE; this says what they were supposed to close.
+ */
+export interface SupplierRequirementRow {
+  id: string;
+  tenant_id: string;
+  supplier_id: string;
+  requirement_id: string;
+  tier: SupplierRequirementTier;
+  notes: string | null;
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+/** An applicability row as returned by the API, both ends joined in. */
+export interface ApiSupplierRequirement extends SupplierRequirementRow {
+  requirement_name?: string;
+  requirement_slug?: string;
+  requirement_checklist?: string | null;
+  requirement_active?: number;
+  supplier_name?: string;
+  supplier_slug?: string;
 }
 
 /**

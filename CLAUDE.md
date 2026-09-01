@@ -81,7 +81,7 @@ bin/                    # Operational scripts (deploy, migrate, seed)
 - **Document Bundles**: Named compliance packages grouping documents with version pinning. Download as ZIP. Draft/finalized workflow.
 - **Spec Limits + Out-of-Parameter Warnings**: Acceptance limits on COA test results (`spec_tests` + `spec_limits`, migration 0084). Two sources judge every result — the COA's own printed spec/pass-fail (no configuration, works on every supplier) and OUR configured limit, which is often tighter than what the supplier certifies against. **Three-state by design**: `in_spec` / `out_of_spec` / `not_checked`, where `not_checked` means we held a limit and could not honestly apply it (a censored `<50` against a ≤10 limit, a CFU/mL result against a CFU/g limit) and is never a silent pass. Engine is `shared/specCheck.ts` (pure); review-queue surfacing via `functions/lib/spec-warnings.ts`; register + alerts via `functions/lib/spec-register.ts` (one email per document, routed by `assignments` and falling back to org_admins). Warns, never blocks. Preview what a limit would catch with `bin/recheck-spec-limits --tenant <id>`.
 
-## Migrations (0001-0086)
+## Migrations (0001-0087)
 
 **Current schema state: `SCHEMA.md`** (generated — regenerate with `./bin/schema-doc`
 after every migration). This table is migration *history*; SCHEMA.md is what the
@@ -185,6 +185,7 @@ be added to `tests/helpers/db.ts`.
 | 0084 | spec_limits | `spec_tests` (analyte + the aliases suppliers print) and `spec_limits` (our acceptance thresholds). Scope columns are all nullable; most specific wins, all-NULL is a tenant-wide default |
 | 0085 | document_spec_checks | The out-of-spec register. One row per judged result with a FROZEN `limit_snapshot`, so moving a threshold cannot rewrite history. Stores `not_checked` too — a register of passes and failures only would imply everything absent from it was fine |
 | 0086 | spec_limits_unique_scope | Unique index on (tenant, analyte, scope) for `spec_limits`. **Expression index** — the three scope columns are COALESCEd to `''` in the key because SQLite treats NULLs as distinct, which would exempt every all-NULL tenant-wide row. Stored values stay NULL; `resolveSpecLimits` and the LEFT JOINs depend on that |
+| 0087 | supplier_requirements | Applicability: WHICH requirements apply to WHICH supplier, with a `tier` of `required` / `recommended` (gap reports default to `required`). The LEFT side of gap detection — `document_requirements` says what a supplier's docs CLOSE, this says what they were supposed to close. Plain `UNIQUE(tenant_id, supplier_id, requirement_id)`, no expression index needed: all three key columns are NOT NULL, so 0086's NULL-distinctness trap cannot bite. Do NOT make `supplier_id` nullable to express a tenant-wide default — that reintroduces it |
 
 ## Role Model (4 roles)
 

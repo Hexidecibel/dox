@@ -12,8 +12,13 @@ import {
   validateCategoryIds,
   resolvePrimaryCategoryId,
   syncDocumentCategories,
+  parseFacetLinks,
+  validateDocumentFacets,
+  syncDocumentFacets,
+  listDocumentFacet,
   isValidRenewalType,
 } from '../../lib/registry';
+import type { DocumentFacetInput } from '../../lib/registry';
 import type { Env, User, Document } from '../../lib/types';
 import type { RenewalType } from '../../../shared/types';
 
@@ -59,6 +64,19 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(docId)
       .all();
     (doc as Record<string, unknown>).categories = categories.results;
+
+    // Registry facets (migration 0080): what this document SATISFIES (layer 2)
+    // and what it TRIGGERS (layer 3), vocabulary joined in.
+    (doc as Record<string, unknown>).requirements = await listDocumentFacet(
+      context.env.DB,
+      'requirement',
+      docId,
+    );
+    (doc as Record<string, unknown>).claims = await listDocumentFacet(
+      context.env.DB,
+      'claim',
+      docId,
+    );
 
     // Get current version info if one exists
     let currentVersion = null;
@@ -165,6 +183,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       // IDP Document Registry fields (migrations 0076/0077).
       categories?: string[];
       primary_category_id?: string | null;
+      // Registry facets (migration 0080). Accept bare ids or full link objects.
+      requirements?: unknown[];
+      claims?: unknown[];
       aliases?: string[];
       criteria?: string[];
       applies_to?: string[];
@@ -196,6 +217,18 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       await validateCategoryIds(context.env.DB, doc.tenant_id, body.categories);
       primaryCatId = resolvePrimaryCategoryId(body.categories, body.primary_category_id);
     }
+
+    // Registry facet link sets. An omitted key leaves the document's existing
+    // links alone; a supplied array (including []) REPLACES that facet's set.
+    const facetInput: DocumentFacetInput = {
+      requirements:
+        body.requirements !== undefined
+          ? parseFacetLinks(body.requirements, 'requirements')
+          : undefined,
+      claims: body.claims !== undefined ? parseFacetLinks(body.claims, 'claims') : undefined,
+    };
+    const hasFacetWrite = facetInput.requirements !== undefined || facetInput.claims !== undefined;
+    await validateDocumentFacets(context.env.DB, doc.tenant_id, facetInput);
 
     // Resolve a typed supplier name into a supplier_id when no explicit id was
     // given. Mutates the local body so the existing supplier_id update + audit
@@ -292,7 +325,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       params.push(primaryCatId ?? null);
     }
 
-    if (updates.length === 0) {
+    // A facet-only edit ("this document also satisfies X") touches no documents
+    // column, so it must not be rejected as an empty update. Bump updated_at so
+    // the row still reflects that the document changed.
+    if (updates.length === 0 && !hasFacetWrite) {
       return new Response(
         JSON.stringify({ error: 'No fields to update' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
@@ -332,6 +368,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
     // REPLACE the category set when provided. FTS category_text refreshes via
     // the document_categories triggers.
+    //
+    // RETIRED by 0080 but deliberately KEPT: 0079's documents_fts_source view
+    // still reads document_categories and every FTS trigger writes through it,
+    // so the facet sync below is ADDITIVE. See the P3 checklist in plan.md.
     if (body.categories !== undefined) {
       await syncDocumentCategories(
         context.env.DB,
@@ -340,6 +380,17 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         primaryCatId ?? null,
       );
     }
+
+    // Registry facets. This is the post-upload EDITOR — a role-gated human
+    // acting on their own tenant — which is exactly the path registry.ts
+    // documents as defaulting to 'confirmed'. Ingest proposes ('suggested'),
+    // this endpoint is where a human confirms; without that there is no route
+    // to a confirmed link and gap detection stays permanently empty. A caller
+    // may still state a status per link.
+    await syncDocumentFacets(context.env.DB, docId, facetInput, {
+      defaultStatus: 'confirmed',
+      actorId: user.id,
+    });
 
     await logAudit(
       context.env.DB,
@@ -371,6 +422,16 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         .bind(docId)
         .all();
       (updated as Record<string, unknown>).categories = cats.results;
+      (updated as Record<string, unknown>).requirements = await listDocumentFacet(
+        context.env.DB,
+        'requirement',
+        docId,
+      );
+      (updated as Record<string, unknown>).claims = await listDocumentFacet(
+        context.env.DB,
+        'claim',
+        docId,
+      );
     }
 
     return new Response(

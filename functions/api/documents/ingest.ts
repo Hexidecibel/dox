@@ -13,11 +13,15 @@ import { extractText } from '../../lib/extract';
 import { attachLotToCoaDocument, extractSubLotCode } from '../../lib/entities/matching';
 import {
   parseStringArray,
+  parseFacetLinks,
   validateCategoryIds,
   resolvePrimaryCategoryId,
   syncDocumentCategories,
+  validateDocumentFacets,
+  syncDocumentFacets,
   isValidRenewalType,
 } from '../../lib/registry';
+import type { DocumentFacetInput } from '../../lib/registry';
 import type { Env, User, Document } from '../../lib/types';
 
 const ALLOWED_TYPES = [
@@ -88,6 +92,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // IDP Document Registry fields (migrations 0076/0077).
     const categoriesRaw = formData.get('categories') as string | null;
     const primaryCategoryId = formData.get('primary_category_id') as string | null;
+    // Registry facets (migration 0080): layer 2 (what this doc SATISFIES) and
+    // layer 3 (what it TRIGGERS). Both accept bare ids or full link objects.
+    const requirementsRaw = formData.get('requirements') as string | null;
+    const claimsRaw = formData.get('claims') as string | null;
     const aliasesRaw = formData.get('aliases') as string | null;
     const criteriaRaw = formData.get('criteria') as string | null;
     const appliesToRaw = formData.get('applies_to') as string | null;
@@ -120,6 +128,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const aliases = parseStringArray(aliasesRaw, 'aliases');
     const criteria = parseStringArray(criteriaRaw, 'criteria');
     const appliesTo = parseStringArray(appliesToRaw, 'applies_to');
+
+    // A facet field that was NOT sent stays undefined so the sync leaves the
+    // document's existing links alone; a field that WAS sent (even as `[]`)
+    // replaces the set.
+    const facetInput: DocumentFacetInput = {
+      requirements:
+        requirementsRaw != null ? parseFacetLinks(requirementsRaw, 'requirements') : undefined,
+      claims: claimsRaw != null ? parseFacetLinks(claimsRaw, 'claims') : undefined,
+    };
 
     if (renewalType && !isValidRenewalType(renewalType)) {
       throw new BadRequestError(
@@ -239,6 +256,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (documentTypeId) {
       await validateCategoryIds(context.env.DB, tenantId, [documentTypeId]);
     }
+
+    // Same for the layer-2/layer-3 facet links, and for a claim's polymorphic
+    // subject. Done here, before any upload or row write, so a cross-tenant id
+    // fails the request rather than half-applying it.
+    await validateDocumentFacets(context.env.DB, tenantId, facetInput);
 
     // Validate product_ids belong to this tenant
     if (productLinks.length > 0) {
@@ -392,6 +414,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
       // REPLACE the category set when categories were sent (multi-category
       // "one doc, many mappings"). FTS category_text refreshes via triggers.
+      //
+      // RETIRED by 0080 but NOT removed: 0079's documents_fts_source view reads
+      // document_categories and every FTS trigger writes through that view, so
+      // the facet writes below are ADDITIVE, not a replacement. See the P3
+      // removal checklist in plan.md.
       if (categoriesRaw != null) {
         await syncDocumentCategories(
           context.env.DB,
@@ -400,6 +427,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           primaryCatId,
         );
       }
+
+      // Registry facets. Ingest is the machine-reachable path (API keys, the
+      // email pipeline), so links land 'suggested' unless the caller states a
+      // status per link — a wrong claim read must not manufacture a false
+      // missing-document alert. preserveRejected keeps a re-run of the same
+      // extraction from resurrecting a link a human already turned down.
+      await syncDocumentFacets(context.env.DB, existingDoc.id, facetInput, {
+        defaultStatus: 'suggested',
+        actorId: user.id,
+        preserveRejected: true,
+      });
 
       // Link products if provided (update flow)
       if (productLinks.length > 0) {
@@ -551,10 +589,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         .run();
 
       // Category set (multi-category). The document row exists now, so the
-      // document_categories FTS triggers refresh category_text.
+      // document_categories FTS triggers refresh category_text. RETIRED by
+      // 0080 but still the only thing feeding category_text — kept alongside
+      // the facet writes below, not replaced by them.
       if (categoryIds.length > 0) {
         await syncDocumentCategories(context.env.DB, docId, categoryIds, primaryCatId);
       }
+
+      // Registry facets — see the update branch for why 'suggested'.
+      await syncDocumentFacets(context.env.DB, docId, facetInput, {
+        defaultStatus: 'suggested',
+        actorId: user.id,
+        preserveRejected: true,
+      });
 
       // Insert version
       const versionId = generateId();
