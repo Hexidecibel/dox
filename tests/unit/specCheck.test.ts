@@ -26,6 +26,7 @@ import {
   resolveSpecLimits,
   matchSpecTest,
   checkConfiguredLimits,
+  resultRestatesSpec,
   type SpecLimit,
 } from '../../shared/specCheck';
 
@@ -517,5 +518,188 @@ describe('checkConfiguredLimits — our limit, not theirs', () => {
       verdicts: [],
       unmatched: [],
     });
+  });
+});
+
+
+describe('placeholder unit cells read as "no unit", not as a unit', () => {
+  // 45 of the 74 unjudgeable rows in a 100-COA prod sample were nothing but
+  // this: a unit column literally containing "N/A". Classifying that as a unit
+  // in its own right made it mismatch every real unit, so a placeholder was
+  // treated HARDER than a blank — which already means "assume it matches".
+  const placeholders = ['N/A', 'n/a', 'na', 'NA', 'n.a.', 'none', 'None', '-', '--', '—', '–', 'null', 'n/a.', '', '  '];
+
+  it('resolves every placeholder spelling to the unknown family', () => {
+    for (const p of placeholders) {
+      expect(normalizeUnit(p).family, `unit ${JSON.stringify(p)}`).toBe('unknown');
+    }
+  });
+
+  it('lets a placeholder unit compare against a real one, exactly as a blank does', () => {
+    for (const p of placeholders) {
+      expect(unitFactor(normalizeUnit(p), normalizeUnit('CFU/g')), `unit ${JSON.stringify(p)}`).toBe(1);
+      expect(unitFactor(normalizeUnit('CFU/g'), normalizeUnit(p)), `unit ${JSON.stringify(p)}`).toBe(1);
+    }
+  });
+
+  it('still refuses the units that genuinely do not line up', () => {
+    // The fix must not become a blanket "assume it matches" — CFU/mL against a
+    // CFU/g limit is a different basis and stays unjudged.
+    expect(unitFactor(normalizeUnit('CFU/mL'), normalizeUnit('CFU/g'))).toBeNull();
+    expect(normalizeUnit('per ml.').family).not.toBe('unknown');
+  });
+
+  it('judges a real result whose unit column is a placeholder', () => {
+    const tests = [{ id: 'st_coliform', name: 'Coliform', aliases: [] }];
+    const limit = {
+      id: 'l1',
+      spec_test_id: 'st_coliform',
+      operator: '<=' as const,
+      value_min: null,
+      value_max: 10,
+      unit: 'CFU/g',
+      severity: 'alert' as const,
+      active: true,
+      supplier_id: null,
+      document_type_id: null,
+      product_id: null,
+    };
+    const src = (unit: string) => [
+      {
+        scope: 'record[0]',
+        tables: [
+          {
+            name: 'micro',
+            headers: ['test', 'specification', 'result', 'units'],
+            rows: [['Coliform', '', '40', unit]],
+          },
+        ],
+      },
+    ];
+    for (const p of ['N/A', 'n.a.', '--', '—', 'null', '']) {
+      const { verdicts } = checkConfiguredLimits(src(p), tests, [limit], {});
+      expect(verdicts, `unit ${JSON.stringify(p)}`).toHaveLength(1);
+      expect(verdicts[0].verdict, `unit ${JSON.stringify(p)}`).toBe('out_of_spec');
+    }
+  });
+});
+
+describe('a result identical to its own printed spec is not a measurement', () => {
+  // Andersen COAs carry a certification paragraph naming the regulatory
+  // thresholds, and the extractor lifts them straight into the results table.
+  // Nothing was measured. Firing an out-of-spec alert on those — on a supplier
+  // already under a sanitation alert — is the fastest way to teach a QA buyer
+  // to ignore the feature.
+  const andersen = [
+    ['BACTERIA STANDARD PLATE COUNT', '100,000', 'per ml.', '100,000 per ml.', 'Pass'],
+    ['SOMATIC CELL COUNT', '400,000', 'per ml.', '400,000 per ml.', 'Pass'],
+  ];
+  const andersenSrc = [
+    {
+      scope: 'record[0]',
+      tables: [
+        {
+          name: 'certification',
+          headers: ['test', 'result', 'units', 'specification', 'pass_fail'],
+          rows: andersen,
+        },
+      ],
+    },
+  ];
+
+  it('spots the restatement even though the unit lives in its own column', () => {
+    // The result cell reads "100,000" and the spec cell "100,000 per ml." — the
+    // two only line up once the row's unit column is put back on the value.
+    expect(resultRestatesSpec('100,000', '100,000 per ml.', 'per ml.')).toBe(true);
+    expect(resultRestatesSpec('100,000 per ml.', '100,000 per ml.', '')).toBe(true);
+    expect(resultRestatesSpec('100000', '100,000', '')).toBe(true);
+  });
+
+  it('reports the boilerplate row as not_checked, never as a pass and never silently', () => {
+    const v = checkPrintedSpecs(andersenSrc);
+    expect(v).toHaveLength(2);
+    for (const row of v) {
+      expect(row.verdict).toBe('not_checked');
+      expect(row.reason).toMatch(/limit restated rather than a measurement/);
+      expect(row.message).toMatch(/identical to the specification printed beside it/);
+    }
+    expect(v[0].test_name_raw).toBe('BACTERIA STANDARD PLATE COUNT');
+  });
+
+  it('does not let our own tighter limit fire on it either', () => {
+    const tests = [{ id: 'st_spc', name: 'Bacteria Standard Plate Count', aliases: [] }];
+    const limit = {
+      id: 'l_spc',
+      spec_test_id: 'st_spc',
+      operator: '<=' as const,
+      value_min: null,
+      value_max: 20000,
+      unit: null,
+      severity: 'alert' as const,
+      active: true,
+      supplier_id: null,
+      document_type_id: null,
+      product_id: null,
+    };
+    const { verdicts } = checkConfiguredLimits(andersenSrc, tests, [limit], {});
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0]).toMatchObject({ verdict: 'not_checked', source: 'limit', limit_id: 'l_spc' });
+    expect(verdicts[0].message).toMatch(/limit restated rather than a measurement/);
+  });
+
+  it('needs both cells present and saying something', () => {
+    expect(resultRestatesSpec('100,000', '', 'per ml.')).toBe(false);
+    expect(resultRestatesSpec('', '100,000', 'per ml.')).toBe(false);
+    expect(resultRestatesSpec('N/A', 'N/A', '')).toBe(false);
+    expect(resultRestatesSpec('—', '—', '')).toBe(false);
+  });
+
+  it('GUARD: a genuine measurement that happens to equal its spec is still judged', () => {
+    // A real result CAN equal its own spec — a pH of 6.5 against a target of
+    // 6.5, a count of 0 against a limit of 0, an "Absent" against a spec of
+    // "Absent". The rule must not eat any of those; the bias is to keep
+    // judging, because a wrongly-suppressed real failure is the expensive way
+    // to be wrong here.
+    expect(resultRestatesSpec('6.5', '6.5', '')).toBe(false); // short numeric
+    expect(resultRestatesSpec('0', '0', '')).toBe(false);
+    expect(resultRestatesSpec('35', '35', 'C')).toBe(false);
+    expect(resultRestatesSpec('100', '100', 'CFU/g')).toBe(false); // 3 digits
+    expect(resultRestatesSpec('Absent', 'Absent', '')).toBe(false); // qualitative
+    expect(resultRestatesSpec('Negative', 'Negative', '')).toBe(false);
+    expect(resultRestatesSpec('<10', '<10', 'CFU/g')).toBe(false); // a detection limit
+  });
+
+  it('GUARD, end to end: a short result equal to its spec is graded, not suppressed', () => {
+    const tests = [{ id: 'st_coliform', name: 'Coliform', aliases: [] }];
+    const limit = {
+      id: 'l1',
+      spec_test_id: 'st_coliform',
+      operator: '<=' as const,
+      value_min: null,
+      value_max: 10,
+      unit: 'CFU/g',
+      severity: 'alert' as const,
+      active: true,
+      supplier_id: null,
+      document_type_id: null,
+      product_id: null,
+    };
+    const src = (row: string[]) => [
+      {
+        scope: 'record[0]',
+        tables: [{ name: 'micro', headers: ['test', 'specification', 'result', 'units'], rows: [row] }],
+      },
+    ];
+    // Result 100 equals a printed spec of 100 — and it really is 100 CFU/g,
+    // ten times our limit. It must still come back out of spec.
+    const out = checkConfiguredLimits(src(['Coliform', '100', '100', 'CFU/g']), tests, [limit], {});
+    expect(out.verdicts).toHaveLength(1);
+    expect(out.verdicts[0].verdict).toBe('out_of_spec');
+
+    // And a genuine pass that matches its spec is still a pass.
+    const pass = checkConfiguredLimits(src(['Coliform', '10', '10', 'CFU/g']), tests, [limit], {}, {
+      includePasses: true,
+    });
+    expect(pass.verdicts[0].verdict).toBe('in_spec');
   });
 });

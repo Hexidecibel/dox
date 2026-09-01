@@ -30,6 +30,7 @@ __export(specCheck_exports, {
   parseLimitExpression: () => parseLimitExpression,
   parseMeasuredValue: () => parseMeasuredValue,
   resolveSpecLimits: () => resolveSpecLimits,
+  resultRestatesSpec: () => resultRestatesSpec,
   specVerdictKey: () => specVerdictKey,
   toSpecLimit: () => toSpecLimit,
   unitFactor: () => unitFactor,
@@ -47,6 +48,7 @@ function norm(s) {
 function normalizeUnit(raw) {
   const s = String(raw ?? "").trim();
   if (!s) return UNKNOWN_UNIT;
+  if (isEmptyCell(s)) return UNKNOWN_UNIT;
   const n = norm(s);
   if (!n) return UNKNOWN_UNIT;
   if (n === "ph") return { family: "ph", perBasis: 1, canonical: "pH" };
@@ -432,7 +434,8 @@ function judgePrinted(scope, target, row) {
   const resultIsVerdict = !verdictRaw && !!resultRaw && (printedFail || printedPass);
   const limit = parseLimitExpression(specRaw);
   const value = parseMeasuredValue(applyRowUnit(resultRaw, unitRaw));
-  const comparable = !!limit && !resultIsVerdict && !isBlankResult(resultRaw);
+  const restated = resultRestatesSpec(resultRaw, specRaw, unitRaw);
+  const comparable = !!limit && !resultIsVerdict && !restated && !isBlankResult(resultRaw);
   const cmp = comparable ? compareToLimit(value, withUnit(limit, unitRaw)) : null;
   if (printedFail) {
     return {
@@ -442,6 +445,16 @@ function judgePrinted(scope, target, row) {
       reason: `document's own pass/fail column reads "${verdictCell}"`,
       message: `${testName}: the COA's own pass/fail column says "${verdictCell}".`,
       value_num: cmp?.value_num ?? null
+    };
+  }
+  if (restated) {
+    return {
+      ...base,
+      verdict: "not_checked",
+      limit_text: limit ? formatLimit(limit) : specRaw || null,
+      reason: RESTATED_SPEC_REASON,
+      message: `${testName} was not judged \u2014 ${RESTATED_SPEC_REASON}.`,
+      value_num: null
     };
   }
   if (!cmp) return null;
@@ -522,12 +535,30 @@ function isBlankResult(raw) {
 }
 function applyRowUnit(value, unit) {
   if (!unit || !value) return value;
+  if (isEmptyCell(unit)) return value;
   if (trailingUnit(value)) return value;
   return `${value} ${unit}`;
 }
 function withUnit(limit, unit) {
-  if (limit.unit || !unit) return limit;
+  if (limit.unit || !unit || isEmptyCell(unit)) return limit;
   return { ...limit, unit };
+}
+var RESTATED_SPEC_REASON = "the reported result is identical to the specification printed beside it, so it is a limit restated rather than a measurement";
+function restatementKey(raw) {
+  return String(raw ?? "").trim().toLowerCase().replace(/,/g, "").replace(/\s+/g, " ");
+}
+function resultRestatesSpec(resultRaw, specRaw, unitRaw = "") {
+  const result = String(resultRaw ?? "").trim();
+  const spec = String(specRaw ?? "").trim();
+  const unit = String(unitRaw ?? "").trim();
+  if (!result || !spec) return false;
+  if (isEmptyCell(result) || isEmptyCell(spec)) return false;
+  const specKey = restatementKey(spec);
+  const withRowUnit = applyRowUnit(result, unit);
+  if (restatementKey(result) !== specKey && restatementKey(withRowUnit) !== specKey) return false;
+  const value = parseMeasuredValue(withRowUnit);
+  if (value.kind !== "numeric") return false;
+  return (result.match(/\d/g) || []).length >= 4;
 }
 function specificity(l) {
   return (l.product_id ? 4 : 0) + (l.supplier_id ? 2 : 0) + (l.document_type_id ? 1 : 0);
@@ -583,7 +614,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
   const verdicts = [];
   const unmatched = /* @__PURE__ */ new Set();
   if (tests.length === 0) return { verdicts, unmatched: [] };
-  const judge = (scope, target, testName, valueRaw, unitRaw) => {
+  const judge = (scope, target, testName, valueRaw, unitRaw, specRaw = "") => {
     if (!testName) return;
     const test = matchSpecTest(testName, tests);
     if (!test) {
@@ -597,6 +628,25 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
     }
     if (isBlankResult(valueRaw)) return;
     const limit = toSpecLimit(configured, test);
+    if (resultRestatesSpec(valueRaw, specRaw, unitRaw)) {
+      const limitTextOnly = formatLimit(limit);
+      verdicts.push({
+        scope,
+        target,
+        test_name_raw: testName,
+        value_raw: valueRaw,
+        unit_raw: unitRaw || null,
+        source: "limit",
+        limit_text: limitTextOnly,
+        spec_test_id: test.id,
+        limit_id: configured.id,
+        value_num: null,
+        reason: RESTATED_SPEC_REASON,
+        verdict: "not_checked",
+        message: `${test.name} could not be judged against our limit of ${limitTextOnly} \u2014 ${RESTATED_SPEC_REASON}.`
+      });
+      return;
+    }
     const value = parseMeasuredValue(applyRowUnit(valueRaw, unitRaw));
     const cmp = compareToLimit(value, withUnit(limit, unitRaw));
     if (cmp.verdict === "in_spec" && !opts.includePasses) return;
@@ -645,7 +695,8 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
           { kind: "table", table_index: ti, row_index: ri, table_name: table.name || "" },
           cell(shape.test),
           cell(shape.result),
-          cell(shape.unit)
+          cell(shape.unit),
+          cell(shape.spec)
         );
       });
     });
@@ -658,7 +709,8 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
           { kind: "group", group: groupName, cell: cellName },
           cellName.replace(/_/g, " "),
           String(cell.value ?? "").trim(),
-          String(cell.unit ?? "").trim()
+          String(cell.unit ?? "").trim(),
+          String(cell.spec ?? "").trim()
         );
       }
     }
@@ -700,6 +752,7 @@ function validateLimitShape(input) {
   parseLimitExpression,
   parseMeasuredValue,
   resolveSpecLimits,
+  resultRestatesSpec,
   specVerdictKey,
   toSpecLimit,
   unitFactor,

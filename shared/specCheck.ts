@@ -163,10 +163,18 @@ function norm(s: unknown): string {
  * unrecognised, which the comparator treats as "assume it matches" rather than
  * as a mismatch — COAs routinely print the unit once in a header column, and
  * refusing to compare whenever a cell omits it would make the feature useless.
+ *
+ * A PLACEHOLDER unit cell ("N/A", "none", "—") is the same statement as a blank
+ * one: the row carries no unit. It must resolve to `unknown` for exactly the
+ * reason above — classifying "N/A" as a unit in its own right made it mismatch
+ * every real unit, so a placeholder was judged HARDER than a blank and 45 of the
+ * 74 unjudgeable rows in the prod sample were nothing but this. The placeholder
+ * vocabulary lives in one place, `isEmptyCell`; do not restate it here.
  */
 export function normalizeUnit(raw: unknown): UnitInfo {
   const s = String(raw ?? '').trim();
   if (!s) return UNKNOWN_UNIT;
+  if (isEmptyCell(s)) return UNKNOWN_UNIT;
   const n = norm(s);
   if (!n) return UNKNOWN_UNIT;
 
@@ -270,6 +278,10 @@ const EMPTY_TOKENS = new Set([
  * Is this cell blank / a placeholder? `none` and `nil` are deliberately in BOTH
  * this set and the absent set: as a *result* they mean "none detected", as a
  * *spec* they mean "nothing stated". Callers disambiguate by position.
+ *
+ * THE ONE SOURCE OF TRUTH for the placeholder vocabulary. `normalizeUnit` and
+ * `resultRestatesSpec` both read it, so "N/A", "n.a.", "--", "—" and friends
+ * mean "this cell says nothing" identically wherever they land.
  */
 function isEmptyCell(raw: unknown): boolean {
   const s = String(raw ?? '').trim();
@@ -749,7 +761,8 @@ function judgePrinted(scope: string, target: SpecTarget, row: PrintedRow): SpecV
   // 2. Result against the printed specification.
   const limit = parseLimitExpression(specRaw);
   const value = parseMeasuredValue(applyRowUnit(resultRaw, unitRaw));
-  const comparable = !!limit && !resultIsVerdict && !isBlankResult(resultRaw);
+  const restated = resultRestatesSpec(resultRaw, specRaw, unitRaw);
+  const comparable = !!limit && !resultIsVerdict && !restated && !isBlankResult(resultRaw);
   const cmp = comparable ? compareToLimit(value, withUnit(limit as SpecLimit, unitRaw)) : null;
 
   if (printedFail) {
@@ -760,6 +773,21 @@ function judgePrinted(scope: string, target: SpecTarget, row: PrintedRow): SpecV
       reason: `document's own pass/fail column reads "${verdictCell}"`,
       message: `${testName}: the COA's own pass/fail column says "${verdictCell}".`,
       value_num: cmp?.value_num ?? null,
+    };
+  }
+
+  // 3. The result cell is the specification restated, not a measurement. It is
+  //    not judged — and per the module contract it is not silently dropped
+  //    either, because "we saw a number here and chose not to grade it" is
+  //    exactly what a reviewer needs told.
+  if (restated) {
+    return {
+      ...base,
+      verdict: 'not_checked',
+      limit_text: limit ? formatLimit(limit) : specRaw || null,
+      reason: RESTATED_SPEC_REASON,
+      message: `${testName} was not judged — ${RESTATED_SPEC_REASON}.`,
+      value_num: null,
     };
   }
 
@@ -862,17 +890,104 @@ function isBlankResult(raw: unknown): boolean {
   );
 }
 
-/** Attach the row's unit column to a bare value so the comparator can see it. */
+/**
+ * Attach the row's unit column to a bare value so the comparator can see it.
+ * A placeholder unit cell is not attached: gluing "N/A" onto the value only
+ * makes it back out again in `normalizeUnit`, and it would leak into the
+ * `value.raw` quoted in reviewer-facing reasons.
+ */
 function applyRowUnit(value: string, unit: string): string {
   if (!unit || !value) return value;
+  if (isEmptyCell(unit)) return value;
   if (trailingUnit(value)) return value;
   return `${value} ${unit}`;
 }
 
 /** A printed limit inherits the row's unit column when it states none itself. */
 function withUnit(limit: SpecLimit, unit: string): SpecLimit {
-  if (limit.unit || !unit) return limit;
+  if (limit.unit || !unit || isEmptyCell(unit)) return limit;
   return { ...limit, unit };
+}
+
+// ---------------------------------------------------------------------------
+// A result that is only its own specification restated
+// ---------------------------------------------------------------------------
+
+/**
+ * The reason text, in one place: it is written into both the printed-spec and
+ * the configured-limit verdict so the register reads the same either way.
+ */
+const RESTATED_SPEC_REASON =
+  'the reported result is identical to the specification printed beside it, so it is a limit restated rather than a measurement';
+
+/** Trim, fold case, drop thousands separators, collapse runs of whitespace. */
+function restatementKey(raw: unknown): string {
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/,/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+/**
+ * Is this "result" just the row's own printed specification, copied across?
+ *
+ * REAL AND ALREADY IN THE CORPUS: 59 rows carry a result byte-identical to
+ * their specification. The clearest are Andersen COAs, whose certification
+ * paragraph names the regulatory thresholds ("...somatic cell (400,000 per ml.)
+ * and bacteria standard plate count (100,000 per ml.)...") and whose extractor
+ * lifts those numbers into the results table:
+ *
+ *     ["BACTERIA STANDARD PLATE COUNT", "100,000", "per ml.", "100,000 per ml.", "Pass"]
+ *
+ * Nothing was measured there. A unit mismatch happens to suppress those rows
+ * today, but that is luck, not a decision — once units line up they would fire
+ * as out_of_spec against a tighter configured limit, on a supplier already under
+ * a sanitation alert. A false alert is the fastest way to teach a QA buyer to
+ * ignore this feature.
+ *
+ * Note the Andersen row's result cell is "100,000" while the spec cell is
+ * "100,000 per ml." — the restatement only shows up once the row's unit column
+ * is put back on the value, so both forms are compared.
+ *
+ * THE GUARD, and why it is drawn where it is. A genuine measurement CAN equal
+ * its own spec: a result of 0 against a limit of 0, a pH of 6.5 against a target
+ * of 6.5, an "Absent" against a spec of "Absent". Suppressing one of those would
+ * cost a real judgement, so this fires only when BOTH hold:
+ *
+ *   1. the value reads as a plain number — a qualitative result ("Absent",
+ *      "Negative") equal to its spec is the normal way a COA reports a pass, and
+ *      "<10" against "<10" is a detection limit, not boilerplate; and
+ *   2. it carries at least 4 digits. Regulatory thresholds lifted off a page are
+ *      big round numbers (100,000 / 400,000); the collisions that are genuine
+ *      measurements are short (0, 6.5, 35, 100). Four digits is deliberately
+ *      generous to the measurement: the bias is to keep judging, because a
+ *      missed guard costs a duplicate alert a reviewer can dismiss, while an
+ *      over-eager one hides a real failure behind "not checked".
+ */
+export function resultRestatesSpec(
+  resultRaw: unknown,
+  specRaw: unknown,
+  unitRaw: unknown = ''
+): boolean {
+  const result = String(resultRaw ?? '').trim();
+  const spec = String(specRaw ?? '').trim();
+  const unit = String(unitRaw ?? '').trim();
+
+  // Both a result and a spec must actually be present and say something.
+  if (!result || !spec) return false;
+  if (isEmptyCell(result) || isEmptyCell(spec)) return false;
+
+  const specKey = restatementKey(spec);
+  const withRowUnit = applyRowUnit(result, unit);
+  if (restatementKey(result) !== specKey && restatementKey(withRowUnit) !== specKey) return false;
+
+  // Guard 1 — only a plain number can be boilerplate here.
+  const value = parseMeasuredValue(withRowUnit);
+  if (value.kind !== 'numeric') return false;
+
+  // Guard 2 — short values are where the genuine collisions live.
+  return (result.match(/\d/g) || []).length >= 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,7 +1144,10 @@ export function checkConfiguredLimits(
     target: SpecTarget,
     testName: string,
     valueRaw: string,
-    unitRaw: string
+    unitRaw: string,
+    /** The row's own printed spec cell, when it has one. Only used to spot a
+     *  result that is that spec restated — our limits are never read from it. */
+    specRaw = ''
   ) => {
     if (!testName) return;
     const test = matchSpecTest(testName, tests);
@@ -1045,6 +1163,30 @@ export function checkConfiguredLimits(
     if (isBlankResult(valueRaw)) return;
 
     const limit = toSpecLimit(configured, test);
+
+    // Our limit is usually TIGHTER than what the supplier certifies against, so
+    // this path is precisely where a spec restated in the result column would
+    // fire as a false out_of_spec. Refuse to grade it, and say so.
+    if (resultRestatesSpec(valueRaw, specRaw, unitRaw)) {
+      const limitTextOnly = formatLimit(limit);
+      verdicts.push({
+        scope,
+        target,
+        test_name_raw: testName,
+        value_raw: valueRaw,
+        unit_raw: unitRaw || null,
+        source: 'limit',
+        limit_text: limitTextOnly,
+        spec_test_id: test.id,
+        limit_id: configured.id,
+        value_num: null,
+        reason: RESTATED_SPEC_REASON,
+        verdict: 'not_checked',
+        message: `${test.name} could not be judged against our limit of ${limitTextOnly} — ${RESTATED_SPEC_REASON}.`,
+      });
+      return;
+    }
+
     const value = parseMeasuredValue(applyRowUnit(valueRaw, unitRaw));
     const cmp = compareToLimit(value, withUnit(limit, unitRaw));
     if (cmp.verdict === 'in_spec' && !opts.includePasses) return;
@@ -1096,7 +1238,8 @@ export function checkConfiguredLimits(
           { kind: 'table', table_index: ti, row_index: ri, table_name: table.name || '' },
           cell(shape.test),
           cell(shape.result),
-          cell(shape.unit)
+          cell(shape.unit),
+          cell(shape.spec)
         );
       });
     });
@@ -1110,7 +1253,8 @@ export function checkConfiguredLimits(
           { kind: 'group', group: groupName, cell: cellName },
           cellName.replace(/_/g, ' '),
           String(cell.value ?? '').trim(),
-          String(cell.unit ?? '').trim()
+          String(cell.unit ?? '').trim(),
+          String(cell.spec ?? '').trim()
         );
       }
     }
