@@ -1732,6 +1732,101 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/audit/export:
+    get:
+      tags: [Audit]
+      summary: Export audit log as CSV
+      description: |
+        Streams a CSV of every audit row matching the given filters — not just
+        one page. Accepts exactly the same filters as `GET /api/audit` and
+        enforces exactly the same permissions:
+        - super_admin can export all entries, optionally narrowed by `tenant_id`.
+        - org_admin is pinned to their own tenant; a `tenant_id` parameter is ignored, never honoured.
+        - user/reader get 403.
+
+        The response is streamed in batches rather than materialised in memory,
+        and is a point-in-time snapshot: the row set is pinned before the export
+        writes its own `audit.export` entry, so the CSV never contains its own
+        record and always matches `X-Audit-Export-Matched`.
+
+        Every field is quoted and escaped per RFC 4180, so commas, double quotes
+        and newlines inside the JSON `details` column round-trip intact.
+
+        Exports over 100,000 matching rows are truncated at that limit; the
+        `X-Audit-Export-Truncated` header reports it. Narrow the date range to
+        retrieve the remainder.
+
+        The export itself is an auditable event and writes an `audit.export`
+        row recording the user, IP, filters applied and matched row count.
+
+        **Requires super_admin or org_admin role.**
+      parameters:
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+          description: Filter by tenant (super_admin only; ignored for org_admin)
+        - name: action
+          in: query
+          schema:
+            type: string
+          description: Filter by action type. Comma-separated for multiple (e.g. `login,logout`).
+        - name: userId
+          in: query
+          schema:
+            type: string
+          description: Filter by user ID
+        - name: resourceType
+          in: query
+          schema:
+            type: string
+          description: Filter by resource type (user, document, tenant, etc.)
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Start date (inclusive)
+        - name: dateTo
+          in: query
+          schema:
+            type: string
+            format: date
+          description: End date (inclusive, through end of day)
+      responses:
+        '200':
+          description: |
+            CSV stream. Columns: id, timestamp, user_id, user_name, user_email,
+            tenant_id, action, resource_type, resource_id, ip_address, details.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: 'attachment; filename="audit-log-YYYY-MM-DD.csv"'
+            X-Audit-Export-Matched:
+              schema:
+                type: integer
+              description: Rows matching the filters at the moment of the request
+            X-Audit-Export-Limit:
+              schema:
+                type: integer
+              description: Maximum rows a single export will emit (100000)
+            X-Audit-Export-Truncated:
+              schema:
+                type: string
+                enum: ['true', 'false']
+              description: Whether the export stopped at the limit
+          content:
+            text/csv:
+              schema:
+                type: string
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/documents/ingest:
     post:
       tags: [Documents]

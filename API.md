@@ -768,13 +768,47 @@ curl "http://localhost:8788/api/audit?userId=USER_ID" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+#### GET /api/audit/export
+
+CSV export of the audit log (super_admin or org_admin only). Accepts the same
+filters as `GET /api/audit` and enforces the same permissions — an `org_admin`
+is pinned to their own tenant and a `tenant_id` parameter from them is ignored,
+never honoured.
+
+```bash
+# Everything the caller is allowed to see
+curl "http://localhost:8788/api/audit/export" \
+  -H "Authorization: Bearer $TOKEN" -o audit.csv
+
+# Same filters as the screen: an action list plus a date range
+curl "http://localhost:8788/api/audit/export?action=document_deleted,user_deactivated&dateFrom=2024-01-01&dateTo=2024-03-31" \
+  -H "Authorization: Bearer $TOKEN" -o audit.csv
+```
+
+CSV columns: `id, timestamp, user_id, user_name, user_email, tenant_id, action,
+resource_type, resource_id, ip_address, details`.
+
+Notes:
+- **Not page-capped.** `GET /api/audit` maxes out at 200 rows per page; the
+  export streams the whole filtered set in batches, so nothing unbounded is
+  held in Worker memory.
+- **Snapshot.** The row set is pinned before the request writes its own
+  `audit.export` entry, so the CSV never contains its own record and its row
+  count always equals `X-Audit-Export-Matched`.
+- **Escaping.** Every field is quoted with embedded quotes doubled (RFC 4180),
+  so the commas, quotes and newlines inside the JSON `details` column survive.
+- **Limit.** Exports stop at 100,000 rows; `X-Audit-Export-Truncated: true`
+  says so. Narrow the date range for the rest.
+- **Self-auditing.** The export writes an `audit.export` row with the user, IP,
+  filters applied and matched row count.
+
 Audit actions logged by the system:
 - `login`, `logout`, `password_changed`
 - `user_created`, `user_updated`, `user_deactivated`, `user.password_reset`
 - `tenant_created`, `tenant_updated`, `tenant_deactivated`
 - `document_created`, `document_updated`, `document_deleted`
 - `document_version_uploaded`, `document_downloaded`
-- `report.generate`
+- `report.generate`, `audit.export`
 
 ---
 

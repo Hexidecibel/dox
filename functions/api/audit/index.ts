@@ -1,5 +1,5 @@
-import { logAudit, getClientIp } from '../../lib/db';
-import { requireRole, canViewAudit, errorToResponse, ForbiddenError } from '../../lib/permissions';
+import { canViewAudit, errorToResponse, ForbiddenError } from '../../lib/permissions';
+import { buildAuditFilters } from '../../lib/audit-filters';
 import type { Env, User } from '../../lib/types';
 
 interface AuditRow {
@@ -32,62 +32,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     const url = new URL(context.request.url);
-    const tenantId = url.searchParams.get('tenant_id');
-    const action = url.searchParams.get('action');
-    const userId = url.searchParams.get('userId');
-    const resourceType = url.searchParams.get('resourceType');
-    const dateFrom = url.searchParams.get('dateFrom');
-    const dateTo = url.searchParams.get('dateTo');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
-    const conditions: string[] = [];
-    const params: (string | number)[] = [];
-
-    // Tenant scoping
-    if (user.role === 'org_admin') {
-      // org_admin can only see their own tenant's logs
-      conditions.push('a.tenant_id = ?');
-      params.push(user.tenant_id!);
-    } else if (tenantId) {
-      // super_admin with optional tenant filter
-      conditions.push('a.tenant_id = ?');
-      params.push(tenantId);
-    }
-
-    if (action) {
-      const actions = action.split(',').map(a => a.trim()).filter(Boolean);
-      if (actions.length === 1) {
-        conditions.push('a.action = ?');
-        params.push(actions[0]);
-      } else if (actions.length > 1) {
-        const placeholders = actions.map(() => '?').join(',');
-        conditions.push(`a.action IN (${placeholders})`);
-        params.push(...actions);
-      }
-    }
-
-    if (userId) {
-      conditions.push('a.user_id = ?');
-      params.push(userId);
-    }
-
-    if (resourceType) {
-      conditions.push('a.resource_type = ?');
-      params.push(resourceType);
-    }
-
-    if (dateFrom) {
-      conditions.push('a.created_at >= ?');
-      params.push(dateFrom);
-    }
-
-    if (dateTo) {
-      conditions.push('a.created_at <= ?');
-      params.push(dateTo + 'T23:59:59');
-    }
-
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    // Shared with GET /api/audit/export so the CSV can never scope
+    // differently from the screen it was exported from.
+    const { whereClause, params } = buildAuditFilters(user, url.searchParams);
 
     // Get total count
     const countResult = await context.env.DB.prepare(

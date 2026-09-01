@@ -23,10 +23,12 @@ import {
   Collapse,
   Tooltip,
   Grid,
+  Button,
 } from '@mui/material';
 import {
   KeyboardArrowDown as ExpandIcon,
   KeyboardArrowUp as CollapseIcon,
+  FileDownload as ExportIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import { HelpWell } from '../../components/HelpWell';
@@ -62,6 +64,7 @@ const ACTION_CATEGORIES: Record<string, { label: string; color: 'success' | 'inf
   user_updated: { label: 'User', color: 'warning' },
   user_deactivated: { label: 'User', color: 'error' },
   'report.generate': { label: 'Report', color: 'info' },
+  'audit.export': { label: 'Report', color: 'info' },
 };
 
 const ALL_ACTIONS = [
@@ -78,6 +81,7 @@ const ALL_ACTIONS = [
   'user_updated',
   'user_deactivated',
   'report.generate',
+  'audit.export',
 ];
 
 function getActionChip(action: string) {
@@ -233,16 +237,37 @@ export function AuditLog() {
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(25);
 
+  // Export
+  const [exporting, setExporting] = useState(false);
+  const [exportNotice, setExportNotice] = useState<{ severity: 'success' | 'warning'; text: string } | null>(null);
+
+  /**
+   * The filters the SERVER understands. Deliberately the single source for
+   * both the table fetch and the export, so the CSV an auditor downloads is
+   * the same result set as the screen they were looking at.
+   *
+   * `userSearch` is intentionally absent: it is a client-side substring filter
+   * over the current page only (the API has no name search), so it cannot be
+   * pushed to the export. The UI says so next to the button rather than
+   * silently producing a CSV that is wider than the screen.
+   */
+  const serverFilters = useCallback((): Record<string, string> => {
+    const params: Record<string, string> = {};
+    if (action) params.action = action;
+    if (dateFrom) params.dateFrom = dateFrom;
+    if (dateTo) params.dateTo = dateTo;
+    return params;
+  }, [action, dateFrom, dateTo]);
+
   const fetchEntries = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const params: Record<string, string> = {};
-      if (action) params.action = action;
-      if (dateFrom) params.dateFrom = dateFrom;
-      if (dateTo) params.dateTo = dateTo;
-      params.limit = String(rowsPerPage);
-      params.offset = String(page * rowsPerPage);
+      const params: Record<string, string> = {
+        ...serverFilters(),
+        limit: String(rowsPerPage),
+        offset: String(page * rowsPerPage),
+      };
 
       const result = await api.audit.list(params);
       setEntries(result.entries as AuditEntry[]);
@@ -252,7 +277,7 @@ export function AuditLog() {
     } finally {
       setLoading(false);
     }
-  }, [action, dateFrom, dateTo, page, rowsPerPage]);
+  }, [serverFilters, page, rowsPerPage]);
 
   useEffect(() => {
     fetchEntries();
@@ -260,6 +285,31 @@ export function AuditLog() {
 
   const handleChangePage = (_: unknown, newPage: number) => {
     setPage(newPage);
+  };
+
+  const handleExport = async () => {
+    setExporting(true);
+    setError('');
+    setExportNotice(null);
+    try {
+      // Exports the whole filtered result set, not just the visible page.
+      const { matched, truncated } = await api.audit.export(serverFilters());
+      setExportNotice(
+        truncated
+          ? {
+              severity: 'warning',
+              text: `${matched.toLocaleString()} rows matched, but the export is capped. Narrow the date range to get the rest.`,
+            }
+          : {
+              severity: 'success',
+              text: `Exported ${matched.toLocaleString()} row${matched === 1 ? '' : 's'} to CSV.`,
+            }
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to export audit log');
+    } finally {
+      setExporting(false);
+    }
   };
 
   const handleChangeRowsPerPage = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -278,12 +328,42 @@ export function AuditLog() {
 
   return (
     <Box>
-      <Typography variant="h4" fontWeight={700} gutterBottom>
-        Audit Log
-      </Typography>
-      <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
-        Track all actions performed in the system.
-      </Typography>
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          justifyContent: 'space-between',
+          gap: 2,
+          flexWrap: 'wrap',
+        }}
+      >
+        <Box>
+          <Typography variant="h4" fontWeight={700} gutterBottom>
+            Audit Log
+          </Typography>
+          <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
+            Track all actions performed in the system.
+          </Typography>
+        </Box>
+        <Tooltip
+          title={
+            userSearch
+              ? 'Exports every row matching the action and date filters. The user search box is a client-side filter over the current page only, so it is NOT applied to the export.'
+              : 'Download every row matching the current filters as CSV — not just this page.'
+          }
+        >
+          <span>
+            <Button
+              variant="outlined"
+              startIcon={exporting ? <CircularProgress size={16} /> : <ExportIcon />}
+              onClick={handleExport}
+              disabled={exporting}
+            >
+              {exporting ? 'Exporting...' : 'Export CSV'}
+            </Button>
+          </span>
+        </Tooltip>
+      </Box>
 
       <HelpWell id="audit.list" title={helpContent.audit.list?.headline ?? 'Audit Log'}>
         {helpContent.audit.list?.well ?? helpContent.audit.well}
@@ -354,6 +434,13 @@ export function AuditLog() {
       {error && (
         <Alert severity="error" sx={{ mb: 2 }}>
           {error}
+        </Alert>
+      )}
+
+      {exportNotice && (
+        <Alert severity={exportNotice.severity} sx={{ mb: 2 }} onClose={() => setExportNotice(null)}>
+          {exportNotice.text}
+          {userSearch && ' The user search filter is client-side and was not applied to the export.'}
         </Alert>
       )}
 

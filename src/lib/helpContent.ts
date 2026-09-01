@@ -1019,20 +1019,20 @@ const reports: ModuleHelpExpanded = {
   list: {
     headline: 'Reports',
     well:
-      "There isn't a dedicated Reports page in dox today — exports are surfaced inline on the lists they apply to (Documents, Audit, Search). Each export hits the /api/reports/generate endpoint, which builds a CSV or JSON snapshot of the current filter set and writes a report.generate row to the audit log.",
+      "Exports are surfaced inline on the screens they apply to rather than behind one central builder. The Audit log's Export CSV button calls /api/audit/export and streams a CSV of the filtered log; the COA Fulfillment page builds its CSV from the rows already on screen; /api/reports/generate builds a CSV or JSON document snapshot and writes a report.generate row to the audit log. Every export is scoped by the caller's role and tenant, exactly as the screen it came from is.",
   },
   help: {
     sections: [
       {
         heading: 'What reports do',
         body:
-          "Reports in dox are inline CSV / JSON exports rather than a separate page. The Documents list, the Audit log, and the Search results page each expose an Export button that calls /api/reports/generate with the active filter set; the response is downloaded as a CSV or JSON file. Reports are tenant-scoped and respect the current user's role — readers see only docs they can download, org_admins see everything in their tenant, super_admins can scope to any tenant via the tenant switcher.",
+          "Reports in dox are inline exports rather than a separate builder. The Audit log (Admin → Audit Log) has an Export CSV button in the page header that calls /api/audit/export with the filters currently applied on screen — action type and date range — and streams back every matching row, not just the page you are looking at. The COA Fulfillment page has its own Export CSV button that writes out the rows already loaded. /api/reports/generate remains available for document snapshots in CSV or JSON. Exports are tenant-scoped and respect the caller's role exactly as the screen they came from does: the audit export is org_admin and super_admin only (a user or a reader gets a 403), an org_admin is pinned to their own tenant and cannot widen it by passing a tenant id, and a super_admin can scope to any tenant.",
       },
       {
         heading: 'Report types',
         body:
           "Documents export — every document matching the current filters (status, doctype, supplier, date range). Columns: title, type, supplier, products, current version, file_name, file_size, created_at, updated_at. Use it for compliance attestations, customer ship-sets, or feeding downstream BI. " +
-          "Audit export — every audit_log row in the date range. Columns: timestamp, user, action, resource_type, resource_id, ip_address, details (JSON). Use it for regulator-facing audits or internal review. " +
+          "Audit export — every audit_log row matching the filters on the Audit Log screen (action type and date range; the endpoint also accepts userId, resourceType and, for super_admins, tenant_id). Columns: id, timestamp, user_id, user_name, user_email, tenant_id, action, resource_type, resource_id, ip_address, details (JSON). Every field is quoted and escaped per RFC 4180, so the commas, quotes and newlines inside the details blob survive the round trip. The rows are streamed, so the export is not capped at the 200-row page size of the screen; an export matching more than 100,000 rows stops there and says so in the response. Use it for regulator-facing audits or internal review. " +
           "Search export — same shape as the documents export but constrained by the search query. Only available in keyword mode (AI mode disables export because the LLM-emitted filters aren't repeatable on demand).",
       },
       {
@@ -1161,7 +1161,7 @@ const audit: ModuleHelpExpanded = {
           "User lifecycle: user_created, user_updated, user_deactivated, role changes. " +
           "Document operations: document_created, document_updated, document_deleted, document_version_uploaded, document_downloaded (when configured). " +
           "Tenant operations: tenant_updated, tenant_deactivated. " +
-          "Reports: report.generate (with the filter parameters used). " +
+          "Reports: report.generate (with the filter parameters used), audit.export (an audit-log CSV export, with the filters used and the row count). " +
           "Read-only operations like list / get aren't logged by default — too noisy. The principle is \"every state change, plus auth events.\"",
       },
       {
@@ -1175,7 +1175,7 @@ const audit: ModuleHelpExpanded = {
         body:
           "Where's the audit entry for X? Some actions don't generate audit rows by design (read-only operations, unprivileged endpoints). If a state-changing action is missing audit coverage, that's a bug — file it. " +
           "Why is the User column \"System\"? The action was performed by a background job (cron poller, scheduled report, email ingester) that doesn't run as a real user. The IP address column will usually be blank for these too. " +
-          "Can I export the log? Yes — use the Reports section's audit export (CSV / JSON of the current filter set). The export itself generates a report.generate audit row, so the trail is self-documenting.",
+          "Can I export the log? Yes — the Export CSV button in the Audit Log page header downloads every row matching the filters you have applied, not just the page on screen. Note that the Search User box is a client-side filter over the visible page only, so it is not applied to the export; use the action and date filters to narrow it. The export itself writes an audit.export row recording who exported, when, from what IP, which filters were used and how many rows matched — so the trail is self-documenting.",
       },
     ],
   },

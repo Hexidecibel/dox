@@ -704,6 +704,53 @@ export const api = {
       const qs = query.toString();
       return fetchApi<AuditListResponse>(`/audit${qs ? `?${qs}` : ''}`);
     },
+
+    /**
+     * GET /api/audit/export
+     * Streams a CSV of every row matching the SAME filters as audit.list
+     * (tenant_id, action, userId, resourceType, dateFrom, dateTo) — not just
+     * the current page — and triggers a browser download.
+     * Returns the matched row count so the caller can tell the user what they
+     * got, and whether the server capped it.
+     */
+    export: async (params?: Record<string, string>): Promise<{ matched: number; truncated: boolean }> => {
+      const query = new URLSearchParams(params || {});
+      const qs = query.toString();
+
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const res = await fetch(`${API_BASE}/audit/export${qs ? `?${qs}` : ''}`, { headers });
+
+      if (!res.ok) {
+        let message: string;
+        try {
+          const body = await res.json();
+          message = body.error || res.statusText;
+        } catch {
+          message = (await res.text()) || res.statusText;
+        }
+        throw new Error(message);
+      }
+
+      const matched = Number(res.headers.get('X-Audit-Export-Matched') || '0');
+      const truncated = res.headers.get('X-Audit-Export-Truncated') === 'true';
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const disposition = res.headers.get('Content-Disposition');
+      const match = disposition?.match(/filename="([^"]+)"/);
+      a.download = match?.[1] || `audit-log-${new Date().toISOString().split('T')[0]}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      return { matched, truncated };
+    },
   },
 
   ingestHistory: {
