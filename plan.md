@@ -71,9 +71,64 @@ at review time, so such a limit would list as active and never fire.
 would mean bypassing the read-only guarantee in `bin/lib/d1.js`, and the
 register fills going forward on every approval.
 
-**Still needed from AJ:** spec limits as five columns — test name **as the
-supplier prints it**, operator, value, unit, scope. The printed names are the
-load-bearing part; matching is exact, never fuzzy.
+**Engine hardening 2026-09-01 (commits `778beb1`, `8ff4f35`).** Five defects,
+each found by measuring against real prod COAs rather than by reading:
+
+1. A placeholder unit cell (`N/A`) was classified as a real unit that mismatched
+   everything, so a placeholder was judged *harder* than a blank. 45 of 74
+   not-checked results on the Andersen corpus were nothing but this.
+2. A result byte-identical to the specification printed beside it is now
+   `not_checked` — Andersen COAs carry the regulation's own thresholds in a
+   certification paragraph and the reader lifts them into the results table.
+3. A bare `%` resolved to the `unknown` unit family, and unknown means "assume
+   it matches" — so a fat content of 24.26% was judged against a coliform limit
+   of `<10 CFU/g` and reported out of spec. `norm('%')` is the empty string and
+   `isEmptyCell('')` fired before the percent branch could be reached.
+4. Absence vocabulary extended to non-detectable / not detected / none detected
+   / no growth, matched at the START of a cell only. A pathogen result is the
+   worst possible place for a false pass.
+5. Crosstab tables — analytes as column headers — were dropped whole, with no
+   verdict and no trace. They are judged now, and a `Buffer` row is recognised as
+   a laboratory control rather than product data.
+
+**Visibility fix.** `produceCoa` never wrote `extended_metadata`, so the register
+could see 81 of 541 prod documents and none of Andersen's.
+`shared/coaExtendedMetadata.ts` is now shared by the approve path and
+`bin/backfill-coa-extended-metadata`, which filled 425 already-approved
+documents. Matching is `external_ref = 'queue-' || pq.id` exactly — a `LIKE`
+prefix would sweep in the multi-product (`-p<N>`) and records (`-<lotKey>`) paths,
+which carry their own richer metadata.
+
+**Blocked:** migration 0086 (the scope uniqueness index) is applied locally but
+**deliberately not on prod**. It turns a duplicate-scope create into a raw
+constraint violation, and the 409 handling that makes that a friendly error is
+committed but undeployed. The two must ship together, which needs a Cloudflare
+token with `Cloudflare Pages : Edit`.
+
+**Received and loaded 2026-09-01.** AJ's workbook (`COA Spec Limits — IDP
+Source Table v0.1`, 25 Aug) arrived in exactly the five-column shape, plus a
+normalised "Test Name Variants" tab carrying every spelling. `bin/import-spec-limits`
+reads that tab pair — never the denormalised "Spec Limits" view, which repeats
+the limit once per spelling and would create 37 limits instead of 8. Loaded to
+prod tenant **Cush Co** (`1f03c3e7…`), not `tenant_medosweet`: "Medosweet Farms"
+is a supplier inside Cush Co, and the Medosweet tenant holds no suppliers and no
+queue items. 8 analytes, 25 aliases, 8 tenant-wide limits.
+
+**First production result:** 506 documents examined, 506 results in spec, 36 out
+of spec, 159 not checked. Of the 36, **33 were caught by the limit printed on the
+COA itself** and 3 by AJ's configured limits. 29 of the 33 are Edaleen Dairy and
+were verified real against their source tables. Six documents contradict
+themselves — a value outside the range printed beside it, on a row the document
+marks "Pass".
+
+**The measured follow-up:** 515 micro results hold a limit and are never judged,
+for want of eight spellings (`Coliform Count` ×157, `Aerobic Count` ×141, …).
+Written up for AJ at `~/drops/aj-micro-limits-questions.md`. That file also holds
+the three genuine QA questions his sheet raises: the CFU/g-vs-CFU/mL
+contradiction between his unit column and his notes, the Mold ≤1 against Yeast
+& Mold ≤10 inconsistency, and — the one that matters most — **which analytes he
+requires to be PRESENT on a COA**, which is the difference between "Andersen
+looks clean" and "Andersen does not test for the organisms you care about".
 
 
 

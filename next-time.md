@@ -4,6 +4,128 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-08-31/09-01 SPEC LIMITS GO LIVE — AJ's micro workbook loaded, engine hardened, 506 docs judged
+
+**AJ's micro limits are LIVE on prod.** First spec data ever loaded — both `spec_tests` and
+`spec_limits` were empty on every tenant before tonight. Two commits: `778beb1`, `8ff4f35`.
+Assessment page (shareable): https://claude.ai/code/artifact/c6de744d-88cf-487e-80b4-b0d0ff6749ef
+
+### TENANT CHOICE — READ THIS BEFORE LOADING ANYTHING ELSE
+Limits went into **`1f03c3e73add44bfafb33bb16508b78b` = "Cush Co"**, NOT `tenant_medosweet`.
+"Medosweet Farms" is a **supplier inside Cush Co**; the `tenant_medosweet` tenant has 0 suppliers,
+0 queue items, 6 documents. AJ's Suppliers tab matches Cush Co's supplier list. User chose Cush Co
+deliberately. If AJ's org ever gets real COAs, the import is idempotent — re-run per tenant.
+
+### THE NUMBERS (prod, measured, not projected)
+| | before | after |
+|---|---|---|
+| documents examined | 81 | **506** |
+| in_spec results | — | **506** |
+| out_of_spec | 8 (7 false) | **36** (33 printed / 3 configured) |
+| not_checked | 10 | **159** |
+| Andersen results judged | 48 | **93** |
+| Andersen not_checked | 74 | **29** |
+
+**36 out-of-spec = 33 caught by the COA's OWN printed limit (zero configuration) + 3 by AJ's limits**
+(Mold 4.62, Mold 20, Yeast 73). 29 of the 33 are **Edaleen Dairy** and are REAL — I inspected the
+source tables: clean `Test | Target/Specification | Result | Unit` alignment, units agree, values
+genuinely outside the printed range. **6 documents contradict themselves** — value outside the range
+printed beside it on a row the document marks "Pass". All were human-approved.
+
+### WHAT SHIPPED (all committed)
+- **`bin/import-spec-limits`** + `bin/lib/specLimitsImport.js`. Reads the workbook's **"Limits by
+  Analyte" + "Test Name Variants"** tabs — NEVER the denormalized "Spec Limits" tab, which would
+  create one duplicate limit per spelling (37 instead of 8). Aliases MERGE, never replace. `version`
+  bumps only when a threshold actually moves. Dry-run default; `--apply`; `--remote --apply --yes`.
+- **Migration 0086** — unique index on (tenant, analyte, scope) as an **expression index** with
+  COALESCE, because SQLite treats NULLs as distinct and all three scope columns are nullable.
+  Stored NULLs untouched (`resolveSpecLimits` + the LEFT JOINs depend on them). **NOT ON PROD — see
+  BLOCKED below.**
+- **spec-limits API 409** on duplicate scope (POST + scope-moving PUT). Without it 0086 turns a
+  routine mistake into a 500.
+- **Engine (`shared/specCheck.ts`)** — five fixes, each measured:
+  1. Placeholder unit (`N/A`) reads as NO unit, not as a unit. Was worth **45 of 74** not_checked.
+  2. Result byte-identical to its own printed spec → `not_checked` (guard: numeric, ≥4 digits).
+  3. **Bare `%` returned family `unknown`** — `norm('%')` is `''` and `isEmptyCell('')` fired first,
+     so fat 24.26% was judged against a coliform limit `<10 CFU/g`. Killed 4 false alerts.
+  4. Absence vocabulary += non-detectable / not detected / none detected / no growth. **Leading
+     token only** — a buried token stays unreadable (a false pass on a pathogen is the worst output).
+  5. **Crosstabs** (analytes as column headers) were dropped whole — no verdict, no trace.
+     Now judged, and **Buffer/control rows are excluded** (exact match, never substring).
+- **`produceCoa` now writes `extended_metadata`** (`shared/coaExtendedMetadata.ts`, in
+  `build:worker-shared`) + **`bin/backfill-coa-extended-metadata`**. Backfilled **425 prod docs**.
+  Matching is `external_ref = 'queue-' || pq.id` EXACTLY — a LIKE prefix would sweep in the
+  multi-product (`-p<N>`) and records (`-<lotKey>`) paths.
+
+### THE ALIAS GAP — cheapest win available, costs no engineering
+**515 micro results hold a limit and are never checked**, purely from 8 missing spellings:
+`Coliform Count` 157, `Aerobic Count` 141, `Coliform Plate Count` 43, `E. coli Plate Count` 42,
+`Salmonella (100g)` 39, `Coliform (cfu/g)` 31, `E. coli (cfu/g)` 31, `SPC (cfu/g)` 31.
+Already written up for AJ. Note `Salmonella (100g)` implies a 100 g absence basis.
+
+### ANDERSEN — 0 out of spec, and that is NOT reassurance
+100 COAs, nothing found. Three reasons not to trust it:
+1. **They test for two organisms** (Coliform, Aerobic). ZERO Listeria/Salmonella/Yeast/Mold across
+   all 100 — six of AJ's eight analytes never appear. A limit cannot judge a test never run.
+2. **38 docs have unusable analyte labels** — extraction merges two analytes into one:
+   `COLIFORM 1:1 AEROBIC` (21), `COLIFORM AEROBIC` (17), `COLIFORM 1-10 FRIDAY` (weekday leaked),
+   `COLIFORM 0` (a result fused into the name). 26 distinct labels for 2 analytes.
+3. **Nothing detects a MISSING required test.** `unmatched` is the reverse direction only.
+   Needs an "expected analytes per supplier" concept — gated on AJ's Q4.
+
+⚠️ **DORMANT TRAP:** 7 Andersen COAs print `BACTERIA STANDARD PLATE COUNT` with value `100,000` —
+lifted from the certification paragraph ("bacteria standard plate count (100,000 per ml.)
+requirements of regulation (EC) No. 853/2004"). It is the REGULATION'S threshold, not a
+measurement. Adding that spelling = 7 instant false alerts. AJ has been told to hold it back.
+
+### STILL WRONG — 3 false alerts, extraction not judgement
+`Butterfat 18.00`, `Nitratable Acidity 26.86`, `Total Solids 18.00` all "outside the printed limit
+of <10" — the reader wrote a coliform row's spec onto non-micro rows. **Both sides unitless, so no
+engine guard can catch it.** Fix is upstream only.
+
+### BLOCKED / OPEN
+- **Migration 0086 is deliberately NOT on prod.** It pairs with the Pages deploy carrying the 409
+  handling; applying the index alone puts a 500 on prod. Needs a token with **`Cloudflare Pages :
+  Edit`**. The import didn't need it — the importer upserts in application code.
+- **Extraction repair workstream was IN FLIGHT at session end** (merged labels, boilerplate lifting,
+  spec-column contamination, dilution-as-result, junk values, 34 header shapes). Was editing
+  `bin/process-worker` and writing `sql/`. **`git status` first.** Its fix is forward-only —
+  the 425 backfilled docs keep their defects until re-extracted.
+- `control_rows` is returned by the engine but not surfaced in `spec-warnings.ts` / the review tile.
+- Crosstab detection needs `spec === -1`; a header like "Standard Plate Count" partial-matches the
+  `standard` spec synonym and would still skip. No real corpus shape hits it today.
+- Pre-existing, NOT fixed: `applyRowUnit` appends the unit column to the value, breaking scientific
+  notation — `"3.0x10^2"` + `"CFU/g"` parses as **3, not 300**. Silent in_spec on a value 3× over.
+
+### METHOD / ENVIRONMENT FACTS WORTH KEEPING
+- **`npx tsc --noEmit` IS A NO-OP.** Root tsconfig has `files: []` + project references, and
+  `--noEmit` doesn't build references. `npm run build` only builds `tsconfig.app.json`, so **the
+  functions project is not typechecked by the build at all.** Real check:
+  `npx tsc -p tsconfig.functions.json --noEmit` → **64 pre-existing errors** (baseline; unchanged
+  by this session). An earlier "187" reading was taken mid-edit and is wrong.
+- **Cloudflare creds are ON-DEMAND now.** No long-lived token. Get one via
+  `cush-tools/bin/secure-entry cfprod --shred-after 2h --bg` → https://entry-cfprod.tunnel.cush.rocks
+  then `export CLOUDFLARE_API_TOKEN="$(cat /tmp/secure-entry/cfprod)"`. Ask for **D1 : Edit**
+  (a SELECT via `wrangler d1 execute --remote` POSTs to the query endpoint), plus
+  **Workers R2 Storage : Read** and **Cloudflare Pages : Edit** if staging files or deploying.
+- **BOTH secret backends are unauthenticated on this box.** `infisical secrets` drops into a login
+  flow; `op whoami` reports no session. So `bin/inject` cannot materialize ANY secret. `.dev.vars`
+  still holds working QWEN_URL/QWEN_SECRET; DOX_API_KEY lives in the systemd unit.
+- **`bin/parity-coa` fetches files through the dox API, not R2** — so extraction work does NOT need
+  an R2 token. Qwen fleet is UP serving `Qwen3-6-35B-A3B-mac-q8` and `-spark-q8` (the pinned pair).
+- `bin/lib/d1.js` is READ-ONLY by contract (refuses non-SELECT). Writing scripts render statements
+  to a temp file and use `wrangler d1 execute --file`, mirroring `bin/migrate`.
+
+### DELIVERABLES
+- **Assessment page** (published, private): https://claude.ai/code/artifact/c6de744d-88cf-487e-80b4-b0d0ff6749ef
+- **`~/drops/aj-micro-limits-questions.md`** — UNPUBLISHED. 8 questions + the 8-spelling action
+  table + the BACTERIA STANDARD PLATE COUNT warning. **Q4 (which analytes are REQUIRED to appear)
+  is the one that matters most** — it is the difference between "Andersen looks clean" and
+  "Andersen doesn't test for the organisms you care about."
+- Workbook + a real Andersen COA are in the session scratchpad under `micro/`.
+
+---
+
 ## 2026-08-05 OVERNIGHT MEASUREMENT SESSION — model/box/text-layer answer, backed by real runs
 
 **Six controlled studies, all read-only against prod. Nothing was deployed.** Reports live in the
