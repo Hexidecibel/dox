@@ -47,7 +47,7 @@ function sharedRules(block: string): string {
     expect(line, `rule ${n} missing from a TABLE EXTRACTION RULES block`).toBeTruthy();
     return line!;
   };
-  return [4, 8, 9, 10, 11, 12, 13].map(pick).join('\n');
+  return [4, 8, 9, 10, 11, 12, 13, 14].map(pick).join('\n');
 }
 
 describe('TABLE EXTRACTION RULES stay in sync across all three prompt copies', () => {
@@ -76,6 +76,12 @@ describe('TABLE EXTRACTION RULES stay in sync across all three prompt copies', (
     expect(canonical).toContain('REGULATORY THRESHOLDS');          // certification boilerplate
     expect(canonical).toContain("ROW'S OWN PRINTED LINE");         // junk values + spec contamination
     expect(canonical).toContain('"test", "result", "unit", "specification", "pass_fail"'); // header instability
+    // Rule 14 was added after rule 4 was measured to INDUCE a defect: naming a
+    // "unit" column made the model fill it with CFU/mL on a COA that prints no
+    // unit at all, and the spec engine then refused to compare CFU/mL against a
+    // CFU/g limit — 6 of 32 results went not_checked. Deleting rule 14 while
+    // keeping rule 4 reintroduces that.
+    expect(canonical).toContain('NEVER SUPPLY A UNIT');
   });
 
   it('names the canonical header vocabulary the spec engine already understands', () => {

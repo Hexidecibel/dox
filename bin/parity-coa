@@ -28,6 +28,12 @@
  *   QWEN_SECRET  — optional Bearer token for the Qwen auth proxy
  *   SAMPLE_N     — how many COA items to sample (default 12)
  *   QWEN_VLM_MODE — passed through to the worker (default off = text path only)
+ *   PARITY_INSTRUCTIONS_FILE — optional. Path to a plain text file whose
+ *       contents STAND IN for the `supplier_extraction_instructions` row that
+ *       would otherwise be fetched for this (supplier, document type). Lets a
+ *       candidate instruction set be measured on real prod documents WITHOUT
+ *       writing a draft to the database first. Read-only like everything else
+ *       here, and honoured only inside the PARITY_ITEM_IDS dry-run branch.
  *
  * Usage:
  *   DOX_API_URL=https://dox.cush.rocks DOX_API_KEY=dox_sk_... \
