@@ -1041,3 +1041,73 @@ describe('crosstab tables are judged, not skipped', () => {
     expect(r.verdicts).toEqual([]);
   });
 });
+
+describe('scientific notation carrying a unit column', () => {
+  // Regression for the worst class of bug this module can have. `applyRowUnit`
+  // appends the unit column to the value, and the scientific-notation match used
+  // to be anchored at the end — so `3.0x10^2` + `CFU/g` parsed as **3**, which
+  // reads as in_spec against a <=100 limit. A value 3x over its limit passed
+  // silently. Labs print micro counts this way routinely.
+  const forms: Array<[string, number]> = [
+    ['3.0x10^2 CFU/g', 300],
+    ['1.2e3 CFU/g', 1200],
+    ['2×10³ CFU/g', 2000],
+    ['5.0 x 10^4 CFU/g', 50000],
+  ];
+
+  it('reads the magnitude, not the leading token', () => {
+    for (const [raw, expected] of forms) {
+      const v = parseMeasuredValue(raw);
+      expect(v.kind, raw).toBe('numeric');
+      expect(v.value, raw).toBe(expected);
+    }
+  });
+
+  it('still recovers the unit, and never claims the exponent as part of it', () => {
+    for (const [raw] of forms) {
+      // `1.2e3 CFU/g` used to yield unit "e3 CFU/g", which matched no unit family.
+      expect(parseMeasuredValue(raw).unit, raw).toBe('CFU/g');
+    }
+  });
+
+  it('judges a value over its limit as OUT of spec, not in', () => {
+    const limit: SpecLimit = {
+      operator: '<=', min: null, max: 100, unit: 'CFU/g',
+      raw: '<=100 CFU/g', basis_grams: null,
+    };
+    const c = compareToLimit(parseMeasuredValue('3.0x10^2 CFU/g'), limit);
+    expect(c.verdict).toBe('out_of_spec');
+    expect(c.value_num).toBe(300);
+  });
+
+  it('carries the magnitude through a censored reading', () => {
+    const v = parseMeasuredValue('<3.0x10^2 CFU/g');
+    expect(v.kind).toBe('censored_lt');
+    expect(v.value).toBe(300);
+    expect(v.unit).toBe('CFU/g');
+  });
+
+  it('leaves ordinary values exactly as they were', () => {
+    const unchanged: Array<[string, string, number | null, string | null]> = [
+      ['40 CFU/g', 'numeric', 40, 'CFU/g'],
+      ['1,530 CFU/g', 'numeric', 1530, 'CFU/g'],
+      ['1.10%', 'numeric', 1.1, '%'],
+      ['3.0x10^2', 'numeric', 300, null],
+      ['<10', 'censored_lt', 10, null],
+      ['<1 est', 'censored_lt', 1, null],
+    ];
+    for (const [raw, kind, value, unit] of unchanged) {
+      const v = parseMeasuredValue(raw);
+      expect(v.kind, raw).toBe(kind);
+      expect(v.value, raw).toBe(value);
+      expect(v.unit, raw).toBe(unit);
+    }
+  });
+
+  it('does not mistake a trailing word for an exponent', () => {
+    // `1.2est` must read as 1.2, not as 1.2 x 10^st or similar.
+    const v = parseMeasuredValue('1.2est');
+    expect(v.kind).toBe('numeric');
+    expect(v.value).toBe(1.2);
+  });
+});

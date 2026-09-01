@@ -374,18 +374,54 @@ function trailingUnit(s: string): string | null {
 }
 
 /** Parse scientific shorthand the labs actually print: 3.0x10^2, 1.2e3, 2×10³. */
-function parseScientific(s: string): number | null {
-  const cleaned = s.replace(/\s+/g, '').replace(/×/g, 'x').replace(/[²³⁴⁵⁶⁷⁸⁹]/g, (c) => {
-    const map: Record<string, string> = {
-      '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
-    };
-    return `^${map[c]}`;
-  });
-  const m = /^([+-]?\d*\.?\d+)x10\^?([+-]?\d+)$/i.exec(cleaned);
-  if (m) return Number(m[1]) * Math.pow(10, Number(m[2]));
-  const e = /^([+-]?\d*\.?\d+)e([+-]?\d+)$/i.exec(cleaned);
-  if (e) return Number(e[1]) * Math.pow(10, Number(e[2]));
+const SUPERSCRIPTS: Record<string, string> = {
+  '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
+};
+
+/**
+ * Match scientific shorthand at the START of a string and report what is left
+ * over, which is the unit.
+ *
+ * This deliberately does NOT anchor at the end. It used to, and the result was
+ * the worst class of bug this module can have: `applyRowUnit` appends the unit
+ * column to the value, so `3.0x10^2` + `CFU/g` became `3.0x10^2 CFU/g`, the
+ * anchored match failed, and `parseLeadingNumber` fell back to the leading
+ * token — yielding **3 instead of 300**, which reads as `in_spec` against a
+ * ≤100 limit. A value three times over its limit passed silently, and every
+ * scientific form was affected (`1.2e3` → 1.2, `2×10³` → 2, `5.0 x 10^4` → 5).
+ * Labs print micro counts this way routinely, so this was not a corner case.
+ */
+function scientificPrefix(s: string): { value: number; rest: string } | null {
+  const t = s.replace(/[²³⁴⁵⁶⁷⁸⁹]/g, (c) => `^${SUPERSCRIPTS[c]}`);
+  const m = /^([+-]?\d*\.?\d+)\s*(?:x|×)\s*10\s*\^?\s*([+-]?\d+)/i.exec(t);
+  if (m) return { value: Number(m[1]) * Math.pow(10, Number(m[2])), rest: t.slice(m[0].length) };
+  // The negative lookahead keeps `1.2e3` from being read out of `1.2e3.5`, and
+  // the required digits keep `1.2est` from looking like an exponent.
+  const e = /^([+-]?\d*\.?\d+)e([+-]?\d+)(?![\d.])/i.exec(t);
+  if (e) return { value: Number(e[1]) * Math.pow(10, Number(e[2])), rest: t.slice(e[0].length) };
   return null;
+}
+
+/** Parse scientific shorthand the labs actually print: 3.0x10^2, 1.2e3, 2×10³. */
+function parseScientific(s: string): number | null {
+  return scientificPrefix(s)?.value ?? null;
+}
+
+/**
+ * Split a numeric cell into its magnitude and its unit, honouring scientific
+ * shorthand. Kept separate from `trailingUnit` because that helper reads a unit
+ * off the tail of the raw string, and on `1.2e3 CFU/g` it would claim the
+ * exponent as part of the unit ("e3 CFU/g").
+ */
+function splitNumericAndUnit(s: string): { value: number; unit: string | null } | null {
+  const sci = scientificPrefix(s.replace(/,/g, ''));
+  if (sci) {
+    const rest = sci.rest.trim();
+    return { value: sci.value, unit: rest ? trailingUnit(rest) : null };
+  }
+  const num = parseLeadingNumber(s);
+  if (num === null) return null;
+  return { value: num, unit: trailingUnit(s) };
 }
 
 /**
@@ -435,22 +471,24 @@ export function parseMeasuredValue(raw: unknown): MeasuredValue {
   const cens = /^(<=|<|≤|>=|>|≥|lessthan|greaterthan)\s*(.+)$/i.exec(s.replace(/\s*(less\s+than)\s*/i, 'lessthan').replace(/\s*(greater\s+than)\s*/i, 'greaterthan'));
   if (cens) {
     const rest = cens[2].trim();
-    const num = parseLeadingNumber(rest);
-    if (num !== null) {
+    const parsed = splitNumericAndUnit(rest);
+    if (parsed !== null) {
       const op = cens[1].toLowerCase();
       const isLt = op === '<' || op === '<=' || op === '≤' || op === 'lessthan';
       return {
         kind: isLt ? 'censored_lt' : 'censored_gt',
-        value: num,
+        value: parsed.value,
         qualifier: null,
-        unit: trailingUnit(rest),
+        unit: parsed.unit,
         raw: s,
       };
     }
   }
 
-  const num = parseLeadingNumber(s);
-  if (num !== null) return { kind: 'numeric', value: num, qualifier: null, unit: trailingUnit(s), raw: s };
+  const parsed = splitNumericAndUnit(s);
+  if (parsed !== null) {
+    return { kind: 'numeric', value: parsed.value, qualifier: null, unit: parsed.unit, raw: s };
+  }
 
   return base;
 }

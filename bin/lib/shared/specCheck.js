@@ -152,25 +152,36 @@ function trailingUnit(s) {
   if (!u || /^(est|estimated|approx|max|min)$/i.test(u)) return null;
   return u;
 }
-function parseScientific(s) {
-  const cleaned = s.replace(/\s+/g, "").replace(/×/g, "x").replace(/[²³⁴⁵⁶⁷⁸⁹]/g, (c) => {
-    const map = {
-      "\xB2": "2",
-      "\xB3": "3",
-      "\u2074": "4",
-      "\u2075": "5",
-      "\u2076": "6",
-      "\u2077": "7",
-      "\u2078": "8",
-      "\u2079": "9"
-    };
-    return `^${map[c]}`;
-  });
-  const m = /^([+-]?\d*\.?\d+)x10\^?([+-]?\d+)$/i.exec(cleaned);
-  if (m) return Number(m[1]) * Math.pow(10, Number(m[2]));
-  const e = /^([+-]?\d*\.?\d+)e([+-]?\d+)$/i.exec(cleaned);
-  if (e) return Number(e[1]) * Math.pow(10, Number(e[2]));
+var SUPERSCRIPTS = {
+  "\xB2": "2",
+  "\xB3": "3",
+  "\u2074": "4",
+  "\u2075": "5",
+  "\u2076": "6",
+  "\u2077": "7",
+  "\u2078": "8",
+  "\u2079": "9"
+};
+function scientificPrefix(s) {
+  const t = s.replace(/[²³⁴⁵⁶⁷⁸⁹]/g, (c) => `^${SUPERSCRIPTS[c]}`);
+  const m = /^([+-]?\d*\.?\d+)\s*(?:x|×)\s*10\s*\^?\s*([+-]?\d+)/i.exec(t);
+  if (m) return { value: Number(m[1]) * Math.pow(10, Number(m[2])), rest: t.slice(m[0].length) };
+  const e = /^([+-]?\d*\.?\d+)e([+-]?\d+)(?![\d.])/i.exec(t);
+  if (e) return { value: Number(e[1]) * Math.pow(10, Number(e[2])), rest: t.slice(e[0].length) };
   return null;
+}
+function parseScientific(s) {
+  return scientificPrefix(s)?.value ?? null;
+}
+function splitNumericAndUnit(s) {
+  const sci = scientificPrefix(s.replace(/,/g, ""));
+  if (sci) {
+    const rest = sci.rest.trim();
+    return { value: sci.value, unit: rest ? trailingUnit(rest) : null };
+  }
+  const num = parseLeadingNumber(s);
+  if (num === null) return null;
+  return { value: num, unit: trailingUnit(s) };
 }
 function parseMeasuredValue(raw) {
   const s = String(raw ?? "").trim();
@@ -190,21 +201,23 @@ function parseMeasuredValue(raw) {
   const cens = /^(<=|<|≤|>=|>|≥|lessthan|greaterthan)\s*(.+)$/i.exec(s.replace(/\s*(less\s+than)\s*/i, "lessthan").replace(/\s*(greater\s+than)\s*/i, "greaterthan"));
   if (cens) {
     const rest = cens[2].trim();
-    const num2 = parseLeadingNumber(rest);
-    if (num2 !== null) {
+    const parsed2 = splitNumericAndUnit(rest);
+    if (parsed2 !== null) {
       const op = cens[1].toLowerCase();
       const isLt = op === "<" || op === "<=" || op === "\u2264" || op === "lessthan";
       return {
         kind: isLt ? "censored_lt" : "censored_gt",
-        value: num2,
+        value: parsed2.value,
         qualifier: null,
-        unit: trailingUnit(rest),
+        unit: parsed2.unit,
         raw: s
       };
     }
   }
-  const num = parseLeadingNumber(s);
-  if (num !== null) return { kind: "numeric", value: num, qualifier: null, unit: trailingUnit(s), raw: s };
+  const parsed = splitNumericAndUnit(s);
+  if (parsed !== null) {
+    return { kind: "numeric", value: parsed.value, qualifier: null, unit: parsed.unit, raw: s };
+  }
   return base;
 }
 function parseLeadingNumber(s) {
