@@ -188,14 +188,39 @@ describe('spec-limits', () => {
   });
 
   it('accepts an absence limit with no bounds at all', async () => {
+    // Its own analyte: one analyte holds at most one tenant-wide limit
+    // (migration 0086), and coliform's is already taken by the test above.
+    const salmonellaId = (
+      await call(
+        createTest,
+        ctx('http://localhost/api/spec-tests', 'POST', orgAdmin, { name: 'Salmonella' })
+      )
+    ).body.specTest.id;
     const r = await call(
       createLimit,
       ctx('http://localhost/api/spec-limits', 'POST', orgAdmin, {
-        spec_test_id: coliformId,
+        spec_test_id: salmonellaId,
         operator: 'absent',
       })
     );
     expect(r.status).toBe(201);
+  });
+
+  it('refuses a second limit at the same scope instead of shadowing the first', async () => {
+    // Two tenant-wide limits on one analyte are not a harmless duplicate:
+    // resolveSpecLimits picks one by updated_at and the other sits in the admin
+    // list looking active while judging nothing. Migration 0086 forbids it; this
+    // check is what turns the constraint into a sentence rather than a 500.
+    const r = await call(
+      createLimit,
+      ctx('http://localhost/api/spec-limits', 'POST', orgAdmin, {
+        spec_test_id: coliformId,
+        operator: '<=',
+        value_max: 999,
+      })
+    );
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/already exists at that scope/i);
   });
 
   it("refuses a scope pinned to another tenant's supplier", async () => {
@@ -320,11 +345,17 @@ describe('spec-limits', () => {
 
   it('refuses cross-tenant access to a limit', async () => {
     const otherAdmin = asUser(seed.orgAdmin2Id, 'org_admin', seed.tenantId2);
+    const ownTest = (
+      await call(
+        createTest,
+        ctx('http://localhost/api/spec-tests', 'POST', orgAdmin, { name: 'Cross Tenant Probe' })
+      )
+    ).body.specTest.id;
     const mine = (
       await call(
         createLimit,
         ctx('http://localhost/api/spec-limits', 'POST', orgAdmin, {
-          spec_test_id: coliformId,
+          spec_test_id: ownTest,
           operator: '<=',
           value_max: 10,
         })

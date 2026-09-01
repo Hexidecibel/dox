@@ -29,6 +29,14 @@ export interface QueueItem {
   status: string;
   created_by: string | null;
   tenant_slug: string;
+  /**
+   * JSON array of ExtractedTable from the flat/legacy extraction path
+   * (processing_queue.tables). Present at runtime on every caller — the
+   * approve handler selects `pq.*` — and read by produceCoa so an approved
+   * single-record COA persists its test tables into
+   * documents.extended_metadata.
+   */
+  tables?: string | null;
 }
 
 /**

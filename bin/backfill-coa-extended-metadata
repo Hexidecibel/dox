@@ -1,0 +1,293 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/backfill-coa-extended-metadata — make old single-record COAs visible to
+ * the spec register.
+ *
+ * THE GAP THIS CLOSES
+ *
+ * `produceCoa`, the single-record COA approve path, did not persist
+ * `documents.extended_metadata`. The multi-product and records producers always
+ * did. That fix is FORWARD-ONLY: every COA approved before it landed still has
+ * a NULL column, and `bin/recheck-spec-limits` filters on
+ * `extended_metadata IS NOT NULL` — so those documents are not "passing" the
+ * spec check, they are not being looked at. On production that was 81 of 561
+ * documents examined for one tenant, with all 100 Andersen Dairy COAs among the
+ * invisible.
+ *
+ * Nothing was lost. The test results are still in `processing_queue.tables` for
+ * the queue item that produced each document. This script copies them across,
+ * through the PRODUCER'S OWN function — `buildFlatExtendedMetadata` from
+ * shared/coaExtendedMetadata.ts, compiled to bin/lib/shared/ by
+ * `npm run build:worker-shared` — so a backfilled row is byte-identical to one
+ * a fresh approval would write. There is no second implementation to drift.
+ *
+ * THE MATCHING RULE
+ *
+ * Documents are matched to queue items on `documents.external_ref = 'queue-' ||
+ * pq.id`, an EQUALITY. The multi-product path writes `queue-<id>-p<N>` and the
+ * records path `queue-<id>-<lotKey>`; both already hold a richer, per-record
+ * payload, and a prefix match would overwrite it with the whole file's tables.
+ *
+ * WHAT IT WILL NOT DO
+ *   - Overwrite a non-NULL extended_metadata. Ever, by any flag.
+ *   - Touch a document whose queue item is missing or not approved.
+ *   - Bump updated_at. Filling a derived column is not an edit a user made.
+ *   - Write anything without --apply.
+ *   - Judge, register, or email anything. Once the column is filled, preview
+ *     what it means with `bin/recheck-spec-limits --tenant <id>`.
+ *
+ * Usage:
+ *   bin/backfill-coa-extended-metadata --tenant <id>                     # dry run, LOCAL
+ *   bin/backfill-coa-extended-metadata --tenant <id> --apply             # LOCAL write
+ *   bin/backfill-coa-extended-metadata --tenant <id> --remote            # dry run, PRODUCTION
+ *   bin/backfill-coa-extended-metadata --tenant <id> --remote --apply    # prompts first
+ *
+ * Flags:
+ *   --tenant ID       tenant to backfill (required)
+ *   --apply           actually write. Without it this is a dry run.
+ *   --remote, -r      target PRODUCTION D1 (with --apply, prompts first)
+ *   --yes, -y         skip the production confirmation prompt
+ *   --limit N         cap documents scanned (prints that it was capped)
+ *   --page-size N     D1 paging size (default 100)
+ *   --json            emit the plan as JSON instead of prose
+ *   -h, --help        this help
+ *
+ * Re-running after a successful --apply reports 0 eligible.
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const { query, queryPaged, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+const { buildFlatExtendedMetadata } = require('./lib/shared/coaExtendedMetadata');
+const { buildPlan, planToSql, batchStatements, formatPlan } = require('./lib/coaBackfill');
+
+function parseArgs(argv) {
+  const opts = {
+    tenant: null,
+    apply: false,
+    remote: false,
+    yes: false,
+    limit: null,
+    pageSize: 100,
+    json: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenant = argv[++i]; break;
+      case '--apply': opts.apply = true; break;
+      case '--remote':
+      case '-r': opts.remote = true; break;
+      case '--yes':
+      case '-y': opts.yes = true; break;
+      case '--limit': opts.limit = Number(argv[++i]); break;
+      case '--page-size': opts.pageSize = Number(argv[++i]); break;
+      case '--json': opts.json = true; break;
+      case '-h':
+      case '--help': printHelp(); process.exit(0); break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  if (!opts.tenant) {
+    console.error('--tenant <id> is required. Run with --help for usage.');
+    process.exit(2);
+  }
+  // The d1 helper takes a raw command string, so the one interpolated value
+  // gets a hard shape check rather than trust.
+  if (!/^[A-Za-z0-9_-]+$/.test(opts.tenant)) {
+    console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+    process.exit(2);
+  }
+  return opts;
+}
+
+function printHelp() {
+  const src = fs.readFileSync(__filename, 'utf8');
+  console.log(src.split("\n").slice(3, 56).join('\n').replace(/^ \* ?/gm, ''));
+}
+
+/**
+ * The database is not empty of meaning: a typo in --tenant would otherwise
+ * report a clean, reassuring "0 documents scanned".
+ */
+function assertTenant(tenant, remote) {
+  const rows = query(`SELECT id, name FROM tenants WHERE id = '${tenant}'`, { remote });
+  if (rows.length === 0) {
+    console.error(`No tenant "${tenant}" in this database. Check the id, or the --remote flag.`);
+    process.exit(1);
+  }
+  return rows[0];
+}
+
+/**
+ * Every document this tenant has that came out of the review queue, joined to
+ * the queue item that produced it.
+ *
+ * The join is an EQUALITY on the whole ref, never a prefix — see
+ * bin/lib/coaBackfill.js for why that is the safety argument and not a detail.
+ * The `LIKE 'queue-%'` in the WHERE clause is only a cheap pre-filter for the
+ * scan; the flat-vs-suffixed decision is made per row, so a suffixed ref is
+ * COUNTED and reported rather than silently excluded by SQL.
+ */
+function loadRows(tenant, opts) {
+  return queryPaged(
+    (pageSize, offset) =>
+      `SELECT d.id, d.title, d.external_ref, d.extended_metadata,
+              pq.id AS queue_id, pq.status AS queue_status, pq.tables AS queue_tables
+         FROM documents d
+         LEFT JOIN processing_queue pq ON d.external_ref = 'queue-' || pq.id
+        WHERE d.tenant_id = '${tenant}'
+          AND d.status = 'active'
+          AND d.external_ref LIKE 'queue-%'
+        ORDER BY d.created_at DESC, d.id
+        LIMIT ${pageSize} OFFSET ${offset}`,
+    { remote: opts.remote, pageSize: opts.pageSize, maxRows: opts.limit || undefined }
+  );
+}
+
+/**
+ * Apply a batch. bin/lib/d1.js is READ-ONLY by design and stays that way — the
+ * write path is here, and it mirrors bin/migrate and bin/import-spec-limits:
+ * render the statements to a file and hand it to `wrangler d1 execute --file`,
+ * so nothing is glued into a shell command line and a long plan cannot overflow
+ * one.
+ */
+function execSql(statements, remote, label) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-coa-backfill-'));
+  const file = path.join(dir, `${label}.sql`);
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  try {
+    execFileSync(
+      'npx',
+      ['wrangler', 'd1', 'execute', DEFAULT_DB, remote ? '--remote' : '--local', `--file=${file}`],
+      { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 }
+    );
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString() : '';
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${stderr || err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function confirmProduction(tenant, plan) {
+  const answer = promptSync(
+    `\nAbout to WRITE to PRODUCTION D1 for tenant ${tenant}: fill extended_metadata on ` +
+      `${plan.counts.write} document(s) that currently have none.\n` +
+      'Type the tenant id to continue: '
+  );
+  if (answer.trim() !== tenant) {
+    console.error('That did not match. Nothing was written.');
+    process.exit(1);
+  }
+}
+
+/** Blocking one-line read from the terminal; no dependency needed. */
+function promptSync(question) {
+  process.stdout.write(question);
+  let fd;
+  try {
+    fd = fs.openSync('/dev/tty', 'rs');
+  } catch {
+    console.error('\nNo terminal to confirm on. Re-run interactively, or pass --yes.');
+    process.exit(1);
+  }
+  const buf = Buffer.alloc(256);
+  let out = '';
+  for (;;) {
+    const n = fs.readSync(fd, buf, 0, buf.length, null);
+    if (n === 0) break;
+    out += buf.toString('utf8', 0, n);
+    if (out.includes('\n')) break;
+  }
+  fs.closeSync(fd);
+  return out.split('\n')[0];
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const remote = opts.remote;
+  const targetLabel = remote ? 'PRODUCTION' : 'local';
+
+  const tenant = assertTenant(opts.tenant, remote);
+
+  const { rows } = loadRows(opts.tenant, opts);
+  const plan = buildPlan(rows, buildFlatExtendedMetadata);
+  const statements = planToSql(plan.writes);
+  const batches = batchStatements(statements);
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          tenant: opts.tenant,
+          tenant_name: tenant.name,
+          target: targetLabel,
+          applied: opts.apply,
+          scanned: plan.scanned,
+          counts: plan.counts,
+          examples: plan.examples,
+          statements: statements.length,
+          batches: batches.length,
+        },
+        null,
+        2
+      )
+    );
+  } else {
+    for (const line of formatPlan(plan, {
+      tenantId: opts.tenant,
+      targetLabel: `${tenant.name}, ${targetLabel}`,
+      capped: opts.limit && rows.length >= opts.limit ? opts.limit : null,
+    })) {
+      console.log(line);
+    }
+  }
+
+  if (!opts.apply) {
+    if (!opts.json) {
+      console.log(
+        statements.length === 0
+          ? 'DRY RUN — nothing to fill in. Every scanned document is already accounted for.'
+          : `DRY RUN — ${statements.length} document(s) not updated (${batches.length} batch(es)). ` +
+              'Re-run with --apply to write.'
+      );
+      console.log('');
+    }
+    return;
+  }
+
+  if (statements.length === 0) {
+    console.log('Nothing to do — no document needs filling in.');
+    return;
+  }
+
+  if (remote && !opts.yes) confirmProduction(opts.tenant, plan);
+
+  let written = 0;
+  for (let i = 0; i < batches.length; i++) {
+    execSql(batches[i], remote, `backfill-${i + 1}`);
+    written += batches[i].length;
+    console.log(`  batch ${i + 1}/${batches.length} — ${batches[i].length} document(s) written`);
+  }
+
+  console.log('');
+  console.log(`Filled extended_metadata on ${written} document(s) in ${targetLabel} D1.`);
+  console.log(
+    'These documents are now visible to the spec register. See what they hold with:\n' +
+      `  bin/recheck-spec-limits --tenant ${opts.tenant}${remote ? ' --remote' : ''}`
+  );
+  console.log('');
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+}

@@ -90,7 +90,21 @@ export interface SpecLimit {
  * splits value / unit / spec. The review tile renders both, so both are checked.
  */
 export type SpecTarget =
-  | { kind: 'table'; table_index: number; row_index: number; table_name: string }
+  | {
+      kind: 'table';
+      table_index: number;
+      row_index: number;
+      table_name: string;
+      /**
+       * Which column the result came from. Only set for a CROSSTAB table, where
+       * one row carries several analytes and `row_index` alone no longer
+       * identifies a result. Absent for the ordinary one-analyte-per-row shape,
+       * so existing keys are unchanged.
+       */
+      col_index?: number;
+      /** The crosstab row's own label ("Product", "Buffer"), when it has one. */
+      row_label?: string;
+    }
   | { kind: 'group'; group: string; cell: string };
 
 export interface SpecVerdict {
@@ -123,7 +137,9 @@ export interface SpecVerdict {
 export function specVerdictKey(v: SpecVerdict): string {
   const where =
     v.target.kind === 'table'
-      ? `t${v.target.table_index}r${v.target.row_index}`
+      ? `t${v.target.table_index}r${v.target.row_index}${
+          v.target.col_index === undefined ? '' : `c${v.target.col_index}`
+        }`
       : `g${v.target.group}/${v.target.cell}`;
   return `${v.scope}::${where}::${v.source}`;
 }
@@ -174,14 +190,27 @@ function norm(s: unknown): string {
 export function normalizeUnit(raw: unknown): UnitInfo {
   const s = String(raw ?? '').trim();
   if (!s) return UNKNOWN_UNIT;
-  if (isEmptyCell(s)) return UNKNOWN_UNIT;
-  const n = norm(s);
-  if (!n) return UNKNOWN_UNIT;
 
-  if (n === 'ph') return { family: 'ph', perBasis: 1, canonical: 'pH' };
+  // PERCENT FIRST, and the ordering is the whole point. `norm` keeps only
+  // alphanumerics, so a bare "%" — by far the commonest way a percent is
+  // printed — normalizes to the empty string, which made both the placeholder
+  // test and the empty-key bail below fire on it and return `unknown`, i.e.
+  // "assume it matches". A prod COA ("100/1OZ CUP CREAM CH SPRD - RASKAS") had a
+  // micro specification misfiled onto its FAT row, and 24.26% was then compared
+  // against a ≤10 CFU/g limit and reported OUT OF SPEC. Resolved properly, a
+  // percent and a count are incomparable, which is `not_checked` — the honest
+  // answer. A "%" is never a placeholder, so testing it first takes nothing
+  // away from the placeholder rule below.
+  const n = norm(s);
   if (n === 'percent' || n === 'pct' || s.includes('%')) {
     return { family: 'percent', perBasis: 1, canonical: '%' };
   }
+
+  if (isEmptyCell(s)) return UNKNOWN_UNIT;
+  // Anything else with no alphanumerics left says nothing either.
+  if (!n) return UNKNOWN_UNIT;
+
+  if (n === 'ph') return { family: 'ph', perBasis: 1, canonical: 'pH' };
   if (n === 'c' || n === 'degc' || n === 'f' || n === 'degf') {
     return { family: 'temp', perBasis: 1, canonical: s };
   }
@@ -241,15 +270,60 @@ const ABSENT_TOKENS = new Set([
   'nd',
   'nondetect',
   'nondetected',
+  'nondetectable',
   'notdetected',
+  'notdetectable',
   'nonedetected',
+  'nonedetectable',
   'none',
   'nil',
   'nonedetect',
   'nodetection',
+  'nogrowth',
+  'nogrowthdetected',
 ]);
 
-const PRESENT_TOKENS = new Set(['present', 'positive', 'pos', 'detected']);
+const PRESENT_TOKENS = new Set(['present', 'positive', 'pos', 'detected', 'detectable']);
+
+/**
+ * The absence vocabulary as it is PRINTED, hyphens and spaces intact — the one
+ * place the phrasings live, read by both `parseMeasuredValue` (a result) and
+ * `parseLimitExpression` (a spec).
+ *
+ * "Non-detectable" is here because a prod run could not judge
+ * `Listeria monocytogenes` against an `absent` limit: the lab printed
+ * "Non-detectable for Listeria mono/25g" and the value read as unparseable.
+ * That is the pathogen result that matters most, so the phrasing has to be
+ * understood — but see `parseMeasuredValue` for the deliberate limits on how
+ * far a phrase is trusted.
+ *
+ * Longest alternatives first so `negative` is not clipped to `neg`.
+ */
+const ABSENT_PHRASE_SRC =
+  'absent|negative|neg|non[\\s-]*detect(?:able|ed)?|not\\s*detect(?:able|ed)?|none\\s*detect(?:able|ed)?|no\\s*growth|no\\s*detection|nd';
+
+const PRESENT_PHRASE_SRC = 'present|positive|detectable|detected|pos';
+
+const ABSENT_PHRASE_RE = new RegExp(`^(?:${ABSENT_PHRASE_SRC})\\b`, 'i');
+
+/**
+ * Scan a whole string for qualitative claims, absence FIRST so that "not
+ * detected" is consumed as an absence rather than leaving "detected" behind to
+ * read as a presence.
+ */
+const QUAL_SCAN_RE = new RegExp(`\\b(?:${ABSENT_PHRASE_SRC})\\b|\\b(?:${PRESENT_PHRASE_SRC})\\b`, 'gi');
+const PRESENT_ONLY_RE = new RegExp(`^(?:${PRESENT_PHRASE_SRC})$`, 'i');
+
+/** Which qualitative families does this string claim? Both = it contradicts itself. */
+function qualitativeFamilies(s: string): { absent: boolean; present: boolean } {
+  let absent = false;
+  let present = false;
+  for (const m of s.match(QUAL_SCAN_RE) || []) {
+    if (PRESENT_ONLY_RE.test(m.replace(/[\s-]+/g, ''))) present = true;
+    else absent = true;
+  }
+  return { absent, present };
+}
 
 const TNTC_TOKENS = new Set(['tntc', 'toonumeroustocount', 'countless', 'overgrown', 'confluent']);
 
@@ -327,13 +401,30 @@ export function parseMeasuredValue(raw: unknown): MeasuredValue {
   const n = norm(s);
   if (TNTC_TOKENS.has(n)) return { ...base, kind: 'qualitative', qualifier: 'tntc' };
 
-  // "Absent/25g", "Negative in 25 g" — qualitative with a sample basis. Matched
-  // against the ORIGINAL string so the word boundary survives ("Absent in 25 g"
-  // collapses to "Absentin25g" once whitespace is stripped, and stops matching).
-  const qualBasis = /^(absent|negative|neg|nd|not\s*detected|none\s*detected|present|positive|detected)\b/i.exec(s);
+  // "Absent/25g", "Negative in 25 g", "Non-detectable for Listeria mono/25g" —
+  // qualitative with trailing text. Matched against the ORIGINAL string so the
+  // word boundary survives ("Absent in 25 g" collapses to "Absentin25g" once
+  // whitespace is stripped, and stops matching).
+  //
+  // ONLY A LEADING TOKEN COUNTS, and that is a deliberate line. A cell that
+  // BEGINS with an absence claim is the lab stating the result, with the rest
+  // naming the analyte or the sample basis ("...for Listeria mono/25g"). A
+  // token buried anywhere in a longer phrase is not the same statement: this
+  // engine sits downstream of ~90.6% extraction accuracy and cells routinely
+  // arrive carrying text from a neighbouring column, so a substring rule would
+  // let the word "Absent" lifted out of a specification paragraph assert that a
+  // pathogen test passed. A false "absent" on a pathogen is the worst output
+  // this module can produce; a phrase we cannot confidently read stays
+  // unparseable, which surfaces as `not_checked`, never as a pass.
+  //
+  // Same reasoning for a cell claiming BOTH ("Negative for Listeria, Positive
+  // for Salmonella"): a contradiction is refused outright rather than resolved
+  // in favour of whichever token happened to come first.
+  const qualBasis = ABSENT_PHRASE_RE.exec(s) || /^(?:present|positive|detected|detectable)\b/i.exec(s);
   if (qualBasis && !/\d+\s*(cfu|mpn)/i.test(s)) {
-    const q = norm(qualBasis[1]);
-    const qualifier: Qualifier = PRESENT_TOKENS.has(q) ? 'present' : 'absent';
+    const fam = qualitativeFamilies(s);
+    if (fam.absent && fam.present) return base; // contradictory — not readable
+    const qualifier: Qualifier = fam.present ? 'present' : 'absent';
     return { ...base, kind: 'qualitative', qualifier, unit: null };
   }
 
@@ -385,7 +476,7 @@ export function parseLimitExpression(raw: unknown): SpecLimit | null {
   const unit = trailingUnit(s);
   const n = norm(s);
 
-  if (ABSENT_TOKENS.has(n) || /^(absent|negative|nd|not\s*detected|none\s*detected)\b/i.test(s)) {
+  if (ABSENT_TOKENS.has(n) || ABSENT_PHRASE_RE.test(s)) {
     return { operator: 'absent', min: null, max: null, unit: null, raw: s, basis_grams: basisGrams(s) };
   }
 
@@ -1117,6 +1208,104 @@ export interface ConfiguredCheckResult {
    * so the gap is discoverable without being noisy.
    */
   unmatched: string[];
+  /**
+   * Labels of crosstab rows recognised as laboratory controls and therefore not
+   * judged as product ("Buffer", "Negative Control"). Same quiet-count contract
+   * as `unmatched`: skipped rows are never silently deleted, because "there were
+   * rows here we chose not to grade" is exactly what this module refuses to keep
+   * to itself.
+   */
+  control_rows: string[];
+}
+
+/**
+ * CROSSTAB TABLES — a shape `detectTableShape` cannot describe.
+ *
+ * Two are in production and both were being dropped entirely by the row loop
+ * below: no verdict, no `not_checked`, no `unmatched`. Silence is precisely the
+ * failure this module exists to prevent, so they are detected here instead.
+ *
+ *   (a) a leading LABEL column, then one column per analyte
+ *       ["Sample","Coliform","Aerobic"] / ["Product","<1","20"]
+ *   (b) EVERY column an analyte
+ *       ["FAT","MOISTURE","pH","SALT","COLIFORMS","YEAST/MOLD"]
+ *
+ * Detection deliberately lives HERE and not in `detectTableShape`, which is
+ * analyte-blind by design: the only thing that tells these apart from an
+ * ordinary table is the configured `spec_tests` list, which is in scope only in
+ * `checkConfiguredLimits`.
+ */
+interface Crosstab {
+  /** Column index of the row/sample label, or -1 when every column is an analyte. */
+  labelIndex: number;
+  /** Column indices to judge, in order. */
+  resultIndexes: number[];
+}
+
+/**
+ * A crosstab is claimed only when two or more headers name DISTINCT configured
+ * analytes. One match is not enough — a two-column table whose second header
+ * happens to be an analyte name is far more likely to be an ordinary table we
+ * failed to read than a crosstab.
+ */
+function detectCrosstab(headers: string[], tests: SpecTestDef[]): Crosstab | null {
+  if (headers.length < 2) return null;
+  const matched = headers.map((h) => matchSpecTest(h, tests));
+  const distinct = new Set(matched.filter(Boolean).map((t) => (t as SpecTestDef).id));
+  if (distinct.size < 2) return null;
+  // Only a LEADING non-analyte column is treated as the row label. A
+  // non-analyte column anywhere else is judged like any other, which routes it
+  // into the quiet `unmatched` count rather than dropping it unseen.
+  const labelIndex = matched[0] === null ? 0 : -1;
+  const resultIndexes = headers.map((_, i) => i).filter((i) => i !== labelIndex);
+  return { labelIndex, resultIndexes };
+}
+
+/**
+ * Row labels that name a laboratory CONTROL rather than the product.
+ *
+ * "Buffer" on a micro crosstab is the negative control — the sterile blank the
+ * lab runs beside the sample. Judging it as product data is wrong in both
+ * directions: a contaminated control raises an alarm about a product that was
+ * never tested that way, and — worse — a reviewer who learns to wave off "that's
+ * just the buffer" has been trained to wave off the real failure sitting next to
+ * it.
+ *
+ * EXACT match on the normalized label, never substring. The failure modes are
+ * not symmetric: mistaking a control for product costs one dismissible alert,
+ * while mistaking product for a control silently drops a real result, which is
+ * the false negative this whole module is built to avoid. So a label this list
+ * does not recognise verbatim gets judged.
+ */
+const CONTROL_ROW_LABELS = new Set([
+  'buffer',
+  'buffers',
+  'buffercontrol',
+  'buffercontrols',
+  'blank',
+  'blanks',
+  'blankcontrol',
+  'control',
+  'controls',
+  'negativecontrol',
+  'negativecontrols',
+  'negcontrol',
+  'positivecontrol',
+  'poscontrol',
+  'media',
+  'mediacontrol',
+  'mediablank',
+  'sterility',
+  'sterilitycontrol',
+  'water',
+  'watercontrol',
+  'waterblank',
+]);
+
+/** Is this crosstab row a laboratory control rather than the product? */
+export function isControlRowLabel(label: unknown): boolean {
+  const key = norm(label);
+  return !!key && CONTROL_ROW_LABELS.has(key);
 }
 
 /**
@@ -1137,7 +1326,8 @@ export function checkConfiguredLimits(
   const resolved = resolveSpecLimits(limits, ctx);
   const verdicts: SpecVerdict[] = [];
   const unmatched = new Set<string>();
-  if (tests.length === 0) return { verdicts, unmatched: [] };
+  const controlRows = new Set<string>();
+  if (tests.length === 0) return { verdicts, unmatched: [], control_rows: [] };
 
   const judge = (
     scope: string,
@@ -1229,7 +1419,48 @@ export function checkConfiguredLimits(
 
   for (const src of sources) {
     (src.tables ?? []).forEach((table, ti) => {
-      const shape = detectTableShape(table.headers || []);
+      const headers = table.headers || [];
+      const shape = detectTableShape(headers);
+
+      // Crosstab first, and only when the ordinary shape found neither a result
+      // nor a spec column — a table that HAS a result column is walked by the
+      // row loop below, and a table is never walked twice.
+      if (shape.result === -1 && shape.spec === -1) {
+        const cross = detectCrosstab(headers, tests);
+        if (cross) {
+          (table.rows || []).forEach((row, ri) => {
+            const cell = (i: number) => (i >= 0 ? String(row[i] ?? '').trim() : '');
+            const label = cell(cross.labelIndex);
+            if (isControlRowLabel(label)) {
+              // Counted, not judged, and not deleted either — see
+              // CONTROL_ROW_LABELS.
+              controlRows.add(label);
+              return;
+            }
+            for (const ci of cross.resultIndexes) {
+              judge(
+                src.scope,
+                {
+                  kind: 'table',
+                  table_index: ti,
+                  row_index: ri,
+                  table_name: table.name || '',
+                  col_index: ci,
+                  ...(label ? { row_label: label } : {}),
+                },
+                headers[ci] ?? '',
+                cell(ci),
+                // A crosstab carries its unit inside the cell ("<10 CFU/g",
+                // "33.09%") and prints no spec of its own.
+                '',
+                ''
+              );
+            }
+          });
+          return;
+        }
+      }
+
       if (shape.result === -1) return;
       (table.rows || []).forEach((row, ri) => {
         const cell = (i: number) => (i >= 0 ? String(row[i] ?? '').trim() : '');
@@ -1260,7 +1491,7 @@ export function checkConfiguredLimits(
     }
   }
 
-  return { verdicts, unmatched: [...unmatched] };
+  return { verdicts, unmatched: [...unmatched], control_rows: [...controlRows] };
 }
 
 /**

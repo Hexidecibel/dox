@@ -9,6 +9,7 @@ import { attachLotToCoaDocument, extractLotNumber, extractSubLotCode } from '../
 import { normalizeLotNumber, normalizeSubLotCode, applyLotScheme, type LotScheme } from '../entities/lots';
 import { getLearnedPreferences } from '../learnedPreferences';
 import type { CoaRecordsPayload } from '../../../shared/types';
+import { buildFlatExtendedMetadata } from '../../../shared/coaExtendedMetadata';
 import type {
   QueueItem,
   ApproveOptions,
@@ -285,6 +286,19 @@ async function persistReviewerCaptures(
   }
 }
 
+/**
+ * Build the `extended_metadata` payload for the FLAT (single-record) COA path.
+ *
+ * The implementation lives in `shared/coaExtendedMetadata.ts` and is re-exported
+ * here so existing importers (and the approve path below) keep their import
+ * site. It is in shared/ because `bin/backfill-coa-extended-metadata` — which
+ * fills this column in for every COA approved BEFORE this producer wrote it —
+ * must emit the identical shape, and it gets the same function via
+ * `bin/lib/shared/coaExtendedMetadata.js` (npm run build:worker-shared) rather
+ * than a hand-copied mirror that could drift.
+ */
+export { buildFlatExtendedMetadata };
+
 export async function produceCoa(
   db: D1Database,
   files: R2Bucket,
@@ -324,6 +338,13 @@ export async function produceCoa(
     if (v) primaryMetadata[k] = v as string;
   }
   const primaryMetadataStr = Object.keys(primaryMetadata).length > 0 ? JSON.stringify(primaryMetadata) : null;
+
+  // Persist the extraction tables the same way the other two producers do.
+  // Source is item.tables (processing_queue.tables) — the stored flat
+  // extraction, which is EXACTLY what registerFlatApproveSpecChecks already
+  // judges on this path: the single-document approve body carries no edited
+  // tables, reviewer table edits arrive as `tableEdits` captures instead.
+  const extendedMetadataStr = buildFlatExtendedMetadata(item.tables);
 
   // Resolve supplier with reviewer-override precedence:
   //   1. opts.supplierId — validate it exists AND belongs to this tenant; use
@@ -367,8 +388,8 @@ export async function produceCoa(
 
   // Insert document
   await db.prepare(
-    `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata)
-     VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?)`
+    `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata, extended_metadata)
+     VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       docId,
@@ -380,7 +401,8 @@ export async function produceCoa(
       externalRef,
       item.document_type_id,
       supplierId,
-      primaryMetadataStr
+      primaryMetadataStr,
+      extendedMetadataStr
     )
     .run();
 

@@ -25,6 +25,7 @@ __export(specCheck_exports, {
   compareToLimit: () => compareToLimit,
   detectTableShape: () => detectTableShape,
   formatLimit: () => formatLimit,
+  isControlRowLabel: () => isControlRowLabel,
   matchSpecTest: () => matchSpecTest,
   normalizeUnit: () => normalizeUnit,
   parseLimitExpression: () => parseLimitExpression,
@@ -38,7 +39,7 @@ __export(specCheck_exports, {
 });
 module.exports = __toCommonJS(specCheck_exports);
 function specVerdictKey(v) {
-  const where = v.target.kind === "table" ? `t${v.target.table_index}r${v.target.row_index}` : `g${v.target.group}/${v.target.cell}`;
+  const where = v.target.kind === "table" ? `t${v.target.table_index}r${v.target.row_index}${v.target.col_index === void 0 ? "" : `c${v.target.col_index}`}` : `g${v.target.group}/${v.target.cell}`;
   return `${v.scope}::${where}::${v.source}`;
 }
 var UNKNOWN_UNIT = { family: "unknown", perBasis: 1, canonical: "" };
@@ -48,13 +49,13 @@ function norm(s) {
 function normalizeUnit(raw) {
   const s = String(raw ?? "").trim();
   if (!s) return UNKNOWN_UNIT;
-  if (isEmptyCell(s)) return UNKNOWN_UNIT;
   const n = norm(s);
-  if (!n) return UNKNOWN_UNIT;
-  if (n === "ph") return { family: "ph", perBasis: 1, canonical: "pH" };
   if (n === "percent" || n === "pct" || s.includes("%")) {
     return { family: "percent", perBasis: 1, canonical: "%" };
   }
+  if (isEmptyCell(s)) return UNKNOWN_UNIT;
+  if (!n) return UNKNOWN_UNIT;
+  if (n === "ph") return { family: "ph", perBasis: 1, canonical: "pH" };
   if (n === "c" || n === "degc" || n === "f" || n === "degf") {
     return { family: "temp", perBasis: 1, canonical: s };
   }
@@ -91,14 +92,33 @@ var ABSENT_TOKENS = /* @__PURE__ */ new Set([
   "nd",
   "nondetect",
   "nondetected",
+  "nondetectable",
   "notdetected",
+  "notdetectable",
   "nonedetected",
+  "nonedetectable",
   "none",
   "nil",
   "nonedetect",
-  "nodetection"
+  "nodetection",
+  "nogrowth",
+  "nogrowthdetected"
 ]);
-var PRESENT_TOKENS = /* @__PURE__ */ new Set(["present", "positive", "pos", "detected"]);
+var PRESENT_TOKENS = /* @__PURE__ */ new Set(["present", "positive", "pos", "detected", "detectable"]);
+var ABSENT_PHRASE_SRC = "absent|negative|neg|non[\\s-]*detect(?:able|ed)?|not\\s*detect(?:able|ed)?|none\\s*detect(?:able|ed)?|no\\s*growth|no\\s*detection|nd";
+var PRESENT_PHRASE_SRC = "present|positive|detectable|detected|pos";
+var ABSENT_PHRASE_RE = new RegExp(`^(?:${ABSENT_PHRASE_SRC})\\b`, "i");
+var QUAL_SCAN_RE = new RegExp(`\\b(?:${ABSENT_PHRASE_SRC})\\b|\\b(?:${PRESENT_PHRASE_SRC})\\b`, "gi");
+var PRESENT_ONLY_RE = new RegExp(`^(?:${PRESENT_PHRASE_SRC})$`, "i");
+function qualitativeFamilies(s) {
+  let absent = false;
+  let present = false;
+  for (const m of s.match(QUAL_SCAN_RE) || []) {
+    if (PRESENT_ONLY_RE.test(m.replace(/[\s-]+/g, ""))) present = true;
+    else absent = true;
+  }
+  return { absent, present };
+}
 var TNTC_TOKENS = /* @__PURE__ */ new Set(["tntc", "toonumeroustocount", "countless", "overgrown", "confluent"]);
 var EMPTY_TOKENS = /* @__PURE__ */ new Set([
   "",
@@ -158,10 +178,11 @@ function parseMeasuredValue(raw) {
   if (!s) return base;
   const n = norm(s);
   if (TNTC_TOKENS.has(n)) return { ...base, kind: "qualitative", qualifier: "tntc" };
-  const qualBasis = /^(absent|negative|neg|nd|not\s*detected|none\s*detected|present|positive|detected)\b/i.exec(s);
+  const qualBasis = ABSENT_PHRASE_RE.exec(s) || /^(?:present|positive|detected|detectable)\b/i.exec(s);
   if (qualBasis && !/\d+\s*(cfu|mpn)/i.test(s)) {
-    const q = norm(qualBasis[1]);
-    const qualifier = PRESENT_TOKENS.has(q) ? "present" : "absent";
+    const fam = qualitativeFamilies(s);
+    if (fam.absent && fam.present) return base;
+    const qualifier = fam.present ? "present" : "absent";
     return { ...base, kind: "qualitative", qualifier, unit: null };
   }
   if (ABSENT_TOKENS.has(n)) return { ...base, kind: "qualitative", qualifier: "absent" };
@@ -199,7 +220,7 @@ function parseLimitExpression(raw) {
   if (!s || isEmptyCell(s)) return null;
   const unit = trailingUnit(s);
   const n = norm(s);
-  if (ABSENT_TOKENS.has(n) || /^(absent|negative|nd|not\s*detected|none\s*detected)\b/i.test(s)) {
+  if (ABSENT_TOKENS.has(n) || ABSENT_PHRASE_RE.test(s)) {
     return { operator: "absent", min: null, max: null, unit: null, raw: s, basis_grams: basisGrams(s) };
   }
   const range = /([+-]?[\d,]*\.?\d+)\s*(?:-|–|—|to|and)\s*([+-]?[\d,]*\.?\d+)/i.exec(s);
@@ -609,11 +630,49 @@ function toSpecLimit(l, test) {
     basis_grams: null
   };
 }
+function detectCrosstab(headers, tests) {
+  if (headers.length < 2) return null;
+  const matched = headers.map((h) => matchSpecTest(h, tests));
+  const distinct = new Set(matched.filter(Boolean).map((t) => t.id));
+  if (distinct.size < 2) return null;
+  const labelIndex = matched[0] === null ? 0 : -1;
+  const resultIndexes = headers.map((_, i) => i).filter((i) => i !== labelIndex);
+  return { labelIndex, resultIndexes };
+}
+var CONTROL_ROW_LABELS = /* @__PURE__ */ new Set([
+  "buffer",
+  "buffers",
+  "buffercontrol",
+  "buffercontrols",
+  "blank",
+  "blanks",
+  "blankcontrol",
+  "control",
+  "controls",
+  "negativecontrol",
+  "negativecontrols",
+  "negcontrol",
+  "positivecontrol",
+  "poscontrol",
+  "media",
+  "mediacontrol",
+  "mediablank",
+  "sterility",
+  "sterilitycontrol",
+  "water",
+  "watercontrol",
+  "waterblank"
+]);
+function isControlRowLabel(label) {
+  const key = norm(label);
+  return !!key && CONTROL_ROW_LABELS.has(key);
+}
 function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
   const resolved = resolveSpecLimits(limits, ctx);
   const verdicts = [];
   const unmatched = /* @__PURE__ */ new Set();
-  if (tests.length === 0) return { verdicts, unmatched: [] };
+  const controlRows = /* @__PURE__ */ new Set();
+  if (tests.length === 0) return { verdicts, unmatched: [], control_rows: [] };
   const judge = (scope, target, testName, valueRaw, unitRaw, specRaw = "") => {
     if (!testName) return;
     const test = matchSpecTest(testName, tests);
@@ -686,7 +745,41 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
   };
   for (const src of sources) {
     (src.tables ?? []).forEach((table, ti) => {
-      const shape = detectTableShape(table.headers || []);
+      const headers = table.headers || [];
+      const shape = detectTableShape(headers);
+      if (shape.result === -1 && shape.spec === -1) {
+        const cross = detectCrosstab(headers, tests);
+        if (cross) {
+          (table.rows || []).forEach((row, ri) => {
+            const cell = (i) => i >= 0 ? String(row[i] ?? "").trim() : "";
+            const label = cell(cross.labelIndex);
+            if (isControlRowLabel(label)) {
+              controlRows.add(label);
+              return;
+            }
+            for (const ci of cross.resultIndexes) {
+              judge(
+                src.scope,
+                {
+                  kind: "table",
+                  table_index: ti,
+                  row_index: ri,
+                  table_name: table.name || "",
+                  col_index: ci,
+                  ...label ? { row_label: label } : {}
+                },
+                headers[ci] ?? "",
+                cell(ci),
+                // A crosstab carries its unit inside the cell ("<10 CFU/g",
+                // "33.09%") and prints no spec of its own.
+                "",
+                ""
+              );
+            }
+          });
+          return;
+        }
+      }
       if (shape.result === -1) return;
       (table.rows || []).forEach((row, ri) => {
         const cell = (i) => i >= 0 ? String(row[i] ?? "").trim() : "";
@@ -715,7 +808,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       }
     }
   }
-  return { verdicts, unmatched: [...unmatched] };
+  return { verdicts, unmatched: [...unmatched], control_rows: [...controlRows] };
 }
 function validateLimitShape(input) {
   const { operator } = input;
@@ -747,6 +840,7 @@ function validateLimitShape(input) {
   compareToLimit,
   detectTableShape,
   formatLimit,
+  isControlRowLabel,
   matchSpecTest,
   normalizeUnit,
   parseLimitExpression,

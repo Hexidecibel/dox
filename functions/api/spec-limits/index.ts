@@ -80,6 +80,62 @@ export async function validateScope(
   return null;
 }
 
+/**
+ * Is there already a limit for this analyte at this exact scope?
+ *
+ * Migration 0086 makes (tenant, analyte, supplier, doctype, product) unique,
+ * with the three nullable scope columns COALESCEd to '' in the index — SQLite
+ * treats NULLs as distinct, so without that fold the commonest row of all (the
+ * tenant-wide default, every scope column NULL) would be exempt from the
+ * constraint. The same fold is applied here so the lookup and the index agree.
+ *
+ * The check exists so a duplicate arrives as a sentence rather than as the 500
+ * a raw constraint violation would produce. Two limits at one scope are not a
+ * harmless duplicate: `resolveSpecLimits` would pick one of them by updated_at
+ * and the other would sit in the admin list looking active while judging
+ * nothing.
+ *
+ * @returns the conflicting limit's id, or null.
+ */
+export async function findScopeConflict(
+  db: D1Database,
+  tenantId: string,
+  specTestId: string,
+  scope: { supplier_id?: string | null; document_type_id?: string | null; product_id?: string | null },
+  excludeId?: string
+): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT id FROM spec_limits
+        WHERE tenant_id = ?
+          AND spec_test_id = ?
+          AND COALESCE(supplier_id, '') = ?
+          AND COALESCE(document_type_id, '') = ?
+          AND COALESCE(product_id, '') = ?
+          AND id != ?`
+    )
+    .bind(
+      tenantId,
+      specTestId,
+      scope.supplier_id || '',
+      scope.document_type_id || '',
+      scope.product_id || '',
+      excludeId || ''
+    )
+    .first<{ id: string }>();
+  return row ? row.id : null;
+}
+
+export function scopeConflictResponse(existingId: string): Response {
+  return new Response(
+    JSON.stringify({
+      error: 'A limit for that analyte already exists at that scope — edit it instead.',
+      existing_id: existingId,
+    }),
+    { status: 409, headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
 /** GET /api/spec-limits — list, joined to the analyte and the scope names. */
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -173,6 +229,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const scopeError = await validateScope(context.env.DB, tenantId, body);
     if (scopeError) return badRequest(scopeError);
+
+    const conflict = await findScopeConflict(context.env.DB, tenantId, body.spec_test_id, body);
+    if (conflict) return scopeConflictResponse(conflict);
 
     const id = generateId();
     await context.env.DB.prepare(

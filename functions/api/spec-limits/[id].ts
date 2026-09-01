@@ -17,7 +17,14 @@ import {
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import { validateLimitShape } from '../../../shared/specCheck';
-import { badRequest, num, validateScope, type LimitBody } from './index';
+import {
+  badRequest,
+  num,
+  validateScope,
+  findScopeConflict,
+  scopeConflictResponse,
+  type LimitBody,
+} from './index';
 import type { Env, User } from '../../lib/types';
 
 const SEVERITIES = new Set(['warn', 'alert']);
@@ -46,6 +53,27 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
 
     const scopeError = await validateScope(context.env.DB, limit.tenant_id as string, body);
     if (scopeError) return badRequest(scopeError);
+
+    // A PUT may MOVE a limit's scope, so the conflict check runs on the
+    // resulting scope, not the submitted fields, and excludes this row.
+    const resultingScope = {
+      supplier_id:
+        body.supplier_id !== undefined ? body.supplier_id || null : (limit.supplier_id as string | null),
+      document_type_id:
+        body.document_type_id !== undefined
+          ? body.document_type_id || null
+          : (limit.document_type_id as string | null),
+      product_id:
+        body.product_id !== undefined ? body.product_id || null : (limit.product_id as string | null),
+    };
+    const conflict = await findScopeConflict(
+      context.env.DB,
+      limit.tenant_id as string,
+      limit.spec_test_id as string,
+      resultingScope,
+      limit.id as string
+    );
+    if (conflict) return scopeConflictResponse(conflict);
 
     const updates: string[] = [];
     const params: (string | number | null)[] = [];

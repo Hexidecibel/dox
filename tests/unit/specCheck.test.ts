@@ -27,6 +27,8 @@ import {
   matchSpecTest,
   checkConfiguredLimits,
   resultRestatesSpec,
+  specVerdictKey,
+  isControlRowLabel,
   type SpecLimit,
 } from '../../shared/specCheck';
 
@@ -517,6 +519,7 @@ describe('checkConfiguredLimits — our limit, not theirs', () => {
     expect(checkConfiguredLimits(src([['Coliform', '', '40', 'CFU/g']]), [], [], {})).toEqual({
       verdicts: [],
       unmatched: [],
+      control_rows: [],
     });
   });
 });
@@ -701,5 +704,340 @@ describe('a result identical to its own printed spec is not a measurement', () =
       includePasses: true,
     });
     expect(pass.verdicts[0].verdict).toBe('in_spec');
+  });
+});
+
+describe('a bare "%" is a unit, not a blank', () => {
+  // ORDERING BUG, live on prod. `norm()` keeps only alphanumerics, so "%" became
+  // "" and returned the unknown family — which the comparator reads as "assume
+  // it matches". A percent then compared cleanly against a CFU/g limit.
+  it('resolves "%" to the percent family', () => {
+    expect(normalizeUnit('%').family).toBe('percent');
+    expect(normalizeUnit(' % ').family).toBe('percent');
+    expect(normalizeUnit('%%').family).toBe('percent');
+    expect(normalizeUnit('% fat').family).toBe('percent');
+    expect(normalizeUnit('percent').family).toBe('percent');
+    expect(normalizeUnit('pct').family).toBe('percent');
+  });
+
+  it('still reads a genuinely empty or placeholder unit as unknown', () => {
+    // The 45-row placeholder fix must survive: a blank is "assume it matches".
+    for (const p of ['', '  ', 'N/A', 'n.a.', 'na', '--', '—', 'null', 'none', '-']) {
+      expect(normalizeUnit(p).family, `unit ${JSON.stringify(p)}`).toBe('unknown');
+    }
+  });
+
+  it('refuses to compare a percent against a count', () => {
+    expect(unitFactor(normalizeUnit('%'), normalizeUnit('CFU/g'))).toBeNull();
+    expect(unitFactor(normalizeUnit('CFU/g'), normalizeUnit('%'))).toBeNull();
+    expect(unitFactor(normalizeUnit('%'), normalizeUnit('%'))).toBe(1);
+  });
+
+  it('does not alert on the RASKAS row, where a micro spec landed on the FAT row', () => {
+    // Verbatim from prod document "100/1OZ CUP CREAM CH SPRD - RASKAS": the
+    // extractor misfiled a micro specification onto the fat row, and 24.26%
+    // was reported as exceeding a 10 CFU/g limit.
+    const raskas = [
+      {
+        scope: 'record[0]',
+        tables: [
+          {
+            name: 'results',
+            headers: ['test', 'result', 'specification'],
+            rows: [['FAT', '24.26%', '<10 CFU/g']],
+          },
+        ],
+      },
+    ];
+    const printed = checkPrintedSpecs(raskas);
+    expect(printed).toHaveLength(1);
+    expect(printed[0].verdict).toBe('not_checked');
+    expect(printed[0].reason).toMatch(/not comparable/);
+
+    // And the same row against one of OUR limits, in CFU/g.
+    const tests = [{ id: 'st_fat', name: 'FAT', aliases: [] }];
+    const limit = {
+      id: 'l_fat',
+      spec_test_id: 'st_fat',
+      operator: '<=' as const,
+      value_min: null,
+      value_max: 10,
+      unit: 'CFU/g',
+      severity: 'alert' as const,
+      active: true,
+      supplier_id: null,
+      document_type_id: null,
+      product_id: null,
+    };
+    const { verdicts } = checkConfiguredLimits(raskas, tests, [limit], {});
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0].verdict).toBe('not_checked');
+  });
+
+  it('still judges a percent against a percent limit', () => {
+    const tests = [{ id: 'st_fat', name: 'FAT', aliases: [] }];
+    const limit = {
+      id: 'l_fat',
+      spec_test_id: 'st_fat',
+      operator: 'between' as const,
+      value_min: 30,
+      value_max: 35,
+      unit: '%',
+      severity: 'warn' as const,
+      active: true,
+      supplier_id: null,
+      document_type_id: null,
+      product_id: null,
+    };
+    const src = (v: string) => [
+      { scope: 'record[0]', tables: [{ name: 'r', headers: ['test', 'result'], rows: [['FAT', v]] }] },
+    ];
+    expect(checkConfiguredLimits(src('24.26%'), tests, [limit], {}).verdicts[0]).toMatchObject({
+      verdict: 'out_of_spec',
+    });
+    expect(
+      checkConfiguredLimits(src('33.09%'), tests, [limit], {}, { includePasses: true }).verdicts[0]
+    ).toMatchObject({ verdict: 'in_spec' });
+  });
+});
+
+describe('the absence vocabulary labs actually print', () => {
+  const absent = [
+    'Absent',
+    'Absent/25g',
+    'Negative',
+    'Neg',
+    'ND',
+    'Not Detected',
+    'not detected',
+    'None Detected',
+    'Non-detectable',
+    'Nondetectable',
+    'non detected',
+    'No Growth',
+    'no growth',
+  ];
+
+  it('reads every spelling of "nothing found" as absent', () => {
+    for (const s of absent) {
+      expect(parseMeasuredValue(s), `value ${JSON.stringify(s)}`).toMatchObject({
+        kind: 'qualitative',
+        qualifier: 'absent',
+      });
+    }
+  });
+
+  it('reads the prod Listeria cell that could not be judged', () => {
+    // From a live run: "Listeria monocytogenes could not be judged against our
+    // limit of absent — result could not be read as a value."
+    const v = parseMeasuredValue('Non-detectable for Listeria mono/25g');
+    expect(v).toMatchObject({ kind: 'qualitative', qualifier: 'absent' });
+
+    const tests = [{ id: 'st_lm', name: 'Listeria monocytogenes', aliases: ['Listeria mono'] }];
+    const limit = {
+      id: 'l_lm',
+      spec_test_id: 'st_lm',
+      operator: 'absent' as const,
+      value_min: null,
+      value_max: null,
+      unit: null,
+      severity: 'alert' as const,
+      active: true,
+      supplier_id: null,
+      document_type_id: null,
+      product_id: null,
+    };
+    const src = [
+      {
+        scope: 'record[0]',
+        tables: [
+          {
+            name: 'micro',
+            headers: ['test', 'result'],
+            rows: [['Listeria monocytogenes', 'Non-detectable for Listeria mono/25g']],
+          },
+        ],
+      },
+    ];
+    expect(checkConfiguredLimits(src, tests, [limit], {}).verdicts).toEqual([]);
+    const withPasses = checkConfiguredLimits(src, tests, [limit], {}, { includePasses: true });
+    expect(withPasses.verdicts[0]).toMatchObject({ verdict: 'in_spec' });
+  });
+
+  it('still reads presence, and still refuses a count dressed as a phrase', () => {
+    expect(parseMeasuredValue('Positive')).toMatchObject({ qualifier: 'present' });
+    expect(parseMeasuredValue('Detected in 25 g')).toMatchObject({ qualifier: 'present' });
+    // A phrase carrying a real enumeration is a count, not a qualitative claim.
+    expect(parseMeasuredValue('Negative, 20 CFU/g').kind).not.toBe('qualitative');
+  });
+
+  it('will not read an absence token buried inside a longer phrase', () => {
+    // Only a LEADING token counts. Cells routinely arrive carrying text from a
+    // neighbouring column, and a false "absent" on a pathogen is the worst
+    // output this module can produce — so an unreadable phrase stays
+    // unparseable, which surfaces as not_checked.
+    for (const s of [
+      'Salmonella spec is Absent/25g',
+      'Tested to a standard of not detected',
+      'See attached: negative',
+    ]) {
+      expect(parseMeasuredValue(s).kind, `value ${JSON.stringify(s)}`).toBe('unparseable');
+    }
+  });
+
+  it('refuses a cell that claims both absence and presence', () => {
+    expect(parseMeasuredValue('Negative for Listeria, Positive for Salmonella').kind).toBe(
+      'unparseable'
+    );
+    expect(parseMeasuredValue('Not detected; presumptive positive').kind).toBe('unparseable');
+  });
+
+  it('reads the same vocabulary in a printed SPEC cell', () => {
+    expect(parseLimitExpression('Non-detectable')).toMatchObject({ operator: 'absent' });
+    expect(parseLimitExpression('No Growth')).toMatchObject({ operator: 'absent' });
+    expect(parseLimitExpression('Negative/25g')).toMatchObject({ operator: 'absent', basis_grams: 25 });
+    // And nothing that used to parse as a number has become an absence limit.
+    expect(parseLimitExpression('NMT 100')).toMatchObject({ operator: '<=', max: 100 });
+    expect(parseLimitExpression('not more than 100')).toMatchObject({ operator: '<=', max: 100 });
+    expect(parseLimitExpression('no more than 100')).toMatchObject({ operator: '<=', max: 100 });
+  });
+});
+
+describe('crosstab tables are judged, not skipped', () => {
+  // 7 of 100 prod Andersen documents and several Schreiber documents were
+  // dropped entirely by the row loop: no verdict, no not_checked, no unmatched.
+  const tests = [
+    { id: 'st_coli', name: 'Coliform', aliases: ['Coliforms'] },
+    { id: 'st_aer', name: 'Aerobic', aliases: ['Aerobic Plate Count'] },
+    { id: 'st_fat', name: 'Fat', aliases: [] },
+  ];
+  const mk = (id: string, spec_test_id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    spec_test_id,
+    operator: '<=' as const,
+    value_min: null,
+    value_max: 10,
+    unit: 'CFU/g',
+    severity: 'alert' as const,
+    active: true,
+    supplier_id: null,
+    document_type_id: null,
+    product_id: null,
+    ...extra,
+  });
+  const limits = [
+    mk('l_coli', 'st_coli'),
+    mk('l_aer', 'st_aer'),
+    mk('l_fat', 'st_fat', { operator: 'between' as const, value_min: 30, value_max: 35, unit: '%' }),
+  ];
+  const table = (headers: string[], rows: string[][]) => [
+    { scope: 'record[0]', tables: [{ name: 'micro', headers, rows }] },
+  ];
+
+  it('shape (a): a leading label column, then one column per analyte', () => {
+    const src = table(
+      ['Sample', 'Coliform', 'Aerobic'],
+      [
+        ['Buffer', '<1', '<1'],
+        ['Product', '<1', '20'],
+      ]
+    );
+    const r = checkConfiguredLimits(src, tests, limits, {});
+    expect(r.verdicts).toHaveLength(1);
+    expect(r.verdicts[0]).toMatchObject({
+      verdict: 'out_of_spec',
+      test_name_raw: 'Aerobic',
+      value_raw: '20',
+    });
+    expect(r.verdicts[0].target).toMatchObject({ kind: 'table', row_index: 1, col_index: 2, row_label: 'Product' });
+  });
+
+  it('shape (b): every column an analyte', () => {
+    const src = table(
+      ['FAT', 'MOISTURE', 'pH', 'SALT', 'COLIFORMS', 'YEAST/MOLD'],
+      [['33.09%', '54.67%', '4.62', '1.10%', '<10 CFU/g', '<10 CFU/g']]
+    );
+    const r = checkConfiguredLimits(src, tests, limits, {}, { includePasses: true });
+    expect(r.verdicts.map((v) => v.test_name_raw).sort()).toEqual(['COLIFORMS', 'FAT']);
+    expect(r.verdicts.every((v) => v.verdict === 'in_spec')).toBe(true);
+    // The columns we hold no limit for land in the quiet unmatched count rather
+    // than vanishing.
+    expect(r.unmatched.sort()).toEqual(['MOISTURE', 'SALT', 'YEAST/MOLD', 'pH']);
+    // And a failing fat reading in that same shape is caught.
+    const bad = checkConfiguredLimits(
+      table(['FAT', 'COLIFORMS'], [['24.26%', '<10 CFU/g']]),
+      tests,
+      limits,
+      {}
+    );
+    expect(bad.verdicts).toHaveLength(1);
+    expect(bad.verdicts[0]).toMatchObject({ verdict: 'out_of_spec', test_name_raw: 'FAT' });
+  });
+
+  it('gives each analyte in a crosstab row its own stable key', () => {
+    const r = checkConfiguredLimits(
+      table(['Sample', 'Coliform', 'Aerobic'], [['Product', '40', '50']]),
+      tests,
+      limits,
+      {}
+    );
+    expect(r.verdicts).toHaveLength(2);
+    expect(new Set(r.verdicts.map(specVerdictKey)).size).toBe(2);
+  });
+
+  it('does NOT judge a laboratory control row as product', () => {
+    // "Buffer" is the negative control. A contaminated control would raise an
+    // alarm about a product that was never tested that way — and a reviewer
+    // taught to wave off "that's just the buffer" will wave off the real one.
+    const r = checkConfiguredLimits(
+      table(
+        ['Sample', 'Coliform', 'Aerobic'],
+        [
+          ['Buffer', '400', '900'],
+          ['Product', '<1', '<1'],
+        ]
+      ),
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    expect(r.verdicts.every((v) => (v.target as { row_label?: string }).row_label === 'Product')).toBe(true);
+    expect(r.verdicts.some((v) => v.verdict === 'out_of_spec')).toBe(false);
+    // Skipped, but never silently: the row's existence is reported.
+    expect(r.control_rows).toEqual(['Buffer']);
+  });
+
+  it('recognises the control vocabulary exactly, and nothing looser', () => {
+    for (const l of ['Buffer', 'buffer', 'Blank', 'CONTROL', 'Negative Control', 'neg control', 'Media', 'Media Control', 'Sterility', 'Water']) {
+      expect(isControlRowLabel(l), `label ${JSON.stringify(l)}`).toBe(true);
+    }
+    // Substring matching would silently drop product rows, which is the false
+    // negative this module exists to avoid.
+    for (const l of ['Product', 'Buffered Cream Cheese', 'Control Sample #4', 'Composite', '']) {
+      expect(isControlRowLabel(l), `label ${JSON.stringify(l)}`).toBe(false);
+    }
+  });
+
+  it('does not crosstab a table that already has a result column', () => {
+    // No double-counting: an ordinary table is walked once, by the row loop.
+    const r = checkConfiguredLimits(
+      table(['Coliform', 'Result', 'Aerobic'], [['Coliform', '40', 'x']]),
+      tests,
+      limits,
+      {}
+    );
+    expect(r.verdicts).toHaveLength(1);
+    expect(r.verdicts[0].target).not.toHaveProperty('col_index');
+  });
+
+  it('needs two distinct analyte headers before it claims a crosstab', () => {
+    const r = checkConfiguredLimits(
+      table(['Description', 'Coliform'], [['Something', '40']]),
+      tests,
+      limits,
+      {}
+    );
+    expect(r.verdicts).toEqual([]);
   });
 });

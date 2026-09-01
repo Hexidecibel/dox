@@ -82,6 +82,7 @@ import m0082 from '../../migrations/0082_processing_queue_text_model.sql?raw';
 import m0083 from '../../migrations/0083_queue_rejection_reason.sql?raw';
 import m0084 from '../../migrations/0084_spec_limits.sql?raw';
 import m0085 from '../../migrations/0085_document_spec_checks.sql?raw';
+import m0086 from '../../migrations/0086_spec_limits_unique_scope.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -93,6 +94,7 @@ const migrations: string[] = [
   m0064, m0065, m0066, m0067, m0068, m0069, m0070, m0071,
   m0072, m0073, m0074, m0075,
   m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
+  m0086,
 ];
 
 /**
