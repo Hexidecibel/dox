@@ -83,10 +83,25 @@ measurement. Adding that spelling = 7 instant false alerts. AJ has been told to 
 of <10" — the reader wrote a coliform row's spec onto non-micro rows. **Both sides unitless, so no
 engine guard can catch it.** Fix is upstream only.
 
+### SHIPPED TO PROD 2026-09-01 (after the entry above was first written)
+- **Pages deploy `272cbb3b`** (Production / master / source `19fc759`). All engine fixes are LIVE.
+  Verified against the live API: queue item `6b11616205…` returns `unmatched: 5`, matching the
+  local computation exactly.
+- **Migration 0086 applied and stamped**, id **69** in `d1_migrations`. Order was deliberate —
+  deploy FIRST (the 409 handler), index SECOND, so there was never a window where a duplicate-scope
+  create hit a bare constraint violation.
+- ⚠️ **CLAUDE.md is wrong about the tracking table.** It says prod uses `_migrations` topping out
+  at 0075. Prod has **no `_migrations` table at all** — it tracks in **`d1_migrations`**, which
+  topped out at `0079_fts_registry.sql` (id 68) before tonight. `bin/migrate` writes to
+  `_migrations`, so running it against prod would CREATE a second competing table. 0086 was applied
+  with `wrangler d1 execute --file` and stamped into `d1_migrations` by hand instead. 0080–0085
+  remain applied-but-unstamped; that gap was left alone deliberately.
+- ⚠️ **Deploying from a detached-HEAD git worktree silently produces a PREVIEW deployment**, not
+  production — `wrangler pages deploy` reads the branch name and a detached worktree reports
+  `HEAD`. The first attempt landed as Preview and had to be redone with
+  `--branch master --commit-hash <sha>`. Always verify with `wrangler pages deployment list`.
+
 ### BLOCKED / OPEN
-- **Migration 0086 is deliberately NOT on prod.** It pairs with the Pages deploy carrying the 409
-  handling; applying the index alone puts a 500 on prod. Needs a token with **`Cloudflare Pages :
-  Edit`**. The import didn't need it — the importer upserts in application code.
 - **Extraction repair workstream was IN FLIGHT at session end** (merged labels, boilerplate lifting,
   spec-column contamination, dilution-as-result, junk values, 34 header shapes). Was editing
   `bin/process-worker` and writing `sql/`. **`git status` first.** Its fix is forward-only —

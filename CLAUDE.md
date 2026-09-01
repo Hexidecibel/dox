@@ -91,7 +91,7 @@ database looks like *now*. Prefer SCHEMA.md when you need current columns.
 `0023_processing_status.sql`). Ordering is deterministic by filename (multi_product
 before processing_status), but never assume one file per number when scripting.
 
-⚠️ The chain is **not re-runnable from scratch**, and prod's `_migrations` tracking
+⚠️ The chain is **not re-runnable from scratch**. Prod tracks in **`d1_migrations`** (NOT `_migrations` — that table does not exist on prod; `bin/migrate` would create a competing one). Prod tracking
 is drifted (0059-0067 applied-but-unstamped). Apply new migrations to prod
 surgically and stamp them — never bulk `migrate:remote`. New migrations must also
 be added to `tests/helpers/db.ts`.
