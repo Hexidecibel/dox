@@ -76,6 +76,7 @@ import { CopyId } from '../components/CopyId';
 import { ProductLinker } from '../components/ProductLinker';
 import { useAuth } from '../contexts/AuthContext';
 import SupplierAutocomplete, { type SupplierValue } from '../components/SupplierAutocomplete';
+import EntityNotes from '../components/EntityNotes';
 import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { helpContent } from '../lib/helpContent';
@@ -1353,6 +1354,20 @@ export function DocumentDetail() {
           </Box>
         </Paper>
       )}
+
+      {/* Notes (migration 0088) — a THREAD, distinct from the Description  */}
+      {/* field edited in the Edit dialog above. Description is one            */}
+      {/* overwritable sentence about what the document IS; a note is what     */}
+      {/* somebody SAID about it, stamped with who and when, and it cannot be  */}
+      {/* rewritten afterwards. Placed below the structured panels and above   */}
+      {/* the preview: the metadata is the document, the notes are the         */}
+      {/* conversation about it, and the conversation reads before the bytes.  */}
+      <EntityNotes
+        entityType="document"
+        entityId={doc.id}
+        tenantId={doc.tenant_id}
+        description="No notes on this document yet. Notes are timestamped, attributed and permanent — for a one-line summary of the document itself, edit its description instead."
+      />
 
       {/* Document Preview */}
       {previewVersion && (

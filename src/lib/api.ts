@@ -35,6 +35,10 @@ import type {
   DocumentFacetLinkInput,
   RequirementListResponse,
   RequirementGetResponse,
+  NoteEntityType,
+  NoteListResponse,
+  NoteGetResponse,
+  EntityNote,
   ClaimTypeListResponse,
   ClaimTypeGetResponse,
   ClaimRuleListResponse,
@@ -2403,5 +2407,66 @@ export const api = {
       delete: (id: string) =>
         fetchApi<{ success: boolean }>(`/search/saved/${id}`, { method: 'DELETE' }),
     },
+  },
+
+  /**
+   * In-system notes on any record (migration 0088). ONE client for every
+   * parent type — suppliers and documents today, requirement lines next —
+   * because the note itself has no per-parent shape.
+   *
+   * Deliberately incomplete: there is no `update`. Notes are append-only; a
+   * correction is a new note. See migrations/0088_entity_notes.sql.
+   */
+  notes: {
+    /**
+     * GET /api/notes?entity_type=&entity_id= — newest first.
+     * Both params are required; this reads the thread ON one record.
+     * `include_deleted` is honoured for org_admin/super_admin only.
+     * Returns: { notes, total, limit, offset }
+     */
+    list: (params: {
+      entity_type: NoteEntityType;
+      entity_id: string;
+      include_deleted?: boolean;
+      tenant_id?: string;
+      limit?: number;
+      offset?: number;
+    }) => {
+      const query = new URLSearchParams({
+        entity_type: params.entity_type,
+        entity_id: params.entity_id,
+      });
+      if (params.include_deleted) query.set('include_deleted', '1');
+      if (params.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params.limit) query.set('limit', String(params.limit));
+      if (params.offset) query.set('offset', String(params.offset));
+      return fetchApi<NoteListResponse>(`/notes?${query.toString()}`);
+    },
+
+    /** GET /api/notes/:id */
+    get: (id: string) => fetchApi<NoteGetResponse>(`/notes/${id}`),
+
+    /**
+     * POST /api/notes — post a note. Not idempotent: two identical posts are
+     * two notes, because two things were said.
+     */
+    create: (data: {
+      entity_type: NoteEntityType;
+      entity_id: string;
+      body: string;
+      tenant_id?: string;
+    }) =>
+      fetchApi<{ note: EntityNote }>('/notes', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * DELETE /api/notes/:id — RETRACT, not erase. The row is kept and stamped
+     * with who withdrew it; it stops appearing in the default read. Author or
+     * admin only.
+     */
+    retract: (id: string) =>
+      fetchApi<{ success: boolean }>(`/notes/${id}`, { method: 'DELETE' }),
   },
 };

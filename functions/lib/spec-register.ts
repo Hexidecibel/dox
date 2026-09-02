@@ -24,6 +24,7 @@
 
 import { generateId } from './db';
 import { sendEmail, buildSpecAlertEmail } from './email';
+import { mintAlertLink, alertLinkUrl } from './alert-links';
 import type { SpecVerdict } from '../../shared/specCheck';
 import type { ConfiguredLimit } from '../../shared/specCheck';
 
@@ -224,6 +225,15 @@ export async function notifySpecFailures(
     );
     if (recipients.length === 0) return 0;
 
+    // A fresh, expiring, token-gated landing page per alert. Best-effort: if
+    // minting fails the email still goes out, just without the no-login link.
+    // A new link every time so an old forwarded one never widens its scope.
+    const alertToken = await mintAlertLink(db, {
+      tenantId: ctx.tenantId,
+      kind: 'spec_alert',
+      documentId: ctx.documentId,
+    });
+
     const { subject, html } = buildSpecAlertEmail({
       tenantName: ctx.tenantName,
       documentTitle: ctx.documentTitle,
@@ -236,6 +246,7 @@ export async function notifySpecFailures(
         source: f.source,
       })),
       appUrl: ctx.appUrl,
+      alertUrl: alertLinkUrl(ctx.appUrl, alertToken),
     });
 
     // One send, all recipients — never one email per failure.

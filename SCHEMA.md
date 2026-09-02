@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 113 tables, 2 views, 171 indexes, 36 triggers.
+Objects: 115 tables, 2 views, 176 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -1299,6 +1299,24 @@ _FTS5 shadow tables (engine internals): `bundles_fts_config`, `bundles_fts_conte
   applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 ```
 
+### `alert_links`
+
+```sql
+  id TEXT PRIMARY KEY
+  token TEXT NOT NULL UNIQUE
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  kind TEXT NOT NULL CHECK (kind IN ('spec_alert', 'renewal_alert'))
+  document_id TEXT REFERENCES documents(id) ON DELETE CASCADE
+  subject_ids TEXT
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  expires_at TEXT NOT NULL
+  revoked_at TEXT
+  view_count INTEGER NOT NULL DEFAULT 0
+  last_viewed_at TEXT
+```
+
+Indexes: `idx_alert_links_document`, `idx_alert_links_tenant`, `idx_alert_links_token`
+
 ### `claim_type_requirements`
 
 ```sql
@@ -1398,6 +1416,22 @@ Indexes: `idx_document_requirements_document`, `idx_document_requirements_requir
 ```
 
 Indexes: `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_tenant_verdict`
+
+### `entity_notes`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  entity_type TEXT NOT NULL CHECK (entity_type IN ('supplier','document','requirement','supplier_requirement'))
+  entity_id TEXT NOT NULL
+  body TEXT NOT NULL
+  author_id TEXT NOT NULL REFERENCES users(id)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  deleted_at TEXT
+  deleted_by TEXT REFERENCES users(id)
+```
+
+Indexes: `idx_entity_notes_author`, `idx_entity_notes_entity`
 
 ### `requirements`
 

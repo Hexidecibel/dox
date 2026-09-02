@@ -84,6 +84,8 @@ import m0084 from '../../migrations/0084_spec_limits.sql?raw';
 import m0085 from '../../migrations/0085_document_spec_checks.sql?raw';
 import m0086 from '../../migrations/0086_spec_limits_unique_scope.sql?raw';
 import m0087 from '../../migrations/0087_supplier_requirements.sql?raw';
+import m0088 from '../../migrations/0088_entity_notes.sql?raw';
+import m0089 from '../../migrations/0089_alert_links.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -95,7 +97,7 @@ const migrations: string[] = [
   m0064, m0065, m0066, m0067, m0068, m0069, m0070, m0071,
   m0072, m0073, m0074, m0075,
   m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
-  m0086, m0087,
+  m0086, m0087, m0088, m0089,
 ];
 
 /**
@@ -333,8 +335,13 @@ export function generateTestId(): string {
 
 export async function cleanTables(db: D1Database): Promise<void> {
   const tables = [
+    // alert_links FKs documents + tenants, so it clears before both.
+    'alert_links',
     'audit_log', 'assignments', 'lot_match_suggestions', 'document_lots',
     'document_categories',
+    // 0088 notes: entity_id is polymorphic and has no FK, so nothing cascades
+    // them. They must be cleared before every parent they can point at.
+    'entity_notes',
     // Spec checks before the limits they point at, limits before their analyte,
     // and all of them before suppliers/products/documents.
     'document_spec_checks', 'spec_limits', 'spec_tests',

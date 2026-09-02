@@ -401,6 +401,16 @@ export function buildAdminResetEmail(params: {
 export function buildRenewalAlertEmail(
   docs: ExpirationRow[],
   tenantName: string,
+  /**
+   * Token-gated /alert/<token> landing page for this digest. Optional because
+   * minting a link is best-effort — an alert with no link still has to go out.
+   *
+   * This is the ONLY link in this email, and it is not a portal deep link:
+   * a meaningful share of renewal owners have no account, and before this
+   * existed the renewal email had no link at all, so the recipient's next move
+   * was to go find the portal, log in, and orient themselves.
+   */
+  alertUrl?: string | null,
 ): { subject: string; html: string; text: string } {
   const count = docs.length;
   const subject = `SupDox: ${count} document${count === 1 ? '' : 's'} need${count === 1 ? 's' : ''} renewal attention`;
@@ -468,6 +478,8 @@ export function buildRenewalAlertEmail(
           </tr>
           ${rows}
         </table>
+        ${alertUrl ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(alertUrl)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;">See what needs renewing</a></p>
+        <p style="margin:8px 0 0;color:#999;font-size:12px;">No login needed. This link works for 30 days.</p>` : ''}
       </td>
     </tr>
     <tr>
@@ -491,7 +503,7 @@ export function buildRenewalAlertEmail(
     ].filter(Boolean);
     return `- ${parts.join(' · ')}`;
   });
-  const text = `Renewal attention needed for ${tenantName}\n\n${count} document${count === 1 ? '' : 's'} expiring, overdue, or expired:\n\n${textLines.join('\n')}\n`;
+  const text = `Renewal attention needed for ${tenantName}\n\n${count} document${count === 1 ? '' : 's'} expiring, overdue, or expired:\n\n${textLines.join('\n')}\n${alertUrl ? `\n${alertUrl}\n(No login needed. This link works for 30 days.)\n` : ''}`;
 
   return { subject, html, text };
 }
@@ -603,6 +615,13 @@ export function buildSpecAlertEmail(params: {
     source: 'printed' | 'limit';
   }>;
   appUrl?: string;
+  /**
+   * Token-gated /alert/<token> landing page for this alert. This is the link a
+   * recipient who is NOT a portal user follows: it needs no account and lands
+   * directly on the failing results. Optional — minting is best-effort, and an
+   * alert with no link still has to go out.
+   */
+  alertUrl?: string | null;
 }): { subject: string; html: string; text: string } {
   const { tenantName, documentTitle, documentId, supplierName, failures } = params;
   const n = failures.length;
@@ -626,7 +645,19 @@ export function buildSpecAlertEmail(params: {
     )
     .join('\n');
 
-  const link = params.appUrl ? `${params.appUrl.replace(/\/$/, '')}/documents/${documentId}` : null;
+  // TWO AUDIENCES, TWO LINKS, IN THAT ORDER OF PRIORITY.
+  //
+  // `alertUrl` is the primary call to action because the recipient may have no
+  // account: /documents/<id> sits behind ProtectedRoute, so for that person the
+  // old single link landed on a login form and the alert failed.
+  //
+  // The portal deep link is kept as a secondary, explicitly labelled line. The
+  // owner of this review queue does have an account and does need the full
+  // record — including our configured limit, which the public landing page
+  // withholds — and silently taking that away would be a regression for them.
+  const alertLink = params.alertUrl || null;
+  const portalLink = params.appUrl ? `${params.appUrl.replace(/\/$/, '')}/documents/${documentId}` : null;
+  const link = alertLink ?? portalLink;
 
   const html = `<!DOCTYPE html>
 <html>
@@ -656,7 +687,8 @@ export function buildSpecAlertEmail(params: {
           </tr>
           ${rows}
         </table>
-        ${link ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;">Open the document</a></p>` : ''}
+        ${link ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;">See the result</a></p>` : ''}
+        ${alertLink ? `<p style="margin:8px 0 0;color:#999;font-size:12px;">No login needed. This link works for 30 days.${portalLink ? ` If you have a SupDox account, the full record is <a href="${escapeHtml(portalLink)}" style="color:#1A365D;">here</a>.` : ''}</p>` : ''}
         <p style="margin:16px 0 0;color:#777;font-size:13px;line-height:1.6;">
           These values were read from the document and compared against the limits on file. SupDox does not reject or hold anything on its own — this is for a person to look at.
         </p>

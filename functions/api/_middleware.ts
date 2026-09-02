@@ -44,6 +44,12 @@ const PUBLIC_ROUTES = [
   // public: token in URL is the gate, narrow prefix protects future
   // admin endpoints under /api/workflow-approvals/.
   '/api/workflow-approvals/public',
+  // Alert landing pages — the "alerted owner" mode. A recipient who is not a
+  // portal user gets an email plus one link; /alert/<token> reads through
+  // here. Same posture as the two above: the unguessable per-alert token is
+  // the gate, the route is read-only, and the prefix is narrow so no future
+  // /api/alerts/* admin endpoint is allowlisted by accident.
+  '/api/alerts/public',
   // Phase B4 — public connector info endpoint serves the bare
   // minimum the public drop form needs to render. The handler at
   // /api/public/connectors/<slug> requires a `?token=` query param

@@ -53,6 +53,7 @@ import { WorkflowBuilder } from './pages/records/WorkflowBuilder';
 import { PublicForm } from './pages/forms/PublicForm';
 import { UpdateRequestForm } from './pages/forms/UpdateRequestForm';
 import { PublicApprovalPage } from './pages/forms/PublicApprovalPage';
+import { AlertLanding } from './pages/AlertLanding';
 import { PublicDrop } from './pages/PublicDrop';
 import { PublicDocsConnectors } from './pages/PublicDocsConnectors';
 import { Approvals } from './pages/Approvals';
@@ -79,6 +80,14 @@ function App() {
 
           {/* Public workflow approval route — magic-link decision page. */}
           <Route path="/a/:token" element={<PublicApprovalPage />} />
+
+          {/* Alert landing page. Some of the people who must ACT on an alert
+              have no account and never will — a plant QA lead who renews one
+              certificate a year, whoever is on the out-of-spec list. Their
+              whole experience is the email plus this one link. Read-only, no
+              shell, no nav; the per-alert token in the URL is the gate and the
+              server projects onto a hard allow-list. */}
+          <Route path="/alert/:token" element={<AlertLanding />} />
 
           {/* Phase B4 — public drop link. Vendors land here from a
               tenant-shared URL; the link token is the auth, the

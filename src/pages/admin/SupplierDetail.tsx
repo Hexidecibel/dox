@@ -55,6 +55,7 @@ import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
 import LotSchemeSelect from '../../components/LotSchemeSelect';
 import SupplierProductMapPanel from '../../components/SupplierProductMapPanel';
 import SupplierRequirementGaps from '../../components/SupplierRequirementGaps';
+import EntityNotes from '../../components/EntityNotes';
 import { useAuth } from '../../contexts/AuthContext';
 import type { LotScheme } from '../../lib/types';
 
@@ -789,6 +790,7 @@ export function SupplierDetail() {
           <Tab label="Extraction Instructions" />
           <Tab label="Document Types" />
           <Tab label="Product Mapping" />
+          <Tab label="Notes" />
         </Tabs>
       </Box>
 
@@ -1473,6 +1475,26 @@ export function SupplierDetail() {
             supplierId={supplier.id}
             supplierName={supplier.name}
             canEdit={isAdmin}
+          />
+        )}
+      </TabPanel>
+
+      {/* Notes Tab — the DCN parity item (migration 0088).                     */}
+      {/* Its OWN tab rather than a panel bolted under Documents: a note about  */}
+      {/* a supplier is usually about the RELATIONSHIP ("they switched labs in  */}
+      {/* March", "AP is chasing an expired W-9"), not about any one document,  */}
+      {/* and the Documents tab is already carrying two stacked questions. A    */}
+      {/* tab also gives the thread the full width it needs to stay readable.   */}
+      {/* Mounted lazily like Product Mapping so the fetch only fires when the  */}
+      {/* tab is actually opened.                                               */}
+      <TabPanel value={tab} index={6}>
+        {tab === 6 && (
+          <EntityNotes
+            entityType="supplier"
+            entityId={supplier.id}
+            tenantId={supplier.tenant_id}
+            title={`Notes on ${supplier.name}`}
+            description="No notes on this supplier yet. Notes are timestamped, attributed and permanent — use them for what happened, not for what the supplier is."
           />
         )}
       </TabPanel>

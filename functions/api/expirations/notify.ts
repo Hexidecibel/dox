@@ -1,6 +1,7 @@
 import { requireRole, requireTenantAccess, BadRequestError, errorToResponse } from '../../lib/permissions';
 import { computeExpirations, alertingRows, DEFAULT_WINDOW_DAYS } from '../../lib/expirations';
 import { sendEmail, buildRenewalAlertEmail } from '../../lib/email';
+import { mintAlertLink, alertLinkUrl } from '../../lib/alert-links';
 import type { Env, User } from '../../lib/types';
 
 /**
@@ -95,7 +96,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return json({ sent: false, reason: 'email_not_configured', recipients, document_count: documentCount });
     }
 
-    const { subject, html } = buildRenewalAlertEmail(alerts, tenantName);
+    // The renewal email had no link at all until now — the recipient's next
+    // move was to go find the portal and orient themselves, which is exactly
+    // the failure this landing page exists to remove. Scoped to the EXACT
+    // document set this email lists, so an old forwarded link never widens.
+    const alertToken = await mintAlertLink(context.env.DB, {
+      tenantId,
+      kind: 'renewal_alert',
+      subjectIds: alerts.map((a) => a.id),
+    });
+    const appUrl = new URL(context.request.url).origin;
+
+    const { subject, html } = buildRenewalAlertEmail(
+      alerts,
+      tenantName,
+      alertLinkUrl(appUrl, alertToken),
+    );
     // ONE email to all recipients (Resend accepts an array of `to`).
     const ok = await sendEmail(context.env.RESEND_API_KEY, {
       to: recipients,

@@ -3899,6 +3899,125 @@ export interface Assignment {
   owner_user_email: string | null;
 }
 
+// === Entity Notes (migration 0088) ===
+
+/**
+ * Records a note can hang off. Polymorphic by design: one notes facility, many
+ * parents. The API gate lives in functions/lib/notes.ts, which additionally
+ * requires the parent to exist IN THE CALLER'S TENANT — entity_id cannot be a
+ * foreign key, so that check is the whole of the isolation guarantee.
+ */
+export type NoteEntityType =
+  | 'supplier'
+  | 'document'
+  | 'requirement'
+  | 'supplier_requirement';
+
+export const NOTE_ENTITY_TYPES: NoteEntityType[] = [
+  'supplier',
+  'document',
+  'requirement',
+  'supplier_requirement',
+];
+
+/**
+ * One note. APPEND-ONLY: there is no updated_at and no edit endpoint, because
+ * `body` is fixed once posted (see migrations/0088_entity_notes.sql). A
+ * correction is a new note.
+ *
+ * `deleted_at` is a RETRACTION, not a delete — the row survives so the record
+ * of who wrote what, and who withdrew it, survives with it. Non-admins never
+ * receive retracted rows.
+ */
+export interface EntityNote {
+  id: string;
+  tenant_id: string;
+  entity_type: NoteEntityType;
+  entity_id: string;
+  body: string;
+  author_id: string;
+  created_at: string;
+  deleted_at: string | null;
+  deleted_by: string | null;
+  // Joined for display, so a thread renders in one round trip.
+  author_name: string | null;
+  author_email: string | null;
+  deleted_by_name?: string | null;
+}
+
+export interface NoteListResponse {
+  notes: EntityNote[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface NoteGetResponse {
+  note: EntityNote;
+}
+
 // === Auth Token Storage Key (single constant) ===
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'auth_user';
+
+// ---------------------------------------------------------------------------
+// Alert landing pages (/alert/:token) — the "alerted owner" mode
+// ---------------------------------------------------------------------------
+
+/** Which alert an /alert/:token link was minted for. */
+export type AlertLinkKind = 'spec_alert' | 'renewal_alert';
+
+/**
+ * One failing result, as shown to somebody who is NOT a portal user.
+ *
+ * NOTE THE ASYMMETRY, IT IS DELIBERATE. `printed_limit` is populated only when
+ * the limit came off the supplier's own certificate — echoing their number back
+ * to them leaks nothing. When the judgement came from an acceptance limit WE
+ * configured, the number is withheld and only the fact of the source is stated.
+ * A supplier who can read the threshold can certify to it.
+ */
+export interface AlertLandingSpecFailure {
+  /** The analyte name exactly as it was printed on the document. */
+  test: string;
+  value: string | null;
+  unit: string | null;
+  /** 'printed' = the certificate's own stated limit; 'internal' = ours. */
+  judged_against: 'printed' | 'internal';
+  /** Populated ONLY when judged_against === 'printed'. Never our number. */
+  printed_limit: string | null;
+}
+
+/** One document needing renewal, as shown on an alert landing page. */
+export interface AlertLandingRenewal {
+  title: string;
+  category: string | null;
+  due_date: string | null;
+  days_until: number | null;
+  status: string;
+}
+
+/**
+ * The ENTIRE payload an unauthenticated alert-link holder can see. This type is
+ * an allow-list, not a convenience shape: every field here was chosen, and the
+ * server projects onto it rather than deleting fields from a wider row. Nothing
+ * carries an internal id, so the payload cannot be used to hand-craft a call
+ * against any other endpoint.
+ */
+export interface AlertLandingView {
+  kind: AlertLinkKind;
+  /** The organization the alert is for — already named in the email body. */
+  tenant_name: string;
+  /** When this link stops working, so the page can say so out loud. */
+  expires_at: string;
+  /** Present for kind === 'spec_alert', null otherwise. */
+  document: {
+    title: string;
+    supplier_name: string | null;
+    document_type_name: string | null;
+    received_date: string | null;
+  } | null;
+  /** Present for kind === 'spec_alert'; empty otherwise. */
+  failures: AlertLandingSpecFailure[];
+  /** Present for kind === 'renewal_alert'; empty otherwise. */
+  renewals: AlertLandingRenewal[];
+}
