@@ -4,6 +4,106 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-09-02 THE LOOP CLOSES — supplier portal proven end to end on prod
+
+**Prod is on `b758f17`.** Migrations 0088-0094 all applied and stamped.
+
+### ⚠️ READ FIRST: THE EXTRACTION FLEET IS DOWN
+Both pinned backends — `Qwen3-6-35B-A3B-spark-q8` and `-mac-q8` — dropped off the
+router. Neither the Spark nor the Mac answers ping. Router serves only
+`Qwen3-6-35B-A3B` and `qwen2.5-vl-7b`, neither in the `best` chain.
+
+**This is the guardrail working, not a bug.** `2ed42da` pinned extraction to those
+two hosts *specifically* so a vanished backend fails loudly instead of silently
+dropping to the Q4 that lost the bake-off. **Do NOT set `QWEN_MODEL_BEST` to work
+around it** — that reintroduces exactly the failure that hid for months.
+
+Timeline: extraction was working at **Sep 1 14:51** (log shows a successful
+Andersen run applying our 5473-char instructions). Fleet went sometime after.
+Nothing noticed because no work arrived. **Waking the machines is the whole fix** —
+the resolver picks them up automatically, and two documents are queued waiting.
+
+**The real gap this exposed: there is NO alert when a chain goes empty.** No
+keepalive, no heartbeat, no warmup — `grep` finds none in process-worker,
+models.ts or qwen-llm/. It is a todo.md item never built. The machine is at the
+CLIENT's house; it sleeping is normal. Discovering it during a demo is not.
+
+### THE LOOP, PROVEN ON PRODUCTION
+Drove the real supplier page with Playwright at a phone viewport, uploading two
+PDFs generated for the purpose. Every link verified in prod D1:
+
+    UPLOAD   Andersen-COI-2026.pdf   34,831b   checksum computed
+             queue_id 369085dc…      document_id NULL
+    QUEUE    source=request_link  supplier=5b1b9455 (Andersen)
+    LINES    5 not_started -> 1 received      (only the ticked line moved)
+
+Then the multi-satisfaction test, one COA ticked against TWO lines:
+
+    submit button read "Send for 2 items" BEFORE the click
+    "That one file covered 2 of your 6 items — you do not need to send it
+     again for the others."
+    progress stayed "0 of 6 accepted"     <- covered is NOT accepted
+    request_upload_lines: 3 rows          <- the many-to-many is real
+
+Audit: 2 `request_link.upload`, 9 `request_link.view`, zero `enqueue_failed`.
+Screenshots in the session scratchpad (`after-coi.png`, `after-coa.png`).
+
+### WHAT SHIPPED SINCE THE LAST ENTRY
+- **`b758f17` portal uploads are READ on arrival.** They previously landed in
+  `request_uploads` and stopped — never extracted, never spec-checked. Now they go
+  through the shared `enqueueDocument` with `supplier_id` from the link (which is
+  what makes per-supplier instructions apply). Enqueue runs AFTER the batch+audit
+  so it structurally cannot fail the upload; a failure leaves `queue_id` NULL
+  (0094's partial index = the re-enqueue worklist) plus an audit row.
+  `source='request_link'` NOT `public_link` — that name is already spent on the
+  connector drop door.
+  **Deliberately NOT built:** line does not move to `accepted` on queue-approve.
+  One arrival can claim seven lines, so a single approve would accept seven on the
+  supplier's own say-so. Accepting is a different judgement by a different person
+  and `PUT /api/request-lines/:id` already owns it.
+- **`397f949` the recheck report printed only failures.** It showed 41 out-of-spec
+  and 122 could-not-judge and NOTHING else, so it read as though nothing could be
+  checked — while 1055 passes were computed and discarded. Now leads with
+  `Results judged 1096 of 1218 (90.0%)`. The user spotted this from the output; I
+  had been quoting "122" without ever establishing the denominator.
+- **`adc9317` CFU/mL judged against CFU/g**, per-tenant switch, default off, ON for
+  Cush Co. Never silent — every affected verdict says so and it is frozen into
+  `limit_snapshot`. Also fixed `isEmptyCell('%')` returning true, which let a
+  percent in a UNIT COLUMN be judged as unitless.
+
+### PROD CONFIG NOW SEEDED (was completely empty)
+The tenant holding all 584 documents had **zero** registry config. Gap detection
+saying "not_configured" was not about Andersen — nothing was configured.
+- fsqa starter pack applied: 27 doc types, 32 requirements, 12 claim types, 14 rules
+- `supplier_requirements` for all 21 suppliers: 6 required + 8 recommended each.
+  **This uniformity is a guess and is almost certainly wrong** — a fluid dairy and
+  a drop-ship distributor do not owe the same packet. AJ must correct it.
+- `owner_routes`: QA/Accounting/Insurance/Purchasing all → ludacris2k4@gmail.com,
+  deliberately NOT AJ, so nothing test-fires at a client.
+- 8 analyte spellings added. `BACTERIA STANDARD PLATE COUNT` was included and
+  **verified silent** — the trap did not fire.
+- Live request issued to Andersen: `1bed7391270741d1b05a4de615891df5`
+  portal: https://supdox.com/r/d4YoD2KOa08uy2N9BY-f-Y9zqDXuqbHdX9MfcjUu6aY
+
+### NUMBERS (measured, post-everything)
+`Results judged 1096/1218 (90.0%)` · in spec 1055 · out of spec 41 (34 printed /
+7 ours) · could-not-judge 122, all honest refusals (censored straddles, `<X`
+cannot confirm absence, percent-vs-CFU). No unit artefacts left.
+
+### TEST BASELINE HAS 15 ENVIRONMENTAL FAILURES
+`tests/api/documents-search-natural.test.ts` (14) and `teach-sessions.test.ts` (1).
+Both call a live model; they fail because the fleet is down. **Not a regression** —
+they passed at 2474/2474 earlier tonight when the Spark was up.
+
+### OPEN
+- Corpus fixture (`tests/fixtures/spec-corpus/`) was mid-build at session end.
+- No internal reviewer surface for portal arrivals: `request_uploads` is written by
+  one file and read by ZERO internal endpoints. No "arrivals against this ask" list.
+- Renewal cron worker not deployed; needs `RENEWAL_ALERT_TOKEN` + `RESEND_API_KEY`.
+- `openapi.yaml`/`API.md` missing every endpoint added in the last two sessions.
+
+---
+
 ## 2026-08-31/09-01 SPEC LIMITS GO LIVE — AJ's micro workbook loaded, engine hardened, 506 docs judged
 
 **AJ's micro limits are LIVE on prod.** First spec data ever loaded — both `spec_tests` and
