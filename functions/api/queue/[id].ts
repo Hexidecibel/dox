@@ -365,6 +365,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
             err instanceof Error ? err.message : String(err)
           );
         }
+
+        // If this item arrived through a supplier request link, the arrival
+        // and the document it became are now two rows that should know about
+        // each other. Provenance only — see the note on the helper for what
+        // this deliberately does NOT do to the request's checklist.
+        await linkApprovedDocumentToRequestUpload(context, user, item.id, response);
       }
       return response;
     }
@@ -381,6 +387,125 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     );
   }
 };
+
+/**
+ * Close the provenance loop on a supplier-request arrival: fill
+ * `request_uploads.document_id` when the queue item that arrival produced is
+ * approved into a document.
+ *
+ * WHAT THIS DOES, AND THE LINE IT STOPS AT
+ * ---------------------------------------
+ * It fills one FK. It does NOT move `request_lines.status` from `received` to
+ * `accepted`, and that omission is the decision, not an oversight.
+ *
+ * Approving a queue item and accepting a checklist line are two different
+ * judgements made by two different people about two different questions:
+ *
+ *   - Queue approve asks "is this extraction faithful to this file?" The
+ *     reviewer is looking at field values against a PDF. They have not seen
+ *     the request, its line, its `criteria`, or its `acceptable_formats`.
+ *   - Line accept asks "does this document satisfy what we asked this supplier
+ *     for?" That is the assigned buyer's job. It already has a home —
+ *     PUT /api/request-lines/:id — which gates on `requireLineWorker`, stamps
+ *     `status_changed_by`, and audits `request_line_status_changed`.
+ *
+ * Writing `accepted` from here would stamp the extraction reviewer as the
+ * person who made a judgement they were never shown the inputs for. Worse, one
+ * arrival may claim SEVEN lines (that many-to-many is the whole point of
+ * `request_upload_lines`), so a single approve would accept seven items on the
+ * strength of the supplier's own claim about what their file covers. Migration
+ * 0092 states the invariant that forbids exactly this: a claim is "CLAIMED,
+ * not proven... it does not mean a reviewer agreed, which is why it moves the
+ * line to `received` and never to `accepted`". Auto-accepting here would
+ * restore the supplier's control over the progress bar through the back door,
+ * with a click on an unrelated screen as the rubber stamp.
+ *
+ * ONE COLUMN, SOMETIMES N DOCUMENTS
+ * ---------------------------------
+ * A records-shaped COA splits one file into N sublot documents, and a
+ * multi-product approve into N product documents. `document_id` is one column,
+ * so it takes the first and the audit row carries the full set. Narrowing, but
+ * the alternative — leaving NULL whenever an arrival was MOST productive —
+ * would keep it in `idx_request_uploads_pending` ("arrivals not yet turned
+ * into documents") forever, which is the more actively wrong answer.
+ *
+ * Best-effort throughout: the approval has already happened and its response
+ * is already built. Nothing here may change that.
+ */
+async function linkApprovedDocumentToRequestUpload(
+  context: EventContext<Env, string, Record<string, unknown>>,
+  user: User,
+  queueItemId: string,
+  response: Response
+): Promise<void> {
+  try {
+    const upload = await context.env.DB.prepare(
+      `SELECT id, tenant_id, request_id, link_id, supplier_id
+         FROM request_uploads
+        WHERE queue_id = ? AND document_id IS NULL`
+    )
+      .bind(queueItemId)
+      .first<{
+        id: string;
+        tenant_id: string;
+        request_id: string;
+        link_id: string;
+        supplier_id: string;
+      }>();
+    if (!upload) return;
+
+    const payload = (await response.clone().json()) as {
+      item?: { status?: string };
+      document?: { id?: string };
+      documents?: Array<{ id?: string }>;
+    };
+
+    // A partially-approved records COA leaves the queue item `pending` with
+    // some records still held. The arrival has not finished becoming a
+    // document yet, so it stays in the reviewer's inbox until it has.
+    if (payload.item?.status !== 'approved') return;
+
+    const documentIds = [
+      ...(payload.document?.id ? [payload.document.id] : []),
+      ...(payload.documents ?? []).map((d) => d?.id).filter((id): id is string => !!id),
+    ];
+    // order/shipment approvals produce records, not documents. Nothing to link.
+    if (documentIds.length === 0) return;
+
+    await context.env.DB.prepare(
+      `UPDATE request_uploads SET document_id = ? WHERE id = ? AND document_id IS NULL`
+    )
+      .bind(documentIds[0], upload.id)
+      .run();
+
+    await logAudit(
+      context.env.DB,
+      user.id,
+      upload.tenant_id,
+      'request_upload.document_linked',
+      'request_upload',
+      upload.id,
+      JSON.stringify({
+        queue_item_id: queueItemId,
+        request_id: upload.request_id,
+        link_id: upload.link_id,
+        supplier_id: upload.supplier_id,
+        document_id: documentIds[0],
+        // The full set, because the column can only hold the first.
+        document_ids: documentIds,
+        document_count: documentIds.length,
+        // Said explicitly so the trail cannot be misread as an acceptance.
+        line_status_unchanged: true,
+      }),
+      getClientIp(context.request)
+    );
+  } catch (err) {
+    console.error(
+      '[queue] request-upload document link failed:',
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+}
 
 async function handleApprove(
   context: EventContext<Env, string, Record<string, unknown>>,

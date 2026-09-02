@@ -90,6 +90,7 @@ import m0090 from '../../migrations/0090_document_requests.sql?raw';
 import m0091 from '../../migrations/0091_renewal_routing_and_alert_state.sql?raw';
 import m0092 from '../../migrations/0092_supplier_request_portal.sql?raw';
 import m0093 from '../../migrations/0093_tenant_spec_unit_equivalence.sql?raw';
+import m0094 from '../../migrations/0094_request_upload_queue_link.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -101,7 +102,7 @@ const migrations: string[] = [
   m0064, m0065, m0066, m0067, m0068, m0069, m0070, m0071,
   m0072, m0073, m0074, m0075,
   m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
-  m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093,
+  m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094,
 ];
 
 /**

@@ -45,9 +45,39 @@
  *     until a human reviews it, per the standing rule that nothing auto-ingests.
  *   - Claimed lines move to `received` and never to `accepted`, so nothing a
  *     supplier does can move the progress number they are shown.
+ *
+ * READING IS NOT DECIDING (migration 0094).
+ * ----------------------------------------
+ * The two bullets above are the rule, and they are unchanged. What changed is
+ * that "nothing auto-ingests" had been implemented here as "nothing is even
+ * read". Every other door in this codebase — the manual upload, the email
+ * webhook, the connector drop, the S3 poller — enqueues its arrival on
+ * `processing_queue` the moment it lands, so the worker extracts it and a
+ * human approves the extraction afterwards. This door did not, which meant the
+ * per-supplier extraction instructions and the spec-limit checking applied to
+ * every intake path except the newest and most visible one.
+ *
+ * So the file is now enqueued on arrival, through the SAME shared helper every
+ * other door uses (`functions/lib/intake/enqueue.ts`), and nothing else moves:
+ *
+ *   - `supplier_id` is passed, because this door knows it from the link. That
+ *     is what makes the worker load the right (supplier, doc-type) extraction
+ *     profile rather than extracting blind.
+ *   - `created_by` is NULL. A supplier is not a user, and the column is a
+ *     nullable FK to `users(id)` — a sentinel string would be an FK violation.
+ *   - Lines still go to `received`, never `accepted`.
+ *     `request_uploads.document_id` still stays NULL until a human approves.
+ *   - A failed enqueue does NOT fail the upload. The supplier's file is in R2
+ *     and their lines have moved; throwing that away because a queue INSERT
+ *     failed would be the worst trade available. It is logged to the audit log
+ *     as `request_link.enqueue_failed` — an operator-visible surface — and
+ *     `request_uploads.queue_id` stays NULL, which is exactly the state a
+ *     re-enqueue sweep would look for.
  */
 
 import { generateId, getClientIp, logAudit } from '../../../../lib/db';
+import { enqueueDocument } from '../../../../lib/intake/enqueue';
+import { computeChecksum } from '../../../../lib/r2';
 import { checkRateLimit, recordAttempt } from '../../../../lib/ratelimit';
 import { buildProgress } from '../../../../lib/document-requests';
 import {
@@ -248,7 +278,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const uploadId = generateId();
     const r2Key = `requests/${request.id}/uploads/${uploadId}/${safeName}`;
-    await context.env.FILES.put(r2Key, file.stream(), {
+
+    // Buffered rather than streamed, because the intake queue's contract
+    // includes a SHA-256 checksum (it is what the duplicate check compares
+    // against) and there is no honest way to produce one without the bytes.
+    // The 25 MB cap above is what makes this safe; the manual-upload door
+    // buffers the same way at four times the size.
+    const bytes = await file.arrayBuffer();
+    const checksum = await computeChecksum(bytes);
+    await context.env.FILES.put(r2Key, bytes, {
       httpMetadata: { contentType: mime },
     });
 
@@ -262,8 +300,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         .prepare(
           `INSERT INTO request_uploads
              (id, tenant_id, link_id, request_id, supplier_id, r2_key, file_name,
-              file_size, mime_type, uploaded_at, uploader_ip, uploader_label)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              file_size, mime_type, checksum, uploaded_at, uploader_ip, uploader_label)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           uploadId,
@@ -275,6 +313,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           safeName,
           file.size,
           mime,
+          checksum,
           now,
           ip,
           uploaderLabel,
@@ -330,6 +369,28 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       ip,
     );
 
+    // -----------------------------------------------------------------------
+    // Enqueue for extraction. See READING IS NOT DECIDING in the header.
+    // -----------------------------------------------------------------------
+    // Everything above this point is already committed: the bytes are in R2,
+    // the upload row exists, and the claimed lines have moved to `received`.
+    // That ordering is the whole safety argument — this block cannot fail the
+    // upload, because the upload is already done. The try/catch is belt to
+    // that braces.
+    await enqueueSupplierUpload(db, {
+      tenantId: link.tenant_id,
+      supplierId: link.supplier_id,
+      requestId: request.id,
+      linkId: link.id,
+      uploadId,
+      r2Key,
+      fileName: safeName,
+      fileSize: file.size,
+      mimeType: mime,
+      checksum,
+      ip,
+    });
+
     // Progress is recomputed from the freshly-written statuses rather than
     // adjusted in memory, so the number the supplier sees is the number the
     // database holds. It will not have moved — that is the point.
@@ -352,3 +413,109 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return json({ error: 'That upload did not go through. Please try again.' }, 500);
   }
 };
+
+
+/**
+ * Put one supplier arrival on the extraction queue and record the pairing.
+ *
+ * Best-effort by construction. The caller has already committed the upload, so
+ * every failure mode here degrades to "the file is stored, the lines moved,
+ * and nobody read it yet" — which is precisely the behaviour that existed
+ * before 0094, and is therefore a safe floor rather than a broken state.
+ *
+ * The failure is made findable in two places rather than one:
+ *   - `console.error`, for whoever is tailing the worker.
+ *   - an audit-log row (`request_link.enqueue_failed`) against the upload,
+ *     which is the surface an operator actually has. A `console.error` in a
+ *     Worker is not a report; nobody is watching it a week from now.
+ *
+ * And the DATA records it too: `request_uploads.queue_id` stays NULL, so
+ * "arrivals we never read" is one indexed query away and a re-enqueue sweep
+ * has an exact worklist.
+ */
+async function enqueueSupplierUpload(
+  db: D1Database,
+  args: {
+    tenantId: string;
+    supplierId: string;
+    requestId: string;
+    linkId: string;
+    uploadId: string;
+    r2Key: string;
+    fileName: string;
+    fileSize: number;
+    mimeType: string;
+    checksum: string;
+    ip: string;
+  },
+): Promise<string | null> {
+  try {
+    const { queueId } = await enqueueDocument(db, {
+      tenantId: args.tenantId,
+      // Unknown, and honestly so. A supplier request packet asks for an
+      // allergen statement, an insurance certificate and a spec sheet in the
+      // same breath; guessing a type here would only teach the worker a wrong
+      // one. NULL lets the doc-type resolution happen downstream where the
+      // extracted text is available to inform it.
+      documentTypeId: null,
+      fileR2Key: args.r2Key,
+      fileName: args.fileName,
+      fileSize: args.fileSize,
+      mimeType: args.mimeType,
+      checksum: args.checksum,
+      // A supplier is not a user. `created_by` is a nullable FK to users(id),
+      // so NULL is the only value that is both true and legal.
+      createdBy: null,
+      // The door, in the vocabulary the other doors use ('email', 's3', 'api',
+      // 'public_link', 'import'). Deliberately NOT 'public_link' — that value
+      // is already taken by the connector drop door, and collapsing the two
+      // would make "which door did this come from" unanswerable for exactly
+      // the two doors an operator most needs to tell apart. `request_link`
+      // matches this feature's own names throughout: the `request_links`
+      // table, the `request_link.upload` audit action, the rate-limit bucket.
+      source: 'request_link',
+      // Enough to walk back to the ask and to the individual arrival.
+      sourceDetail: `request:${args.requestId}:upload:${args.uploadId}`,
+      // NULL, treated as 'coa' downstream. Same reasoning as documentTypeId.
+      outputKind: null,
+      // Not a connector. A request link is its own kind of door.
+      sourceId: null,
+      // THE POINT. The link knows exactly which supplier this is, so the
+      // worker can load that supplier's extraction instructions instead of
+      // extracting blind.
+      supplierId: args.supplierId,
+    });
+
+    await db
+      .prepare(`UPDATE request_uploads SET queue_id = ? WHERE id = ? AND tenant_id = ?`)
+      .bind(queueId, args.uploadId, args.tenantId)
+      .run();
+
+    return queueId;
+  } catch (err) {
+    console.error('Supplier request upload: enqueue failed:', err);
+    try {
+      await logAudit(
+        db,
+        null,
+        args.tenantId,
+        'request_link.enqueue_failed',
+        'request_upload',
+        args.uploadId,
+        JSON.stringify({
+          request_id: args.requestId,
+          link_id: args.linkId,
+          supplier_id: args.supplierId,
+          file_name: args.fileName,
+          r2_key: args.r2Key,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+        args.ip,
+      );
+    } catch {
+      // If even the audit write fails, the console line is what is left.
+      // Still not a reason to fail an upload that already succeeded.
+    }
+    return null;
+  }
+}

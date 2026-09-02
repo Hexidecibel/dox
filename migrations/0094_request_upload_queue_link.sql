@@ -1,0 +1,44 @@
+-- Migration 0094: the supplier's arrival gets READ.
+--
+-- WHY
+-- ---
+-- 0092 built the door and stated the rule that governs it: "an arrival is NOT
+-- a document", `request_uploads.document_id` stays NULL until a human reviews
+-- it, and a supplier's own action can never move the progress number. All of
+-- that is still true and none of it changes here.
+--
+-- What was wrong was the implementation of that rule. "Do not auto-ingest" had
+-- been implemented as "do not even open the file". Every other intake door in
+-- this codebase — manual upload, email, the connector drop, the S3 poller —
+-- puts its arrival on `processing_queue` the moment it lands, lets the worker
+-- extract it, and asks a human to approve the extraction afterwards. The
+-- supplier request portal, the newest and most visible door, did not. So the
+-- per-supplier extraction instructions, the spec-limit checking, the review
+-- queue — none of it applied to files arriving through it.
+--
+-- Reading is not deciding. This column is the join that lets an arrival be
+-- read on arrival while every decision about it stays exactly where 0092 put
+-- it: with a person.
+--
+--
+-- WHY A COLUMN AND NOT A LOOKUP
+-- -----------------------------
+-- The pair could in principle be recovered by matching `file_r2_key`, since
+-- both rows point at the same object. That is a string join across two tables
+-- on a value neither table owns, it breaks the moment a key is rewritten, and
+-- it cannot express "we tried to enqueue this and failed" — which is a real
+-- state, because a failed enqueue must never fail the upload. An explicit
+-- nullable FK says the three things that are true: enqueued (id), not enqueued
+-- (NULL), and which queue item it is.
+--
+-- ON DELETE SET NULL, matching `document_id` directly above it. Purging a
+-- queue item is a housekeeping act; it must not cascade into deleting the
+-- record that a supplier sent us a file.
+ALTER TABLE request_uploads ADD COLUMN queue_id TEXT REFERENCES processing_queue(id) ON DELETE SET NULL;
+
+-- The reverse lookup, which is the one the approve path needs: given a queue
+-- item a reviewer just approved, did it come from a supplier request? Partial,
+-- because the overwhelming majority of uploads either predate this or failed
+-- to enqueue, and neither is worth an index entry.
+CREATE INDEX IF NOT EXISTS idx_request_uploads_queue
+  ON request_uploads(queue_id) WHERE queue_id IS NOT NULL;

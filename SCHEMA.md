@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 125 tables, 2 views, 200 indexes, 36 triggers.
+Objects: 125 tables, 2 views, 201 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -1638,9 +1638,10 @@ Indexes: `idx_request_upload_lines_line`
   uploader_label TEXT
   document_id TEXT REFERENCES documents(id) ON DELETE SET NULL
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  queue_id TEXT REFERENCES processing_queue(id) ON DELETE SET NULL
 ```
 
-Indexes: `idx_request_uploads_link`, `idx_request_uploads_pending`, `idx_request_uploads_request`
+Indexes: `idx_request_uploads_link`, `idx_request_uploads_pending`, `idx_request_uploads_queue`, `idx_request_uploads_request`
 
 ### `requirements`
 

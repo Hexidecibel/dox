@@ -26,6 +26,7 @@ import { onRequestGet as portalGet } from '../../functions/api/supplier-requests
 import { onRequestPost as portalUpload } from '../../functions/api/supplier-requests/public/[token]/upload';
 import { onRequest as middleware } from '../../functions/api/_middleware';
 import { onRequestPut as lineUpdate } from '../../functions/api/request-lines/[id]';
+import { onRequestPut as queueUpdate } from '../../functions/api/queue/[id]';
 import {
   computeRequestLinkExpiry,
   generateRequestToken,
@@ -131,6 +132,43 @@ async function linePut(
     functionPath: `/api/request-lines/${lineId}`,
   } as never;
   const resp = await lineUpdate(c);
+  let parsed: unknown = null;
+  try {
+    parsed = await resp.json();
+  } catch {
+    parsed = null;
+  }
+  return { status: resp.status, body: parsed };
+}
+
+/** Authenticated PUT against one queue item, as an org_admin reviewer. */
+async function queuePut(
+  queueId: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: unknown }> {
+  const c = {
+    request: new Request(`http://localhost/api/queue/${queueId}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/json' },
+    }),
+    env,
+    data: {
+      user: {
+        id: seed.orgAdminId,
+        email: 'orgadmin@test.com',
+        name: 'Org Admin',
+        role: 'org_admin',
+        tenant_id: seed.tenantId,
+      },
+    },
+    params: { id: queueId },
+    waitUntil: () => {},
+    passThroughOnException: () => {},
+    next: async () => new Response(null),
+    functionPath: `/api/queue/${queueId}`,
+  } as never;
+  const resp = await queueUpdate(c);
   let parsed: unknown = null;
   try {
     parsed = await resp.json();
@@ -1086,5 +1124,259 @@ describe('the two note columns have two audiences', () => {
     expect(view.items[0].attention_reason).toContain('valid through 2027');
     // The internal note was written at the same moment and still does not leave.
     expect(JSON.stringify(view)).not.toContain(INTERNAL_NOTE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Migration 0094 — the arrival is READ on arrival.
+ *
+ * "Nothing auto-ingests" had been implemented on this door as "nothing is even
+ * opened", which quietly exempted the newest intake path from extraction, from
+ * the per-supplier extraction instructions and from spec checking. What is
+ * pinned here is that reading is now wired AND that nothing about deciding
+ * moved: the line still stops at `received`, `document_id` is still NULL until
+ * a human approves, and a queue outage still leaves the supplier with a
+ * successful upload.
+ */
+describe('the arrival is read on arrival, and still decided by a human', () => {
+  it('enqueues the file for extraction, with the supplier the link already knows', async () => {
+    const { token, requestId, lineIds } = await makeRequest(['Allergen Statement']);
+    const resp = await upload(token, await refsFor(token, lineIds), { name: 'allergen.pdf' });
+    expect(resp.status).toBe(200);
+
+    const up = await db
+      .prepare(
+        `SELECT id, queue_id, document_id, checksum, r2_key
+           FROM request_uploads WHERE request_id = ? ORDER BY rowid DESC LIMIT 1`,
+      )
+      .bind(requestId)
+      .first<{
+        id: string;
+        queue_id: string | null;
+        document_id: string | null;
+        checksum: string | null;
+        r2_key: string;
+      }>();
+
+    // The two rows can be walked to each other in both directions.
+    expect(up?.queue_id).toBeTruthy();
+
+    const q = await db
+      .prepare('SELECT * FROM processing_queue WHERE id = ?')
+      .bind(up!.queue_id)
+      .first<Record<string, unknown>>();
+    expect(q).toBeTruthy();
+
+    // THE POINT: the worker can load this supplier's extraction instructions
+    // instead of extracting blind. This door knows the supplier from the link.
+    expect(q!.supplier_id).toBe(supplierId);
+    expect(q!.tenant_id).toBe(seed.tenantId);
+
+    // The door names itself, in the vocabulary the other doors use, and is
+    // distinguishable from the connector drop door's 'public_link'.
+    expect(q!.source).toBe('request_link');
+    expect(String(q!.source_detail)).toContain(`request:${requestId}`);
+    expect(String(q!.source_detail)).toContain(`upload:${up!.id}`);
+
+    // A supplier is not a user. created_by is an FK to users(id); a sentinel
+    // string would be a constraint violation, so NULL is the only legal truth.
+    expect(q!.created_by).toBeNull();
+
+    // It is queued for the worker, not ingested.
+    expect(q!.status).toBe('pending');
+    expect(q!.processing_status).toBe('queued');
+
+    // Same bytes, same object — and the checksum the queue needs is now also
+    // recorded on the arrival, which 0092 left permanently NULL.
+    expect(q!.file_r2_key).toBe(up!.r2_key);
+    expect(up!.checksum).toBeTruthy();
+    expect(q!.checksum).toBe(up!.checksum);
+  });
+
+  it('does not move the line past received, and does not make it a document', async () => {
+    const { token, requestId, lineIds } = await makeRequest(['Insurance Certificate', 'Spec Sheet']);
+    const refs = await refsFor(token, lineIds);
+    // One file, claimed against both items — the many-to-many that is the
+    // whole product argument, and the reason auto-accepting would be wrong.
+    const resp = await upload(token, refs, { name: 'both.pdf' });
+    expect(resp.status).toBe(200);
+
+    const lines = await db
+      .prepare('SELECT id, status FROM request_lines WHERE request_id = ?')
+      .bind(requestId)
+      .all<{ id: string; status: string }>();
+    for (const l of lines.results ?? []) {
+      expect(l.status).toBe('received');
+      expect(l.status).not.toBe('accepted');
+    }
+
+    const up = await db
+      .prepare('SELECT document_id, queue_id FROM request_uploads WHERE request_id = ?')
+      .bind(requestId)
+      .first<{ document_id: string | null; queue_id: string | null }>();
+    expect(up?.queue_id).toBeTruthy();
+    // Enqueued for reading; still not a document.
+    expect(up?.document_id).toBeNull();
+
+    // And the number the supplier is shown has not moved.
+    const view = (await get(token)).body as SupplierRequestView;
+    expect(view.progress.required_satisfied).toBe(0);
+  });
+
+  it('keeps the upload when the queue insert fails, and says so where an operator looks', async () => {
+    const { token, requestId, lineIds } = await makeRequest(['Kosher Letter']);
+    const refs = await refsFor(token, lineIds);
+
+    // A DB that behaves normally except that processing_queue is unavailable.
+    const brokenDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'prepare') {
+          return (sql: string) => {
+            if (sql.includes('INSERT INTO processing_queue')) {
+              throw new Error('simulated queue outage');
+            }
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as D1Database;
+    const brokenEnv = new Proxy(env as Record<string, unknown>, {
+      get(target, prop, receiver) {
+        if (prop === 'DB') return brokenDb;
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const form = new FormData();
+    form.append(
+      'file',
+      new File([new Blob([new Uint8Array(64)], { type: 'application/pdf' })], 'kosher.pdf', {
+        type: 'application/pdf',
+      }),
+    );
+    form.append('item_refs', JSON.stringify(refs));
+    const resp = await portalUpload({
+      request: new Request(
+        `http://localhost/api/supplier-requests/public/${token}/upload`,
+        { method: 'POST', body: form },
+      ),
+      env: brokenEnv,
+      data: {},
+      params: { token },
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+      next: async () => new Response(null),
+      functionPath: `/api/supplier-requests/public/${token}/upload`,
+    } as never);
+
+    // The supplier's file was stored and their items moved. Losing that
+    // because a queue INSERT failed would be the worst trade available.
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as SupplierUploadResult;
+    expect(body.covered_count).toBe(1);
+
+    const up = await db
+      .prepare('SELECT id, queue_id, r2_key FROM request_uploads WHERE request_id = ?')
+      .bind(requestId)
+      .first<{ id: string; queue_id: string | null; r2_key: string }>();
+    expect(up).toBeTruthy();
+    // NULL queue_id IS the record of the failure, and the exact worklist a
+    // re-enqueue sweep would select on.
+    expect(up!.queue_id).toBeNull();
+    expect(await env.FILES.head(up!.r2_key)).toBeTruthy();
+
+    const line = await db
+      .prepare('SELECT status FROM request_lines WHERE request_id = ?')
+      .bind(requestId)
+      .first<{ status: string }>();
+    expect(line?.status).toBe('received');
+
+    // Visible somewhere an operator actually looks — not only a console line
+    // in a Worker nobody is tailing a week from now.
+    const failed = await db
+      .prepare(
+        `SELECT details FROM audit_log
+          WHERE action = 'request_link.enqueue_failed' AND resource_id = ?`,
+      )
+      .bind(up!.id)
+      .first<{ details: string }>();
+    expect(failed).toBeTruthy();
+    expect(String(failed!.details)).toContain('simulated queue outage');
+  });
+
+  it('fills document_id when a reviewer approves, and still does not accept the line', async () => {
+    const { token, requestId, lineIds } = await makeRequest(['Third Party Audit']);
+    await upload(token, await refsFor(token, lineIds), { name: 'audit.pdf' });
+
+    const up = await db
+      .prepare('SELECT id, queue_id FROM request_uploads WHERE request_id = ?')
+      .bind(requestId)
+      .first<{ id: string; queue_id: string }>();
+    expect(up?.queue_id).toBeTruthy();
+
+    // Stand in for the worker: resolve a doc type and write an extraction.
+    let docTypeId = (
+      await db
+        .prepare('SELECT id FROM document_types WHERE tenant_id = ? AND slug = ?')
+        .bind(seed.tenantId, 'coa')
+        .first<{ id: string }>()
+    )?.id;
+    if (!docTypeId) {
+      docTypeId = generateTestId();
+      await db
+        .prepare(
+          `INSERT INTO document_types (id, tenant_id, name, slug, active)
+           VALUES (?, ?, 'COA', 'coa', 1)`,
+        )
+        .bind(docTypeId, seed.tenantId)
+        .run();
+    }
+    await db
+      .prepare(
+        `UPDATE processing_queue
+            SET document_type_id = ?, processing_status = 'ready',
+                extracted_text = 'audit report text',
+                ai_fields = ?, ai_confidence = 'high', confidence_score = 0.9
+          WHERE id = ?`,
+      )
+      .bind(
+        docTypeId,
+        JSON.stringify({ supplier_name: 'Portal Supplier', lot_number: 'L-1', product_name: 'Cream' }),
+        up!.queue_id,
+      )
+      .run();
+
+    const approveResp = await queuePut(up!.queue_id, { status: 'approved', fields: { lot_number: 'L-1' } });
+    expect(approveResp.status).toBe(200);
+
+    const after = await db
+      .prepare('SELECT document_id FROM request_uploads WHERE id = ?')
+      .bind(up!.id)
+      .first<{ document_id: string | null }>();
+    // Provenance closed: the arrival now points at what it became.
+    expect(after?.document_id).toBeTruthy();
+    const doc = await db
+      .prepare('SELECT id FROM documents WHERE id = ?')
+      .bind(after!.document_id)
+      .first<{ id: string }>();
+    expect(doc).toBeTruthy();
+
+    // THE LINE THAT IS DELIBERATELY NOT CROSSED. Approving an extraction is a
+    // judgement about whether the fields match the PDF. Accepting a checklist
+    // item is a judgement about whether the document satisfies what we asked
+    // for, made by the assigned buyer through PUT /api/request-lines/:id. The
+    // queue reviewer was never shown the line, its criteria or its acceptable
+    // formats, so their click must not move the progress number.
+    const line = await db
+      .prepare('SELECT status FROM request_lines WHERE request_id = ?')
+      .bind(requestId)
+      .first<{ status: string }>();
+    expect(line?.status).toBe('received');
+    const view = (await get(token)).body as SupplierRequestView;
+    expect(view.progress.required_satisfied).toBe(0);
   });
 });
