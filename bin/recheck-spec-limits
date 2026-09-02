@@ -227,6 +227,7 @@ function main() {
   const unmatched = new Map();
   let examined = 0;
   let withResults = 0;
+  let inSpec = 0;
 
   for (const doc of docs) {
     examined++;
@@ -246,7 +247,12 @@ function main() {
           document_type_id: doc.document_type_id || null,
           product_ids: [],
         },
-        { unitPolicy }
+        // Passes are asked for so they can be COUNTED. Without them this report
+        // prints only failures and refusals, so a run where 1055 results passed
+        // and 101 could not be judged reads as though almost nothing can be
+        // checked. A report that hides its own denominator misleads exactly the
+        // way a two-state verdict would.
+        { unitPolicy, includePasses: true }
       );
     }
 
@@ -255,7 +261,10 @@ function main() {
     }
 
     for (const v of [...printed, ...configured.verdicts]) {
-      if (v.verdict === 'in_spec') continue;
+      if (v.verdict === 'in_spec') {
+        inSpec++;
+        continue;
+      }
       findings.push({
         document_id: doc.id,
         document_title: doc.title,
@@ -283,6 +292,7 @@ function main() {
           with_results: withResults,
           analytes: tests.length,
           active_limits: limits.length,
+          in_spec: inSpec,
           unit_policy: unitPolicy,
           out_of_spec: outOfSpec,
           not_checked: notChecked,
@@ -311,6 +321,12 @@ function main() {
     console.log(`NOTE: capped at --limit ${opts.limit}; more documents were not examined.`);
   }
   console.log('');
+  const judged = inSpec + outOfSpec.length;
+  const totalResults = judged + notChecked.length;
+  const pct = totalResults ? ((judged / totalResults) * 100).toFixed(1) : '0.0';
+  console.log(`Results judged ........... ${judged} of ${totalResults}  (${pct}%)`);
+  console.log('');
+  console.log(`IN SPEC .................. ${inSpec}`);
   console.log(`OUT OF SPEC .............. ${outOfSpec.length}`);
   console.log(`COULD NOT BE JUDGED ...... ${notChecked.length}`);
   console.log('');
