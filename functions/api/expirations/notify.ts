@@ -1,30 +1,46 @@
 import { requireRole, requireTenantAccess, BadRequestError, errorToResponse } from '../../lib/permissions';
-import { computeExpirations, alertingRows, DEFAULT_WINDOW_DAYS } from '../../lib/expirations';
-import { sendEmail, buildRenewalAlertEmail } from '../../lib/email';
-import { mintAlertLink, alertLinkUrl } from '../../lib/alert-links';
+import { DEFAULT_WINDOW_DAYS } from '../../lib/expirations';
+import { runRenewalAlerts } from '../../lib/renewal-alerts';
 import type { Env, User } from '../../lib/types';
 
 /**
  * POST /api/expirations/notify
  *
- * Manual-trigger renewal alert. Resolves the expiring/expired/overdue set for
- * a tenant (via the shared computeExpirations helper), then sends ONE summary
- * email to the tenant's org_admins + all super_admins. `keep_current` docs are
- * never included (they never alert).
+ * MANUAL renewal alert. A human in the Renewals page presses "Send alert" and
+ * this fires immediately for one tenant.
  *
- * Recipient logic (MINIMAL — no per-owner routing yet; assignments.owner_user_id
- * is the FUTURE hook): all active org_admins of the target tenant + all active
- * super_admins, deduped by email. Each doc's `owner` string is shown in the
- * body for triage.
+ * All of the actual work - selecting the alert set, grouping it by owner,
+ * routing each group, minting a per-group /alert/<token> link, sending, and
+ * stamping the re-alert ledger - lives in `functions/lib/renewal-alerts.ts`,
+ * which is shared verbatim with the scheduled path
+ * (POST /api/expirations/run-scheduled, driven by the dox-renewal-alerts
+ * Worker). This endpoint is the auth + parameter shell around it. That split
+ * is deliberate: a manual button and a cron that send DIFFERENT things to
+ * DIFFERENT people is how a scheduled alert quietly stops matching what anyone
+ * tested.
  *
- * Degrades cleanly when RESEND_API_KEY is unset — returns a no-op result
- * ({ sent:false, reason:'email_not_configured' }) instead of 500'ing, mirroring
- * how other email sites skip sending.
+ * WHAT THIS NO LONGER DOES
+ * ------------------------
+ * It used to select every org_admin of the tenant plus every super_admin in
+ * the install and send them one email listing everything. That is the
+ * "an alert everyone receives is an alert nobody acts on" failure; see
+ * `functions/lib/alert-routing.ts` for the ladder that replaced it and
+ * `migrations/0091` for how a free-text owner label became resolvable.
+ *
+ * Records whose owner does not resolve are NOT silently re-broadcast to the
+ * admin pool. They come back in `unrouted` and produce a separate, plainly
+ * worded routing-gap notice plus an audit row.
+ *
+ * COOLDOWN: skipped here on purpose (`respectCooldown: false`). A person
+ * asking for the digest right now gets the whole current alert set, not
+ * whatever the weekly quiet period left over. The ledger is still WRITTEN, so
+ * pressing this at 09:00 suppresses the cron's repeat later the same day.
+ *
+ * Degrades cleanly when RESEND_API_KEY is unset - returns
+ * { sent:false, reason:'email_not_configured' } rather than 500'ing.
  *
  * Body/query params: tenant_id (super_admin only), window_days (default 60),
  * as_of (default today).
- *
- * Returns { sent, recipients, document_count, ... }.
  */
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -37,13 +53,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const text = await context.request.text();
       if (text) body = JSON.parse(text);
     } catch {
-      // Empty / non-JSON body is fine — all params have defaults.
+      // Empty / non-JSON body is fine - all params have defaults.
     }
 
     const param = (k: string): string | null =>
       (body[k] != null ? String(body[k]) : null) ?? url.searchParams.get(k);
 
-    // ── tenant scope ────────────────────────────────────────────────────────
+    // -- tenant scope --------------------------------------------------------
     let tenantId = param('tenant_id');
     if (user.role !== 'super_admin') {
       tenantId = user.tenant_id;
@@ -57,69 +73,25 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const windowDays = Number.isFinite(windowRaw) && windowRaw >= 0 ? windowRaw : DEFAULT_WINDOW_DAYS;
     const asOf = param('as_of') || new Date().toISOString().slice(0, 10);
 
-    // ── resolve the alert set (shared computation) ─────────────────────────
-    const { rows } = await computeExpirations(context.env.DB, tenantId, asOf, windowDays);
-    const alerts = alertingRows(rows);
-
-    // ── recipients: tenant org_admins + all super_admins ───────────────────
-    const recipRes = await context.env.DB.prepare(
-      `SELECT DISTINCT email FROM users
-        WHERE active = 1
-          AND email IS NOT NULL
-          AND (
-            (role = 'org_admin' AND tenant_id = ?)
-            OR role = 'super_admin'
-          )`,
-    )
-      .bind(tenantId)
-      .all<{ email: string }>();
-    const recipients = (recipRes.results ?? [])
-      .map((r) => r.email)
-      .filter((e): e is string => !!e);
-
-    // ── tenant name for the email header ────────────────────────────────────
-    const tenantRow = await context.env.DB.prepare('SELECT name FROM tenants WHERE id = ?')
-      .bind(tenantId)
-      .first<{ name: string }>();
-    const tenantName = tenantRow?.name ?? 'your organization';
-
-    const documentCount = alerts.length;
-
-    // Nothing to alert on → no-op success.
-    if (documentCount === 0) {
-      return json({ sent: false, reason: 'no_documents', recipients, document_count: 0 });
-    }
-    if (recipients.length === 0) {
-      return json({ sent: false, reason: 'no_recipients', recipients, document_count: documentCount });
-    }
-    if (!context.env.RESEND_API_KEY) {
-      return json({ sent: false, reason: 'email_not_configured', recipients, document_count: documentCount });
-    }
-
-    // The renewal email had no link at all until now — the recipient's next
-    // move was to go find the portal and orient themselves, which is exactly
-    // the failure this landing page exists to remove. Scoped to the EXACT
-    // document set this email lists, so an old forwarded link never widens.
-    const alertToken = await mintAlertLink(context.env.DB, {
+    const result = await runRenewalAlerts(context.env.DB, context.env.RESEND_API_KEY, {
       tenantId,
-      kind: 'renewal_alert',
-      subjectIds: alerts.map((a) => a.id),
-    });
-    const appUrl = new URL(context.request.url).origin;
-
-    const { subject, html } = buildRenewalAlertEmail(
-      alerts,
-      tenantName,
-      alertLinkUrl(appUrl, alertToken),
-    );
-    // ONE email to all recipients (Resend accepts an array of `to`).
-    const ok = await sendEmail(context.env.RESEND_API_KEY, {
-      to: recipients,
-      subject,
-      html,
+      asOf,
+      windowDays,
+      appUrl: url.origin,
+      respectCooldown: false,
+      actorUserId: user.id,
     });
 
-    return json({ sent: ok, recipients, document_count: documentCount });
+    return json({
+      sent: result.sent,
+      recipients: result.recipients,
+      document_count: result.document_count,
+      alerting_count: result.alerting_count,
+      suppressed_count: result.suppressed_count,
+      groups: result.groups,
+      unrouted: result.unrouted,
+      ...(result.reason ? { reason: result.reason } : {}),
+    });
   } catch (err) {
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;

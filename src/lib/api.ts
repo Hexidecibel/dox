@@ -87,6 +87,8 @@ import type {
   CoaFulfillmentResponse,
   ExpirationListResponse,
   ExpirationNotifyResponse,
+  OwnerRoute,
+  OwnerRouteListResponse,
   LotMatchListResponse,
   CoaRecordsPayload,
   CoaRecordDecision,
@@ -1480,8 +1482,19 @@ export const api = {
 
     /**
      * POST /api/expirations/notify
-     * Sends ONE summary alert email to org_admins + super_admins for the
-     * expiring/expired/overdue set. Returns the send result.
+     *
+     * Sends the renewal digest NOW, grouped by the record's owner: one email
+     * per owner label containing only that owner's records, addressed only to
+     * the people that label resolves to via /api/owner-routes.
+     *
+     * It no longer blasts every org_admin plus every super_admin. Records with
+     * no resolvable owner come back in `unrouted` and get a separate
+     * routing-GAP notice instead of being quietly re-broadcast - check that
+     * block, it is the part that says who was NOT told.
+     *
+     * The manual path ignores the 7-day re-alert cooldown (a human asking now
+     * gets everything now) but still stamps it, so this does not double up
+     * with the scheduled daily run.
      */
     notify: (params?: {
       tenantId?: string;
@@ -1497,6 +1510,49 @@ export const api = {
         }),
       });
     },
+  },
+
+  /**
+   * Owner routes - map a free-text `documents.owner` label ('QA',
+   * 'Insurance', ...) to the people who should receive its renewal alerts.
+   * Without a route, records carrying that label are UNROUTED and nobody is
+   * alerted about them. See migration 0091.
+   */
+  ownerRoutes: {
+    /** GET /api/owner-routes[?owner=QA] */
+    list: (params?: { tenantId?: string; owner?: string }): Promise<OwnerRouteListResponse> => {
+      const query = new URLSearchParams();
+      if (params?.tenantId) query.set('tenant_id', params.tenantId);
+      if (params?.owner) query.set('owner', params.owner);
+      const qs = query.toString();
+      return fetchApi<OwnerRouteListResponse>(`/owner-routes${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * POST /api/owner-routes
+     * Exactly one of userId / email. A bare email is the supported case for an
+     * owner with no portal account (a broker, a site manager).
+     */
+    create: (params: {
+      ownerLabel: string;
+      userId?: string;
+      email?: string;
+      tenantId?: string;
+    }): Promise<{ route: OwnerRoute }> => {
+      return fetchApi<{ route: OwnerRoute }>(`/owner-routes`, {
+        method: 'POST',
+        body: JSON.stringify({
+          owner_label: params.ownerLabel,
+          user_id: params.userId,
+          email: params.email,
+          tenant_id: params.tenantId,
+        }),
+      });
+    },
+
+    /** DELETE /api/owner-routes/:id */
+    remove: (id: string): Promise<{ success: boolean }> =>
+      fetchApi<{ success: boolean }>(`/owner-routes/${id}`, { method: 'DELETE' }),
   },
 
   bundles: {

@@ -25,6 +25,8 @@
 import { generateId } from './db';
 import { sendEmail, buildSpecAlertEmail } from './email';
 import { mintAlertLink, alertLinkUrl } from './alert-links';
+import { resolveAlertRouting } from './alert-routing';
+import type { AlertRecipient } from './alert-routing';
 import type { SpecVerdict } from '../../shared/specCheck';
 import type { ConfiguredLimit } from '../../shared/specCheck';
 
@@ -133,59 +135,41 @@ export async function registerSpecChecks(
   }
 }
 
-export interface AlertRecipient {
-  email: string;
-  name: string | null;
-}
+export type { AlertRecipient } from './alert-routing';
 
 /**
  * Who hears about an out-of-spec result on this (supplier, document type).
  *
- * The owner of that review queue first — `assignments` (migration 0071) already
- * models exactly this, so a tenant that has done the ownership work does not do
- * it twice. Failing that, the tenant's org_admins, because "nobody is assigned"
- * must not mean "nobody is told".
+ * THIN SHIM as of migration 0091. The ladder now lives in
+ * `functions/lib/alert-routing.ts` and is shared with the renewal path, so
+ * there is one answer to "who owns this record" instead of two.
+ *
+ * `adminFallback: true` is passed DELIBERATELY and is the one place the spec
+ * path differs from the renewal path. An out-of-spec analytical result is a
+ * one-shot food-safety event: if nobody is assigned, telling the tenant's
+ * org_admins is better than telling nobody. The renewal digest makes the
+ * opposite call, because it runs every day and the admin pool would be the
+ * standing recipient of everything — see alert-routing.ts for the full
+ * argument.
+ *
+ * `ownerLabel` is optional and threads `documents.owner` in where the caller
+ * has it, so a record that names its own owner routes there first.
  */
 export async function resolveAlertRecipients(
   db: D1Database,
   tenantId: string,
   supplierId: string | null,
-  documentTypeId: string | null
+  documentTypeId: string | null,
+  ownerLabel?: string | null
 ): Promise<AlertRecipient[]> {
-  try {
-    if (supplierId && documentTypeId) {
-      const owner = await db
-        .prepare(
-          `SELECT u.email, u.name
-             FROM assignments a
-             JOIN users u ON u.id = a.owner_user_id
-            WHERE a.tenant_id = ? AND a.supplier_id = ? AND a.document_type_id = ?
-              AND u.active = 1 AND u.email IS NOT NULL`
-        )
-        .bind(tenantId, supplierId, documentTypeId)
-        .all();
-      const rows = (owner.results ?? []) as Array<{ email: string; name: string | null }>;
-      if (rows.length > 0) return rows.map((r) => ({ email: r.email, name: r.name }));
-    }
-
-    const admins = await db
-      .prepare(
-        `SELECT email, name FROM users
-          WHERE tenant_id = ? AND role = 'org_admin' AND active = 1 AND email IS NOT NULL`
-      )
-      .bind(tenantId)
-      .all();
-    return ((admins.results ?? []) as Array<{ email: string; name: string | null }>).map((r) => ({
-      email: r.email,
-      name: r.name,
-    }));
-  } catch (err) {
-    console.error(
-      '[spec-register] resolving alert recipients failed:',
-      err instanceof Error ? err.message : String(err)
-    );
-    return [];
-  }
+  const { recipients } = await resolveAlertRouting(db, {
+    tenantId,
+    ownerLabel: ownerLabel ?? null,
+    supplierId,
+    documentTypeId,
+    adminFallback: true,
+  });
+  return recipients;
 }
 
 export interface NotifyContext {
@@ -196,6 +180,8 @@ export interface NotifyContext {
   supplierId: string | null;
   supplierName: string | null;
   documentTypeId: string | null;
+  /** documents.owner, when the caller has it. Routes ahead of `assignments`. */
+  ownerLabel?: string | null;
   appUrl?: string;
 }
 
@@ -221,7 +207,8 @@ export async function notifySpecFailures(
       db,
       ctx.tenantId,
       ctx.supplierId,
-      ctx.documentTypeId
+      ctx.documentTypeId,
+      ctx.ownerLabel ?? null
     );
     if (recipients.length === 0) return 0;
 

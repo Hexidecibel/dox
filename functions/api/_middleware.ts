@@ -35,6 +35,13 @@ const PUBLIC_ROUTES = [
   // (CONNECTOR_POLL_TOKEN) checked inside the handler — bypasses JWT so
   // the companion `dox-connector-poller` Worker can drive it on cron.
   '/api/sources/poll',
+  // Scheduled renewal-alert endpoint. Same posture as /api/sources/poll and
+  // for the same structural reason: Pages cannot host a cron, so the schedule
+  // lives in the companion `dox-renewal-alerts` Worker and reaches the Pages
+  // project over HTTP. Authed by RENEWAL_ALERT_TOKEN inside the handler, which
+  // fails closed when unset. Exact-path entry, NOT a prefix: `/api/expirations`
+  // itself stays behind the JWT gate.
+  '/api/expirations/run-scheduled',
   '/api/forms/public',
   // Records update requests — recipient form gate is the unguessable
   // token in the URL, not a login. Same scoping rule as /api/forms/public:

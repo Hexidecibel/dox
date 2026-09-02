@@ -3,6 +3,14 @@
  *   - GET  /api/expirations         (functions/api/expirations/index.ts)
  *   - POST /api/expirations/notify  (functions/api/expirations/notify.ts)
  *
+ * NOTE on the notify block: it used to assert "ONE email to org_admins +
+ * super_admins". That was the behaviour the client rejected — an alert
+ * everyone receives is an alert nobody acts on — so those assertions were
+ * rewritten rather than kept. The full per-owner routing, suppression and
+ * scheduling coverage lives in tests/api/renewal-alerts.test.ts; what stays
+ * here is that this endpoint still selects the right SET and still degrades
+ * cleanly.
+ *
  * Drives the handlers directly with hand-rolled contexts — SELF.fetch isn't
  * wired in this project's vitest-pool-workers config (same pattern as
  * reports-coa-fulfillment.test.ts). The Resend HTTP call is stubbed via
@@ -221,9 +229,29 @@ describe('GET /api/expirations — classification + summary', () => {
   });
 });
 
-describe('POST /api/expirations/notify — selection + single send', () => {
-  it('selects the alert set, sends ONE email to org_admins + super_admins', async () => {
-    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+describe('POST /api/expirations/notify — selection + per-owner routing', () => {
+  it('selects the alert set and sends ONE email PER OWNER, not one to everybody', async () => {
+    // Alice and Bob are mapped to real recipients; Carol deliberately is not,
+    // so this also pins the mixed case: some routed, some reported.
+    await db
+      .prepare(`INSERT INTO owner_routes (id, tenant_id, owner_key, owner_label, email, active)
+                VALUES (?, ?, 'alice', 'Alice', 'alice@test.com', 1)`)
+      .bind(generateTestId(), seed.tenantId)
+      .run();
+    await db
+      .prepare(`INSERT INTO owner_routes (id, tenant_id, owner_key, owner_label, user_id, active)
+                VALUES (?, ?, 'bob', 'Bob', ?, 1)`)
+      .bind(generateTestId(), seed.tenantId, seed.userId)
+      .run();
+
+    const sent: Array<{ to: string[]; subject: string; html: string }> = [];
+    const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes('resend.com')) {
+        const p = JSON.parse((init?.body as string) ?? '{}');
+        sent.push({ to: p.to, subject: p.subject, html: p.html });
+      }
+      return new Response('{}', { status: 200 });
+    });
     vi.stubGlobal('fetch', fetchMock);
 
     const { status, body } = await runNotify(
@@ -232,23 +260,47 @@ describe('POST /api/expirations/notify — selection + single send', () => {
     );
     expect(status).toBe(200);
     expect(body.sent).toBe(true);
-    // A (expired) + B (expiring) + C (overdue). D (stale) + E (current) excluded.
-    expect(body.document_count).toBe(3);
-    // sendEmail hit the Resend endpoint exactly once.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [urlArg, reqInit] = fetchMock.mock.calls[0];
-    expect(String(urlArg)).toContain('resend.com');
-    // Recipients: tenant-1 org_admin + super_admin, deduped.
-    expect(body.recipients).toContain('orgadmin@test.com');
-    expect(body.recipients).toContain('admin@test.com');
-    // Tenant-2 org_admin must NOT be included.
-    expect(body.recipients).not.toContain('orgadmin2@test.com');
-    // Payload lists the alerting docs, not the keep_current/current ones.
-    const payload = JSON.parse((reqInit as RequestInit).body as string);
-    expect(payload.to).toEqual(expect.arrayContaining(['orgadmin@test.com', 'admin@test.com']));
-    expect(payload.html).toContain('A Expired License');
-    expect(payload.html).not.toContain('D Spec Sheet');
-    expect(payload.html).not.toContain('E Future COI');
+
+    // A (expired, Alice) + B (expiring, Bob) + C (overdue, Carol) are the
+    // alert set. D (stale) + E (current) are excluded as before.
+    expect(body.alerting_count).toBe(3);
+    // Two of the three routed; Carol's did not, and is REPORTED rather than
+    // quietly mailed to the admin pool.
+    expect(body.document_count).toBe(2);
+    expect(body.unrouted.count).toBe(1);
+    expect(body.unrouted.owner_labels).toEqual(['Carol']);
+
+    // Two owner digests + one routing-gap notice. Never one blast to everyone.
+    expect(sent).toHaveLength(3);
+
+    const alice = sent.find((m) => m.to.includes('alice@test.com'))!;
+    const bob = sent.find((m) => m.to.includes('user@test.com'))!;
+    expect(alice.to).toEqual(['alice@test.com']);
+    expect(bob.to).toEqual(['user@test.com']);
+    // Each owner sees only their own record.
+    expect(alice.html).toContain('A Expired License');
+    expect(alice.html).not.toContain('B Organic Application');
+    expect(bob.html).toContain('B Organic Application');
+    expect(bob.html).not.toContain('A Expired License');
+    // And nothing that never alerts leaks into either.
+    for (const m of sent) {
+      expect(m.html).not.toContain('D Spec Sheet');
+      expect(m.html).not.toContain('E Future COI');
+    }
+
+    // The old behaviour is gone: no super_admin, and no tenant-2 admin, on any
+    // renewal digest.
+    for (const m of sent) {
+      expect(m.to).not.toContain('admin@test.com');
+      expect(m.to).not.toContain('orgadmin2@test.com');
+    }
+
+    // The routing-gap notice is a separate, differently-worded message.
+    const gap = sent.find((m) => m.subject.includes('no owner'))!;
+    expect(gap).toBeTruthy();
+    expect(gap.to).toEqual(['orgadmin@test.com']);
+    expect(gap.subject).toContain('nobody was alerted');
+    expect(gap.html).toContain('C Audit Review');
   });
 
   it('degrades to a no-op (no 500) when RESEND_API_KEY is unset', async () => {
@@ -263,7 +315,10 @@ describe('POST /api/expirations/notify — selection + single send', () => {
     expect(status).toBe(200);
     expect(body.sent).toBe(false);
     expect(body.reason).toBe('email_not_configured');
-    expect(body.document_count).toBe(3);
+    // Nothing was SENT, but the alert set was still resolved — so an operator
+    // can see what would go where before wiring up email.
+    expect(body.document_count).toBe(0);
+    expect(body.alerting_count).toBe(3);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

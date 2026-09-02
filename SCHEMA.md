@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 115 tables, 2 views, 176 indexes, 36 triggers.
+Objects: 122 tables, 2 views, 194 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -1371,6 +1371,36 @@ Indexes: `idx_claim_types_tenant`
 
 Indexes: `idx_document_claims_document`, `idx_document_claims_subject`, `idx_document_claims_type`, `idx_document_claims_unique`
 
+### `document_requests`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE
+  root_request_id TEXT NOT NULL
+  version INTEGER NOT NULL DEFAULT 1
+  supersedes_id TEXT REFERENCES document_requests(id)
+  superseded_at TEXT
+  amendment_reason TEXT
+  reissue_of_request_id TEXT REFERENCES document_requests(id)
+  origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'template', 'gap', 'generated'))
+  origin_ref TEXT
+  title TEXT NOT NULL
+  intro TEXT
+  due_date TEXT
+  assigned_to TEXT REFERENCES users(id)
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'issued', 'cancelled', 'closed'))
+  issued_at TEXT
+  closed_at TEXT
+  cancelled_at TEXT
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_by TEXT
+```
+
+Indexes: `idx_document_requests_assigned`, `idx_document_requests_due`, `idx_document_requests_root_live`, `idx_document_requests_root_version`, `idx_document_requests_supersedes`, `idx_document_requests_supplier`
+
 ### `document_requirements`
 
 ```sql
@@ -1432,6 +1462,127 @@ Indexes: `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_tenant_verdict`
 ```
 
 Indexes: `idx_entity_notes_author`, `idx_entity_notes_entity`
+
+### `owner_routes`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  owner_key TEXT NOT NULL
+  owner_label TEXT NOT NULL
+  user_id TEXT REFERENCES users(id) ON DELETE CASCADE
+  email TEXT
+  active INTEGER NOT NULL DEFAULT 1
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  CHECK ((user_id IS NOT NULL) <> (email IS NOT NULL))
+```
+
+Indexes: `idx_owner_routes_lookup`, `idx_owner_routes_unique`
+
+### `renewal_alert_state`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE
+  last_status TEXT NOT NULL
+  last_due_date TEXT
+  last_notified_at TEXT NOT NULL DEFAULT (datetime('now'))
+  last_notified_as_of TEXT
+  notify_count INTEGER NOT NULL DEFAULT 1
+  UNIQUE(tenant_id, document_id)
+```
+
+Indexes: `idx_renewal_alert_state_doc`
+
+### `request_lines`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  request_id TEXT NOT NULL REFERENCES document_requests(id) ON DELETE CASCADE
+  line_kind TEXT NOT NULL DEFAULT 'requirement' CHECK (line_kind IN ('requirement', 'free_text'))
+  requirement_id TEXT REFERENCES requirements(id) ON DELETE CASCADE
+  name TEXT NOT NULL
+  explanation TEXT
+  acceptable_formats TEXT
+  criteria TEXT
+  owner TEXT
+  tier TEXT NOT NULL DEFAULT 'required' CHECK (tier IN ('required', 'recommended'))
+  status TEXT NOT NULL DEFAULT 'not_started' CHECK (status IN ('not_started', 'received', 'under_review', 'accepted', 'needs_attention'))
+  status_note TEXT
+  status_changed_at TEXT
+  status_changed_by TEXT REFERENCES users(id)
+  sort_order INTEGER NOT NULL DEFAULT 0
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_by TEXT
+  CHECK ( (line_kind = 'requirement' AND requirement_id IS NOT NULL) OR (line_kind = 'free_text' AND requirement_id IS NULL) )
+```
+
+Indexes: `idx_request_lines_request`, `idx_request_lines_requirement`, `idx_request_lines_requirement_unique`, `idx_request_lines_status`
+
+### `request_routing`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  request_id TEXT NOT NULL UNIQUE REFERENCES document_requests(id) ON DELETE CASCADE
+  issued_by TEXT NOT NULL REFERENCES users(id)
+  issued_at TEXT NOT NULL DEFAULT (datetime('now'))
+  version INTEGER NOT NULL DEFAULT 1
+  amendment_of_routing_id TEXT REFERENCES request_routing(id)
+  channel TEXT NOT NULL DEFAULT 'portal' CHECK (channel IN ('portal', 'email', 'manual'))
+  recipient TEXT
+  internal_notes TEXT
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+```
+
+Indexes: `idx_request_routing_issued_by`, `idx_request_routing_tenant`
+
+### `request_template_lines`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  template_id TEXT NOT NULL REFERENCES request_templates(id) ON DELETE CASCADE
+  line_kind TEXT NOT NULL DEFAULT 'requirement' CHECK (line_kind IN ('requirement', 'free_text'))
+  requirement_id TEXT REFERENCES requirements(id) ON DELETE CASCADE
+  name TEXT NOT NULL
+  explanation TEXT
+  acceptable_formats TEXT
+  criteria TEXT
+  owner TEXT
+  tier TEXT NOT NULL DEFAULT 'required' CHECK (tier IN ('required', 'recommended'))
+  sort_order INTEGER NOT NULL DEFAULT 0
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  CHECK ( (line_kind = 'requirement' AND requirement_id IS NOT NULL) OR (line_kind = 'free_text' AND requirement_id IS NULL) )
+```
+
+Indexes: `idx_request_template_lines_requirement_unique`, `idx_request_template_lines_template`
+
+### `request_templates`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  name TEXT NOT NULL
+  slug TEXT NOT NULL
+  description TEXT
+  default_due_in_days INTEGER
+  active INTEGER NOT NULL DEFAULT 1
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_by TEXT
+  UNIQUE(tenant_id, slug)
+```
+
+Indexes: `idx_request_templates_tenant`
 
 ### `requirements`
 

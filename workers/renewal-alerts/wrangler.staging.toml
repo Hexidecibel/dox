@@ -1,0 +1,22 @@
+name = "dox-renewal-alerts-staging"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Staging twin of dox-renewal-alerts. See `wrangler.toml` for why this
+# companion Worker exists at all (Pages cannot host crons) and for the reasoning
+# behind the daily 13:00 UTC cadence.
+[triggers]
+crons = ["0 13 * * *"]
+
+[vars]
+# Staging Pages project URL - MUST stay distinct from prod (`supdox.com`) so a
+# misconfigured token can never make the staging cron mail production tenants'
+# owners. This job SENDS EMAIL to real addresses, so the prod/staging split
+# matters more here than it does for the connector poller.
+DOX_API_BASE = "https://doc-upload-site-staging.pages.dev"
+
+# Secrets (set via `npx wrangler secret put --config wrangler.staging.toml`):
+#   RENEWAL_ALERT_TOKEN - bearer token sent to /api/expirations/run-scheduled
+#                         on the staging Pages project. MUST match the value
+#                         set on `doc-upload-site-staging`, and MUST be a
+#                         different value from prod's.

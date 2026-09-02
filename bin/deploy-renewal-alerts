@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+#
+# Deploy the companion `dox-renewal-alerts` Worker.
+#
+# This is a SEPARATE deploy artifact from the main Pages project - the Worker
+# hosts the daily cron that drives `/api/expirations/run-scheduled` on the
+# Pages side. Pages cannot host its own cron, hence the split. Same shape as
+# `bin/deploy-connector-poller`, on purpose.
+#
+# Cadence: 13:00 UTC daily (~06:00 US/Pacific). The cron decides how often we
+# LOOK; the 7-day cooldown in `functions/lib/renewal-alerts.ts` decides how
+# often an owner actually gets mail about the same record.
+#
+# Secrets:
+#   RENEWAL_ALERT_TOKEN must be set on BOTH sides - the Pages project (via
+#   `bin/set-pages-secret`) and this Worker (via `wrangler secret put`). The
+#   Worker sends it as a bearer token; the Pages handler compares it. Use the
+#   SAME value on both sides, and a DIFFERENT value from CONNECTOR_POLL_TOKEN
+#   (this job sends mail; that one dispatches ingest runs).
+#
+#     # one-time, from this script's directory:
+#     cd workers/renewal-alerts
+#     npx wrangler secret put RENEWAL_ALERT_TOKEN                                # prod
+#     npx wrangler secret put RENEWAL_ALERT_TOKEN --config wrangler.staging.toml # staging
+#
+# Also required on the Pages side for anything to actually send:
+#   RESEND_API_KEY. Without it the run still executes and still reports what it
+#   WOULD have routed (reason: email_not_configured) - useful for a dry check
+#   before the cutover.
+#
+# Usage:
+#   ./bin/deploy-renewal-alerts            # prod deploy (dox-renewal-alerts)
+#   ./bin/deploy-renewal-alerts --staging  # staging deploy (dox-renewal-alerts-staging)
+#   ./bin/deploy-renewal-alerts --dry-run  # validate config only (combine with --staging)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DRY_RUN=0
+STAGING=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --staging) STAGING=1 ;;
+    -h|--help)
+      grep '^#' "$0" | sed 's/^#//'
+      exit 0
+      ;;
+  esac
+done
+
+if [[ "$STAGING" == "1" ]]; then
+  CONFIG_ARGS=(--config wrangler.staging.toml)
+  LABEL="dox-renewal-alerts-staging (STAGING)"
+else
+  CONFIG_ARGS=()
+  LABEL="dox-renewal-alerts (PROD)"
+fi
+
+echo "==> Deploying $LABEL"
+cd workers/renewal-alerts
+
+if [[ ! -d node_modules ]]; then
+  echo "==> Installing worker dependencies (first run)"
+  npm install
+fi
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  npx wrangler deploy "${CONFIG_ARGS[@]}" --dry-run
+  echo "==> Dry run complete (no upload)"
+else
+  npx wrangler deploy "${CONFIG_ARGS[@]}"
+  echo
+  echo "==> Reminder: ensure RENEWAL_ALERT_TOKEN is set on BOTH the Worker"
+  echo "    (here) and the Pages project. The endpoint fails closed with 401"
+  echo "    if the Pages-side value is unset."
+  echo
+  echo "==> Verify a tick without waiting for 13:00 UTC:"
+  echo "      curl -X POST https://supdox.com/api/expirations/run-scheduled \\"
+  echo "        -H \"Authorization: Bearer \$RENEWAL_ALERT_TOKEN\""
+  echo "    Check documents_unrouted in the response before trusting the run:"
+  echo "    a non-zero value means those records reached NOBODY."
+fi

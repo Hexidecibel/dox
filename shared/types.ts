@@ -3839,12 +3839,84 @@ export interface ExpirationListResponse {
   as_of: string;
 }
 
-export interface ExpirationNotifyResponse {
-  sent: boolean;
+/** Which rung of the alert-routing ladder produced a group's recipients. */
+export type AlertRoutingVia = 'owner_route' | 'assignment' | 'tenant_admins' | 'unrouted';
+
+/** One owner's slice of a renewal send: their records, their recipients. */
+export interface RenewalAlertGroup {
+  /** documents.owner as stored ('QA', 'Insurance', ...). */
+  owner_label: string | null;
+  via: AlertRoutingVia;
   recipients: string[];
   document_count: number;
-  /** Present when nothing was sent: no_documents | no_recipients | email_not_configured. */
-  reason?: 'no_documents' | 'no_recipients' | 'email_not_configured';
+  document_ids: string[];
+  sent: boolean;
+}
+
+/**
+ * Records that reached NOBODY, and what was done about it.
+ *
+ * This block is the honest half of the response. A renewal run that routes
+ * three of five records and stays quiet about the other two is a run that
+ * failed, and the caller must be able to say so without inferring it from a
+ * count mismatch.
+ */
+export interface RenewalUnroutedReport {
+  count: number;
+  /** Distinct owner labels with no route; null means the record named no owner. */
+  owner_labels: Array<string | null>;
+  documents: Array<{ id: string; title: string; owner: string | null }>;
+  /** Admins sent the routing-GAP notice - which is not the renewal alert. */
+  notified: string[];
+  notice_sent: boolean;
+}
+
+export type RenewalNoSendReason =
+  | 'no_documents'
+  | 'all_suppressed'
+  | 'email_not_configured'
+  | 'all_unrouted'
+  | 'no_recipients';
+
+export interface ExpirationNotifyResponse {
+  sent: boolean;
+  /** Everyone actually mailed a renewal digest, across all owner groups. */
+  recipients: string[];
+  /** Documents included in a digest that was actually sent. */
+  document_count: number;
+  /** Documents in the alert set before the re-alert cooldown was applied. */
+  alerting_count: number;
+  /** Held back because nothing about them changed since the last alert. */
+  suppressed_count: number;
+  /** One entry per owner label that resolved to somebody. */
+  groups: RenewalAlertGroup[];
+  unrouted: RenewalUnroutedReport;
+  reason?: RenewalNoSendReason;
+}
+
+/**
+ * A mapping from a free-text `documents.owner` label to a real recipient.
+ * Exactly one of user_id / email is set. See migration 0091.
+ */
+export interface OwnerRoute {
+  id: string;
+  tenant_id: string;
+  /** Normalized match key (lower-cased, whitespace-collapsed). */
+  owner_key: string;
+  /** The label as typed, for display. */
+  owner_label: string;
+  user_id: string | null;
+  email: string | null;
+  active: number;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  user_name?: string | null;
+  user_email?: string | null;
+}
+
+export interface OwnerRouteListResponse {
+  routes: OwnerRoute[];
 }
 
 // === Review Queue v2: weak COA→lot match suggestions ===
@@ -4020,4 +4092,393 @@ export interface AlertLandingView {
   failures: AlertLandingSpecFailure[];
   /** Present for kind === 'renewal_alert'; empty otherwise. */
   renewals: AlertLandingRenewal[];
+}
+
+// ===========================================================================
+// Document requests — the composer (migration 0090)
+// ===========================================================================
+
+/**
+ * Lifecycle of one request VERSION.
+ *
+ * `draft` is editable in place; every other state is reached through the one
+ * issue path. There is deliberately no 'superseded' status: a row that was
+ * issued stays `issued` forever, because that is what happened. Supersession
+ * is tracked by `superseded_at`, which is chain metadata rather than a
+ * restatement of the ask.
+ */
+export type DocumentRequestStatus = 'draft' | 'issued' | 'cancelled' | 'closed';
+
+/** What composed a draft. Provenance only — it never selects a code path. */
+export type DocumentRequestOrigin = 'manual' | 'template' | 'gap' | 'generated';
+
+/**
+ * Whether a line resolves to a registry requirement or is an untyped escape
+ * hatch. 'requirement' is the default everywhere; 'free_text' has to be asked
+ * for by name, and both the DB CHECK and the API refuse to infer it from a
+ * missing requirement_id.
+ */
+export type RequestLineKind = 'requirement' | 'free_text';
+
+/** The client's exact five per-line states. No transition graph is imposed. */
+export type RequestLineStatus =
+  | 'not_started'
+  | 'received'
+  | 'under_review'
+  | 'accepted'
+  | 'needs_attention';
+
+/** How an issued packet left the building. Internal routing detail. */
+export type RequestIssueChannel = 'portal' | 'email' | 'manual';
+
+export const DOCUMENT_REQUEST_STATUSES: readonly DocumentRequestStatus[] = [
+  'draft',
+  'issued',
+  'cancelled',
+  'closed',
+];
+
+export const REQUEST_LINE_STATUSES: readonly RequestLineStatus[] = [
+  'not_started',
+  'received',
+  'under_review',
+  'accepted',
+  'needs_attention',
+];
+
+/** One request line as stored. */
+export interface RequestLineRow {
+  id: string;
+  tenant_id: string;
+  request_id: string;
+  line_kind: RequestLineKind;
+  /** NULL only when line_kind === 'free_text'. Enforced by a paired CHECK. */
+  requirement_id: string | null;
+  name: string;
+  explanation: string | null;
+  acceptable_formats: string | null;
+  criteria: string | null;
+  owner: string | null;
+  tier: SupplierRequirementTier;
+  status: RequestLineStatus;
+  status_note: string | null;
+  status_changed_at: string | null;
+  status_changed_by: string | null;
+  sort_order: number;
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+/**
+ * What `document_requirements` already says about a typed line, read back and
+ * attached to it.
+ *
+ * DERIVED AND READ-ONLY. It is the existing registry mechanism showing its
+ * work, not a second one: a confirmed `document_requirements` row on one of
+ * this supplier's active documents for this line's requirement. It never
+ * writes, and it never moves `status` — see the note on
+ * `RequestLineWithClosure.closure`.
+ *
+ * A free-text line can never have one, which is the client's whole argument
+ * for typed lines expressed as a field a UI can render.
+ */
+export interface RequestLineClosure {
+  document_id: string;
+  document_title: string;
+  confirmed_at: string | null;
+}
+
+export interface RequestLineWithClosure extends RequestLineRow {
+  requirement_name: string | null;
+  requirement_slug: string | null;
+  requirement_checklist: string | null;
+  /**
+   * Confirmed documents from this supplier that satisfy this line's
+   * requirement. Empty for free-text lines, always.
+   *
+   * This does NOT set `status`. `accepted` is a human verdict and `received` /
+   * `under_review` sit in front of it; a machine jumping straight to `accepted`
+   * would erase the review those states exist to describe.
+   */
+  closure: RequestLineClosure[];
+}
+
+/** One request version as stored. */
+export interface DocumentRequestRow {
+  id: string;
+  tenant_id: string;
+  supplier_id: string;
+  root_request_id: string;
+  version: number;
+  supersedes_id: string | null;
+  superseded_at: string | null;
+  amendment_reason: string | null;
+  reissue_of_request_id: string | null;
+  origin: DocumentRequestOrigin;
+  origin_ref: string | null;
+  title: string;
+  intro: string | null;
+  due_date: string | null;
+  assigned_to: string | null;
+  status: DocumentRequestStatus;
+  issued_at: string | null;
+  closed_at: string | null;
+  cancelled_at: string | null;
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+/** The internal issue record. NEVER projected externally. */
+export interface RequestRoutingRow {
+  id: string;
+  tenant_id: string;
+  request_id: string;
+  issued_by: string;
+  issued_at: string;
+  version: number;
+  amendment_of_routing_id: string | null;
+  channel: RequestIssueChannel;
+  recipient: string | null;
+  internal_notes: string | null;
+  created_at: string;
+}
+
+/** Counts a composer screen renders without walking the line list. */
+export interface DocumentRequestLineCounts {
+  total: number;
+  /** Lines that resolve to a requirement — the ones the registry can reason about. */
+  typed: number;
+  /**
+   * Lines that do not. Surfaced as a first-class number so "how much of this
+   * packet is unreasonable-about" is on the screen rather than something a
+   * reviewer has to scan for.
+   */
+  free_text: number;
+  required: number;
+  recommended: number;
+  by_status: Record<RequestLineStatus, number>;
+}
+
+/**
+ * The INTERNAL view of a request: everything, including routing.
+ * Requires an authenticated user of the owning tenant.
+ */
+export interface DocumentRequestDetail extends DocumentRequestRow {
+  supplier_name: string | null;
+  assigned_to_name: string | null;
+  lines: RequestLineWithClosure[];
+  counts: DocumentRequestLineCounts;
+  /** The issue record for THIS version, when it has been issued. */
+  routing: RequestRoutingRow | null;
+  /** Every version of this ask, oldest first — the amendment trail. */
+  history: DocumentRequestVersionSummary[];
+}
+
+/** One entry in the amendment trail. */
+export interface DocumentRequestVersionSummary {
+  id: string;
+  version: number;
+  status: DocumentRequestStatus;
+  title: string;
+  due_date: string | null;
+  issued_at: string | null;
+  superseded_at: string | null;
+  amendment_reason: string | null;
+  line_count: number;
+  is_current: boolean;
+}
+
+export interface DocumentRequestListItem extends DocumentRequestRow {
+  supplier_name: string | null;
+  assigned_to_name: string | null;
+  counts: DocumentRequestLineCounts;
+}
+
+export interface DocumentRequestListResponse {
+  requests: DocumentRequestListItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface DocumentRequestResponse {
+  request: DocumentRequestDetail;
+}
+
+/**
+ * The ENTIRE payload that may cross to a supplier.
+ *
+ * An allow-list, not a filter: `buildSupplierRequestView` constructs this field
+ * by field from named columns, exactly as `buildAlertLandingView` does for
+ * alert links. It never spreads a row and never deletes keys from a wider
+ * object, because the failure mode — the assigned buyer's identity, an internal
+ * note, or the routing record reaching a vendor — is not recoverable by
+ * apologising.
+ *
+ * Deliberately absent: every internal id (request, tenant, supplier, line,
+ * requirement, user), the routing record in any form, `assigned_to`,
+ * `internal_notes`, `recipient`, `origin`/`origin_ref` (which would tell a
+ * supplier they were auto-generated), the version chain, `amendment_reason`,
+ * and the line-level review state — a supplier being told an item is
+ * `under_review` is being told about our internal process.
+ */
+export interface SupplierRequestView {
+  /** The organization asking. Already known to the recipient. */
+  tenant_name: string;
+  title: string;
+  intro: string | null;
+  due_date: string | null;
+  issued_at: string | null;
+  /** Present only for an amendment, so a recipient knows this replaces one. */
+  amended: boolean;
+  items: SupplierRequestItem[];
+}
+
+/** One line, as a supplier sees it. */
+export interface SupplierRequestItem {
+  name: string;
+  explanation: string | null;
+  acceptable_formats: string | null;
+  criteria: string | null;
+  /** 'required' | 'recommended' — what we expect, which they may fairly know. */
+  tier: SupplierRequirementTier;
+}
+
+/** A composable line, as posted by the composer. */
+export interface RequestLineInput {
+  /** Defaults to 'requirement'. 'free_text' must be stated explicitly. */
+  line_kind?: RequestLineKind;
+  requirement_id?: string | null;
+  /** Optional for a typed line — defaults to the requirement's own name. */
+  name?: string;
+  explanation?: string | null;
+  acceptable_formats?: string | null;
+  criteria?: string | null;
+  owner?: string | null;
+  tier?: SupplierRequirementTier;
+  sort_order?: number;
+}
+
+export interface CreateDocumentRequestRequest {
+  supplier_id: string;
+  title: string;
+  intro?: string | null;
+  due_date?: string | null;
+  assigned_to?: string | null;
+  origin?: DocumentRequestOrigin;
+  origin_ref?: string | null;
+  lines?: RequestLineInput[];
+  /** super_admin only. */
+  tenant_id?: string;
+}
+
+export interface IssueDocumentRequestRequest {
+  channel?: RequestIssueChannel;
+  recipient?: string | null;
+  internal_notes?: string | null;
+}
+
+export interface AmendDocumentRequestRequest extends IssueDocumentRequestRequest {
+  /** Required: an amendment with no stated reason is an untraceable rewrite. */
+  amendment_reason: string;
+  title?: string;
+  intro?: string | null;
+  due_date?: string | null;
+  assigned_to?: string | null;
+  /** When present, REPLACES the line set wholesale on the new version. */
+  lines?: RequestLineInput[];
+}
+
+export interface ReissueDocumentRequestRequest {
+  supplier_id?: string;
+  title?: string;
+  intro?: string | null;
+  due_date?: string | null;
+  assigned_to?: string | null;
+}
+
+/** A saved, re-issuable composed set. */
+export interface RequestTemplateRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  default_due_in_days: number | null;
+  active: number;
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+/**
+ * A template line: the composable SUBSET of a request line. No status, no
+ * status_changed_*, no request_id — the columns a template cannot meaningfully
+ * hold, whose absence is the argument against an is_template flag.
+ */
+export interface RequestTemplateLineRow {
+  id: string;
+  tenant_id: string;
+  template_id: string;
+  line_kind: RequestLineKind;
+  requirement_id: string | null;
+  name: string;
+  explanation: string | null;
+  acceptable_formats: string | null;
+  criteria: string | null;
+  owner: string | null;
+  tier: SupplierRequirementTier;
+  sort_order: number;
+  created_at: string;
+  created_by: string | null;
+}
+
+export interface RequestTemplateDetail extends RequestTemplateRow {
+  lines: RequestTemplateLineRow[];
+}
+
+export interface RequestTemplateListResponse {
+  templates: RequestTemplateDetail[];
+  total: number;
+}
+
+export interface RequestTemplateResponse {
+  template: RequestTemplateDetail;
+}
+
+export interface CreateRequestTemplateRequest {
+  name: string;
+  slug?: string;
+  description?: string | null;
+  default_due_in_days?: number | null;
+  lines?: RequestLineInput[];
+  /** Snapshot an existing request's composed lines into the new template. */
+  from_request_id?: string;
+  /** super_admin only. */
+  tenant_id?: string;
+}
+
+export interface InstantiateRequestTemplateRequest {
+  supplier_id: string;
+  title?: string;
+  intro?: string | null;
+  due_date?: string | null;
+  assigned_to?: string | null;
+}
+
+export interface UpdateRequestLineRequest {
+  status?: RequestLineStatus;
+  status_note?: string | null;
+  name?: string;
+  explanation?: string | null;
+  acceptable_formats?: string | null;
+  criteria?: string | null;
+  owner?: string | null;
+  tier?: SupplierRequirementTier;
+  sort_order?: number;
 }

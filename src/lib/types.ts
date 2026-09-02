@@ -163,6 +163,8 @@ export type {
   EntityNote,
   NoteListResponse,
   NoteGetResponse,
+  OwnerRoute,
+  OwnerRouteListResponse,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';
 // Value exports (not types): the rejection-reason enum + its reviewer-facing

@@ -21,6 +21,18 @@ export interface Env {
    */
   CONNECTOR_POLL_TOKEN?: string;
   /**
+   * Bearer token for the `/api/expirations/run-scheduled` endpoint - shared
+   * with the companion `dox-renewal-alerts` Worker, which holds the daily
+   * cron Pages cannot host. Set the SAME value on both sides.
+   *
+   * Deliberately NOT the same secret as CONNECTOR_POLL_TOKEN: one dispatches
+   * ingest runs, the other sends mail to customers' customers, and sharing a
+   * secret between them makes a leak of either a leak of both.
+   *
+   * Absence disables the endpoint (fails closed with 401).
+   */
+  RENEWAL_ALERT_TOKEN?: string;
+  /**
    * AES-GCM-256 key (64-char hex / 32 raw bytes) used by
    * `functions/lib/intakeEncryption.ts` to encrypt connector intake
    * credentials at rest (currently the R2 secret access key for

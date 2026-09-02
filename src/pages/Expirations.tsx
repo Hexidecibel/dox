@@ -88,7 +88,7 @@ export function Expirations() {
   const [windowDays, setWindowDays] = useState(60);
   const [onlyAttention, setOnlyAttention] = useState(true);
   const [sending, setSending] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; severity: 'success' | 'error' | 'info' } | null>(null);
+  const [toast, setToast] = useState<{ msg: string; severity: 'success' | 'error' | 'info' | 'warning' } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -118,21 +118,37 @@ export function Expirations() {
         tenantId: selectedTenantId || undefined,
         windowDays,
       });
+      // The unrouted count is reported WHETHER OR NOT anything sent. A run
+      // that mailed three owners and silently skipped two records is not a
+      // success, and the toast is the only place a person sees that.
+      const gap =
+        res.unrouted && res.unrouted.count > 0
+          ? ` ${res.unrouted.count} record${res.unrouted.count === 1 ? '' : 's'} had no resolvable owner and reached nobody${res.unrouted.notice_sent ? ' — admins were sent a routing-gap notice' : ''}.`
+          : '';
+
       if (res.sent) {
+        const groupCount = (res.groups ?? []).filter((g) => g.sent).length;
         setToast({
-          msg: `Alert sent to ${res.recipients.length} recipient${res.recipients.length === 1 ? '' : 's'} (${res.document_count} document${res.document_count === 1 ? '' : 's'}).`,
-          severity: 'success',
+          msg:
+            `Sent ${groupCount} owner digest${groupCount === 1 ? '' : 's'} to ` +
+            `${res.recipients.length} recipient${res.recipients.length === 1 ? '' : 's'} ` +
+            `(${res.document_count} document${res.document_count === 1 ? '' : 's'}).${gap}`,
+          severity: gap ? 'warning' : 'success',
         });
       } else {
         const reasonMsg =
           res.reason === 'no_documents'
             ? 'Nothing to alert on — no expiring, overdue, or expired documents.'
-            : res.reason === 'no_recipients'
-              ? 'No org admins or super admins to notify.'
-              : res.reason === 'email_not_configured'
-                ? 'Email is not configured on the server (RESEND_API_KEY unset).'
-                : 'Alert not sent.';
-        setToast({ msg: reasonMsg, severity: 'info' });
+            : res.reason === 'all_suppressed'
+              ? 'Everything in the window was already alerted on recently.'
+              : res.reason === 'all_unrouted'
+                ? 'Nothing was sent — not one of these records resolves to an owner.'
+                : res.reason === 'no_recipients'
+                  ? 'No owner resolved to a deliverable address.'
+                  : res.reason === 'email_not_configured'
+                    ? 'Email is not configured on the server (RESEND_API_KEY unset).'
+                    : 'Alert not sent.';
+        setToast({ msg: `${reasonMsg}${gap}`, severity: gap ? 'warning' : 'info' });
       }
     } catch (err) {
       setToast({ msg: err instanceof Error ? err.message : 'Failed to send alert', severity: 'error' });

@@ -411,9 +411,17 @@ export function buildRenewalAlertEmail(
    * was to go find the portal, log in, and orient themselves.
    */
   alertUrl?: string | null,
+  /**
+   * The owner label this digest was routed to (`documents.owner`, e.g. 'QA').
+   * Present since the digest became per-owner rather than one broadcast to the
+   * admin pool — it tells the recipient WHY this landed in their inbox, which
+   * is the difference between a task and a notification.
+   */
+  ownerLabel?: string | null,
 ): { subject: string; html: string; text: string } {
   const count = docs.length;
-  const subject = `SupDox: ${count} document${count === 1 ? '' : 's'} need${count === 1 ? 's' : ''} renewal attention`;
+  const ownerSuffix = ownerLabel ? ` (${ownerLabel})` : '';
+  const subject = `SupDox: ${count} document${count === 1 ? '' : 's'} need${count === 1 ? 's' : ''} renewal attention${ownerSuffix}`;
 
   const statusLabel = (s: ExpirationStatus): string => {
     switch (s) {
@@ -468,6 +476,7 @@ export function buildRenewalAlertEmail(
         <p style="margin:0 0 24px;color:#555;line-height:1.6;">
           ${count} document${count === 1 ? '' : 's'} for <strong>${escapeHtml(tenantName)}</strong> ${count === 1 ? 'is' : 'are'} expiring, overdue, or already expired. Review and renew as needed.
         </p>
+        ${ownerLabel ? `<p style="margin:0 0 24px;color:#555;line-height:1.6;">You are receiving this because these records are owned by <strong>${escapeHtml(ownerLabel)}</strong>.</p>` : ''}
         <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #eee;border-radius:6px;overflow:hidden;margin:0 0 24px;">
           <tr style="background:#f8f9fa;">
             <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Document</th>
@@ -709,6 +718,86 @@ export function buildSpecAlertEmail(params: {
     (f) => `- ${f.test}: ${f.value || '—'} (limit ${f.limit || '—'}, ${sourceLabel(f.source)})`
   );
   const text = `Out of spec — ${documentTitle}${supplierName ? ` from ${supplierName}` : ''}\n\n${textLines.join('\n')}\n${link ? `\n${link}\n` : ''}\nSupDox does not reject or hold anything on its own — this is for a person to look at.\n`;
+
+  return { subject, html, text };
+}
+
+
+/**
+ * The message that goes out when renewal records have NO resolvable owner.
+ *
+ * This is deliberately NOT the renewal alert. The renewal digest says "these
+ * are yours, renew them"; this says "nobody was told about these, and that is
+ * a configuration problem you need to fix". It goes to the tenant's org_admins
+ * because somebody has to be told the routing is broken — but it is worded,
+ * subject-lined and coloured as a FAILURE NOTICE, so it can never be mistaken
+ * for the alert having been delivered to an owner.
+ *
+ * Why this exists at all: the alternative was to keep silently falling back to
+ * the admin pool, which is how "route to the owner" quietly degrades back into
+ * "mail everybody" without anyone noticing the routing was never configured.
+ */
+export function buildRenewalRoutingGapEmail(
+  docs: ExpirationRow[],
+  tenantName: string,
+): { subject: string; html: string; text: string } {
+  const count = docs.length;
+  const subject = `SupDox: ${count} renewal record${count === 1 ? '' : 's'} have no owner — nobody was alerted`;
+
+  const rows = docs.map((d) => `<tr>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${escapeHtml(d.title)}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#666;font-size:13px;">${escapeHtml(d.primary_category_name || '—')}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:${d.owner ? '#ed6c02' : '#d32f2f'};font-size:13px;">${d.owner ? `${escapeHtml(d.owner)} — no route configured` : 'No owner set'}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${escapeHtml(d.renewal_due_date || '—')}</td>
+            </tr>`).join('\n');
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr>
+      <td style="background:#8a1c1c;padding:24px 32px;">
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox — routing gap</h1>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:32px;">
+        <h2 style="margin:0 0 16px;color:#333;font-size:18px;">${count} renewal record${count === 1 ? '' : 's'} could not be routed to an owner</h2>
+        <p style="margin:0 0 24px;color:#555;line-height:1.6;">
+          ${count === 1 ? 'This record is' : 'These records are'} expiring, overdue or already expired for <strong>${escapeHtml(tenantName)}</strong>, and <strong>no renewal alert was sent for ${count === 1 ? 'it' : 'them'}</strong> — either the record names no owner, or its owner label has no one mapped to it.
+        </p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #eee;border-radius:6px;overflow:hidden;margin:0 0 24px;">
+          <tr style="background:#f8f9fa;">
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Document</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Category</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Owner</th>
+            <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Due</th>
+          </tr>
+          ${rows}
+        </table>
+        <p style="margin:0;color:#555;line-height:1.6;font-size:14px;">
+          Set an owner on the record, and map that owner label to the people who should receive its alerts. Until then these records will keep going unalerted.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
+        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+          Automated routing-gap notice from SupDox for ${escapeHtml(tenantName)}. This is not a renewal alert.
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  const text = `${count} renewal record${count === 1 ? '' : 's'} for ${tenantName} could not be routed to an owner, so NO renewal alert was sent for ${count === 1 ? 'it' : 'them'}.\n\n`
+    + docs.map((d) => `- ${d.title} (due ${d.renewal_due_date || '—'}) — ${d.owner ? `owner "${d.owner}" has no route configured` : 'no owner set'}`).join('\n')
+    + `\n\nSet an owner on the record and map that owner label to recipients.\n`;
 
   return { subject, html, text };
 }
