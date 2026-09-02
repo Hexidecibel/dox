@@ -1,0 +1,53 @@
+<!--
+  03 — NorthStar Creamery, a fluid-dairy in-house COA covering two samples drawn
+  the same day: a raw silo (results per MILLILITRE) and a butter churn (results
+  per GRAM).
+
+  WHAT THIS FIXTURE IS FOR: the per-tenant unit-equivalence setting, and the
+  exact line it must not cross.
+
+  A fluid-dairy QA lead states his acceptance limits as "<= 10 CFU/g (CFU/mL for
+  fluid)" — for milk and cream the density difference is about 3%, immaterial
+  against a 20,000 CFU ceiling. Every limit on file is written in CFU/g, so with
+  the setting OFF the per-millilitre majority of this certificate is judged
+  against nothing at all. With it ON they are judged, and every verdict it made
+  reachable has to say so out loud.
+
+  The SAME ANALYTE is printed in both bases here on purpose — Coliform per mL on
+  the silo, per gram on the churn. The per-gram rows lined up on their own and
+  must therefore carry NO equivalence note; a blanket "units were equated"
+  banner across the document would be a lie about the two rows that never needed
+  it.
+-->
+<style>@page{size:letter;margin:0.75in}body{font-family:Georgia,'Times New Roman',serif;font-size:10.5pt;color:#111}
+.hdr{border-bottom:1px solid #444;padding-bottom:8px;margin-bottom:4px}
+h1{font-size:16pt;margin:0}
+.tag{font-size:9pt;color:#555;font-style:italic}
+.addr{font-size:8.5pt;color:#555;margin-top:3px}
+h2{font-size:10pt;margin:18px 0 4px}
+table{border-collapse:collapse;width:100%;margin:4px 0}td,th{border:1px solid #999;padding:5px 7px;font-size:9.5pt;text-align:left}
+th{background:#f0efe9}
+.meta td{border:none;padding:2px 10px 2px 0;font-size:9.5pt}.meta{margin:10px 0 0}.k{color:#555}
+.note{font-size:8.5pt;color:#444;margin-top:14px;line-height:1.45}
+.sig{margin-top:20px;font-size:9pt}</style>
+<div class="hdr"><h1>NorthStar Creamery</h1>
+<div class="tag">Grade A Fluid Milk &amp; Cultured Products &mdash; Plant 41-118</div>
+<div class="addr">2200 Dairy Row, Sumner, WA 98390 &bull; QA Lab ext. 226</div></div>
+<div style="text-align:center;font-size:12pt;margin:10px 0 2px">CERTIFICATE OF ANALYSIS</div>
+<table class="meta">
+<tr><td class="k">Certificate No.</td><td><b>NSC-26-2431</b></td><td class="k">Production Date</td><td>08/30/2026</td></tr>
+<tr><td class="k">Lot / Batch</td><td><b>26243-A</b></td><td class="k">Code Date</td><td>09/19/2026</td></tr>
+<tr><td class="k">Products Covered</td><td colspan="3">2% Reduced Fat Milk (gal) &bull; Sweet Cream Butter, 55 lb block</td></tr>
+</table>
+<h2>Microbiological Results</h2>
+<table>
+<tr><th>Sample</th><th>Test</th><th>Result</th><th>Units</th><th>Specification</th></tr>
+<tr><td>Raw Silo 3</td><td>Coliform</td><td>120</td><td>CFU/mL</td><td>&lt; 1,000 CFU/mL</td></tr>
+<tr><td>Raw Silo 3</td><td>Standard Plate Count</td><td>4,500</td><td>CFU/mL</td><td>&lt; 20,000 CFU/mL</td></tr>
+<tr><td>Butter Churn 2</td><td>Coliform</td><td>8</td><td>CFU/g</td><td>&lt; 10 CFU/g</td></tr>
+<tr><td>Butter Churn 2</td><td>Standard Plate Count</td><td>12,000</td><td>CFU/g</td><td>&lt; 20,000 CFU/g</td></tr>
+</table>
+<div class="note"><b>LABORATORY NOTE.</b> Silo samples are enumerated volumetrically (per mL) per SM 9215B; churn samples are
+enumerated gravimetrically (per g). Plant acceptance criteria are maintained in CFU/g and are applied to fluid samples as CFU/mL,
+per QA Policy 4.2 (&ldquo;for milk and cream the two bases are treated as equivalent&rdquo;).</div>
+<div class="sig">Released by <b>K. Osterhout</b>, QA Supervisor &nbsp;&bull;&nbsp; 08/31/2026</div>

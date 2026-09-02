@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/check-spec-corpus — run the spec engine over the generated certificate
+ * corpus and check it against `tests/fixtures/spec-corpus/corpus.json`.
+ *
+ * WHY THIS EXISTS. Every defect the spec engine has hit was found by accident,
+ * on production data: a control row judged as product, a certification
+ * paragraph's regulatory thresholds reported as measurements, `3.0x10^2` read
+ * as 3, a placeholder unit cell treated as a unit that matched nothing. Each of
+ * those is now a document you can open and read, with the verdicts it must
+ * produce written down beside it.
+ *
+ * WHICH LAYER IT COVERS — and be honest about it. `shared/specCheck.ts` takes an
+ * ALREADY-EXTRACTED `tables` structure, so this exercises the JUDGING layer:
+ * deterministic, offline, sub-second. It does NOT prove that a real read of the
+ * PDF produces the declared shape. That is the extraction layer, it needs the
+ * worker and a model, and it is neither fast nor deterministic. The corpus is
+ * built so the same fixtures serve both: each shape's `sources` is exactly the
+ * target an extraction harness would compare a live read against.
+ *
+ * Rows marked `layer: extraction` in the output are statements FOR that harness
+ * (no reagent lot in `lot_number`, no plate expiry in `expiration_date`). They
+ * are checked here against the DECLARED fields, which validates the fixture,
+ * not the extractor. The summary counts them separately for that reason.
+ *
+ * It loads `bin/lib/shared/specCheck.js` — the bundle production tooling
+ * actually runs — so a finding here is byte-for-byte a finding in the review
+ * queue. `tests/unit/specCorpus.test.ts` drives the identical manifest through
+ * the TypeScript source, so a drifted bundle shows up as a disagreement.
+ *
+ * Usage:
+ *   bin/check-spec-corpus                  # every document
+ *   bin/check-spec-corpus --doc 01-...     # one document
+ *   bin/check-spec-corpus --json           # machine-readable
+ *   bin/check-spec-corpus --dump 01-.../as_printed
+ *                                          # print what the engine ACTUALLY
+ *                                          # produces, as manifest-ready
+ *                                          # expectations. This is how the
+ *                                          # manifest was written.
+ *
+ * Exit code 1 when any expectation fails. Findings here ARE failures — unlike
+ * bin/recheck-spec-limits, which reports on data rather than on code.
+ */
+
+const path = require('node:path');
+const fs = require('node:fs');
+const { pathToFileURL } = require('node:url');
+
+const ROOT = path.resolve(__dirname, '..');
+const CORPUS = path.join(ROOT, 'tests/fixtures/spec-corpus/corpus.json');
+const EVALUATOR = path.join(ROOT, 'tests/fixtures/spec-corpus/evaluate.mjs');
+
+const C = process.stdout.isTTY
+  ? { g: '\x1b[32m', r: '\x1b[31m', y: '\x1b[33m', d: '\x1b[2m', b: '\x1b[1m', x: '\x1b[0m' }
+  : { g: '', r: '', y: '', d: '', b: '', x: '' };
+
+function parseArgs(argv) {
+  const opts = { doc: null, json: false, dump: null, verbose: false };
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
+      case '--doc': opts.doc = argv[++i]; break;
+      case '--json': opts.json = true; break;
+      case '--dump': opts.dump = argv[++i]; break;
+      case '-v':
+      case '--verbose': opts.verbose = true; break;
+      case '-h':
+      case '--help': opts.help = true; break;
+      default:
+        console.error(`unknown flag: ${argv[i]}`);
+        process.exit(2);
+    }
+  }
+  return opts;
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(3, 45).join('\n').replace(/^ ?\*\/?/gm, ''));
+    return 0;
+  }
+
+  const engine = require('./lib/shared/specCheck');
+  const { evaluateCorpus, dumpShape } = await import(pathToFileURL(EVALUATOR).href);
+  const corpus = JSON.parse(fs.readFileSync(CORPUS, 'utf8'));
+
+  if (opts.dump) {
+    const [docId, shapeId] = opts.dump.split('/');
+    console.log(JSON.stringify(dumpShape(corpus, engine, docId, shapeId), null, 2));
+    return 0;
+  }
+
+  const result = evaluateCorpus(corpus, engine, { only: opts.doc });
+
+  if (opts.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return result.summary.fail === 0 ? 0 : 1;
+  }
+
+  console.log(`${C.b}spec corpus — judging layer${C.x} ${C.d}(engine: bin/lib/shared/specCheck.js)${C.x}\n`);
+  for (const doc of result.documents) {
+    const failed = doc.shapes.flatMap((s) => s.checks).filter((c) => !c.ok).length +
+      doc.fieldChecks.filter((c) => !c.ok).length;
+    console.log(`${failed ? C.r + '✗' : C.g + '✓'}${C.x} ${C.b}${doc.id}${C.x}`);
+    console.log(`  ${C.d}${doc.title}${C.x}`);
+    for (const cover of doc.covers) console.log(`    ${C.d}· ${cover}${C.x}`);
+    for (const shape of doc.shapes) {
+      const bad = shape.checks.filter((c) => !c.ok);
+      const n = shape.checks.length;
+      console.log(
+        `  ${bad.length ? C.r + '✗' : C.g + '✓'}${C.x} shape ${shape.id} ${C.d}— ${n - bad.length}/${n} checks; ` +
+          `${shape.counts.printed} printed, ${shape.counts.limit} judged, ${shape.counts.queued} queued, ` +
+          `${shape.counts.unmatched} unmatched, ${shape.counts.control_rows} control${C.x}`
+      );
+      for (const c of bad) console.log(`      ${C.r}FAIL${C.x} ${c.name}\n           ${c.detail}`);
+      if (opts.verbose) for (const c of shape.checks.filter((x) => x.ok)) {
+        console.log(`      ${C.g}ok${C.x}   ${C.d}${c.name} — ${c.detail}${C.x}`);
+      }
+    }
+    if (doc.fieldChecks.length) {
+      const bad = doc.fieldChecks.filter((c) => !c.ok);
+      console.log(
+        `  ${bad.length ? C.r + '✗' : C.g + '✓'}${C.x} ${C.y}extraction-layer${C.x} field statements ` +
+          `${C.d}— ${doc.fieldChecks.length - bad.length}/${doc.fieldChecks.length} (checked against the declared shape)${C.x}`
+      );
+      for (const c of bad) console.log(`      ${C.r}FAIL${C.x} ${c.name}\n           ${c.detail}`);
+    }
+    console.log('');
+  }
+
+  const { pass, fail, extractionPass, total } = result.summary;
+  console.log(
+    `${fail ? C.r + 'FAILED' : C.g + 'PASSED'}${C.x} — ${pass} judging-layer checks passed, ` +
+      `${extractionPass} extraction-layer statements validated, ${fail} failed (of ${total}).`
+  );
+  return fail === 0 ? 0 : 1;
+}
+
+main().then(
+  (code) => process.exit(code),
+  (err) => {
+    console.error(err);
+    process.exit(2);
+  }
+);

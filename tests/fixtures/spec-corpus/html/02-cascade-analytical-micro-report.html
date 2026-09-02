@@ -1,0 +1,64 @@
+<!--
+  02 — Cascade Analytical Services, a contract-lab report on a cream cheese
+  spread. The long-table COA shape: Analysis / Method / Result / Units /
+  Specification / Pass-Fail, plus a chemical block.
+
+  WHAT THIS FIXTURE IS FOR:
+    * TWO ROWS CONTRADICT THEMSELVES — the value is outside the printed
+      specification and the disposition column still reads "Pass";
+    * SCIENTIFIC NOTATION in the result column with the unit in its own column
+      (2x10^3, 1.2e3). Both parsed as 2 and 1.2 until recently, which reads as a
+      comfortable pass three orders of magnitude under the truth;
+    * a CENSORED value that straddles our tighter limit (<50 against 10) beside
+      one that clears it (<1 against 10) — different answers, different reasons;
+    * MPN, which is a different enumeration method from CFU and is not
+      convertible to it;
+    * the ABSENCE VOCABULARY as labs print it: Negative, Not Detected,
+      Non-detectable for Listeria mono/25g, Absent/25g;
+    * PLACEHOLDER UNIT CELLS in the chemical block — "N/A", "none", an em dash.
+      A placeholder is the same statement as a blank: this row carries no unit.
+-->
+<style>@page{size:letter;margin:0.6in}body{font-family:Helvetica,Arial,sans-serif;font-size:10pt;color:#111}
+.hdr{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px double #333;padding-bottom:6px}
+h1{font-size:15pt;margin:0}.addr{font-size:8.5pt;color:#555;text-align:right;line-height:1.35}
+h2{font-size:10pt;margin:16px 0 4px;color:#333}
+table{border-collapse:collapse;width:100%;margin:4px 0}td,th{border:1px solid #999;padding:4px 6px;font-size:9pt;text-align:left}
+th{background:#e8e8e8;font-size:8.5pt}
+.meta td{border:none;padding:2px 6px 2px 0;font-size:9pt}
+.meta{width:100%;margin:8px 0 2px}.k{color:#555;width:120px}
+.foot{margin-top:16px;font-size:8pt;color:#444;line-height:1.4;border-top:1px solid #bbb;padding-top:6px}</style>
+<div class="hdr"><div><h1>CASCADE ANALYTICAL SERVICES</h1>
+<div style="font-size:9pt;color:#555">Food Microbiology &amp; Chemistry &bull; ISO/IEC 17025 Accredited (Cert. L-2214)</div></div>
+<div class="addr">4180 NE Columbia Blvd<br>Portland, OR 97218<br>(503) 555-0188</div></div>
+<table class="meta">
+<tr><td class="k">Report No.</td><td><b>CAS-26-118447</b></td><td class="k">Date Received</td><td>08/24/2026</td></tr>
+<tr><td class="k">Client</td><td>Medosweet Farms, Inc.</td><td class="k">Date Reported</td><td>08/28/2026</td></tr>
+<tr><td class="k">Sample Description</td><td><b>Cream Cheese Spread, 1 oz cup</b></td><td class="k">Sampled By</td><td>Client</td></tr>
+<tr><td class="k">Lot / Batch</td><td><b>CCS-26-0819</b></td><td class="k">Best By</td><td>02/19/2027</td></tr>
+</table>
+<h2>MICROBIOLOGICAL ANALYSIS</h2>
+<table>
+<tr><th>Analysis</th><th>Method</th><th>Result</th><th>Units</th><th>Specification</th><th>Pass/Fail</th></tr>
+<tr><td>Standard Plate Count</td><td>SM 9215B</td><td>25,000</td><td>CFU/g</td><td>&lt; 20,000</td><td>Pass</td></tr>
+<tr><td>Thermoduric Plate Count</td><td>SM 9215B</td><td>1.2e3</td><td>CFU/g</td><td>&lt; 5,000</td><td>Pass</td></tr>
+<tr><td>Yeast</td><td>FDA BAM 18</td><td>2&times;10&sup3;</td><td>CFU/g</td><td>&lt; 1,000</td><td>Pass</td></tr>
+<tr><td>Mold</td><td>FDA BAM 18</td><td>&lt;1</td><td>CFU/g</td><td>&lt; 100</td><td>Pass</td></tr>
+<tr><td>Coliforms</td><td>Petrifilm CC</td><td>&lt;50</td><td>CFU/g</td><td>&lt; 100</td><td>Pass</td></tr>
+<tr><td>Coliforms (MPN)</td><td>SM 9221C</td><td>&lt; 3.0</td><td>MPN/g</td><td>&lt; 10 MPN/g</td><td>Pass</td></tr>
+<tr><td>E. coli</td><td>Petrifilm EC</td><td>&lt;1</td><td>CFU/g</td><td>Absent</td><td>Pass</td></tr>
+<tr><td>E. coli O157:H7</td><td>FDA BAM 4A</td><td>Absent/25g</td><td></td><td>Absent/25g</td><td>Pass</td></tr>
+<tr><td>Listeria monocytogenes</td><td>FDA BAM 10</td><td>Non-detectable for Listeria mono/25g</td><td></td><td>Negative/25g</td><td>Pass</td></tr>
+<tr><td>Salmonella</td><td>FDA BAM 5</td><td>Negative</td><td></td><td>Negative/25g</td><td>Pass</td></tr>
+<tr><td>Staphylococcus aureus</td><td>SM 9213B</td><td>Not Detected</td><td></td><td>&lt; 10 CFU/g</td><td>Pass</td></tr>
+</table>
+<h2>CHEMICAL / PHYSICAL ANALYSIS</h2>
+<table>
+<tr><th>Analysis</th><th>Result</th><th>Units</th><th>Specification</th><th>Pass/Fail</th></tr>
+<tr><td>Fat</td><td>33.09</td><td>%</td><td>30.0 - 35.0</td><td>Pass</td></tr>
+<tr><td>Moisture</td><td>54.67 %</td><td>none</td><td>52.0 - 56.0</td><td>Pass</td></tr>
+<tr><td>Salt</td><td>1.10</td><td>N/A</td><td>1.0 - 1.5</td><td>Pass</td></tr>
+<tr><td>pH</td><td>6.62</td><td>&mdash;</td><td>6.4 - 6.8</td><td>Pass</td></tr>
+</table>
+<div class="foot">Results relate only to the items tested. This report shall not be reproduced except in full without the written
+approval of the laboratory. Micro results are reported on an as-received basis. Uncertainty of measurement available on request.<br>
+Approved by: <b>D. Ruiz, Laboratory Director</b> &nbsp;&bull;&nbsp; 08/28/2026</div>

@@ -51,3 +51,7 @@ pending/
 !.env.example
 .cush-secrets.materialized/
 .dev.vars.staging
+
+# Generated spec-corpus PDFs — the HTML in tests/fixtures/spec-corpus/html is
+# the source of truth; rebuild with bin/render-spec-corpus.
+tests/fixtures/spec-corpus/pdf/

@@ -1,0 +1,1948 @@
+{
+  "_readme": "Machine-readable expectations for the generated spec-engine corpus. See README.md. Each document declares the extraction shape a correct read of its PDF produces, and the verdicts shared/specCheck.ts must produce from it. Every expectation list is EXHAUSTIVE: an unexpected verdict is a failure just as a missing one is.",
+  "unit_policies": {
+    "strict": {},
+    "fluid_dairy": {
+      "volume_mass_equivalent": true
+    }
+  },
+  "spec_tests": [
+    {
+      "id": "st_coliform",
+      "name": "Coliform",
+      "aliases": [
+        "Coliforms",
+        "Total Coliform",
+        "Coliforms (MPN)"
+      ]
+    },
+    {
+      "id": "st_aerobic",
+      "name": "Aerobic Plate Count",
+      "aliases": [
+        "Aerobic",
+        "APC",
+        "SPC",
+        "Standard Plate Count",
+        "Total Plate Count",
+        "Bacteria Standard Plate Count"
+      ]
+    },
+    {
+      "id": "st_thermo",
+      "name": "Thermoduric Plate Count",
+      "aliases": [
+        "Thermoduric"
+      ]
+    },
+    {
+      "id": "st_yeast",
+      "name": "Yeast",
+      "aliases": [
+        "Yeasts"
+      ]
+    },
+    {
+      "id": "st_mold",
+      "name": "Mold",
+      "aliases": [
+        "Molds"
+      ]
+    },
+    {
+      "id": "st_ecoli",
+      "name": "E. coli",
+      "aliases": [
+        "Escherichia coli",
+        "Generic E. coli"
+      ]
+    },
+    {
+      "id": "st_ecoli_o157",
+      "name": "E. coli O157:H7",
+      "aliases": [
+        "Escherichia coli O157:H7"
+      ]
+    },
+    {
+      "id": "st_listeria",
+      "name": "Listeria monocytogenes",
+      "aliases": [
+        "Listeria mono",
+        "L. monocytogenes"
+      ]
+    },
+    {
+      "id": "st_salmonella",
+      "name": "Salmonella",
+      "aliases": [
+        "Salmonella spp."
+      ]
+    },
+    {
+      "id": "st_staph",
+      "name": "Staphylococcus aureus",
+      "aliases": [
+        "Staph aureus",
+        "S. aureus"
+      ]
+    },
+    {
+      "id": "st_fat",
+      "name": "Fat",
+      "aliases": [
+        "FAT",
+        "Butterfat",
+        "Milkfat"
+      ]
+    },
+    {
+      "id": "st_moisture",
+      "name": "Moisture",
+      "aliases": []
+    },
+    {
+      "id": "st_ph",
+      "name": "pH",
+      "aliases": []
+    },
+    {
+      "id": "st_somatic",
+      "name": "Somatic Cell Count",
+      "aliases": [
+        "SCC"
+      ]
+    }
+  ],
+  "spec_limits": [
+    {
+      "id": "l_coliform",
+      "spec_test_id": "st_coliform",
+      "operator": "<=",
+      "value_min": null,
+      "value_max": 10,
+      "unit": "CFU/g",
+      "severity": "alert",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_aerobic",
+      "spec_test_id": "st_aerobic",
+      "operator": "<=",
+      "value_min": null,
+      "value_max": 20000,
+      "unit": "CFU/g",
+      "severity": "alert",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_thermo",
+      "spec_test_id": "st_thermo",
+      "operator": "<=",
+      "value_min": null,
+      "value_max": 1000,
+      "unit": "CFU/g",
+      "severity": "warn",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_yeast",
+      "spec_test_id": "st_yeast",
+      "operator": "<=",
+      "value_min": null,
+      "value_max": 100,
+      "unit": "CFU/g",
+      "severity": "warn",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_mold",
+      "spec_test_id": "st_mold",
+      "operator": "<=",
+      "value_min": null,
+      "value_max": 10,
+      "unit": "CFU/g",
+      "severity": "warn",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_ecoli",
+      "spec_test_id": "st_ecoli",
+      "operator": "absent",
+      "value_min": null,
+      "value_max": null,
+      "unit": null,
+      "severity": "alert",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_ecoli_o157",
+      "spec_test_id": "st_ecoli_o157",
+      "operator": "absent",
+      "value_min": null,
+      "value_max": null,
+      "unit": null,
+      "severity": "alert",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_listeria",
+      "spec_test_id": "st_listeria",
+      "operator": "absent",
+      "value_min": null,
+      "value_max": null,
+      "unit": null,
+      "severity": "alert",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_salmonella",
+      "spec_test_id": "st_salmonella",
+      "operator": "absent",
+      "value_min": null,
+      "value_max": null,
+      "unit": null,
+      "severity": "alert",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_staph",
+      "spec_test_id": "st_staph",
+      "operator": "<=",
+      "value_min": null,
+      "value_max": 10,
+      "unit": "CFU/g",
+      "severity": "alert",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_fat_default",
+      "spec_test_id": "st_fat",
+      "operator": "between",
+      "value_min": 30,
+      "value_max": 35,
+      "unit": "%",
+      "severity": "warn",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_fat_cream",
+      "spec_test_id": "st_fat",
+      "operator": "between",
+      "value_min": 38,
+      "value_max": 42,
+      "unit": "%",
+      "severity": "warn",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": "prod_heavy_cream"
+    },
+    {
+      "id": "l_moisture",
+      "spec_test_id": "st_moisture",
+      "operator": "between",
+      "value_min": 52,
+      "value_max": 56,
+      "unit": "%",
+      "severity": "warn",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_ph",
+      "spec_test_id": "st_ph",
+      "operator": "between",
+      "value_min": 6.4,
+      "value_max": 6.8,
+      "unit": null,
+      "severity": "warn",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    },
+    {
+      "id": "l_somatic",
+      "spec_test_id": "st_somatic",
+      "operator": "<=",
+      "value_min": null,
+      "value_max": 750000,
+      "unit": null,
+      "severity": "alert",
+      "active": true,
+      "supplier_id": null,
+      "document_type_id": null,
+      "product_id": null
+    }
+  ],
+  "documents": [
+    {
+      "id": "01-andersen-heavy-cream-coa",
+      "title": "Andersen Dairy — Certificate of Analysis, HEAVY CREAM 40%",
+      "html": "html/01-andersen-heavy-cream-coa.html",
+      "pdf": "pdf/01-andersen-heavy-cream-coa.pdf",
+      "covers": [
+        "crosstab table with a laboratory control row",
+        "certification boilerplate quoting the regulation's own thresholds",
+        "reagent / plate lots carrying their own lot codes and expiry dates",
+        "a result identical to the specification printed beside it",
+        "a placeholder unit cell on a judged row",
+        "limit scope resolution — a product-pinned limit beating the tenant default"
+      ],
+      "pdf_text_must_contain": [
+        "ANDERSEN DAIRY INC.",
+        "CERTIFICATE OF ANALYSIS",
+        "HEAVY CREAM 40%",
+        "HC-082826-1",
+        "Buffer",
+        "418325251B",
+        "somatic",
+        "(400,000 per ml.)",
+        "(100,000 per ml.)"
+      ],
+      "fields": {
+        "supplier": "Andersen Dairy Inc.",
+        "product_name": "HEAVY CREAM 40%",
+        "product_code": "0804",
+        "lot_number": "HC-082826-1",
+        "production_date": "2026-08-28",
+        "expiration_date": "2026-09-18",
+        "qc_technician": "AFTON"
+      },
+      "fields_must_not_contain": {
+        "why": "The reagent / plate lot table carries lot codes and expiry dates of its own. A 3M Petrifilm plate lot is not the product's lot, and a plate's expiry is not the product's code date. EXTRACTION-LAYER assertion — see README.",
+        "values": [
+          "418325251B",
+          "348F2A",
+          "16044D",
+          "04/12/'27",
+          "10/03/'27",
+          "03/01/'28",
+          "2027-04-12",
+          "2027-10-03",
+          "2028-03-01",
+          "400,000",
+          "100,000"
+        ]
+      },
+      "shapes": [
+        {
+          "id": "as_printed",
+          "note": "A correct read of the PDF. The certification paragraph's two thresholds arrive in a results table because that is what production extraction does with them.",
+          "unit_policy": "strict",
+          "limit_context": {
+            "supplier_id": "sup_andersen",
+            "document_type_id": "dt_coa",
+            "product_ids": [
+              "prod_heavy_cream"
+            ]
+          },
+          "sources": [
+            {
+              "scope": "record[0]",
+              "tables": [
+                {
+                  "name": "microbiological_results",
+                  "headers": [
+                    "Sample",
+                    "Coliform",
+                    "Aerobic",
+                    "Yeast",
+                    "Mold"
+                  ],
+                  "rows": [
+                    [
+                      "Buffer",
+                      "<1",
+                      "<1",
+                      "<1",
+                      "<1"
+                    ],
+                    [
+                      "Product",
+                      "34",
+                      "1,200",
+                      "15",
+                      "2"
+                    ]
+                  ]
+                },
+                {
+                  "name": "product_quality",
+                  "headers": [
+                    "Test",
+                    "Result",
+                    "Units"
+                  ],
+                  "rows": [
+                    [
+                      "Fat",
+                      "40.12",
+                      "%"
+                    ],
+                    [
+                      "pH",
+                      "6.62",
+                      "—"
+                    ],
+                    [
+                      "Flavor",
+                      "GOOD",
+                      "—"
+                    ],
+                    [
+                      "Odor",
+                      "GOOD",
+                      "—"
+                    ]
+                  ]
+                },
+                {
+                  "name": "reagent_plate_lots",
+                  "headers": [
+                    "Reagent",
+                    "Lot #",
+                    "Expiration"
+                  ],
+                  "rows": [
+                    [
+                      "Coliform Count Plate (CC)",
+                      "Lot #418325251B",
+                      "04/12/'27"
+                    ],
+                    [
+                      "Aerobic Count Plate (AC)",
+                      "Lot #348F2A",
+                      "10/03/'27"
+                    ],
+                    [
+                      "Buffer",
+                      "Lot #16044D",
+                      "03/01/'28"
+                    ]
+                  ]
+                },
+                {
+                  "name": "certification",
+                  "headers": [
+                    "test",
+                    "result",
+                    "units",
+                    "specification",
+                    "pass_fail"
+                  ],
+                  "rows": [
+                    [
+                      "BACTERIA STANDARD PLATE COUNT",
+                      "100,000",
+                      "per ml.",
+                      "100,000 per ml.",
+                      "Pass"
+                    ],
+                    [
+                      "SOMATIC CELL COUNT",
+                      "400,000",
+                      "per ml.",
+                      "400,000 per ml.",
+                      "Pass"
+                    ]
+                  ],
+                  "printed_verbatim": false,
+                  "printed_verbatim_why": "NOT printed as a table. This is what production extraction does to the closing certification PARAGRAPH: it lifts the regulation's two thresholds out of the prose and files them as results. The paragraph is printed; this table is the mangling of it, which is exactly the input the engine has to survive."
+                }
+              ]
+            }
+          ],
+          "expect": {
+            "printed": [
+              {
+                "scope": "record[0]",
+                "table": 3,
+                "row": 0,
+                "source": "printed",
+                "verdict": "not_checked",
+                "test_name_raw": "BACTERIA STANDARD PLATE COUNT",
+                "value_raw": "100,000",
+                "unit_equivalence_applied": false,
+                "reason_contains": "the reported result is identical to the specification printed beside it, so it is a limit restated rather than a measurement",
+                "message_contains": "identical to the specification printed beside it"
+              },
+              {
+                "scope": "record[0]",
+                "table": 3,
+                "row": 1,
+                "source": "printed",
+                "verdict": "not_checked",
+                "test_name_raw": "SOMATIC CELL COUNT",
+                "value_raw": "400,000",
+                "unit_equivalence_applied": false,
+                "reason_contains": "the reported result is identical to the specification printed beside it, so it is a limit restated rather than a measurement",
+                "message_contains": "identical to the specification printed beside it"
+              }
+            ],
+            "limit": [
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 1,
+                "col": 1,
+                "source": "limit",
+                "verdict": "out_of_spec",
+                "test_name_raw": "Coliform",
+                "value_raw": "34",
+                "value_num": 34,
+                "limit_id": "l_coliform",
+                "unit_equivalence_applied": false,
+                "reason_contains": "34 exceeds the 10 limit",
+                "message_contains": "outside our limit of ≤10 CFU/g"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 1,
+                "col": 2,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Aerobic",
+                "value_raw": "1,200",
+                "value_num": 1200,
+                "limit_id": "l_aerobic",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 1,
+                "col": 3,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Yeast",
+                "value_raw": "15",
+                "value_num": 15,
+                "limit_id": "l_yeast",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 1,
+                "col": 4,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Mold",
+                "value_raw": "2",
+                "value_num": 2,
+                "limit_id": "l_mold",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 1,
+                "row": 0,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Fat",
+                "value_raw": "40.12",
+                "value_num": 40.12,
+                "limit_id": "l_fat_cream",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 1,
+                "row": 1,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "pH",
+                "value_raw": "6.62",
+                "value_num": 6.62,
+                "limit_id": "l_ph",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 3,
+                "row": 0,
+                "source": "limit",
+                "verdict": "not_checked",
+                "test_name_raw": "BACTERIA STANDARD PLATE COUNT",
+                "value_raw": "100,000",
+                "limit_id": "l_aerobic",
+                "unit_equivalence_applied": false,
+                "reason_contains": "the reported result is identical to the specification printed beside it, so it is a limit restated rather than a measurement",
+                "message_contains": "could not be judged against our limit of ≤20000 CFU/g"
+              },
+              {
+                "scope": "record[0]",
+                "table": 3,
+                "row": 1,
+                "source": "limit",
+                "verdict": "not_checked",
+                "test_name_raw": "SOMATIC CELL COUNT",
+                "value_raw": "400,000",
+                "limit_id": "l_somatic",
+                "unit_equivalence_applied": false,
+                "reason_contains": "the reported result is identical to the specification printed beside it, so it is a limit restated rather than a measurement",
+                "message_contains": "could not be judged against our limit of ≤750000"
+              }
+            ],
+            "unmatched": [
+              "Flavor",
+              "Odor"
+            ],
+            "control_rows": [
+              "Buffer"
+            ]
+          },
+          "must_not": [
+            {
+              "why": "Buffer is the sterile negative control the lab runs beside the sample. Judging it as product is wrong in both directions, and a reviewer taught to wave off 'that's just the buffer' will wave off the real failure sitting next to it.",
+              "no_verdict_where": {
+                "row_label": "Buffer"
+              }
+            },
+            {
+              "why": "Nothing in the control row may be judged, whatever its label was read as.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 0
+              }
+            },
+            {
+              "why": "100,000 is the regulation's standard-plate-count threshold quoted in the certification paragraph. Nothing was measured; it must never surface as a measured value.",
+              "no_verdict_where": {
+                "value_num": 100000
+              }
+            },
+            {
+              "why": "400,000 is the regulation's somatic-cell threshold. Same argument.",
+              "no_verdict_where": {
+                "value_num": 400000
+              }
+            },
+            {
+              "why": "The certification rows are boilerplate. They may be reported as not_checked, never graded — an out_of_spec here is a fabricated alert on a supplier already under scrutiny.",
+              "no_verdict_where": {
+                "table": 3,
+                "verdict": "out_of_spec"
+              }
+            },
+            {
+              "why": "And never as a pass either: a pass would assert the document certified something it only quoted.",
+              "no_verdict_where": {
+                "table": 3,
+                "verdict": "in_spec"
+              }
+            },
+            {
+              "why": "The reagent / plate lot table is not test results and must yield nothing at all.",
+              "no_verdict_where": {
+                "table": 2
+              }
+            },
+            {
+              "why": "'Coliform Count Plate (CC)' is a 3M consumable, not an analyte. A looser name match would judge a plate as a coliform result.",
+              "no_verdict_where": {
+                "test_name_raw": "Coliform Count Plate (CC)"
+              }
+            },
+            {
+              "why": "Heavy cream's fat must be judged against the product-pinned 38-42% limit, not the tenant-wide 30-35% default that would call 40.12% a failure.",
+              "no_verdict_where": {
+                "limit_id": "l_fat_default"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "02-cascade-analytical-micro-report",
+      "title": "Cascade Analytical Services — micro + chemical report, cream cheese spread",
+      "html": "html/02-cascade-analytical-micro-report.html",
+      "pdf": "pdf/02-cascade-analytical-micro-report.pdf",
+      "covers": [
+        "a long table with printed Specification and Pass/Fail columns",
+        "the document contradicting itself — value outside its own printed range, row marked Pass",
+        "scientific notation with the unit in its own column (2x10^3, 1.2e3)",
+        "a censored value that straddles our limit (<50 vs 10) and one that clears it (<1 vs 10)",
+        "MPN units, which are not CFU",
+        "the absence vocabulary labs print: Negative, Not Detected, Non-detectable for ... /25g, Absent/25g",
+        "placeholder unit cells: N/A, none, an em dash",
+        "a percent value judged against a percent limit",
+        "a percent refused against a CFU limit (misextraction shape)"
+      ],
+      "pdf_text_must_contain": [
+        "CASCADE ANALYTICAL SERVICES",
+        "CAS-26-118447",
+        "CCS-26-0819",
+        "Thermoduric Plate Count",
+        "1.2e3",
+        "2×10³",
+        "Coliforms (MPN)",
+        "Non-detectable for Listeria mono/25g",
+        "Absent/25g",
+        "MPN/g"
+      ],
+      "fields": {
+        "supplier": "Cascade Analytical Services",
+        "report_number": "CAS-26-118447",
+        "product_name": "Cream Cheese Spread, 1 oz cup",
+        "lot_number": "CCS-26-0819",
+        "expiration_date": "2027-02-19"
+      },
+      "fields_must_not_contain": {
+        "why": "The report number, the accreditation certificate and the analytical method codes are identifiers, not lots. EXTRACTION-LAYER assertion.",
+        "values": [
+          "L-2214",
+          "SM 9215B",
+          "FDA BAM 18",
+          "Petrifilm CC",
+          "SM 9221C"
+        ]
+      },
+      "shapes": [
+        {
+          "id": "as_printed",
+          "note": "A correct read of the PDF.",
+          "unit_policy": "strict",
+          "limit_context": {
+            "supplier_id": "sup_cascade",
+            "document_type_id": "dt_coa",
+            "product_ids": [
+              "prod_cream_cheese_spread"
+            ]
+          },
+          "sources": [
+            {
+              "scope": "record[0]",
+              "tables": [
+                {
+                  "name": "microbiological_analysis",
+                  "headers": [
+                    "Analysis",
+                    "Method",
+                    "Result",
+                    "Units",
+                    "Specification",
+                    "Pass/Fail"
+                  ],
+                  "rows": [
+                    [
+                      "Standard Plate Count",
+                      "SM 9215B",
+                      "25,000",
+                      "CFU/g",
+                      "< 20,000",
+                      "Pass"
+                    ],
+                    [
+                      "Thermoduric Plate Count",
+                      "SM 9215B",
+                      "1.2e3",
+                      "CFU/g",
+                      "< 5,000",
+                      "Pass"
+                    ],
+                    [
+                      "Yeast",
+                      "FDA BAM 18",
+                      "2×10³",
+                      "CFU/g",
+                      "< 1,000",
+                      "Pass"
+                    ],
+                    [
+                      "Mold",
+                      "FDA BAM 18",
+                      "<1",
+                      "CFU/g",
+                      "< 100",
+                      "Pass"
+                    ],
+                    [
+                      "Coliforms",
+                      "Petrifilm CC",
+                      "<50",
+                      "CFU/g",
+                      "< 100",
+                      "Pass"
+                    ],
+                    [
+                      "Coliforms (MPN)",
+                      "SM 9221C",
+                      "< 3.0",
+                      "MPN/g",
+                      "< 10 MPN/g",
+                      "Pass"
+                    ],
+                    [
+                      "E. coli",
+                      "Petrifilm EC",
+                      "<1",
+                      "CFU/g",
+                      "Absent",
+                      "Pass"
+                    ],
+                    [
+                      "E. coli O157:H7",
+                      "FDA BAM 4A",
+                      "Absent/25g",
+                      "",
+                      "Absent/25g",
+                      "Pass"
+                    ],
+                    [
+                      "Listeria monocytogenes",
+                      "FDA BAM 10",
+                      "Non-detectable for Listeria mono/25g",
+                      "",
+                      "Negative/25g",
+                      "Pass"
+                    ],
+                    [
+                      "Salmonella",
+                      "FDA BAM 5",
+                      "Negative",
+                      "",
+                      "Negative/25g",
+                      "Pass"
+                    ],
+                    [
+                      "Staphylococcus aureus",
+                      "SM 9213B",
+                      "Not Detected",
+                      "",
+                      "< 10 CFU/g",
+                      "Pass"
+                    ]
+                  ]
+                },
+                {
+                  "name": "chemical_physical_analysis",
+                  "headers": [
+                    "Analysis",
+                    "Result",
+                    "Units",
+                    "Specification",
+                    "Pass/Fail"
+                  ],
+                  "rows": [
+                    [
+                      "Fat",
+                      "33.09",
+                      "%",
+                      "30.0 - 35.0",
+                      "Pass"
+                    ],
+                    [
+                      "Moisture",
+                      "54.67 %",
+                      "none",
+                      "52.0 - 56.0",
+                      "Pass"
+                    ],
+                    [
+                      "Salt",
+                      "1.10",
+                      "N/A",
+                      "1.0 - 1.5",
+                      "Pass"
+                    ],
+                    [
+                      "pH",
+                      "6.62",
+                      "—",
+                      "6.4 - 6.8",
+                      "Pass"
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "expect": {
+            "printed": [
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 0,
+                "source": "printed",
+                "verdict": "out_of_spec",
+                "test_name_raw": "Standard Plate Count",
+                "value_raw": "25,000",
+                "value_num": 25000,
+                "unit_equivalence_applied": false,
+                "reason_contains": "25000 exceeds the 20000 limit",
+                "message_contains": "the document contradicts itself"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 2,
+                "source": "printed",
+                "verdict": "out_of_spec",
+                "test_name_raw": "Yeast",
+                "value_raw": "2×10³",
+                "value_num": 2000,
+                "unit_equivalence_applied": false,
+                "reason_contains": "2000 exceeds the 1000 limit",
+                "message_contains": "the document contradicts itself"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 6,
+                "source": "printed",
+                "verdict": "not_checked",
+                "test_name_raw": "E. coli",
+                "value_raw": "<1",
+                "value_num": 1,
+                "unit_equivalence_applied": false,
+                "reason_contains": "reported as <1, which cannot confirm absence"
+              }
+            ],
+            "limit": [
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 0,
+                "source": "limit",
+                "verdict": "out_of_spec",
+                "test_name_raw": "Standard Plate Count",
+                "value_raw": "25,000",
+                "value_num": 25000,
+                "limit_id": "l_aerobic",
+                "unit_equivalence_applied": false,
+                "reason_contains": "25000 exceeds the 20000 limit"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 1,
+                "source": "limit",
+                "verdict": "out_of_spec",
+                "test_name_raw": "Thermoduric Plate Count",
+                "value_raw": "1.2e3",
+                "value_num": 1200,
+                "limit_id": "l_thermo",
+                "unit_equivalence_applied": false,
+                "reason_contains": "1200 exceeds the 1000 limit"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 2,
+                "source": "limit",
+                "verdict": "out_of_spec",
+                "test_name_raw": "Yeast",
+                "value_raw": "2×10³",
+                "value_num": 2000,
+                "limit_id": "l_yeast",
+                "unit_equivalence_applied": false,
+                "reason_contains": "2000 exceeds the 100 limit"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 3,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Mold",
+                "value_raw": "<1",
+                "value_num": 1,
+                "limit_id": "l_mold",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 4,
+                "source": "limit",
+                "verdict": "not_checked",
+                "test_name_raw": "Coliforms",
+                "value_raw": "<50",
+                "value_num": 50,
+                "limit_id": "l_coliform",
+                "unit_equivalence_applied": false,
+                "reason_contains": "reported as <50, which straddles the 10 limit — the true value could fall either side",
+                "message_contains": "could not be judged against our limit of ≤10 CFU/g"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 5,
+                "source": "limit",
+                "verdict": "not_checked",
+                "test_name_raw": "Coliforms (MPN)",
+                "value_raw": "< 3.0",
+                "limit_id": "l_coliform",
+                "unit_equivalence_applied": false,
+                "reason_contains": "result is in MPN/g but the limit is in CFU/g — not comparable",
+                "message_contains": "could not be judged against our limit of ≤10 CFU/g"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 6,
+                "source": "limit",
+                "verdict": "not_checked",
+                "test_name_raw": "E. coli",
+                "value_raw": "<1",
+                "value_num": 1,
+                "limit_id": "l_ecoli",
+                "unit_equivalence_applied": false,
+                "reason_contains": "reported as <1, which cannot confirm absence"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 7,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "E. coli O157:H7",
+                "value_raw": "Absent/25g",
+                "limit_id": "l_ecoli_o157",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 8,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Listeria monocytogenes",
+                "value_raw": "Non-detectable for Listeria mono/25g",
+                "limit_id": "l_listeria",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 9,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Salmonella",
+                "value_raw": "Negative",
+                "limit_id": "l_salmonella",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 10,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Staphylococcus aureus",
+                "value_raw": "Not Detected",
+                "limit_id": "l_staph",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 1,
+                "row": 0,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Fat",
+                "value_raw": "33.09",
+                "value_num": 33.09,
+                "limit_id": "l_fat_default",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 1,
+                "row": 1,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Moisture",
+                "value_raw": "54.67 %",
+                "value_num": 54.67,
+                "limit_id": "l_moisture",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 1,
+                "row": 3,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "pH",
+                "value_raw": "6.62",
+                "value_num": 6.62,
+                "limit_id": "l_ph",
+                "unit_equivalence_applied": false
+              }
+            ],
+            "unmatched": [
+              "Salt"
+            ],
+            "control_rows": []
+          },
+          "must_not": [
+            {
+              "why": "2×10³ is 2000, not 2. Reading the leading token made a value twice its printed ceiling look like a comfortable pass — the worst class of bug this engine can have.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 2,
+                "value_num": 2
+              }
+            },
+            {
+              "why": "1.2e3 is 1200, not 1.2.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 1,
+                "value_num": 1.2
+              }
+            },
+            {
+              "why": "<50 against our 10 limit is not a pass. The true value could be 2 or 49, and calling it in spec is the false negative that discredits the feature.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 4,
+                "source": "limit",
+                "verdict": "in_spec"
+              }
+            },
+            {
+              "why": "...and it is not a failure either. Both answers are lies; the honest one is not_checked.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 4,
+                "source": "limit",
+                "verdict": "out_of_spec"
+              }
+            },
+            {
+              "why": "MPN and CFU are different enumeration methods. A 3.0 MPN/g result must never be graded against a CFU/g limit in either direction.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 5,
+                "source": "limit",
+                "verdict": "in_spec"
+              }
+            },
+            {
+              "why": "Same row, same argument, other direction.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 5,
+                "source": "limit",
+                "verdict": "out_of_spec"
+              }
+            },
+            {
+              "why": "'Non-detectable for Listeria mono/25g' is the pathogen result that matters most. It must be read, and it must not read as a failure.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 8,
+                "verdict": "out_of_spec"
+              }
+            },
+            {
+              "why": "A placeholder unit cell means the row carries no unit — the same statement as a blank. Treating 'none' or '—' as a unit in its own right makes it mismatch every real unit and refuses rows that were perfectly judgeable.",
+              "no_verdict_where": {
+                "table": 1,
+                "verdict": "not_checked"
+              }
+            },
+            {
+              "why": "'Pass' in a disposition column is the document asserting its own compliance, never a measurement.",
+              "no_verdict_where": {
+                "value_raw": "Pass"
+              }
+            }
+          ]
+        },
+        {
+          "id": "misextracted_spec_column",
+          "note": "The PDF prints a clean chemical block. This shape is what production extraction did to one (prod document '100/1OZ CUP CREAM CH SPRD - RASKAS'): a micro specification misfiled onto the chemical rows. The engine cannot fix a misread — it can only refuse to grade across it, which is what this pins. Both forms are here: a percent in its own unit column, and a percent carried on the value.",
+          "unit_policy": "strict",
+          "limit_context": {
+            "supplier_id": "sup_cascade",
+            "document_type_id": "dt_coa",
+            "product_ids": [
+              "prod_cream_cheese_spread"
+            ]
+          },
+          "sources": [
+            {
+              "scope": "record[0]",
+              "tables": [
+                {
+                  "name": "chemical_physical_analysis",
+                  "headers": [
+                    "Analysis",
+                    "Result",
+                    "Units",
+                    "Specification",
+                    "Pass/Fail"
+                  ],
+                  "rows": [
+                    [
+                      "Fat",
+                      "33.09",
+                      "%",
+                      "< 10 CFU/g",
+                      "Pass"
+                    ],
+                    [
+                      "Moisture",
+                      "54.67 %",
+                      "none",
+                      "< 10 CFU/g",
+                      "Pass"
+                    ]
+                  ],
+                  "printed_verbatim": false,
+                  "printed_verbatim_why": "NOT printed. The PDF prints a clean chemical block; this is the observed misextraction (a micro specification misfiled onto chemical rows) that the engine must refuse to grade across."
+                }
+              ]
+            }
+          ],
+          "expect": {
+            "printed": [
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 0,
+                "source": "printed",
+                "verdict": "not_checked",
+                "test_name_raw": "Fat",
+                "value_raw": "33.09",
+                "unit_equivalence_applied": false,
+                "reason_contains": "result is in % but the limit is in CFU/g — not comparable"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 1,
+                "source": "printed",
+                "verdict": "not_checked",
+                "test_name_raw": "Moisture",
+                "value_raw": "54.67 %",
+                "unit_equivalence_applied": false,
+                "reason_contains": "result is in % but the limit is in CFU/g — not comparable"
+              }
+            ],
+            "limit": [
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 0,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Fat",
+                "value_raw": "33.09",
+                "value_num": 33.09,
+                "limit_id": "l_fat_default",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 1,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Moisture",
+                "value_raw": "54.67 %",
+                "value_num": 54.67,
+                "limit_id": "l_moisture",
+                "unit_equivalence_applied": false
+              }
+            ],
+            "unmatched": [],
+            "control_rows": []
+          },
+          "must_not": [
+            {
+              "why": "A percent and a count are incomparable. Compared, 33.09% reads as three times a 10 CFU/g ceiling and the reviewer gets a fabricated alert; refused, they get the truth.",
+              "no_verdict_where": {
+                "source": "printed",
+                "verdict": "out_of_spec"
+              }
+            },
+            {
+              "why": "And never a silent pass either.",
+              "no_verdict_where": {
+                "source": "printed",
+                "verdict": "in_spec"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "03-northstar-fluid-dairy-coa",
+      "title": "NorthStar Creamery — fluid dairy COA, per mL and per g on one certificate",
+      "html": "html/03-northstar-fluid-dairy-coa.html",
+      "pdf": "pdf/03-northstar-fluid-dairy-coa.pdf",
+      "covers": [
+        "CFU/mL results against CFU/g limits — refused by default",
+        "the same analyte printed per mL on one line and per g on another",
+        "the per-tenant unit-equivalence setting flipping a verdict, and announcing that it did",
+        "rows whose units lined up on their own carrying no equivalence note"
+      ],
+      "pdf_text_must_contain": [
+        "NorthStar Creamery",
+        "NSC-26-2431",
+        "26243-A",
+        "Raw Silo 3",
+        "Butter Churn 2",
+        "CFU/mL",
+        "CFU/g"
+      ],
+      "fields": {
+        "supplier": "NorthStar Creamery",
+        "certificate_number": "NSC-26-2431",
+        "lot_number": "26243-A",
+        "production_date": "2026-08-30",
+        "expiration_date": "2026-09-19"
+      },
+      "fields_must_not_contain": {
+        "why": "41-118 is the plant number and 4.2 is a QA policy reference. EXTRACTION-LAYER assertion.",
+        "values": [
+          "41-118",
+          "QA Policy 4.2",
+          "SM 9215B"
+        ]
+      },
+      "shapes": [
+        {
+          "id": "as_printed_strict",
+          "note": "The tenant has said nothing about units. The per-millilitre majority of this certificate is judged against nothing at all, and says so.",
+          "unit_policy": "strict",
+          "limit_context": {
+            "supplier_id": "sup_northstar",
+            "document_type_id": "dt_coa",
+            "product_ids": []
+          },
+          "sources": [
+            {
+              "scope": "record[0]",
+              "tables": [
+                {
+                  "name": "microbiological_results",
+                  "headers": [
+                    "Sample",
+                    "Test",
+                    "Result",
+                    "Units",
+                    "Specification"
+                  ],
+                  "rows": [
+                    [
+                      "Raw Silo 3",
+                      "Coliform",
+                      "120",
+                      "CFU/mL",
+                      "< 1,000 CFU/mL"
+                    ],
+                    [
+                      "Raw Silo 3",
+                      "Standard Plate Count",
+                      "4,500",
+                      "CFU/mL",
+                      "< 20,000 CFU/mL"
+                    ],
+                    [
+                      "Butter Churn 2",
+                      "Coliform",
+                      "8",
+                      "CFU/g",
+                      "< 10 CFU/g"
+                    ],
+                    [
+                      "Butter Churn 2",
+                      "Standard Plate Count",
+                      "12,000",
+                      "CFU/g",
+                      "< 20,000 CFU/g"
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "expect": {
+            "printed": [],
+            "limit": [
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 0,
+                "source": "limit",
+                "verdict": "not_checked",
+                "test_name_raw": "Coliform",
+                "value_raw": "120",
+                "limit_id": "l_coliform",
+                "unit_equivalence_applied": false,
+                "reason_contains": "result is in CFU/mL but the limit is in CFU/g — not comparable",
+                "message_contains": "could not be judged against our limit of ≤10 CFU/g"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 1,
+                "source": "limit",
+                "verdict": "not_checked",
+                "test_name_raw": "Standard Plate Count",
+                "value_raw": "4,500",
+                "limit_id": "l_aerobic",
+                "unit_equivalence_applied": false,
+                "reason_contains": "result is in CFU/mL but the limit is in CFU/g — not comparable"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 2,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Coliform",
+                "value_raw": "8",
+                "value_num": 8,
+                "limit_id": "l_coliform",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 3,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Standard Plate Count",
+                "value_raw": "12,000",
+                "value_num": 12000,
+                "limit_id": "l_aerobic",
+                "unit_equivalence_applied": false
+              }
+            ],
+            "unmatched": [],
+            "control_rows": []
+          },
+          "must_not": [
+            {
+              "why": "CFU/mL against a CFU/g limit is a genuinely different quantity for a powder. Off by default means off — no verdict may be graded across the bases.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 0,
+                "source": "limit",
+                "verdict": "out_of_spec"
+              }
+            },
+            {
+              "why": "Same row, other direction.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 0,
+                "source": "limit",
+                "verdict": "in_spec"
+              }
+            },
+            {
+              "why": "Nothing here was equated, so nothing may claim it was.",
+              "no_verdict_where": {
+                "unit_equivalence_applied": true
+              }
+            }
+          ]
+        },
+        {
+          "id": "as_printed_fluid_equivalence",
+          "note": "The same document with the tenant's volume/mass equivalence ON. Row 0 flips from not_checked to out_of_spec — the one setting in this engine that can change a verdict, and every verdict it made reachable names it.",
+          "unit_policy": "fluid_dairy",
+          "limit_context": {
+            "supplier_id": "sup_northstar",
+            "document_type_id": "dt_coa",
+            "product_ids": []
+          },
+          "sources_ref": "as_printed_strict",
+          "expect": {
+            "printed": [],
+            "limit": [
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 0,
+                "source": "limit",
+                "verdict": "out_of_spec",
+                "test_name_raw": "Coliform",
+                "value_raw": "120",
+                "value_num": 120,
+                "limit_id": "l_coliform",
+                "unit_equivalence_applied": true,
+                "reason_contains": "120 exceeds the 10 limit (CFU/mL judged as CFU/g, per this tenant's setting)",
+                "message_contains": "outside our limit of ≤10 CFU/g (CFU/mL judged as CFU/g, per this tenant's setting)"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 1,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Standard Plate Count",
+                "value_raw": "4,500",
+                "value_num": 4500,
+                "limit_id": "l_aerobic",
+                "unit_equivalence_applied": true,
+                "reason_contains": "4500 is within the 20000 limit (CFU/mL judged as CFU/g, per this tenant's setting)",
+                "message_contains": "within our limit of ≤20000 CFU/g (CFU/mL judged as CFU/g, per this tenant's setting)"
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 2,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Coliform",
+                "value_raw": "8",
+                "value_num": 8,
+                "limit_id": "l_coliform",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 3,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Standard Plate Count",
+                "value_raw": "12,000",
+                "value_num": 12000,
+                "limit_id": "l_aerobic",
+                "unit_equivalence_applied": false
+              }
+            ],
+            "unmatched": [],
+            "control_rows": []
+          },
+          "must_not": [
+            {
+              "why": "The two per-gram rows lined up on their own. Marking them as equated would be a lie about rows that never needed the setting.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 2,
+                "unit_equivalence_applied": true
+              }
+            },
+            {
+              "why": "Same, the other per-gram row.",
+              "no_verdict_where": {
+                "table": 0,
+                "row": 3,
+                "unit_equivalence_applied": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "04-valley-copack-multiproduct-coa",
+      "title": "Valley Co-Pack — one certificate, three products, three lots",
+      "html": "html/04-valley-copack-multiproduct-coa.html",
+      "pdf": "pdf/04-valley-copack-multiproduct-coa.pdf",
+      "covers": [
+        "a multi-product certificate that historically collapsed into one record",
+        "a result the supplier passed and our tighter limit fails",
+        "a placeholder unit column on a micro row that must still be judged",
+        "scientific notation beside a placeholder unit"
+      ],
+      "pdf_text_must_contain": [
+        "VALLEY CO-PACK, LLC",
+        "VCP-26-0841",
+        "VCP-26-0842",
+        "VCP-26-0843",
+        "CULTURED BUTTERMILK 1%",
+        "SOUR CREAM 18%",
+        "FRENCH ONION DIP",
+        "3.0x10^2"
+      ],
+      "fields": {
+        "supplier": "Valley Co-Pack, LLC",
+        "certificate_number": "VCP-COA-26-0841",
+        "records": [
+          {
+            "product_name": "Cultured Buttermilk 1%",
+            "lot_number": "VCP-26-0841",
+            "expiration_date": "2026-09-25"
+          },
+          {
+            "product_name": "Sour Cream 18%",
+            "lot_number": "VCP-26-0842",
+            "expiration_date": "2026-10-10"
+          },
+          {
+            "product_name": "French Onion Dip",
+            "lot_number": "VCP-26-0843",
+            "expiration_date": "2026-10-11"
+          }
+        ]
+      },
+      "fields_must_not_contain": {
+        "why": "18449271604 is the FDA facility registration on the letterhead, not a lot. EXTRACTION-LAYER assertion.",
+        "values": [
+          "18449271604"
+        ]
+      },
+      "shapes": [
+        {
+          "id": "as_printed",
+          "note": "Three scopes, one per item block. A single-scope read is the historic multi-record collapse and would lose two lots and the failure each carries.",
+          "unit_policy": "strict",
+          "limit_context": {
+            "supplier_id": "sup_valley",
+            "document_type_id": "dt_coa",
+            "product_ids": []
+          },
+          "sources": [
+            {
+              "scope": "record[0]",
+              "tables": [
+                {
+                  "name": "microbiological_results",
+                  "headers": [
+                    "Test",
+                    "Result",
+                    "Units",
+                    "Specification"
+                  ],
+                  "rows": [
+                    [
+                      "Coliform",
+                      "<1",
+                      "CFU/g",
+                      "< 10 CFU/g"
+                    ],
+                    [
+                      "Standard Plate Count",
+                      "1,800",
+                      "CFU/g",
+                      "< 20,000 CFU/g"
+                    ]
+                  ]
+                }
+              ]
+            },
+            {
+              "scope": "record[1]",
+              "tables": [
+                {
+                  "name": "microbiological_results",
+                  "headers": [
+                    "Test",
+                    "Result",
+                    "Units",
+                    "Specification"
+                  ],
+                  "rows": [
+                    [
+                      "Coliform",
+                      "40",
+                      "N/A",
+                      "< 100 CFU/g"
+                    ],
+                    [
+                      "Standard Plate Count",
+                      "3.0x10^2",
+                      "N/A",
+                      "< 20,000 CFU/g"
+                    ]
+                  ]
+                }
+              ]
+            },
+            {
+              "scope": "record[2]",
+              "tables": [
+                {
+                  "name": "microbiological_results",
+                  "headers": [
+                    "Test",
+                    "Result",
+                    "Units",
+                    "Specification"
+                  ],
+                  "rows": [
+                    [
+                      "Yeast",
+                      "250",
+                      "CFU/g",
+                      "< 1,000 CFU/g"
+                    ],
+                    [
+                      "Listeria monocytogenes",
+                      "Negative",
+                      "",
+                      "Negative/25g"
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "expect": {
+            "printed": [],
+            "limit": [
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 0,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Coliform",
+                "value_raw": "<1",
+                "value_num": 1,
+                "limit_id": "l_coliform",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[0]",
+                "table": 0,
+                "row": 1,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Standard Plate Count",
+                "value_raw": "1,800",
+                "value_num": 1800,
+                "limit_id": "l_aerobic",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[1]",
+                "table": 0,
+                "row": 0,
+                "source": "limit",
+                "verdict": "out_of_spec",
+                "test_name_raw": "Coliform",
+                "value_raw": "40",
+                "value_num": 40,
+                "limit_id": "l_coliform",
+                "unit_equivalence_applied": false,
+                "reason_contains": "40 exceeds the 10 limit",
+                "message_contains": "outside our limit of ≤10 CFU/g"
+              },
+              {
+                "scope": "record[1]",
+                "table": 0,
+                "row": 1,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Standard Plate Count",
+                "value_raw": "3.0x10^2",
+                "value_num": 300,
+                "limit_id": "l_aerobic",
+                "unit_equivalence_applied": false
+              },
+              {
+                "scope": "record[2]",
+                "table": 0,
+                "row": 0,
+                "source": "limit",
+                "verdict": "out_of_spec",
+                "test_name_raw": "Yeast",
+                "value_raw": "250",
+                "value_num": 250,
+                "limit_id": "l_yeast",
+                "unit_equivalence_applied": false,
+                "reason_contains": "250 exceeds the 100 limit",
+                "message_contains": "outside our limit of ≤100 CFU/g"
+              },
+              {
+                "scope": "record[2]",
+                "table": 0,
+                "row": 1,
+                "source": "limit",
+                "verdict": "in_spec",
+                "test_name_raw": "Listeria monocytogenes",
+                "value_raw": "Negative",
+                "limit_id": "l_listeria",
+                "unit_equivalence_applied": false
+              }
+            ],
+            "unmatched": [],
+            "control_rows": []
+          },
+          "scopes_must_all_produce_a_verdict": [
+            "record[0]",
+            "record[1]",
+            "record[2]"
+          ],
+          "must_not": [
+            {
+              "why": "Item 2's coliform is inside the supplier's own printed ceiling. Their paper is not wrong; our limit is tighter. The printed source must stay silent about it.",
+              "no_verdict_where": {
+                "scope": "record[1]",
+                "table": 0,
+                "row": 0,
+                "source": "printed"
+              }
+            },
+            {
+              "why": "A unit cell reading 'N/A' means the row carries no unit. Refusing it would drop a genuine 4x-over-limit coliform result, which was 45 of the 74 unjudgeable rows in a 100-COA production sample.",
+              "no_verdict_where": {
+                "scope": "record[1]",
+                "table": 0,
+                "row": 0,
+                "verdict": "not_checked"
+              }
+            },
+            {
+              "why": "3.0x10^2 is 300, not 3.",
+              "no_verdict_where": {
+                "scope": "record[1]",
+                "value_num": 3
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "05-andersen-letter-of-guarantee",
+      "title": "Andersen Dairy — Continuing Guaranty (not a COA)",
+      "html": "html/05-andersen-letter-of-guarantee.html",
+      "pdf": "pdf/05-andersen-letter-of-guarantee.pdf",
+      "covers": [
+        "a non-COA document that must produce no spec results at all"
+      ],
+      "pdf_text_must_contain": [
+        "CONTINUING GUARANTY",
+        "ANDERSEN DAIRY INC.",
+        "21 U.S.C.",
+        "0.5 ppm",
+        "11294874528"
+      ],
+      "fields": {
+        "supplier": "Andersen Dairy Inc.",
+        "document_type": "Letter of Guarantee",
+        "effective_date": "2026-01-01"
+      },
+      "fields_must_not_contain": {
+        "why": "Statute sections, a tolerance figure and a facility registration are not lots, products or expirations. EXTRACTION-LAYER assertion.",
+        "values": [
+          "331",
+          "342",
+          "343",
+          "0.5 ppm",
+          "11294874528",
+          "117",
+          "1240",
+          "180"
+        ]
+      },
+      "shapes": [
+        {
+          "id": "as_printed",
+          "note": "The signature block extracts as a key/value table, which is the harder case: the engine has a 'result' column to find and must still produce nothing.",
+          "unit_policy": "strict",
+          "limit_context": {
+            "supplier_id": "sup_andersen",
+            "document_type_id": "dt_letter_of_guarantee",
+            "product_ids": []
+          },
+          "sources": [
+            {
+              "scope": "ai_fields",
+              "tables": [
+                {
+                  "name": "guaranty_details",
+                  "headers": [
+                    "Field",
+                    "Value"
+                  ],
+                  "rows": [
+                    [
+                      "Guarantor",
+                      "Andersen Dairy Inc."
+                    ],
+                    [
+                      "Facility Registration",
+                      "11294874528"
+                    ],
+                    [
+                      "Effective Date",
+                      "January 1, 2026"
+                    ],
+                    [
+                      "Buyer",
+                      "Medosweet Farms, Inc., 1150 Central Ave N, Kent, WA 98032"
+                    ],
+                    [
+                      "Incidental additive tolerance",
+                      "0.5 ppm"
+                    ],
+                    [
+                      "Statutory reference",
+                      "21 U.S.C. 331, 342, 343"
+                    ]
+                  ],
+                  "printed_verbatim": false,
+                  "printed_verbatim_why": "NOT printed as a table. The guaranty is prose plus a signature block; this is a plausible extractor synthesis of it, used here to prove that even when a non-COA hands the engine a result column it produces nothing."
+                }
+              ]
+            }
+          ],
+          "expect": {
+            "printed": [],
+            "limit": [],
+            "unmatched": [
+              "Guarantor",
+              "Facility Registration",
+              "Effective Date",
+              "Buyer",
+              "Incidental additive tolerance",
+              "Statutory reference"
+            ],
+            "control_rows": []
+          },
+          "must_not": [
+            {
+              "why": "A legal guaranty contains no test results. A spec engine that finds one here will invent them anywhere.",
+              "no_verdict_where": {}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

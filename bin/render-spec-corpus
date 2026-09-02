@@ -1,0 +1,183 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/render-spec-corpus — turn the corpus HTML into PDFs, then prove the text
+ * layer says what the fixture claims it says.
+ *
+ * WHY HTML AND NOT COMMITTED PDFs. A binary fixture is unreadable and
+ * unreviewable: you cannot tell from a checked-in PDF whether the certificate
+ * prints "<50" or "＜50", whether the buffer row exists, or whether the
+ * certification paragraph really quotes 100,000. The HTML in
+ * `tests/fixtures/spec-corpus/html/` is the source of truth and reads like the
+ * document it renders; the PDFs are build output and are gitignored.
+ *
+ * WHY THE TEXT CHECK IS PART OF RENDERING. A fixture whose text layer is wrong
+ * tests the wrong thing — silently. If a ligature, a soft hyphen or a CSS
+ * choice mangles "2×10³" or breaks "Non-detectable for Listeria mono/25g"
+ * across lines, every downstream conclusion drawn from that document is about a
+ * document nobody has. So each fixture declares `pdf_text_must_contain` in
+ * corpus.json and this script asserts every string against
+ * `pdftotext -layout` output before it will report success.
+ *
+ * Usage:
+ *   bin/render-spec-corpus                 # render + verify all
+ *   bin/render-spec-corpus --doc 01-...    # one document
+ *   bin/render-spec-corpus --text          # also dump the extracted text
+ *   bin/render-spec-corpus --verify-only   # re-check existing PDFs
+ *
+ * Requires the Playwright chromium already used by the e2e suite, and
+ * `pdftotext` (poppler-utils) for the verification step.
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+const ROOT = path.resolve(__dirname, '..');
+const DIR = path.join(ROOT, 'tests/fixtures/spec-corpus');
+const CORPUS = path.join(DIR, 'corpus.json');
+
+const C = process.stdout.isTTY
+  ? { g: '\x1b[32m', r: '\x1b[31m', d: '\x1b[2m', b: '\x1b[1m', x: '\x1b[0m' }
+  : { g: '', r: '', d: '', b: '', x: '' };
+
+function parseArgs(argv) {
+  const o = { doc: null, text: false, verifyOnly: false, help: false };
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
+      case '--doc': o.doc = argv[++i]; break;
+      case '--text': o.text = true; break;
+      case '--verify-only': o.verifyOnly = true; break;
+      case '-h': case '--help': o.help = true; break;
+      default: console.error(`unknown flag: ${argv[i]}`); process.exit(2);
+    }
+  }
+  return o;
+}
+
+/**
+ * The text layer as a reader of the PDF would get it. Normalised only for
+ * whitespace: a fixture string must survive line wrapping, because that is what
+ * the extraction pipeline copes with too, but nothing else is smoothed over.
+ */
+function pdfText(file) {
+  return execFileSync('pdftotext', ['-layout', file, '-'], { encoding: 'utf8' });
+}
+
+function flat(s) {
+  return s.replace(/\s+/g, ' ');
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(3, 31).join('\n').replace(/^ ?\*\/?/gm, ''));
+    return 0;
+  }
+
+  const corpus = JSON.parse(fs.readFileSync(CORPUS, 'utf8'));
+  const docs = corpus.documents.filter((d) => !opts.doc || d.id === opts.doc);
+  if (!docs.length) {
+    console.error(`no document matched ${JSON.stringify(opts.doc)}`);
+    return 2;
+  }
+  fs.mkdirSync(path.join(DIR, 'pdf'), { recursive: true });
+
+  let browser = null;
+  if (!opts.verifyOnly) {
+    const { chromium } = require('@playwright/test');
+    browser = await chromium.launch();
+  }
+
+  let failures = 0;
+  for (const doc of docs) {
+    const html = path.join(DIR, doc.html);
+    const pdf = path.join(DIR, doc.pdf);
+
+    if (browser) {
+      const page = await browser.newPage();
+      // file:// so relative assets would resolve; these fixtures are
+      // self-contained on purpose — no network, no fonts to fetch, so what
+      // renders here renders the same on any machine.
+      await page.goto(`file://${html}`, { waitUntil: 'load' });
+      await page.pdf({ path: pdf, printBackground: true });
+      await page.close();
+    } else if (!fs.existsSync(pdf)) {
+      console.log(`${C.r}✗${C.x} ${doc.id} ${C.d}— no PDF to verify; run without --verify-only${C.x}`);
+      failures++;
+      continue;
+    }
+
+    const text = pdfText(pdf);
+    const flatText = flat(text).toLowerCase();
+    const missing = (doc.pdf_text_must_contain || []).filter(
+      (s) => !flatText.includes(flat(s).toLowerCase())
+    );
+    const size = fs.statSync(pdf).size;
+
+    // THE LOAD-BEARING CHECK. Every header and every non-empty cell of every
+    // table the fixture claims is printed verbatim must be findable in the text
+    // layer. Without this the manifest's declared extraction shape is just an
+    // assertion about a document nobody has read: someone edits the HTML, the
+    // shape goes stale, and the judging tests keep passing against a
+    // certificate that no longer says any of it.
+    //
+    // A table may opt out with `printed_verbatim: false`, and three do. Those
+    // are shapes that are DELIBERATELY not what the page prints — an
+    // extractor's mangling of a prose paragraph, a misfiled spec column — and
+    // each states why. Those are the inputs the engine has to survive, so they
+    // have to be expressible.
+    const unprinted = [];
+    for (const shape of doc.shapes) {
+      for (const src of shape.sources || []) {
+        for (const table of src.tables || []) {
+          if (table.printed_verbatim === false) continue;
+          const cells = [...(table.headers || []), ...(table.rows || []).flat()];
+          for (const cell of cells) {
+            const v = String(cell ?? '').trim();
+            if (!v) continue;
+            if (!flatText.includes(flat(v).toLowerCase())) {
+              unprinted.push(`${shape.id}/${table.name}: ${JSON.stringify(v)}`);
+            }
+          }
+        }
+      }
+    }
+
+    if (missing.length || unprinted.length) {
+      failures++;
+      console.log(`${C.r}✗${C.x} ${C.b}${doc.id}${C.x} ${C.d}(${size} bytes)${C.x}`);
+      for (const m of missing) {
+        console.log(`    ${C.r}text layer does not contain${C.x} ${JSON.stringify(m)}`);
+      }
+      for (const u of unprinted) {
+        console.log(`    ${C.r}declared extraction shape claims a cell the page never prints${C.x} — ${u}`);
+      }
+      console.log(`    ${C.d}a fixture whose text layer is wrong tests the wrong thing${C.x}`);
+    } else {
+      const cells = doc.shapes
+        .flatMap((s) => s.sources || [])
+        .flatMap((s) => s.tables || [])
+        .filter((t) => t.printed_verbatim !== false)
+        .reduce((n, t) => n + (t.headers || []).length + (t.rows || []).flat().filter(Boolean).length, 0);
+      console.log(
+        `${C.g}✓${C.x} ${C.b}${doc.id}${C.x} ${C.d}(${size} bytes, ` +
+          `${(doc.pdf_text_must_contain || []).length} text assertions, ${cells} declared cells found in the text layer)${C.x}`
+      );
+    }
+    if (opts.text) console.log(`${C.d}${text.replace(/^/gm, '    │ ')}${C.x}`);
+  }
+
+  if (browser) await browser.close();
+  console.log(
+    failures
+      ? `\n${C.r}FAILED${C.x} — ${failures} of ${docs.length} fixtures do not print what they claim.`
+      : `\n${C.g}PASSED${C.x} — ${docs.length} fixtures rendered and their text layers verified.`
+  );
+  return failures ? 1 : 0;
+}
+
+main().then(
+  (code) => process.exit(code),
+  (err) => { console.error(err); process.exit(2); }
+);
