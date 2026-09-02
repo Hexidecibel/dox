@@ -1151,6 +1151,9 @@ Indexes: `idx_sessions_user`
   extraction_context TEXT
   extraction_context_updated_at TEXT
   extraction_context_updated_by TEXT
+  spec_volume_mass_equivalent INTEGER NOT NULL DEFAULT 0
+  spec_unit_policy_updated_at TEXT
+  spec_unit_policy_updated_by TEXT
 ```
 
 ### `users`

@@ -20,6 +20,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // shared/specCheck.ts
 var specCheck_exports = {};
 __export(specCheck_exports, {
+  STRICT_UNIT_POLICY: () => STRICT_UNIT_POLICY,
   checkConfiguredLimits: () => checkConfiguredLimits,
   checkPrintedSpecs: () => checkPrintedSpecs,
   compareToLimit: () => compareToLimit,
@@ -31,9 +32,11 @@ __export(specCheck_exports, {
   parseLimitExpression: () => parseLimitExpression,
   parseMeasuredValue: () => parseMeasuredValue,
   resolveSpecLimits: () => resolveSpecLimits,
+  resolveUnits: () => resolveUnits,
   resultRestatesSpec: () => resultRestatesSpec,
   specVerdictKey: () => specVerdictKey,
   toSpecLimit: () => toSpecLimit,
+  unitEquivalenceNote: () => unitEquivalenceNote,
   unitFactor: () => unitFactor,
   validateLimitShape: () => validateLimitShape
 });
@@ -75,15 +78,30 @@ function normalizeUnit(raw) {
   }
   return { family: `other:${n}`, perBasis: 1, canonical: s };
 }
-function unitFactor(from, to) {
-  if (from.family === "unknown" || to.family === "unknown") return 1;
-  if (from.family === to.family) return to.perBasis / from.perBasis;
-  const fMethod = from.family.split(":")[0];
-  const tMethod = to.family.split(":")[0];
-  const fUnspec = from.family.endsWith(":unspecified");
-  const tUnspec = to.family.endsWith(":unspecified");
-  if (fMethod === tMethod && (fUnspec || tUnspec)) return to.perBasis / from.perBasis;
+var STRICT_UNIT_POLICY = {};
+function resolveUnits(from, to, policy = STRICT_UNIT_POLICY) {
+  if (from.family === "unknown" || to.family === "unknown") return { factor: 1, equated: false };
+  if (from.family === to.family) return { factor: to.perBasis / from.perBasis, equated: false };
+  const [fMethod, fBasis] = from.family.split(":");
+  const [tMethod, tBasis] = to.family.split(":");
+  if (fMethod !== tMethod) return null;
+  if (fBasis === "unspecified" || tBasis === "unspecified") {
+    return { factor: to.perBasis / from.perBasis, equated: false };
+  }
+  const volumeVsMass = fBasis === "volume" && tBasis === "mass" || fBasis === "mass" && tBasis === "volume";
+  if (volumeVsMass && policy.volume_mass_equivalent) {
+    return { factor: to.perBasis / from.perBasis, equated: true };
+  }
   return null;
+}
+function unitFactor(from, to, policy = STRICT_UNIT_POLICY) {
+  const m = resolveUnits(from, to, policy);
+  return m ? m.factor : null;
+}
+function unitEquivalenceNote(value, limit) {
+  const v = value.canonical || "the printed unit";
+  const l = limit.canonical || "the limit unit";
+  return `${v} judged as ${l}, per this tenant's setting`;
 }
 var ABSENT_TOKENS = /* @__PURE__ */ new Set([
   "absent",
@@ -142,6 +160,7 @@ var EMPTY_TOKENS = /* @__PURE__ */ new Set([
 function isEmptyCell(raw) {
   const s = String(raw ?? "").trim();
   if (!s) return true;
+  if (s.includes("%")) return false;
   if (/^[-–—.·*]+$/.test(s)) return true;
   return EMPTY_TOKENS.has(norm(s)) && !/\d/.test(s);
 }
@@ -286,7 +305,7 @@ function formatLimit(limit) {
       return limit.raw;
   }
 }
-function compareToLimit(value, limit) {
+function compareToLimit(value, limit, policy = STRICT_UNIT_POLICY) {
   if (value.kind === "unparseable") {
     return { verdict: "not_checked", reason: `result "${value.raw}" could not be read as a value`, value_num: null };
   }
@@ -331,15 +350,20 @@ function compareToLimit(value, limit) {
   }
   const vu = normalizeUnit(value.unit);
   const lu = normalizeUnit(limit.unit);
-  const factor = unitFactor(vu, lu);
-  if (factor === null) {
+  const match = resolveUnits(vu, lu, policy);
+  if (match === null) {
     return {
       verdict: "not_checked",
       reason: `result is in ${vu.canonical || "an unknown unit"} but the limit is in ${lu.canonical || "another unit"} \u2014 not comparable`,
       value_num: null
     };
   }
-  const v = value.value * factor;
+  const v = value.value * match.factor;
+  const say = (c) => match.equated ? {
+    ...c,
+    reason: `${c.reason} (${unitEquivalenceNote(vu, lu)})`,
+    unit_equivalence_applied: true
+  } : c;
   const exceedsCeiling = (bound, inclusive) => inclusive ? v > bound : v >= bound;
   const belowFloor = (bound, inclusive) => inclusive ? v < bound : v <= bound;
   switch (limit.operator) {
@@ -349,45 +373,59 @@ function compareToLimit(value, limit) {
       const inclusive = limit.operator === "<=";
       if (value.kind === "censored_lt") {
         if (v <= bound) {
-          return { verdict: "in_spec", reason: `reported below ${value.value}, which clears the limit`, value_num: v };
+          return say({ verdict: "in_spec", reason: `reported below ${value.value}, which clears the limit`, value_num: v });
         }
-        return {
+        return say({
           verdict: "not_checked",
           reason: `reported as <${value.value}, which straddles the ${bound} limit \u2014 the true value could fall either side`,
           value_num: v
-        };
+        });
       }
       if (value.kind === "censored_gt") {
-        return exceedsCeiling(bound, inclusive) ? { verdict: "out_of_spec", reason: `reported above ${value.value}, past the ${bound} limit`, value_num: v } : { verdict: "not_checked", reason: `reported as >${value.value}, which straddles the ${bound} limit`, value_num: v };
+        return say(
+          exceedsCeiling(bound, inclusive) ? { verdict: "out_of_spec", reason: `reported above ${value.value}, past the ${bound} limit`, value_num: v } : { verdict: "not_checked", reason: `reported as >${value.value}, which straddles the ${bound} limit`, value_num: v }
+        );
       }
-      return exceedsCeiling(bound, inclusive) ? { verdict: "out_of_spec", reason: `${v} exceeds the ${bound} limit`, value_num: v } : { verdict: "in_spec", reason: `${v} is within the ${bound} limit`, value_num: v };
+      return say(
+        exceedsCeiling(bound, inclusive) ? { verdict: "out_of_spec", reason: `${v} exceeds the ${bound} limit`, value_num: v } : { verdict: "in_spec", reason: `${v} is within the ${bound} limit`, value_num: v }
+      );
     }
     case ">":
     case ">=": {
       const bound = limit.min;
       const inclusive = limit.operator === ">=";
       if (value.kind === "censored_gt") {
-        return v >= bound ? { verdict: "in_spec", reason: `reported above ${value.value}, which clears the minimum`, value_num: v } : { verdict: "not_checked", reason: `reported as >${value.value}, which straddles the ${bound} minimum`, value_num: v };
+        return say(
+          v >= bound ? { verdict: "in_spec", reason: `reported above ${value.value}, which clears the minimum`, value_num: v } : { verdict: "not_checked", reason: `reported as >${value.value}, which straddles the ${bound} minimum`, value_num: v }
+        );
       }
       if (value.kind === "censored_lt") {
-        return belowFloor(bound, inclusive) ? { verdict: "out_of_spec", reason: `reported below ${value.value}, under the ${bound} minimum`, value_num: v } : { verdict: "not_checked", reason: `reported as <${value.value}, which straddles the ${bound} minimum`, value_num: v };
+        return say(
+          belowFloor(bound, inclusive) ? { verdict: "out_of_spec", reason: `reported below ${value.value}, under the ${bound} minimum`, value_num: v } : { verdict: "not_checked", reason: `reported as <${value.value}, which straddles the ${bound} minimum`, value_num: v }
+        );
       }
-      return belowFloor(bound, inclusive) ? { verdict: "out_of_spec", reason: `${v} is below the ${bound} minimum`, value_num: v } : { verdict: "in_spec", reason: `${v} meets the ${bound} minimum`, value_num: v };
+      return say(
+        belowFloor(bound, inclusive) ? { verdict: "out_of_spec", reason: `${v} is below the ${bound} minimum`, value_num: v } : { verdict: "in_spec", reason: `${v} meets the ${bound} minimum`, value_num: v }
+      );
     }
     case "between": {
       const lo = limit.min;
       const hi = limit.max;
       if (value.kind !== "numeric") {
-        return { verdict: "not_checked", reason: `a censored result cannot be placed inside the ${lo}\u2013${hi} range`, value_num: v };
+        return say({ verdict: "not_checked", reason: `a censored result cannot be placed inside the ${lo}\u2013${hi} range`, value_num: v });
       }
-      return v < lo || v > hi ? { verdict: "out_of_spec", reason: `${v} falls outside the ${lo}\u2013${hi} range`, value_num: v } : { verdict: "in_spec", reason: `${v} is inside the ${lo}\u2013${hi} range`, value_num: v };
+      return say(
+        v < lo || v > hi ? { verdict: "out_of_spec", reason: `${v} falls outside the ${lo}\u2013${hi} range`, value_num: v } : { verdict: "in_spec", reason: `${v} is inside the ${lo}\u2013${hi} range`, value_num: v }
+      );
     }
     case "==": {
       const target = limit.min;
       if (value.kind !== "numeric") {
-        return { verdict: "not_checked", reason: "a censored result cannot be matched to an exact target", value_num: v };
+        return say({ verdict: "not_checked", reason: "a censored result cannot be matched to an exact target", value_num: v });
       }
-      return v === target ? { verdict: "in_spec", reason: `${v} matches the target`, value_num: v } : { verdict: "out_of_spec", reason: `${v} does not match the ${target} target`, value_num: v };
+      return say(
+        v === target ? { verdict: "in_spec", reason: `${v} matches the target`, value_num: v } : { verdict: "out_of_spec", reason: `${v} does not match the ${target} target`, value_num: v }
+      );
     }
     default:
       return { verdict: "not_checked", reason: "unsupported limit operator", value_num: v };
@@ -451,7 +489,7 @@ var PASS_VERDICT_TOKENS = /* @__PURE__ */ new Set([
   "withinspec",
   "meetsspec"
 ]);
-function judgePrinted(scope, target, row) {
+function judgePrinted(scope, target, row, policy = STRICT_UNIT_POLICY) {
   const { testName, resultRaw, specRaw, verdictRaw, unitRaw } = row;
   if (!testName) return null;
   const base = {
@@ -470,7 +508,7 @@ function judgePrinted(scope, target, row) {
   const value = parseMeasuredValue(applyRowUnit(resultRaw, unitRaw));
   const restated = resultRestatesSpec(resultRaw, specRaw, unitRaw);
   const comparable = !!limit && !resultIsVerdict && !restated && !isBlankResult(resultRaw);
-  const cmp = comparable ? compareToLimit(value, withUnit(limit, unitRaw)) : null;
+  const cmp = comparable ? compareToLimit(value, withUnit(limit, unitRaw), policy) : null;
   if (printedFail) {
     return {
       ...base,
@@ -493,19 +531,23 @@ function judgePrinted(scope, target, row) {
   }
   if (!cmp) return null;
   const limitText = formatLimit(limit);
+  const equatedSuffix = cmp.unit_equivalence_applied ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(withUnit(limit, unitRaw).unit))})` : "";
+  const equated = cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {};
   if (cmp.verdict === "out_of_spec") {
     return {
       ...base,
+      ...equated,
       verdict: "out_of_spec",
       limit_text: limitText,
       reason: cmp.reason,
-      message: printedPass ? `${testName} is ${resultRaw} against the COA's own printed limit of ${limitText}, but the row is marked "${verdictCell}" \u2014 the document contradicts itself.` : `${testName} is ${resultRaw}, outside the COA's own printed limit of ${limitText}.`,
+      message: printedPass ? `${testName} is ${resultRaw} against the COA's own printed limit of ${limitText}${equatedSuffix}, but the row is marked "${verdictCell}" \u2014 the document contradicts itself.` : `${testName} is ${resultRaw}, outside the COA's own printed limit of ${limitText}${equatedSuffix}.`,
       value_num: cmp.value_num
     };
   }
   if (cmp.verdict === "not_checked") {
     return {
       ...base,
+      ...equated,
       verdict: "not_checked",
       limit_text: limitText,
       reason: cmp.reason,
@@ -515,7 +557,8 @@ function judgePrinted(scope, target, row) {
   }
   return null;
 }
-function checkPrintedSpecs(sources) {
+function checkPrintedSpecs(sources, opts = {}) {
+  const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
   const out = [];
   for (const src of sources) {
     (src.tables ?? []).forEach((table, ti) => {
@@ -532,7 +575,8 @@ function checkPrintedSpecs(sources) {
             specRaw: cell(shape.spec),
             verdictRaw: cell(shape.verdict),
             unitRaw: cell(shape.unit)
-          }
+          },
+          policy
         );
         if (v) out.push(v);
       });
@@ -551,7 +595,8 @@ function checkPrintedSpecs(sources) {
             specRaw: String(cell.spec ?? "").trim(),
             verdictRaw: "",
             unitRaw: String(cell.unit ?? "").trim()
-          }
+          },
+          policy
         );
         if (v) out.push(v);
       }
@@ -681,6 +726,7 @@ function isControlRowLabel(label) {
   return !!key && CONTROL_ROW_LABELS.has(key);
 }
 function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
+  const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
   const resolved = resolveSpecLimits(limits, ctx);
   const verdicts = [];
   const unmatched = /* @__PURE__ */ new Set();
@@ -719,10 +765,12 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       });
       return;
     }
+    const effectiveLimit = withUnit(limit, unitRaw);
     const value = parseMeasuredValue(applyRowUnit(valueRaw, unitRaw));
-    const cmp = compareToLimit(value, withUnit(limit, unitRaw));
+    const cmp = compareToLimit(value, effectiveLimit, policy);
     if (cmp.verdict === "in_spec" && !opts.includePasses) return;
     const limitText = formatLimit(limit);
+    const equatedSuffix = cmp.unit_equivalence_applied ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(effectiveLimit.unit))})` : "";
     const base = {
       scope,
       target,
@@ -734,13 +782,14 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       spec_test_id: test.id,
       limit_id: configured.id,
       value_num: cmp.value_num,
-      reason: cmp.reason
+      reason: cmp.reason,
+      ...cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {}
     };
     if (cmp.verdict === "out_of_spec") {
       verdicts.push({
         ...base,
         verdict: "out_of_spec",
-        message: `${test.name} is ${valueRaw}, outside our limit of ${limitText}.`
+        message: `${test.name} is ${valueRaw}, outside our limit of ${limitText}${equatedSuffix}.`
       });
     } else if (cmp.verdict === "not_checked") {
       verdicts.push({
@@ -752,7 +801,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       verdicts.push({
         ...base,
         verdict: "in_spec",
-        message: `${test.name} is ${valueRaw}, within our limit of ${limitText}.`
+        message: `${test.name} is ${valueRaw}, within our limit of ${limitText}${equatedSuffix}.`
       });
     }
   };
@@ -848,6 +897,7 @@ function validateLimitShape(input) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  STRICT_UNIT_POLICY,
   checkConfiguredLimits,
   checkPrintedSpecs,
   compareToLimit,
@@ -859,9 +909,11 @@ function validateLimitShape(input) {
   parseLimitExpression,
   parseMeasuredValue,
   resolveSpecLimits,
+  resolveUnits,
   resultRestatesSpec,
   specVerdictKey,
   toSpecLimit,
+  unitEquivalenceNote,
   unitFactor,
   validateLimitShape
 });

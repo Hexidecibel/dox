@@ -26,6 +26,13 @@
  * product-scoped limit would sit in this list looking active while never
  * firing. Better to omit the option than to ship a lie.
  *
+ * ONE SETTING ON THIS PAGE CHANGES HOW A LIMIT IS READ rather than adding
+ * another one: unit equivalence (migration 0093). It is deliberately at the top
+ * and worded as the QA judgement it is, because a tenant that turns it on is
+ * saying something about its products — that a millilitre and a gram of them
+ * are the same quantity for counting purposes — and that is not a claim code
+ * should make on anyone's behalf. Off by default.
+ *
  * NOTHING HERE BLOCKS AN APPROVAL. These rows produce warnings.
  */
 
@@ -42,11 +49,13 @@ import {
   DialogTitle,
   FormControl,
   IconButton,
+  FormControlLabel,
   InputLabel,
   MenuItem,
   Paper,
   Select,
   Stack,
+  Switch,
   Table,
   TableBody,
   TableCell,
@@ -119,6 +128,12 @@ export function SpecLimits() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // Unit equivalence (migration 0093). `null` = we could not read it — the
+  // control is then shown disabled rather than defaulted to "off", because a
+  // switch that shows a state it did not load is a lie about a safety setting.
+  const [unitEquiv, setUnitEquiv] = useState<boolean | null>(null);
+  const [unitEquivSaving, setUnitEquivSaving] = useState(false);
+
   const { user, isSuperAdmin } = useAuth();
   const { selectedTenantId } = useTenant();
   const activeTenantId = isSuperAdmin ? selectedTenantId || undefined : user?.tenant_id || undefined;
@@ -147,16 +162,18 @@ export function SpecLimits() {
     setLoading(true);
     setError('');
     try {
-      const [t, l, s, d] = await Promise.all([
+      const [t, l, s, d, p] = await Promise.all([
         api.specTests.list({ tenant_id: activeTenantId }),
         api.specLimits.list({ tenant_id: activeTenantId }),
         api.suppliers.list({ tenant_id: activeTenantId, limit: 200 }).catch(() => ({ suppliers: [] })),
         api.documentTypes.list({ tenant_id: activeTenantId }).catch(() => ({ documentTypes: [] })),
+        api.specUnitPolicy.get({ tenant_id: activeTenantId }).catch(() => null),
       ]);
       setSpecTests(t.specTests);
       setLimits(l.specLimits);
       setSuppliers((s as { suppliers: ApiSupplier[] }).suppliers || []);
       setDocTypes((d as { documentTypes: ApiDocumentType[] }).documentTypes || []);
+      setUnitEquiv(p ? p.volume_mass_equivalent : null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load spec limits');
     } finally {
@@ -174,6 +191,27 @@ export function SpecLimits() {
     for (const l of limits) (out[l.spec_test_id] ||= []).push(l);
     return out;
   }, [limits]);
+
+  /**
+   * Flip the equivalence. Optimistic-free on purpose: the switch only moves
+   * once the server has said it moved, so the page never shows a rule that is
+   * not actually in force.
+   */
+  const saveUnitEquiv = async (next: boolean) => {
+    setUnitEquivSaving(true);
+    setError('');
+    try {
+      const saved = await api.specUnitPolicy.put({
+        volume_mass_equivalent: next,
+        tenant_id: isSuperAdmin ? activeTenantId : undefined,
+      });
+      setUnitEquiv(saved.volume_mass_equivalent);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save the unit setting');
+    } finally {
+      setUnitEquivSaving(false);
+    }
+  };
 
   const openCreateTest = () => {
     setEditingTest(null);
@@ -355,6 +393,52 @@ export function SpecLimits() {
           {error}
         </Alert>
       )}
+
+      <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
+        <FormControlLabel
+          sx={{ alignItems: 'flex-start', m: 0 }}
+          control={
+            <Switch
+              sx={{ mt: 0.25, mr: 1 }}
+              checked={unitEquiv === true}
+              disabled={unitEquiv === null || unitEquivSaving}
+              onChange={(e) => saveUnitEquiv(e.target.checked)}
+            />
+          }
+          label={
+            <Box>
+              <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                Judge results in CFU/mL against limits written in CFU/g
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                Suppliers print fluid results per millilitre and your limits are
+                written per gram. With this <strong>on</strong>, a result of
+                120 CFU/mL is compared against a ≤20,000 CFU/g limit as the same
+                number — which is right for milk and cream, where a millilitre
+                and a gram differ by about 3%. With it <strong>off</strong>,
+                those results come back as “could not be judged” — never as a
+                pass. The same applies to MPN/mL against MPN/g.
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                <strong>This is a QA decision, not a technical one.</strong>{' '}
+                Leave it off if you handle powders or dry blends, where a gram
+                and a millilitre are genuinely different quantities and treating
+                them alike would let a real failure read as a pass. It does not
+                loosen anything else: a percentage against a CFU limit, or CFU
+                against MPN, is still refused either way. Every result judged
+                under this setting says so on the review screen and in the
+                out-of-spec register.
+              </Typography>
+              {unitEquiv === null && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                  Setting unavailable — pick a tenant first, or this environment
+                  has not taken migration 0093 yet.
+                </Typography>
+              )}
+            </Box>
+          }
+        />
+      </Paper>
 
       {specTests.length === 0 ? (
         <EmptyState

@@ -171,6 +171,37 @@ function main() {
     value_max: r.value_max == null ? null : Number(r.value_max),
   }));
 
+  /**
+   * The tenant's unit-equivalence setting (migration 0093), which changes which
+   * results are comparable at all. Read here for the same reason the review
+   * queue reads it: a preview that judged under different rules than production
+   * would be worse than no preview — you would size a limit against numbers the
+   * live engine never produces. A database without 0093 falls back to strict,
+   * which is what it is actually running.
+   */
+  let unitPolicy = {};
+  try {
+    const tenantRows = query(
+      `SELECT spec_volume_mass_equivalent FROM tenants WHERE id = '${opts.tenant}'`,
+      { remote }
+    );
+    const flag = Number((tenantRows || [])[0]?.spec_volume_mass_equivalent ?? 0) === 1;
+    unitPolicy = { volume_mass_equivalent: flag };
+    if (flag) {
+      console.log(
+        'Unit equivalence is ON for this tenant: CFU/mL is judged against CFU/g\n' +
+        '(and MPN/mL against MPN/g) as the same number. Findings below say so.\n'
+      );
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such column|no such table/i.test(msg)) throw err;
+    console.error(
+      'This database predates migration 0093 — checking with strict units, which\n' +
+      'is what it is running.'
+    );
+  }
+
   if (!opts.printedOnly && limits.length === 0) {
     console.log(
       'No active spec limits for this tenant — nothing of ours to check.\n' +
@@ -203,14 +234,20 @@ function main() {
     if (sources.length === 0) continue;
     withResults++;
 
-    const printed = checkPrintedSpecs(sources);
+    const printed = checkPrintedSpecs(sources, { unitPolicy });
     let configured = { verdicts: [], unmatched: [] };
     if (!opts.printedOnly) {
-      configured = checkConfiguredLimits(sources, tests, limits, {
-        supplier_id: doc.supplier_id || null,
-        document_type_id: doc.document_type_id || null,
-        product_ids: [],
-      });
+      configured = checkConfiguredLimits(
+        sources,
+        tests,
+        limits,
+        {
+          supplier_id: doc.supplier_id || null,
+          document_type_id: doc.document_type_id || null,
+          product_ids: [],
+        },
+        { unitPolicy }
+      );
     }
 
     for (const name of configured.unmatched) {
@@ -229,6 +266,7 @@ function main() {
         verdict: v.verdict,
         source: v.source,
         message: v.message,
+        unit_equivalence_applied: v.unit_equivalence_applied === true,
       });
     }
   }
@@ -245,6 +283,7 @@ function main() {
           with_results: withResults,
           analytes: tests.length,
           active_limits: limits.length,
+          unit_policy: unitPolicy,
           out_of_spec: outOfSpec,
           not_checked: notChecked,
           unmatched: [...unmatched.entries()]
@@ -265,6 +304,9 @@ function main() {
   console.log(`  with test results ...... ${withResults}`);
   console.log(`Analytes configured ...... ${tests.length}`);
   console.log(`Active limits ............ ${limits.length}`);
+  console.log(
+    `CFU/mL judged as CFU/g ... ${unitPolicy.volume_mass_equivalent ? 'YES (tenant setting)' : 'no'}`
+  );
   if (opts.limit && docs.length >= opts.limit) {
     console.log(`NOTE: capped at --limit ${opts.limit}; more documents were not examined.`);
   }

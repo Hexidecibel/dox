@@ -40,15 +40,38 @@ export interface RegisterContext {
   acknowledgementNote?: string | null;
 }
 
-/** The frozen copy of a limit stored alongside a verdict. */
+/**
+ * The frozen copy of a limit stored alongside a verdict.
+ *
+ * THE UNIT EQUIVALENCE BELONGS IN HERE, and it is not a detail. When a tenant
+ * has said CFU/mL may be judged as CFU/g (migration 0093), the thing a result
+ * was actually judged against is not "≤20000 CFU/g" — it is "≤20000 CFU/g, with
+ * a millilitre basis accepted as a gram basis". Someone can turn that setting
+ * off next month, and this table exists precisely so that moving a threshold
+ * cannot rewrite history; a snapshot that omitted the equivalence would leave a
+ * verdict that can no longer be re-explained, or worse, one that looks like it
+ * was reached under rules that were never applied to it.
+ *
+ * Recorded only when it was actually USED on this row (`unit_equivalence`
+ * absent = the units lined up on their own). The verdict's `reason` says the
+ * same thing in words and is stored beside it, so the record reads correctly
+ * whether a person or a query is doing the reading.
+ */
 function snapshotFor(verdict: SpecVerdict, limits: ConfiguredLimit[]): string | null {
+  const equated = verdict.unit_equivalence_applied ? { unit_equivalence: 'volume_mass' } : {};
   if (verdict.source !== 'limit' || !verdict.limit_id) {
     // A printed-spec verdict's "limit" is the document's own text, which is
     // already captured verbatim in limit_text.
-    return verdict.limit_text ? JSON.stringify({ printed: verdict.limit_text }) : null;
+    return verdict.limit_text
+      ? JSON.stringify({ printed: verdict.limit_text, ...equated })
+      : null;
   }
   const l = limits.find((x) => x.id === verdict.limit_id);
-  if (!l) return verdict.limit_text ? JSON.stringify({ printed: verdict.limit_text }) : null;
+  if (!l) {
+    return verdict.limit_text
+      ? JSON.stringify({ printed: verdict.limit_text, ...equated })
+      : null;
+  }
   return JSON.stringify({
     operator: l.operator,
     value_min: l.value_min,
@@ -56,6 +79,7 @@ function snapshotFor(verdict: SpecVerdict, limits: ConfiguredLimit[]): string | 
     unit: l.unit,
     severity: l.severity,
     text: verdict.limit_text,
+    ...equated,
   });
 }
 

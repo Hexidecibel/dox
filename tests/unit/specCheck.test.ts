@@ -26,6 +26,7 @@ import {
   resolveSpecLimits,
   matchSpecTest,
   checkConfiguredLimits,
+  resolveUnits,
   resultRestatesSpec,
   specVerdictKey,
   isControlRowLabel,
@@ -1109,5 +1110,253 @@ describe('scientific notation carrying a unit column', () => {
     const v = parseMeasuredValue('1.2est');
     expect(v.kind).toBe('numeric');
     expect(v.value).toBe(1.2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-tenant unit equivalence (migration 0093)
+// ---------------------------------------------------------------------------
+
+/**
+ * A fluid-dairy tenant declares that CFU/mL and CFU/g are the same number for
+ * its products. On production the majority of its results print `cfu/mL` while
+ * every limit on file is written in CFU/g, so before this setting existed the
+ * majority unit was judged against nothing at all.
+ *
+ * These tests exist in equal measure to pin what the setting must NOT do. It is
+ * an equivalence between two BASES of one enumeration method, not permission to
+ * ignore units: a percent against a CFU/g limit stays refused (that refusal
+ * caught a real extraction bug — a micro spec misfiled onto a FAT row), and CFU
+ * against MPN stays refused too. And nothing it makes reachable is allowed to
+ * be quiet about it.
+ */
+const EQUATE = { volume_mass_equivalent: true };
+
+const cfuGramLimit = (max: number): SpecLimit =>
+  lim({ operator: '<=', max, unit: 'CFU/g' });
+
+describe('unit equivalence — OFF by default', () => {
+  it('still refuses CFU/mL against a CFU/g limit', () => {
+    // The default must be today's behaviour, byte for byte. A tenant that has
+    // said nothing gets the answer that is correct for a powder.
+    expect(unitFactor(normalizeUnit('CFU/mL'), normalizeUnit('CFU/g'))).toBeNull();
+    expect(resolveUnits(normalizeUnit('CFU/mL'), normalizeUnit('CFU/g'))).toBeNull();
+
+    const cmp = compareToLimit(parseMeasuredValue('120 CFU/mL'), cfuGramLimit(20000));
+    expect(cmp.verdict).toBe('not_checked');
+    expect(cmp.reason).toMatch(/not comparable/);
+    expect(cmp.unit_equivalence_applied).toBeUndefined();
+  });
+
+  it('is off when an empty policy object is passed, not just when omitted', () => {
+    expect(unitFactor(normalizeUnit('CFU/mL'), normalizeUnit('CFU/g'), {})).toBeNull();
+    expect(
+      unitFactor(normalizeUnit('CFU/mL'), normalizeUnit('CFU/g'), {
+        volume_mass_equivalent: false,
+      })
+    ).toBeNull();
+  });
+});
+
+describe('unit equivalence — ON, and never silent about it', () => {
+  it('compares CFU/mL against a CFU/g limit at 1:1', () => {
+    const match = resolveUnits(normalizeUnit('CFU/mL'), normalizeUnit('CFU/g'), EQUATE);
+    expect(match).toEqual({ factor: 1, equated: true });
+  });
+
+  it('names itself in the reason of a pass — the whole point', () => {
+    // A bare "120 is within the 20000 limit" here would be exactly the false
+    // confidence the three-state design exists to prevent.
+    const cmp = compareToLimit(parseMeasuredValue('120 CFU/mL'), cfuGramLimit(20000), EQUATE);
+    expect(cmp.verdict).toBe('in_spec');
+    expect(cmp.value_num).toBe(120);
+    expect(cmp.unit_equivalence_applied).toBe(true);
+    expect(cmp.reason).toBe(
+      "120 is within the 20000 limit (CFU/mL judged as CFU/g, per this tenant's setting)"
+    );
+  });
+
+  it('names itself in the reason of a failure too', () => {
+    const cmp = compareToLimit(parseMeasuredValue('40000 CFU/mL'), cfuGramLimit(20000), EQUATE);
+    expect(cmp.verdict).toBe('out_of_spec');
+    expect(cmp.reason).toMatch(/40000 exceeds the 20000 limit \(cfu\/mL judged as CFU\/g/i);
+  });
+
+  it('names itself on a refusal that happened for a DIFFERENT reason', () => {
+    // The units were bridged; the censored value is what blocked the verdict.
+    // Both facts belong in the record.
+    const cmp = compareToLimit(parseMeasuredValue('<50 CFU/mL'), cfuGramLimit(10), EQUATE);
+    expect(cmp.verdict).toBe('not_checked');
+    expect(cmp.reason).toMatch(/straddles the 10 limit/);
+    expect(cmp.reason).toMatch(/judged as CFU\/g, per this tenant's setting/);
+  });
+
+  it('works in the other direction — a CFU/g result against a CFU/mL limit', () => {
+    const cmp = compareToLimit(
+      parseMeasuredValue('5 CFU/g'),
+      lim({ operator: '<=', max: 10, unit: 'CFU/mL' }),
+      EQUATE
+    );
+    expect(cmp.verdict).toBe('in_spec');
+    expect(cmp.unit_equivalence_applied).toBe(true);
+  });
+
+  it('carries the per-basis scaling across the bridge', () => {
+    // 500 CFU/100mL is 5 per mL, which is 5 per g once the bases are equated.
+    const cmp = compareToLimit(parseMeasuredValue('500 CFU/100mL'), cfuGramLimit(10), EQUATE);
+    expect(cmp.verdict).toBe('in_spec');
+    expect(cmp.value_num).toBeCloseTo(5);
+  });
+
+  it('applies to MPN as well, within MPN', () => {
+    const cmp = compareToLimit(
+      parseMeasuredValue('3 MPN/mL'),
+      lim({ operator: '<=', max: 10, unit: 'MPN/g' }),
+      EQUATE
+    );
+    expect(cmp.verdict).toBe('in_spec');
+    expect(cmp.unit_equivalence_applied).toBe(true);
+  });
+
+  it('leaves an ordinary same-unit comparison completely unmarked', () => {
+    // Turning the setting on must not add noise to results that never needed it.
+    const cmp = compareToLimit(parseMeasuredValue('5 CFU/g'), cfuGramLimit(10), EQUATE);
+    expect(cmp.verdict).toBe('in_spec');
+    expect(cmp.reason).toBe('5 is within the 10 limit');
+    expect(cmp.unit_equivalence_applied).toBeUndefined();
+  });
+
+  it('leaves a unitless result unmarked — it was never a mismatch', () => {
+    const cmp = compareToLimit(parseMeasuredValue('5'), cfuGramLimit(10), EQUATE);
+    expect(cmp.verdict).toBe('in_spec');
+    expect(cmp.unit_equivalence_applied).toBeUndefined();
+  });
+});
+
+describe('unit equivalence is NOT "ignore units"', () => {
+  it('still refuses a percent against a CFU/g limit, setting on or off', () => {
+    // THE line this feature must not cross. A prod COA had a micro
+    // specification misfiled onto its FAT row, and 24.26% was compared against
+    // a ≤10 CFU/g limit and reported OUT OF SPEC. A percent and a count are
+    // incomparable; loosening units for fluid dairy must not resurrect that.
+    for (const policy of [{}, EQUATE]) {
+      const cmp = compareToLimit(parseMeasuredValue('24.26%'), cfuGramLimit(10), policy);
+      expect(cmp.verdict).toBe('not_checked');
+      expect(cmp.reason).toMatch(/not comparable/);
+      expect(cmp.unit_equivalence_applied).toBeUndefined();
+    }
+    expect(unitFactor(normalizeUnit('%'), normalizeUnit('CFU/g'), EQUATE)).toBeNull();
+    expect(unitFactor(normalizeUnit('CFU/g'), normalizeUnit('%'), EQUATE)).toBeNull();
+  });
+
+  it('still refuses MPN against CFU — a different method, not a different basis', () => {
+    expect(unitFactor(normalizeUnit('MPN/g'), normalizeUnit('CFU/g'), EQUATE)).toBeNull();
+    expect(unitFactor(normalizeUnit('MPN/mL'), normalizeUnit('CFU/g'), EQUATE)).toBeNull();
+    const cmp = compareToLimit(parseMeasuredValue('3 MPN/mL'), cfuGramLimit(10), EQUATE);
+    expect(cmp.verdict).toBe('not_checked');
+  });
+
+  it('still refuses pH and temperature against a count', () => {
+    expect(unitFactor(normalizeUnit('pH'), normalizeUnit('CFU/g'), EQUATE)).toBeNull();
+    expect(unitFactor(normalizeUnit('C'), normalizeUnit('CFU/g'), EQUATE)).toBeNull();
+  });
+});
+
+describe('unit equivalence through the checkers', () => {
+  const tests = [{ id: 'st_coliform', name: 'Coliform', aliases: ['Total Coliform'] }];
+  const configured = {
+    id: 'l1',
+    spec_test_id: 'st_coliform',
+    operator: '<=' as const,
+    value_min: null,
+    value_max: 20000,
+    unit: 'CFU/g',
+    severity: 'alert' as const,
+    active: true,
+    supplier_id: null,
+    document_type_id: null,
+    product_id: null,
+  };
+  const src = (rows: string[][]) => [
+    {
+      scope: 'record[0]',
+      tables: [{ name: 'micro', headers: ['test', 'specification', 'result', 'units'], rows }],
+    },
+  ];
+  const fluid = src([['Coliform', '', '120', 'CFU/mL']]);
+
+  it('is refused by default — the tenant that has said nothing', () => {
+    const { verdicts } = checkConfiguredLimits(fluid, tests, [configured], {});
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0].verdict).toBe('not_checked');
+    expect(verdicts[0].message).toMatch(/could not be judged against our limit/);
+  });
+
+  it('passes with the setting on, and the reviewer sentence says why', () => {
+    const { verdicts } = checkConfiguredLimits(fluid, tests, [configured], {}, {
+      includePasses: true,
+      unitPolicy: EQUATE,
+    });
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0]).toMatchObject({ verdict: 'in_spec', unit_equivalence_applied: true });
+    expect(verdicts[0].message).toBe(
+      "Coliform is 120, within our limit of ≤20000 CFU/g (CFU/mL judged as CFU/g, per this tenant's setting)."
+    );
+    expect(verdicts[0].reason).toMatch(/judged as CFU\/g, per this tenant's setting/);
+  });
+
+  it('says it on a failure the setting made reachable', () => {
+    const { verdicts } = checkConfiguredLimits(
+      src([['Coliform', '', '40000', 'CFU/mL']]),
+      tests,
+      [configured],
+      {},
+      { unitPolicy: EQUATE }
+    );
+    expect(verdicts[0].verdict).toBe('out_of_spec');
+    expect(verdicts[0].unit_equivalence_applied).toBe(true);
+    expect(verdicts[0].message).toMatch(/outside our limit of ≤20000 CFU\/g \(CFU\/mL judged as CFU\/g/);
+  });
+
+  it('says it exactly once on a refusal — the message must not repeat the note', () => {
+    const { verdicts } = checkConfiguredLimits(
+      src([['Coliform', '', '<50000', 'CFU/mL']]),
+      tests,
+      [configured],
+      {},
+      { unitPolicy: EQUATE }
+    );
+    expect(verdicts[0].verdict).toBe('not_checked');
+    expect(verdicts[0].message.match(/per this tenant's setting/g)).toHaveLength(1);
+  });
+
+  it('reaches the COA\'s OWN printed spec too', () => {
+    // The tenant's statement is about its products, not about whose limit is
+    // being read, so a printed CFU/g spec beside a CFU/mL result is judged on
+    // the same footing.
+    const printedSrc = src([['Coliform', '≤10 CFU/g', '4000', 'CFU/mL']]);
+    expect(checkPrintedSpecs(printedSrc)[0]).toMatchObject({ verdict: 'not_checked' });
+
+    const on = checkPrintedSpecs(printedSrc, { unitPolicy: EQUATE })[0];
+    expect(on).toMatchObject({ verdict: 'out_of_spec', unit_equivalence_applied: true });
+    expect(on.message).toMatch(/per this tenant's setting/);
+  });
+
+  it('leaves a percent row refused even with the setting on', () => {
+    // The prod shape verbatim: a micro specification misfiled onto a FAT row,
+    // so 24.26% arrives against a ≤10 CFU/g limit. Compared, it reads OUT OF
+    // SPEC and is a fabricated alert; refused, it is the honest answer. Turning
+    // on fluid-dairy unit equivalence must not change that by one character.
+    const tight = { ...configured, id: 'l-tight', value_max: 10 };
+    const off = checkConfiguredLimits(src([['Coliform', '', '24.26%', '']]), tests, [tight], {});
+    const on = checkConfiguredLimits(src([['Coliform', '', '24.26%', '']]), tests, [tight], {}, {
+      unitPolicy: EQUATE,
+    });
+    for (const { verdicts } of [off, on]) {
+      expect(verdicts).toHaveLength(1);
+      expect(verdicts[0].verdict).toBe('not_checked');
+      expect(verdicts[0].unit_equivalence_applied).toBeUndefined();
+      expect(verdicts[0].reason).toMatch(/not comparable/);
+    }
   });
 });

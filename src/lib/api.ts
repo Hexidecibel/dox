@@ -2022,6 +2022,36 @@ export const api = {
   },
 
   /**
+   * Per-tenant unit equivalence for spec checking (migration 0093).
+   *
+   * `volume_mass_equivalent` lets CFU/mL be judged against a CFU/g limit (and
+   * MPN/mL against MPN/g) as the same number. OFF by default; it is a QA
+   * judgement about the tenant's product range, not a technical toggle, and
+   * every verdict it makes reachable says so in its own reason text.
+   */
+  specUnitPolicy: {
+    get: (params?: { tenant_id?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.tenant_id) qs.set('tenant_id', params.tenant_id);
+      const suffix = qs.toString() ? `?${qs.toString()}` : '';
+      return fetchApi<{
+        volume_mass_equivalent: boolean;
+        updated_at: string | null;
+        updated_by: string | null;
+      }>(`/spec-unit-policy${suffix}`);
+    },
+    put: (body: { volume_mass_equivalent: boolean; tenant_id?: string }) =>
+      fetchApi<{
+        volume_mass_equivalent: boolean;
+        updated_at: string | null;
+        updated_by: string | null;
+      }>('/spec-unit-policy', {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }),
+  },
+
+  /**
    * Per-tenant extraction context. The org-wide prompt layer prepended to every
    * extraction for this tenant (the editable "industry/domain" slot). NULL on
    * the server means fall back to the built-in dairy default; the GET returns

@@ -20,13 +20,14 @@
  * SAME CONTRACT AS THE INVARIANTS: never throws, never blocks, advisory only.
  */
 
-import { checkPrintedSpecs, checkConfiguredLimits } from '../../shared/specCheck';
+import { checkPrintedSpecs, checkConfiguredLimits, STRICT_UNIT_POLICY } from '../../shared/specCheck';
 import type {
   SpecSource,
   SpecVerdict,
   SpecTestDef,
   ConfiguredLimit,
   LimitContext,
+  UnitPolicy,
 } from '../../shared/specCheck';
 
 /**
@@ -123,9 +124,43 @@ export function withSpecResults<T extends SpecWarnableRow>(
 export interface SpecConfig {
   tests: SpecTestDef[];
   limits: ConfiguredLimit[];
+  /**
+   * The tenant's unit-equivalence setting (migration 0093). Loaded here so the
+   * engine never has to reach for it, and carried explicitly into every call —
+   * a setting that changed verdicts from somewhere the caller could not see is
+   * precisely what this feature must not be.
+   */
+  unitPolicy: UnitPolicy;
 }
 
-export const EMPTY_SPEC_CONFIG: SpecConfig = { tests: [], limits: [] };
+export const EMPTY_SPEC_CONFIG: SpecConfig = {
+  tests: [],
+  limits: [],
+  unitPolicy: STRICT_UNIT_POLICY,
+};
+
+/**
+ * Read the tenant's unit policy. Its OWN try/catch, deliberately not folded
+ * into the `Promise.all` below: an environment that has not taken migration
+ * 0093 would otherwise fail the whole load and lose the limits too, silently
+ * turning spec checking off. A missing column costs the equivalence, nothing
+ * more — and the fallback is the strict, safe answer.
+ */
+async function loadUnitPolicy(db: D1Database, tenantId: string): Promise<UnitPolicy> {
+  try {
+    const row = await db
+      .prepare('SELECT spec_volume_mass_equivalent FROM tenants WHERE id = ?')
+      .bind(tenantId)
+      .first<{ spec_volume_mass_equivalent: number | null }>();
+    return { volume_mass_equivalent: Number(row?.spec_volume_mass_equivalent ?? 0) === 1 };
+  } catch (err) {
+    console.error(
+      '[spec-warnings] loading unit policy failed (falling back to strict):',
+      err instanceof Error ? err.message : String(err)
+    );
+    return STRICT_UNIT_POLICY;
+  }
+}
 
 /**
  * Load a tenant's analytes and limits. One query each — the queue list endpoint
@@ -137,6 +172,7 @@ export const EMPTY_SPEC_CONFIG: SpecConfig = { tests: [], limits: [] };
  * shows no spec warnings.
  */
 export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<SpecConfig> {
+  const unitPolicy = await loadUnitPolicy(db, tenantId);
   try {
     const [testRows, limitRows] = await Promise.all([
       db
@@ -189,7 +225,7 @@ export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<
       };
     });
 
-    return { tests, limits };
+    return { tests, limits, unitPolicy };
   } catch (err) {
     console.error(
       '[spec-warnings] loading spec config failed:',
@@ -239,8 +275,12 @@ export function specResultsWithConfig(
 ): { results: SpecVerdict[]; summary: SpecSummary } {
   try {
     const sources = specSourcesFor(row);
-    const printed = checkPrintedSpecs(sources);
-    const configured = checkConfiguredLimits(sources, config.tests, config.limits, ctx, opts);
+    const unitPolicy = config.unitPolicy ?? STRICT_UNIT_POLICY;
+    const printed = checkPrintedSpecs(sources, { unitPolicy });
+    const configured = checkConfiguredLimits(sources, config.tests, config.limits, ctx, {
+      ...opts,
+      unitPolicy,
+    });
     const results = [...printed, ...configured.verdicts];
     return {
       results,

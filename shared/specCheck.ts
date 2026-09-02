@@ -27,6 +27,12 @@
  * catches this. So every row we had a limit for but could not honestly compare
  * comes back `not_checked` with a reason, never a silent pass.
  *
+ * ONE SETTING CAN CHANGE A VERDICT, and it announces itself. `UnitPolicy` lets a
+ * tenant declare that CFU/mL and CFU/g are the same number for its products (a
+ * fluid-dairy QA judgement, off by default). Any verdict it made reachable says
+ * so in its reason, its message and a flag — never a bare "in spec". See the
+ * type's own comment for the full argument and the lines it does NOT cross.
+ *
  * WARN, NEVER BLOCK — same contract as the invariant checks. Nothing in this
  * file can refuse an approval.
  *
@@ -131,6 +137,13 @@ export interface SpecVerdict {
   limit_id?: string | null;
   /** Normalized numeric value, when one could be derived. For the register. */
   value_num?: number | null;
+  /**
+   * True when this verdict was only reachable because the tenant equates
+   * volume and mass bases (`UnitPolicy.volume_mass_equivalent`). `reason` and
+   * `message` both say so in words; this is the flag the register freezes and
+   * the UI can badge. Absent means the units lined up on their own.
+   */
+  unit_equivalence_applied?: boolean;
 }
 
 /** Stable identity for a verdict, so UI state survives refetch. */
@@ -236,21 +249,109 @@ export function normalizeUnit(raw: unknown): UnitInfo {
 }
 
 /**
+ * PER-TENANT UNIT POLICY — the one place a configured setting is allowed to
+ * change a verdict, and it is deliberately narrow.
+ *
+ * `volume_mass_equivalent` lets `CFU/mL` be judged against a `CFU/g` limit (and
+ * `MPN/mL` against `MPN/g`) at 1:1. OFF BY DEFAULT, and it must stay that way:
+ * for a powder, per-gram and per-millilitre are genuinely different quantities
+ * and refusing to compare them is the correct answer.
+ *
+ * WHY IT EXISTS. A fluid-dairy tenant's COAs print `cfu/mL` on the majority of
+ * results while every limit on file is written in `CFU/g` — on production, 370
+ * results against 265, so the majority unit matched no limit and came back
+ * `not_checked`. The QA lead who wrote those limits states them as
+ * "≤ 10 CFU/g (CFU/mL for fluid)": for milk and cream the density difference is
+ * about 3%, immaterial against a 20,000 CFU ceiling. He considers them the same
+ * number. That is a QA judgement about a product range, so it is a setting a
+ * person makes, not an assumption code makes for them.
+ *
+ * WHAT IT IS NOT. It is not "ignore units". A percent against a CFU/g limit
+ * stays `not_checked` — that is a real misalignment and it has already caught a
+ * genuine extraction bug (a micro specification misfiled onto a FAT row). CFU
+ * against MPN stays refused too: different enumeration methods, not a basis
+ * difference. Only volume-vs-mass WITHIN one method is in scope.
+ *
+ * AND IT IS NEVER SILENT. Every verdict this setting made reachable says so in
+ * its own reason text and carries `unit_equivalence_applied`, because an
+ * equivalence that hides in a config table and produces a bare "in spec" is
+ * exactly the false confidence the three-state design exists to prevent.
+ */
+export interface UnitPolicy {
+  /** Judge `cfu:volume` against `cfu:mass` (and `mpn:*` likewise) at 1:1. */
+  volume_mass_equivalent?: boolean;
+}
+
+/** Today's behaviour: nothing equated. The default everywhere. */
+export const STRICT_UNIT_POLICY: UnitPolicy = {};
+
+/** The outcome of lining two units up. */
+export interface UnitMatch {
+  /** Multiplier that puts a magnitude in `from` onto `to`'s footing. */
+  factor: number;
+  /**
+   * True ONLY when the units are of genuinely different bases and the tenant's
+   * `volume_mass_equivalent` setting is the sole reason they compared. A verdict
+   * carrying this must say so in its reason.
+   */
+  equated: boolean;
+}
+
+/**
  * Are these two units comparable, and if so what factor converts a magnitude in
  * `from` to the same footing as `to`? `null` means "do not compare".
  *
  * An unknown unit on either side is treated as agreement — see `normalizeUnit`.
  */
-export function unitFactor(from: UnitInfo, to: UnitInfo): number | null {
-  if (from.family === 'unknown' || to.family === 'unknown') return 1;
-  if (from.family === to.family) return to.perBasis / from.perBasis;
+export function resolveUnits(
+  from: UnitInfo,
+  to: UnitInfo,
+  policy: UnitPolicy = STRICT_UNIT_POLICY
+): UnitMatch | null {
+  if (from.family === 'unknown' || to.family === 'unknown') return { factor: 1, equated: false };
+  if (from.family === to.family) return { factor: to.perBasis / from.perBasis, equated: false };
+
   // An unspecified basis still tells us the method; allow it against either basis.
-  const fMethod = from.family.split(':')[0];
-  const tMethod = to.family.split(':')[0];
-  const fUnspec = from.family.endsWith(':unspecified');
-  const tUnspec = to.family.endsWith(':unspecified');
-  if (fMethod === tMethod && (fUnspec || tUnspec)) return to.perBasis / from.perBasis;
+  const [fMethod, fBasis] = from.family.split(':');
+  const [tMethod, tBasis] = to.family.split(':');
+  if (fMethod !== tMethod) return null;
+  if (fBasis === 'unspecified' || tBasis === 'unspecified') {
+    return { factor: to.perBasis / from.perBasis, equated: false };
+  }
+
+  // The ONE case the tenant setting reaches. Note the method has already had to
+  // match, so CFU-against-MPN and percent-against-CFU never arrive here.
+  const volumeVsMass =
+    (fBasis === 'volume' && tBasis === 'mass') || (fBasis === 'mass' && tBasis === 'volume');
+  if (volumeVsMass && policy.volume_mass_equivalent) {
+    return { factor: to.perBasis / from.perBasis, equated: true };
+  }
   return null;
+}
+
+/**
+ * The factor alone, for callers that do not care how it was reached. Anything
+ * that renders a reason to a human should use `resolveUnits` instead, so an
+ * equated comparison can name itself.
+ */
+export function unitFactor(
+  from: UnitInfo,
+  to: UnitInfo,
+  policy: UnitPolicy = STRICT_UNIT_POLICY
+): number | null {
+  const m = resolveUnits(from, to, policy);
+  return m ? m.factor : null;
+}
+
+/**
+ * How an equated comparison explains itself. One phrasing, used by the reason
+ * text and by the reviewer-facing message, so the register and the queue read
+ * the same.
+ */
+export function unitEquivalenceNote(value: UnitInfo, limit: UnitInfo): string {
+  const v = value.canonical || 'the printed unit';
+  const l = limit.canonical || 'the limit unit';
+  return `${v} judged as ${l}, per this tenant's setting`;
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +461,11 @@ const EMPTY_TOKENS = new Set([
 function isEmptyCell(raw: unknown): boolean {
   const s = String(raw ?? '').trim();
   if (!s) return true;
+  // A bare "%" normalises to the empty string, so without this it read as an
+  // EMPTY token and `applyRowUnit` dropped it — leaving a fat percentage to be
+  // judged as unitless against a CFU/g limit, which is the exact false alert
+  // the percent family exists to refuse. "%" is a unit, not an absent value.
+  if (s.includes('%')) return false;
   if (/^[-–—.·*]+$/.test(s)) return true;
   return EMPTY_TOKENS.has(norm(s)) && !/\d/.test(s);
 }
@@ -592,6 +698,12 @@ export interface Comparison {
   reason: string;
   /** Value converted onto the limit's footing, when that was possible. */
   value_num: number | null;
+  /**
+   * Set when this verdict was only reachable because the tenant equates
+   * volume and mass bases (see `UnitPolicy`). `reason` already names it; this
+   * is the machine-readable copy, for the register and the UI.
+   */
+  unit_equivalence_applied?: boolean;
 }
 
 /**
@@ -604,9 +716,17 @@ export interface Comparison {
  *                           this a pass is the false negative that discredits the
  *                           whole feature, and calling it a fail is a lie.
  *  - `TNTC` against any ceiling → out of spec. Uncountable exceeds any count.
- *  - CFU/mL against CFU/g → NOT CHECKED. Different basis, not convertible.
+ *  - CFU/mL against CFU/g → NOT CHECKED. Different basis, not convertible —
+ *                           UNLESS this tenant has said the two are the same
+ *                           number for its products, in which case they are
+ *                           compared and every reason produced says so out
+ *                           loud. See `UnitPolicy`.
  */
-export function compareToLimit(value: MeasuredValue, limit: SpecLimit): Comparison {
+export function compareToLimit(
+  value: MeasuredValue,
+  limit: SpecLimit,
+  policy: UnitPolicy = STRICT_UNIT_POLICY
+): Comparison {
   if (value.kind === 'unparseable') {
     return { verdict: 'not_checked', reason: `result "${value.raw}" could not be read as a value`, value_num: null };
   }
@@ -663,15 +783,30 @@ export function compareToLimit(value: MeasuredValue, limit: SpecLimit): Comparis
   // Numeric and censored values need a unit that lines up.
   const vu = normalizeUnit(value.unit);
   const lu = normalizeUnit(limit.unit);
-  const factor = unitFactor(vu, lu);
-  if (factor === null) {
+  const match = resolveUnits(vu, lu, policy);
+  if (match === null) {
     return {
       verdict: 'not_checked',
       reason: `result is in ${vu.canonical || 'an unknown unit'} but the limit is in ${lu.canonical || 'another unit'} — not comparable`,
       value_num: null,
     };
   }
-  const v = (value.value as number) * factor;
+  const v = (value.value as number) * match.factor;
+
+  /**
+   * Every verdict below passes through here. When the tenant's unit-equivalence
+   * setting is the only reason a comparison happened at all, the reason text
+   * has to carry that — a bare "120 is within the 20000 limit" would be the
+   * silent pass this module is built to refuse.
+   */
+  const say = (c: Comparison): Comparison =>
+    match.equated
+      ? {
+          ...c,
+          reason: `${c.reason} (${unitEquivalenceNote(vu, lu)})`,
+          unit_equivalence_applied: true,
+        }
+      : c;
 
   const exceedsCeiling = (bound: number, inclusive: boolean) => (inclusive ? v > bound : v >= bound);
   const belowFloor = (bound: number, inclusive: boolean) => (inclusive ? v < bound : v <= bound);
@@ -686,61 +821,77 @@ export function compareToLimit(value: MeasuredValue, limit: SpecLimit): Comparis
         // for both `<` and `<=`: a value strictly under 10 satisfies "<10" and
         // "≤10" alike, so the bound is inclusive either way.
         if (v <= bound) {
-          return { verdict: 'in_spec', reason: `reported below ${value.value}, which clears the limit`, value_num: v };
+          return say({ verdict: 'in_spec', reason: `reported below ${value.value}, which clears the limit`, value_num: v });
         }
-        return {
+        return say({
           verdict: 'not_checked',
           reason: `reported as <${value.value}, which straddles the ${bound} limit — the true value could fall either side`,
           value_num: v,
-        };
+        });
       }
       if (value.kind === 'censored_gt') {
-        return exceedsCeiling(bound, inclusive)
-          ? { verdict: 'out_of_spec', reason: `reported above ${value.value}, past the ${bound} limit`, value_num: v }
-          : { verdict: 'not_checked', reason: `reported as >${value.value}, which straddles the ${bound} limit`, value_num: v };
+        return say(
+          exceedsCeiling(bound, inclusive)
+            ? { verdict: 'out_of_spec', reason: `reported above ${value.value}, past the ${bound} limit`, value_num: v }
+            : { verdict: 'not_checked', reason: `reported as >${value.value}, which straddles the ${bound} limit`, value_num: v }
+        );
       }
-      return exceedsCeiling(bound, inclusive)
-        ? { verdict: 'out_of_spec', reason: `${v} exceeds the ${bound} limit`, value_num: v }
-        : { verdict: 'in_spec', reason: `${v} is within the ${bound} limit`, value_num: v };
+      return say(
+        exceedsCeiling(bound, inclusive)
+          ? { verdict: 'out_of_spec', reason: `${v} exceeds the ${bound} limit`, value_num: v }
+          : { verdict: 'in_spec', reason: `${v} is within the ${bound} limit`, value_num: v }
+      );
     }
     case '>':
     case '>=': {
       const bound = limit.min as number;
       const inclusive = limit.operator === '>=';
       if (value.kind === 'censored_gt') {
-        return v >= bound
-          ? { verdict: 'in_spec', reason: `reported above ${value.value}, which clears the minimum`, value_num: v }
-          : { verdict: 'not_checked', reason: `reported as >${value.value}, which straddles the ${bound} minimum`, value_num: v };
+        return say(
+          v >= bound
+            ? { verdict: 'in_spec', reason: `reported above ${value.value}, which clears the minimum`, value_num: v }
+            : { verdict: 'not_checked', reason: `reported as >${value.value}, which straddles the ${bound} minimum`, value_num: v }
+        );
       }
       if (value.kind === 'censored_lt') {
-        return belowFloor(bound, inclusive)
-          ? { verdict: 'out_of_spec', reason: `reported below ${value.value}, under the ${bound} minimum`, value_num: v }
-          : { verdict: 'not_checked', reason: `reported as <${value.value}, which straddles the ${bound} minimum`, value_num: v };
+        return say(
+          belowFloor(bound, inclusive)
+            ? { verdict: 'out_of_spec', reason: `reported below ${value.value}, under the ${bound} minimum`, value_num: v }
+            : { verdict: 'not_checked', reason: `reported as <${value.value}, which straddles the ${bound} minimum`, value_num: v }
+        );
       }
-      return belowFloor(bound, inclusive)
-        ? { verdict: 'out_of_spec', reason: `${v} is below the ${bound} minimum`, value_num: v }
-        : { verdict: 'in_spec', reason: `${v} meets the ${bound} minimum`, value_num: v };
+      return say(
+        belowFloor(bound, inclusive)
+          ? { verdict: 'out_of_spec', reason: `${v} is below the ${bound} minimum`, value_num: v }
+          : { verdict: 'in_spec', reason: `${v} meets the ${bound} minimum`, value_num: v }
+      );
     }
     case 'between': {
       const lo = limit.min as number;
       const hi = limit.max as number;
       if (value.kind !== 'numeric') {
-        return { verdict: 'not_checked', reason: `a censored result cannot be placed inside the ${lo}–${hi} range`, value_num: v };
+        return say({ verdict: 'not_checked', reason: `a censored result cannot be placed inside the ${lo}–${hi} range`, value_num: v });
       }
-      return v < lo || v > hi
-        ? { verdict: 'out_of_spec', reason: `${v} falls outside the ${lo}–${hi} range`, value_num: v }
-        : { verdict: 'in_spec', reason: `${v} is inside the ${lo}–${hi} range`, value_num: v };
+      return say(
+        v < lo || v > hi
+          ? { verdict: 'out_of_spec', reason: `${v} falls outside the ${lo}–${hi} range`, value_num: v }
+          : { verdict: 'in_spec', reason: `${v} is inside the ${lo}–${hi} range`, value_num: v }
+      );
     }
     case '==': {
       const target = limit.min as number;
       if (value.kind !== 'numeric') {
-        return { verdict: 'not_checked', reason: 'a censored result cannot be matched to an exact target', value_num: v };
+        return say({ verdict: 'not_checked', reason: 'a censored result cannot be matched to an exact target', value_num: v });
       }
-      return v === target
-        ? { verdict: 'in_spec', reason: `${v} matches the target`, value_num: v }
-        : { verdict: 'out_of_spec', reason: `${v} does not match the ${target} target`, value_num: v };
+      return say(
+        v === target
+          ? { verdict: 'in_spec', reason: `${v} matches the target`, value_num: v }
+          : { verdict: 'out_of_spec', reason: `${v} does not match the ${target} target`, value_num: v }
+      );
     }
     default:
+      // No comparison was made, so nothing was equated — an unsupported
+      // operator is refused on its own terms, not because of a unit.
       return { verdict: 'not_checked', reason: 'unsupported limit operator', value_num: v };
   }
 }
@@ -865,7 +1016,12 @@ interface PrintedRow {
  * "N/A" or "Report" produces nothing at all — the supplier stated no limit, so
  * there is nothing for a reviewer to act on.
  */
-function judgePrinted(scope: string, target: SpecTarget, row: PrintedRow): SpecVerdict | null {
+function judgePrinted(
+  scope: string,
+  target: SpecTarget,
+  row: PrintedRow,
+  policy: UnitPolicy = STRICT_UNIT_POLICY
+): SpecVerdict | null {
   const { testName, resultRaw, specRaw, verdictRaw, unitRaw } = row;
   if (!testName) return null;
 
@@ -892,7 +1048,7 @@ function judgePrinted(scope: string, target: SpecTarget, row: PrintedRow): SpecV
   const value = parseMeasuredValue(applyRowUnit(resultRaw, unitRaw));
   const restated = resultRestatesSpec(resultRaw, specRaw, unitRaw);
   const comparable = !!limit && !resultIsVerdict && !restated && !isBlankResult(resultRaw);
-  const cmp = comparable ? compareToLimit(value, withUnit(limit as SpecLimit, unitRaw)) : null;
+  const cmp = comparable ? compareToLimit(value, withUnit(limit as SpecLimit, unitRaw), policy) : null;
 
   if (printedFail) {
     return {
@@ -922,16 +1078,23 @@ function judgePrinted(scope: string, target: SpecTarget, row: PrintedRow): SpecV
 
   if (!cmp) return null;
   const limitText = formatLimit(limit as SpecLimit);
+  // A `not_checked` message already ends with `cmp.reason`, which carries the
+  // note; appending it again would say it twice.
+  const equatedSuffix = cmp.unit_equivalence_applied
+    ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(withUnit(limit as SpecLimit, unitRaw).unit))})`
+    : '';
+  const equated = cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {};
 
   if (cmp.verdict === 'out_of_spec') {
     return {
       ...base,
+      ...equated,
       verdict: 'out_of_spec',
       limit_text: limitText,
       reason: cmp.reason,
       message: printedPass
-        ? `${testName} is ${resultRaw} against the COA's own printed limit of ${limitText}, but the row is marked "${verdictCell}" — the document contradicts itself.`
-        : `${testName} is ${resultRaw}, outside the COA's own printed limit of ${limitText}.`,
+        ? `${testName} is ${resultRaw} against the COA's own printed limit of ${limitText}${equatedSuffix}, but the row is marked "${verdictCell}" — the document contradicts itself.`
+        : `${testName} is ${resultRaw}, outside the COA's own printed limit of ${limitText}${equatedSuffix}.`,
       value_num: cmp.value_num,
     };
   }
@@ -939,6 +1102,7 @@ function judgePrinted(scope: string, target: SpecTarget, row: PrintedRow): SpecV
   if (cmp.verdict === 'not_checked') {
     return {
       ...base,
+      ...equated,
       verdict: 'not_checked',
       limit_text: limitText,
       reason: cmp.reason,
@@ -957,8 +1121,18 @@ function judgePrinted(scope: string, target: SpecTarget, row: PrintedRow): SpecV
  *
  * Covers both shapes COAs arrive in: free-form `tables`, and the records
  * assembler's structured `groups`.
+ *
+ * `unitPolicy` is the tenant's own statement about which units are the same
+ * quantity for its products. It applies here as well as to our configured
+ * limits: it is a claim about the PRODUCT range, not about whose limit is being
+ * read, so a COA printing its spec in CFU/g beside a CFU/mL result is judged on
+ * exactly the same footing.
  */
-export function checkPrintedSpecs(sources: SpecSource[]): SpecVerdict[] {
+export function checkPrintedSpecs(
+  sources: SpecSource[],
+  opts: { unitPolicy?: UnitPolicy } = {}
+): SpecVerdict[] {
+  const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
   const out: SpecVerdict[] = [];
   for (const src of sources) {
     (src.tables ?? []).forEach((table, ti) => {
@@ -976,7 +1150,8 @@ export function checkPrintedSpecs(sources: SpecSource[]): SpecVerdict[] {
             specRaw: cell(shape.spec),
             verdictRaw: cell(shape.verdict),
             unitRaw: cell(shape.unit),
-          }
+          },
+          policy
         );
         if (v) out.push(v);
       });
@@ -996,7 +1171,8 @@ export function checkPrintedSpecs(sources: SpecSource[]): SpecVerdict[] {
             specRaw: String(cell.spec ?? '').trim(),
             verdictRaw: '',
             unitRaw: String(cell.unit ?? '').trim(),
-          }
+          },
+          policy
         );
         if (v) out.push(v);
       }
@@ -1353,14 +1529,20 @@ export function isControlRowLabel(label: unknown): boolean {
  * queue does not want them (silence is the signal that a row is fine); the
  * approve-time register does, because "we checked this and it passed" is
  * precisely the record a QA buyer is paying for.
+ *
+ * `unitPolicy` is the tenant's unit-equivalence setting, passed in explicitly
+ * rather than read from anywhere: this module holds no state, and a policy that
+ * could be set once and then apply invisibly is the shape of exactly the bug
+ * this feature must not become. Default is today's strict behaviour.
  */
 export function checkConfiguredLimits(
   sources: SpecSource[],
   tests: SpecTestDef[],
   limits: ConfiguredLimit[],
   ctx: LimitContext,
-  opts: { includePasses?: boolean } = {}
+  opts: { includePasses?: boolean; unitPolicy?: UnitPolicy } = {}
 ): ConfiguredCheckResult {
+  const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
   const resolved = resolveSpecLimits(limits, ctx);
   const verdicts: SpecVerdict[] = [];
   const unmatched = new Set<string>();
@@ -1415,11 +1597,20 @@ export function checkConfiguredLimits(
       return;
     }
 
+    const effectiveLimit = withUnit(limit, unitRaw);
     const value = parseMeasuredValue(applyRowUnit(valueRaw, unitRaw));
-    const cmp = compareToLimit(value, withUnit(limit, unitRaw));
+    const cmp = compareToLimit(value, effectiveLimit, policy);
     if (cmp.verdict === 'in_spec' && !opts.includePasses) return;
 
     const limitText = formatLimit(limit);
+    // An equated comparison names itself in the reviewer-facing sentence too,
+    // not only in `reason`. A pass that reads "120, within our limit of ≤20000
+    // CFU/g" while the COA printed CFU/mL would be the quiet answer this
+    // module refuses to give. `not_checked` already ends with `cmp.reason`,
+    // which carries the note, so it is not repeated there.
+    const equatedSuffix = cmp.unit_equivalence_applied
+      ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(effectiveLimit.unit))})`
+      : '';
     const base = {
       scope,
       target,
@@ -1432,13 +1623,14 @@ export function checkConfiguredLimits(
       limit_id: configured.id,
       value_num: cmp.value_num,
       reason: cmp.reason,
+      ...(cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {}),
     };
 
     if (cmp.verdict === 'out_of_spec') {
       verdicts.push({
         ...base,
         verdict: 'out_of_spec',
-        message: `${test.name} is ${valueRaw}, outside our limit of ${limitText}.`,
+        message: `${test.name} is ${valueRaw}, outside our limit of ${limitText}${equatedSuffix}.`,
       });
     } else if (cmp.verdict === 'not_checked') {
       verdicts.push({
@@ -1450,7 +1642,7 @@ export function checkConfiguredLimits(
       verdicts.push({
         ...base,
         verdict: 'in_spec',
-        message: `${test.name} is ${valueRaw}, within our limit of ${limitText}.`,
+        message: `${test.name} is ${valueRaw}, within our limit of ${limitText}${equatedSuffix}.`,
       });
     }
   };
