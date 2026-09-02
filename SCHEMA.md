@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 122 tables, 2 views, 194 indexes, 36 triggers.
+Objects: 125 tables, 2 views, 200 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -1520,10 +1520,30 @@ Indexes: `idx_renewal_alert_state_doc`
   created_by TEXT
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   updated_by TEXT
+  attention_reason TEXT
   CHECK ( (line_kind = 'requirement' AND requirement_id IS NOT NULL) OR (line_kind = 'free_text' AND requirement_id IS NULL) )
 ```
 
 Indexes: `idx_request_lines_request`, `idx_request_lines_requirement`, `idx_request_lines_requirement_unique`, `idx_request_lines_status`
+
+### `request_links`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  token TEXT NOT NULL UNIQUE
+  root_request_id TEXT NOT NULL
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  expires_at TEXT NOT NULL
+  revoked_at TEXT
+  created_by TEXT REFERENCES users(id)
+  view_count INTEGER NOT NULL DEFAULT 0
+  last_viewed_at TEXT
+  last_upload_at TEXT
+```
+
+Indexes: `idx_request_links_root`, `idx_request_links_tenant`
 
 ### `request_routing`
 
@@ -1583,6 +1603,41 @@ Indexes: `idx_request_template_lines_requirement_unique`, `idx_request_template_
 ```
 
 Indexes: `idx_request_templates_tenant`
+
+### `request_upload_lines`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  upload_id TEXT NOT NULL REFERENCES request_uploads(id) ON DELETE CASCADE
+  line_id TEXT NOT NULL REFERENCES request_lines(id) ON DELETE CASCADE
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  UNIQUE(upload_id, line_id)
+```
+
+Indexes: `idx_request_upload_lines_line`
+
+### `request_uploads`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  link_id TEXT NOT NULL REFERENCES request_links(id) ON DELETE CASCADE
+  request_id TEXT NOT NULL REFERENCES document_requests(id) ON DELETE CASCADE
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE
+  r2_key TEXT NOT NULL
+  file_name TEXT NOT NULL
+  file_size INTEGER NOT NULL
+  mime_type TEXT NOT NULL
+  checksum TEXT
+  uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
+  uploader_ip TEXT
+  uploader_label TEXT
+  document_id TEXT REFERENCES documents(id) ON DELETE SET NULL
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+```
+
+Indexes: `idx_request_uploads_link`, `idx_request_uploads_pending`, `idx_request_uploads_request`
 
 ### `requirements`
 

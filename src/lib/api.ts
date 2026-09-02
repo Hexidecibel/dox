@@ -89,6 +89,8 @@ import type {
   ExpirationNotifyResponse,
   OwnerRoute,
   OwnerRouteListResponse,
+  ApiSupplierRequirement,
+  SupplierRequirementTier,
   LotMatchListResponse,
   CoaRecordsPayload,
   CoaRecordDecision,
@@ -281,6 +283,32 @@ export interface ApproveStagedBody {
   extended_metadata?: Record<string, unknown>;
   items?: ApproveStagedItemEdit[];
 }
+
+// ---------------------------------------------------------------------------
+// The request composer (migration 0090). Kept as its own import statement so
+// the composer's shapes can be read as a set; everything else it needs is in
+// the block above.
+// ---------------------------------------------------------------------------
+import type {
+  AmendDocumentRequestRequest,
+  CreateDocumentRequestRequest,
+  CreateRequestTemplateRequest,
+  DocumentRequestListResponse,
+  DocumentRequestLineCounts,
+  DocumentRequestResponse,
+  DocumentRequestStatus,
+  InstantiateRequestTemplateRequest,
+  IssueDocumentRequestRequest,
+  ReissueDocumentRequestRequest,
+  RequestLineInput,
+  RequestLineRow,
+  RequestLineWithClosure,
+  RequestTemplateListResponse,
+  RequestTemplateResponse,
+  SupplierRequestView,
+  UpdateRequestLineRequest,
+} from '../../shared/types';
+import type { SupplierGapListResponse } from '../../shared/requirementGap';
 
 export const api = {
   auth: {
@@ -1262,6 +1290,92 @@ export const api = {
 
     /** DELETE /api/requirements/:id — soft-delete (active = 0) */
     delete: (id: string) => fetchApi<{ success: boolean }>(`/requirements/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * Applicability — WHICH checklist items apply to WHICH supplier
+   * (migration 0087). `requirements` is the vocabulary; this says who owes
+   * what. Without a row here a line item applies to nobody and can never be
+   * reported as a gap, which is why an unconfigured supplier must read as
+   * "nothing set up yet" and never as "nothing outstanding".
+   */
+  supplierRequirements: {
+    /**
+     * GET /api/supplier-requirements
+     * Returns: { supplierRequirements, total, limit, offset }
+     *
+     * The server caps `limit` at 500, so a tenant-wide read (no supplier_id)
+     * has to page. `listAll` below does that for you.
+     */
+    list: (params?: {
+      supplier_id?: string;
+      requirement_id?: string;
+      tier?: SupplierRequirementTier;
+      tenant_id?: string;
+      limit?: number;
+      offset?: number;
+    }) => {
+      const query = new URLSearchParams();
+      if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
+      if (params?.requirement_id) query.set('requirement_id', params.requirement_id);
+      if (params?.tier) query.set('tier', params.tier);
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      const qs = query.toString();
+      return fetchApi<{
+        supplierRequirements: ApiSupplierRequirement[];
+        total: number;
+        limit: number;
+        offset: number;
+      }>(`/supplier-requirements${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * Every applicability row in the tenant, paged out in full.
+     *
+     * The cross-supplier roster needs the WHOLE set to tell a supplier with no
+     * checklist from one it just has not loaded yet — a truncated read would
+     * report configured suppliers as unconfigured, which is the one wrong
+     * answer this surface must not give.
+     */
+    listAll: async (params?: { tenant_id?: string }): Promise<ApiSupplierRequirement[]> => {
+      const page = 500;
+      const rows: ApiSupplierRequirement[] = [];
+      for (let offset = 0; ; offset += page) {
+        const res = await api.supplierRequirements.list({ ...params, limit: page, offset });
+        rows.push(...res.supplierRequirements);
+        if (rows.length >= res.total || res.supplierRequirements.length === 0) break;
+      }
+      return rows;
+    },
+
+    /**
+     * POST /api/supplier-requirements — attach a requirement to a supplier.
+     * Idempotent: re-attaching an existing pair updates its tier in place.
+     */
+    attach: (data: {
+      supplier_id: string;
+      requirement_id: string;
+      tier?: SupplierRequirementTier;
+      notes?: string | null;
+      tenant_id?: string;
+    }) =>
+      fetchApi<{ supplierRequirement: ApiSupplierRequirement }>('/supplier-requirements', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /** PUT /api/supplier-requirements/:id — change tier or notes. */
+    update: (id: string, data: { tier?: SupplierRequirementTier; notes?: string | null }) =>
+      fetchApi<{ supplierRequirement: ApiSupplierRequirement }>(
+        `/supplier-requirements/${id}`,
+        { method: 'PUT', body: JSON.stringify(data) },
+      ),
+
+    /** DELETE /api/supplier-requirements/:id — detach. Hard delete, no tombstone. */
+    detach: (id: string) =>
+      fetchApi<{ success: boolean }>(`/supplier-requirements/${id}`, { method: 'DELETE' }),
   },
 
   /**
@@ -2524,5 +2638,251 @@ export const api = {
      */
     retract: (id: string) =>
       fetchApi<{ success: boolean }>(`/notes/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * The gap report — what a supplier owes and has not sent (migration 0087 +
+   * shared/requirementGap.ts).
+   *
+   * Read-only, and the composer's SEED: composing an ask for a supplier who
+   * already has open items should offer those rather than making a QA manager
+   * re-pick from the whole checklist. One request, server-computed; there is
+   * no client-side join here and there must not be one.
+   */
+  supplierGaps: {
+    /** GET /api/supplier-gaps — one supplier's, or the whole tenant's. */
+    list: (params?: {
+      supplier_id?: string;
+      tenant_id?: string;
+      include_recommended?: boolean;
+      status?: 'open' | 'satisfied' | 'not_configured';
+      limit?: number;
+      offset?: number;
+    }) => {
+      const query = new URLSearchParams();
+      if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.include_recommended) query.set('include_recommended', '1');
+      if (params?.status) query.set('status', params.status);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      const qs = query.toString();
+      return fetchApi<SupplierGapListResponse>(`/supplier-gaps${qs ? `?${qs}` : ''}`);
+    },
+  },
+
+  /**
+   * The request composer (migration 0090) — how a person ASKS a supplier for
+   * the documents the registry says are missing.
+   *
+   * The transitions are NOT interchangeable and this client does not let them
+   * look it:
+   *
+   *   update   edits a DRAFT in place. Refused after issue (409).
+   *   amend    supersedes an ISSUED version with a new one on the same root.
+   *            The original survives untouched; a reason is mandatory.
+   *   reissue  starts a NEW ask at version 1, keeping only provenance. This is
+   *            a renewal, not a correction, and it lands as a draft.
+   *
+   * `compose` always produces a draft, whatever the origin — issuing is one
+   * separate, deliberate act by a human.
+   */
+  documentRequests: {
+    /**
+     * GET /api/document-requests
+     *
+     * Superseded versions are excluded by default: a list that mixed a live
+     * version with the one it replaced would double-count what is outstanding.
+     */
+    list: (params?: {
+      supplier_id?: string;
+      status?: DocumentRequestStatus;
+      assigned_to?: string;
+      include_superseded?: boolean;
+      tenant_id?: string;
+      limit?: number;
+      offset?: number;
+    }) => {
+      const query = new URLSearchParams();
+      if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
+      if (params?.status) query.set('status', params.status);
+      if (params?.assigned_to) query.set('assigned_to', params.assigned_to);
+      if (params?.include_superseded) query.set('include_superseded', '1');
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      const qs = query.toString();
+      return fetchApi<DocumentRequestListResponse>(
+        `/document-requests${qs ? `?${qs}` : ''}`,
+      );
+    },
+
+    /** GET /api/document-requests/:id — request + lines + closure + routing + history. */
+    get: (id: string) => fetchApi<DocumentRequestResponse>(`/document-requests/${id}`),
+
+    /** POST /api/document-requests — compose a DRAFT. Never issues. */
+    compose: (data: CreateDocumentRequestRequest) =>
+      fetchApi<DocumentRequestResponse>('/document-requests', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /** PUT /api/document-requests/:id — header fields of a DRAFT only. */
+    update: (
+      id: string,
+      data: {
+        title?: string;
+        intro?: string | null;
+        due_date?: string | null;
+        assigned_to?: string | null;
+      },
+    ) =>
+      fetchApi<DocumentRequestResponse>(`/document-requests/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * DELETE /api/document-requests/:id — hard-deletes a draft, soft-cancels an
+     * issued ask. `deleted` says which happened.
+     */
+    cancel: (id: string) =>
+      fetchApi<{ success: boolean; deleted: boolean }>(`/document-requests/${id}`, {
+        method: 'DELETE',
+      }),
+
+    /** POST /api/document-requests/:id/issue — the one issue path. */
+    issue: (id: string, data: IssueDocumentRequestRequest = {}) =>
+      fetchApi<DocumentRequestResponse>(`/document-requests/${id}/issue`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * POST /api/document-requests/:id/amend — a NEW version of the SAME ask.
+     * Returns the new version; `supersedes_id` is the one it replaced.
+     */
+    amend: (id: string, data: AmendDocumentRequestRequest) =>
+      fetchApi<DocumentRequestResponse & { supersedes_id: string }>(
+        `/document-requests/${id}/amend`,
+        { method: 'POST', body: JSON.stringify(data) },
+      ),
+
+    /**
+     * POST /api/document-requests/:id/reissue — a NEW ask modelled on this one.
+     * Lands as a draft at version 1 with line progress reset.
+     */
+    reissue: (id: string, data: ReissueDocumentRequestRequest = {}) =>
+      fetchApi<DocumentRequestResponse & { reissue_of_request_id: string }>(
+        `/document-requests/${id}/reissue`,
+        { method: 'POST', body: JSON.stringify(data) },
+      ),
+
+    /** GET /api/document-requests/:id/lines */
+    lines: (id: string) =>
+      fetchApi<{ lines: RequestLineWithClosure[]; counts: DocumentRequestLineCounts }>(
+        `/document-requests/${id}/lines`,
+      ),
+
+    /** POST /api/document-requests/:id/lines — draft only. */
+    addLines: (id: string, lines: RequestLineInput[]) =>
+      fetchApi<{ lines: RequestLineRow[]; counts: DocumentRequestLineCounts }>(
+        `/document-requests/${id}/lines`,
+        { method: 'POST', body: JSON.stringify({ lines }) },
+      ),
+
+    /**
+     * GET /api/document-requests/:id/external — EXACTLY what the supplier sees.
+     *
+     * The server builds this from an allow-list, so this is the only honest way
+     * to preview an ask before it goes out. 409 for anything not currently
+     * issued.
+     */
+    external: (id: string) =>
+      fetchApi<{ view: SupplierRequestView }>(`/document-requests/${id}/external`),
+  },
+
+  /**
+   * One line on a request.
+   *
+   * Two different permissions live behind one endpoint, and the split matters:
+   * moving `status` is the assigned buyer working the queue (role `user` and
+   * up), while changing WHAT was asked for is composing and is refused once the
+   * request is issued — that is an amendment.
+   */
+  requestLines: {
+    /** GET /api/request-lines/:id */
+    get: (id: string) => fetchApi<{ line: RequestLineRow }>(`/request-lines/${id}`),
+
+    /** PUT /api/request-lines/:id */
+    update: (id: string, data: UpdateRequestLineRequest) =>
+      fetchApi<{ line: RequestLineRow }>(`/request-lines/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /** DELETE /api/request-lines/:id — draft only. */
+    remove: (id: string) =>
+      fetchApi<{ success: boolean }>(`/request-lines/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * Saved, re-issuable composed sets.
+   *
+   * A template holds only what a template can mean — lines, wording, tiers. It
+   * has no supplier, no status and no version chain, which is why instantiating
+   * one produces an ordinary draft that then travels the one issue path.
+   */
+  requestTemplates: {
+    /** GET /api/request-templates */
+    list: (params?: { tenant_id?: string; include_inactive?: boolean }) => {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.include_inactive) query.set('include_inactive', '1');
+      const qs = query.toString();
+      return fetchApi<RequestTemplateListResponse>(
+        `/request-templates${qs ? `?${qs}` : ''}`,
+      );
+    },
+
+    /** GET /api/request-templates/:id */
+    get: (id: string) => fetchApi<RequestTemplateResponse>(`/request-templates/${id}`),
+
+    /**
+     * POST /api/request-templates — from explicit lines, or by snapshotting an
+     * existing request with `from_request_id`.
+     */
+    create: (data: CreateRequestTemplateRequest) =>
+      fetchApi<RequestTemplateResponse>('/request-templates', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /** PUT /api/request-templates/:id — `lines` REPLACES the set wholesale. */
+    update: (
+      id: string,
+      data: {
+        name?: string;
+        description?: string | null;
+        default_due_in_days?: number | null;
+        active?: number | boolean;
+        lines?: RequestLineInput[];
+      },
+    ) =>
+      fetchApi<RequestTemplateResponse>(`/request-templates/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    /** DELETE /api/request-templates/:id — retires it (active = 0). */
+    retire: (id: string) =>
+      fetchApi<{ success: boolean }>(`/request-templates/${id}`, { method: 'DELETE' }),
+
+    /** POST /api/request-templates/:id/instantiate — compose a draft from it. */
+    instantiate: (id: string, data: InstantiateRequestTemplateRequest) =>
+      fetchApi<DocumentRequestResponse>(`/request-templates/${id}/instantiate`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
 };

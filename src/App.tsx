@@ -28,6 +28,10 @@ import { Requirements } from './pages/admin/Requirements';
 import { SpecAlerts } from './pages/SpecAlerts';
 import { ClaimTypes } from './pages/admin/ClaimTypes';
 import { ClaimRules } from './pages/admin/ClaimRules';
+import { Requests } from './pages/requests/Requests';
+import { RequestCompose } from './pages/requests/RequestCompose';
+import { RequestDetail } from './pages/requests/RequestDetail';
+import { RequestTemplates } from './pages/requests/RequestTemplates';
 import { Bundles } from './pages/Bundles';
 import { BundleDetail } from './pages/BundleDetail';
 import { IngestHistory } from './pages/IngestHistory';
@@ -55,6 +59,9 @@ import { UpdateRequestForm } from './pages/forms/UpdateRequestForm';
 import { PublicApprovalPage } from './pages/forms/PublicApprovalPage';
 import { AlertLanding } from './pages/AlertLanding';
 import { PublicDrop } from './pages/PublicDrop';
+// The external supplier request page. Unauthenticated, token-gated: see
+// functions/api/supplier-requests/public/[token].ts.
+import { SupplierRequestPortal } from './pages/supplier/RequestPortal';
 import { PublicDocsConnectors } from './pages/PublicDocsConnectors';
 import { Approvals } from './pages/Approvals';
 import { Help } from './pages/Help';
@@ -88,6 +95,10 @@ function App() {
               shell, no nav; the per-alert token in the URL is the gate and the
               server projects onto a hard allow-list. */}
           <Route path="/alert/:token" element={<AlertLanding />} />
+
+          {/* The supplier's side of a document request. No account, no
+              password: the token is the gate, exactly as /alert/ and /u/ do it. */}
+          <Route path="/r/:token" element={<SupplierRequestPortal />} />
 
           {/* Phase B4 — public drop link. Vendors land here from a
               tenant-shared URL; the link token is the auth, the
@@ -123,6 +134,17 @@ function App() {
               <Route path="/orders" element={<Orders />} />
               <Route path="/orders/:id" element={<OrderDetail />} />
               <Route path="/lots" element={<Lots />} />
+              {/* The request composer (migration 0090). Reading is open to any
+                  authenticated user of the tenant — an outstanding-request list
+                  is evidence, not configuration, and the API says the same. The
+                  two composing routes are gated to the roles that may commit
+                  the organization to an outbound ask. */}
+              <Route path="/requests" element={<Requests />} />
+              <Route path="/requests/templates" element={<RequestTemplates />} />
+              <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>
+                <Route path="/requests/new" element={<RequestCompose />} />
+              </Route>
+              <Route path="/requests/:id" element={<RequestDetail />} />
               <Route element={<ProtectedRoute roles={['super_admin', 'org_admin', 'user']} />}>
                 <Route path="/reports" element={<Reports />} />
                 <Route path="/expirations" element={<Expirations />} />

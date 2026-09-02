@@ -164,7 +164,12 @@ export type {
   NoteListResponse,
   NoteGetResponse,
   OwnerRoute,
+  OwnerLabelInUse,
   OwnerRouteListResponse,
+  // Supplier applicability — what a supplier owes (migration 0087)
+  SupplierRequirementTier,
+  SupplierRequirementRow,
+  ApiSupplierRequirement,
 } from '../../shared/types';
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';
 // Value exports (not types): the rejection-reason enum + its reviewer-facing
@@ -204,3 +209,62 @@ export type {
   SupplierGapGetResponse,
   ClassificationCounts,
 } from '../../shared/requirementGap';
+
+// ---------------------------------------------------------------------------
+// The request composer (migration 0090) — composing, issuing, amending and
+// re-issuing an ask, plus saved templates.
+//
+// Re-exported here for the same reason as everything above: `src/` imports its
+// API shapes from one place, and a type that reaches shared/types.ts and
+// api.ts but not this file compiles under tsc and breaks `npm run build`.
+// ---------------------------------------------------------------------------
+export type {
+  DocumentRequestStatus,
+  DocumentRequestOrigin,
+  RequestLineKind,
+  RequestLineStatus,
+  RequestIssueChannel,
+  RequestLineRow,
+  RequestLineClosure,
+  RequestLineWithClosure,
+  DocumentRequestRow,
+  RequestRoutingRow,
+  DocumentRequestLineCounts,
+  DocumentRequestDetail,
+  DocumentRequestVersionSummary,
+  DocumentRequestListItem,
+  DocumentRequestListResponse,
+  DocumentRequestResponse,
+  SupplierRequestView,
+  SupplierRequestItem,
+  RequestLineInput,
+  CreateDocumentRequestRequest,
+  IssueDocumentRequestRequest,
+  AmendDocumentRequestRequest,
+  ReissueDocumentRequestRequest,
+  RequestTemplateRow,
+  RequestTemplateLineRow,
+  RequestTemplateDetail,
+  RequestTemplateListResponse,
+  RequestTemplateResponse,
+  CreateRequestTemplateRequest,
+  InstantiateRequestTemplateRequest,
+  UpdateRequestLineRequest,
+} from '../../shared/types';
+
+// The external supplier request page (/r/:token). Appended here rather than
+// merged into the block above because `shared/types.ts` is being edited
+// concurrently — and because a type that reaches `src/` without a re-export
+// through this file compiles under tsc and fails only at `npm run build`.
+export type {
+  SupplierRequestProgress,
+  SupplierRequestUpload,
+  SupplierUploadResult,
+} from '../../shared/types';
+
+// Value exports: the two status vocabularies, so a filter control and the API
+// cannot drift apart.
+export {
+  DOCUMENT_REQUEST_STATUSES,
+  REQUEST_LINE_STATUSES,
+} from '../../shared/types';

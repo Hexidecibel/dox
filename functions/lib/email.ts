@@ -643,12 +643,21 @@ export function buildSpecAlertEmail(params: {
   const sourceLabel = (s: 'printed' | 'limit') =>
     s === 'limit' ? 'our limit' : "the COA's own limit";
 
+  // Same asymmetry the public landing page enforces (`buildAlertLandingView`):
+  // a limit the SUPPLIER printed came off their own document, so echoing it
+  // tells them nothing they do not have. OUR configured threshold is the
+  // commercial edge — a supplier who can see it can certify to it — and email
+  // is the one surface we cannot control the onward reach of. A recipient who
+  // needs the number is a portal user and can follow the link to it.
+  const limitCell = (f: { limit?: string | null; source: 'printed' | 'limit' }) =>
+    f.source === 'printed' ? escapeHtml(f.limit || '—') : 'held on file';
+
   const rows = failures
     .map(
       (f) => `<tr>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;font-weight:600;">${escapeHtml(f.test)}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#d32f2f;font-weight:600;">${escapeHtml(f.value || '—')}</td>
-              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${escapeHtml(f.limit || '—')}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${limitCell(f)}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#666;font-size:13px;">${sourceLabel(f.source)}</td>
             </tr>`
     )

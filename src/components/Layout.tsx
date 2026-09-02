@@ -42,6 +42,7 @@ import {
   EventBusy as RenewalsIcon,
   ErrorOutline as OutOfSpecIcon,
   ContactMail as CustomersIcon,
+  ForwardToInbox as RequestsIcon,
   TableView as RecordsIcon,
   HelpOutline as HelpIcon,
   Settings as SettingsIcon,
@@ -71,6 +72,12 @@ const navItems: NavItem[] = [
   { label: 'Orders', path: '/orders', icon: <OrdersIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Lots', path: '/lots', icon: <LotsIcon />, roles: ['super_admin', 'org_admin', 'user', 'reader'] },
   { label: 'Suppliers', path: '/admin/suppliers', icon: <SuppliersIcon />, roles: ['super_admin', 'org_admin'] },
+  // Sits with Suppliers rather than with the alert queues below it: a request
+  // is always addressed to a supplier and is composed from what that supplier
+  // owes, so the supplier workflow stays contiguous. Readable by every role —
+  // an outstanding-request list is evidence, not configuration — with the
+  // composing actions gated inside the page, exactly as the API gates them.
+  { label: 'Requests', path: '/requests', icon: <RequestsIcon />, roles: ['super_admin', 'org_admin', 'user', 'reader'] },
   { label: 'Customers', path: '/admin/customers', icon: <CustomersIcon />, roles: ['super_admin', 'org_admin'] },
   { label: 'COA Fulfillment', path: '/reports', icon: <ReportsIcon />, roles: ['super_admin', 'org_admin', 'user'] },
   { label: 'Renewals', path: '/expirations', icon: <RenewalsIcon />, roles: ['super_admin', 'org_admin', 'user'] },

@@ -9,7 +9,9 @@
  *
  * DENSE AND FACTUAL, deliberately. This is the reviewer surface: counts first,
  * every applicable line item enumerable underneath, and no decorative
- * summarising. Nothing here is actionable-by-clicking yet; it reports.
+ * summarising. It REPORTS rather than edits — the one exception is the optional
+ * `onConfigure` escape hatch to the editor, because a "not configured" warning
+ * with nowhere to go is a dead end.
  *
  * THE FALSE-CLEAN GUARD IS THE POINT. Three visual states, never two:
  *
@@ -34,6 +36,7 @@ import {
   Alert,
   AlertTitle,
   Box,
+  Button,
   Chip,
   CircularProgress,
   FormControlLabel,
@@ -148,7 +151,19 @@ function OriginCell({ item }: { item: GapRequirement }) {
   );
 }
 
-export default function SupplierRequirementGaps({ supplierId }: { supplierId: string }) {
+export default function SupplierRequirementGaps({
+  supplierId,
+  onConfigure,
+}: {
+  supplierId: string;
+  /**
+   * Take the reader to the editor. Optional because this panel still reports
+   * correctly without one — but a "not configured" warning with nowhere to go
+   * is a dead end, and the whole point of the warning is that somebody should
+   * act on it.
+   */
+  onConfigure?: () => void;
+}) {
   const [gap, setGap] = useState<SupplierGap | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -215,16 +230,23 @@ export default function SupplierRequirementGaps({ supplierId }: { supplierId: st
             Counting {gap.tiers_counted.join(' + ')}.
           </Typography>
         </Box>
-        <FormControlLabel
-          control={
-            <Switch
-              size="small"
-              checked={includeRecommended}
-              onChange={(e) => setIncludeRecommended(e.target.checked)}
-            />
-          }
-          label={<Typography variant="body2">Count recommended too</Typography>}
-        />
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={includeRecommended}
+                onChange={(e) => setIncludeRecommended(e.target.checked)}
+              />
+            }
+            label={<Typography variant="body2">Count recommended too</Typography>}
+          />
+          {onConfigure && gap.status !== 'not_configured' ? (
+            <Button size="small" variant="outlined" onClick={onConfigure}>
+              Edit requirements
+            </Button>
+          ) : null}
+        </Box>
       </Box>
 
       {/* The three states, never two. "Not configured" is a warning, not a pass. */}
@@ -234,6 +256,13 @@ export default function SupplierRequirementGaps({ supplierId }: { supplierId: st
           Nothing has been attached to this supplier, so nothing is being checked.
           This is <strong>not</strong> the same as compliant — attach the checklist
           line items this supplier owes before reading anything below as clean.
+          {onConfigure ? (
+            <Box sx={{ mt: 1 }}>
+              <Button size="small" variant="contained" color="warning" onClick={onConfigure}>
+                Set up requirements
+              </Button>
+            </Box>
+          ) : null}
         </Alert>
       ) : gap.status === 'satisfied' ? (
         <Alert severity={unreviewed > 0 ? 'info' : 'success'} sx={{ mb: 2 }}>

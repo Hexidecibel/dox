@@ -145,7 +145,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     await context.env.DB.prepare(
       `UPDATE request_lines
           SET name = ?, explanation = ?, acceptable_formats = ?, criteria = ?,
-              owner = ?, tier = ?, status = ?, status_note = ?,
+              owner = ?, tier = ?, status = ?, status_note = ?, attention_reason = ?,
               status_changed_at = CASE WHEN ? THEN datetime('now') ELSE status_changed_at END,
               status_changed_by = CASE WHEN ? THEN ? ELSE status_changed_by END,
               sort_order = ?, updated_at = datetime('now'), updated_by = ?
@@ -162,6 +162,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         body.tier === undefined ? line.tier : body.tier,
         body.status === undefined ? line.status : body.status,
         body.status_note === undefined ? line.status_note : (body.status_note || null),
+        // The supplier-facing half of the pair. Two columns, two audiences —
+        // see migration 0092 for why reusing `status_note` for this would be
+        // the leak the allow-list cannot catch.
+        body.attention_reason === undefined
+          ? line.attention_reason
+          : (body.attention_reason || null),
         statusChanged ? 1 : 0,
         statusChanged ? 1 : 0,
         user.id,

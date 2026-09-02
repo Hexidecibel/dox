@@ -31,6 +31,13 @@
 
 import { generateId, logAudit } from './db';
 import {
+  computeItemRefs,
+  loadCoSatisfaction,
+  loadReceivedCounts,
+  loadUploadHistory,
+  mintRequestLink,
+} from './request-links';
+import {
   BadRequestError,
   ForbiddenError,
   NotFoundError,
@@ -55,6 +62,8 @@ import type {
   RequestRoutingRow,
   RequestTemplateLineRow,
   SupplierRequestItem,
+  SupplierRequestProgress,
+  SupplierRequestUpload,
   SupplierRequestView,
   SupplierRequirementTier,
 } from '../../shared/types';
@@ -274,7 +283,7 @@ function lineInsertStatements(
   lines: ResolvedLine[],
   userId: string,
   /** Carried-forward statuses, keyed by the line key. See `carryStatuses`. */
-  statuses?: Map<string, { status: RequestLineStatus; note: string | null }>,
+  statuses?: Map<string, CarriedLineState>,
 ): D1PreparedStatement[] {
   return lines.map((l) => {
     const carried = statuses?.get(lineKey(l));
@@ -283,8 +292,8 @@ function lineInsertStatements(
         `INSERT INTO request_lines
            (id, tenant_id, request_id, line_kind, requirement_id, name, explanation,
             acceptable_formats, criteria, owner, tier, status, status_note,
-            sort_order, created_by, updated_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            attention_reason, sort_order, created_by, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         generateId(),
@@ -300,6 +309,7 @@ function lineInsertStatements(
         l.tier,
         carried?.status ?? 'not_started',
         carried?.note ?? null,
+        carried?.attention_reason ?? null,
         l.sort_order,
         userId,
         userId,
@@ -320,6 +330,21 @@ function lineKey(l: { line_kind: RequestLineKind; requirement_id: string | null;
     : `txt:${l.name.trim().toLowerCase()}`;
 }
 
+/** What survives an amendment, per line. */
+interface CarriedLineState {
+  status: RequestLineStatus;
+  /** Internal note. Carried because it is the reviewer's own working memory. */
+  note: string | null;
+  /**
+   * The supplier-facing reason. Carried for the same reason the status is: an
+   * item that was open BECAUSE something was wrong with it is still open for
+   * that reason after we fix a typo in the due date, and dropping the sentence
+   * would leave the supplier looking at a needs_attention item with nothing
+   * telling them what to do — the exact state this page must never reach.
+   */
+  attention_reason: string | null;
+}
+
 /**
  * Statuses from the version being amended, so progress survives the amendment.
  *
@@ -328,12 +353,14 @@ function lineKey(l: { line_kind: RequestLineKind; requirement_id: string | null;
  * something they already have. Lines that are new in the amendment simply have
  * no entry and start at `not_started`.
  */
-function carryStatuses(
-  previous: RequestLineRow[],
-): Map<string, { status: RequestLineStatus; note: string | null }> {
-  const m = new Map<string, { status: RequestLineStatus; note: string | null }>();
+function carryStatuses(previous: RequestLineRow[]): Map<string, CarriedLineState> {
+  const m = new Map<string, CarriedLineState>();
   for (const p of previous) {
-    m.set(lineKey(p), { status: p.status, note: p.status_note });
+    m.set(lineKey(p), {
+      status: p.status,
+      note: p.status_note,
+      attention_reason: p.attention_reason ?? null,
+    });
   }
   return m;
 }
@@ -747,6 +774,38 @@ export async function issueRequest(
         clean(input.internalNotes),
       ),
   ]);
+
+  // The supplier's door, minted once per ASK rather than once per issue.
+  //
+  // The link pins `root_request_id` (migration 0092), so the URL an amendment
+  // is chased with is the URL the original went out on — which is the whole
+  // reason it pins a root. Minting a second one here would hand the supplier
+  // two live links to the same ask and make "revoke it" a question with two
+  // answers.
+  //
+  // Best-effort and last, exactly like the alert-link path: a packet that
+  // issued without a convenience URL can still be chased by email, whereas an
+  // issue that rolled back because a URL could not be written has lost the
+  // routing row and the audit trail with it.
+  const existingLink = await db
+    .prepare(
+      `SELECT id FROM request_links
+        WHERE root_request_id = ? AND tenant_id = ?
+          AND revoked_at IS NULL AND expires_at > datetime('now')
+        LIMIT 1`,
+    )
+    .bind(request.root_request_id, tenantId)
+    .first<{ id: string }>();
+
+  if (!existingLink) {
+    await mintRequestLink(db, {
+      tenantId,
+      rootRequestId: request.root_request_id,
+      supplierId: request.supplier_id,
+      dueDate: request.due_date,
+      createdBy: user.id,
+    });
+  }
 }
 
 /**
@@ -1075,39 +1134,225 @@ export function templateLineInsertStatements(
  *   - the version chain and `amendment_reason` — the fact of an amendment is
  *     surfaced as a bare boolean because the recipient needs to know this
  *     replaces something; WHY we changed it is our business
- *   - per-line `status`, `status_note`, `owner` — 'under_review' is a
- *     statement about OUR process
+ *   - `status_note` — the INTERNAL note column. Its supplier-facing counterpart
+ *     is `attention_reason`, a separate column added in 0092 precisely so the
+ *     two audiences cannot be confused by a reviewer typing in the wrong box
+ *   - `owner` — who at either end is chasing it is not the supplier's business
+ *     to read off a page
  *   - `line_kind` — whether an ask is typed is a registry concern
+ *   - the uploader IP we record against every arrival, and the R2 key of
+ *     anything we hold
  *   - anything belonging to another supplier, request, or tenant
  *
- * Returns null for anything not currently issued, so a draft, a cancelled ask
- * or a superseded version can never be projected at all.
+ * ONE REVERSAL FROM THE ORIGINAL PROJECTION, STATED PLAINLY. Per-line `status`
+ * used to be withheld here on the grounds that 'under_review' describes our
+ * process. It is now shown. A supplier who cannot tell "we have it" from "we
+ * are waiting on you" phones to ask, and that call is the single thing this
+ * page exists to stop. What they learn is one word about where their own
+ * document sits, which is not the same as learning how we judged it — the
+ * judgement, its reasoning, and every threshold behind it stay out.
+ *
+ * WHAT PROJECTS AND WHAT DOES NOT:
+ *
+ *   - `issued`    -> yes. The live ask.
+ *   - `closed`    -> yes, READ ONLY. The client is explicit that "the supplier
+ *                    can always see their own history — what they sent, when,
+ *                    and what state it is in", and calls it the question that
+ *                    generates the most phone calls. Going dark the moment a
+ *                    buyer marks the ask complete would delete that record from
+ *                    under the one person who needs it, at exactly the moment
+ *                    they want to confirm they are done. `accepting_uploads`
+ *                    turns off; nothing else does.
+ *   - `draft`     -> null. Never sent; there is no state in which showing a
+ *                    supplier an unissued packet is correct.
+ *   - `cancelled` -> null. We withdrew the ask, and the realistic reason is
+ *                    that it went to the wrong supplier.
+ *   - superseded  -> null. An old version is not what they hold; the link
+ *                    resolves to the current one instead.
  */
-export function buildSupplierRequestView(
-  tenantName: string,
-  request: DocumentRequestRow,
-  lines: RequestLineRow[],
-): SupplierRequestView | null {
-  if (request.status !== 'issued') return null;
+export interface SupplierViewInputs {
+  tenantName: string;
+  supplierName: string;
+  request: DocumentRequestRow;
+  lines: RequestLineRow[];
+  /** line_id -> the opaque handle this response will publish for it. */
+  refs: Map<string, string>;
+  /** line_id -> how many files the supplier has claimed against it. */
+  receivedCounts: Map<string, number>;
+  /** What they sent, newest first, with the line ids each file was claimed against. */
+  uploads: SupplierUploadSource[];
+  /** requirement_id -> requirement ids this supplier's own documents closed alongside it. */
+  coSatisfaction: Map<string, Set<string>>;
+  linkExpiresAt: string;
+  acceptingUploads: boolean;
+}
+
+/**
+ * One arrival, as the projection needs it.
+ *
+ * Coverage arrives already resolved to item NAMES rather than line ids — see
+ * `loadUploadHistory` in ./request-links.ts for why. It means this struct
+ * carries no id at all, so there is nothing here for the allow-list to have to
+ * remember to drop.
+ */
+export interface SupplierUploadSource {
+  file_name: string;
+  file_size: number;
+  uploaded_at: string;
+  uploader_label: string | null;
+  covered_names: string[];
+}
+
+/**
+ * The sentence a supplier reads when an item comes back to them.
+ *
+ * NEVER the bare word "rejected". A rejection with no reason is a second round
+ * trip we have chosen to make them take, and it arrives with no information
+ * about how to avoid a third. So: the reviewer's own words when they wrote
+ * them, and otherwise a fallback composed from the item's OWN criteria and
+ * formats — both of which the supplier can already read further up the same
+ * page, so restating them here discloses nothing and makes the item actionable
+ * on its own.
+ *
+ * Returns null for every state but 'needs_attention', and a non-null string for
+ * that one. That asymmetry is the guarantee: it is enforced here, server-side,
+ * not left to a component remembering to render a default.
+ */
+function attentionReasonFor(l: RequestLineRow): string | null {
+  if (l.status !== 'needs_attention') return null;
+
+  const written = clean(l.attention_reason);
+  if (written) return written;
+
+  const parts = ['We were not able to accept what was sent, so this item is still open.'];
+  const criteria = clean(l.criteria);
+  if (criteria) parts.push(`The replacement needs to show: ${criteria}`);
+  const formats = clean(l.acceptable_formats);
+  if (formats) parts.push(`Acceptable formats: ${formats}`);
+  if (parts.length === 1) {
+    parts.push(
+      'Please send a current version. If you are not sure what changed, reply to the message that brought you here.',
+    );
+  }
+  return parts.join(' ');
+}
+
+export function buildSupplierRequestView(input: SupplierViewInputs): SupplierRequestView | null {
+  const { request, lines } = input;
+  if (request.status !== 'issued' && request.status !== 'closed') return null;
   if (request.superseded_at) return null;
 
-  const items: SupplierRequestItem[] = lines.map((l) => ({
-    name: l.name,
-    explanation: l.explanation,
-    acceptable_formats: l.acceptable_formats,
-    criteria: l.criteria,
-    tier: l.tier,
+  // requirement_id -> the refs of the lines asking for it, so co-satisfaction
+  // can be published as handles rather than as registry ids.
+  const refsByRequirement = new Map<string, string[]>();
+  for (const l of lines) {
+    if (!l.requirement_id) continue;
+    const ref = input.refs.get(l.id);
+    if (!ref) continue;
+    const list = refsByRequirement.get(l.requirement_id) ?? [];
+    list.push(ref);
+    refsByRequirement.set(l.requirement_id, list);
+  }
+
+  const items: SupplierRequestItem[] = lines.map((l) => {
+    const ref = input.refs.get(l.id) ?? '';
+
+    // Sibling items this supplier's own paperwork has closed at the same time.
+    // Self is excluded; order follows the checklist, not the query.
+    const also = new Set<string>();
+    if (l.requirement_id) {
+      for (const sibling of input.coSatisfaction.get(l.requirement_id) ?? []) {
+        for (const siblingRef of refsByRequirement.get(sibling) ?? []) {
+          if (siblingRef !== ref) also.add(siblingRef);
+        }
+      }
+    }
+
+    return {
+      ref,
+      name: l.name,
+      explanation: l.explanation,
+      acceptable_formats: l.acceptable_formats,
+      criteria: l.criteria,
+      tier: l.tier,
+      status: l.status,
+      attention_reason: attentionReasonFor(l),
+      received_count: input.receivedCounts.get(l.id) ?? 0,
+      also_covers: [...also],
+    };
+  });
+
+  // Names, not ids: an upload's coverage is rendered as the item text the
+  // supplier already sees, so the history block needs no handle at all.
+  const history: SupplierRequestUpload[] = input.uploads.map((u) => ({
+    file_name: u.file_name,
+    size_bytes: u.file_size,
+    uploaded_at: u.uploaded_at,
+    uploader_label: u.uploader_label,
+    covered_items: u.covered_names,
   }));
 
+  const progress = buildProgress(lines);
+
   return {
-    tenant_name: tenantName,
+    tenant_name: input.tenantName,
+    supplier_name: input.supplierName,
     title: request.title,
     intro: request.intro,
     due_date: request.due_date,
     issued_at: request.issued_at,
     amended: request.version > 1,
     items,
+    progress,
+    complete: isComplete(lines, progress),
+    history,
+    accepting_uploads: input.acceptingUploads,
+    link_expires_at: input.linkExpiresAt,
   };
+}
+
+/**
+ * SATISFIED LINES, NOT UPLOADED FILES.
+ *
+ * The client was explicit: "Those are different numbers and the second one
+ * flatters us." So the only thing counted is a line at 'accepted' — a state
+ * only a reviewer can write. A supplier uploading ten files against one item
+ * moves this by zero, which is correct and is the reason the number is worth
+ * showing them.
+ */
+export function buildProgress(lines: RequestLineRow[]): SupplierRequestProgress {
+  let required_total = 0;
+  let required_satisfied = 0;
+  let recommended_total = 0;
+  let recommended_satisfied = 0;
+  for (const l of lines) {
+    const done = l.status === 'accepted';
+    if (l.tier === 'required') {
+      required_total += 1;
+      if (done) required_satisfied += 1;
+    } else {
+      recommended_total += 1;
+      if (done) recommended_satisfied += 1;
+    }
+  }
+  return { required_total, required_satisfied, recommended_total, recommended_satisfied };
+}
+
+/**
+ * "Am I done?" — the question the finished state answers.
+ *
+ * Required items only. A recommended item left open is not a failure to
+ * comply, and telling a supplier they are incomplete because they declined an
+ * optional extra would be the page lying in the other direction. A packet made
+ * entirely of recommended lines falls back to all of them, so `complete` is
+ * never trivially true for a request with outstanding work.
+ */
+function isComplete(lines: RequestLineRow[], progress: SupplierRequestProgress): boolean {
+  if (lines.length === 0) return false;
+  if (progress.required_total > 0) {
+    return progress.required_satisfied === progress.required_total;
+  }
+  return progress.recommended_satisfied === progress.recommended_total;
 }
 
 // ---------------------------------------------------------------------------
@@ -1188,4 +1433,93 @@ export async function auditRequest(
     JSON.stringify(details),
     ip,
   );
+}
+
+// ---------------------------------------------------------------------------
+// The one assembler
+// ---------------------------------------------------------------------------
+
+export interface AssembleSupplierViewInput {
+  tenantId: string;
+  /** The token whose handles this response publishes. See `itemRef`. */
+  token: string;
+  request: DocumentRequestRow;
+  rootRequestId: string;
+  supplierId: string;
+  /** Null when there is no link yet — the internal preview before issue. */
+  linkId: string | null;
+  linkExpiresAt: string;
+  acceptingUploads: boolean;
+}
+
+/**
+ * Gather every input the outward payload needs and hand them to the ONE
+ * projection.
+ *
+ * Both callers go through here — the public token route and the authenticated
+ * "show me what they will see" preview — for the reason the preview's own
+ * module note gives: "An allow-list only works if it is the ONE place the
+ * outward shape is decided... Every future outward channel calls the same
+ * function rather than assembling its own 'mostly the same' object, which is
+ * how the second copy ends up with one field too many."
+ *
+ * Assembling is separated from projecting so the projection stays pure: it
+ * takes named values and returns a payload, with no database in reach to
+ * accidentally read one more column from.
+ */
+export async function assembleSupplierView(
+  db: D1Database,
+  input: AssembleSupplierViewInput,
+): Promise<SupplierRequestView | null> {
+  const lines = await loadLines(db, input.tenantId, input.request.id);
+
+  const tenant = await db
+    .prepare('SELECT name FROM tenants WHERE id = ?')
+    .bind(input.tenantId)
+    .first<{ name: string }>();
+  // Tenant-scoped: the supplier name is read through the tenant that owns the
+  // ask, never by id alone.
+  const supplier = await db
+    .prepare('SELECT name FROM suppliers WHERE id = ? AND tenant_id = ?')
+    .bind(input.supplierId, input.tenantId)
+    .first<{ name: string }>();
+  if (!tenant || !supplier) return null;
+
+  const refs = await computeItemRefs(input.token, lines);
+
+  const uploads = input.linkId
+    ? await loadUploadHistory(db, input.linkId, input.tenantId)
+    : [];
+  const receivedCounts = input.linkId
+    ? await loadReceivedCounts(
+        db,
+        input.linkId,
+        input.tenantId,
+        input.rootRequestId,
+        input.request.id,
+      )
+    : new Map<string, number>();
+
+  const requirementIds = [
+    ...new Set(lines.map((l) => l.requirement_id).filter((v): v is string => !!v)),
+  ];
+  const coSatisfaction = await loadCoSatisfaction(
+    db,
+    input.tenantId,
+    input.supplierId,
+    requirementIds,
+  );
+
+  return buildSupplierRequestView({
+    tenantName: tenant.name,
+    supplierName: supplier.name,
+    request: input.request,
+    lines,
+    refs,
+    receivedCounts,
+    uploads,
+    coSatisfaction,
+    linkExpiresAt: input.linkExpiresAt,
+    acceptingUploads: input.acceptingUploads,
+  });
 }

@@ -18,12 +18,22 @@
  * assembling its own "mostly the same" object, which is how the second copy
  * ends up with one field too many.
  *
- * WHAT THIS IS TODAY: an authenticated PREVIEW. It is behind the same auth as
+ * WHAT THIS IS: an authenticated PREVIEW. It is behind the same auth as
  * everything else under /api, and it answers "show me what they will see"
  * before a buyer presses issue, and "what exactly did we send them" after.
- * There is deliberately no token-gated public variant yet — the moment one is
- * wanted it follows the alert_links pattern (0089): an expiring token, one
- * link, one ask, read only. It is not a filter added to this route.
+ *
+ * The token-gated public variant this file used to anticipate now exists, at
+ * /api/supplier-requests/public/:token (migration 0092), and it followed the
+ * alert_links pattern as predicted. Both routes go through
+ * `assembleSupplierView` into the one `buildSupplierRequestView`, which is the
+ * arrangement the paragraph below insists on. Neither assembles its own object.
+ *
+ * The preview binds to the LIVE link when the ask has one, so the item handles
+ * and the upload history it shows are the supplier's actual ones rather than a
+ * plausible imitation — "what exactly did we send them" is only a true answer
+ * if it reads the same row the supplier is reading. With no link yet, it falls
+ * back to an ephemeral token: the shape is exact and the handles address
+ * nothing, which is correct for a packet nobody has been given.
  *
  * WHAT IT NEVER RETURNS: the routing row in any form, `assigned_to`, any
  * internal id, `origin`, the version chain, `amendment_reason`, per-line
@@ -38,11 +48,12 @@
 
 import { errorToResponse } from '../../../lib/permissions';
 import {
-  buildSupplierRequestView,
-  loadLines,
+  assembleSupplierView,
   loadRequest,
   resolveTenantForRequest,
 } from '../../../lib/document-requests';
+import { computeRequestLinkExpiry, generateRequestToken } from '../../../lib/request-links';
+import type { RequestLinkRow } from '../../../lib/request-links';
 import type { Env, User } from '../../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -59,13 +70,30 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const tenantId = await resolveTenantForRequest(context.env.DB, user, id);
 
     const request = await loadRequest(context.env.DB, tenantId, id);
-    const lines = await loadLines(context.env.DB, tenantId, id);
 
-    const tenant = await context.env.DB.prepare('SELECT name FROM tenants WHERE id = ?')
-      .bind(tenantId)
-      .first<{ name: string }>();
+    // The live link for this ask, if one has been minted. Revoked and expired
+    // links are excluded for the same reason the public route excludes them:
+    // they are not what the supplier holds.
+    const link = await context.env.DB.prepare(
+      `SELECT * FROM request_links
+        WHERE root_request_id = ? AND tenant_id = ?
+          AND revoked_at IS NULL AND expires_at > datetime('now')
+        ORDER BY created_at DESC
+        LIMIT 1`,
+    )
+      .bind(request.root_request_id, tenantId)
+      .first<RequestLinkRow>();
 
-    const view = buildSupplierRequestView(tenant?.name ?? '', request, lines);
+    const view = await assembleSupplierView(context.env.DB, {
+      tenantId,
+      token: link?.token ?? generateRequestToken(),
+      request,
+      rootRequestId: request.root_request_id,
+      supplierId: request.supplier_id,
+      linkId: link?.id ?? null,
+      linkExpiresAt: link?.expires_at ?? computeRequestLinkExpiry(request.due_date),
+      acceptingUploads: request.status === 'issued',
+    });
     if (!view) {
       return json(
         {

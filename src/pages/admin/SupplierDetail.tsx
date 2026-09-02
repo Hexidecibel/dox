@@ -55,6 +55,7 @@ import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
 import LotSchemeSelect from '../../components/LotSchemeSelect';
 import SupplierProductMapPanel from '../../components/SupplierProductMapPanel';
 import SupplierRequirementGaps from '../../components/SupplierRequirementGaps';
+import SupplierRequirementsEditor from '../../components/SupplierRequirementsEditor';
 import EntityNotes from '../../components/EntityNotes';
 import { useAuth } from '../../contexts/AuthContext';
 import type { LotScheme } from '../../lib/types';
@@ -240,6 +241,9 @@ export function SupplierDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [tab, setTab] = useState(0);
+  // Bumped after a requirements edit so the gap panel on the Documents tab
+  // remounts and re-reads rather than showing a stale "not configured".
+  const [requirementsVersion, setRequirementsVersion] = useState(0);
 
   // Edit header state
   const [editingHeader, setEditingHeader] = useState(false);
@@ -787,6 +791,7 @@ export function SupplierDetail() {
           <Tab label="Products" />
           <Tab label="Templates" />
           <Tab label={`Documents${documentsTotal ? ` (${documentsTotal})` : ''}`} />
+          <Tab label="Requirements" />
           <Tab label="Extraction Instructions" />
           <Tab label="Document Types" />
           <Tab label="Product Mapping" />
@@ -1131,7 +1136,11 @@ export function SupplierDetail() {
       {/* complete one. It renders above the empty-state branch on purpose:    */}
       {/* a supplier with zero documents is the case most worth counting.      */}
       <TabPanel value={tab} index={2}>
-        <SupplierRequirementGaps supplierId={supplier.id} />
+        <SupplierRequirementGaps
+          key={requirementsVersion}
+          supplierId={supplier.id}
+          onConfigure={() => setTab(3)}
+        />
 
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
           <Typography variant="h6" fontWeight={600}>
@@ -1205,7 +1214,25 @@ export function SupplierDetail() {
       {/* doc type in the tenant; rendered with ExtractionInstructionsBox, the */}
       {/* same component the Review Queue uses so the save/load contract is   */}
       {/* identical.                                                          */}
+      {/* Requirements Tab                                                   */}
+      {/* The editor for what this supplier owes, on the page where somebody  */}
+      {/* is already looking at this supplier. The Documents tab above reports */}
+      {/* the gap; this is where it gets closed. Same component the           */}
+      {/* Settings -> Supplier Requirements roster mounts, so there is one    */}
+      {/* editor and not two.                                                 */}
       <TabPanel value={tab} index={3}>
+        <SupplierRequirementsEditor
+          supplierId={supplier.id}
+          supplierName={supplier.name}
+          /* The supplier's own tenant, not the caller's: a super_admin has no
+             implicit tenant and POST /api/supplier-requirements 400s without
+             one. For an org_admin the server ignores it and uses their own. */
+          tenantId={supplier.tenant_id}
+          onChanged={() => setRequirementsVersion((v) => v + 1)}
+        />
+      </TabPanel>
+
+      <TabPanel value={tab} index={4}>
         <Box sx={{ mb: 2 }}>
           <Typography variant="h6" fontWeight={600}>
             Extraction Instructions
@@ -1257,7 +1284,7 @@ export function SupplierDetail() {
       {/* (supplier_id NULL, shared across the tenant) + this supplier's    */}
       {/* own types. Owned ones are editable here; global ones are shown    */}
       {/* read-only for reference and managed on the global admin page.     */}
-      <TabPanel value={tab} index={4}>
+      <TabPanel value={tab} index={5}>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
           <Typography variant="h6" fontWeight={600}>Document Types</Typography>
           <Button variant="outlined" size="small" startIcon={<AddIcon />} onClick={openCreateDocType}>
@@ -1468,7 +1495,7 @@ export function SupplierDetail() {
       {/* teach-at-review picker only appears for multi-record COAs; this lets  */}
       {/* an admin author maps for single-product suppliers too. Self-loads the */}
       {/* supplier's COA products and persists each pick via PUT /product-map.  */}
-      <TabPanel value={tab} index={5}>
+      <TabPanel value={tab} index={6}>
         {tab === 5 && (
           <SupplierProductMapPanel
             tenantId={supplier.tenant_id}
@@ -1487,7 +1514,7 @@ export function SupplierDetail() {
       {/* tab also gives the thread the full width it needs to stay readable.   */}
       {/* Mounted lazily like Product Mapping so the fetch only fires when the  */}
       {/* tab is actually opened.                                               */}
-      <TabPanel value={tab} index={6}>
+      <TabPanel value={tab} index={7}>
         {tab === 6 && (
           <EntityNotes
             entityType="supplier"

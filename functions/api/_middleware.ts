@@ -57,6 +57,13 @@ const PUBLIC_ROUTES = [
   // the gate, the route is read-only, and the prefix is narrow so no future
   // /api/alerts/* admin endpoint is allowlisted by accident.
   '/api/alerts/public',
+  // The external supplier request page — /r/<token> reads and uploads through
+  // here. Same posture as the four above: the unguessable per-ask token is the
+  // gate, and the prefix is narrow so no future /api/supplier-requests/* admin
+  // endpoint is allowlisted by accident. Note this covers BOTH the GET read and
+  // the POST upload beneath it; the upload handler re-derives the link from the
+  // same token and rate-limits per (link, IP) in its own bucket.
+  '/api/supplier-requests/public',
   // Phase B4 — public connector info endpoint serves the bare
   // minimum the public drop form needs to render. The handler at
   // /api/public/connectors/<slug> requires a `?token=` query param

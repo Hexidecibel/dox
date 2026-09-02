@@ -3915,8 +3915,39 @@ export interface OwnerRoute {
   user_email?: string | null;
 }
 
+/**
+ * An owner label as it actually appears on this tenant's documents.
+ *
+ * `documents.owner` is free text with no vocabulary table behind it, so the
+ * only way to know which labels exist is to look at the documents. The routing
+ * screen leads with this list rather than a blank text box: the labels a person
+ * forgets to type are exactly the ones that stay unrouted.
+ *
+ * `route_count === 0` is the state that matters — documents carry the label,
+ * and nobody is reachable for them.
+ */
+export interface OwnerLabelInUse {
+  /** Normalized match key, the same one `owner_routes.owner_key` holds. */
+  owner_key: string;
+  /** A display spelling — the first one found for this key. */
+  owner_label: string;
+  /** Every distinct spelling folding onto this key. More than one is worth seeing. */
+  spellings: string[];
+  /** Active documents carrying the label. */
+  document_count: number;
+  /** The subset carrying renewal terms — the records renewal alerts fire on. */
+  renewal_count: number;
+  /** Active routes resolving this key. Zero means every one of those records is unrouted. */
+  route_count: number;
+}
+
 export interface OwnerRouteListResponse {
   routes: OwnerRoute[];
+  /**
+   * Every owner label found on the tenant's documents. NOT filtered by the
+   * `?owner=` parameter — it describes the tenant, not the query.
+   */
+  labels_in_use: OwnerLabelInUse[];
 }
 
 // === Review Queue v2: weak COA→lot match suggestions ===
@@ -4161,7 +4192,19 @@ export interface RequestLineRow {
   owner: string | null;
   tier: SupplierRequirementTier;
   status: RequestLineStatus;
+  /**
+   * INTERNAL. Where a reviewer writes "third time they've sent the 2023 cert,
+   * escalate to Dan". Absent from every outward projection, always. The
+   * supplier-facing counterpart is `attention_reason` — see migration 0092 for
+   * why the two audiences get two columns rather than one.
+   */
   status_note: string | null;
+  /**
+   * EXTERNAL. The sentence a supplier reads when an item comes back to them:
+   * what was wrong, and what the replacement must contain. Written to be read
+   * by them, and the only one of the two note columns that leaves the portal.
+   */
+  attention_reason: string | null;
   status_changed_at: string | null;
   status_changed_by: string | null;
   sort_order: number;
@@ -4329,6 +4372,8 @@ export interface DocumentRequestResponse {
 export interface SupplierRequestView {
   /** The organization asking. Already known to the recipient. */
   tenant_name: string;
+  /** The supplier entity being asked. Their own name, back to them. */
+  supplier_name: string;
   title: string;
   intro: string | null;
   due_date: string | null;
@@ -4336,16 +4381,120 @@ export interface SupplierRequestView {
   /** Present only for an amendment, so a recipient knows this replaces one. */
   amended: boolean;
   items: SupplierRequestItem[];
+  /**
+   * SATISFIED ITEMS, never uploaded files. The client, verbatim: "Those are
+   * different numbers and the second one flatters us." See the type.
+   */
+  progress: SupplierRequestProgress;
+  /** True once every REQUIRED item is accepted. Drives the finished state. */
+  complete: boolean;
+  /** What they sent, when, and what each file covered. Newest first. */
+  history: SupplierRequestUpload[];
+  /**
+   * Whether this door still takes files. False once the ask is closed or
+   * cancelled — the page stays readable, so history never disappears.
+   */
+  accepting_uploads: boolean;
+  /** When the link stops working. Stated, not sprung on them. */
+  link_expires_at: string;
+}
+
+/**
+ * The progress number, and ONLY the honest one.
+ *
+ * There is deliberately no file count in here. A count of uploads is the
+ * flattering number and the client called it out by name; keeping it out of the
+ * progress object means a UI cannot render it in the bar by reaching for the
+ * nearest available integer. Files are visible — in `history`, where they are
+ * a record of what was sent rather than a claim about what is done.
+ *
+ * `required_satisfied` counts lines at status 'accepted'. Not 'received', which
+ * means a file arrived; not 'under_review', which is a statement about our
+ * process. A supplier's own actions can therefore never move this number —
+ * only a reviewer accepting something can, which is the property that makes it
+ * worth showing them at all.
+ */
+export interface SupplierRequestProgress {
+  required_total: number;
+  required_satisfied: number;
+  recommended_total: number;
+  recommended_satisfied: number;
 }
 
 /** One line, as a supplier sees it. */
 export interface SupplierRequestItem {
+  /**
+   * An opaque per-item handle, derived from the token and the line id. It is
+   * what a per-line upload names. Not an internal id: see `itemRef` in
+   * functions/lib/request-links.ts for why it is derived rather than exposed.
+   */
+  ref: string;
   name: string;
   explanation: string | null;
   acceptable_formats: string | null;
   criteria: string | null;
   /** 'required' | 'recommended' — what we expect, which they may fairly know. */
   tier: SupplierRequirementTier;
+  /**
+   * Where this item stands. The client's five states, shown as-is.
+   *
+   * This reverses the original projection's choice to withhold line status. The
+   * reasoning then was that 'under_review' describes our process; the reasoning
+   * now is that a supplier who cannot tell "we have it" from "we are waiting on
+   * you" phones to ask, and that call is the thing this page exists to stop.
+   * 'under_review' tells them the ball is on our side, which is true and is the
+   * only part of our process they learn.
+   */
+  status: RequestLineStatus;
+  /**
+   * Set ONLY for 'needs_attention', and then never null: what was wrong and
+   * what the replacement must contain. The projection composes a fallback from
+   * the item's own criteria when a reviewer left it blank, so the bare word
+   * "rejected" is not a state this payload can reach.
+   */
+  attention_reason: string | null;
+  /** How many files they have sent against this item. Their own count. */
+  received_count: number;
+  /**
+   * Refs of the other items that this supplier's own paperwork has previously
+   * closed at the same time. The page pre-ticks these the moment this item is
+   * ticked, which is what turns "upload once" from a claim into an experience.
+   * Empty when there is no history to learn from — never a guess.
+   */
+  also_covers: string[];
+}
+
+/** One file the supplier sent, as they see it back. */
+export interface SupplierRequestUpload {
+  file_name: string;
+  size_bytes: number;
+  uploaded_at: string;
+  /** Their own words, if they typed a name. Echoed back only because it is theirs. */
+  uploader_label: string | null;
+  /** The items this file was claimed against, by name. */
+  covered_items: string[];
+}
+
+/**
+ * What comes back the instant a file lands. THE PRODUCT THESIS, RENDERED.
+ *
+ * `covered_count` is the count of distinct items this ONE file was claimed
+ * against. When it is greater than one, the page says so in a sentence, because
+ * a supplier who has spent years re-uploading the same certificate to the
+ * incumbent's portal has never been told that before.
+ *
+ * `message` is composed server-side rather than in the browser so the sentence
+ * is auditable and cannot drift between clients. It says "covered", not
+ * "closed": covering is what the supplier just did, accepting is ours to do,
+ * and a page whose whole argument is about honest numbers cannot afford to
+ * blur that in its best moment.
+ */
+export interface SupplierUploadResult {
+  file_name: string;
+  covered_count: number;
+  covered_items: string[];
+  message: string;
+  progress: SupplierRequestProgress;
 }
 
 /** A composable line, as posted by the composer. */
@@ -4473,7 +4622,17 @@ export interface InstantiateRequestTemplateRequest {
 
 export interface UpdateRequestLineRequest {
   status?: RequestLineStatus;
+  /** INTERNAL note. Never leaves the portal. */
   status_note?: string | null;
+  /**
+   * EXTERNAL. What the supplier reads when an item comes back to them: what was
+   * wrong, and what the replacement must contain.
+   *
+   * Deliberately NOT a "wording change" for the purposes of the draft-only gate
+   * below — setting it is review work on an issued ask, which is exactly when a
+   * reviewer needs it, and it changes nothing about what was asked for.
+   */
+  attention_reason?: string | null;
   name?: string;
   explanation?: string | null;
   acceptable_formats?: string | null;

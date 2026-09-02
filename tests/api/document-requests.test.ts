@@ -887,12 +887,46 @@ describe('GET /api/document-requests/:id/external', () => {
     const { status, body } = await external(id);
     expect(status).toBe(200);
 
+    // The exact outward contract. Adding a field to `buildSupplierRequestView`
+    // fails here on purpose — that is the whole point of asserting the key set
+    // rather than spot-checking a few of them.
     expect(Object.keys(body.view).sort()).toEqual(
-      ['amended', 'due_date', 'intro', 'issued_at', 'items', 'title', 'tenant_name'].sort(),
+      [
+        'accepting_uploads',
+        'amended',
+        'complete',
+        'due_date',
+        'history',
+        'intro',
+        'issued_at',
+        'items',
+        'link_expires_at',
+        'progress',
+        'supplier_name',
+        'title',
+        'tenant_name',
+      ].sort(),
     );
     expect(Object.keys(body.view.items[0]).sort()).toEqual(
-      ['acceptable_formats', 'criteria', 'explanation', 'name', 'tier'].sort(),
+      [
+        'acceptable_formats',
+        'also_covers',
+        'attention_reason',
+        'criteria',
+        'explanation',
+        'name',
+        'received_count',
+        'ref',
+        'status',
+        'tier',
+      ].sort(),
     );
+
+    // `status` is now shown DELIBERATELY — see the note on SupplierRequestItem.
+    // A supplier who cannot tell "we have it" from "we are waiting on you"
+    // phones to ask. What is still withheld is everything about how we JUDGED
+    // it, which is the list below.
+    expect(body.view.items[0].status).toBe('not_started');
 
     // The whole payload, serialized, must not contain anything internal.
     const serialized = JSON.stringify(body);
@@ -904,8 +938,13 @@ describe('GET /api/document-requests/:id/external', () => {
       seed.orgAdminId,
       'Chase via Sam',
       'qa@alpha.example',
-      'not_started',
       'manual',
+      'status_note',
+      'internal_notes',
+      'issued_by',
+      'assigned_to',
+      'line_kind',
+      'origin_ref',
     ]) {
       expect(serialized).not.toContain(secret);
     }

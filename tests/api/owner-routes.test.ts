@@ -33,6 +33,38 @@ function ctx(method: string, url: string, user: any, body?: unknown, params: Rec
   };
 }
 
+/**
+ * A document carrying an owner label, so the in-use scan has something to find.
+ * `renewalDue` decides whether it counts toward `renewal_count` — the subset
+ * the renewal run would actually try to alert on.
+ */
+async function makeDocument(
+  title: string,
+  owner: string | null,
+  opts: { renewalDue?: string; tenantId?: string; status?: string } = {},
+): Promise<string> {
+  const id = `doc-${Math.random().toString(36).slice(2, 10)}`;
+  await db
+    .prepare(
+      `INSERT INTO documents
+         (id, tenant_id, title, current_version, status, created_by, owner,
+          renewal_type, renewal_due_date)
+       VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      opts.tenantId ?? seed.tenantId,
+      title,
+      opts.status ?? 'active',
+      seed.orgAdminId,
+      owner,
+      opts.renewalDue ? 'hard_expiry' : null,
+      opts.renewalDue ?? null,
+    )
+    .run();
+  return id;
+}
+
 const orgAdmin = () => ({ id: 'user-org-admin', role: 'org_admin', tenant_id: seed.tenantId });
 const orgAdmin2 = () => ({ id: 'user-org-admin-2', role: 'org_admin', tenant_id: seed.tenantId2 });
 const reader = () => ({ id: 'user-reader', role: 'reader', tenant_id: seed.tenantId });
@@ -169,5 +201,84 @@ describe('DELETE /api/owner-routes/:id', () => {
   it('404s on an unknown id', async () => {
     const res = await deleteRoute(ctx('DELETE', '/api/owner-routes/nope', orgAdmin(), undefined, { id: 'nope' }));
     expect(res.status).toBe(404);
+  });
+});
+
+
+/**
+ * `labels_in_use` is what turns the routing screen from "type a label from
+ * memory" into "here is what your documents actually say". The states worth
+ * pinning are the ones that would send somebody to configure the wrong thing:
+ * a label nobody routed, a spelling that drifted, and another tenant's labels
+ * leaking in.
+ */
+describe('GET /api/owner-routes — labels_in_use', () => {
+  it('reports labels found on documents, with their document and renewal counts', async () => {
+    await makeDocument('COI 2026', 'Insurance', { renewalDue: '2026-12-01' });
+    await makeDocument('Broker letter', 'Insurance');
+    await makeDocument('Allergen matrix', 'QA');
+
+    const { body } = await get(orgAdmin());
+    const byKey = Object.fromEntries(
+      body.labels_in_use.map((l: any) => [l.owner_key, l]),
+    );
+    expect(byKey.insurance.document_count).toBe(2);
+    expect(byKey.insurance.renewal_count).toBe(1);
+    expect(byKey.qa.document_count).toBe(1);
+    expect(byKey.qa.renewal_count).toBe(0);
+  });
+
+  it('marks a label with no route as unrouted, and sorts it first', async () => {
+    await makeDocument('COI 2026', 'Insurance', { renewalDue: '2026-12-01' });
+    await makeDocument('Allergen matrix', 'QA');
+    await post(orgAdmin(), { owner_label: 'QA', email: 'qa@example.com' });
+
+    const { body } = await get(orgAdmin());
+    // Insurance has nobody behind it — that is the state the screen leads with.
+    expect(body.labels_in_use[0].owner_key).toBe('insurance');
+    expect(body.labels_in_use[0].route_count).toBe(0);
+    const qa = body.labels_in_use.find((l: any) => l.owner_key === 'qa');
+    expect(qa.route_count).toBe(1);
+  });
+
+  it('folds drifted spellings onto one key and keeps both spellings visible', async () => {
+    await makeDocument('a', 'QA');
+    await makeDocument('b', 'qa ');
+
+    const { body } = await get(orgAdmin());
+    expect(body.labels_in_use).toHaveLength(1);
+    expect(body.labels_in_use[0].owner_key).toBe('qa');
+    expect(body.labels_in_use[0].document_count).toBe(2);
+    expect(body.labels_in_use[0].spellings.sort()).toEqual(['QA', 'qa ']);
+  });
+
+  it('ignores blank owners and non-active documents', async () => {
+    await makeDocument('no owner', null);
+    await makeDocument('blank owner', '   ');
+    await makeDocument('deleted', 'QA', { status: 'deleted' });
+
+    const { body } = await get(orgAdmin());
+    expect(body.labels_in_use).toEqual([]);
+  });
+
+  it('never leaks another tenant’s labels', async () => {
+    await makeDocument('theirs', 'Purchasing', { tenantId: seed.tenantId2 });
+    await makeDocument('mine', 'QA');
+
+    const { body } = await get(orgAdmin());
+    expect(body.labels_in_use.map((l: any) => l.owner_key)).toEqual(['qa']);
+  });
+
+  it('is NOT narrowed by ?owner= — the point is the labels you did not ask about', async () => {
+    await makeDocument('a', 'QA');
+    await makeDocument('b', 'Insurance');
+    await post(orgAdmin(), { owner_label: 'QA', email: 'qa@example.com' });
+
+    const { body } = await get(orgAdmin(), '?owner=QA');
+    expect(body.routes).toHaveLength(1);
+    expect(body.labels_in_use.map((l: any) => l.owner_key).sort()).toEqual(['insurance', 'qa']);
+    // And the route count for the filtered-out label is still correct.
+    const qa = body.labels_in_use.find((l: any) => l.owner_key === 'qa');
+    expect(qa.route_count).toBe(1);
   });
 });

@@ -25,6 +25,8 @@ import {
   Straighten as SpecLimitsIcon,
   LocalOffer as ClaimsIcon,
   Rule as RuleIcon,
+  FactCheck as SupplierRequirementsIcon,
+  AlternateEmail as OwnerRoutesIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import type { Role } from '../lib/types';
@@ -36,6 +38,8 @@ import { Requirements } from './admin/Requirements';
 import { SpecLimits } from './admin/SpecLimits';
 import { ClaimTypes } from './admin/ClaimTypes';
 import { ClaimRules } from './admin/ClaimRules';
+import { SupplierRequirements } from './admin/SupplierRequirements';
+import { OwnerRoutes } from './admin/OwnerRoutes';
 import { Sources } from './admin/Sources';
 import { Users } from './admin/Users';
 import { Assignments } from './admin/Assignments';
@@ -74,6 +78,10 @@ const SECTIONS: SettingsSection[] = [
       { key: 'requirements', label: 'Checklist', icon: <ChecklistIcon />, roles: ALL_ADMIN, component: Requirements },
       { key: 'claim-types', label: 'Claims', icon: <ClaimsIcon />, roles: ALL_ADMIN, component: ClaimTypes },
       { key: 'claim-rules', label: 'Claim Rules', icon: <RuleIcon />, roles: ALL_ADMIN, component: ClaimRules },
+      // Applicability: the checklist above is a vocabulary; this says who owes
+      // which of it. Without a row here a line item applies to nobody and can
+      // never be reported as a gap.
+      { key: 'supplier-requirements', label: 'Supplier Requirements', icon: <SupplierRequirementsIcon />, roles: ALL_ADMIN, component: SupplierRequirements },
       // Acceptance criteria for the values inside a document, as opposed to
       // the taxonomy above, which is about the document itself.
       { key: 'spec-limits', label: 'Spec Limits', icon: <SpecLimitsIcon />, roles: ALL_ADMIN, component: SpecLimits },
@@ -85,6 +93,9 @@ const SECTIONS: SettingsSection[] = [
     items: [
       { key: 'users', label: 'Users', icon: <UsersIcon />, roles: ALL_ADMIN, component: Users },
       { key: 'assignments', label: 'Assignments', icon: <AssignmentsIcon />, roles: ALL_ADMIN, component: Assignments },
+      // The third answer to "who is responsible?": the free-text owner label on
+      // a document, mapped to a person or a bare address.
+      { key: 'owner-routes', label: 'Owner Routing', icon: <OwnerRoutesIcon />, roles: ALL_ADMIN, component: OwnerRoutes },
       { key: 'api-keys', label: 'API Keys', icon: <ApiKeyIcon />, roles: ALL_ADMIN, component: ApiKeys },
       { key: 'tenants', label: 'Tenants', icon: <TenantsIcon />, roles: ['super_admin'], component: Tenants },
     ],
