@@ -32,6 +32,9 @@
 #   --name "<name>"      REQUIRED. Name for the new (clone) tenant.
 #   --slug <slug>        Optional slug for the new tenant (default: derived).
 #   --dry-run            Print the per-table row counts it WOULD copy; no writes.
+#   --with-recipients    Copy owner_routes RECIPIENTS verbatim (real user_ids /
+#                        real email addresses) instead of redacting them.
+#                        OFF BY DEFAULT -- see "OWNER ROUTES" below.
 #   --yes / -y           Skip the interactive confirmation (still honors prod gate).
 #   -h / --help          Show this help.
 #
@@ -53,13 +56,38 @@
 #
 # Tables copied (tenant-scoped, FK-safe order) -- skipped if absent in target:
 #   suppliers, products, product_suppliers, document_types,
+#   requirements, claim_types, claim_type_requirements, supplier_requirements,
+#   spec_tests, spec_limits, document_type_extraction_instructions,
 #   supplier_extraction_instructions, extraction_examples, extraction_templates,
-#   naming_templates, email_domain_mappings, assignments, teach_sessions,
+#   email_domain_mappings, owner_routes (recipients REDACTED by default),
+#   assignments, teach_sessions,
 #   teach_messages, customers, customer_contacts, documents, document_versions,
 #   document_products, lots, document_lots, orders, order_items,
 #   lot_match_suggestions, processing_queue (INCLUDING ai_records / ai_fields so
 #   the multi-sublot shadow data comes along), reviewer_field_picks,
 #   reviewer_field_dismissals, reviewer_table_edits.
+#
+# CONFIGURATION, NOT JUST CONTENT. The registry vocabulary (requirements /
+#   claim_types / claim_type_requirements), the applicability table
+#   (supplier_requirements), the spec engine's inputs (spec_tests / spec_limits),
+#   the extraction prompt layers and the alert routes are all part of what an org
+#   IS. A clone that carried documents but none of these arrived LOOKING
+#   configured and EMPTY underneath -- the gap engine answered `not_configured`,
+#   spec checking judged nothing, and no alert routed anywhere. That is worse
+#   than an obviously bare tenant, because the emptiness is invisible. If you add
+#   a new per-tenant configuration table, add it here too.
+#
+# OWNER ROUTES -- recipients are REDACTED by default (see the node block for the
+#   full reasoning). owner_routes rows carry REAL people: a bare email or a
+#   portal user, one or the other (0091's CHECK). Copying those verbatim into a
+#   demo/rehearsal tenant means the clone can email a real person about documents
+#   in an org they have never heard of. So by default the clone keeps the owner
+#   LABEL and the row (the structure a human needs to see and refill), replaces
+#   the recipient with a per-row `@clone.invalid` placeholder, and sets
+#   `active = 0` -- which alert-routing.ts already treats as the off switch, so
+#   the clone honestly reports a routing GAP instead of pretending to be routed.
+#   `--with-recipients` copies them verbatim; --dry-run always states how many
+#   real addresses that would be.
 #
 # Intentionally NOT copied (non-essential for the COA rehearsal; noted, not
 # silently dropped):
@@ -72,6 +100,16 @@
 #   - records_* module tables (the spreadsheet/records product is orthogonal to COA).
 #   - audit_log / email_ingest_log  (history; not needed to exercise the pipeline).
 #   - *_fts / *_fts_map / search_reindex_jobs (virtual/shadow; rebuilt by reindex).
+#   - document_requirements / document_claims (per-DOCUMENT registry facts: what
+#     a given doc SATISFIES / TRIGGERS). NOT configuration, and out of scope for
+#     this pass -- but be aware of the consequence: the clone now carries the
+#     applicability side (supplier_requirements) WITHOUT the closure side, so a
+#     gap report in the clone reads "open" for requirements the source had
+#     closed. It is honest rather than wrong, but it is not a faithful copy.
+#   - naming_templates: NOT a choice -- the table does not exist. Migration 0014
+#     created it and 0018 DROPPED it. It sat in TABLE_ORDER for a long time doing
+#     nothing (the tableExists() guard skipped it every run) and was removed on
+#     2026-09-03. Do not re-add it; there is no such table to copy from.
 #   To pull any of these in later, add them to TABLE_ORDER in the embedded node
 #   program below (they follow the same remap pattern).
 #
@@ -100,6 +138,7 @@ DRY_RUN=0
 SKIP_CONFIRM=0
 PROD_OK=0
 NULL_USER_FKS=0
+WITH_RECIPIENTS=0       # 1 = copy owner_routes recipients verbatim (see header)
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -111,9 +150,13 @@ while [ $# -gt 0 ]; do
     --source-remote|--from-prod) SOURCE_REMOTE=1; shift ;;
     --i-understand-prod) PROD_OK=1; shift ;;
     --null-user-fks) NULL_USER_FKS=1; shift ;;
+    --with-recipients) WITH_RECIPIENTS=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes|-y) SKIP_CONFIRM=1; shift ;;
-    -h|--help) sed -n '2,99p' "$0"; exit 0 ;;
+    # Print the leading comment block, whatever length it has grown to. The
+    # old form was a hardcoded 'sed -n 2,99p', which both truncated the header
+    # and spilled shell code into --help once the header moved.
+    -h|--help) awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "$0"; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -203,7 +246,8 @@ trap 'rm -f "$CLONE_SQL" "$COUNTS"' EXIT
 
 # Export config for the node program. SRC_* drives source-row reads; DST_*
 # drives target-schema introspection (which tables/columns exist to write).
-export SRC_DB SRC_REMOTE DST_DB DST_REMOTE SRC_ID NEW_NAME NEW_SLUG DRY_RUN NULL_USER_FKS COUNTS
+export SRC_DB SRC_REMOTE DST_DB DST_REMOTE SRC_ID NEW_NAME NEW_SLUG DRY_RUN NULL_USER_FKS
+export WITH_RECIPIENTS COUNTS
 
 node <<'NODE' > "$CLONE_SQL"
 const { execFileSync } = require('child_process');
@@ -219,6 +263,7 @@ const NEW_NAME = process.env.NEW_NAME;
 const NEW_SLUG = process.env.NEW_SLUG;
 const DRY_RUN = process.env.DRY_RUN === '1';
 const NULL_USER_FKS = process.env.NULL_USER_FKS === '1';
+const WITH_RECIPIENTS = process.env.WITH_RECIPIENTS === '1';
 const COUNTS = process.env.COUNTS;
 
 const newId = () => crypto.randomUUID().replace(/-/g, '');
@@ -298,6 +343,15 @@ const FK = {
   products:                       { supplier_id: 'suppliers' },
   product_suppliers:              { product_id: 'products', supplier_id: 'suppliers' },
   document_types:                 { supplier_id: 'suppliers' },
+  // Registry vocabulary + applicability (0080 / 0087). requirements, claim_types
+  // and spec_tests have no FK but tenants, so they need no entry here.
+  claim_type_requirements:        { claim_type_id: 'claim_types', requirement_id: 'requirements' },
+  supplier_requirements:          { supplier_id: 'suppliers', requirement_id: 'requirements' },
+  // spec_limits' three scope columns are all NULLABLE (0084) -- an all-NULL scope
+  // is the tenant-wide default. The remap below only rewrites non-NULL values,
+  // so a tenant-wide limit stays tenant-wide.
+  spec_limits:                    { spec_test_id: 'spec_tests', supplier_id: 'suppliers', document_type_id: 'document_types', product_id: 'products' },
+  document_type_extraction_instructions: { document_type_id: 'document_types' },
   supplier_extraction_instructions:{ supplier_id: 'suppliers', document_type_id: 'document_types' },
   extraction_examples:            { document_type_id: 'document_types' },
   extraction_templates:           { supplier_id: 'suppliers', document_type_id: 'document_types' },
@@ -331,17 +385,82 @@ const SCOPE = {
   order_items:           { via: 'order_id', parent: 'orders' },
 };
 
+// --- owner_routes: a route is a REAL PERSON, and a clone is not their tenant ---
+//
+// 0091's CHECK is `(user_id IS NOT NULL) <> (email IS NOT NULL)`: every route
+// points at exactly one recipient, either a portal user or a bare address (a
+// broker, a site manager -- people who will never have an account, which is why
+// documents.owner was never converted into a user FK).
+//
+// Copying those verbatim is the one thing in this script that can reach OUTSIDE
+// the database. A clone exists to be experimented on: someone runs the renewal
+// job against it, or presses the notify button, and a real person gets mail
+// about documents in an org they have never heard of, from a tenant named
+// "CMF Rehearse". That is not a rehearsal, it is a live send.
+//
+// So the DEFAULT copies the STRUCTURE and not the RECIPIENTS:
+//   - owner_key / owner_label survive verbatim. They are the part a human needs
+//     to see -- the clone shows that 'QA', 'Insurance' and 'Purchasing' are the
+//     owners this org routes by, and which documents name them.
+//   - the recipient is replaced with a per-row placeholder at `clone.invalid`
+//     (RFC 2606 reserves .invalid; it can never resolve or deliver). Per-ROW,
+//     not per-label, because several rows may share one label and the unique
+//     index is (tenant_id, owner_key, COALESCE(user_id, email)) -- one shared
+//     placeholder would collapse three routes into one failed INSERT.
+//   - `active = 0`. This is the important half. alert-routing.ts requires
+//     `r.active = 1` and documents that flag as "the off switch" for a bare
+//     address, so an inactive route is NOT a recipient: the clone reports a
+//     routing GAP (`via: 'unrouted'` + an expirations.routing_gap audit row)
+//     instead of silently believing it is routed. Redaction alone would have
+//     recreated this script's original sin at a smaller scale -- something that
+//     LOOKS configured with nothing real behind it.
+//
+// `--with-recipients` opts back into the verbatim copy for the case that
+// justifies it: cloning an org for that same org's own staff to look at.
+// --dry-run always prints how many real addresses are involved either way.
+const ownerRouteAudit = { total: 0, portal_users: 0, bare_emails: 0, copied: WITH_RECIPIENTS };
+
+// Per-row placeholder recipient. Keeps the owner key legible so the redaction
+// is obvious on sight in the Owner Routes screen, and stays unique per row.
+function redactedRecipient(row, i) {
+  const base = String(row.owner_key || row.owner_label || 'owner')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'owner';
+  return `${base}-${i + 1}@clone.invalid`;
+}
+
 // FK-safe insertion order.
+//
+// Dependency edges that dictate the CONFIGURATION block below (per SCHEMA.md):
+//   requirements / claim_types / spec_tests    -> tenants only
+//   claim_type_requirements                    -> claim_types + requirements
+//   supplier_requirements                      -> suppliers + requirements
+//   spec_limits                                -> spec_tests, and optionally
+//                                                 suppliers / document_types /
+//                                                 products via its scope columns
+//   document_type_extraction_instructions      -> document_types
+//   owner_routes                               -> users (or a bare email)
+// suppliers / products / document_types are already above, so the whole block
+// slots in after them and before anything document-shaped.
 const TABLE_ORDER = [
   'suppliers',
   'products',
   'product_suppliers',
   'document_types',
+  // --- configuration: what the org IS, not what it has stored ---
+  'requirements',
+  'claim_types',
+  'claim_type_requirements',
+  'supplier_requirements',
+  'spec_tests',
+  'spec_limits',
+  'document_type_extraction_instructions',
   'supplier_extraction_instructions',
   'extraction_examples',
   'extraction_templates',
-  'naming_templates',
   'email_domain_mappings',
+  'owner_routes',
   'assignments',
   'teach_sessions',
   'teach_messages',
@@ -416,7 +535,26 @@ for (const table of TABLE_ORDER) {
     continue;
   }
 
-  counts.push({ table, rows: rows.length });
+  // Audit owner_routes BEFORE the zero-row bail, so --dry-run can state the
+  // real-recipient count in both the redacting and the --with-recipients case.
+  if (table === 'owner_routes') {
+    ownerRouteAudit.total = rows.length;
+    for (const r of rows) {
+      if (r.user_id != null) ownerRouteAudit.portal_users++;
+      else if (r.email != null) ownerRouteAudit.bare_emails++;
+    }
+    counts.push({
+      table,
+      rows: rows.length,
+      // No note on an empty table -- "recipients redacted" next to a 0 reads as
+      // a claim about rows that do not exist.
+      note: rows.length === 0
+        ? undefined
+        : WITH_RECIPIENTS ? 'recipients COPIED VERBATIM' : 'recipients redacted + active=0',
+    });
+  } else {
+    counts.push({ table, rows: rows.length });
+  }
   if (rows.length === 0) continue;
 
   // First pass: allocate new ids so self/cross refs within the batch resolve.
@@ -430,11 +568,41 @@ for (const table of TABLE_ORDER) {
   // NOT NULL DEFAULT 'auto') applies, instead of writing NULL. Always emit the
   // synthesized columns (id / tenant_id) even if absent in the source.
   const SYNTH = new Set(['id', 'tenant_id']);
+  // Placeholder recipient per owner_routes row (see redactedRecipient above).
+  // Built here rather than inline so the index is stable and unique per row.
+  const routeRedaction =
+    table === 'owner_routes' && !WITH_RECIPIENTS
+      ? new Map(rows.map((r, i) => [r.id, redactedRecipient(r, i)]))
+      : null;
+  // Redaction REWRITES these three rather than copying them, so they must be
+  // emitted whether or not the source row object carried the key. A user-shaped
+  // route whose `email` key went missing would otherwise be written with
+  // neither recipient and trip 0091's CHECK for the whole file.
+  if (routeRedaction) { SYNTH.add('user_id'); SYNTH.add('email'); SYNTH.add('active'); }
   for (const r of rows) {
     const writeCols = colNames.filter(c => SYNTH.has(c) || Object.prototype.hasOwnProperty.call(r, c));
     const vals = writeCols.map(c => {
       if (c === 'id') return sqlStr(remap[table].get(r.id));
       if (c === 'tenant_id') return sqlStr(newTenantId);
+      // owner_routes recipient policy. Handled HERE, ahead of the generic user-FK
+      // rules, for two reasons: user_id is not in USER_FK_COLS (other tables use
+      // that name for things this policy must not touch), and --null-user-fks
+      // must never be allowed to NULL it -- a route with neither user_id nor
+      // email violates 0091's CHECK and the whole file would fail.
+      if (table === 'owner_routes') {
+        if (routeRedaction) {
+          // Redacting: force the row into the email shape with a dead address.
+          if (c === 'user_id') return 'NULL';
+          if (c === 'email') return sqlStr(routeRedaction.get(r.id));
+          if (c === 'active') return '0';
+        } else if (c === 'user_id') {
+          // --with-recipients: keep the user, but the id has to exist in the
+          // TARGET or the FK dangles (typical in --from-prod). resolveUserFk
+          // substitutes a target user; it never returns NULL for a non-NULL
+          // input, so the CHECK stays satisfied.
+          return sqlStr(resolveUserFk(r[c]));
+        }
+      }
       if (c === 'created_at' || c === 'updated_at') {
         return r[c] == null ? 'NULL' : sqlStr(r[c]);
       }
@@ -471,7 +639,7 @@ for (const table of TABLE_ORDER) {
 }
 
 // Persist the per-table counts for the bash side to render.
-fs.writeFileSync(COUNTS, JSON.stringify({ newTenantId, counts }));
+fs.writeFileSync(COUNTS, JSON.stringify({ newTenantId, counts, ownerRouteAudit }));
 
 if (DRY_RUN) {
   // Emit nothing to the SQL file in dry-run.
@@ -487,15 +655,34 @@ NODE
 echo "Per-table row counts to copy (source tenant -> new tenant):"
 node -e '
   const fs=require("fs");
-  const {newTenantId,counts}=JSON.parse(fs.readFileSync(process.env.COUNTS,"utf8"));
+  const {newTenantId,counts,ownerRouteAudit}=JSON.parse(fs.readFileSync(process.env.COUNTS,"utf8"));
   let total=0;
   for(const c of counts){
     const note=c.note?("  ("+c.note+")"):"";
-    console.log("  "+c.table.padEnd(34)+String(c.rows).padStart(6)+note);
+    console.log("  "+c.table.padEnd(38)+String(c.rows).padStart(6)+note);
     if(c.table!=="tenants") total+=c.rows;
   }
-  console.log("  "+"".padEnd(34)+"------");
-  console.log("  "+"TOTAL (excl. tenant row)".padEnd(34)+String(total).padStart(6));
+  console.log("  "+"".padEnd(38)+"------");
+  console.log("  "+"TOTAL (excl. tenant row)".padEnd(38)+String(total).padStart(6));
+
+  // Say out loud how many REAL addresses this run would put in the clone. This
+  // is the one number in the whole report that describes something able to
+  // leave the database, so it gets its own paragraph rather than a column.
+  const a=ownerRouteAudit||{total:0,portal_users:0,bare_emails:0,copied:false};
+  const real=(a.portal_users||0)+(a.bare_emails||0);
+  console.log("\n  owner_routes recipients:");
+  if(a.total===0){
+    console.log("    none -- the source tenant has no owner routes.");
+  } else if(a.copied){
+    console.log("    "+real+" REAL recipient(s) WOULD BE COPIED VERBATIM ("+a.bare_emails+" bare email address(es), "+a.portal_users+" portal user(s)).");
+    console.log("    --with-recipients is set. The clone CAN email these people. Drop the flag to redact.");
+  } else {
+    console.log("    0 real email addresses would be copied.");
+    console.log("    "+a.total+" route(s) cloned as label + structure only: recipient replaced with a");
+    console.log("    dead @clone.invalid placeholder and active=0, so the clone routes NOTHING.");
+    console.log("    ("+a.bare_emails+" bare email address(es) and "+a.portal_users+" portal user(s) in the source would be");
+    console.log("     copied if you passed --with-recipients.)");
+  }
   console.log("\n  new tenant id (would be): "+newTenantId);
 '
 echo
