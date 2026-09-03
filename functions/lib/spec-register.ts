@@ -26,6 +26,8 @@ import { generateId } from './db';
 import { sendEmail, buildSpecAlertEmail } from './email';
 import { mintAlertLink, alertLinkUrl } from './alert-links';
 import { resolveAlertRouting } from './alert-routing';
+import { isModuleEnabledForTenant } from './module-access';
+import { MODULES } from '../../shared/modules';
 import type { AlertRecipient } from './alert-routing';
 import type { SpecVerdict } from '../../shared/specCheck';
 import type { ConfiguredLimit } from '../../shared/specCheck';
@@ -235,6 +237,23 @@ export async function notifySpecFailures(
 ): Promise<number> {
   if (failures.length === 0) return 0;
   if (!apiKey) return 0;
+
+  // MODULE FILTER — compute and store, but do not send.
+  //
+  // The register is EVIDENCE attached to a document: what was judged, against
+  // which limit, and who approved it anyway. That has to be written whatever a
+  // tenant has switched on, or turning a module off would quietly create a gap
+  // in a compliance record. `registerSpecChecks` has already run by the time
+  // anything reaches here, and it is not gated.
+  //
+  // The EMAIL is the part a tenant switched off. Approvals happen on machine
+  // paths with no signed-in caller (an ingest, a queue approval), so the
+  // middleware gate cannot reach this send — the check has to be here. Fails
+  // OPEN, like every other module read: a safety alert is not the thing to
+  // drop because a lookup failed.
+  if (!(await isModuleEnabledForTenant(db, ctx.tenantId, MODULES.compliance.key))) {
+    return 0;
+  }
 
   try {
     const recipients = await resolveAlertRecipients(

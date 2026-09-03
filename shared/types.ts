@@ -13,6 +13,11 @@ import type { SpecVerdict, SpecVerdictKind, SpecOperator } from './specCheck';
 // write one of its literals.
 export type { SpecCriticality } from './specCriticality';
 import type { SpecCriticality } from './specCriticality';
+// Module keys (migration 0099). Same discipline again: the vocabulary and the
+// resolver live in shared/modules.ts, and no module-key literal is written
+// anywhere else — including in the API shapes below.
+export type { ModuleKey } from './modules';
+import type { ModuleKey } from './modules';
 
 // === Roles & Enums ===
 export type Role = 'super_admin' | 'org_admin' | 'user' | 'reader';
@@ -4849,4 +4854,93 @@ export interface UpdateRequestLineRequest {
   owner?: string | null;
   tier?: SupplierRequirementTier;
   sort_order?: number;
+}
+
+// === Modules (migration 0099) ===
+// The vocabulary itself lives in `shared/modules.ts` and nowhere else; these
+// are only the API envelopes around it, so a rename of a module key still
+// fails to compile here.
+
+export interface ModuleSummary {
+  key: ModuleKey;
+  label: string;
+  blurb: string;
+  /** Resolved, not raw: an absent `tenant_modules` row reports the default. */
+  enabled: boolean;
+  /**
+   * True when a row exists for this (tenant, module). Distinguishes "somebody
+   * decided this" from "nobody has ever opened the screen", which is the
+   * difference between a toggle worth asking about and a default.
+   */
+  configured: boolean;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+export interface ModuleListResponse {
+  tenant_id: string;
+  modules: ModuleSummary[];
+}
+
+export interface UpdateModuleRequest {
+  enabled: boolean;
+  /** super_admin only. */
+  tenant_id?: string;
+}
+
+export interface ModuleUpdateResponse {
+  module: ModuleSummary;
+}
+
+/** One department/function row of the visibility grid. */
+export interface ModuleVisibilityFunction {
+  owner_key: string;
+  owner_label: string;
+  /**
+   * False means UNCONSTRAINED — no rows, so this function sees every module
+   * the tenant has. Absence means unconstrained, deliberately the inverse of
+   * `owner_routes`; see `shared/modules.ts`.
+   */
+  constrained: boolean;
+  /** Empty when unconstrained. Never empty when `constrained` is true. */
+  modules: ModuleKey[];
+  /** How many owner_routes resolve this label — i.e. how many people it moves. */
+  route_count: number;
+  /**
+   * True when the label exists only on `owner_routes` and has not been
+   * promoted into `owner_labels` yet. It can still be configured: the PUT
+   * declares it on the way through.
+   */
+  declared: boolean;
+}
+
+export interface ModuleVisibilityResponse {
+  tenant_id: string;
+  modules: ModuleSummary[];
+  functions: ModuleVisibilityFunction[];
+}
+
+export interface UpdateModuleVisibilityRequest {
+  constrained: boolean;
+  /** Required and non-empty when `constrained` is true. */
+  modules?: string[];
+  /** super_admin only. */
+  tenant_id?: string;
+}
+
+export interface ModuleVisibilityUpdateResponse {
+  function: ModuleVisibilityFunction;
+}
+
+/** What the signed-in user may see. Read by the nav and the router. */
+export interface ModuleAccessResponse {
+  tenant_id: string | null;
+  role: Role;
+  /** The tenant ceiling, before this person's functions narrow it. */
+  tenant_enabled: ModuleKey[];
+  visible: ModuleKey[];
+  /** The functions this user holds, for "why can't I see X". */
+  functions: string[];
+  /** True when a lookup failed and the answer fell open. */
+  degraded: boolean;
 }

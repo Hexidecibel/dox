@@ -1,4 +1,5 @@
 import { verifyToken, hashApiKey } from '../lib/auth';
+import { checkModuleAccess } from '../lib/module-access';
 import type { Env, User } from '../lib/types';
 
 const corsHeaders: Record<string, string> = {
@@ -261,7 +262,59 @@ const auth: PagesFunction<Env> = async (context) => {
   return context.next();
 };
 
-export const onRequest: PagesFunction<Env>[] = [cors, auth];
+/**
+ * The module gate — hidden has to mean unreachable.
+ *
+ * Runs AFTER `auth`, so `context.data.user` is already resolved however the
+ * caller authenticated. That ordering is the whole point of API KEYS
+ * INHERITING THE GATE: a key authenticates as the user who created it, so it
+ * arrives here as that user and is narrowed exactly as that user is. A key
+ * that walked past this would make "disabled" mean nothing more than "hidden
+ * from the nav".
+ *
+ * NO USER MEANS NO GATE. Public routes reach this handler too (the `auth`
+ * handler calls `next()` for them without setting a user), and so do the
+ * machine paths — `/api/webhooks/*`, `/api/sources/poll`,
+ * `/api/expirations/run-scheduled`, and the token-gated public reads behind
+ * `/alert/`, `/r/`, `/u/`, `/a/` and `/drop/`. There is nobody to resolve
+ * visibility for on those, which is PRECISELY why the scheduled jobs filter
+ * themselves (see `functions/lib/module-access.ts`,
+ * `isModuleEnabledForTenant`).
+ *
+ * ⚠ `/api/graphql` is in PUBLIC_ROUTES and authenticates itself, so it never
+ * reaches this gate with a user. Its visible set is computed in
+ * `functions/lib/graphql/context.ts` instead.
+ *
+ * 403, NOT 404. The caller is authenticated and the module is listed — greyed
+ * — on the Settings screen, so the honest answer is "this exists and you may
+ * not have it". A 404 would be indistinguishable from a genuinely missing
+ * record and would make every "it just stopped working" ticket unanswerable.
+ *
+ * FAILS OPEN on a database error, by construction: `checkModuleAccess` returns
+ * "allowed" when it cannot read, and logs. Module visibility is a SCOPE
+ * control, not a confidentiality boundary — tenant isolation
+ * (`requireTenantAccess`) and the four permission tiers (`requireRole`) are
+ * the security boundary and are untouched by any of this. Failing closed on a
+ * transient D1 blip would take the whole app down to protect a preference.
+ */
+const moduleGate: PagesFunction<Env> = async (context) => {
+  const user = context.data.user as User | undefined;
+  if (!user) return context.next();
+
+  const url = new URL(context.request.url);
+  // Skips both reads for every path no module owns, which is most of them —
+  // `/api/documents` included, deliberately: it is a shared read primitive
+  // that compliance and fulfillment both depend on. See `shared/modules.ts`.
+  const denial = await checkModuleAccess(context.env.DB, user, url.pathname, context.data);
+  if (!denial) return context.next();
+
+  return new Response(
+    JSON.stringify({ error: denial.message, code: denial.code, module: denial.module }),
+    { status: 403, headers: { 'Content-Type': 'application/json' } },
+  );
+};
+
+export const onRequest: PagesFunction<Env>[] = [cors, auth, moduleGate];
 
 // Durable Object classes are NOT hosted by this Pages project. They live
 // in dedicated Workers (see `workers/sheet-session/`) and are bound here

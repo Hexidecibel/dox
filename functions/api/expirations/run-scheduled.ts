@@ -52,6 +52,8 @@
 import type { Env } from '../../lib/types';
 import { runRenewalAlerts, type RenewalAlertResult } from '../../lib/renewal-alerts';
 import { DEFAULT_WINDOW_DAYS } from '../../lib/expirations';
+import { isModuleEnabledForTenant } from '../../lib/module-access';
+import { MODULES } from '../../../shared/modules';
 
 const LOCK_TTL_MS = 15 * 60 * 1000;
 const LOCK_KEY = 'renewal_alert_lock';
@@ -179,7 +181,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           .all<{ id: string }>()
       : await context.env.DB.prepare(`SELECT id FROM tenants WHERE active = 1`).all<{ id: string }>();
 
-    const tenantIds = (tenantRes.results ?? []).map((t) => t.id);
+    const allTenantIds = (tenantRes.results ?? []).map((t) => t.id);
+
+    // MODULE FILTER — the machine path has to gate itself.
+    //
+    // This endpoint is allowlisted past `_middleware.ts` (there is no user to
+    // resolve, only a bearer token), so the module gate that stops a person
+    // reaching a switched-off surface cannot possibly run here. A tenant that
+    // turned Compliance off would keep receiving renewal digests every
+    // morning: a module you HID that still EMAILS you is the bug the customer
+    // reports, and it is worse than the surface having stayed visible, because
+    // they cannot even find the screen that explains where the mail is coming
+    // from.
+    //
+    // `MODULES.compliance.key` rather than the bare string: renaming the
+    // module then fails to compile here, which is the whole discipline in
+    // `shared/modules.ts`. Fails OPEN per tenant — a tenant keeps its alerts
+    // if we cannot read the table.
+    const tenantIds: string[] = [];
+    for (const tenantId of allTenantIds) {
+      if (await isModuleEnabledForTenant(context.env.DB, tenantId, MODULES.compliance.key)) {
+        tenantIds.push(tenantId);
+      }
+    }
+    const skippedModuleOff = allTenantIds.length - tenantIds.length;
 
     const results: RenewalAlertResult[] = [];
     for (const tenantId of tenantIds) {
@@ -214,6 +239,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       window_days: windowDays,
       tenants_checked: tenantIds.length,
       tenants_completed: results.length,
+      // Reported rather than silent: an operator reading a run that alerted
+      // fewer tenants than yesterday needs to see that the difference was a
+      // configuration choice and not a failure.
+      tenants_skipped_module_off: skippedModuleOff,
       emails_sent: results.reduce((n, r) => n + r.groups.filter((g) => g.sent).length, 0),
       documents_alerted: results.reduce((n, r) => n + r.document_count, 0),
       documents_suppressed: results.reduce((n, r) => n + r.suppressed_count, 0),
