@@ -9,8 +9,26 @@
 #   requirements             what it SATISFIES          (layer 2)
 #   claim_types              what it TRIGGERS           (layer 3)
 #   claim_type_requirements  which requirement a claim OPENS
+# ...plus everything a tenant needs to DEMONSTRATE the system rather than merely
+# hold a vocabulary:
+#   document_type_requirements          which items a document of this TYPE closes,
+#                                       so an approved document stops closing nothing
+#   document_types.default_owner        the department a renewal alert routes to
+#   document_type_extraction_instructions  how to READ each type
+#   owner_labels                        the departments themselves
+#   spec_tests + spec_limits            the analyte SYNONYM MAP and one tenant-wide
+#                                       acceptance limit each, so a COA result is
+#                                       judged instead of landing 'not_checked'
+#   tenant_modules                      which parts of the portal this vertical uses
+#
+# A pack also DEFINES requirement packets and a teaching example that it
+# deliberately does NOT seed — see the "deliberately never writes" block in
+# bin/lib/starter-packs.mjs, and each pack's own `_deliberately_omitted`.
+#
 # Packs ship for `fsqa` (food safety) and `finance`. Adding a vertical is a new
 # JSON file — no change to this script. Run `--list-packs` to see them.
+# (`npm run build:packs` regenerates the copy the Pages Functions bundle serves
+# to the browser; Workers have no filesystem.)
 #
 # Usage:
 #   ./bin/create-tenant --name "Medosweet Farms" --slug medosweet [--id <id>]
@@ -53,7 +71,7 @@ while [ $# -gt 0 ]; do
     --admin-email) ADMIN_EMAIL="$2"; shift ;;
     --admin-name) ADMIN_NAME="$2"; shift ;;
     --admin-role) ADMIN_ROLE="$2"; shift ;;
-    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,60p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
   shift

@@ -6,59 +6,385 @@
     "This file is DATA. Edit it with a text editor — no code changes needed.",
     "document_types = what a document IS. requirements = the checklist line items it CLOSES.",
     "claim_types + claim_rules = what a document ASSERTS and which requirement that opens.",
+    "",
+    "On a document type:",
+    "  closes                  = the requirement slugs a document of this TYPE normally closes. An EMPTY list is a real",
+    "                            answer, not an omission: an invoice or a receipt is filed and searched, and closes no",
+    "                            period-close line item at all.",
+    "  owner                   = the department that owns this type's renewals. Must be one of owner_labels below.",
+    "  extraction_instructions = the document-type layer of the extraction prompt. A string, or an array of lines.",
+    "",
+    "owner_labels        = the departments this vertical has. LABELS ONLY — a human adds the actual people.",
+    "requirement_packets = named sets of requirements, applied to ONE counterparty at a time. Nothing is seeded from these.",
+    "teach               = the worked example the setup wizard teaches one concept with.",
+    "modules             = which parts of the portal a tenant seeded from this pack starts with.",
+    "",
     "Seeding is additive (INSERT OR IGNORE) — re-running never overwrites edits made in the admin UI."
   ],
   "_deliberately_omitted": [
     "Retention PERIODS (7 years, permanent, ...). We do not know this client's schedule and a wrong number in a compliance tool is worse than no number. Retention is a per-document field, not a vocabulary row, and is parked in backlog.md.",
     "Jurisdiction- or framework-specific checklists (SOX, GAAP/IFRS, IRS publication cites). Those are a real deliverable, not a starter guess.",
     "Expiry / renewal defaults per document type — document_types has no renewal columns today (renewal lives per document), so any default here would be fiction.",
-    "A large claim taxonomy. Only the two claims that unambiguously open a named document are seeded."
+    "A large claim taxonomy. Only the two claims that unambiguously open a named document are seeded.",
+    "spec_tests / spec_limits — and this omission is the format working, not a gap. A spec limit judges a numeric ANALYTE RESULT printed on a certificate against an acceptance threshold. A bank statement has no analyte. Seeding an empty synonym map here would have been the same mistake as seeding six requirements onto every supplier: configuration that looks present and judges nothing.",
+    "supplier_requirements — a new tenant has zero counterparties, so there is nothing to apply a packet to. Packets are defined below and applied one counterparty at a time.",
+    "owner_routes — a route needs a real recipient. This pack supplies department LABELS; a human supplies the people.",
+    "extraction_context — tenants.extraction_context (0072) is a whole-block replacement, so a pack writing it would overwrite an edited block on every re-run."
   ],
-
+  "owner_labels": [
+    {
+      "label": "Accounting",
+      "description": "The period close: ledgers, reconciliations, statements, payroll and the counterparty paperwork that feeds them."
+    },
+    {
+      "label": "Tax",
+      "description": "Filed returns, information returns and whatever the outside auditor asks for."
+    },
+    {
+      "label": "Legal",
+      "description": "Executed agreements and the board approvals behind them."
+    },
+    {
+      "label": "Risk",
+      "description": "Insurance policies and coverage. Frequently a broker rather than a portal user, which is why a route may point at a bare email address."
+    }
+  ],
   "document_types": [
-    { "name": "Invoice", "description": "Vendor or customer invoice." },
-    { "name": "Purchase Order", "description": "Authorized purchase commitment." },
-    { "name": "Receipt", "description": "Proof of payment." },
-    { "name": "Bank Statement", "description": "Periodic statement from a financial institution." },
-    { "name": "Bank Reconciliation", "description": "Reconciliation of a bank statement to the ledger." },
-    { "name": "General Ledger Export", "description": "Ledger detail for a fiscal period." },
-    { "name": "Trial Balance", "description": "Period-end trial balance." },
-    { "name": "Journal Entry Support", "description": "Backup documentation for a manual journal entry." },
-    { "name": "Financial Statement", "description": "Balance sheet, income statement or cash-flow statement." },
-    { "name": "Tax Return", "description": "Filed return for a tax period." },
-    { "name": "Payroll Register", "description": "Per-period payroll detail." },
-    { "name": "Fixed Asset Register", "description": "Asset listing with cost and accumulated depreciation." },
-    { "name": "External Audit Report", "description": "Report issued by an outside auditor." },
-    { "name": "Contract", "description": "Executed agreement with a counterparty." },
-    { "name": "Insurance Policy", "description": "Policy document with coverage and term." },
-    { "name": "Board Minutes", "description": "Minutes recording board approvals." },
-    { "name": "W-9", "slug": "w-9", "description": "Counterparty tax identification form." },
-    { "name": "1099", "slug": "1099", "description": "Information return issued to a contractor." }
+    {
+      "name": "Invoice",
+      "slug": "invoice",
+      "description": "Vendor or customer invoice.",
+      "owner": "Accounting",
+      "closes": [],
+      "extraction_instructions": [
+        "An invoice is a demand for payment against one counterparty and one period. Everything on it belongs to that single transaction.",
+        "",
+        "- supplier_name is the company ISSUING the invoice — the letterhead and the remit-to block will agree. customer_name is the BILL TO / SOLD TO party. Getting these the wrong way round files the document against the wrong counterparty.",
+        "- Capture the invoice number, the invoice date and the due date under the labels the document prints for them. A payment-terms string (\"Net 30\", \"2/10 Net 30\") is captured as printed and never converted into a due date the invoice did not state.",
+        "- Emit the line items as a table named \"line_items\" using the document's own column headings (commonly Description, Quantity, Unit Price, Amount).",
+        "- Copy every amount EXACTLY as printed, including its currency symbol or code where one appears. Never convert a currency, never re-scale a figure, and never compute a total the invoice did not print.",
+        "- A purchase-order number, contract number or job number printed on the invoice is a REFERENCE to another document. Capture it under its own label; it does not make this document a purchase order.",
+        "- document_expires_on is null. An invoice does not expire; it is paid, disputed or written off."
+      ]
+    },
+    {
+      "name": "Purchase Order",
+      "slug": "purchase-order",
+      "description": "Authorized purchase commitment.",
+      "owner": "Accounting",
+      "closes": []
+    },
+    {
+      "name": "Receipt",
+      "slug": "receipt",
+      "description": "Proof of payment.",
+      "owner": "Accounting",
+      "closes": []
+    },
+    {
+      "name": "Bank Statement",
+      "slug": "bank-statement",
+      "description": "Periodic statement from a financial institution.",
+      "owner": "Accounting",
+      "closes": [],
+      "extraction_instructions": [
+        "A bank statement covers one ACCOUNT for one PERIOD, and both of those are the point of filing it.",
+        "",
+        "- Capture the institution name, the account name and the statement period start and end dates as printed.",
+        "- The account number is nearly always MASKED on the statement (\"****4471\"). Capture it exactly as shown, mask included. Never reconstruct, unmask or pad an account number.",
+        "- Capture the opening and closing balances under the labels the statement prints. Do not compute either one from the transaction list, and do not correct a balance that does not appear to foot — a statement that does not reconcile is a finding, not a transcription error to fix.",
+        "- Emit the transactions as a table named \"transactions\" with the statement's own columns (commonly Date, Description, Debit, Credit, Balance). Keep debits and credits in the columns they were printed in; never net them into a single signed figure.",
+        "- Interest, fees and adjustments are ordinary transaction rows unless the statement gives them their own summary block, in which case capture that block under its printed heading.",
+        "- document_expires_on is null: a statement covers a period that has already closed."
+      ]
+    },
+    {
+      "name": "Bank Reconciliation",
+      "slug": "bank-reconciliation",
+      "description": "Reconciliation of a bank statement to the ledger.",
+      "owner": "Accounting",
+      "closes": [
+        "bank-reconciliations-on-file"
+      ]
+    },
+    {
+      "name": "General Ledger Export",
+      "slug": "general-ledger-export",
+      "description": "Ledger detail for a fiscal period.",
+      "owner": "Accounting",
+      "closes": [
+        "general-ledger-on-file"
+      ]
+    },
+    {
+      "name": "Trial Balance",
+      "slug": "trial-balance",
+      "description": "Period-end trial balance.",
+      "owner": "Accounting",
+      "closes": [
+        "trial-balance-on-file"
+      ]
+    },
+    {
+      "name": "Journal Entry Support",
+      "slug": "journal-entry-support",
+      "description": "Backup documentation for a manual journal entry.",
+      "owner": "Accounting",
+      "closes": [
+        "journal-entry-support-on-file"
+      ]
+    },
+    {
+      "name": "Financial Statement",
+      "slug": "financial-statement",
+      "description": "Balance sheet, income statement or cash-flow statement.",
+      "owner": "Accounting",
+      "closes": [
+        "financial-statements-on-file"
+      ]
+    },
+    {
+      "name": "Tax Return",
+      "slug": "tax-return",
+      "description": "Filed return for a tax period.",
+      "owner": "Tax",
+      "closes": [
+        "tax-return-on-file"
+      ]
+    },
+    {
+      "name": "Payroll Register",
+      "slug": "payroll-register",
+      "description": "Per-period payroll detail.",
+      "owner": "Accounting",
+      "closes": [
+        "payroll-register-on-file"
+      ]
+    },
+    {
+      "name": "Fixed Asset Register",
+      "slug": "fixed-asset-register",
+      "description": "Asset listing with cost and accumulated depreciation.",
+      "owner": "Accounting",
+      "closes": [
+        "fixed-asset-register-on-file"
+      ]
+    },
+    {
+      "name": "External Audit Report",
+      "slug": "external-audit-report",
+      "description": "Report issued by an outside auditor.",
+      "owner": "Tax",
+      "closes": [
+        "external-audit-report-on-file"
+      ]
+    },
+    {
+      "name": "Contract",
+      "slug": "contract",
+      "description": "Executed agreement with a counterparty.",
+      "owner": "Legal",
+      "closes": [
+        "executed-contract-on-file"
+      ],
+      "extraction_instructions": [
+        "An executed agreement. The parties, the term and the signatures are what makes it filable; the body is prose and is not a field.",
+        "",
+        "- Capture every named party with the role the contract gives it (\"Supplier\", \"Vendor\", \"Client\", \"Licensor\"). supplier_name is the counterparty; customer_name is us. Where the preamble defines short names (\"...hereinafter 'the Supplier'\"), capture the legal entity name, not the short name.",
+        "- Capture the effective date, the term and the expiry or renewal date under the labels the contract prints. document_expires_on is the end of the CURRENT term only. An auto-renewal clause is captured as text under its own label and never turned into a future date the document did not state.",
+        "- Capture the notice period for termination as printed, in the units printed.",
+        "- Capture each signature block: signatory name, title, and the date beside that signature. An unsigned or undated signature block is captured as empty — it is the single most important thing to report honestly about an agreement, and inferring a date from elsewhere in the document destroys it.",
+        "- Amounts, rates and minimums stay exactly as printed, with the currency the contract printed. Never annualize, prorate or convert.",
+        "- Exhibits and schedules are part of the same document. Where a schedule is a table, emit it under its own printed name."
+      ]
+    },
+    {
+      "name": "Insurance Policy",
+      "slug": "insurance-policy",
+      "description": "Policy document with coverage and term.",
+      "owner": "Risk",
+      "closes": [
+        "insurance-certificate-on-file"
+      ]
+    },
+    {
+      "name": "Board Minutes",
+      "slug": "board-minutes",
+      "description": "Minutes recording board approvals.",
+      "owner": "Legal",
+      "closes": [
+        "board-approval-on-file"
+      ]
+    },
+    {
+      "name": "W-9",
+      "slug": "w-9",
+      "description": "Counterparty tax identification form.",
+      "owner": "Accounting",
+      "closes": [
+        "counterparty-w9-on-file"
+      ]
+    },
+    {
+      "name": "1099",
+      "slug": "1099",
+      "description": "Information return issued to a contractor.",
+      "owner": "Tax",
+      "closes": []
+    }
   ],
-
   "requirements": [
-    { "name": "Trial Balance on file", "slug": "trial-balance-on-file", "checklist": "Period Close" },
-    { "name": "General Ledger on file", "slug": "general-ledger-on-file", "checklist": "Period Close" },
-    { "name": "Bank Reconciliations on file", "slug": "bank-reconciliations-on-file", "checklist": "Period Close" },
-    { "name": "Financial Statements on file", "slug": "financial-statements-on-file", "checklist": "Period Close" },
-    { "name": "Payroll Register on file", "slug": "payroll-register-on-file", "checklist": "Period Close" },
-    { "name": "Fixed Asset Register on file", "slug": "fixed-asset-register-on-file", "checklist": "Period Close" },
-    { "name": "Journal Entry Support on file", "slug": "journal-entry-support-on-file", "checklist": "Period Close" },
-    { "name": "Board Approval on file", "slug": "board-approval-on-file", "checklist": "Period Close" },
-    { "name": "Tax Return on file", "slug": "tax-return-on-file", "checklist": "Tax & Audit" },
-    { "name": "External Audit Report on file", "slug": "external-audit-report-on-file", "checklist": "Tax & Audit" },
-    { "name": "Counterparty W-9 on file", "slug": "counterparty-w9-on-file", "checklist": "Counterparty" },
-    { "name": "Executed Contract on file", "slug": "executed-contract-on-file", "checklist": "Counterparty" },
-    { "name": "Insurance Certificate on file", "slug": "insurance-certificate-on-file", "checklist": "Counterparty" }
+    {
+      "name": "Trial Balance on file",
+      "slug": "trial-balance-on-file",
+      "checklist": "Period Close"
+    },
+    {
+      "name": "General Ledger on file",
+      "slug": "general-ledger-on-file",
+      "checklist": "Period Close"
+    },
+    {
+      "name": "Bank Reconciliations on file",
+      "slug": "bank-reconciliations-on-file",
+      "checklist": "Period Close"
+    },
+    {
+      "name": "Financial Statements on file",
+      "slug": "financial-statements-on-file",
+      "checklist": "Period Close"
+    },
+    {
+      "name": "Payroll Register on file",
+      "slug": "payroll-register-on-file",
+      "checklist": "Period Close"
+    },
+    {
+      "name": "Fixed Asset Register on file",
+      "slug": "fixed-asset-register-on-file",
+      "checklist": "Period Close"
+    },
+    {
+      "name": "Journal Entry Support on file",
+      "slug": "journal-entry-support-on-file",
+      "checklist": "Period Close"
+    },
+    {
+      "name": "Board Approval on file",
+      "slug": "board-approval-on-file",
+      "checklist": "Period Close"
+    },
+    {
+      "name": "Tax Return on file",
+      "slug": "tax-return-on-file",
+      "checklist": "Tax & Audit"
+    },
+    {
+      "name": "External Audit Report on file",
+      "slug": "external-audit-report-on-file",
+      "checklist": "Tax & Audit"
+    },
+    {
+      "name": "Counterparty W-9 on file",
+      "slug": "counterparty-w9-on-file",
+      "checklist": "Counterparty"
+    },
+    {
+      "name": "Executed Contract on file",
+      "slug": "executed-contract-on-file",
+      "checklist": "Counterparty"
+    },
+    {
+      "name": "Insurance Certificate on file",
+      "slug": "insurance-certificate-on-file",
+      "checklist": "Counterparty"
+    }
   ],
-
   "claim_types": [
-    { "name": "Externally Audited Period", "slug": "externally-audited", "subject_grain": "tenant", "description": "The document states the period was audited by an outside firm — the audit report itself then has to be on file." },
-    { "name": "Reportable Contractor Payment", "slug": "reportable-contractor-payment", "subject_grain": "supplier", "description": "The document records a payment to a contractor that triggers information reporting — the counterparty W-9 has to be on file." }
+    {
+      "name": "Externally Audited Period",
+      "slug": "externally-audited",
+      "subject_grain": "tenant",
+      "description": "The document states the period was audited by an outside firm — the audit report itself then has to be on file."
+    },
+    {
+      "name": "Reportable Contractor Payment",
+      "slug": "reportable-contractor-payment",
+      "subject_grain": "supplier",
+      "description": "The document records a payment to a contractor that triggers information reporting — the counterparty W-9 has to be on file."
+    }
   ],
-
   "claim_rules": [
-    { "claim": "externally-audited", "requires": ["external-audit-report-on-file"] },
-    { "claim": "reportable-contractor-payment", "requires": ["counterparty-w9-on-file"], "recommends": ["executed-contract-on-file"] }
-  ]
+    {
+      "claim": "externally-audited",
+      "requires": [
+        "external-audit-report-on-file"
+      ]
+    },
+    {
+      "claim": "reportable-contractor-payment",
+      "requires": [
+        "counterparty-w9-on-file"
+      ],
+      "recommends": [
+        "executed-contract-on-file"
+      ]
+    }
+  ],
+  "requirement_packets": [
+    {
+      "name": "Period Close",
+      "slug": "period-close",
+      "default": true,
+      "description": "The binder for one fiscal period. Applied to the entity being closed, not to a counterparty.",
+      "requirements": [
+        "trial-balance-on-file",
+        "general-ledger-on-file",
+        "bank-reconciliations-on-file",
+        "financial-statements-on-file"
+      ],
+      "recommends": [
+        "payroll-register-on-file",
+        "fixed-asset-register-on-file",
+        "journal-entry-support-on-file"
+      ]
+    },
+    {
+      "name": "Counterparty Onboarding",
+      "slug": "counterparty-onboarding",
+      "description": "What a new vendor or contractor owes before they are paid. Applied one counterparty at a time — the same discipline as the food-safety pack, for the same reason: applied in bulk it becomes a checklist that is uniform and wrong.",
+      "requirements": [
+        "counterparty-w9-on-file",
+        "executed-contract-on-file"
+      ],
+      "recommends": [
+        "insurance-certificate-on-file"
+      ]
+    }
+  ],
+  "teach": {
+    "document_type": "bank-reconciliation",
+    "closes": [
+      "bank-reconciliations-on-file"
+    ],
+    "decoy": "general-ledger-on-file",
+    "decoy_reason": "A reconciliation QUOTES the ledger balance it is reconciling to. It is not the ledger, and filing it against the General Ledger line item leaves that line item looking closed by a document that contains none of the detail. A document TYPE is not a checklist REQUIREMENT — that is the one idea this screen exists to teach.",
+    "also_closed_by": {
+      "requirement": "general-ledger-on-file",
+      "document_type": "general-ledger-export"
+    },
+    "sample_file": null,
+    "_sample_file_note": "NULL until a real sample document ships. The wizard renders this in the PDF viewer on the teaching screen; a path here that does not resolve is a broken screen, so it stays null rather than naming a file nobody has produced yet. Put the file under public/samples/ and name it here when there is one."
+  },
+  "modules": {
+    "default_on": [
+      "library",
+      "compliance",
+      "records"
+    ],
+    "default_off": [
+      "fulfillment"
+    ],
+    "_note": "Order Fulfillment is off for the same reason in every vertical that does not ship product: four surfaces that would render empty forever."
+  }
 }

@@ -16,10 +16,38 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { packToSql, packSummary, normalizePack } from './lib/starter-packs.mjs';
+import { packToSql, packSummary, summaryLine, normalizePack } from './lib/starter-packs.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PACK_DIR = join(__dirname, '..', 'starter-packs');
+
+/**
+ * The module keys this build knows, read out of shared/modules.ts.
+ *
+ * BEST EFFORT, AND SILENT WHEN IT FAILS. `shared/modules.ts` is TypeScript and
+ * bin/lib/starter-packs.mjs imports nothing, so there is no honest way to
+ * import the real `MODULE_KEYS` here. A regex over the one `as const` array
+ * gives the CLI enough to WARN about a stale module key; when the shape of
+ * that file changes, this returns null and the check is skipped rather than
+ * failing a render. That asymmetry is the point — a pack must not become a
+ * build dependency of whoever owns the nav.
+ *
+ * The authoritative check lives in tests/unit/starter-packs.test.ts, which
+ * imports MODULE_KEYS properly.
+ */
+function readModuleKeys() {
+  try {
+    const src = readFileSync(join(__dirname, '..', 'shared', 'modules.ts'), 'utf8');
+    const m = src.match(/MODULE_KEYS\s*=\s*\[([^\]]*)\]\s*as const/);
+    if (!m) return null;
+    const keys = [...m[1].matchAll(/'([^']+)'|"([^"]+)"/g)].map((x) => x[1] || x[2]);
+    return keys.length ? keys : null;
+  } catch {
+    return null;
+  }
+}
+
+const MODULE_KEYS = readModuleKeys();
 
 function listPacks() {
   if (!existsSync(PACK_DIR)) return [];
@@ -67,12 +95,11 @@ try {
 
   if (opts.list) {
     for (const name of listPacks()) {
-      const pack = normalizePack(loadPack(name));
-      const s = packSummary(loadPack(name));
-      console.log(
-        `${name.padEnd(10)} ${pack.label} — ${s.document_types} types, ${s.requirements} requirements, ` +
-          `${s.claim_types} claims, ${s.claim_rules} claim rules`,
-      );
+      const pack = normalizePack(loadPack(name), { moduleKeys: MODULE_KEYS });
+      const s = packSummary(loadPack(name), { moduleKeys: MODULE_KEYS });
+      console.log(`${name.padEnd(10)} ${pack.label}`);
+      console.log(`${''.padEnd(10)} ${summaryLine(s)}`);
+      for (const w of s.warnings) console.log(`${''.padEnd(10)} warning: ${w}`);
     }
     process.exit(0);
   }
@@ -81,8 +108,10 @@ try {
     let failed = false;
     for (const name of listPacks()) {
       try {
-        normalizePack(loadPack(name));
-        console.log(`ok   ${name}`);
+        const s = packSummary(loadPack(name), { moduleKeys: MODULE_KEYS });
+        console.log(`ok   ${name.padEnd(10)} ${summaryLine(s)}`);
+        // Warnings never fail the run. See readModuleKeys above.
+        for (const w of s.warnings) console.log(`     ${''.padEnd(10)} warning: ${w}`);
       } catch (err) {
         failed = true;
         console.error(`FAIL ${name}: ${err.message}`);
@@ -98,15 +127,19 @@ try {
   const pack = loadPack(opts.pack);
 
   if (opts.summary) {
-    const s = packSummary(pack);
-    console.log(
-      `${s.document_types} document types, ${s.requirements} requirements, ` +
-        `${s.claim_types} claim types, ${s.claim_rules} claim rules`,
-    );
+    const s = packSummary(pack, { moduleKeys: MODULE_KEYS });
+    console.log(summaryLine(s));
+    for (const w of s.warnings) console.error(`warning: ${w}`);
     process.exit(0);
   }
 
-  process.stdout.write(packToSql(pack, { tenantId: opts.tenantId, tenantSlug: opts.tenantSlug }));
+  process.stdout.write(
+    packToSql(pack, {
+      tenantId: opts.tenantId,
+      tenantSlug: opts.tenantSlug,
+      moduleKeys: MODULE_KEYS,
+    }),
+  );
 } catch (err) {
   console.error(`render-starter-pack: ${err.message}`);
   process.exit(1);

@@ -8,113 +8,1036 @@
     "requirements   = the checklist line items a document CLOSES. Many per document. (Layer 2)",
     "claim_types    = what a document ASSERTS, which makes OTHER documents required. (Layer 3)",
     "claim_rules    = which requirement(s) each claim opens. 'requires' = a gap when missing; 'recommends' = advisory only.",
+    "",
+    "On a document type:",
+    "  closes                  = the requirement slugs a document of this TYPE normally closes. This is the key that",
+    "                            makes an approved document mean something: it seeds document_type_requirements, and",
+    "                            the arriving document gets those links proposed as 'suggested' for a human to confirm.",
+    "  owner                   = the department that owns this type's renewals. Must be one of owner_labels below.",
+    "                            It becomes documents.owner, which is what the renewal alert routes on.",
+    "  extraction_instructions = the document-type layer of the extraction prompt. A string, or an array of lines.",
+    "                            Say WHERE a value sits and WHAT to pull; never say what a page contains, and never",
+    "                            supply a unit, limit or verdict the document did not print.",
+    "",
+    "owner_labels        = the departments this vertical has. LABELS ONLY — a route needs a real person, and a human adds those.",
+    "requirement_packets = named sets of requirements, applied to ONE supplier at a time. Nothing is seeded from these.",
+    "spec_tests          = the analytes we judge COA results against. The 'aliases' list is the load-bearing part:",
+    "                      matching is EXACT on the printed name, so a spelling that is missing here resolves to",
+    "                      'not_checked' rather than to a pass or a fail.",
+    "                      The THRESHOLDS are starting points written for a dried dairy ingredient, and every one of",
+    "                      them should be reviewed against the client's own specs before anyone acts on a warning.",
+    "                      They warn; they never block. The aliases are the part that is right for everybody.",
+    "teach               = the worked example the setup wizard teaches one concept with.",
+    "modules             = which parts of the portal a tenant seeded from this pack starts with.",
+    "",
     "Every 'slug' is the stable id. Change a name freely; change a slug only if you mean to create a new row.",
     "Seeding is additive (INSERT OR IGNORE) — re-running never overwrites edits made in the admin UI."
   ],
-
+  "_deliberately_omitted": [
+    "supplier_requirements — WHICH requirements apply to WHICH supplier. A brand-new tenant has ZERO suppliers, so there is literally nothing to seed against. Worse, seeding every supplier the same six items is exactly what made the live tenant's checklist uniform-and-wrong: it came from one retroactive bulk write across 21 existing suppliers. Packets below are DEFINED here and applied one supplier at a time, by a human who knows what that supplier sends.",
+    "owner_routes — who actually receives a renewal alert. A route needs a real recipient, and a placeholder one routes compliance alerts to nobody WITHOUT reporting a routing gap, which is strictly worse than the unrouted state it replaced. This pack supplies the department LABELS; a human supplies the people.",
+    "extraction_context — tenants.extraction_context (migration 0072) is a whole-block REPLACEMENT of the tenant's editable industry prompt, not a row. A pack writing it would overwrite an edited block every time the pack was re-run. Type-level guidance goes in extraction_instructions instead, because that layer COMPOSES rather than replaces.",
+    "naming_templates — the table does not exist: created by migration 0014, dropped by 0018. Its replacement, document_types.naming_format, has zero readers anywhere in the codebase.",
+    "Renewal periods per document type — how often each certificate must be re-collected is a per-client policy, and a wrong interval in a compliance tool produces confident alerts on the wrong dates."
+  ],
+  "owner_labels": [
+    {
+      "label": "QA",
+      "description": "Product specifications, certificates of analysis, allergen and claim paperwork — the document types that describe what the product IS."
+    },
+    {
+      "label": "Food Safety",
+      "description": "The plant-level programs and the third-party audit: HACCP, food safety and defense plans, sanitation, pest control, recall."
+    },
+    {
+      "label": "Insurance",
+      "description": "Certificates of insurance and the coverage they evidence. Very often a broker rather than a portal user, which is why a route may point at a bare email address."
+    },
+    {
+      "label": "Accounting",
+      "description": "Tax forms and anything the finance team owns on a supplier."
+    },
+    {
+      "label": "Purchasing",
+      "description": "Supplier onboarding and the paperwork chased at the point of buying. Declared even though no document type defaults to it, so it can be scoped and routed from day one."
+    }
+  ],
   "document_types": [
-    { "name": "Specification Sheet", "description": "Supplier product spec. Typically closes many checklist items at once (micro limits, pack size, nutritionals, allergens, origin, GTIN)." },
-    { "name": "Certificate of Analysis", "slug": "certificate-of-analysis", "description": "Lot-level test results for a specific shipment." },
-    { "name": "Safety Data Sheet", "slug": "safety-data-sheet", "description": "SDS for chemicals and sanitation products." },
-
-    { "name": "3rd Party Food Safety Audit Report", "slug": "3rd-party-food-safety-audit-report", "description": "The full audit REPORT — findings, non-conformances, corrective actions. A dated snapshot of an audit event: it does not 'expire', it is superseded by the next audit. Distinct from the certificate below." },
-    { "name": "3rd Party Audit Certificate", "slug": "3rd-party-audit-certificate", "description": "The one-page CERTIFICATE issued on passing the audit — scheme, grade, valid-through date. Hard expiry on that date, unlike the report it accompanies. Distinct from the report above." },
-
-    { "name": "Organic Certificate", "description": "USDA/NOP organic certification for a product or facility." },
-    { "name": "Kosher Certificate", "description": "Kosher certification letter." },
-    { "name": "Halal Certificate", "description": "Halal certification letter." },
-    { "name": "Gluten-Free Certificate", "description": "Gluten-free certification or attestation." },
-    { "name": "Non-GMO Certificate", "description": "Non-GMO Project verification or equivalent." },
-    { "name": "Animal Welfare Certificate", "description": "Certified Humane / Global Animal Partnership / equivalent." },
-    { "name": "Sustainability Certificate", "description": "Rainforest Alliance, Fair Trade, RSPO and similar." },
-
-    { "name": "Allergen Statement", "description": "Allergen declaration / matrix." },
-    { "name": "Nutritional Information", "description": "Nutrition panel data, typically per 100g." },
-    { "name": "Country of Origin Statement", "description": "Origin attestation for a product." },
-    { "name": "Product Label", "description": "Label artwork or a photo of the applied label." },
-    { "name": "Letter of Guarantee", "description": "Continuing guarantee of compliance from the supplier." },
-    { "name": "Certificate of Insurance", "description": "Supplier liability insurance, with limits and expiry." },
-    { "name": "W-9", "slug": "w-9", "description": "Supplier tax identification form." },
-
-    { "name": "HACCP Plan", "slug": "haccp-plan", "description": "Hazard analysis and critical control point plan." },
-    { "name": "Food Safety Plan", "description": "Preventive controls / FSMA food safety plan." },
-    { "name": "Food Defense Plan", "description": "Intentional adulteration / food defense plan." },
-    { "name": "Recall Program", "description": "Recall and traceability program, including mock recall results." },
-    { "name": "Pest Control Program", "description": "Pest control program and service records." },
-    { "name": "Sanitation Program", "description": "SSOPs and sanitation schedules." },
-    { "name": "GMP Self Audit", "description": "Internal good-manufacturing-practice self audit." },
-    { "name": "Process Flow Diagram", "description": "Production process flow for the supplied product." }
+    {
+      "name": "Specification Sheet",
+      "slug": "specification-sheet",
+      "description": "Supplier product spec. Typically closes many checklist items at once (micro limits, pack size, nutritionals, allergens, origin, GTIN).",
+      "owner": "QA",
+      "closes": [
+        "spec-sheet",
+        "micro-limits",
+        "pack-size",
+        "nutritionals-100g",
+        "allergen-matrix",
+        "country-of-origin",
+        "gtin",
+        "shelf-life",
+        "ingredient-statement"
+      ],
+      "extraction_instructions": [
+        "A spec sheet describes a PRODUCT, not a lot. This is the single most common confusion on this type.",
+        "",
+        "- lot_number, batch_number and code_date are null. If the sheet prints a revision or issue date, capture it under that label — it is the paperwork's date, not a production date.",
+        "- The analytical table holds LIMITS, not measurements. Put each printed limit in \"specification\" and leave \"result\" EMPTY. A spec sheet has nothing to report as a result, and copying the limit across makes the product look tested when it was not.",
+        "- Only fill \"unit\" where the sheet prints one on that row or in its column heading.",
+        "- Capture product_name, product_code, pack size / net_weight, grade, shelf life and storage conditions as printed.",
+        "- Ingredient and nutritional blocks are separate tables — name them \"ingredients\" and \"nutrition\" and keep the document's own columns.",
+        "- document_expires_on is null: a specification does not expire on a date, it is superseded by a later revision."
+      ]
+    },
+    {
+      "name": "Certificate of Analysis",
+      "slug": "certificate-of-analysis",
+      "description": "Lot-level test results for a specific shipment.",
+      "owner": "QA",
+      "closes": [
+        "coa-on-file"
+      ],
+      "extraction_instructions": [
+        "A Certificate of Analysis reports what was MEASURED on one specific lot. Everything on it is lot-scoped, and that is what separates it from a specification sheet.",
+        "",
+        "- lot_number is the lot / batch / code printed for THIS shipment, under whatever label the certificate uses (Lot, Batch, Lot Code, Code, Batch No.). Copy it exactly — leading zeros, letters and separators included. Never normalize it, never strip a suffix, and never merge two lots that were printed separately.",
+        "- When one certificate covers SEVERAL lots or several products, emit ONE RECORD PER LOT. Collapsing them into a single record silently discards the results of every lot but the first.",
+        "- The results table is the substance of the document. Emit it with the columns the certificate prints — typically Test / Analyte, Result, Specification (or Limit), Unit and Method. The measured value goes in \"result\" and the printed acceptance limit goes in \"specification\": they are different columns, and swapping them turns a limit into a measurement.",
+        "- Copy every result EXACTLY as printed, censored values included (\"<10\", \"<1.0\", \"ND\", \"Absent\", \"Negative\", \"TNTC\"). A \"<10\" is not 10 and must never be rewritten as a number.",
+        "- Only fill \"unit\" where the certificate prints one, on the row or in its column heading. Never supply a unit from what you know of the test. CFU/mL and CFU/g are different bases, and a result carrying an invented unit cannot be matched to a limit — it drops out of spec checking with nobody told.",
+        "- Capture the production / manufacture date and the best-by / expiration date under their own printed labels. expiration_date is the PRODUCT's date on this lot; document_expires_on is null, because a certificate of analysis does not expire — it is superseded by the next lot's.",
+        "- supplier_name is the company on the letterhead that ran or commissioned the testing, and customer_name is the addressee. A third-party laboratory named on the report is the issuing body, not the supplier.",
+        "- Capture product_name and product_code as printed, plus the pack size or net weight when the certificate carries one."
+      ]
+    },
+    {
+      "name": "Safety Data Sheet",
+      "slug": "safety-data-sheet",
+      "description": "SDS for chemicals and sanitation products.",
+      "owner": "QA",
+      "closes": [
+        "sds-on-file"
+      ],
+      "extraction_instructions": [
+        "A GHS Safety Data Sheet has 16 numbered sections and the section number tells you what a value is.",
+        "",
+        "- Section 1 gives the product identifier (product_name, product_code) and the supplier / manufacturer (supplier_name). Skip the emergency telephone number.",
+        "- Section 2 is the hazard identification: capture the classification, signal word, hazard (H) statements and precautionary (P) statements as a table named \"hazards\" with the printed columns.",
+        "- Section 9 is physical and chemical properties. Emit it as a table with the property, the value and the unit AS PRINTED. Many rows read \"Not available\", \"Not applicable\" or \"No data\" — those are empty cells, not values, and never a licence to fill in a figure for the property.",
+        "- The revision date and version live in section 16 or the footer. Capture them under those labels.",
+        "- An SDS does not expire and is not lot-specific: document_expires_on, expiration_date, lot_number and code_date are all null. A revision date is not an expiry."
+      ]
+    },
+    {
+      "name": "3rd Party Food Safety Audit Report",
+      "slug": "3rd-party-food-safety-audit-report",
+      "description": "The full audit REPORT — findings, non-conformances, corrective actions. A dated snapshot of an audit event: it does not 'expire', it is superseded by the next audit. Distinct from the certificate below.",
+      "owner": "Food Safety",
+      "closes": [
+        "third-party-audit-report"
+      ]
+    },
+    {
+      "name": "3rd Party Audit Certificate",
+      "slug": "3rd-party-audit-certificate",
+      "description": "The one-page CERTIFICATE issued on passing the audit — scheme, grade, valid-through date. Hard expiry on that date, unlike the report it accompanies. Distinct from the report above.",
+      "owner": "Food Safety",
+      "closes": [
+        "third-party-audit-certificate"
+      ],
+      "extraction_instructions": [
+        "This is the one-page CERTIFICATE issued on passing an audit — not the audit report. If the document runs to findings, non-conformances and corrective actions, it is the report and this guidance does not apply.",
+        "",
+        "- Three parties, all printed: the AUDITED SITE (supplier_name, with its address and often a site or GLN code), the CERTIFICATION BODY that issued it (NSF, SGS, Eurofins, Kiwa — the issuing body), and the SCHEME it was audited against (SQF, BRCGS, FSSC 22000, PrimusGFS, SQF Food Safety Code Edition 9).",
+        "- Capture the grade or score EXACTLY as printed — \"A\", \"AA\", \"Excellent\", \"95\". Do not convert a score into a grade or a grade into a score, and do not add a scale the certificate did not print.",
+        "- Two different dates usually appear: the AUDIT DATE and the certificate's own expiry. Keep them under their printed labels, and set document_expires_on from the certificate expiry / \"valid until\" only.",
+        "- Capture the scope statement (the products and processes covered) and the certificate number.",
+        "- There is no lot and no product expiry on this document."
+      ]
+    },
+    {
+      "name": "Organic Certificate",
+      "slug": "organic-certificate",
+      "description": "USDA/NOP organic certification for a product or facility.",
+      "owner": "QA",
+      "closes": [
+        "organic-certificate"
+      ],
+      "extraction_instructions": [
+        "A USDA/NOP organic certificate names two parties: keep them apart.",
+        "",
+        "- supplier_name is the CERTIFIED OPERATION (the company being certified). The CERTIFYING AGENT — Oregon Tilth, QAI, CCOF, Global Organic Alliance — is the issuing body, not the supplier.",
+        "- Capture the certificate number and the scope category the form prints (Crops, Livestock, Wild Crops, Handling/Processing).",
+        "- Dates: NOP certificates often print an EFFECTIVE date and an ANNIVERSARY date rather than an expiry. Capture what is printed, each under its own label. Only set document_expires_on when the certificate actually prints a \"valid through\" / \"expires\" date — never compute one from an anniversary or an effective date plus a year.",
+        "- The certified products are usually an appended list; put each one in products.",
+        "- There is no lot and no test table."
+      ]
+    },
+    {
+      "name": "Kosher Certificate",
+      "slug": "kosher-certificate",
+      "description": "Kosher certification letter.",
+      "owner": "QA",
+      "closes": [
+        "kosher-certificate"
+      ],
+      "extraction_instructions": [
+        "A kosher certificate (a \"letter of certification\") is issued by an agency to a plant, for a list of products.",
+        "",
+        "- supplier_name is the certified company or plant. The AGENCY — OU, OK, Star-K, KOF-K, cRc — is the issuing body; capture it and the certification symbol under their own labels.",
+        "- Capture the certificate / UKD number as printed.",
+        "- document_expires_on: these almost always print an explicit \"expiration date\" or \"valid until\". Use it.",
+        "- The product list usually carries a STATUS per product (Pareve, Dairy, Dairy Equipment, Cholov Yisroel, Passover). Emit that list as a table named \"certified_products\" with the printed columns. Never infer a status for a product the certificate lists without one, and never carry one product's status down onto the next row.",
+        "- There is no lot, no product expiry and no test table."
+      ]
+    },
+    {
+      "name": "Halal Certificate",
+      "slug": "halal-certificate",
+      "description": "Halal certification letter.",
+      "owner": "QA",
+      "closes": [
+        "halal-certificate"
+      ]
+    },
+    {
+      "name": "Gluten-Free Certificate",
+      "slug": "gluten-free-certificate",
+      "description": "Gluten-free certification or attestation.",
+      "owner": "QA",
+      "closes": [
+        "gluten-free-certificate"
+      ],
+      "extraction_instructions": [
+        "A gluten-free certificate attests a THRESHOLD, and the threshold is the part most often mis-read.",
+        "",
+        "- Capture the threshold exactly as the certificate prints it, with its unit only if that unit is printed on the page. Schemes differ (GFCO certifies at 10 ppm, the FDA rule is 20 ppm) — never supply the number or the unit from what you know of the scheme. If the page shows a bare number, the number is what you record and the unit stays empty.",
+        "- supplier_name is the certified company or facility; the CERTIFYING BODY (GFCO/GIG, NSF, BRCGS, Intertek) is the issuing body.",
+        "- Capture the certificate or licence number.",
+        "- document_expires_on is the \"valid through\" / \"expires\" date on the certificate.",
+        "- The products in scope go in products; when they are printed as a table, keep the document's own columns."
+      ]
+    },
+    {
+      "name": "Non-GMO Certificate",
+      "slug": "non-gmo-certificate",
+      "description": "Non-GMO Project verification or equivalent.",
+      "owner": "QA",
+      "closes": [
+        "non-gmo-certificate"
+      ]
+    },
+    {
+      "name": "Animal Welfare Certificate",
+      "slug": "animal-welfare-certificate",
+      "description": "Certified Humane / Global Animal Partnership / equivalent.",
+      "owner": "QA",
+      "closes": [
+        "animal-welfare-certificate"
+      ]
+    },
+    {
+      "name": "Sustainability Certificate",
+      "slug": "sustainability-certificate",
+      "description": "Rainforest Alliance, Fair Trade, RSPO and similar.",
+      "owner": "QA",
+      "closes": [
+        "sustainability-certificate"
+      ]
+    },
+    {
+      "name": "Allergen Statement",
+      "slug": "allergen-statement",
+      "description": "Allergen declaration / matrix.",
+      "owner": "QA",
+      "closes": [
+        "allergen-matrix"
+      ],
+      "extraction_instructions": [
+        "The substance of this document is a MATRIX, not fields: allergens down the side, a declaration per row.",
+        "",
+        "- Emit the matrix as a table named \"allergen_statement\" using the column headings the document prints (commonly Allergen, Present / Contains, May Contain / Cross Contact, Same Line, Same Facility).",
+        "- Copy each cell exactly as printed. \"May contain\" and \"contains\" are DIFFERENT declarations and must never be collapsed into each other, and \"may contain\" must never be read as a yes or a no.",
+        "- A blank or unmarked cell stays empty. An unmarked allergen is an unanswered question, not a declaration of absence.",
+        "- Never add an allergen row the document did not list, including one you would expect for the product.",
+        "- product_name and product_code come from the header block; supplier_name from the letterhead.",
+        "- document_expires_on only when the statement prints its own review or valid-through date."
+      ]
+    },
+    {
+      "name": "Nutritional Information",
+      "slug": "nutritional-information",
+      "description": "Nutrition panel data, typically per 100g.",
+      "owner": "QA",
+      "closes": [
+        "nutritionals-100g"
+      ]
+    },
+    {
+      "name": "Country of Origin Statement",
+      "slug": "country-of-origin-statement",
+      "description": "Origin attestation for a product.",
+      "owner": "QA",
+      "closes": [
+        "country-of-origin"
+      ],
+      "extraction_instructions": [
+        "A short signed attestation naming where a product comes from.",
+        "",
+        "- Emit the origin declaration as a table named \"origins\" using the columns printed (commonly Product, Item Code, Country of Origin, and sometimes a percentage or a Country of Processing).",
+        "- Never infer a country from the supplier's own address, from the product name, or from a plant code. Only a country the statement prints as an origin is an origin.",
+        "- Where a product lists several origins, keep every one, in the order printed. Do not reduce a list to its first entry and do not add a percentage the statement did not print.",
+        "- supplier_name is the signing company on the letterhead; customer_name is the addressee.",
+        "- Capture the statement / signature date under its printed label. document_expires_on only when the statement prints its own validity period.",
+        "- There is no lot and no test table."
+      ]
+    },
+    {
+      "name": "Product Label",
+      "slug": "product-label",
+      "description": "Label artwork or a photo of the applied label.",
+      "owner": "QA",
+      "closes": [
+        "product-label",
+        "gtin"
+      ]
+    },
+    {
+      "name": "Letter of Guarantee",
+      "slug": "letter-of-guarantee",
+      "description": "Continuing guarantee of compliance from the supplier.",
+      "owner": "QA",
+      "closes": [
+        "letter-of-guarantee"
+      ],
+      "extraction_instructions": [
+        "A continuing guarantee is a one-page signed letter, not a form. Nearly everything is prose.",
+        "",
+        "- supplier_name is the company that SIGNED it — the letterhead at the top and the signature block at the bottom will agree. customer_name is the addressee after \"To:\" or \"Dear\".",
+        "- Capture the date the letter was signed under the label the letter prints for it (\"Date\", \"Dated\", \"Effective\"). Do not put it in code_date: nothing here was produced or packed.",
+        "- Capture the signatory name and title, and the products or product categories the guarantee covers, as printed.",
+        "- document_expires_on is null unless the letter states its own validity (\"valid through\", \"expires\", \"for calendar year 2026\"). A continuing guarantee usually has none by design — leave it null rather than inventing one a year out.",
+        "- There is no lot, no test table and no product expiry on this document."
+      ]
+    },
+    {
+      "name": "Certificate of Insurance",
+      "slug": "certificate-of-insurance",
+      "description": "Supplier liability insurance, with limits and expiry.",
+      "owner": "Insurance",
+      "closes": [
+        "certificate-of-insurance"
+      ],
+      "extraction_instructions": [
+        "This is almost always an ACORD 25 form.",
+        "",
+        "- supplier_name is the company in the INSURED box (left column, under the producer). The PRODUCER box is the insurance BROKER and is not the supplier. The CERTIFICATE HOLDER box at the bottom is the customer_name — it is who the certificate was issued to, usually us.",
+        "- The carriers are listed as INSURER A / B / C with their NAIC numbers; those are the issuing bodies.",
+        "- The coverage grid runs one row per coverage (General Liability, Automobile, Umbrella, Workers Compensation) with POLICY NUMBER, POLICY EFF and POLICY EXP. Capture that grid as a table named \"coverage\" using the column headings printed on the form.",
+        "- document_expires_on is the policy expiry: the EARLIEST POLICY EXP date on the form, because that is when the certificate stops covering everything it claims. Do not average, extend or round dates.",
+        "- There is no product on this document, so expiration_date, lot_number, code_date and product_code are all null.",
+        "- Limits (Each Occurrence, General Aggregate, Products-Completed Operations) belong in the coverage table exactly as printed. Do not add a currency symbol the form did not print and do not restate a limit in different units."
+      ]
+    },
+    {
+      "name": "W-9",
+      "slug": "w-9",
+      "description": "Supplier tax identification form.",
+      "owner": "Accounting",
+      "closes": [
+        "w9-on-file"
+      ]
+    },
+    {
+      "name": "HACCP Plan",
+      "slug": "haccp-plan",
+      "description": "Hazard analysis and critical control point plan.",
+      "owner": "Food Safety",
+      "closes": [
+        "haccp-plan"
+      ]
+    },
+    {
+      "name": "Food Safety Plan",
+      "slug": "food-safety-plan",
+      "description": "Preventive controls / FSMA food safety plan.",
+      "owner": "Food Safety",
+      "closes": [
+        "food-safety-plan"
+      ]
+    },
+    {
+      "name": "Food Defense Plan",
+      "slug": "food-defense-plan",
+      "description": "Intentional adulteration / food defense plan.",
+      "owner": "Food Safety",
+      "closes": [
+        "food-defense-plan"
+      ]
+    },
+    {
+      "name": "Recall Program",
+      "slug": "recall-program",
+      "description": "Recall and traceability program, including mock recall results.",
+      "owner": "Food Safety",
+      "closes": [
+        "recall-program"
+      ]
+    },
+    {
+      "name": "Pest Control Program",
+      "slug": "pest-control-program",
+      "description": "Pest control program and service records.",
+      "owner": "Food Safety",
+      "closes": [
+        "pest-control-program"
+      ]
+    },
+    {
+      "name": "Sanitation Program",
+      "slug": "sanitation-program",
+      "description": "SSOPs and sanitation schedules.",
+      "owner": "Food Safety",
+      "closes": [
+        "sanitation-program"
+      ]
+    },
+    {
+      "name": "GMP Self Audit",
+      "slug": "gmp-self-audit",
+      "description": "Internal good-manufacturing-practice self audit.",
+      "owner": "Food Safety",
+      "closes": [
+        "gmp-self-audit"
+      ]
+    },
+    {
+      "name": "Process Flow Diagram",
+      "slug": "process-flow-diagram",
+      "description": "Production process flow for the supplied product.",
+      "owner": "Food Safety",
+      "closes": [
+        "process-flow-diagram"
+      ]
+    }
   ],
-
   "requirements": [
-    { "name": "Specification Sheet on file", "slug": "spec-sheet", "checklist": "SOP 102.2", "description": "A current product specification is on file." },
-    { "name": "Microbiological Limits", "slug": "micro-limits", "checklist": "SOP 102.2", "description": "Micro limits stated for the product." },
-    { "name": "Pack Size / Case Configuration", "slug": "pack-size", "checklist": "SOP 102.2" },
-    { "name": "100g Nutritionals", "slug": "nutritionals-100g", "checklist": "SOP 102.2", "description": "Nutrition values per 100g." },
-    { "name": "Allergen Matrix", "slug": "allergen-matrix", "checklist": "SOP 102.2", "description": "Allergen declaration covering the big-9." },
-    { "name": "Country of Origin", "slug": "country-of-origin", "checklist": "SOP 102.2" },
-    { "name": "GTIN / UPC", "slug": "gtin", "checklist": "SOP 102.2" },
-    { "name": "Shelf Life & Storage", "slug": "shelf-life", "checklist": "SOP 102.2" },
-    { "name": "Ingredient Statement", "slug": "ingredient-statement", "checklist": "SOP 102.2" },
-    { "name": "Certificate of Analysis on file", "slug": "coa-on-file", "checklist": "SOP 102.2" },
-    { "name": "Safety Data Sheet on file", "slug": "sds-on-file", "checklist": "SOP 102.2", "description": "Required for chemicals and sanitation products." },
-    { "name": "Letter of Guarantee on file", "slug": "letter-of-guarantee", "checklist": "SOP 102.2" },
-    { "name": "Certificate of Insurance on file", "slug": "certificate-of-insurance", "checklist": "SOP 102.2" },
-    { "name": "W-9 on file", "slug": "w9-on-file", "checklist": "SOP 102.2" },
-
-    { "name": "3rd Party Audit REPORT on file", "slug": "third-party-audit-report", "checklist": "SOP 102.2", "description": "The full audit report. Separate line item from the certificate — a supplier can send one without the other, and only having the certificate hides the findings." },
-    { "name": "3rd Party Audit CERTIFICATE on file", "slug": "third-party-audit-certificate", "checklist": "SOP 102.2", "description": "The valid-through certificate. Separate line item from the report, and the one that drives expiry tracking." },
-
-    { "name": "HACCP Plan on file", "slug": "haccp-plan", "checklist": "SOP 102.2" },
-    { "name": "Food Safety Plan on file", "slug": "food-safety-plan", "checklist": "SOP 102.2" },
-    { "name": "Food Defense Plan on file", "slug": "food-defense-plan", "checklist": "SOP 102.2" },
-    { "name": "Recall Program on file", "slug": "recall-program", "checklist": "SOP 102.2" },
-    { "name": "Pest Control Program on file", "slug": "pest-control-program", "checklist": "SOP 102.2" },
-    { "name": "Sanitation Program on file", "slug": "sanitation-program", "checklist": "SOP 102.2" },
-    { "name": "GMP Self Audit on file", "slug": "gmp-self-audit", "checklist": "SOP 102.2" },
-    { "name": "Process Flow Diagram on file", "slug": "process-flow-diagram", "checklist": "SOP 102.2" },
-    { "name": "Product Label on file", "slug": "product-label", "checklist": "SOP 102.2" },
-
-    { "name": "Organic Certificate on file", "slug": "organic-certificate", "checklist": "Claim Substantiation" },
-    { "name": "Kosher Certificate on file", "slug": "kosher-certificate", "checklist": "Claim Substantiation" },
-    { "name": "Halal Certificate on file", "slug": "halal-certificate", "checklist": "Claim Substantiation" },
-    { "name": "Gluten-Free Certificate on file", "slug": "gluten-free-certificate", "checklist": "Claim Substantiation" },
-    { "name": "Non-GMO Certificate on file", "slug": "non-gmo-certificate", "checklist": "Claim Substantiation" },
-    { "name": "Animal Welfare Certificate on file", "slug": "animal-welfare-certificate", "checklist": "Claim Substantiation" },
-    { "name": "Sustainability Certificate on file", "slug": "sustainability-certificate", "checklist": "Claim Substantiation" }
+    {
+      "name": "Specification Sheet on file",
+      "slug": "spec-sheet",
+      "checklist": "SOP 102.2",
+      "description": "A current product specification is on file."
+    },
+    {
+      "name": "Microbiological Limits",
+      "slug": "micro-limits",
+      "checklist": "SOP 102.2",
+      "description": "Micro limits stated for the product."
+    },
+    {
+      "name": "Pack Size / Case Configuration",
+      "slug": "pack-size",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "100g Nutritionals",
+      "slug": "nutritionals-100g",
+      "checklist": "SOP 102.2",
+      "description": "Nutrition values per 100g."
+    },
+    {
+      "name": "Allergen Matrix",
+      "slug": "allergen-matrix",
+      "checklist": "SOP 102.2",
+      "description": "Allergen declaration covering the big-9."
+    },
+    {
+      "name": "Country of Origin",
+      "slug": "country-of-origin",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "GTIN / UPC",
+      "slug": "gtin",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Shelf Life & Storage",
+      "slug": "shelf-life",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Ingredient Statement",
+      "slug": "ingredient-statement",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Certificate of Analysis on file",
+      "slug": "coa-on-file",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Safety Data Sheet on file",
+      "slug": "sds-on-file",
+      "checklist": "SOP 102.2",
+      "description": "Required for chemicals and sanitation products."
+    },
+    {
+      "name": "Letter of Guarantee on file",
+      "slug": "letter-of-guarantee",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Certificate of Insurance on file",
+      "slug": "certificate-of-insurance",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "W-9 on file",
+      "slug": "w9-on-file",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "3rd Party Audit REPORT on file",
+      "slug": "third-party-audit-report",
+      "checklist": "SOP 102.2",
+      "description": "The full audit report. Separate line item from the certificate — a supplier can send one without the other, and only having the certificate hides the findings."
+    },
+    {
+      "name": "3rd Party Audit CERTIFICATE on file",
+      "slug": "third-party-audit-certificate",
+      "checklist": "SOP 102.2",
+      "description": "The valid-through certificate. Separate line item from the report, and the one that drives expiry tracking."
+    },
+    {
+      "name": "HACCP Plan on file",
+      "slug": "haccp-plan",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Food Safety Plan on file",
+      "slug": "food-safety-plan",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Food Defense Plan on file",
+      "slug": "food-defense-plan",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Recall Program on file",
+      "slug": "recall-program",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Pest Control Program on file",
+      "slug": "pest-control-program",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Sanitation Program on file",
+      "slug": "sanitation-program",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "GMP Self Audit on file",
+      "slug": "gmp-self-audit",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Process Flow Diagram on file",
+      "slug": "process-flow-diagram",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Product Label on file",
+      "slug": "product-label",
+      "checklist": "SOP 102.2"
+    },
+    {
+      "name": "Organic Certificate on file",
+      "slug": "organic-certificate",
+      "checklist": "Claim Substantiation"
+    },
+    {
+      "name": "Kosher Certificate on file",
+      "slug": "kosher-certificate",
+      "checklist": "Claim Substantiation"
+    },
+    {
+      "name": "Halal Certificate on file",
+      "slug": "halal-certificate",
+      "checklist": "Claim Substantiation"
+    },
+    {
+      "name": "Gluten-Free Certificate on file",
+      "slug": "gluten-free-certificate",
+      "checklist": "Claim Substantiation"
+    },
+    {
+      "name": "Non-GMO Certificate on file",
+      "slug": "non-gmo-certificate",
+      "checklist": "Claim Substantiation"
+    },
+    {
+      "name": "Animal Welfare Certificate on file",
+      "slug": "animal-welfare-certificate",
+      "checklist": "Claim Substantiation"
+    },
+    {
+      "name": "Sustainability Certificate on file",
+      "slug": "sustainability-certificate",
+      "checklist": "Claim Substantiation"
+    }
   ],
-
   "claim_types": [
-    { "name": "Organic", "slug": "organic", "subject_grain": "product", "description": "The document states the product is organic." },
-    { "name": "Kosher", "slug": "kosher", "subject_grain": "product" },
-    { "name": "Halal", "slug": "halal", "subject_grain": "product" },
-    { "name": "Gluten-Free", "slug": "gluten-free", "subject_grain": "product" },
-    { "name": "Non-GMO", "slug": "non-gmo", "subject_grain": "product" },
-    { "name": "Certified Humane / Animal Welfare", "slug": "animal-welfare", "subject_grain": "product" },
-    { "name": "Fair Trade / Rainforest Alliance", "slug": "sustainably-sourced", "subject_grain": "product" },
-    { "name": "Contains Major Allergens", "slug": "contains-allergens", "subject_grain": "product", "description": "The document names one or more of the big-9 allergens." },
-    { "name": "Made in USA", "slug": "made-in-usa", "subject_grain": "product" },
-    { "name": "rBST-Free", "slug": "rbst-free", "subject_grain": "product" },
-    { "name": "GFSI-Certified Facility", "slug": "gfsi-certified", "subject_grain": "supplier", "description": "SQF, BRCGS, FSSC 22000 or another GFSI-benchmarked scheme. Claimed about the SUPPLIER, not a product." },
-    { "name": "Chemical / Non-Food Product", "slug": "chemical-product", "subject_grain": "product", "description": "Sanitizer, lubricant or other non-food chemical — pulls in the SDS." }
+    {
+      "name": "Organic",
+      "slug": "organic",
+      "subject_grain": "product",
+      "description": "The document states the product is organic."
+    },
+    {
+      "name": "Kosher",
+      "slug": "kosher",
+      "subject_grain": "product"
+    },
+    {
+      "name": "Halal",
+      "slug": "halal",
+      "subject_grain": "product"
+    },
+    {
+      "name": "Gluten-Free",
+      "slug": "gluten-free",
+      "subject_grain": "product"
+    },
+    {
+      "name": "Non-GMO",
+      "slug": "non-gmo",
+      "subject_grain": "product"
+    },
+    {
+      "name": "Certified Humane / Animal Welfare",
+      "slug": "animal-welfare",
+      "subject_grain": "product"
+    },
+    {
+      "name": "Fair Trade / Rainforest Alliance",
+      "slug": "sustainably-sourced",
+      "subject_grain": "product"
+    },
+    {
+      "name": "Contains Major Allergens",
+      "slug": "contains-allergens",
+      "subject_grain": "product",
+      "description": "The document names one or more of the big-9 allergens."
+    },
+    {
+      "name": "Made in USA",
+      "slug": "made-in-usa",
+      "subject_grain": "product"
+    },
+    {
+      "name": "rBST-Free",
+      "slug": "rbst-free",
+      "subject_grain": "product"
+    },
+    {
+      "name": "GFSI-Certified Facility",
+      "slug": "gfsi-certified",
+      "subject_grain": "supplier",
+      "description": "SQF, BRCGS, FSSC 22000 or another GFSI-benchmarked scheme. Claimed about the SUPPLIER, not a product."
+    },
+    {
+      "name": "Chemical / Non-Food Product",
+      "slug": "chemical-product",
+      "subject_grain": "product",
+      "description": "Sanitizer, lubricant or other non-food chemical — pulls in the SDS."
+    }
   ],
-
   "claim_rules": [
-    { "claim": "organic", "requires": ["organic-certificate"] },
-    { "claim": "kosher", "requires": ["kosher-certificate"] },
-    { "claim": "halal", "requires": ["halal-certificate"] },
-    { "claim": "gluten-free", "requires": ["gluten-free-certificate"] },
-    { "claim": "non-gmo", "requires": ["non-gmo-certificate"] },
-    { "claim": "animal-welfare", "requires": ["animal-welfare-certificate"] },
-    { "claim": "sustainably-sourced", "requires": ["sustainability-certificate"] },
-    { "claim": "contains-allergens", "requires": ["allergen-matrix"], "recommends": ["product-label"] },
-    { "claim": "made-in-usa", "requires": ["country-of-origin"] },
-    { "claim": "rbst-free", "recommends": ["letter-of-guarantee"], "notes": "An rBST-free claim is normally substantiated by a supplier affidavit rather than a certificate — advisory until the client confirms." },
+    {
+      "claim": "organic",
+      "requires": [
+        "organic-certificate"
+      ]
+    },
+    {
+      "claim": "kosher",
+      "requires": [
+        "kosher-certificate"
+      ]
+    },
+    {
+      "claim": "halal",
+      "requires": [
+        "halal-certificate"
+      ]
+    },
+    {
+      "claim": "gluten-free",
+      "requires": [
+        "gluten-free-certificate"
+      ]
+    },
+    {
+      "claim": "non-gmo",
+      "requires": [
+        "non-gmo-certificate"
+      ]
+    },
+    {
+      "claim": "animal-welfare",
+      "requires": [
+        "animal-welfare-certificate"
+      ]
+    },
+    {
+      "claim": "sustainably-sourced",
+      "requires": [
+        "sustainability-certificate"
+      ]
+    },
+    {
+      "claim": "contains-allergens",
+      "requires": [
+        "allergen-matrix"
+      ],
+      "recommends": [
+        "product-label"
+      ]
+    },
+    {
+      "claim": "made-in-usa",
+      "requires": [
+        "country-of-origin"
+      ]
+    },
+    {
+      "claim": "rbst-free",
+      "recommends": [
+        "letter-of-guarantee"
+      ],
+      "notes": "An rBST-free claim is normally substantiated by a supplier affidavit rather than a certificate — advisory until the client confirms."
+    },
     {
       "claim": "gfsi-certified",
-      "requires": ["third-party-audit-report", "third-party-audit-certificate"],
+      "requires": [
+        "third-party-audit-report",
+        "third-party-audit-certificate"
+      ],
       "notes": "Both documents, not one: the certificate proves the scheme and its valid-through date, the report carries the findings and corrective actions."
     },
-    { "claim": "chemical-product", "requires": ["sds-on-file"] }
-  ]
+    {
+      "claim": "chemical-product",
+      "requires": [
+        "sds-on-file"
+      ]
+    }
+  ],
+  "requirement_packets": [
+    {
+      "name": "Approved Supplier Baseline",
+      "slug": "baseline",
+      "default": true,
+      "description": "What every approved supplier owes, whatever they sell us. Apply this one first, to any supplier; the packets below sit on top of it.",
+      "requirements": [
+        "letter-of-guarantee",
+        "certificate-of-insurance",
+        "w9-on-file",
+        "third-party-audit-certificate"
+      ],
+      "recommends": [
+        "third-party-audit-report",
+        "recall-program"
+      ]
+    },
+    {
+      "name": "Ingredient Supplier",
+      "slug": "ingredient-supplier",
+      "description": "A supplier of a food ingredient we put into product. The heaviest packet, and the one that makes a supplier's checklist look like the SOP.",
+      "requirements": [
+        "spec-sheet",
+        "micro-limits",
+        "allergen-matrix",
+        "nutritionals-100g",
+        "country-of-origin",
+        "ingredient-statement",
+        "coa-on-file",
+        "haccp-plan",
+        "food-safety-plan"
+      ],
+      "recommends": [
+        "gtin",
+        "shelf-life",
+        "pack-size",
+        "process-flow-diagram",
+        "product-label",
+        "sanitation-program"
+      ]
+    },
+    {
+      "name": "Chemical / Sanitation Supplier",
+      "slug": "chemical-sanitation",
+      "description": "Sanitizers, lubricants and other non-food chemicals. Nothing here is eaten, so the micro and nutritional items that dominate the ingredient packet do not apply — which is the point of having more than one packet.",
+      "requirements": [
+        "sds-on-file",
+        "spec-sheet",
+        "letter-of-guarantee"
+      ],
+      "recommends": [
+        "product-label",
+        "country-of-origin"
+      ]
+    }
+  ],
+  "spec_tests": [
+    {
+      "name": "Standard Plate Count",
+      "aliases": [
+        "SPC",
+        "APC",
+        "TPC",
+        "Total Plate Count",
+        "Aerobic Plate Count",
+        "Total Aerobic Count",
+        "Total Aerobic Plate Count",
+        "Mesophilic Aerobic Count",
+        "Standard Plate Count (SPC)",
+        "Aerobic Plate Count (APC)",
+        "Total Bacteria Count"
+      ],
+      "default_unit": "CFU/g",
+      "notes": "The classic five-spelling analyte. SPC / APC / TPC are one test and a COA may print any of them.",
+      "limit": {
+        "operator": "<=",
+        "value_max": 10000,
+        "unit": "CFU/g",
+        "severity": "warn",
+        "criticality": "medium"
+      }
+    },
+    {
+      "name": "Coliform",
+      "aliases": [
+        "Coliforms",
+        "Total Coliform",
+        "Total Coliforms",
+        "Coliform Count",
+        "Coliforms (MPN)",
+        "COLIFORM CT",
+        "Coliformes",
+        "Total Coliform Count"
+      ],
+      "default_unit": "CFU/g",
+      "notes": "Deliberately NOT aliased to Fecal Coliform or E. coli — different tests, different limits.",
+      "limit": {
+        "operator": "<=",
+        "value_max": 10,
+        "unit": "CFU/g",
+        "severity": "alert",
+        "criticality": "high"
+      }
+    },
+    {
+      "name": "Fecal Coliform",
+      "aliases": [
+        "Fecal Coliforms",
+        "Faecal Coliform",
+        "Thermotolerant Coliforms"
+      ],
+      "default_unit": "CFU/g",
+      "limit": {
+        "operator": "<=",
+        "value_max": 3,
+        "unit": "CFU/g",
+        "severity": "alert",
+        "criticality": "high"
+      }
+    },
+    {
+      "name": "E. coli",
+      "slug": "e-coli",
+      "aliases": [
+        "E.coli",
+        "E coli",
+        "Escherichia coli",
+        "Generic E. coli",
+        "E. Coli (generic)",
+        "E COLI"
+      ],
+      "limit": {
+        "operator": "absent",
+        "severity": "alert",
+        "criticality": "high",
+        "notes": "Absent / Negative / ND / None detected. Most certificates print a /g or /25 g basis next to it; the basis is on the certificate, not in this limit."
+      }
+    },
+    {
+      "name": "Salmonella",
+      "aliases": [
+        "Salmonella spp.",
+        "Salmonella sp.",
+        "Salmonella species",
+        "SALMONELLA",
+        "Salmonella spp"
+      ],
+      "limit": {
+        "operator": "absent",
+        "severity": "alert",
+        "criticality": "high",
+        "notes": "Normally certified per 25 g. Any result other than an absence statement is a finding."
+      }
+    },
+    {
+      "name": "Listeria monocytogenes",
+      "aliases": [
+        "Listeria",
+        "L. monocytogenes",
+        "Listeria mono",
+        "Listeria Monocytogenes",
+        "LM"
+      ],
+      "limit": {
+        "operator": "absent",
+        "severity": "alert",
+        "criticality": "high",
+        "notes": "Listeria species and L. monocytogenes are certified separately by some labs; only the spellings that mean monocytogenes are aliased here."
+      }
+    },
+    {
+      "name": "Staphylococcus aureus",
+      "aliases": [
+        "Staph aureus",
+        "S. aureus",
+        "Staphylococcus",
+        "Coagulase Positive Staphylococci",
+        "Coag. Pos. Staph"
+      ],
+      "default_unit": "CFU/g",
+      "limit": {
+        "operator": "<=",
+        "value_max": 10,
+        "unit": "CFU/g",
+        "severity": "alert",
+        "criticality": "high"
+      }
+    },
+    {
+      "name": "Yeast",
+      "aliases": [
+        "Yeasts",
+        "Yeast Count",
+        "Yeast (CFU/g)"
+      ],
+      "default_unit": "CFU/g",
+      "notes": "A combined 'Yeast & Mold' result is a THIRD test and is not aliased here — judging a combined count against a yeast-only limit would be a wrong verdict rather than a missing one.",
+      "limit": {
+        "operator": "<=",
+        "value_max": 100,
+        "unit": "CFU/g",
+        "severity": "warn",
+        "criticality": "medium"
+      }
+    },
+    {
+      "name": "Mold",
+      "aliases": [
+        "Molds",
+        "Mould",
+        "Moulds",
+        "Mold Count"
+      ],
+      "default_unit": "CFU/g",
+      "limit": {
+        "operator": "<=",
+        "value_max": 100,
+        "unit": "CFU/g",
+        "severity": "warn",
+        "criticality": "medium"
+      }
+    },
+    {
+      "name": "Moisture",
+      "aliases": [
+        "Moisture %",
+        "% Moisture",
+        "Moisture Content",
+        "H2O",
+        "Water Content"
+      ],
+      "default_unit": "%",
+      "notes": "Written for a dried dairy ingredient. Re-scope or re-value it per product before it means anything for a fluid.",
+      "limit": {
+        "operator": "<=",
+        "value_max": 4.0,
+        "unit": "%",
+        "severity": "warn",
+        "criticality": "low"
+      }
+    },
+    {
+      "name": "pH",
+      "aliases": [
+        "pH Value",
+        "P.H.",
+        "pH @ 20C"
+      ],
+      "notes": "A unit-less measurement. The one 'between' limit in this pack, so the operator gets exercised on day one.",
+      "limit": {
+        "operator": "between",
+        "value_min": 6.4,
+        "value_max": 6.8,
+        "unit": null,
+        "severity": "warn",
+        "criticality": "low"
+      }
+    },
+    {
+      "name": "Water Activity",
+      "aliases": [
+        "Aw",
+        "aW",
+        "Water Activity (aw)",
+        "A/W",
+        "Water Activity Aw"
+      ],
+      "notes": "Unit-less by convention; the limit carries no unit for that reason.",
+      "limit": {
+        "operator": "<=",
+        "value_max": 0.6,
+        "unit": null,
+        "severity": "warn",
+        "criticality": "medium"
+      }
+    }
+  ],
+  "teach": {
+    "document_type": "certificate-of-analysis",
+    "closes": [
+      "coa-on-file"
+    ],
+    "decoy": "micro-limits",
+    "decoy_reason": "A COA reports THIS LOT's results. The Microbiological Limits line item asks for the PRODUCT's limits, which live on the specification sheet — the COA is measured against them, it does not state them. This is the whole lesson: a document TYPE is not a checklist REQUIREMENT, and the mapping between them is what you are configuring.",
+    "also_closed_by": {
+      "requirement": "micro-limits",
+      "document_type": "specification-sheet"
+    },
+    "sample_file": null,
+    "_note": "Honest counts: in this vocabulary a certificate of analysis closes exactly ONE line item. The multi-close document is the Specification Sheet, which closes nine — that is what `also_closed_by` points the learner at once they have tried the decoy.",
+    "_sample_file_note": "NULL until a real sample document ships. The wizard renders this in the PDF viewer on the teaching screen; a path here that does not resolve is a broken screen, so it stays null rather than naming a file nobody has produced yet. Put the file under public/samples/ and name it here when there is one."
+  },
+  "modules": {
+    "default_on": [
+      "library",
+      "compliance",
+      "records"
+    ],
+    "default_off": [
+      "fulfillment"
+    ],
+    "_note": "Order Fulfillment (Orders / Lots / Customers / COA Fulfillment) starts OFF. The client was explicit that COA-convergence is the LAST phase, and a tenant carrying four empty surfaces from day one is the thing the module gate exists to prevent. Switching it on later is one toggle."
+  }
 }

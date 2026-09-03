@@ -1,0 +1,346 @@
+#!/usr/bin/env node
+/**
+ * Codegen: starter-packs/*.json  ->  functions/lib/starterPacks.generated.ts
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * `bin/create-tenant`'s header promises that "adding a vertical is a new JSON
+ * file — no change to this script". The setup wizard has to be able to show a
+ * pack before it seeds one, and Pages Functions have NO FILESYSTEM: a Worker
+ * cannot `readFileSync('starter-packs/fsqa.json')`, and a `fetch` of a static
+ * asset would make the pack a runtime dependency of the CDN. So the packs are
+ * compiled into the Worker bundle at build time, exactly as
+ * `npm run build:worker-shared` compiles shared/*.ts into bin/lib/shared/*.js
+ * for the process worker. Adding a vertical stays a new JSON file plus
+ * `npm run build:packs`, which `npm run build` runs for you.
+ *
+ * WHAT IS EMITTED
+ * ---------------
+ * The NORMALIZED pack — slugs derived, sort orders assigned, every
+ * cross-reference already resolved by `normalizePack`. A pack that does not
+ * validate fails the build here rather than at seed time in front of a
+ * customer. The editorial keys (`_editing`, `_deliberately_omitted`, `_note`)
+ * are dropped: they are for whoever opens the JSON, and shipping them to the
+ * browser would be dead weight.
+ *
+ * The output is COMMITTED, so `npm run typecheck` and a fresh clone work
+ * without running a build step first — the same treatment bin/lib/shared/*.js
+ * already gets.
+ *
+ * Usage:
+ *   bin/build-starter-packs            # write the file
+ *   bin/build-starter-packs --check    # exit 1 if the file is stale (CI)
+ */
+
+import { readFileSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
+import { dirname, join, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { normalizePack } from './lib/starter-packs.mjs';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(__dirname, '..');
+const PACK_DIR = join(ROOT, 'starter-packs');
+const OUT = join(ROOT, 'functions', 'lib', 'starterPacks.generated.ts');
+
+/** See the identical helper in bin/render-starter-pack for why this is a regex
+ *  and why failing to parse is silent: a pack must never become a build
+ *  dependency of whoever owns shared/modules.ts. */
+function readModuleKeys() {
+  try {
+    const src = readFileSync(join(ROOT, 'shared', 'modules.ts'), 'utf8');
+    const m = src.match(/MODULE_KEYS\s*=\s*\[([^\]]*)\]\s*as const/);
+    if (!m) return null;
+    const keys = [...m[1].matchAll(/'([^']+)'|"([^"]+)"/g)].map((x) => x[1] || x[2]);
+    return keys.length ? keys : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Project the normalized pack onto exactly the fields the generated types
+ * declare. `normalizePack` spreads the source object, so an unknown key an
+ * editor added to the JSON would otherwise ride into a typed structure that
+ * does not declare it.
+ */
+function project(pack) {
+  return {
+    pack: pack.pack,
+    label: pack.label,
+    description: pack.description,
+    document_types: pack.document_types.map((d) => ({
+      name: d.name,
+      slug: d.slug,
+      description: d.description,
+      sort_order: d.sort_order,
+      owner: d.owner,
+      closes: d.closes,
+      extraction_instructions: d.extraction_instructions,
+    })),
+    requirements: pack.requirements.map((r) => ({
+      name: r.name,
+      slug: r.slug,
+      description: r.description,
+      checklist: r.checklist,
+      sort_order: r.sort_order,
+    })),
+    claim_types: pack.claim_types.map((c) => ({
+      name: c.name,
+      slug: c.slug,
+      description: c.description,
+      subject_grain: c.subject_grain,
+      sort_order: c.sort_order,
+    })),
+    claim_rules: pack.claim_rules.map((r) => ({
+      claim: r.claim,
+      requires: r.requires,
+      recommends: r.recommends,
+      notes: r.notes,
+    })),
+    owner_labels: pack.owner_labels.map((o) => ({
+      label: o.label,
+      owner_key: o.owner_key,
+      description: o.description,
+    })),
+    requirement_packets: pack.requirement_packets.map((p) => ({
+      name: p.name,
+      slug: p.slug,
+      description: p.description,
+      default: p.default,
+      requirements: p.requirements,
+      recommends: p.recommends,
+    })),
+    spec_tests: pack.spec_tests.map((t) => ({
+      name: t.name,
+      slug: t.slug,
+      aliases: t.aliases,
+      default_unit: t.default_unit,
+      notes: t.notes,
+      limit: t.limit,
+    })),
+    teach: pack.teach,
+    modules: pack.modules,
+  };
+}
+
+const TYPES = `/**
+ * One document type, and the three things a pack now says about it beyond its
+ * name: which checklist items it CLOSES, which department OWNS its renewals,
+ * and how to READ it.
+ */
+export interface StarterPackDocumentType {
+  name: string;
+  slug: string;
+  description: string | null;
+  sort_order: number;
+  /** A declared \`owner_labels\` label, or null. Becomes \`document_types.default_owner\`. */
+  owner: string | null;
+  /** Requirement slugs from the same pack. Becomes \`document_type_requirements\`. */
+  closes: string[];
+  /** The document-type layer of the extraction prompt stack (migration 0098). */
+  extraction_instructions: string | null;
+}
+
+export interface StarterPackRequirement {
+  name: string;
+  slug: string;
+  description: string | null;
+  checklist: string | null;
+  sort_order: number;
+}
+
+export interface StarterPackClaimType {
+  name: string;
+  slug: string;
+  description: string | null;
+  subject_grain: string;
+  sort_order: number;
+}
+
+export interface StarterPackClaimRule {
+  claim: string;
+  requires: string[];
+  recommends: string[];
+  notes: string | null;
+}
+
+/** A department. LABELS ONLY — a pack never writes \`owner_routes\`, because a
+ *  route needs a real recipient and a fake one routes an alert nowhere without
+ *  reporting a gap. */
+export interface StarterPackOwnerLabel {
+  label: string;
+  /** Lower-cased, whitespace-collapsed — \`normalizeOwnerKey\` in functions/lib/alert-routing.ts. */
+  owner_key: string;
+  description: string | null;
+}
+
+/**
+ * A named set of requirements, DEFINED by the pack and applied to ONE supplier
+ * at a time. Nothing is seeded from this: \`supplier_requirements\` needs a
+ * supplier, a new tenant has none, and bulk application is what made the live
+ * tenant's checklist uniform-and-wrong.
+ */
+export interface StarterPackRequirementPacket {
+  name: string;
+  slug: string;
+  description: string | null;
+  /** The packet the wizard offers first. It applies nothing on its own. */
+  default: boolean;
+  requirements: string[];
+  recommends: string[];
+}
+
+/** One tenant-wide acceptance limit — all three scope columns NULL. */
+export interface StarterPackSpecLimit {
+  operator: string;
+  value_min: number | null;
+  value_max: number | null;
+  /** null is a DECLARATION that the analyte is dimensionless (pH, water activity). */
+  unit: string | null;
+  severity: string;
+  criticality: string;
+  notes: string | null;
+}
+
+/**
+ * An analyte and the spellings suppliers actually print for it.
+ *
+ * \`aliases\` is the load-bearing half. \`matchSpecTest\` is EXACT on a normalized
+ * name and never fuzzy, so a spelling missing here resolves to \`not_checked\`
+ * rather than to a pass or a fail.
+ */
+export interface StarterPackSpecTest {
+  name: string;
+  slug: string;
+  aliases: string[];
+  default_unit: string | null;
+  notes: string | null;
+  limit: StarterPackSpecLimit | null;
+}
+
+/**
+ * The setup wizard's one lesson: a document TYPE is not a checklist
+ * REQUIREMENT. Copy and a worked example, not tenant state — nothing is seeded
+ * from it.
+ */
+export interface StarterPackTeach {
+  document_type: string;
+  /** A subset of that type's own \`closes\`. */
+  closes: string[];
+  /** The tempting WRONG answer. Guaranteed not to be in the type's \`closes\`. */
+  decoy: string | null;
+  decoy_reason: string | null;
+  /** "then what does close it?" — a type that really does list that requirement. */
+  also_closed_by: { requirement: string; document_type: string } | null;
+  sample_file: string | null;
+}
+
+/**
+ * Which modules a tenant seeded from this pack starts with.
+ *
+ * Typed as \`string[]\`, NOT \`ModuleKey[]\`, deliberately: an unrecognised key
+ * must not fail a build. It is inert anyway — a \`tenant_modules\` row naming a
+ * module this build does not have can hide nothing, because surfaces come from
+ * code. Filter with \`isModuleKey\` from shared/modules.ts at the point of use.
+ */
+export interface StarterPackModules {
+  default_on: string[];
+  default_off: string[];
+}
+
+export interface StarterPack {
+  pack: string;
+  label: string;
+  description: string;
+  document_types: StarterPackDocumentType[];
+  requirements: StarterPackRequirement[];
+  claim_types: StarterPackClaimType[];
+  claim_rules: StarterPackClaimRule[];
+  owner_labels: StarterPackOwnerLabel[];
+  requirement_packets: StarterPackRequirementPacket[];
+  spec_tests: StarterPackSpecTest[];
+  teach: StarterPackTeach | null;
+  modules: StarterPackModules;
+}
+`;
+
+function build() {
+  if (!existsSync(PACK_DIR)) throw new Error(`No starter-packs directory at ${PACK_DIR}`);
+  const names = readdirSync(PACK_DIR)
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => basename(f, '.json'))
+    .sort();
+
+  const moduleKeys = readModuleKeys();
+  const packs = {};
+  for (const name of names) {
+    const raw = JSON.parse(readFileSync(join(PACK_DIR, `${name}.json`), 'utf8'));
+    let normalized;
+    try {
+      normalized = normalizePack(raw, { moduleKeys });
+    } catch (err) {
+      throw new Error(`starter-packs/${name}.json: ${err.message}`);
+    }
+    for (const w of normalized.warnings) console.error(`warning: ${name}: ${w}`);
+    if (normalized.pack !== name) {
+      // The filename is the pack id everywhere else (--pack fsqa), so a
+      // disagreement would make one pack reachable under two names.
+      throw new Error(
+        `starter-packs/${name}.json declares "pack": "${normalized.pack}" — it must match the filename`,
+      );
+    }
+    packs[name] = project(normalized);
+  }
+
+  const body = [
+    `// GENERATED by 'npm run build:packs' from starter-packs/*.json -- DO NOT EDIT BY HAND.`,
+    `//`,
+    `// Pages Functions have no filesystem, so the packs are compiled into the`,
+    `// bundle. Edit starter-packs/<name>.json and re-run 'npm run build:packs'.`,
+    `// See bin/build-starter-packs.`,
+    '',
+    TYPES,
+    '/** Every pack that ships, keyed by the name `--pack` takes. */',
+    `export const STARTER_PACKS: Record<string, StarterPack> = ${JSON.stringify(packs, null, 2)};`,
+    '',
+    '/** Pack names, sorted — the order `--list-packs` prints them in. */',
+    `export const STARTER_PACK_NAMES: readonly string[] = ${JSON.stringify(names)};`,
+    '',
+    '/** The pack a tenant gets when nobody chooses one. Matches bin/create-tenant. */',
+    `export const DEFAULT_STARTER_PACK = ${JSON.stringify(names.includes('fsqa') ? 'fsqa' : names[0] ?? '')};`,
+    '',
+    '/** Lookup that does not throw on an unknown name. */',
+    'export function getStarterPack(name: string | null | undefined): StarterPack | null {',
+    '  if (!name) return null;',
+    '  return Object.prototype.hasOwnProperty.call(STARTER_PACKS, name) ? STARTER_PACKS[name] : null;',
+    '}',
+    '',
+  ].join('\n');
+
+  return body;
+}
+
+try {
+  const body = build();
+  const check = process.argv.includes('--check');
+  const current = existsSync(OUT) ? readFileSync(OUT, 'utf8') : null;
+  if (check) {
+    if (current !== body) {
+      console.error(
+        `${OUT} is stale. Run 'npm run build:packs' and commit the result.`,
+      );
+      process.exit(1);
+    }
+    console.log('starter packs: generated module is up to date');
+    process.exit(0);
+  }
+  if (current === body) {
+    console.log(`starter packs: functions/lib/starterPacks.generated.ts unchanged`);
+  } else {
+    writeFileSync(OUT, body, 'utf8');
+    console.log(`starter packs: wrote functions/lib/starterPacks.generated.ts`);
+  }
+} catch (err) {
+  console.error(`build-starter-packs: ${err.message}`);
+  process.exit(1);
+}
