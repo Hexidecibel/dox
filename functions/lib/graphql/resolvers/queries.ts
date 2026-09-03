@@ -1,6 +1,7 @@
 import type { GraphQLContext } from '../context';
 import { roleToGql, statusToGql, statusToDB } from '../roles';
 import type { User as DBUser, Tenant, Document, AuditEntry } from '../../types';
+import type { ModuleKey } from '../../../../shared/modules';
 import {
   UnauthorizedError,
   ForbiddenError,
@@ -456,4 +457,44 @@ export const queryResolvers = {
       total: countResult?.total || 0,
     };
   },
+};
+
+/**
+ * WHICH MODULE OWNS EACH QUERY'S DATA — the gate's input, applied in
+ * `../index.ts` by `gateResolvers`.
+ *
+ * EXHAUSTIVE BY TYPE: `keyof typeof queryResolvers` means a new query that
+ * does not appear here fails to compile, in this file, while the person adding
+ * it is still looking at it. A missing entry would otherwise default to open,
+ * which is the failure this whole pass exists to close.
+ *
+ * EVERY QUERY IS `null` TODAY, AND THAT IS THE RIGHT ANSWER, not an oversight.
+ * A module owns a resolver only when its data EXCLUSIVELY serves that module's
+ * surfaces — the precedent is the deliberate omission of `/api/documents` from
+ * `library.apiPrefixes` (see `shared/modules.ts`), because renewal digests,
+ * alert landings and COA fulfillment all read documents, so gating them behind
+ * `library` would break `compliance` and `fulfillment` for a tenant that has
+ * those switched ON.
+ *
+ *   - `me`, `user`, `users`, `tenant`, `tenants` — identity and organization
+ *     config. `/api/users` and `/api/tenants` belong to no module either; a
+ *     tenant with every module off still has a portal to log into.
+ *   - `documents`, `document`, `lookupDocument`, `searchDocuments` — the
+ *     shared read primitive itself, plus its search. `/api/documents` and
+ *     `/api/search` are both ungated on the REST side for the same reason.
+ *   - `auditLog` — evidence, not a module's surface. `/api/audit` is ungated,
+ *     and a compliance record with a hole in it the moment somebody flips a
+ *     toggle is worth less than no record.
+ */
+export const queryModules: Record<keyof typeof queryResolvers, ModuleKey | null> = {
+  me: null,
+  tenants: null,
+  tenant: null,
+  users: null,
+  user: null,
+  documents: null,
+  document: null,
+  lookupDocument: null,
+  searchDocuments: null,
+  auditLog: null,
 };

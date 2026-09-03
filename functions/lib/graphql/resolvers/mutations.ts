@@ -18,6 +18,11 @@ import { validatePassword } from '../../validation';
 import { logAudit, getClientIp } from '../../db';
 import { sendEmail, buildAdminResetEmail } from '../../email';
 import type { User as DBUser, Document } from '../../types';
+// The module key is imported, never written as a literal: `MODULES` is the one
+// place a module is named, so a rename fails to compile rather than silently
+// un-gating a field. Same discipline as `shared/specCriticality.ts`.
+import { MODULES } from '../../../../shared/modules';
+import type { ModuleKey } from '../../../../shared/modules';
 
 function requireAuth(ctx: GraphQLContext): DBUser {
   if (!ctx.user) {
@@ -1109,4 +1114,53 @@ export const mutationResolvers = {
 
     return { data, total: data.length };
   },
+};
+
+/**
+ * WHICH MODULE OWNS EACH MUTATION'S DATA — the gate's input, applied in
+ * `../index.ts` by `gateResolvers`. Exhaustive by type, for the reason spelled
+ * out over `queryModules` in `./queries.ts`: a new mutation with no entry here
+ * does not compile, so no field can default to open by being forgotten.
+ *
+ * `generateReport` IS THE HOLE THIS PASS CLOSES. It is the GraphQL twin of
+ * `POST /api/reports/generate`, and `/api/reports` is already listed under
+ * `fulfillment.apiPrefixes` — so before this, the same report was a 403 over
+ * REST and a 200 over GraphQL for the same user in the same tenant. The
+ * module ownership is not a new judgement made here; it is the one already
+ * written down in `shared/modules.ts`, and the two transports were simply
+ * answering differently about it. Reports are `fulfillment`'s surface
+ * (`/reports` is in its `uiPrefixes` too) — the rows it returns are documents,
+ * but the REPORT is what a module owns, the same way `/api/documents` stays
+ * ungated while `/api/reports` does not.
+ *
+ * Everything else is `null`, and deliberately:
+ *
+ *   - `login`, `logout`, `changePassword` — authentication. A person whose
+ *     tenant has every module off must still be able to sign in, and gating
+ *     `login` would be a lockout, not a scope control.
+ *   - `createTenant` / `updateTenant` / `deleteTenant`, `createUser` /
+ *     `updateUser` / `deleteUser`, `resetUserPassword` — organization
+ *     administration, which belongs to no module on the REST side either.
+ *     These are guarded by `requireRole`, which is the security boundary and
+ *     is untouched here.
+ *   - `createDocument` / `updateDocument` / `deleteDocument` — the shared
+ *     document primitive. Gating writes to it behind `library` would break
+ *     `compliance` and `fulfillment` for a tenant that has those switched ON,
+ *     which is the exact failure the `/api/documents` omission avoids.
+ */
+export const mutationModules: Record<keyof typeof mutationResolvers, ModuleKey | null> = {
+  login: null,
+  logout: null,
+  changePassword: null,
+  createTenant: null,
+  updateTenant: null,
+  deleteTenant: null,
+  createUser: null,
+  updateUser: null,
+  deleteUser: null,
+  resetUserPassword: null,
+  createDocument: null,
+  updateDocument: null,
+  deleteDocument: null,
+  generateReport: MODULES.fulfillment.key,
 };

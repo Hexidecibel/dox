@@ -192,6 +192,41 @@ export interface ModuleDenial {
 }
 
 /**
+ * Given an already-resolved access answer, is this module refused — and by
+ * WHICH of the two layers?
+ *
+ * THE ONLY PLACE A DENIAL IS PHRASED. Two enforcement paths reach it: the REST
+ * middleware, which arrives via `checkModuleAccess` after turning a URL into a
+ * module, and the GraphQL gate (`functions/lib/graphql/module-gate.ts`), which
+ * already knows its module because a resolver declared it. Keeping the wording
+ * and the code in one function is deliberate — the middleware's own failure
+ * mode was three layers disagreeing about who can see what, and a second
+ * enforcement surface that phrased its refusals independently would be a
+ * fourth. A client hitting `/api/reports` and a client running the GraphQL
+ * `generateReport` mutation get the same `code` for the same reason.
+ *
+ * Returns `null` for "allowed".
+ */
+export function denialForModule(access: ModuleAccess, moduleKey: ModuleKey): ModuleDenial | null {
+  if (access.visible.includes(moduleKey)) return null;
+
+  const label = MODULES[moduleKey].label;
+  // Off at the tenant means nobody in the organization has it; still inside
+  // the ceiling means the person's own functions narrowed them.
+  return access.tenantEnabled.includes(moduleKey)
+    ? {
+        module: moduleKey,
+        code: 'module_not_visible',
+        message: `${label} is not part of your role's access. An administrator can change this in Settings.`,
+      }
+    : {
+        module: moduleKey,
+        code: 'module_disabled',
+        message: `${label} is not enabled for this organization`,
+      };
+}
+
+/**
  * The gate itself: does this user get to touch this API path?
  *
  * Returns `null` for "allowed", which covers the common case cheaply — a path
@@ -212,23 +247,7 @@ export async function checkModuleAccess(
   const moduleKey = moduleForApiPath(pathname);
   if (!moduleKey) return null;
 
-  const access = await getModuleAccess(db, user, memo);
-  if (access.visible.includes(moduleKey)) return null;
-
-  const label = MODULES[moduleKey].label;
-  // Off at the tenant means nobody in the organization has it; still inside
-  // the ceiling means the person's own functions narrowed them.
-  return access.tenantEnabled.includes(moduleKey)
-    ? {
-        module: moduleKey,
-        code: 'module_not_visible',
-        message: `${label} is not part of your role's access. An administrator can change this in Settings.`,
-      }
-    : {
-        module: moduleKey,
-        code: 'module_disabled',
-        message: `${label} is not enabled for this organization`,
-      };
+  return denialForModule(await getModuleAccess(db, user, memo), moduleKey);
 }
 
 /**
