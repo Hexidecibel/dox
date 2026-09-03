@@ -49,6 +49,29 @@ export interface SetupStepProps {
   /** Jump to a screen. The stepper is navigable; nothing here is a gate. */
   goToStep: (step: number) => void;
   /**
+   * Let the screen on display spend ONE press of Next on itself.
+   *
+   * WHY THIS EXISTS AT ALL, given that Back and Next are never disabled and no
+   * screen gates the one after it. Screen 4 is not collecting configuration,
+   * it is teaching an idea, and the only moment at which it can tell whether
+   * the idea landed is the moment somebody decides they are finished with it.
+   * Somebody who ticks one box and reaches for Next has understood the screen
+   * as a form; a sentence shown after they have left is a sentence nobody
+   * reads.
+   *
+   * IT IS NOT A GATE, and the difference is worth being precise about. The
+   * button stays enabled. The intercept returns `true` at most ONCE per visit
+   * — the screen is responsible for disarming itself — so the second press
+   * always advances, whatever the screen thinks of the answer. It cannot
+   * refuse; it can only ask once, in place, without a modal.
+   *
+   * Pass `null` to disarm. A screen MUST disarm on unmount (return it from the
+   * registering effect) — React runs an unmounting child's cleanup before the
+   * replacing child's effects, so that ordering is what keeps one screen's
+   * intercept from firing on the next screen's Next.
+   */
+  setNextIntercept: (intercept: (() => boolean) | null) => void;
+  /**
    * Mark the run `completed` and leave the wizard.
    *
    * COMPLETION IS A DECLARATION, NOT A SCORE. The run finishes because somebody

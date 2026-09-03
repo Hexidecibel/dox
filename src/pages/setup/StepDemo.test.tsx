@@ -136,6 +136,7 @@ function props(over: Partial<SetupStepProps> = {}): SetupStepProps {
     patchState: vi.fn(),
     refreshRun: vi.fn().mockResolvedValue(undefined),
     goToStep: vi.fn(),
+    setNextIntercept: vi.fn(),
     finish: vi.fn().mockResolvedValue(undefined),
     ...over,
   };

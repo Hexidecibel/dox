@@ -327,6 +327,8 @@ export type {
   ApplyRequirementPacketResponse,
   DocumentTypeRequirementRow,
   DocumentTypeRequirementsResponse,
+  ReplaceDocumentTypeRequirementsRequest,
+  ReplaceDocumentTypeRequirementsResponse,
 } from '../../shared/types';
 
 // Value export: how many screens the wizard has, so the stepper and the

@@ -100,6 +100,8 @@ import type {
   ApplyStarterPackResponse,
   ApplyRequirementPacketResponse,
   DocumentTypeRequirementsResponse,
+  ReplaceDocumentTypeRequirementsRequest,
+  ReplaceDocumentTypeRequirementsResponse,
   ApiSupplierRequirement,
   SupplierRequirementTier,
   LotMatchListResponse,
@@ -1840,6 +1842,32 @@ export const api = {
       fetchApi<DocumentTypeRequirementsResponse>(
         `/document-type-requirements?document_type_id=${encodeURIComponent(params.documentTypeId)}`,
       ),
+
+    /**
+     * PUT /api/document-type-requirements — REPLACE the mapping for one type.
+     *
+     * `requirementIds` is the whole set: anything not in it is deleted. The
+     * signature says `replace` rather than `update` for that reason — a caller
+     * that thinks it is patching would quietly unmap everything it did not
+     * bother to send.
+     *
+     * There is no batch form here or on the server, and there must not be one:
+     * a call that could map every type at once is the bulk data entry the
+     * wizard's teaching screen exists to replace.
+     */
+    replace: (params: {
+      documentTypeId: string;
+      requirementIds: string[];
+      source?: 'wizard' | 'human';
+    }): Promise<ReplaceDocumentTypeRequirementsResponse> =>
+      fetchApi<ReplaceDocumentTypeRequirementsResponse>('/document-type-requirements', {
+        method: 'PUT',
+        body: JSON.stringify({
+          document_type_id: params.documentTypeId,
+          requirement_ids: params.requirementIds,
+          source: params.source,
+        } satisfies ReplaceDocumentTypeRequirementsRequest),
+      }),
   },
 
   /**

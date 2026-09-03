@@ -57,7 +57,7 @@ import StepModules from './StepModules';
 import StepOwners from './StepOwners';
 import StepReceipt from './StepReceipt';
 import StepDemo from './StepDemo';
-import StepPlaceholder from './StepPlaceholder';
+import StepTeach from './StepTeach';
 
 /** Same debounce as `records/FormBuilder.tsx`. One number, one meaning. */
 const AUTOSAVE_DEBOUNCE_MS = 600;
@@ -65,16 +65,15 @@ const AUTOSAVE_DEBOUNCE_MS = 600;
 /**
  * The six screens.
  *
- * 4 is owned by other work and renders `StepPlaceholder`. It is in the list
- * rather than absent from it because the stepper has to show the real shape of
- * the flow — a five-step wizard telling somebody it is step "3 of 6" is worse
- * than a step that admits it is unfinished.
+ * 1-3 are prerequisites, 5 is a receipt and 6 is the payoff. 4 is the reason
+ * the wizard exists: the only screen that introduces an idea rather than
+ * collecting or reporting a setting.
  */
 const STEPS: SetupStepDefinition[] = [
   { step: 1, label: 'Your industry', title: 'What do you make or handle?', Component: StepPack },
   { step: 2, label: 'Modules', title: 'Which parts of the portal do you use?', Component: StepModules },
   { step: 3, label: 'Renewals', title: 'Who owns renewals?', Component: StepOwners },
-  { step: 4, label: 'The idea', title: 'One document, several boxes', Component: StepPlaceholder },
+  { step: 4, label: 'The idea', title: 'One document, several boxes', Component: StepTeach },
   { step: 5, label: 'Receipt', title: 'Here is what exists now.', Component: StepReceipt },
   { step: 6, label: 'Try it', title: 'Drop a document through it', Component: StepDemo },
 ];
@@ -143,6 +142,11 @@ export function SetupWizard() {
   // updater — React may invoke an updater twice in development, and scheduling
   // a save from inside one would fire the debounce twice for one edit.
   const runRef = useRef<TenantSetupRun | null>(null);
+  // The screen on display may spend ONE press of Next on itself — see
+  // `setNextIntercept` in stepProps.ts. Held in a ref rather than in state
+  // because registering it must not re-render the shell, and because the value
+  // is read exactly once, inside the click handler.
+  const nextInterceptRef = useRef<(() => boolean) | null>(null);
 
   const currentStep = useMemo(() => {
     const parsed = Number(stepParam);
@@ -273,6 +277,10 @@ export function SetupWizard() {
     [navigate],
   );
 
+  const setNextIntercept = useCallback((intercept: (() => boolean) | null) => {
+    nextInterceptRef.current = intercept;
+  }, []);
+
   // No :step in the URL — land on wherever the run says it was. This IS the
   // resume: a person who left at screen 4 opens /setup and gets screen 4.
   useEffect(() => {
@@ -398,6 +406,7 @@ export function SetupWizard() {
     patchState,
     refreshRun,
     goToStep,
+    setNextIntercept,
     finish,
   };
 
@@ -463,7 +472,16 @@ export function SetupWizard() {
         {active < TENANT_SETUP_STEPS ? (
           // Never disabled. The nudging is the teaching; blocking would turn
           // the wizard back into a form.
-          <Button variant="contained" endIcon={<NextIcon />} onClick={() => goToStep(active + 1)}>
+          //
+          // A screen may claim ONE press (screen 4 spends it on the sentence
+          // somebody is about to walk past). It stays enabled throughout and
+          // the intercept disarms itself, so pressing again always advances —
+          // see `setNextIntercept` in stepProps.ts.
+          <Button variant="contained" endIcon={<NextIcon />} onClick={() => {
+            const intercept = nextInterceptRef.current;
+            if (intercept && intercept()) return;
+            goToStep(active + 1);
+          }}>
             Next
           </Button>
         ) : (

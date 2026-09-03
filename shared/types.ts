@@ -5244,3 +5244,29 @@ export interface DocumentTypeRequirementsResponse {
   document_type_id: string;
   requirements: DocumentTypeRequirementRow[];
 }
+
+/**
+ * PUT /api/document-type-requirements — replace the mapping for ONE type.
+ *
+ * ONE TYPE PER CALL, and there is deliberately no batch form. The wizard's
+ * teaching screen writes what the document in front of somebody closes; a shape
+ * that carried several types would invite a "map all 27" button, which is the
+ * data entry the screen exists to replace.
+ *
+ * `source` cannot be 'pack': the column tells "the starter pack decided this"
+ * apart from "somebody here decided this", and a human write claiming the
+ * former erases the distinction.
+ */
+export interface ReplaceDocumentTypeRequirementsRequest {
+  document_type_id: string;
+  /** The WHOLE set. Anything absent is deleted — this is a replace, not a merge. */
+  requirement_ids: string[];
+  source?: 'wizard' | 'human';
+}
+
+export interface ReplaceDocumentTypeRequirementsResponse extends DocumentTypeRequirementsResponse {
+  /** Rows this call inserted that were not mapped before. */
+  added: number;
+  /** Rows it deleted. Reported because a replace can silently subtract. */
+  removed: number;
+}
