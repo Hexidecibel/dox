@@ -21,6 +21,7 @@ import {
   syncDocumentFacets,
   isValidRenewalType,
 } from '../../lib/registry';
+import { applyDocumentTypeRequirementDefaults } from '../../lib/requirement-defaults';
 import type { DocumentFacetInput } from '../../lib/registry';
 import type { Env, User, Document } from '../../lib/types';
 
@@ -439,6 +440,26 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         preserveRejected: true,
       });
 
+      // Type-level requirement defaults (migration 0100) — ONLY when the caller
+      // said nothing about requirements. An API caller that names its own
+      // requirement ids knows more than a per-type default does, and having
+      // both write would mix a deliberate set with a guess. Best-effort and
+      // gated on configuration existing; see requirement-defaults.ts.
+      if (facetInput.requirements === undefined) {
+        await applyDocumentTypeRequirementDefaults(context.env.DB, {
+          documentId: existingDoc.id,
+          tenantId,
+          // Narrow cast: the shared `Document` type predates document_type_id
+          // (migration 0012) and does not declare it — the response builder
+          // below already carries errors on the same property. Stating the
+          // shape locally beats widening that type inside this change.
+          documentTypeId:
+            effectiveDocTypeId ||
+            (existingDoc as unknown as { document_type_id: string | null }).document_type_id,
+          actorId: user.id,
+        });
+      }
+
       // Link products if provided (update flow)
       if (productLinks.length > 0) {
         for (const link of productLinks) {
@@ -602,6 +623,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         actorId: user.id,
         preserveRejected: true,
       });
+
+      // Type-level requirement defaults — see the update branch. Same rule:
+      // an explicit `requirements` facet wins outright.
+      if (facetInput.requirements === undefined) {
+        await applyDocumentTypeRequirementDefaults(context.env.DB, {
+          documentId: docId,
+          tenantId,
+          documentTypeId: effectiveDocTypeId,
+          actorId: user.id,
+        });
+      }
 
       // Insert version
       const versionId = generateId();

@@ -19,6 +19,7 @@ import {
   isValidRenewalType,
 } from '../../lib/registry';
 import type { DocumentFacetInput } from '../../lib/registry';
+import { applyDocumentTypeRequirementDefaults } from '../../lib/requirement-defaults';
 import type { Env, User, Document } from '../../lib/types';
 import type { RenewalType } from '../../../shared/types';
 
@@ -391,6 +392,51 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       defaultStatus: 'confirmed',
       actorId: user.id,
     });
+
+    // Type-level requirement defaults (migration 0100). RE-TYPING a document is
+    // the one edit on this endpoint that changes what it should be closing, so
+    // it is the one edit that gets to propose links. Three guards, and all
+    // three are about not overruling a human:
+    //   - the type actually CHANGED (a title edit re-suggests nothing);
+    //   - the caller sent no `requirements` facet, so an explicit set — even an
+    //     explicit empty one, which is somebody clearing the checkboxes — wins;
+    //   - the document has NO requirement links at all yet. A curated set built
+    //     under the old type is a set of decisions; the defaults for the new
+    //     type are a guess, and a guess does not get to arrive alongside them.
+    //
+    // The read of `document_type_id` goes through a narrow cast: the shared
+    // `Document` type in lib/types.ts predates the column (migration 0012) and
+    // does not declare it, which is why the diff block above already carries
+    // four errors on exactly this property. Widening that type is a separate
+    // change with its own blast radius, so this pass states the shape it needs
+    // locally rather than adding a fifth.
+    const currentDocTypeId =
+      (doc as unknown as { document_type_id: string | null }).document_type_id ?? null;
+    const newDocTypeId: string | null =
+      body.categories !== undefined
+        ? (primaryCatId ?? null)
+        : body.document_type_id !== undefined
+          ? (body.document_type_id ?? null)
+          : currentDocTypeId;
+    if (
+      newDocTypeId &&
+      newDocTypeId !== currentDocTypeId &&
+      facetInput.requirements === undefined
+    ) {
+      const linkCount = await context.env.DB.prepare(
+        'SELECT COUNT(*) AS n FROM document_requirements WHERE document_id = ?',
+      )
+        .bind(docId)
+        .first<{ n: number }>();
+      if ((linkCount?.n ?? 0) === 0) {
+        await applyDocumentTypeRequirementDefaults(context.env.DB, {
+          documentId: docId,
+          tenantId: doc.tenant_id,
+          documentTypeId: newDocTypeId,
+          actorId: user.id,
+        });
+      }
+    }
 
     await logAudit(
       context.env.DB,

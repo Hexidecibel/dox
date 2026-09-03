@@ -8,6 +8,7 @@ import { extractRecordPdf } from './coaPageScope';
 import { attachLotToCoaDocument, extractLotNumber, extractSubLotCode } from '../entities/matching';
 import { normalizeLotNumber, normalizeSubLotCode, applyLotScheme, type LotScheme } from '../entities/lots';
 import { getLearnedPreferences } from '../learnedPreferences';
+import { applyDocumentTypeRequirementDefaults } from '../requirement-defaults';
 import type { CoaRecordsPayload } from '../../../shared/types';
 import { buildFlatExtendedMetadata } from '../../../shared/coaExtendedMetadata';
 import type { RenewalWrite } from '../renewal-proposal';
@@ -487,6 +488,16 @@ export async function produceCoa(
     .run();
 
   await auditRenewalDecision(db, userId, item.tenant_id, docId, item.id, renewal, clientIp || null);
+  // Propose the checklist items a document of this TYPE normally closes
+  // (migration 0100). Best-effort by construction — see requirement-defaults.ts:
+  // a suggestion that cannot be written must never fail an approve that has
+  // already written the document. No mappings configured => no writes at all.
+  await applyDocumentTypeRequirementDefaults(db, {
+    documentId: docId,
+    tenantId: item.tenant_id,
+    documentTypeId: item.document_type_id,
+    actorId: userId,
+  });
 
   // Insert document version
   const versionId = generateId();
@@ -785,6 +796,16 @@ export async function produceMultiProductCoa(
       .run();
 
     await auditRenewalDecision(db, userId, item.tenant_id, docId, item.id, renewal, clientIp || null);
+    // Propose the checklist items a document of this TYPE normally closes
+    // (migration 0100). Best-effort by construction — see requirement-defaults.ts:
+    // a suggestion that cannot be written must never fail an approve that has
+    // already written the document. No mappings configured => no writes at all.
+    await applyDocumentTypeRequirementDefaults(db, {
+      documentId: docId,
+      tenantId: item.tenant_id,
+      documentTypeId: item.document_type_id,
+      actorId: userId,
+    });
 
     // Insert document version
     const versionId = generateId();
@@ -1236,6 +1257,16 @@ export async function produceCoaRecords(
         .run();
 
       await auditRenewalDecision(db, userId, item.tenant_id, docId, item.id, renewal, clientIp || null);
+      // Propose the checklist items a document of this TYPE normally closes
+      // (migration 0100). Best-effort by construction — see requirement-defaults.ts:
+      // a suggestion that cannot be written must never fail an approve that has
+      // already written the document. No mappings configured => no writes at all.
+      await applyDocumentTypeRequirementDefaults(db, {
+        documentId: docId,
+        tenantId: item.tenant_id,
+        documentTypeId: item.document_type_id,
+        actorId: userId,
+      });
 
       const versionId = generateId();
       await db

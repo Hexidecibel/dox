@@ -96,6 +96,7 @@ import m0096 from '../../migrations/0096_document_type_renewal_period.sql?raw';
 import m0097 from '../../migrations/0097_renewal_policy_and_decision.sql?raw';
 import m0098 from '../../migrations/0098_document_type_extraction_instructions.sql?raw';
 import m0099 from '../../migrations/0099_module_visibility.sql?raw';
+import m0100 from '../../migrations/0100_document_type_requirements.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -108,7 +109,7 @@ const migrations: string[] = [
   m0072, m0073, m0074, m0075,
   m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
   m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094, m0095,
-  m0096, m0097, m0098, m0099,
+  m0096, m0097, m0098, m0099, m0100,
 ];
 
 /**
@@ -369,6 +370,9 @@ export async function cleanTables(db: D1Database): Promise<void> {
     'document_requirements', 'document_claims', 'claim_type_requirements',
     // 0087 applicability rows: before suppliers and requirements, after neither.
     'supplier_requirements',
+    // 0100 type-level requirement DEFAULTS: FK both document_types and
+    // requirements, so they clear ahead of both (and ahead of tenants).
+    'document_type_requirements',
     // 0090 composer: routing and lines before the requests they hang off, and
     // all three before suppliers, requirements and users.
     'request_routing', 'request_lines', 'document_requests',

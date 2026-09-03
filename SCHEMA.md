@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 129 tables, 2 views, 203 indexes, 36 triggers.
+Objects: 130 tables, 2 views, 204 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -149,6 +149,7 @@ Triggers: `trg_document_categories_ad_fts`, `trg_document_categories_ai_fts`
   supplier_id TEXT
   renewal_interval_months INTEGER
   renewal_policy TEXT NOT NULL DEFAULT 'inherit' CHECK (renewal_policy IN ('inherit', 'period', 'none'))
+  default_owner TEXT
   UNIQUE(tenant_id, slug)
 ```
 
@@ -1470,6 +1471,21 @@ Indexes: `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_tenant_verdict`
 ```
 
 Indexes: `idx_dtei_tenant_doctype`
+
+### `document_type_requirements`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  document_type_id TEXT NOT NULL REFERENCES document_types(id) ON DELETE CASCADE
+  requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE
+  source TEXT NOT NULL DEFAULT 'pack'
+  created_at TEXT DEFAULT (datetime('now'))
+  created_by TEXT
+  UNIQUE (document_type_id, requirement_id)
+```
+
+Indexes: `idx_dtr_tenant_type`
 
 ### `entity_notes`
 
