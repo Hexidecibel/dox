@@ -1015,19 +1015,27 @@
     }
   ],
   "teach": {
-    "document_type": "certificate-of-analysis",
+    "document_type": "specification-sheet",
     "closes": [
-      "coa-on-file"
+      "spec-sheet",
+      "micro-limits",
+      "pack-size",
+      "nutritionals-100g",
+      "allergen-matrix",
+      "country-of-origin",
+      "gtin",
+      "shelf-life",
+      "ingredient-statement"
     ],
-    "decoy": "micro-limits",
-    "decoy_reason": "A COA reports THIS LOT's results. The Microbiological Limits line item asks for the PRODUCT's limits, which live on the specification sheet — the COA is measured against them, it does not state them. This is the whole lesson: a document TYPE is not a checklist REQUIREMENT, and the mapping between them is what you are configuring.",
+    "decoy": "coa-on-file",
+    "decoy_reason": "A specification sheet is the document a COA is judged AGAINST, and the two arrive together, so filing this one against the Certificate of Analysis line item is the tempting mistake. It is wrong for a reason worth internalising: a specification measures nothing. Every figure on it is an acceptance limit for the PRODUCT, unchanged from lot to lot; a COA reports what one lot actually measured. Tick this box and the line item reads as closed by a document that contains no result at all. A document TYPE is not a checklist REQUIREMENT, and the mapping between them is what you are configuring.",
     "also_closed_by": {
-      "requirement": "micro-limits",
-      "document_type": "specification-sheet"
+      "requirement": "coa-on-file",
+      "document_type": "certificate-of-analysis"
     },
-    "sample_file": null,
-    "_note": "Honest counts: in this vocabulary a certificate of analysis closes exactly ONE line item. The multi-close document is the Specification Sheet, which closes nine — that is what `also_closed_by` points the learner at once they have tried the decoy.",
-    "_sample_file_note": "NULL until a real sample document ships. The wizard renders this in the PDF viewer on the teaching screen; a path here that does not resolve is a broken screen, so it stays null rather than naming a file nobody has produced yet. Put the file under public/samples/ and name it here when there is one."
+    "sample_file": "/setup-samples/fsqa/specification-sheet.pdf",
+    "_note": "Nine boxes off one document, and every one of them is genuinely printed on the sample: bin/render-setup-samples re-reads the built PDF's text layer and fails if any requirement here loses its evidence, or if this list stops matching document_types \"Specification Sheet\".closes. The mirror runs the other way: in this vocabulary a certificate of analysis closes exactly ONE line item, which is why it is the decoy rather than the teaching example.",
+    "_sample_file_source": "tests/fixtures/setup-samples/html/fsqa-specification-sheet.html is the source of truth; the PDF is build output, committed because the web app serves it as a static asset. Rebuild with bin/render-setup-samples."
   },
   "modules": {
     "default_on": [

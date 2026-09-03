@@ -1,0 +1,250 @@
+<!--
+  THE WIZARD'S TEACHING DOCUMENT — FSQA pack, screen 4 ("One document, several
+  boxes").
+
+  WHY A SPECIFICATION SHEET AND NOT A COA. Screen 4 exists to teach exactly one
+  idea: a document TYPE is not a checklist REQUIREMENT, and one document can
+  close several line items at once. Written honestly, a certificate of analysis
+  closes ONE — it reports one lot's measured results. The Specification Sheet is
+  the multi-close document in this vocabulary: `starter-packs/fsqa.json` has it
+  closing NINE requirements, and this page is the proof that a real supplier
+  spec sheet genuinely prints all nine.
+
+  EVERY CLAIM IS ASSERTED. bin/render-setup-samples reads
+  tests/fixtures/setup-samples/manifest.json, renders this file to
+  public/setup-samples/fsqa/specification-sheet.pdf, and then re-reads the PDF's
+  text layer to check that each of the nine requirements has its evidence
+  PRINTED ON THE PAGE. If a requirement's proof strings go missing the render
+  fails — because the failure mode this guards against is a teaching screen
+  whose ticked boxes do not match the document beside them, shown to a
+  food-safety professional who wrote the requirements.
+
+  SYNTHETIC AND FICTIONAL, DELIBERATELY. This is shown to prospects during
+  sales. Northfield Creamery Ingredients does not exist; the address, phone,
+  email, plant code, GTINs, certificate numbers and people are invented. The
+  domain is .example (RFC 2606) so it can never resolve. Nothing here is any
+  real supplier's data.
+
+  DENSE AND SLIGHTLY AWKWARD ON PURPOSE. Real spec sheets mix tables with
+  prose, put the allergen matrix next to the ingredient statement, restate the
+  same fact in two places, and carry a revision history nobody reads. A clean
+  form would teach the wrong thing about what arrives in the inbox.
+-->
+<style>
+@page { size: letter; margin: 0.42in 0.5in; }
+body { font-family: "Liberation Sans", Arial, Helvetica, sans-serif; font-size: 7.4pt; color: #111; line-height: 1.24; }
+.hdr { border-bottom: 2.5px solid #1a3a5c; padding-bottom: 6px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: flex-start; }
+.co { font-size: 13pt; font-weight: bold; letter-spacing: 0.4px; color: #1a3a5c; margin: 0 0 2px; }
+.addr { font-size: 7pt; color: #444; }
+.docid { font-size: 7pt; text-align: right; line-height: 1.45; border: 1px solid #999; padding: 4px 7px; background: #f4f6f8; white-space: nowrap; }
+.docid b { color: #1a3a5c; }
+.title { text-align: center; font-size: 11pt; font-weight: bold; margin: 6px 0 8px; }
+/* No letter-spacing on the title, deliberately: Chromium emits a letter-spaced
+   run as individually positioned glyphs and pdftotext reads it back as
+   "P R O D U C T  S P E C I F I C AT I O N", which the extractor then cannot
+   match. Real supplier sheets do letter-space their titles and this document is
+   allowed to be awkward — but not in the one string that names what it is. */
+h2 { font-size: 7.9pt; margin: 7px 0 2px; text-transform: uppercase; letter-spacing: 0.7px; border-bottom: 1px solid #1a3a5c; padding-bottom: 1px; color: #1a3a5c; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 4px; }
+td, th { border: 1px solid #8a8a8a; padding: 1.5px 5px; font-size: 7.1pt; vertical-align: top; }
+th { background: #e8ecf0; text-align: left; font-weight: bold; }
+.k { width: 27%; background: #f7f8f9; font-weight: bold; }
+.cols { display: flex; gap: 11px; }
+.cols > div { flex: 1; }
+p { margin: 3px 0; text-align: justify; }
+.note { font-size: 6.9pt; color: #333; }
+.sig { margin-top: 7px; border-top: 1px solid #8a8a8a; padding-top: 4px; font-size: 7pt; display: flex; justify-content: space-between; }
+.ftr { margin-top: 6px; border-top: 2px solid #1a3a5c; padding-top: 3px; font-size: 6.6pt; color: #444; }
+.ctr { text-align: center; }
+/* The micro table's Specification and Method columns never wrap. Left to wrap,
+   "Negative in 375 g" broke after the number and "AOAC 2013.10" after the word,
+   and the extractor read back "Negative in 375" and "AOAC" — a limit silently
+   losing its basis, which is the one thing a micro spec cannot afford. The page
+   is allowed to be awkward; a wrapped sample size is not awkward, it is wrong. */
+.mt td:nth-child(2), .mt td:nth-child(4) { white-space: nowrap; }
+/* A FORCED page break, and a continuation header behind it. Chromium would
+   otherwise break wherever the flow ran out, leaving a second page barely a
+   third full. Pinning it here puts the whole product definition — identity,
+   composition, allergens, nutrition and both analytical tables — on page one,
+   and the logistics on page two, which is where this sheet breaks anyway; the
+   point of forcing it is that editing the prose above can no longer drag an
+   analyte table across the fold. A real multi-page supplier spec repeats its
+   document number at the top of every page, because pages get separated. */
+.brk { page-break-before: always; }
+.cont { display: flex; justify-content: space-between; border-bottom: 1.5px solid #1a3a5c;
+        padding-bottom: 4px; margin-bottom: 8px; font-size: 7.2pt; color: #1a3a5c; font-weight: bold; }
+</style>
+
+<div class="hdr">
+  <div>
+    <div class="co">NORTHFIELD CREAMERY INGREDIENTS, INC.</div>
+    <div class="addr">1425 Kettle Creek Road &middot; Northfield, Wisconsin 53012 &middot; USA<br>
+    Tel (262) 555-0148 &middot; Quality Assurance: qa@northfieldcreamery.example &middot; FDA Food Facility Reg. 18902457364</div>
+  </div>
+  <div class="docid">
+    <b>Specification No. SPEC-NCI-2280</b><br>
+    Revision 5<br>
+    Effective Date: 12 March 2026<br>
+    Supersedes: Rev. 4, 03 August 2024<br>
+    Next Scheduled Review: March 2029<br>
+    Page 1 of 2
+  </div>
+</div>
+
+<div class="title">PRODUCT SPECIFICATION SHEET</div>
+
+<table>
+  <tr><td class="k">Product Name</td><td>Cheddar Cheese Powder, Medium</td><td class="k" style="width:20%">Product Code</td><td>NCI-2280</td></tr>
+  <tr><td class="k">Common / Usual Name</td><td>Cheese Powder</td><td class="k">Product Form</td><td>Free-flowing spray-dried powder</td></tr>
+  <tr><td class="k">Manufacturing Site</td><td>Northfield, Wisconsin, USA &mdash; Plant Code 55-0421</td><td class="k">Process</td><td>Blended, pasteurised, spray dried</td></tr>
+  <tr><td class="k">Country of Origin</td><td>United States of America</td><td class="k">Shelf Life</td><td>12 months from manufacture</td></tr>
+  <tr><td class="k">Certification</td><td colspan="3">SQF Food Safety Code for Manufacturing, Edition 9 &mdash; Certificate SQF-114772. Kosher certified (Dairy, cRc). Manufactured under a HACCP plan and a Preventive Controls food safety plan per 21 CFR 117. Current certificates are issued as their own documents and are not part of this specification.</td></tr>
+</table>
+
+<p>This specification describes the medium cheddar cheese powder supplied by Northfield Creamery Ingredients under
+item NCI-2280. It is intended for use as a flavour and colour ingredient in dry seasoning blends, snack topical
+applications, sauce and soup bases, and extruded snack coatings. It is <b>not</b> intended for retail sale as a
+finished consumer product without further processing. All values stated in the specification tables below are
+<b>acceptance limits for the product</b>; results measured on an individual production lot are reported separately on
+the certificate of analysis issued with each shipment.</p>
+
+<h2>Ingredient Statement</h2>
+<p>The following statement is the declaration for this ingredient and must be carried through to the finished-product
+label in descending order of predominance:</p>
+<p style="border:1px solid #8a8a8a;background:#f7f8f9;padding:4px 6px;margin:3px 0"><b>INGREDIENTS:</b> WHEY, CHEDDAR CHEESE
+(PASTEURIZED MILK, CHEESE CULTURES, SALT, ENZYMES), BUTTERMILK, SALT, DISODIUM PHOSPHATE, LACTIC ACID, ANNATTO
+(COLOR).&nbsp;&nbsp;<b>CONTAINS: MILK.</b></p>
+<p class="note">No artificial flavours, no added MSG, no hydrolysed vegetable protein, no preservatives. All ingredients are
+GRAS or are used in accordance with 21 CFR, and no ingredient is bioengineered as defined by 7 CFR Part 66.</p>
+
+<div class="cols">
+  <div>
+    <h2>Allergen Matrix &mdash; FDA "Big 9"</h2>
+    <table>
+      <tr><th>Allergen</th><th>In product</th><th>Shared line</th><th>In facility</th></tr>
+      <tr><td>Milk</td><td><b>YES</b> &mdash; ingredient</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>Eggs</td><td>No</td><td>No</td><td>No</td></tr>
+      <tr><td>Fish</td><td>No</td><td>No</td><td>No</td></tr>
+      <tr><td>Crustacean shellfish</td><td>No</td><td>No</td><td>No</td></tr>
+      <tr><td>Tree nuts</td><td>No</td><td>No</td><td>No</td></tr>
+      <tr><td>Peanuts</td><td>No</td><td>No</td><td>No</td></tr>
+      <tr><td>Wheat</td><td>No</td><td>No</td><td>No</td></tr>
+      <tr><td>Soybeans</td><td>No</td><td>No</td><td><b>Yes</b> &mdash; see note</td></tr>
+      <tr><td>Sesame</td><td>No</td><td>No</td><td>No</td></tr>
+    </table>
+    <p class="note">Soy lecithin is handled in Room 4 of the Northfield facility on dedicated equipment that shares no
+    air handling, dust collection or product contact surface with the NCI-2280 line. Allergen changeover is
+    validated by ATP swab and by protein-specific lateral flow at a 5 ppm limit of detection. Gluten:
+    this product is not made from a gluten-containing grain and tests &lt; 20 ppm gluten by R5 ELISA.</p>
+  </div>
+  <div>
+    <h2>Nutritional Information &mdash; per 100 g</h2>
+    <table>
+      <tr><th>Nutrient</th><th>Per 100 g</th><th>Method / basis</th></tr>
+      <tr><td>Energy</td><td>497 kcal / 2,079 kJ</td><td>Calculated</td></tr>
+      <tr><td>Total Fat</td><td>33.0 g</td><td>AOAC 989.05</td></tr>
+      <tr><td>&nbsp;&nbsp;of which Saturated Fat</td><td>20.5 g</td><td>AOAC 996.06</td></tr>
+      <tr><td>&nbsp;&nbsp;of which Trans Fat</td><td>1.1 g</td><td>AOAC 996.06</td></tr>
+      <tr><td>Cholesterol</td><td>95 mg</td><td>AOAC 994.10</td></tr>
+      <tr><td>Sodium</td><td>3,100 mg</td><td>AOAC 985.35</td></tr>
+      <tr><td>Total Carbohydrate</td><td>24.0 g</td><td>By difference</td></tr>
+      <tr><td>&nbsp;&nbsp;of which Dietary Fibre</td><td>0 g</td><td>AOAC 991.43</td></tr>
+      <tr><td>&nbsp;&nbsp;of which Total Sugars</td><td>18.0 g</td><td>AOAC 982.14</td></tr>
+      <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;incl. Lactose</td><td>17.2 g</td><td>AOAC 984.15</td></tr>
+      <tr><td>Protein (N &times; 6.38)</td><td>26.0 g</td><td>AOAC 991.20</td></tr>
+      <tr><td>Calcium</td><td>780 mg</td><td>AOAC 985.35</td></tr>
+      <tr><td>Moisture</td><td>3.5 g</td><td>AOAC 927.05</td></tr>
+      <tr><td>Ash</td><td>13.5 g</td><td>AOAC 930.30</td></tr>
+    </table>
+    <p class="note">Typical values, per 100 g of product as sold. Not a lot-specific analysis.</p>
+  </div>
+</div>
+
+<div class="cols">
+  <div>
+    <h2>Chemical &amp; Physical Specification</h2>
+    <table>
+      <tr><th>Attribute</th><th>Specification</th><th>Unit</th><th>Method</th></tr>
+      <tr><td>Moisture</td><td>3.5 max</td><td>%</td><td>AOAC 927.05</td></tr>
+      <tr><td>Milkfat</td><td>32.0 &ndash; 34.5</td><td>%</td><td>AOAC 989.05</td></tr>
+      <tr><td>Protein (N &times; 6.38)</td><td>24.0 min</td><td>%</td><td>AOAC 991.20</td></tr>
+      <tr><td>Salt (as NaCl)</td><td>6.5 &ndash; 8.5</td><td>%</td><td>AOAC 971.27</td></tr>
+      <tr><td>Ash</td><td>14.0 max</td><td>%</td><td>AOAC 930.30</td></tr>
+      <tr><td>pH (10% w/v solution, 20&deg;C)</td><td>5.2 &ndash; 5.8</td><td>&mdash;</td><td>AOAC 981.12</td></tr>
+      <tr><td>Bulk density, loose</td><td>0.42 &ndash; 0.52</td><td>g/mL</td><td>NCI-QM-014</td></tr>
+      <tr><td>Particle size, through US #40</td><td>95 min</td><td>%</td><td>ASTM E11</td></tr>
+      <tr><td>Scorched particles</td><td>Disc B max</td><td>&mdash;</td><td>ADPI</td></tr>
+    </table>
+  </div>
+  <div>
+    <h2>Microbiological Limits</h2>
+    <table class="mt">
+      <tr><th>Test</th><th>Specification</th><th>Unit</th><th>Method</th></tr>
+      <tr><td>Standard Plate Count</td><td>30,000 max</td><td>CFU/g</td><td>AOAC 990.12</td></tr>
+      <tr><td>Coliforms</td><td>10 max</td><td>CFU/g</td><td>AOAC 991.14</td></tr>
+      <tr><td>Escherichia coli</td><td>Negative in 1 g</td><td>&mdash;</td><td>AOAC 991.14</td></tr>
+      <tr><td>Yeast</td><td>50 max</td><td>CFU/g</td><td>AOAC 997.02</td></tr>
+      <tr><td>Mould</td><td>50 max</td><td>CFU/g</td><td>AOAC 997.02</td></tr>
+      <tr><td>Staph. aureus, coag. pos.</td><td>10 max</td><td>CFU/g</td><td>AOAC 2003.07</td></tr>
+      <tr><td>Salmonella</td><td>Negative in 375 g</td><td>&mdash;</td><td>AOAC 2016.01</td></tr>
+      <tr><td>Listeria monocytogenes</td><td>Negative in 25 g</td><td>&mdash;</td><td>AOAC 2013.10</td></tr>
+    </table>
+    <p class="note">Micro limits apply to the product as shipped. Environmental monitoring of the dry-blend zone is
+    performed weekly under NCI-QM-031.</p>
+  </div>
+</div>
+
+<div class="brk"></div>
+<div class="cont">
+  <div>Specification No. SPEC-NCI-2280 &middot; Revision 5 &middot; Cheddar Cheese Powder, Medium (NCI-2280)</div>
+  <div>Northfield Creamery Ingredients, Inc. &middot; Page 2 of 2</div>
+</div>
+<h2>Pack Size &amp; Case Configuration</h2>
+<table>
+  <tr><td class="k">Primary pack</td><td>50 lb (22.68 kg) net &mdash; 5-ply multiwall kraft bag with blue polyethylene liner, heat sealed</td></tr>
+  <tr><td class="k">Case GTIN-14</td><td>10812345600282</td></tr>
+  <tr><td class="k">Consumer unit UPC-A</td><td>812345600285 &mdash; 2 lb (907 g) foil pouch, item NCI-2280-02</td></tr>
+  <tr><td class="k">Pallet configuration</td><td>8 bags per layer &times; 5 layers = 40 bags per pallet (Ti 8 / Hi 5); pallet net weight 2,000 lb (907.2 kg)</td></tr>
+  <tr><td class="k">Pallet</td><td>48 &times; 40 in. heat-treated wood, ISPM-15 stamped, stretch wrapped with a top slip sheet</td></tr>
+  <tr><td class="k">Bulk alternative</td><td>2,000 lb (907 kg) corrugated tote with liner, item NCI-2280-T &mdash; minimum order 4 totes</td></tr>
+</table>
+
+<div class="cols">
+  <div>
+    <h2>Shelf Life &amp; Storage</h2>
+    <table>
+      <tr><td class="k" style="width:34%">Shelf life</td><td>12 months from date of manufacture in unopened original packaging</td></tr>
+      <tr><td class="k">Storage conditions</td><td>Store below 75&deg;F (24&deg;C) at 65% relative humidity or less, in a dry, odour-free warehouse, off the floor and out of direct sunlight</td></tr>
+      <tr><td class="k">After opening</td><td>Reseal the liner and use within 30 days</td></tr>
+      <tr><td class="k">Date coding</td><td>Julian code YYDDD followed by the line number, ink-jetted on the bag gusset</td></tr>
+      <tr><td class="k">Transport</td><td>Dry van, food-grade, previous-load restricted; refrigeration not required</td></tr>
+    </table>
+  </div>
+  <div>
+    <h2>Country of Origin</h2>
+    <p><b>Country of Origin: United States of America.</b> The milk, whey and buttermilk used in this product are
+    sourced exclusively from Grade A dairy farms in Wisconsin and Minnesota. Blending, pasteurisation, spray drying
+    and packing are all performed at our Northfield, Wisconsin facility (Plant Code 55-0421). No component of this
+    product is imported. Country of origin does not change from lot to lot; any change to this statement will be
+    issued as a new revision of this specification.</p>
+    <h2>Sensory</h2>
+    <table>
+      <tr><td class="k" style="width:26%">Appearance</td><td>Free-flowing powder, free of lumps and foreign matter</td></tr>
+      <tr><td class="k">Colour</td><td>Uniform orange to orange-yellow</td></tr>
+      <tr><td class="k">Flavour &amp; odour</td><td>Clean, characteristic medium cheddar; no rancid, scorched or off notes</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="sig">
+  <div><b>Prepared by:</b> M. Okonkwo, Quality Assurance Technologist &nbsp;&middot;&nbsp; 12 March 2026</div>
+  <div><b>Approved by:</b> Dana Whitcomb, Director of Quality Assurance &nbsp;&middot;&nbsp; 12 March 2026</div>
+</div>
+
+<div class="ftr">
+  <b>Revision history:</b> Rev. 4 (03 Aug 2024) sesame added to the allergen matrix &middot; Rev. 5 (12 Mar 2026) pallet
+  configuration corrected to Ti 8 / Hi 5, nutritionals re-issued per 100 g.<br>
+  Every figure in the tables above is an <b>acceptance limit for the product</b>. Measured results for an individual
+  production lot are reported on the certificate of analysis that accompanies each shipment; this specification is the
+  document those results are judged against. Uncontrolled when printed.
+</div>

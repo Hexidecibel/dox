@@ -41,6 +41,16 @@ import { validateLimitShape, matchSpecTest } from '../../shared/specCheck';
 import fsqaRaw from '../../starter-packs/fsqa.json?raw';
 import financeRaw from '../../starter-packs/finance.json?raw';
 import seedScriptRaw from '../../bin/seed-doctype-extraction-instructions?raw';
+import sampleManifestRaw from '../../tests/fixtures/setup-samples/manifest.json?raw';
+
+/**
+ * The teaching sample PDFs that are actually on disk, resolved by Vite at
+ * transform time. `node:fs` is not an option here — this suite runs in the
+ * workerd pool, where existsSync cannot see the repository — and a glob is the
+ * better check anyway: it is answered by the same resolver that decides what
+ * ends up in `dist/`, so it fails for exactly the reason screen 4 would.
+ */
+const SAMPLE_PDFS = import.meta.glob('../../public/setup-samples/**/*.pdf');
 
 const fsqa = JSON.parse(fsqaRaw);
 const finance = JSON.parse(financeRaw);
@@ -421,6 +431,49 @@ describe('starter packs — every shipped pack is demonstrable', () => {
       (d: any) => d.slug === norm.teach.also_closed_by.document_type,
     );
     expect(other.closes).toContain(norm.teach.also_closed_by.requirement);
+  });
+
+  /**
+   * The teaching screen renders `teach.sample_file` in a PDF viewer. A path
+   * that does not resolve is a blank screen 4, and the pack is edited far more
+   * often than the document is rebuilt — so the file is checked to be THERE, on
+   * disk, under the directory Vite copies into `dist/`. `null` was the honest
+   * answer while no sample existed; now that one does, null is a regression.
+   */
+  it.each(PACKS)('%s: the teaching example names a sample file that exists', (_n, pack) => {
+    const norm = normalizePack(pack);
+    const file = norm.teach.sample_file;
+    expect(file, 'teach.sample_file is null — screen 4 has nothing to render').toBeTruthy();
+    // Served straight off `public/`: functions/ only claims /api/*.
+    expect(file.startsWith('/setup-samples/')).toBe(true);
+    const built = Object.keys(SAMPLE_PDFS);
+    expect(built.some((k) => k.endsWith(file)), `${file} is not in public/ — built: ${built}`).toBe(true);
+  });
+
+  /**
+   * ...and the document is held to what the pack claims it closes. The
+   * evidence itself — "is this string printed on the page?" — belongs to
+   * bin/render-setup-samples, which can read the PDF's text layer. What is
+   * checked here is the join: the sample manifest and the pack must name the
+   * same document type, the same file, and exactly the same requirements. Add a
+   * requirement to a teaching type and this fails until the sample earns it,
+   * which is the drift that would otherwise tick a box the document beside it
+   * does not support.
+   */
+  it.each(PACKS)('%s: the sample document and the pack agree on what it closes', (_n, pack) => {
+    const norm = normalizePack(pack);
+    const manifest = JSON.parse(sampleManifestRaw);
+    const sample = manifest.samples.find((x: any) => x.sample_file === norm.teach.sample_file);
+    expect(sample, `no sample in the manifest for ${norm.teach.sample_file}`).toBeDefined();
+    expect(sample.document_type).toBe(norm.teach.document_type);
+    const type = norm.document_types.find((d: any) => d.slug === sample.document_type);
+    expect(Object.keys(sample.closes).sort()).toEqual([...type.closes].sort());
+    // Every claim carries evidence; an empty proof list would pass the render
+    // silently.
+    for (const ev of Object.values<any>(sample.closes)) {
+      expect(ev.proof.length).toBeGreaterThan(0);
+      expect(ev.why).toBeTruthy();
+    }
   });
 });
 

@@ -535,7 +535,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "requirement": "general-ledger-on-file",
         "document_type": "general-ledger-export"
       },
-      "sample_file": null
+      "sample_file": "/setup-samples/finance/bank-reconciliation.pdf"
     },
     "modules": {
       "default_on": [
@@ -1616,17 +1616,25 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       }
     ],
     "teach": {
-      "document_type": "certificate-of-analysis",
+      "document_type": "specification-sheet",
       "closes": [
-        "coa-on-file"
+        "spec-sheet",
+        "micro-limits",
+        "pack-size",
+        "nutritionals-100g",
+        "allergen-matrix",
+        "country-of-origin",
+        "gtin",
+        "shelf-life",
+        "ingredient-statement"
       ],
-      "decoy": "micro-limits",
-      "decoy_reason": "A COA reports THIS LOT's results. The Microbiological Limits line item asks for the PRODUCT's limits, which live on the specification sheet — the COA is measured against them, it does not state them. This is the whole lesson: a document TYPE is not a checklist REQUIREMENT, and the mapping between them is what you are configuring.",
+      "decoy": "coa-on-file",
+      "decoy_reason": "A specification sheet is the document a COA is judged AGAINST, and the two arrive together, so filing this one against the Certificate of Analysis line item is the tempting mistake. It is wrong for a reason worth internalising: a specification measures nothing. Every figure on it is an acceptance limit for the PRODUCT, unchanged from lot to lot; a COA reports what one lot actually measured. Tick this box and the line item reads as closed by a document that contains no result at all. A document TYPE is not a checklist REQUIREMENT, and the mapping between them is what you are configuring.",
       "also_closed_by": {
-        "requirement": "micro-limits",
-        "document_type": "specification-sheet"
+        "requirement": "coa-on-file",
+        "document_type": "certificate-of-analysis"
       },
-      "sample_file": null
+      "sample_file": "/setup-samples/fsqa/specification-sheet.pdf"
     },
     "modules": {
       "default_on": [

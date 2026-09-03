@@ -373,8 +373,9 @@
       "requirement": "general-ledger-on-file",
       "document_type": "general-ledger-export"
     },
-    "sample_file": null,
-    "_sample_file_note": "NULL until a real sample document ships. The wizard renders this in the PDF viewer on the teaching screen; a path here that does not resolve is a broken screen, so it stays null rather than naming a file nobody has produced yet. Put the file under public/samples/ and name it here when there is one."
+    "sample_file": "/setup-samples/finance/bank-reconciliation.pdf",
+    "_note": "A bank reconciliation closes exactly ONE line item, and the sample is scaled to that rather than padded to match the FSQA pack's nine. What it does carry is the decoy's bait, printed in full: the general ledger balance for account 1010-00, quoted by account number, next to a note saying the ledger detail is not reproduced. The temptation and its answer are both on the page.",
+    "_sample_file_source": "tests/fixtures/setup-samples/html/finance-bank-reconciliation.html is the source of truth; the PDF is build output, committed because the web app serves it as a static asset. Rebuild with bin/render-setup-samples."
   },
   "modules": {
     "default_on": [

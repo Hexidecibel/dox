@@ -1,0 +1,190 @@
+{
+  "_readme": "The setup wizard's teaching documents, and the evidence that each one prints what its starter pack claims it closes. bin/render-setup-samples renders `html` to `pdf` and then re-reads the PDF's text layer to prove every string under `closes` is actually on the page. The PDFs are BUILD OUTPUT of the HTML next door, exactly as in tests/fixtures/doctype-corpus — but unlike the corpus they are committed, because the running web app serves them as static assets and a gitignored sample would mean screen 4 breaks on a fresh clone.",
+  "_why_closes_is_a_map": "A flat list of strings would let the document and the pack drift apart silently: somebody adds a requirement to the pack's document type, nobody adds evidence to the page, and the teaching screen ticks a box the document beside it does not support — in front of the person who wrote the requirement. So the keys of `closes` are checked to be EXACTLY the pack document type's own `closes` array, and each key carries the strings that prove it. Adding a requirement to the pack now fails this render until the document earns it.",
+  "_why_two_readings": "Same reasoning as bin/render-doctype-corpus: `pdftotext -layout` preserves columns, which interleaves the two-column blocks on this page and can split a phrase; the plain content-stream reading keeps each element contiguous. A claim satisfied by EITHER reading is printed on the page, which is all this check is entitled to assert.",
+  "samples": [
+    {
+      "id": "fsqa-specification-sheet",
+      "pack": "fsqa",
+      "document_type": "specification-sheet",
+      "html": "html/fsqa-specification-sheet.html",
+      "pdf": "public/setup-samples/fsqa/specification-sheet.pdf",
+      "sample_file": "/setup-samples/fsqa/specification-sheet.pdf",
+      "closes": {
+        "spec-sheet": {
+          "requirement": "Specification Sheet on file",
+          "why": "The page IS a controlled product specification and says so: a document number, a revision, an effective date, what it supersedes and when it is next reviewed — which is what makes 'a CURRENT product specification is on file' answerable rather than a guess.",
+          "proof": [
+            "PRODUCT SPECIFICATION SHEET",
+            "SPEC-NCI-2280",
+            "Revision 5",
+            "Effective Date: 12 March 2026",
+            "Supersedes: Rev. 4",
+            "Next Scheduled Review",
+            "Cheddar Cheese Powder, Medium"
+          ]
+        },
+        "micro-limits": {
+          "requirement": "Microbiological Limits",
+          "why": "A dedicated micro table stating the PRODUCT's acceptance limits — the pathogens by absence in a stated sample size, the indicators by count. This is the requirement the wizard's decoy points at: these limits live here, and the COA is measured against them.",
+          "proof": [
+            "Microbiological Limits",
+            "Standard Plate Count",
+            "30,000 max",
+            "CFU/g",
+            "Coliforms",
+            "Salmonella",
+            "Negative in 375 g",
+            "Listeria monocytogenes",
+            "Negative in 25 g"
+          ]
+        },
+        "pack-size": {
+          "requirement": "Pack Size / Case Configuration",
+          "why": "Primary pack and its net weight, the pallet pattern as Ti/Hi, bags per pallet, pallet net weight and pallet type — the receiving-dock facts, not just a bag size.",
+          "proof": [
+            "50 lb (22.68 kg) net",
+            "multiwall kraft bag",
+            "8 bags per layer",
+            "40 bags per pallet",
+            "Ti 8 / Hi 5",
+            "2,000 lb (907.2 kg)",
+            "ISPM-15"
+          ]
+        },
+        "nutritionals-100g": {
+          "requirement": "100g Nutritionals",
+          "why": "A nutrient table explicitly on a per-100-g basis, with energy in both kcal and kJ and the method beside each value.",
+          "proof": [
+            "Nutritional Information",
+            "per 100 g",
+            "497 kcal",
+            "2,079 kJ",
+            "Total Fat",
+            "33.0 g",
+            "Saturated Fat",
+            "Sodium",
+            "3,100 mg",
+            "Total Carbohydrate",
+            "26.0 g"
+          ]
+        },
+        "allergen-matrix": {
+          "requirement": "Allergen Matrix",
+          "why": "All nine US major allergens named individually, each answered three ways — in the product, on a shared line, in the facility. A 'Contains: Milk' line alone would not be a matrix, and the soy row is answered 'in facility' rather than 'no', which is what a matrix is for.",
+          "proof": [
+            "Allergen Matrix",
+            "Big 9",
+            "In product",
+            "Shared line",
+            "In facility",
+            "Milk",
+            "Eggs",
+            "Fish",
+            "Crustacean shellfish",
+            "Tree nuts",
+            "Peanuts",
+            "Wheat",
+            "Soybeans",
+            "Sesame"
+          ]
+        },
+        "country-of-origin": {
+          "requirement": "Country of Origin",
+          "why": "A named country, stated as an origin declaration, with where the milk came from and where the powder was made — and a sentence saying the statement does not change lot to lot, which is what lets it sit on a specification instead of on every COA.",
+          "proof": [
+            "Country of Origin",
+            "United States of America",
+            "Wisconsin and Minnesota",
+            "Plant Code 55-0421",
+            "No component of this product is imported"
+          ]
+        },
+        "gtin": {
+          "requirement": "GTIN / UPC",
+          "why": "Both trade item numbers with valid check digits: the case GTIN-14 and the consumer-unit UPC-A, each tied to the item code it identifies.",
+          "proof": [
+            "GTIN-14",
+            "10812345600282",
+            "UPC-A",
+            "812345600285",
+            "NCI-2280-02"
+          ]
+        },
+        "shelf-life": {
+          "requirement": "Shelf Life & Storage",
+          "why": "Shelf life stated as a DURATION from manufacture (not a date), the storage conditions it is contingent on, the after-opening limit, and how the manufacture date is coded on the bag so the duration can be applied.",
+          "proof": [
+            "Shelf Life",
+            "12 months from date of manufacture",
+            "unopened original packaging",
+            "Storage conditions",
+            "65% relative humidity",
+            "Reseal the liner and use within 30 days",
+            "Julian code YYDDD"
+          ]
+        },
+        "ingredient-statement": {
+          "requirement": "Ingredient Statement",
+          "why": "The label declaration itself, in descending order of predominance with the sub-ingredients of the cheese parenthesised and the Contains statement attached — presented as the text to carry to the finished-product label, which is what makes it a statement rather than a composition table.",
+          "proof": [
+            "Ingredient Statement",
+            "INGREDIENTS:",
+            "WHEY, CHEDDAR CHEESE",
+            "PASTEURIZED MILK, CHEESE CULTURES, SALT, ENZYMES",
+            "DISODIUM PHOSPHATE",
+            "ANNATTO",
+            "CONTAINS: MILK"
+          ]
+        }
+      },
+      "must_contain": [
+        "NORTHFIELD CREAMERY INGREDIENTS, INC.",
+        "Northfield, Wisconsin",
+        "certificate of analysis"
+      ],
+      "must_contain_why": "The letterhead makes it a document somebody sent rather than a form, and the closing sentence — limits here, lot results on the COA — is the wizard's decoy stated by the document itself.",
+      "must_not_contain": [
+        "Riverbend"
+      ],
+      "must_not_contain_why": "tests/fixtures/doctype-corpus already ships a Riverbend Ingredients spec sheet as a GRADED fixture. This sales sample must not be confusable with it."
+    },
+    {
+      "id": "finance-bank-reconciliation",
+      "pack": "finance",
+      "document_type": "bank-reconciliation",
+      "html": "html/finance-bank-reconciliation.html",
+      "pdf": "public/setup-samples/finance/bank-reconciliation.pdf",
+      "sample_file": "/setup-samples/finance/bank-reconciliation.pdf",
+      "closes": {
+        "bank-reconciliations-on-file": {
+          "requirement": "Bank Reconciliations on file",
+          "why": "One named account, one closed period, both sides carried to an adjusted balance that agrees, an explicit zero difference, and a preparer/reviewer/approver sign-off — which is what makes a reconciliation evidence of a period close rather than a worksheet.",
+          "proof": [
+            "BANK RECONCILIATION",
+            "for the month ended 31 July 2026",
+            "Second Cascade Bank",
+            "account ending 4417",
+            "Balance per bank statement",
+            "Deposits in transit",
+            "Outstanding checks",
+            "Adjusted bank balance",
+            "Adjusted book balance",
+            "1,281,913.45",
+            "Unreconciled difference",
+            "Prepared by",
+            "Reviewed by",
+            "Approved by"
+          ]
+        }
+      },
+      "must_contain": [
+        "MERRITT & VALE HOLDINGS, LLC",
+        "general ledger account 1010-00",
+        "1,258,559.87",
+        "Ledger transaction detail for the period is not reproduced"
+      ],
+      "must_contain_why": "The ledger balance is the DECOY bait — teach.decoy is general-ledger-on-file — so it has to be printed prominently and by account number, and the note that the ledger detail is absent has to be printed with it. Without both, the finance lesson has nothing to be tempted by."
+    }
+  ]
+}

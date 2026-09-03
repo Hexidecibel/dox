@@ -1,0 +1,253 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/render-setup-samples — build the setup wizard's teaching documents, and
+ * prove each one prints what its starter pack claims it closes.
+ *
+ * WHY IT MIRRORS bin/render-doctype-corpus. Same discipline, same reason: a
+ * committed binary is unreviewable, so the HTML in
+ * `tests/fixtures/setup-samples/html/` is the source of truth and the PDF is
+ * built from it with the Playwright chromium the e2e suite already ships.
+ *
+ * WHERE IT DIVERGES, AND WHY. The doctype corpus gitignores its PDFs; these are
+ * COMMITTED, into `public/setup-samples/`, because the running web app serves
+ * them as static assets — wizard screen 4 renders `teach.sample_file` in a PDF
+ * viewer, and a gitignored sample means a fresh clone deploys a broken screen.
+ * Vite copies `public/` verbatim into `dist/`, and `functions/` only claims
+ * `/api/*`, so `/setup-samples/...` is served straight off the CDN.
+ *
+ * WHAT IS ASSERTED, and why it is worth a script rather than a README:
+ *
+ *   1. THE PACK AND THE DOCUMENT CANNOT DRIFT. The keys of a sample's `closes`
+ *      map must be EXACTLY the `closes` array of that document type in
+ *      `starter-packs/<pack>.json` — not a subset, not a superset. Add a
+ *      requirement to the pack and this render fails until the document earns
+ *      it. The failure it exists to prevent is a teaching screen whose ticked
+ *      boxes do not match the document beside them, shown to the food-safety
+ *      professional who wrote the requirements.
+ *
+ *   2. EVERY REQUIREMENT IS PRINTED. Each `closes` entry carries the strings
+ *      that prove it, and every one of them must appear in the built PDF's text
+ *      layer. Evidence that is not on the page is not evidence.
+ *
+ *   3. THE PACK POINTS AT THE FILE. `teach.sample_file` must equal the sample's
+ *      declared web path, and `teach.document_type` must be the type the
+ *      document actually is. A pack naming a file nobody produced, or naming
+ *      this file while teaching a different type, is the same broken screen.
+ *
+ * Both readings of the page are accepted, as in the corpus renderer: `-layout`
+ * preserves columns (and therefore interleaves the two-column blocks), while
+ * the plain content-stream reading keeps each element contiguous. A string
+ * found by either is printed on the page.
+ *
+ * Usage:
+ *   bin/render-setup-samples                 # render + verify everything
+ *   bin/render-setup-samples --id fsqa-specification-sheet
+ *   bin/render-setup-samples --verify-only   # re-check the committed PDFs
+ *   bin/render-setup-samples --text          # dump the extracted text layer
+ *
+ * Requires the Playwright chromium used by the e2e suite and `pdftotext`
+ * (poppler-utils). Read-only with respect to everything but the two PDFs.
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+const ROOT = path.resolve(__dirname, '..');
+const DIR = path.join(ROOT, 'tests/fixtures/setup-samples');
+const MANIFEST = path.join(DIR, 'manifest.json');
+const PACK_DIR = path.join(ROOT, 'starter-packs');
+
+const C = process.stdout.isTTY
+  ? { g: '\x1b[32m', r: '\x1b[31m', y: '\x1b[33m', d: '\x1b[2m', b: '\x1b[1m', x: '\x1b[0m' }
+  : { g: '', r: '', y: '', d: '', b: '', x: '' };
+
+function parseArgs(argv) {
+  const o = { id: null, text: false, verifyOnly: false, help: false };
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
+      case '--id': o.id = argv[++i]; break;
+      case '--text': o.text = true; break;
+      case '--verify-only': o.verifyOnly = true; break;
+      case '-h': case '--help': o.help = true; break;
+      default: console.error(`unknown flag: ${argv[i]}`); process.exit(2);
+    }
+  }
+  return o;
+}
+
+function pdfText(file, layout = true) {
+  const args = layout ? ['-layout', file, '-'] : [file, '-'];
+  return execFileSync('pdftotext', args, { encoding: 'utf8' });
+}
+
+/**
+ * Whitespace-flattened, case-folded, dash/quote-folded — bin/render-doctype-corpus's
+ * `flat`, verbatim and for its reasons. `&mdash;` comes out of the text layer as
+ * U+2014 while the manifest is typed with an ASCII hyphen; CSS `text-transform`
+ * and `letter-spacing` change the case and the spacing of a heading but not the
+ * words. Nothing else is smoothed over.
+ */
+function flat(s) {
+  return String(s)
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function loadPack(name) {
+  return JSON.parse(fs.readFileSync(path.join(PACK_DIR, `${name}.json`), 'utf8'));
+}
+
+/**
+ * The pack-side checks. These run whether or not a PDF is rebuilt, because
+ * they are about the pack agreeing with the manifest, and the pack is edited
+ * far more often than the document.
+ */
+function checkPack(sample) {
+  const problems = [];
+  let pack;
+  try {
+    pack = loadPack(sample.pack);
+  } catch (err) {
+    return [`starter-packs/${sample.pack}.json: ${err.message}`];
+  }
+
+  const type = (pack.document_types || []).find((d) => d.slug === sample.document_type);
+  if (!type) {
+    return [`starter-packs/${sample.pack}.json has no document type "${sample.document_type}"`];
+  }
+
+  const packCloses = [...(type.closes || [])].sort();
+  const docCloses = Object.keys(sample.closes).sort();
+  for (const slug of packCloses) {
+    if (!docCloses.includes(slug)) {
+      problems.push(
+        `"${type.name}" closes "${slug}" in the pack, but the sample document offers no evidence for it — ` +
+          'the teaching screen would tick a box the document does not support',
+      );
+    }
+  }
+  for (const slug of docCloses) {
+    if (!packCloses.includes(slug)) {
+      problems.push(
+        `the sample document claims evidence for "${slug}", which "${type.name}" does not close in the pack`,
+      );
+    }
+  }
+
+  const reqSlugs = new Set((pack.requirements || []).map((r) => r.slug));
+  for (const slug of docCloses) {
+    if (!reqSlugs.has(slug)) problems.push(`"${slug}" is not a requirement in starter-packs/${sample.pack}.json`);
+  }
+
+  const teach = pack.teach || {};
+  if (teach.document_type !== sample.document_type) {
+    problems.push(
+      `teach.document_type is "${teach.document_type}" but this sample is a "${sample.document_type}" — ` +
+        'the screen would render this document beside another type\'s lesson',
+    );
+  }
+  if (teach.sample_file !== sample.sample_file) {
+    problems.push(
+      `teach.sample_file is ${JSON.stringify(teach.sample_file)}, expected ${JSON.stringify(sample.sample_file)}`,
+    );
+  }
+  return problems;
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(3, 50).join('\n').replace(/^ ?\*\/?/gm, ''));
+    return 0;
+  }
+
+  const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
+  const samples = manifest.samples.filter((s) => !opts.id || s.id === opts.id);
+  if (!samples.length) {
+    console.error(`no sample matched ${JSON.stringify(opts.id)}`);
+    return 2;
+  }
+
+  let browser = null;
+  if (!opts.verifyOnly) {
+    const { chromium } = require('@playwright/test');
+    browser = await chromium.launch();
+  }
+
+  let failures = 0;
+  for (const sample of samples) {
+    const html = path.join(DIR, sample.html);
+    const pdf = path.join(ROOT, sample.pdf);
+    fs.mkdirSync(path.dirname(pdf), { recursive: true });
+
+    if (browser) {
+      const page = await browser.newPage();
+      await page.goto(`file://${html}`, { waitUntil: 'load' });
+      await page.pdf({ path: pdf, printBackground: true });
+      await page.close();
+    } else if (!fs.existsSync(pdf)) {
+      console.log(`${C.r}✗${C.x} ${sample.id} ${C.d}— no PDF to verify; run without --verify-only${C.x}`);
+      failures++;
+      continue;
+    }
+
+    const text = pdfText(pdf);
+    const flatLayout = flat(text);
+    const flatRaw = flat(pdfText(pdf, false));
+    const seen = (s) => flatLayout.includes(flat(s)) || flatRaw.includes(flat(s));
+
+    const problems = checkPack(sample);
+    // A wizard sample is shown to somebody in a PDF viewer; more than a couple
+    // of pages is not a spec sheet a supplier sent, it is a brochure.
+    const pages = (execFileSync('pdfinfo', [pdf], { encoding: 'utf8' }).match(/^Pages:\s+(\d+)/m) || [])[1];
+
+    const proven = [];
+    for (const [slug, ev] of Object.entries(sample.closes)) {
+      const missing = (ev.proof || []).filter((p) => !seen(p));
+      if (missing.length) {
+        problems.push(`${slug}: the page never prints ${missing.map((m) => JSON.stringify(m)).join(', ')}`);
+      } else {
+        proven.push(slug);
+      }
+    }
+    for (const s of sample.must_contain || []) {
+      if (!seen(s)) problems.push(`must_contain: the page never prints ${JSON.stringify(s)}`);
+    }
+    for (const s of sample.must_not_contain || []) {
+      if (seen(s)) problems.push(`must_not_contain: the page prints ${JSON.stringify(s)}`);
+    }
+
+    const size = `${(fs.statSync(pdf).size / 1024).toFixed(0)}kb, ${pages} page${pages === '1' ? '' : 's'}`;
+    if (problems.length) {
+      failures++;
+      console.log(`${C.r}✗${C.x} ${C.b}${sample.id}${C.x} ${C.d}(${size})${C.x}`);
+      for (const p of problems) console.log(`    ${C.r}${p}${C.x}`);
+      console.log(`    ${C.d}a lesson the document beside it does not support is worse than no lesson${C.x}`);
+    } else {
+      console.log(
+        `${C.g}✓${C.x} ${C.b}${sample.id}${C.x} ${C.d}(${size}) — ${proven.length} requirement${proven.length === 1 ? '' : 's'} ` +
+          `proved on the page: ${proven.join(', ')}${C.x}`,
+      );
+    }
+    if (opts.text) console.log(`${C.d}${text.replace(/^/gm, '    │ ')}${C.x}`);
+  }
+
+  if (browser) await browser.close();
+  console.log(
+    failures
+      ? `\n${C.r}FAILED${C.x} — ${failures} of ${samples.length} teaching documents do not print what their pack claims.`
+      : `\n${C.g}PASSED${C.x} — ${samples.length} teaching document${samples.length === 1 ? '' : 's'} rendered and verified.`,
+  );
+  return failures ? 1 : 0;
+}
+
+main().then(
+  (code) => process.exit(code),
+  (err) => { console.error(err); process.exit(2); },
+);

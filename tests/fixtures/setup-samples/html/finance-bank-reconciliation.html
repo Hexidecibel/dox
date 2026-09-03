@@ -1,0 +1,138 @@
+<!--
+  THE WIZARD'S TEACHING DOCUMENT — Finance pack, screen 4.
+
+  SCALE IS SET BY THE PACK, NOT BY SYMMETRY. `starter-packs/finance.json` has a
+  Bank Reconciliation closing exactly ONE requirement
+  ("bank-reconciliations-on-file"), so this page is deliberately a single,
+  ordinary month-end reconciliation and not a nine-facet showcase. Padding it to
+  match the FSQA sample would be inventing content the pack does not claim.
+
+  WHAT IT HAS TO DO INSTEAD IS BAIT THE DECOY. The finance lesson turns on
+  `teach.decoy = general-ledger-on-file`: a reconciliation QUOTES the ledger
+  balance it reconciles to, which makes it tempting to file against the General
+  Ledger line item and leaves that line looking closed by a document holding
+  none of the ledger detail. So the ledger balance is printed here, prominently,
+  by account number — and the footnote says in as many words that the ledger
+  detail is not reproduced. The temptation and its answer are both on the page.
+
+  THE ARITHMETIC TIES. Adjusted bank balance and adjusted book balance both come
+  to $1,281,913.45 and the unreconciled difference is $0.00. A reconciliation
+  that does not reconcile would be a strange thing to teach with, and
+  bin/render-setup-samples asserts both totals are printed.
+
+  SYNTHETIC AND FICTIONAL. Merritt & Vale Holdings, Second Cascade Bank, every
+  payee, every account number and every person are invented.
+-->
+<style>
+@page { size: letter; margin: 0.7in 0.75in; }
+body { font-family: "Liberation Serif", "Times New Roman", Times, serif; font-size: 9.5pt; color: #111; line-height: 1.35; }
+.hdr { text-align: center; border-bottom: 1.5px solid #111; padding-bottom: 7px; margin-bottom: 10px; }
+.co { font-size: 13pt; font-weight: bold; letter-spacing: 0.6px; }
+.sub { font-size: 10.5pt; margin-top: 3px; }
+.per { font-size: 9.5pt; font-style: italic; margin-top: 2px; }
+table { border-collapse: collapse; width: 100%; margin: 6px 0; }
+td, th { padding: 2px 6px; font-size: 9pt; vertical-align: top; }
+th { text-align: left; border-bottom: 1px solid #111; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 0.5px; }
+.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sec { font-weight: bold; padding-top: 6px; }
+.rule td { border-top: 1px solid #666; }
+.dbl td { border-top: 1px solid #111; border-bottom: 3px double #111; font-weight: bold; }
+.ind { padding-left: 18px; }
+.ind2 { padding-left: 34px; }
+h2 { font-size: 9.5pt; margin: 12px 0 2px; text-transform: uppercase; letter-spacing: 0.7px; border-bottom: 1px solid #111; padding-bottom: 1px; }
+p { margin: 4px 0; text-align: justify; }
+.meta { width: 100%; border: 1px solid #111; margin-bottom: 8px; }
+.meta td { border: 1px solid #bbb; font-size: 8.5pt; }
+.meta .k { background: #f2f2f2; font-weight: bold; width: 21%; }
+.note { font-size: 8pt; color: #333; }
+.sig td { border-top: 1px solid #111; padding-top: 3px; font-size: 8.5pt; }
+</style>
+
+<div class="hdr">
+  <div class="co">MERRITT &amp; VALE HOLDINGS, LLC</div>
+  <div class="sub">BANK RECONCILIATION</div>
+  <div class="per">Operating Account &mdash; Second Cascade Bank, N.A. &mdash; for the month ended 31 July 2026</div>
+</div>
+
+<table class="meta">
+  <tr>
+    <td class="k">Bank</td><td>Second Cascade Bank, N.A. &mdash; Commercial Banking, Portland OR</td>
+    <td class="k">Statement period</td><td>01 July 2026 &ndash; 31 July 2026</td>
+  </tr>
+  <tr>
+    <td class="k">Account</td><td>Operating &mdash; account ending 4417 (statement no. 2026-07-4417)</td>
+    <td class="k">General ledger account</td><td>1010-00 &mdash; Cash, Operating</td>
+  </tr>
+  <tr>
+    <td class="k">Entity</td><td>Merritt &amp; Vale Holdings, LLC (EIN 84-2207195)</td>
+    <td class="k">Reconciliation ref.</td><td>REC-2026-07-4417, prepared 06 August 2026</td>
+  </tr>
+</table>
+
+<h2>Balance per Bank</h2>
+<table>
+  <tr><td>Balance per bank statement, 31 July 2026</td><td class="num">1,284,306.42</td></tr>
+
+  <tr><td class="sec">Add: Deposits in transit</td><td></td></tr>
+  <tr><td class="ind">31 Jul 2026 &mdash; Lockbox deposit LB-7742, credited 03 Aug 2026</td><td class="num">38,915.20</td></tr>
+  <tr><td class="ind">31 Jul 2026 &mdash; Merchant settlement, Cardinal Pay batch 41180, credited 04 Aug 2026</td><td class="num">12,447.63</td></tr>
+  <tr class="rule"><td class="ind2">Total deposits in transit</td><td class="num">51,362.83</td></tr>
+
+  <tr><td class="sec">Less: Outstanding checks</td><td></td></tr>
+  <tr><td class="ind">Ck 20418 &mdash; 09 Jul 2026 &mdash; Kellner Freight Systems</td><td class="num">(9,842.11)</td></tr>
+  <tr><td class="ind">Ck 20455 &mdash; 22 Jul 2026 &mdash; Bay Ridge Utilities District</td><td class="num">(1,236.90)</td></tr>
+  <tr><td class="ind">Ck 20461 &mdash; 27 Jul 2026 &mdash; Orrin Staffing Group, invoice 88214</td><td class="num">(27,504.35)</td></tr>
+  <tr><td class="ind">Ck 20468 &mdash; 29 Jul 2026 &mdash; Delacroix Property Management, August rent</td><td class="num">(18,750.00)</td></tr>
+  <tr><td class="ind">Ck 20470 &mdash; 31 Jul 2026 &mdash; Petty cash reimbursement, Northgate office</td><td class="num">(612.44)</td></tr>
+  <tr class="rule"><td class="ind2">Total outstanding checks</td><td class="num">(57,945.80)</td></tr>
+
+  <tr><td class="sec">Add: Bank errors</td><td></td></tr>
+  <tr><td class="ind">Ck 20447 presented and charged twice on 18 Jul 2026; bank credit received 04 Aug 2026</td><td class="num">4,190.00</td></tr>
+
+  <tr class="dbl"><td>Adjusted bank balance, 31 July 2026</td><td class="num">1,281,913.45</td></tr>
+</table>
+
+<h2>Balance per Books</h2>
+<table>
+  <tr><td>Balance per general ledger account 1010-00, 31 July 2026</td><td class="num">1,258,559.87</td></tr>
+
+  <tr><td class="sec">Add: Receipts recorded by the bank and not yet posted</td><td></td></tr>
+  <tr><td class="ind">EFT collection &mdash; Halvorsen Foods, remittance 28 Jul 2026 (JE-2607-14)</td><td class="num">26,400.00</td></tr>
+  <tr><td class="ind">Interest earned on the operating balance, July 2026 (JE-2607-14)</td><td class="num">388.20</td></tr>
+
+  <tr><td class="sec">Less: Charges recorded by the bank and not yet posted</td><td></td></tr>
+  <tr><td class="ind">Account analysis and treasury service charges, July 2026 (JE-2607-15)</td><td class="num">(1,284.62)</td></tr>
+  <tr><td class="ind">Returned item &mdash; Ashgrove Catering check, deposited 14 Jul 2026, NSF 24 Jul 2026 (JE-2607-16)</td><td class="num">(2,150.00)</td></tr>
+
+  <tr class="dbl"><td>Adjusted book balance, 31 July 2026</td><td class="num">1,281,913.45</td></tr>
+</table>
+
+<table>
+  <tr class="dbl"><td>Unreconciled difference</td><td class="num">0.00</td></tr>
+</table>
+
+<h2>Notes</h2>
+<p><b>1. Source of the ledger balance.</b> The $1,258,559.87 shown above is the closing balance of general ledger
+account 1010-00 as reported on trial balance run TB-2026-07, extracted from the accounting system on 05 August 2026.
+Ledger transaction detail for the period is not reproduced in this reconciliation and is retained separately.</p>
+<p><b>2. Journal entries required.</b> Entries JE-2607-14 through JE-2607-16, totalling a net debit of $23,353.58, were
+posted to the July period on 06 August 2026 to record the four book-side reconciling items listed above. The general
+ledger balance for account 1010-00 after posting is $1,281,913.45.</p>
+<p><b>3. Aged items.</b> Check 20418 (Kellner Freight Systems, $9,842.11) has been outstanding for 22 days. No item on
+this reconciliation has been outstanding for more than 90 days, and no stale-dated check write-off is required this
+period. The Ashgrove Catering returned item has been referred to credit and collections; a receivable was
+re-established under JE-2607-16.</p>
+<p><b>4. Controls.</b> This reconciliation was prepared by a person independent of cash disbursement authority and
+independent of the bank statement's receipt, in accordance with the company's period-close procedure FIN-CLS-04.
+The bank statement was obtained directly from Second Cascade Bank's commercial portal on 03 August 2026.</p>
+
+<table class="sig">
+  <tr>
+    <td style="width:34%">Prepared by: <b>Priya Raghunathan</b>, Staff Accountant<br>06 August 2026</td>
+    <td style="width:33%">Reviewed by: <b>T. Okafor</b>, Assistant Controller<br>07 August 2026</td>
+    <td style="width:33%">Approved by: <b>Lena Brightwater</b>, Controller<br>07 August 2026</td>
+  </tr>
+</table>
+
+<p class="note" style="margin-top:8px">Merritt &amp; Vale Holdings, LLC &mdash; 2200 Fennimore Street, Suite 610, Portland, Oregon 97209.
+Retain per the company records retention schedule, seven years from period end. Uncontrolled when printed.</p>
