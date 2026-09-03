@@ -61,6 +61,12 @@ export const CANONICAL_FIELDS = new Set([
   'issuing_body', 'certificate_number', 'scheme', 'kosher_status',
   'gluten_threshold', 'allergens', 'country_of_origin', 'revision_date',
   'signatory',
+  // Added to rule 1 on 2026-09-03. It is the ANCHOR shared/renewalPeriod.ts
+  // counts a renewal period FROM, and nothing extracted it, so every
+  // period-based renewal proposal resolved to `unresolvable`. The graded rows
+  // that used to be called `issue_date` are this field renamed — the schema
+  // slot they were measuring the absence of now exists.
+  'effective_date',
 ]);
 
 /** Case-fold, dash-fold, quote-fold, strip surrounding punctuation, collapse whitespace. */

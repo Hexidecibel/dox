@@ -174,14 +174,25 @@
       "certification_type",
       "status"
     ],
-    "issue_date": [
+    "effective_date": [
+      "effective_date",
       "issue_date",
       "issued",
       "date_issued",
-      "letter_date",
-      "document_date",
+      "issued_on",
+      "date_of_issue",
+      "certificate_issue_date",
+      "certificate_date",
       "statement_date",
-      "effective_date",
+      "letter_date",
+      "valid_from",
+      "effective",
+      "effective_from",
+      "effective_on",
+      "policy_effective_date",
+      "inception",
+      "inception_date",
+      "document_date",
       "date"
     ]
   },
@@ -255,6 +266,16 @@
             "02/18/2026"
           ],
           "why": "a certificate has no PRODUCT shelf life; llm.ts rule for document_expires_on says never put the same date in both"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "text",
+          "truth": "2026-02-15",
+          "accept": [
+            "2026-02-18"
+          ],
+          "why": "the POLICY EFFECTIVE date — the start of the period whose end (02/15/2027) is document_expires_on. The certificate's own \"Date Issued\" 02/18/2026 is the same event three days later and is accepted"
         }
       ]
     },
@@ -333,6 +354,16 @@
             "2/20/26",
             "2026-02-20"
           ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "text",
+          "truth": "2026-02-15",
+          "accept": [
+            "2026-02-20"
+          ],
+          "why": "\"Inception 15-FEB-2026\" in the coverage table; the cover runs through 14 Feb 2027, which is document_expires_on. The \"Issued 2/20/26\" stamp is accepted as the same event"
         }
       ]
     },
@@ -411,6 +442,16 @@
           "accept": [
             "Medosweet Farms"
           ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "text",
+          "truth": "2026-07-04",
+          "accept": [
+            "2026-08-12"
+          ],
+          "why": "the policy period is \"07/04/2026 to 07/04/2027\" — its START is this field and its END is document_expires_on. The \"Certificate Date\" 08/12/2026 is accepted as the same event"
         }
       ]
     },
@@ -467,10 +508,11 @@
           ]
         },
         {
-          "name": "issue_date",
-          "keys_ref": "issue_date",
+          "name": "effective_date",
+          "keys_ref": "effective_date",
           "match": "date",
-          "truth": "2026-03-03"
+          "truth": "2026-03-03",
+          "why": "labelled \"Effective Date\"; the superseded guaranty's date (January 4, 2024) is the decoy"
         },
         {
           "name": "document_expires_on",
@@ -554,10 +596,11 @@
           "why": "in prose, in a third date format, beside a decoy year (2024)"
         },
         {
-          "name": "issue_date",
-          "keys_ref": "issue_date",
+          "name": "effective_date",
+          "keys_ref": "effective_date",
           "match": "date",
-          "truth": "2026-03-09"
+          "truth": "2026-03-09",
+          "why": "\"Issued 9-MAR-2026\"; the letter it replaces is dated 2024 and the guarantee lapses 03/31/2027, which is document_expires_on"
         }
       ]
     },
@@ -654,10 +697,11 @@
           "why": "GENUINELY ABSENT, with five dates on the page"
         },
         {
-          "name": "issue_date",
-          "keys_ref": "issue_date",
+          "name": "effective_date",
+          "keys_ref": "effective_date",
           "match": "date",
-          "truth": "2026-08-11"
+          "truth": "2026-08-11",
+          "why": "\"Letter dated 11 August 2026\"; the superseded guarantee (04 January 2024), the addendum (17 June 2025), the registration renewal (30 September 2025) and the audit (22 May 2026) are all decoys"
         }
       ]
     },
@@ -798,6 +842,13 @@
           "keys_ref": "doc_expiry",
           "match": "date",
           "truth": "2027-06-30"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-04-14",
+          "why": "\"Prepared 14-APR-2026\" — the declaration says it reflects the formulation in effect at that date. \"Valid until 30 June 2027\" is document_expires_on"
         }
       ]
     },
@@ -964,6 +1015,13 @@
             "n/a",
             "not applicable"
           ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-02-06",
+          "why": "\"Issued February 6, 2026\" — the date a specification sheet's three-year review window is counted from, which is the whole reason this field exists"
         }
       ],
       "tables_must_contain": [
@@ -1055,6 +1113,13 @@
             "n/a",
             "not applicable"
           ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-05-18",
+          "why": "\"Issue 18-MAY-2026\". \"Next review 05/18/28\" is a review due date, not the date the sheet took effect — and it is not an expiry either"
         }
       ],
       "tables_must_contain": [
@@ -1152,6 +1217,13 @@
             "n/a",
             "not applicable"
           ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-07",
+          "why": "\"Issued 07 January 2026\"; \"Supersedes rev 8 of 19 March 2024\" is the PREVIOUS version's date"
         }
       ],
       "tables_must_contain": [
@@ -1212,6 +1284,13 @@
           "keys_ref": "doc_expiry",
           "match": "date",
           "truth": "2027-03-31"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-04-01",
+          "why": "labelled \"Effective Date\"; \"Valid Through\" March 31, 2027 is document_expires_on and the two must not be swapped"
         }
       ]
     },
@@ -1268,6 +1347,13 @@
           "keys_ref": "doc_expiry",
           "match": "date",
           "truth": "2027-12-31"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-12",
+          "why": "\"Issued 12-JAN-2026\". \"Certification first granted 01/12/24\" is when the RELATIONSHIP began, not when this certificate took effect"
         }
       ]
     },
@@ -1348,6 +1434,13 @@
             "indefinite"
           ],
           "why": "GENUINELY ABSENT and this is the REAL NOP form -- 7 CFR 205.404(c) certificates have no expiry"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-02-16",
+          "why": "\"Issued 16 February 2026\"; the anniversary date (\"1 March each year\") and the last inspection (4 Feb 2026) are decoys, and this certificate has no expiry at all"
         }
       ]
     },
@@ -1416,6 +1509,13 @@
             "meat"
           ],
           "truth": "Dairy - Cholov Yisroel"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-15",
+          "why": "labelled \"Issue Date\"; the \"Expiration Date\" December 31, 2026 beside it is document_expires_on"
         }
       ]
     },
@@ -1467,10 +1567,11 @@
           "why": "prose, day-first-ish format, beside a Hebrew calendar date"
         },
         {
-          "name": "issue_date",
-          "keys_ref": "issue_date",
+          "name": "effective_date",
+          "keys_ref": "effective_date",
           "match": "date",
-          "truth": "2026-01-26"
+          "truth": "2026-01-26",
+          "why": "\"Issued 8 Shevat 5786 (26 January 2026)\"; the Hebrew calendar year is not a date and 31-DEC-2026 is document_expires_on"
         }
       ]
     },
@@ -1538,6 +1639,17 @@
           "match": "date",
           "truth": "2026-09-30",
           "why": "day-first 30/09/2026, in the last paragraph, against a 2021 commencement date"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "1 October 2021",
+            "2021-10-01"
+          ],
+          "why": "GENUINELY ABSENT. \"Supervision commenced 1 October 2021\" is when the RELATIONSHIP began; this letter states no date on which IT took effect, and anchoring an annual period on 2021 would date a current letter five years stale"
         }
       ]
     },
@@ -1605,6 +1717,13 @@
           "keys_ref": "doc_expiry",
           "match": "date",
           "truth": "2027-05-03"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-05-04",
+          "why": "labelled \"Issue Date\"; \"Valid Through\" May 3, 2027 is document_expires_on"
         }
       ]
     },
@@ -1672,6 +1791,16 @@
           "match": "date",
           "truth": "2027-05-31",
           "why": "the second half of a RANGE printed in one cell"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "text",
+          "truth": "2026-06-01",
+          "accept": [
+            "2026-05-27"
+          ],
+          "why": "the validity cell reads \"2026-06-01 to 2027-05-31\" — its START is this field, its END is document_expires_on. The \"Registered 27-MAY-2026\" stamp is accepted as the same event"
         }
       ]
     },
@@ -1749,6 +1878,13 @@
           "keys_ref": "doc_expiry",
           "match": "date",
           "truth": "2027-03-02"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-03-03",
+          "why": "\"Statement date 3 March 2026\"; the laboratory report of 26 Feb 2026 and the 2 March 2027 expiry are the decoys"
         }
       ]
     },
@@ -1836,6 +1972,13 @@
           "keys_ref": "cert_number",
           "match": "text",
           "truth": "NSF-SQF-2026-2211"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-06-30",
+          "why": "\"Certificate Issue Date June 30, 2026\". The AUDIT date (June 11, 2026) is when the work was done, not when the certificate took effect, and July 25, 2027 is document_expires_on"
         }
       ]
     },
@@ -1922,6 +2065,13 @@
           "accept": [
             "Cert. 8841207"
           ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-09-28",
+          "why": "\"Certificate issue date 28 SEP 2026\"; the audit date (14/08/2026), the expiry (2027-09-11) and the re-audit window (2027-07-17) sit in the same strip"
         }
       ]
     },
@@ -2017,6 +2167,17 @@
           "keys_ref": "cert_number",
           "match": "text",
           "truth": "IC-FSSC-40921"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "12 November 2020",
+            "2020-11-12"
+          ],
+          "why": "GENUINELY ABSENT. \"Registered since 12 November 2020\" is when the REGISTRATION began; this certificate prints no issue or effective date of its own, only a surveillance due date and an expiry"
         }
       ]
     },
@@ -2345,6 +2506,13 @@
             "not applicable",
             "no expiration"
           ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-03-12",
+          "why": "labelled \"Statement Date\"; the statement carries no expiry, so this anchor is the only thing a renewal period can be counted from"
         }
       ]
     },
@@ -2421,6 +2589,13 @@
             "not applicable",
             "no expiration"
           ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-06-22",
+          "why": "\"Issued 22-JUN-2026\"; the purchase order \"dated 06/02/26\" is the ORDER's date, not the declaration's"
         }
       ]
     },
@@ -2508,21 +2683,28 @@
             "not applicable",
             "no expiration"
           ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-05-04",
+          "why": "\"Letter date 4 May 2026\"; \"Supersedes letter of 18 January 2025\" is the superseded letter's date"
         }
       ]
     }
   ],
   "_type_instructions_why": "The counterfactual arm. The baseline run measures llm.ts EXACTLY as production runs it, and its dominant failure is that the canonical field list in rule 1 is COA-shaped -- there is no slot for an issuing body, a certificate number, an allergen list, a country of origin. That is a SCHEMA gap, and a schema gap and a MODEL gap have completely different fixes. So bin/measure-doctype-extraction --instructions re-runs the same documents with these per-type field lists appended to the industry layer (the shape a per-document-type extraction-instructions row would take) and scores them identically. The delta is the answer to 'if we name the field, can the model find it?'. These strings name FIELDS ONLY. They never state a value, never say which documents lack one, and the closing line is the same universal null instruction for every type -- otherwise the guided arm would be measuring how well the instructions were written against these specific fixtures.",
   "type_instructions": {
-    "coi": "This is a certificate of insurance. In addition to the canonical fields, return: certificate_number (the certificate's own number -- a policy number or a form number is not one), insured (the company whose operations the coverage protects; not the producing broker and not the insurer), and document_expires_on (the end of the policy period).",
-    "log": "This is a letter of guarantee from a supplier to a customer. In addition to the canonical fields, return: guarantor (the company giving the guarantee), signatory (the person who signed it), issue_date (the date of the letter), and document_expires_on (the date the guarantee itself stops being effective).",
-    "allergen": "This is an allergen statement. In addition to the canonical fields, return: allergens (the allergens present IN the product's formulation -- allergens named only as absent, and allergens named only as a shared-line or cross-contact risk, are not present in the formulation), and document_expires_on (the date the statement itself stops being valid).",
-    "spec": "This is a product specification sheet. It states acceptance LIMITS, not measured results. In addition to the canonical fields, return: product_code (the supplier's own code for this product -- a document number, a plant code and a customer's internal item number are not one), and document_expires_on (the date the specification itself stops being valid).",
-    "organic": "This is an organic certificate. In addition to the canonical fields, return: issuing_body (the certifying agent that issued the certificate; an accreditation body that accredits the certifier is not the issuer), certificate_number, and document_expires_on (the date the certificate itself stops being valid).",
-    "kosher": "This is a kosher certificate. In addition to the canonical fields, return: issuing_body (the certifying agency), certificate_number, kosher_status (the designation applying to the certified products, e.g. dairy, pareve, meat), and document_expires_on (the date the certificate itself stops being valid).",
-    "gf": "This is a gluten-free certificate. In addition to the canonical fields, return: issuing_body (the certifying organisation), certificate_number, gluten_threshold (the ppm figure the certification is granted against, as printed), and document_expires_on (the date the certificate itself stops being valid).",
-    "audit": "This is a third-party food-safety audit certificate. In addition to the canonical fields, return: issuing_body (the certification body that issued this certificate; the scheme owner and the accreditation body are not the issuer), scheme (the standard audited against), audit_grade (the grade, rating or score awarded), certificate_number, and document_expires_on (the date the certificate itself stops being valid).",
+    "coi": "This is a certificate of insurance. In addition to the canonical fields, return: certificate_number (the certificate's own number -- a policy number or a form number is not one), insured (the company whose operations the coverage protects; not the producing broker and not the insurer), and document_expires_on (the end of the policy period). Also return effective_date (the date the document itself took effect or was issued -- never its expiry, and never a product date).",
+    "log": "This is a letter of guarantee from a supplier to a customer. In addition to the canonical fields, return: guarantor (the company giving the guarantee), signatory (the person who signed it), effective_date (the date of the letter), and document_expires_on (the date the guarantee itself stops being effective). Also return effective_date (the date the document itself took effect or was issued -- never its expiry, and never a product date).",
+    "allergen": "This is an allergen statement. In addition to the canonical fields, return: allergens (the allergens present IN the product's formulation -- allergens named only as absent, and allergens named only as a shared-line or cross-contact risk, are not present in the formulation), and document_expires_on (the date the statement itself stops being valid). Also return effective_date (the date the document itself took effect or was issued -- never its expiry, and never a product date).",
+    "spec": "This is a product specification sheet. It states acceptance LIMITS, not measured results. In addition to the canonical fields, return: product_code (the supplier's own code for this product -- a document number, a plant code and a customer's internal item number are not one), and document_expires_on (the date the specification itself stops being valid). Also return effective_date (the date the document itself took effect or was issued -- never its expiry, and never a product date).",
+    "organic": "This is an organic certificate. In addition to the canonical fields, return: issuing_body (the certifying agent that issued the certificate; an accreditation body that accredits the certifier is not the issuer), certificate_number, and document_expires_on (the date the certificate itself stops being valid). Also return effective_date (the date the document itself took effect or was issued -- never its expiry, and never a product date).",
+    "kosher": "This is a kosher certificate. In addition to the canonical fields, return: issuing_body (the certifying agency), certificate_number, kosher_status (the designation applying to the certified products, e.g. dairy, pareve, meat), and document_expires_on (the date the certificate itself stops being valid). Also return effective_date (the date the document itself took effect or was issued -- never its expiry, and never a product date).",
+    "gf": "This is a gluten-free certificate. In addition to the canonical fields, return: issuing_body (the certifying organisation), certificate_number, gluten_threshold (the ppm figure the certification is granted against, as printed), and document_expires_on (the date the certificate itself stops being valid). Also return effective_date (the date the document itself took effect or was issued -- never its expiry, and never a product date).",
+    "audit": "This is a third-party food-safety audit certificate. In addition to the canonical fields, return: issuing_body (the certification body that issued this certificate; the scheme owner and the accreditation body are not the issuer), scheme (the standard audited against), audit_grade (the grade, rating or score awarded), certificate_number, and document_expires_on (the date the certificate itself stops being valid). Also return effective_date (the date the document itself took effect or was issued -- never its expiry, and never a product date).",
     "sds": "This is a safety data sheet. In addition to the canonical fields, return: revision_date (the date this version of the sheet was issued or revised -- a print date is not a revision date), signal_word (the GHS signal word assigned to THIS product), and document_expires_on (the date the sheet itself stops being valid).",
-    "coo": "This is a country-of-origin statement. In addition to the canonical fields, return: country_of_origin (the origin the document declares for the goods themselves; the origin of packaging, the location of a laboratory, a port of transhipment, a corporate domicile and a barred export market are not the origin of the goods), and document_expires_on (the date the statement itself stops being valid)."
+    "coo": "This is a country-of-origin statement. In addition to the canonical fields, return: country_of_origin (the origin the document declares for the goods themselves; the origin of packaging, the location of a laboratory, a port of transhipment, a corporate domicile and a barred export market are not the origin of the goods), and document_expires_on (the date the statement itself stops being valid). Also return effective_date (the date the document itself took effect or was issued -- never its expiry, and never a product date)."
   }
 }

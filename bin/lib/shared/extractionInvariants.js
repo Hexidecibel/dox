@@ -54,6 +54,11 @@ var DATE_KEYS = [
   // here so a new date field gets the same parse/plausibility checking as
   // every other one rather than arriving unvalidated.
   "document_expires_on",
+  // The ANCHOR a renewal period is counted from (shared/renewalPeriod.ts
+  // tiers 5-7). Added with the field itself: an anchor that never parses, or
+  // that reads 2201, silently produces a renewal due date nobody can explain,
+  // and this is the list that catches both before a reviewer sees them.
+  "effective_date",
   "production_date",
   "mfg_date",
   "best_by_date",

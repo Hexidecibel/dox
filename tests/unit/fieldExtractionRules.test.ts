@@ -25,6 +25,10 @@
  *     corpus deliberately contains a gluten-free certificate that cites
  *     21 CFR 101.91 and prints NO ppm figure, where supplying the well-known
  *     20 ppm is scored as a failure, not a near miss.
+ *   * `effective_date` (2026-09-03) was the anchor a renewal period counts
+ *     from, named nowhere in any of the three copies, so tiers 5-7 of
+ *     shared/renewalPeriod.ts returned `unresolvable` on every AI-extracted
+ *     document. It is layout-generic in exactly the same way.
  *
  * A copy left behind would extract worse on one surface, silently.
  */
@@ -42,11 +46,18 @@ function extractFieldRuleBlocks(src: string): string[] {
   return blocks;
 }
 
-/** The nine canonical field lines added for certificates, plus rules 6 and 7. */
+/**
+ * The canonical field lines added for certificates, plus rules 6 and 7.
+ *
+ * `effective_date` (2026-09-03) joins them for the same reason: it is the
+ * ANCHOR shared/renewalPeriod.ts counts a renewal period FROM, nothing on any
+ * surface extracted it, and a copy left behind would leave one intake door
+ * unable to date a renewal at all.
+ */
 const SHARED_FIELDS = [
   'issuing_body', 'certificate_number', 'scheme', 'kosher_status',
   'gluten_threshold', 'allergens', 'country_of_origin', 'revision_date',
-  'signatory',
+  'signatory', 'effective_date',
 ];
 
 function sharedText(block: string): string {
@@ -99,6 +110,24 @@ describe('the certificate field rules stay in sync across all three prompt copie
     expect(canonical).toContain('the well-known regulatory number is exactly the value you must not supply');
     // The signatory carve-out is explicit about what it does NOT license.
     expect(canonical).toContain('Rule 3 still bars the signature MARK');
+    // effective_date names the decoy it exists alongside. A certificate of
+    // insurance prints an effective date AND an expiry, and document_expires_on
+    // was added specifically to stop a product date being read as a renewal
+    // date — teaching the anchor without teaching the difference would trade
+    // one confusion for the other.
+    expect(canonical).toContain('IT IS NOT AN EXPIRY');
+    expect(canonical).toContain('a certificate of insurance prints BOTH');
+    expect(canonical).toContain('never put the same date in both');
+    // …and the two other dates it is nearest to. The date a supplier
+    // relationship began ("registered since") would anchor a live document
+    // years stale. The revision stamp is a SPLIT, not an exclusion: a
+    // specification prints "Issued" AND "rev 9", and measurement showed that
+    // wording the clause as an exclusion sent every spec sheet's issue date
+    // into revision_date — leaving the type with the three-year rule, the one
+    // that most needs an anchor, with none.
+    expect(canonical).toContain('the date a RELATIONSHIP began');
+    expect(canonical).toContain('a date labelled as a REVISION belongs in revision_date');
+    expect(canonical).toContain('is this field even when the same page prints a revision or version number');
   });
 
   it('leaves rule 14 itself intact on every copy', () => {
@@ -150,6 +179,38 @@ describe('certificate field aliases fold onto the canonical names', () => {
     // ordering must not decide which value wins.
     const out = canonicalizeFields({ certifying_body: 'Alias Co', issuing_body: 'Exact Co' });
     expect(out.issuing_body).toBe('Exact Co');
+  });
+
+  it('folds every issue/effective wording onto the renewal anchor', () => {
+    // shared/renewalPeriod.ts tiers 5-7 read primary_metadata.effective_date
+    // and nothing else. A model that answers "issue_date" is answering the
+    // question; the anchor is only unresolvable if the fold is missing.
+    for (const key of ['issue_date', 'date_issued', 'issued', 'valid_from', 'inception', 'certificate_date']) {
+      const out = canonicalizeFields({ [key]: '2026-02-15' });
+      expect(out.effective_date, `${key} did not fold onto effective_date`).toBe('2026-02-15');
+    }
+  });
+
+  it('keeps the anchor out of the expiry, in both directions', () => {
+    // The COI case: one page, both dates. document_expires_on exists to stop a
+    // product's shelf life being read as a renewal date, and the anchor must
+    // not undo that by colliding with it.
+    const out = canonicalizeFields({
+      policy_effective_date: '2026-02-15',
+      policy_expiration: '2027-02-15',
+      expiration_date: null,
+    });
+    expect(out.effective_date).toBe('2026-02-15');
+    expect(out.document_expires_on).toBe('2027-02-15');
+    expect(out.expiration_date).toBeNull();
+  });
+
+  it('does not let the anchor swallow issued_by, which names a company', () => {
+    // 'issued' is an anchor alias and 'issued_by' is an issuing_body alias.
+    // The map is keyed on exact names, and this pins that it stays that way.
+    const out = canonicalizeFields({ issued: '2026-02-15', issued_by: 'Oregon Tilth' });
+    expect(out.effective_date).toBe('2026-02-15');
+    expect(out.issuing_body).toBe('Oregon Tilth');
   });
 
   it('leaves generic keys alone', () => {
