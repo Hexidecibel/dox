@@ -172,6 +172,40 @@ export function catalogEntry(pack: StarterPack): StarterPackCatalogEntry {
         .map((dt) => dt.name),
     })),
     total_rows: sections.filter((s) => s.seeded).reduce((n, s) => n + s.count, 0),
+    // Passed through verbatim rather than resolved here. Screen 2 needs the
+    // pack's OPINION about modules — which is not the same thing as the
+    // tenant's state, and the two are shown side by side precisely so a person
+    // can see when they differ. `isModuleKey` filtering happens at the point of
+    // use; an unrecognised key must not fail this response.
+    modules: {
+      default_on: [...pack.modules.default_on],
+      default_off: [...pack.modules.default_off],
+    },
+    // Carried whole, nulls included. `sample_file` being null is a real state
+    // the wizard renders (no bundled sample yet — drop your own file), so it is
+    // reported rather than hidden behind an omitted `teach`.
+    teach: pack.teach
+      ? {
+          document_type: pack.teach.document_type,
+          closes: [...pack.teach.closes],
+          decoy: pack.teach.decoy,
+          decoy_reason: pack.teach.decoy_reason,
+          also_closed_by: pack.teach.also_closed_by
+            ? { ...pack.teach.also_closed_by }
+            : null,
+          sample_file: pack.teach.sample_file,
+        }
+      : null,
+    // The packets in full, not just counted. The last screen applies ONE to ONE
+    // named supplier and has to be able to say which line items that means.
+    packets: pack.requirement_packets.map((p) => ({
+      name: p.name,
+      slug: p.slug,
+      description: p.description,
+      default: p.default,
+      requirements: [...p.requirements],
+      recommends: [...p.recommends],
+    })),
   };
 }
 

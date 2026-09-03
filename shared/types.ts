@@ -389,6 +389,17 @@ export interface DocumentTypeRow {
    * the two columns cannot contradict each other. See shared/renewalPeriod.ts.
    */
   renewal_policy: TypeRenewalPolicy;
+  /**
+   * The department that owns renewals for documents of this type (migration
+   * 0100) — a free-text `owner_routes` label, not a user id, because the owners
+   * are ROLES that change hands and some of them will never have an account.
+   *
+   * NULL means nobody has said, and it stays NULL rather than defaulting to
+   * 'QA': a stored value should be there because somebody chose it.
+   * `functions/lib/requirement-defaults.ts` copies it onto `documents.owner`
+   * when the document has none, and never overwrites one a human set.
+   */
+  default_owner: string | null;
   active: number;
   created_at: string;
   updated_at: string;
@@ -5087,6 +5098,54 @@ export interface StarterPackCatalogEntry {
   }>;
   /** Total rows a first application would insert, across every seeded section. */
   total_rows: number;
+  /**
+   * Which modules a tenant seeded from this pack starts with (screen 2).
+   *
+   * Keys are plain strings, NOT `ModuleKey`, and that is deliberate — the pack
+   * is a JSON file that may name a module this build does not have. Filter with
+   * `isModuleKey` at the point of use, exactly as the compiler and the resolver
+   * already do; a stale key is inert because surfaces come from code.
+   */
+  modules: { default_on: string[]; default_off: string[] };
+  /**
+   * The teaching example screen 4 renders, and the sample document screen 6
+   * offers. NULL when the pack declares none.
+   *
+   * `sample_file` is a public path served as a static asset, and it is null
+   * until a real file ships. Every consumer must handle the null: a screen that
+   * names a document nobody produced is a broken screen, which is why the pack
+   * leaves it null rather than guessing at a filename.
+   */
+  teach: {
+    document_type: string;
+    closes: string[];
+    decoy: string | null;
+    decoy_reason: string | null;
+    also_closed_by: { requirement: string; document_type: string } | null;
+    sample_file: string | null;
+  } | null;
+  /**
+   * The named packets defined by the pack, in full.
+   *
+   * Carried as data rather than as a count (the `requirement_packets` section
+   * only counts them) because screen 6 applies ONE of them to ONE named
+   * supplier and has to show which line items that means. Nothing is seeded
+   * from this — see the section's `not_seeded_reason`.
+   */
+  packets: StarterPackPacket[];
+}
+
+/** One named starting checklist, as defined by the pack. */
+export interface StarterPackPacket {
+  name: string;
+  slug: string;
+  description: string | null;
+  /** The packet a wizard offers first. It applies nothing on its own. */
+  default: boolean;
+  /** Requirement slugs written at tier 'required'. */
+  requirements: string[];
+  /** Requirement slugs written at tier 'recommended'. */
+  recommends: string[];
 }
 
 export interface StarterPackCatalogResponse {
@@ -5115,4 +5174,73 @@ export interface ApplyStarterPackResponse {
   inserted: number;
   /** The run row, re-read with its ledger updated, when `run_id` was sent. */
   run: TenantSetupRun | null;
+}
+
+/**
+ * POST /api/starter-packs/apply-packet — one packet, ONE supplier.
+ *
+ * There is deliberately no "apply to every supplier" shape here and there must
+ * never be one. Seeding every supplier the same items is what made the live
+ * tenant's checklist uniform-and-wrong, and an endpoint that can do it will be
+ * called by a button somebody adds later. A packet is a starting point for a
+ * supplier, and the supplier is named.
+ *
+ * Exactly one of `supplier_id` and `supplier_name` is required. The name form
+ * exists because the supplier the wizard's demo document names may not have a
+ * row yet — it resolves through the same lookup-or-create the approve path
+ * uses, so a spelling that matches an existing supplier attaches to it rather
+ * than forking a duplicate.
+ */
+export interface ApplyRequirementPacketRequest {
+  pack: string;
+  /** `slug` of a packet in that pack. */
+  packet: string;
+  supplier_id?: string;
+  supplier_name?: string;
+  tenant_id?: string;
+  /** Stamps the result into this run's `applied` ledger when given. */
+  run_id?: string;
+}
+
+export interface ApplyRequirementPacketResponse {
+  pack: string;
+  packet: string;
+  packet_name: string;
+  supplier_id: string;
+  supplier_name: string;
+  /** True when the supplier row was created by this call. */
+  supplier_created: boolean;
+  /** Rows this call INSERTed, by tier. A re-run reports zeros. */
+  attached: { required: number; recommended: number };
+  /**
+   * Requirement slugs the packet names that this tenant has no row for.
+   *
+   * Reported rather than silently dropped: a packet referring to a checklist
+   * item the tenant never seeded means the pack and the tenant have diverged,
+   * and the supplier's checklist is quietly shorter than the packet promised.
+   */
+  unknown_requirements: string[];
+  run: TenantSetupRun | null;
+}
+
+/**
+ * GET /api/document-type-requirements?document_type_id=…
+ *
+ * The read side of migration 0100 — "what would a document of this type be
+ * proposed to close?". `functions/lib/requirement-defaults.ts` is the writer
+ * and runs at approve time; this exists so a screen can state the consequence
+ * BEFORE anybody approves anything, out of the same rows.
+ */
+export interface DocumentTypeRequirementRow {
+  requirement_id: string;
+  requirement_name: string;
+  requirement_slug: string;
+  requirement_checklist: string | null;
+  source: string;
+}
+
+export interface DocumentTypeRequirementsResponse {
+  tenant_id: string;
+  document_type_id: string;
+  requirements: DocumentTypeRequirementRow[];
 }

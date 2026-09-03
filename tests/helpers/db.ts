@@ -98,6 +98,7 @@ import m0098 from '../../migrations/0098_document_type_extraction_instructions.s
 import m0099 from '../../migrations/0099_module_visibility.sql?raw';
 import m0100 from '../../migrations/0100_document_type_requirements.sql?raw';
 import m0101 from '../../migrations/0101_tenant_setup_runs.sql?raw';
+import m0102 from '../../migrations/0102_supplier_requirement_provenance.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -110,7 +111,7 @@ const migrations: string[] = [
   m0072, m0073, m0074, m0075,
   m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
   m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094, m0095,
-  m0096, m0097, m0098, m0099, m0100, m0101,
+  m0096, m0097, m0098, m0099, m0100, m0101, m0102,
 ];
 
 /**

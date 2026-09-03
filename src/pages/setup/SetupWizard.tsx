@@ -53,8 +53,10 @@ import { TENANT_SETUP_STEPS } from '../../lib/types';
 import type { StarterPackCatalogResponse, TenantSetupRun } from '../../lib/types';
 import type { SetupStepDefinition, SetupStepProps } from './stepProps';
 import StepPack from './StepPack';
+import StepModules from './StepModules';
 import StepOwners from './StepOwners';
 import StepReceipt from './StepReceipt';
+import StepDemo from './StepDemo';
 import StepPlaceholder from './StepPlaceholder';
 
 /** Same debounce as `records/FormBuilder.tsx`. One number, one meaning. */
@@ -63,18 +65,18 @@ const AUTOSAVE_DEBOUNCE_MS = 600;
 /**
  * The six screens.
  *
- * 2, 4 and 6 are owned by other work and render `StepPlaceholder`. They are in
- * the list rather than absent from it because the stepper has to show the real
- * shape of the flow — a four-step wizard telling somebody it is step "3 of 6"
- * is worse than a step that admits it is unfinished.
+ * 4 is owned by other work and renders `StepPlaceholder`. It is in the list
+ * rather than absent from it because the stepper has to show the real shape of
+ * the flow — a five-step wizard telling somebody it is step "3 of 6" is worse
+ * than a step that admits it is unfinished.
  */
 const STEPS: SetupStepDefinition[] = [
   { step: 1, label: 'Your industry', title: 'What do you make or handle?', Component: StepPack },
-  { step: 2, label: 'Modules', title: 'Which parts of the portal do you use?', Component: StepPlaceholder },
+  { step: 2, label: 'Modules', title: 'Which parts of the portal do you use?', Component: StepModules },
   { step: 3, label: 'Renewals', title: 'Who owns renewals?', Component: StepOwners },
   { step: 4, label: 'The idea', title: 'One document, several boxes', Component: StepPlaceholder },
   { step: 5, label: 'Receipt', title: 'Here is what exists now.', Component: StepReceipt },
-  { step: 6, label: 'Try it', title: 'Drop a document through it', Component: StepPlaceholder },
+  { step: 6, label: 'Try it', title: 'Drop a document through it', Component: StepDemo },
 ];
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
@@ -298,19 +300,50 @@ export function SetupWizard() {
     scheduleSave(run.id, { current_step: currentStep });
   }, [currentStep, run, scheduleSave]);
 
-  const finish = useCallback(async () => {
-    if (!run) return;
-    setSaveState('saving');
-    try {
-      const res = await api.tenantSetup.update(run.id, { status: 'completed' });
-      setRun(res.run);
-      setSaveState('saved');
-      navigate('/dashboard');
-    } catch (err) {
-      setSaveState('error');
-      setError(err instanceof Error ? err.message : 'Could not finish setup');
-    }
-  }, [run, navigate]);
+  /**
+   * Finish the run.
+   *
+   * `patch` rides along in the SAME PATCH as the status change, rather than
+   * being written by a separate `patchState` call first. Two reasons, and both
+   * have teeth: the scratch write is DEBOUNCED, so a screen that called
+   * `patchState({ demo_skipped: true })` and then `finish()` would very often
+   * navigate away before the 600ms timer fired and lose it; and even if it did
+   * fire, two requests can land in either order against one row. One write,
+   * one order.
+   *
+   * A pending debounce is cancelled for the same reason — it holds an older
+   * copy of the same blob and would overwrite this one on the way out.
+   */
+  const finish = useCallback(
+    async (patch?: Record<string, unknown>) => {
+      const current = runRef.current;
+      if (!current) return;
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      const pending = pendingRef.current;
+      pendingRef.current = {};
+      setSaveState('saving');
+      try {
+        const state =
+          patch === undefined && pending.state === undefined
+            ? undefined
+            : { ...current.state, ...pending.state, ...patch };
+        const res = await api.tenantSetup.update(current.id, {
+          status: 'completed',
+          ...(state === undefined ? {} : { state }),
+        });
+        setRun(res.run);
+        setSaveState('saved');
+        navigate('/dashboard');
+      } catch (err) {
+        setSaveState('error');
+        setError(err instanceof Error ? err.message : 'Could not finish setup');
+      }
+    },
+    [navigate],
+  );
 
   const restart = useCallback(async () => {
     setRestarting(true);
@@ -365,6 +398,7 @@ export function SetupWizard() {
     patchState,
     refreshRun,
     goToStep,
+    finish,
   };
 
   return (

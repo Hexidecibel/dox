@@ -48,6 +48,20 @@ export interface SetupStepProps {
   refreshRun: () => Promise<void>;
   /** Jump to a screen. The stepper is navigable; nothing here is a gate. */
   goToStep: (step: number) => void;
+  /**
+   * Mark the run `completed` and leave the wizard.
+   *
+   * COMPLETION IS A DECLARATION, NOT A SCORE. The run finishes because somebody
+   * said it was finished, whether or not the readiness list is fully green —
+   * there is no computed threshold anywhere, and a tenant that skipped four
+   * screens is allowed to be done. Screens 5 and 6 both show what is still
+   * empty; neither of them gates on it.
+   *
+   * `patch` is merged into the run's scratch in the SAME write, so a screen can
+   * record why it finished (`{ demo_skipped: true }`) without a second request
+   * that might land after the status change — or not at all.
+   */
+  finish: (patch?: Record<string, unknown>) => Promise<void>;
 }
 
 /** One screen, as the stepper knows it. */

@@ -98,6 +98,8 @@ import type {
   TenantSetupStatus,
   StarterPackCatalogResponse,
   ApplyStarterPackResponse,
+  ApplyRequirementPacketResponse,
+  DocumentTypeRequirementsResponse,
   ApiSupplierRequirement,
   SupplierRequirementTier,
   LotMatchListResponse,
@@ -1789,6 +1791,55 @@ export const api = {
           run_id: params.runId,
         }),
       }),
+
+    /**
+     * POST /api/starter-packs/apply-packet — ONE packet, ONE named supplier.
+     *
+     * Note what this signature CANNOT express: there is no "every supplier"
+     * form, here or on the server. Bulk-writing the same checklist across every
+     * supplier is what made the live tenant's gap report uniform-and-wrong, and
+     * the endpoint is shaped so a convenience button cannot be built on it.
+     *
+     * `supplierName` resolves through the same lookup-or-create the approve path
+     * uses, so the supplier a just-read document names attaches to an existing
+     * row when the spelling matches one.
+     */
+    applyPacket: (params: {
+      pack: string;
+      packet: string;
+      supplierId?: string;
+      supplierName?: string;
+      tenantId?: string;
+      runId?: string;
+    }): Promise<ApplyRequirementPacketResponse> =>
+      fetchApi<ApplyRequirementPacketResponse>('/starter-packs/apply-packet', {
+        method: 'POST',
+        body: JSON.stringify({
+          pack: params.pack,
+          packet: params.packet,
+          supplier_id: params.supplierId,
+          supplier_name: params.supplierName,
+          tenant_id: params.tenantId,
+          run_id: params.runId,
+        }),
+      }),
+  },
+
+  /**
+   * The read side of migration 0100 — which checklist items a document of this
+   * TYPE is normally proposed to close.
+   *
+   * Exists so a screen can state the consequence of an approval BEFORE anybody
+   * approves: `functions/lib/requirement-defaults.ts` only writes the links once
+   * a `documents` row exists, so anything that needs the number earlier has to
+   * read the mapping itself rather than guess at it.
+   */
+  documentTypeRequirements: {
+    /** GET /api/document-type-requirements?document_type_id= */
+    list: (params: { documentTypeId: string }): Promise<DocumentTypeRequirementsResponse> =>
+      fetchApi<DocumentTypeRequirementsResponse>(
+        `/document-type-requirements?document_type_id=${encodeURIComponent(params.documentTypeId)}`,
+      ),
   },
 
   /**

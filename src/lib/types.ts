@@ -322,6 +322,11 @@ export type {
   StarterPackCatalogResponse,
   ApplyStarterPackRequest,
   ApplyStarterPackResponse,
+  StarterPackPacket,
+  ApplyRequirementPacketRequest,
+  ApplyRequirementPacketResponse,
+  DocumentTypeRequirementRow,
+  DocumentTypeRequirementsResponse,
 } from '../../shared/types';
 
 // Value export: how many screens the wizard has, so the stepper and the

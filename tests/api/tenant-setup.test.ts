@@ -305,6 +305,32 @@ describe('GET /api/starter-packs — the catalog', () => {
     }
   });
 
+  it('carries the pack’s module opinion, its teaching example and its packets in full', async () => {
+    const body = (await (
+      await getPacks(ctx('GET', '/api/starter-packs', admin()))
+    ).json()) as StarterPackCatalogResponse;
+    const fsqa = body.packs.find((p) => p.pack === 'fsqa')!;
+
+    // Screen 2 shows the pack's OPINION beside the tenant's state, so the two
+    // can visibly differ. Passed through verbatim — an unrecognised key must
+    // not fail the response, it is filtered at the point of use.
+    expect(fsqa.modules).toEqual(STARTER_PACKS.fsqa.modules);
+
+    // Screen 6 offers the bundled sample and has to handle it being null: a
+    // path that does not resolve is a broken screen, so the pack leaves it null
+    // until a real file ships and the catalog reports that honestly.
+    expect(fsqa.teach).not.toBeNull();
+    expect(fsqa.teach!.sample_file).toBe(STARTER_PACKS.fsqa.teach!.sample_file);
+
+    // The packets in FULL, not just counted: the closing action applies one to
+    // one named supplier and has to say which line items that means.
+    expect(fsqa.packets).toHaveLength(STARTER_PACKS.fsqa.requirement_packets.length);
+    const baseline = fsqa.packets.find((p) => p.slug === 'baseline')!;
+    expect(baseline.requirements).toEqual(
+      STARTER_PACKS.fsqa.requirement_packets.find((p) => p.slug === 'baseline')!.requirements,
+    );
+  });
+
   it('carries the renewal window the alert engine actually uses', async () => {
     const body = (await (
       await getPacks(ctx('GET', '/api/starter-packs', admin()))
