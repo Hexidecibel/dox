@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import {
   Box,
@@ -13,6 +13,7 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  ListSubheader,
   Divider,
   Chip,
   Button,
@@ -26,74 +27,34 @@ import {
 } from '@mui/material';
 import {
   Menu as MenuIcon,
-  Dashboard as DashboardIcon,
-  Description as DocsIcon,
-  Search as SearchIcon,
   Logout as LogoutIcon,
   Person as PersonIcon,
   FilterList as FilterIcon,
-  LocalShipping as SuppliersIcon,
-  Timeline as ActivityIcon,
-  FileUpload as ImportIcon,
-  RateReview as RateReviewIcon,
-  ShoppingCart as OrdersIcon,
-  Inventory2 as LotsIcon,
-  Assessment as ReportsIcon,
-  EventBusy as RenewalsIcon,
-  ErrorOutline as OutOfSpecIcon,
-  ContactMail as CustomersIcon,
-  ForwardToInbox as RequestsIcon,
-  TableView as RecordsIcon,
   HelpOutline as HelpIcon,
-  Settings as SettingsIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
-import { RoleGuard } from './RoleGuard';
 import { NotificationsBell } from './NotificationsBell';
+import { navGroupsForRole, pinnedNavSurfaces } from '../lib/surfaces';
+import type { Surface } from '../lib/surfaces';
 
 const DRAWER_WIDTH = 260;
 
-interface NavItem {
-  label: string;
-  path: string;
-  icon: React.ReactNode;
-  roles?: ('super_admin' | 'org_admin' | 'user' | 'reader')[];
-}
-
-// Primary rail. Each item's path + roles are preserved from the previous
-// nav/admin arrays. Settings is appended separately (pinned, divider above).
-const navItems: NavItem[] = [
-  { label: 'Dashboard', path: '/dashboard', icon: <DashboardIcon /> },
-  { label: 'Search', path: '/search', icon: <SearchIcon /> },
-  { label: 'Documents', path: '/documents', icon: <DocsIcon /> },
-  { label: 'Import', path: '/import', icon: <ImportIcon />, roles: ['super_admin', 'org_admin', 'user'] },
-  { label: 'Review Queue', path: '/review', icon: <RateReviewIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'Orders', path: '/orders', icon: <OrdersIcon />, roles: ['super_admin', 'org_admin', 'user'] },
-  { label: 'Lots', path: '/lots', icon: <LotsIcon />, roles: ['super_admin', 'org_admin', 'user', 'reader'] },
-  { label: 'Suppliers', path: '/admin/suppliers', icon: <SuppliersIcon />, roles: ['super_admin', 'org_admin'] },
-  // Sits with Suppliers rather than with the alert queues below it: a request
-  // is always addressed to a supplier and is composed from what that supplier
-  // owes, so the supplier workflow stays contiguous. Readable by every role —
-  // an outstanding-request list is evidence, not configuration — with the
-  // composing actions gated inside the page, exactly as the API gates them.
-  { label: 'Requests', path: '/requests', icon: <RequestsIcon />, roles: ['super_admin', 'org_admin', 'user', 'reader'] },
-  { label: 'Customers', path: '/admin/customers', icon: <CustomersIcon />, roles: ['super_admin', 'org_admin'] },
-  { label: 'COA Fulfillment', path: '/reports', icon: <ReportsIcon />, roles: ['super_admin', 'org_admin', 'user'] },
-  { label: 'Renewals', path: '/expirations', icon: <RenewalsIcon />, roles: ['super_admin', 'org_admin', 'user'] },
-  { label: 'Out of Spec', path: '/spec-alerts', icon: <OutOfSpecIcon />, roles: ['super_admin', 'org_admin', 'user'] },
-  { label: 'Activity', path: '/activity', icon: <ActivityIcon /> },
-  { label: 'Records', path: '/records', icon: <RecordsIcon /> },
-];
-
-// Pinned at the bottom of the rail. Gated to roles with at least one
-// Settings section (super_admin, org_admin).
-const settingsItem: NavItem = {
-  label: 'Settings',
-  path: '/settings',
-  icon: <SettingsIcon />,
-  roles: ['super_admin', 'org_admin'],
-};
+/**
+ * The rail is rendered from `src/lib/surfaces.tsx` — the same rows that
+ * produce the routes in `App.tsx`. There is deliberately no `navItems` array
+ * here any more: this file and App.tsx used to be two independent lists of
+ * paths and had already drifted in both directions on production, which is
+ * how a `user` came to see the Out-of-Spec link and be bounced by the route.
+ *
+ * Items are GROUPED BY MODULE, with a `ListSubheader` per group and a divider
+ * between them. Not collapsible: there is nowhere to persist per-user collapse
+ * state, and collapsing would re-hide exactly what grouping just made
+ * findable. Empty groups drop their heading — same shape as `Settings.tsx`.
+ *
+ * NO TENANT MODULE FILTER IS APPLIED HERE YET. Grouping is presentational; the
+ * gate that reads `tenant_modules` lands in a later pass.
+ */
 
 const roleColors: Record<string, 'primary' | 'secondary' | 'default'> = {
   super_admin: 'primary',
@@ -124,6 +85,33 @@ export function Layout() {
     return location.pathname === path || location.pathname.startsWith(path + '/');
   };
 
+  // One computation per role change, shared by both blocks of the rail.
+  const navGroups = useMemo(() => navGroupsForRole(user?.role), [user?.role]);
+  const pinned = useMemo(() => pinnedNavSurfaces(user?.role), [user?.role]);
+
+  // Every rail entry looks the same whether it is grouped or pinned; the only
+  // thing a surface contributes is its label, icon and path.
+  const renderNavItem = (surface: Surface) => {
+    const active = isActive(surface.path);
+    return (
+      <ListItem key={surface.path} disablePadding sx={{ mb: 0.5 }}>
+        <ListItemButton
+          onClick={() => handleNavClick(surface.path)}
+          selected={active}
+          sx={{ borderRadius: 1 }}
+        >
+          <ListItemIcon sx={{ minWidth: 40, color: active ? 'primary.main' : 'text.secondary' }}>
+            {surface.nav!.icon}
+          </ListItemIcon>
+          <ListItemText
+            primary={surface.nav!.label}
+            primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: active ? 600 : 400 }}
+          />
+        </ListItemButton>
+      </ListItem>
+    );
+  };
+
   const getInitials = (name: string) => {
     return name
       .split(' ')
@@ -146,46 +134,34 @@ export function Layout() {
       <Divider />
 
       <List sx={{ flex: 1, px: 1, py: 1 }}>
-        {navItems.map((item) => {
-          const button = (
-            <ListItem key={item.label} disablePadding sx={{ mb: 0.5 }}>
-              <ListItemButton
-                onClick={() => handleNavClick(item.path)}
-                selected={isActive(item.path)}
-                sx={{ borderRadius: 1 }}
-              >
-                <ListItemIcon sx={{ minWidth: 40, color: isActive(item.path) ? 'primary.main' : 'text.secondary' }}>
-                  {item.icon}
-                </ListItemIcon>
-                <ListItemText primary={item.label} primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: isActive(item.path) ? 600 : 400 }} />
-              </ListItemButton>
-            </ListItem>
-          );
-          if (item.roles) {
-            return (
-              <RoleGuard key={item.label} roles={item.roles}>
-                {button}
-              </RoleGuard>
-            );
-          }
-          return button;
-        })}
+        {navGroups.map((group, idx) => (
+          <Fragment key={group.module ?? 'always-on'}>
+            {group.heading && (
+              <>
+                {idx > 0 && <Divider sx={{ my: 1 }} />}
+                <ListSubheader
+                  disableSticky
+                  disableGutters
+                  sx={{
+                    px: 2,
+                    lineHeight: 2.2,
+                    bgcolor: 'transparent',
+                    color: 'text.secondary',
+                    fontSize: '0.65rem',
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {group.heading}
+                </ListSubheader>
+              </>
+            )}
+            {group.items.map(renderNavItem)}
+          </Fragment>
+        ))}
 
-        <RoleGuard roles={settingsItem.roles!}>
-          <Divider sx={{ my: 1.5 }} />
-          <ListItem disablePadding sx={{ mb: 0.5 }}>
-            <ListItemButton
-              onClick={() => handleNavClick(settingsItem.path)}
-              selected={isActive(settingsItem.path)}
-              sx={{ borderRadius: 1 }}
-            >
-              <ListItemIcon sx={{ minWidth: 40, color: isActive(settingsItem.path) ? 'primary.main' : 'text.secondary' }}>
-                {settingsItem.icon}
-              </ListItemIcon>
-              <ListItemText primary={settingsItem.label} primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: isActive(settingsItem.path) ? 600 : 400 }} />
-            </ListItemButton>
-          </ListItem>
-        </RoleGuard>
+        {pinned.length > 0 && <Divider sx={{ my: 1.5 }} />}
+        {pinned.map(renderNavItem)}
       </List>
 
       {/* Tenant Selector for super_admin */}

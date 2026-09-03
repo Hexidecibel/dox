@@ -6,54 +6,10 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { Layout } from './components/Layout';
 import { VersionChip } from './components/VersionChip';
 import { WhatsNewToast } from './components/WhatsNewToast';
+import { SURFACES } from './lib/surfaces';
 import { Login } from './pages/Login';
 import { ForgotPassword } from './pages/ForgotPassword';
 import { ResetPassword } from './pages/ResetPassword';
-import { Dashboard } from './pages/Dashboard';
-import { Documents } from './pages/Documents';
-import { DocumentDetail } from './pages/DocumentDetail';
-import { DocumentCreate } from './pages/DocumentCreate';
-import { Search } from './pages/Search';
-import { Profile } from './pages/Profile';
-import { Users } from './pages/admin/Users';
-import { Tenants } from './pages/admin/Tenants';
-import { AuditLog } from './pages/admin/AuditLog';
-import { ApiKeys } from './pages/admin/ApiKeys';
-import { Products } from './pages/admin/Products';
-import { ProductDetail } from './pages/admin/ProductDetail';
-import { Suppliers } from './pages/admin/Suppliers';
-import { SupplierDetail } from './pages/admin/SupplierDetail';
-import { DocumentTypes } from './pages/admin/DocumentTypes';
-import { Requirements } from './pages/admin/Requirements';
-import { SpecAlerts } from './pages/SpecAlerts';
-import { ClaimTypes } from './pages/admin/ClaimTypes';
-import { ClaimRules } from './pages/admin/ClaimRules';
-import { Requests } from './pages/requests/Requests';
-import { RequestCompose } from './pages/requests/RequestCompose';
-import { RequestDetail } from './pages/requests/RequestDetail';
-import { RequestTemplates } from './pages/requests/RequestTemplates';
-import { Bundles } from './pages/Bundles';
-import { BundleDetail } from './pages/BundleDetail';
-import { IngestHistory } from './pages/IngestHistory';
-import { Import } from './pages/Import';
-import ReviewQueue from './pages/ReviewQueue';
-import { Sources } from './pages/admin/Sources';
-import { SourceDetail } from './pages/admin/SourceDetail';
-import { SourceWizard } from './pages/admin/SourceWizard';
-import { Customers } from './pages/admin/Customers';
-import { CustomerDetail } from './pages/admin/CustomerDetail';
-import LearningDashboard from './pages/admin/LearningDashboard';
-import { ProcessingStatus } from './pages/admin/ProcessingStatus';
-import { Orders } from './pages/Orders';
-import { OrderDetail } from './pages/OrderDetail';
-import { Lots } from './pages/Lots';
-import { Reports } from './pages/Reports';
-import { Expirations } from './pages/Expirations';
-import { Activity } from './pages/Activity';
-import { Sheets } from './pages/records/Sheets';
-import { SheetDetail } from './pages/records/SheetDetail';
-import { FormBuilder } from './pages/records/FormBuilder';
-import { WorkflowBuilder } from './pages/records/WorkflowBuilder';
 import { PublicForm } from './pages/forms/PublicForm';
 import { UpdateRequestForm } from './pages/forms/UpdateRequestForm';
 import { PublicApprovalPage } from './pages/forms/PublicApprovalPage';
@@ -63,10 +19,27 @@ import { PublicDrop } from './pages/PublicDrop';
 // functions/api/supplier-requests/public/[token].ts.
 import { SupplierRequestPortal } from './pages/supplier/RequestPortal';
 import { PublicDocsConnectors } from './pages/PublicDocsConnectors';
-import { Approvals } from './pages/Approvals';
-import { Help } from './pages/Help';
-import { Settings } from './pages/Settings';
 
+/**
+ * Routing.
+ *
+ * Everything inside the authenticated shell comes from `src/lib/surfaces.tsx`
+ * — one row per surface, carrying its path, element, permission tier, module
+ * and optional nav entry. The nav rail is rendered from the SAME rows, which
+ * is the point: this file and `Layout.tsx` used to be two independent lists of
+ * paths and had already drifted in both directions (a `user` could work the
+ * review queue by URL but saw no link; a `user` saw the Out-of-Spec link and
+ * was bounced by the route). A path can no longer exist in one and not the
+ * other, because there is only one place to write it.
+ *
+ * The `roles` on a surface is exactly what the old nested
+ * `<ProtectedRoute roles={[...]}>` blocks meant — the nesting was only ever a
+ * way to avoid repeating the tier, so flattening it loses nothing.
+ *
+ * The PUBLIC routes below stay hand-written. They are outside the shell: no
+ * auth, no layout, no nav entry and no module, so a `Surface` row for them
+ * would be three empty fields and a lie about where they live.
+ */
 function App() {
   return (
     <AuthProvider>
@@ -114,79 +87,22 @@ function App() {
               No auth, no app shell — pure documentation. */}
           <Route path="/docs/connectors" element={<PublicDocsConnectors />} />
 
-          {/* Protected routes with layout */}
+          {/* Protected routes with layout — one per row of SURFACES. */}
           <Route element={<ProtectedRoute />}>
             <Route element={<Layout />}>
-              <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/documents" element={<Documents />} />
-              <Route element={<ProtectedRoute roles={['super_admin', 'org_admin', 'user']} />}>
-                <Route path="/documents/new" element={<DocumentCreate />} />
-              </Route>
-              <Route path="/documents/:id" element={<DocumentDetail />} />
-              <Route path="/search" element={<Search />} />
-              <Route path="/profile" element={<Profile />} />
-              <Route path="/bundles" element={<Bundles />} />
-              <Route path="/bundles/:id" element={<BundleDetail />} />
-              <Route path="/ingest-history" element={<IngestHistory />} />
-              <Route path="/activity" element={<Activity />} />
-              <Route path="/import" element={<Import />} />
-              <Route path="/review" element={<ReviewQueue />} />
-              <Route path="/orders" element={<Orders />} />
-              <Route path="/orders/:id" element={<OrderDetail />} />
-              <Route path="/lots" element={<Lots />} />
-              {/* The request composer (migration 0090). Reading is open to any
-                  authenticated user of the tenant — an outstanding-request list
-                  is evidence, not configuration, and the API says the same. The
-                  two composing routes are gated to the roles that may commit
-                  the organization to an outbound ask. */}
-              <Route path="/requests" element={<Requests />} />
-              <Route path="/requests/templates" element={<RequestTemplates />} />
-              <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>
-                <Route path="/requests/new" element={<RequestCompose />} />
-              </Route>
-              <Route path="/requests/:id" element={<RequestDetail />} />
-              <Route element={<ProtectedRoute roles={['super_admin', 'org_admin', 'user']} />}>
-                <Route path="/reports" element={<Reports />} />
-                <Route path="/expirations" element={<Expirations />} />
-              </Route>
-              <Route path="/records" element={<Sheets />} />
-              <Route path="/records/:sheetId" element={<SheetDetail />} />
-              <Route path="/records/:sheetId/forms/:formId" element={<FormBuilder />} />
-              <Route path="/records/:sheetId/workflows/:workflowId" element={<WorkflowBuilder />} />
-              <Route path="/approvals" element={<Approvals />} />
-              <Route path="/help" element={<Help />} />
-              <Route path="/help/:module" element={<Help />} />
-
-              {/* Admin routes - users management and audit for super_admin and org_admin */}
-              <Route element={<ProtectedRoute roles={['super_admin', 'org_admin']} />}>
-                <Route path="/settings" element={<Settings />} />
-                <Route path="/settings/:section" element={<Settings />} />
-                <Route path="/spec-alerts" element={<SpecAlerts />} />
-                <Route path="/admin/users" element={<Users />} />
-                <Route path="/admin/api-keys" element={<ApiKeys />} />
-                <Route path="/admin/audit" element={<AuditLog />} />
-                <Route path="/admin/document-types" element={<DocumentTypes />} />
-                {/* Registry taxonomy vocabularies (migration 0080) */}
-                <Route path="/admin/requirements" element={<Requirements />} />
-                <Route path="/admin/claim-types" element={<ClaimTypes />} />
-                <Route path="/admin/claim-rules" element={<ClaimRules />} />
-                <Route path="/admin/products" element={<Products />} />
-                <Route path="/admin/products/:id" element={<ProductDetail />} />
-                <Route path="/admin/suppliers" element={<Suppliers />} />
-                <Route path="/admin/suppliers/:id" element={<SupplierDetail />} />
-                <Route path="/admin/sources" element={<Sources />} />
-                <Route path="/admin/sources/new" element={<SourceWizard />} />
-                <Route path="/admin/sources/:id/edit" element={<SourceWizard />} />
-                <Route path="/admin/sources/:id" element={<SourceDetail />} />
-                <Route path="/admin/customers" element={<Customers />} />
-                <Route path="/admin/customers/:id" element={<CustomerDetail />} />
-                <Route path="/admin/learning-dashboard" element={<LearningDashboard />} />
-              </Route>
-              {/* Super admin only routes */}
-              <Route element={<ProtectedRoute roles={['super_admin']} />}>
-                <Route path="/admin/tenants" element={<Tenants />} />
-                <Route path="/admin/processing-status" element={<ProcessingStatus />} />
-              </Route>
+              {SURFACES.map((surface) => (
+                <Route
+                  key={surface.path}
+                  path={surface.path}
+                  element={
+                    surface.roles ? (
+                      <ProtectedRoute roles={surface.roles}>{surface.element}</ProtectedRoute>
+                    ) : (
+                      surface.element
+                    )
+                  }
+                />
+              ))}
             </Route>
           </Route>
 
