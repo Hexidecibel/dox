@@ -26,6 +26,7 @@ import { api } from '../lib/api';
 import type { Document } from '../lib/types';
 import { DocumentCard } from '../components/DocumentCard';
 import { RoleGuard } from '../components/RoleGuard';
+import { SetupCard } from '../components/SetupPrompt';
 
 export function Dashboard() {
   const { user } = useAuth();
@@ -76,6 +77,15 @@ export function Dashboard() {
           {error}
         </Alert>
       )}
+
+      {/* The first-run offer, for an admin in a tenant that has neither
+          finished the wizard nor accumulated any documents. Renders nothing
+          otherwise, including for a `user` or a `reader`. */}
+      <RoleGuard roles={['super_admin', 'org_admin']}>
+        <Box sx={{ mb: 3 }}>
+          <SetupCard />
+        </Box>
+      </RoleGuard>
 
       {/* Stats Cards */}
       <Grid container spacing={2} sx={{ mb: 4 }}>

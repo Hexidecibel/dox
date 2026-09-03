@@ -97,6 +97,7 @@ import m0097 from '../../migrations/0097_renewal_policy_and_decision.sql?raw';
 import m0098 from '../../migrations/0098_document_type_extraction_instructions.sql?raw';
 import m0099 from '../../migrations/0099_module_visibility.sql?raw';
 import m0100 from '../../migrations/0100_document_type_requirements.sql?raw';
+import m0101 from '../../migrations/0101_tenant_setup_runs.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -109,7 +110,7 @@ const migrations: string[] = [
   m0072, m0073, m0074, m0075,
   m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
   m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094, m0095,
-  m0096, m0097, m0098, m0099, m0100,
+  m0096, m0097, m0098, m0099, m0100, m0101,
 ];
 
 /**
@@ -349,6 +350,11 @@ export async function cleanTables(db: D1Database): Promise<void> {
   const tables = [
     // alert_links FKs documents + tenants, so it clears before both.
     'alert_links',
+    // 0101 setup runs: FK tenants only, and it is the wizard's POSITION, not
+    // its output — clearing it strands nothing. Ahead of tenants, and ahead of
+    // users only because started_by/completed_by name one (bare TEXT, no FK,
+    // so this is tidiness rather than a constraint).
+    'tenant_setup_runs',
     // 0099 module visibility: the scoping rows carry a composite FK to
     // owner_labels, and owner_labels FKs tenants — so visibility clears before
     // labels, and both before owner_routes/users/tenants below. tenant_modules

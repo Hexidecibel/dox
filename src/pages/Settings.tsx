@@ -27,9 +27,11 @@ import {
   Rule as RuleIcon,
   FactCheck as SupplierRequirementsIcon,
   AlternateEmail as OwnerRoutesIcon,
+  ViewModule as ModulesIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
-import type { Role } from '../lib/types';
+import { useModuleAccess } from '../contexts/ModuleAccessContext';
+import type { ModuleKey, Role } from '../lib/types';
 
 // Embedded page components — these already render their own content inside
 // the app Layout (no nested layout), so we just render them in the pane.
@@ -40,6 +42,7 @@ import { ClaimTypes } from './admin/ClaimTypes';
 import { ClaimRules } from './admin/ClaimRules';
 import { SupplierRequirements } from './admin/SupplierRequirements';
 import { OwnerRoutes } from './admin/OwnerRoutes';
+import { Modules } from './admin/Modules';
 import { Sources } from './admin/Sources';
 import { Users } from './admin/Users';
 import { Assignments } from './admin/Assignments';
@@ -56,6 +59,24 @@ interface SettingsItem {
   label: string;
   icon: React.ReactNode;
   roles: Role[];
+  /**
+   * The module this section configures, if any. Omitted means ALWAYS ON.
+   *
+   * A tenant that does not use Compliance has no business being offered a
+   * Spec Limits screen — the settings tree is a surface like any other, and
+   * leaving it un-gated would put every hidden module's configuration one
+   * click from the sidebar it was removed from.
+   *
+   * `modules` ITSELF IS NEVER GATED, and must never become so: it is the
+   * screen that switches a module back on, so gating it on a module would
+   * make the last one switched off unrecoverable from the UI.
+   *
+   * Users / Assignments / Owner Routing / API Keys / Tenants stay ungated on
+   * purpose too: accounts and who-gets-told exist whatever the organization
+   * has bought, and owner routing is the very thing the visibility grid
+   * reads its departments from.
+   */
+  module?: ModuleKey;
   component: React.ComponentType;
 }
 
@@ -71,26 +92,30 @@ const SECTIONS: SettingsSection[] = [
     title: 'Catalog & Sources',
     items: [
       { key: 'extraction-context', label: 'Extraction Context', icon: <ExtractionContextIcon />, roles: ALL_ADMIN, component: TenantExtractionContextBox },
-      { key: 'document-types', label: 'Document Types', icon: <DocTypesIcon />, roles: ALL_ADMIN, component: DocumentTypes },
+      { key: 'document-types', label: 'Document Types', icon: <DocTypesIcon />, roles: ALL_ADMIN, module: 'library', component: DocumentTypes },
       // The three registry facets, in the order a tenant configures them:
       // what a document IS (document types), what it SATISFIES (checklist),
       // what it TRIGGERS (claims) and what each claim opens (claim rules).
-      { key: 'requirements', label: 'Checklist', icon: <ChecklistIcon />, roles: ALL_ADMIN, component: Requirements },
-      { key: 'claim-types', label: 'Claims', icon: <ClaimsIcon />, roles: ALL_ADMIN, component: ClaimTypes },
-      { key: 'claim-rules', label: 'Claim Rules', icon: <RuleIcon />, roles: ALL_ADMIN, component: ClaimRules },
+      { key: 'requirements', label: 'Checklist', icon: <ChecklistIcon />, roles: ALL_ADMIN, module: 'library', component: Requirements },
+      { key: 'claim-types', label: 'Claims', icon: <ClaimsIcon />, roles: ALL_ADMIN, module: 'library', component: ClaimTypes },
+      { key: 'claim-rules', label: 'Claim Rules', icon: <RuleIcon />, roles: ALL_ADMIN, module: 'library', component: ClaimRules },
       // Applicability: the checklist above is a vocabulary; this says who owes
       // which of it. Without a row here a line item applies to nobody and can
       // never be reported as a gap.
-      { key: 'supplier-requirements', label: 'Supplier Requirements', icon: <SupplierRequirementsIcon />, roles: ALL_ADMIN, component: SupplierRequirements },
+      { key: 'supplier-requirements', label: 'Supplier Requirements', icon: <SupplierRequirementsIcon />, roles: ALL_ADMIN, module: 'library', component: SupplierRequirements },
       // Acceptance criteria for the values inside a document, as opposed to
       // the taxonomy above, which is about the document itself.
-      { key: 'spec-limits', label: 'Spec Limits', icon: <SpecLimitsIcon />, roles: ALL_ADMIN, component: SpecLimits },
-      { key: 'sources', label: 'Sources', icon: <ConnectorsIcon />, roles: ALL_ADMIN, component: Sources },
+      { key: 'spec-limits', label: 'Spec Limits', icon: <SpecLimitsIcon />, roles: ALL_ADMIN, module: 'compliance', component: SpecLimits },
+      { key: 'sources', label: 'Sources', icon: <ConnectorsIcon />, roles: ALL_ADMIN, module: 'library', component: Sources },
     ],
   },
   {
     title: 'Access',
     items: [
+      // First in the section because it is the ceiling everything else sits
+      // under: what the organization uses at all, then who works in which
+      // part of it, then the accounts themselves.
+      { key: 'modules', label: 'Modules', icon: <ModulesIcon />, roles: ALL_ADMIN, component: Modules },
       { key: 'users', label: 'Users', icon: <UsersIcon />, roles: ALL_ADMIN, component: Users },
       { key: 'assignments', label: 'Assignments', icon: <AssignmentsIcon />, roles: ALL_ADMIN, component: Assignments },
       // The third answer to "who is responsible?": the free-text owner label on
@@ -114,18 +139,23 @@ export function Settings() {
   const { section } = useParams<{ section?: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { visible: visibleModules } = useModuleAccess();
 
   const role = user?.role;
 
   // Sections filtered to items the current user can see; sections with no
-  // visible items are dropped entirely.
+  // visible items are dropped entirely. Two predicates now, ANDed: the role
+  // tier this screen has always applied, and the module gate — a tenant that
+  // does not use Compliance should not be offered Spec Limits.
   const visibleSections = useMemo(() => {
     if (!role) return [];
     return SECTIONS.map((s) => ({
       ...s,
-      items: s.items.filter((i) => i.roles.includes(role)),
+      items: s.items.filter(
+        (i) => i.roles.includes(role) && (i.module === undefined || visibleModules.includes(i.module))
+      ),
     })).filter((s) => s.items.length > 0);
-  }, [role]);
+  }, [role, visibleModules]);
 
   const allVisibleItems = useMemo(
     () => visibleSections.flatMap((s) => s.items),

@@ -1,8 +1,10 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
 import { TenantProvider } from './contexts/TenantContext';
+import { ModuleAccessProvider } from './contexts/ModuleAccessContext';
 import { ReleaseNotesProvider } from './contexts/ReleaseNotesContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
+import { ModuleRoute } from './components/ModuleRoute';
 import { Layout } from './components/Layout';
 import { VersionChip } from './components/VersionChip';
 import { WhatsNewToast } from './components/WhatsNewToast';
@@ -34,7 +36,20 @@ import { PublicDocsConnectors } from './pages/PublicDocsConnectors';
  *
  * The `roles` on a surface is exactly what the old nested
  * `<ProtectedRoute roles={[...]}>` blocks meant — the nesting was only ever a
- * way to avoid repeating the tier, so flattening it loses nothing.
+ * way to avoid repeating the tier, so flattening it lost nothing. It is now
+ * enforced by `ModuleRoute` instead; `ProtectedRoute` kept only the question
+ * that really does end in a redirect, which is whether there is a session.
+ *
+ * EVERY shell route is wrapped in `<ModuleRoute>`, not just the ones the nav
+ * would have hidden. Filtering only the rail leaves every route reachable by
+ * URL, which is the exact bug the surface table was built to end — a module a
+ * tenant switched off has to be unreachable, not merely unlisted. ModuleRoute
+ * is also where the surface's `roles` is now enforced: all three ways a
+ * surface can refuse belong in one place that explains itself, rather than
+ * one redirect that does not.
+ *
+ * `ModuleAccessProvider` sits inside `TenantProvider` because a super_admin
+ * scoping into another tenant has to re-ask what THAT tenant uses.
  *
  * The PUBLIC routes below stay hand-written. They are outside the shell: no
  * auth, no layout, no nav entry and no module, so a `Surface` row for them
@@ -44,6 +59,7 @@ function App() {
   return (
     <AuthProvider>
       <TenantProvider>
+        <ModuleAccessProvider>
         <ReleaseNotesProvider>
         <Routes>
           {/* Public routes */}
@@ -95,11 +111,9 @@ function App() {
                   key={surface.path}
                   path={surface.path}
                   element={
-                    surface.roles ? (
-                      <ProtectedRoute roles={surface.roles}>{surface.element}</ProtectedRoute>
-                    ) : (
-                      surface.element
-                    )
+                    <ModuleRoute module={surface.module} roles={surface.roles}>
+                      {surface.element}
+                    </ModuleRoute>
                   }
                 />
               ))}
@@ -113,6 +127,7 @@ function App() {
         <VersionChip />
         <WhatsNewToast />
         </ReleaseNotesProvider>
+        </ModuleAccessProvider>
       </TenantProvider>
     </AuthProvider>
   );

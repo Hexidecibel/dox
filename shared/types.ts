@@ -4944,3 +4944,175 @@ export interface ModuleAccessResponse {
   /** True when a lookup failed and the answer fell open. */
   degraded: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// The first-run setup wizard (migration 0101).
+//
+// The run row records WHERE SOMEBODY GOT TO. It is not a staging copy of the
+// configuration: every screen writes real rows to real tables as it goes, so
+// deleting a run loses a position and nothing else. See the migration header.
+// ---------------------------------------------------------------------------
+
+/** `tenant_setup_runs.status`. Exactly three, CHECK-constrained in SQL. */
+export type TenantSetupStatus = 'draft' | 'completed' | 'abandoned';
+
+/** How many screens the wizard has. The run's `current_step` is clamped to it. */
+export const TENANT_SETUP_STEPS = 6;
+
+/**
+ * What screen 1 wrote, stamped into `tenant_setup_runs.applied` at the moment
+ * it ran.
+ *
+ * This is the answer to "has the pack already been applied", which decides
+ * whether screen 1 renders as a chooser or as a read-only summary. It is
+ * deliberately NOT recomputed by counting rows back out of the tenant: somebody
+ * who renames a seeded document type has not un-applied the pack, and a tenant
+ * created by `bin/create-tenant --pack fsqa` was seeded before any run existed
+ * — which is why the endpoint also detects that case from the tenant itself.
+ */
+export interface TenantSetupPackApplication {
+  name: string;
+  applied_at: string;
+  /** Rows actually inserted on that run. Zeros on a second application. */
+  counts: Record<string, number>;
+  /** Rows already present, so re-running added nothing. */
+  already_seeded?: boolean;
+}
+
+/** The `applied` ledger. One key per screen that writes something. */
+export interface TenantSetupApplied {
+  pack?: TenantSetupPackApplication;
+  [key: string]: unknown;
+}
+
+export interface TenantSetupRun {
+  id: string;
+  tenant_id: string;
+  status: TenantSetupStatus;
+  current_step: number;
+  pack: string | null;
+  /** The wizard's own scratch — selections and dismissals, never configuration. */
+  state: Record<string, unknown>;
+  applied: TenantSetupApplied;
+  started_by: string | null;
+  started_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  completed_by: string | null;
+}
+
+/**
+ * Why the wizard is (or is not) being offered.
+ *
+ * `needed` is true only when NEITHER condition disqualifies the tenant, and
+ * both matter on their own: a tenant with documents but no completed run must
+ * never be nagged (they are plainly already working), and a completed run on a
+ * still-empty tenant must not re-prompt (they finished; emptiness is their
+ * choice). The reason is returned so the banner can say which it is rather
+ * than silently not appearing.
+ */
+export type TenantSetupNeedReason =
+  | 'never_run'
+  | 'in_progress'
+  | 'already_completed'
+  | 'has_documents'
+  | 'no_tenant';
+
+export interface TenantSetupResponse {
+  /** The draft in flight, or the most recent completed run, or null. */
+  run: TenantSetupRun | null;
+  needed: boolean;
+  reason: TenantSetupNeedReason;
+  /** Active documents in the tenant. The second half of the `needed` test. */
+  document_count: number;
+  /** True when a completed run exists, whatever `run` currently points at. */
+  has_completed_run: boolean;
+}
+
+/** POST /api/tenant-setup — `restart` abandons any draft and opens a fresh run. */
+export interface CreateTenantSetupRequest {
+  tenant_id?: string;
+  restart?: boolean;
+  pack?: string;
+}
+
+/** PATCH /api/tenant-setup/:id — the autosave target. Every field optional. */
+export interface UpdateTenantSetupRequest {
+  current_step?: number;
+  state?: Record<string, unknown>;
+  status?: TenantSetupStatus;
+  pack?: string | null;
+}
+
+export interface TenantSetupRunResponse {
+  run: TenantSetupRun;
+}
+
+// --- the pack catalog, for screen 1 -----------------------------------------
+
+/**
+ * One honest count plus three real rows from the pack.
+ *
+ * The three examples are drawn from the pack JSON rather than written as copy,
+ * because a card that promises "comprehensive food-safety coverage" and a card
+ * that says "27 document types, e.g. Certificate of Analysis, Specification
+ * Sheet, HACCP Plan" are different products. If the examples read badly, the
+ * pack is wrong and that is worth seeing before it is applied.
+ */
+export interface StarterPackSection {
+  key: string;
+  /** Plural noun for the count line, e.g. "document types". */
+  label: string;
+  count: number;
+  /** Up to three names, verbatim from the pack. */
+  examples: string[];
+  /** Present when the section is DEFINED but deliberately not seeded. */
+  seeded: boolean;
+  /** Why it is not seeded, in one sentence. Only when `seeded` is false. */
+  not_seeded_reason?: string;
+}
+
+export interface StarterPackCatalogEntry {
+  pack: string;
+  label: string;
+  description: string;
+  sections: StarterPackSection[];
+  /** The departments screen 3 proposes, with the types that default to each. */
+  owner_labels: Array<{
+    label: string;
+    owner_key: string;
+    description: string | null;
+    /** Document type names whose `owner` is this label. */
+    document_types: string[];
+  }>;
+  /** Total rows a first application would insert, across every seeded section. */
+  total_rows: number;
+}
+
+export interface StarterPackCatalogResponse {
+  packs: StarterPackCatalogEntry[];
+  default_pack: string;
+  /**
+   * The renewal look-ahead the alert engine actually uses
+   * (`DEFAULT_WINDOW_DAYS`). Sent rather than hardcoded in the wizard copy so
+   * the sentence on screen 3 — "when it is N days from expiring" — cannot state
+   * a number the engine has since changed.
+   */
+  renewal_window_days: number;
+}
+
+/** POST /api/starter-packs/apply */
+export interface ApplyStarterPackRequest {
+  pack: string;
+  tenant_id?: string;
+  /** Stamps the result into this run's `applied` ledger when given. */
+  run_id?: string;
+}
+
+export interface ApplyStarterPackResponse {
+  pack: string;
+  counts: Record<string, number>;
+  inserted: number;
+  /** The run row, re-read with its ledger updated, when `run_id` was sent. */
+  run: TenantSetupRun | null;
+}

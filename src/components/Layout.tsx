@@ -34,7 +34,9 @@ import {
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
+import { useModuleAccess } from '../contexts/ModuleAccessContext';
 import { NotificationsBell } from './NotificationsBell';
+import { SetupBanner } from './SetupPrompt';
 import { navGroupsForRole, pinnedNavSurfaces } from '../lib/surfaces';
 import type { Surface } from '../lib/surfaces';
 
@@ -52,8 +54,12 @@ const DRAWER_WIDTH = 260;
  * state, and collapsing would re-hide exactly what grouping just made
  * findable. Empty groups drop their heading — same shape as `Settings.tsx`.
  *
- * NO TENANT MODULE FILTER IS APPLIED HERE YET. Grouping is presentational; the
- * gate that reads `tenant_modules` lands in a later pass.
+ * THE TENANT MODULE FILTER IS APPLIED HERE, and again on every route in
+ * App.tsx. Both, deliberately: filtering only the rail would leave every
+ * surface reachable by URL, and gating only the routes would leave links in
+ * the sidebar that all end in a refusal panel. The set comes from
+ * `ModuleAccessContext`; `ProtectedRoute` has already waited for it, so the
+ * rail is drawn once with the right items rather than drawn and then pruned.
  */
 
 const roleColors: Record<string, 'primary' | 'secondary' | 'default'> = {
@@ -66,6 +72,7 @@ const roleColors: Record<string, 'primary' | 'secondary' | 'default'> = {
 export function Layout() {
   const { user, logout, isSuperAdmin } = useAuth();
   const { tenants, selectedTenantId, setSelectedTenantId } = useTenant();
+  const { visible: visibleModules } = useModuleAccess();
   const navigate = useNavigate();
   const location = useLocation();
   const theme = useTheme();
@@ -85,8 +92,12 @@ export function Layout() {
     return location.pathname === path || location.pathname.startsWith(path + '/');
   };
 
-  // One computation per role change, shared by both blocks of the rail.
-  const navGroups = useMemo(() => navGroupsForRole(user?.role), [user?.role]);
+  // One computation per role or visibility change, shared by both blocks of
+  // the rail. Pinned surfaces belong to no module, so they need no set.
+  const navGroups = useMemo(
+    () => navGroupsForRole(user?.role, visibleModules),
+    [user?.role, visibleModules]
+  );
   const pinned = useMemo(() => pinnedNavSurfaces(user?.role), [user?.role]);
 
   // Every rail entry looks the same whether it is grouped or pinned; the only
@@ -345,6 +356,11 @@ export function Layout() {
           maxWidth: '100%',
         }}
       >
+        {/* The first-run offer. Renders nothing unless the tenant has no
+            completed setup run AND no documents, and it is dismissible per
+            browser — never a modal, because a super_admin scoping into a fresh
+            tenant mid-demo must not be ambushed. */}
+        <SetupBanner />
         <Outlet />
       </Box>
     </Box>

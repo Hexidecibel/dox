@@ -31,6 +31,12 @@ import {
   sqlNum,
 } from '../../bin/lib/starter-packs.mjs';
 import { MODULE_KEYS } from '../../shared/modules';
+import {
+  packRowId as packRowIdTs,
+  slugify as slugifyTs,
+  starterPackStatements,
+} from '../../functions/lib/starter-packs';
+import { STARTER_PACKS } from '../../functions/lib/starterPacks.generated';
 import { validateLimitShape, matchSpecTest } from '../../shared/specCheck';
 import fsqaRaw from '../../starter-packs/fsqa.json?raw';
 import financeRaw from '../../starter-packs/finance.json?raw';
@@ -757,5 +763,106 @@ describe('starter packs — the CLI summary stays truthful', () => {
     expect(sqlNum(null)).toBe('NULL');
     expect(sqlNum(0)).toBe('0');
     expect(() => sqlNum(Infinity)).toThrow();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// The two implementations of "apply a pack"
+// ---------------------------------------------------------------------------
+/**
+ * There are two, and there have to be: `bin/lib/starter-packs.mjs` emits SQL
+ * TEXT for `wrangler d1 execute --file`, while the setup wizard runs inside a
+ * Worker where values belong in bound parameters, not interpolated into a
+ * string. What must never differ is the ROW IDENTITY: both write
+ * `packRowId(prefix, tenantSlug, slug)`, so a tenant seeded by the CLI and then
+ * walked through the wizard collides on every primary key and inserts nothing.
+ *
+ * If those ids ever drift, nothing fails loudly — the wizard simply inserts a
+ * complete second copy of the vocabulary under fresh keys. That is the failure
+ * these assertions exist to make impossible.
+ */
+describe('starter packs — the CLI and the in-portal applier agree', () => {
+  /**
+   * Enough of a D1 stand-in to capture what would be bound. `prepare` returns a
+   * recorder rather than a statement; nothing here touches a database.
+   */
+  function recordingDb() {
+    const calls: Array<{ sql: string; args: unknown[] }> = [];
+    const db = {
+      prepare(sql: string) {
+        return {
+          bind(...args: unknown[]) {
+            const call = { sql, args };
+            calls.push(call);
+            return call;
+          },
+        };
+      },
+    };
+    return { db, calls };
+  }
+
+  it('derives identical row ids in both implementations', () => {
+    for (const [name, pack] of PACKS) {
+      const normalized = normalizePack(pack, { moduleKeys: MODULE_KEYS });
+      for (const dt of normalized.document_types) {
+        expect(packRowIdTs('dt', 'acme-foods', dt.slug), `${name}/${dt.slug}`).toBe(
+          `dt_acme-foods_${dt.slug}`,
+        );
+      }
+      // The slug rule is the other half of the id and is restated in both
+      // files, so pin it directly rather than trusting that it looks similar.
+      expect(slugifyTs('Certificate of Analysis (COA)')).toBe(slugify('Certificate of Analysis (COA)'));
+      expect(slugifyTs('  Trailing — Dashes  ')).toBe(slugify('  Trailing — Dashes  '));
+    }
+  });
+
+  it('emits the same number of statements as the CLI compiler, for every pack', () => {
+    for (const name of Object.keys(STARTER_PACKS)) {
+      const raw = name === 'fsqa' ? fsqa : finance;
+      const cliStatements = packToStatements(raw, {
+        tenantId: 'tenant-1',
+        tenantSlug: 'acme-foods',
+        moduleKeys: MODULE_KEYS,
+      });
+      const { db, calls } = recordingDb();
+      const tagged = starterPackStatements(
+        db as unknown as D1Database,
+        STARTER_PACKS[name],
+        'tenant-1',
+        'acme-foods',
+      );
+      expect(tagged.length, `${name}: statement count`).toBe(cliStatements.length);
+      expect(calls.length).toBe(cliStatements.length);
+    }
+  });
+
+  it('binds every deterministic id the CLI would have inlined', () => {
+    const cliStatements: string[] = packToStatements(fsqa, {
+      tenantId: 'tenant-1',
+      tenantSlug: 'acme-foods',
+      moduleKeys: MODULE_KEYS,
+    });
+    const { db, calls } = recordingDb();
+    starterPackStatements(
+      db as unknown as D1Database,
+      STARTER_PACKS.fsqa,
+      'tenant-1',
+      'acme-foods',
+    );
+
+    const bound = new Set(
+      calls.flatMap((c) => c.args.filter((a): a is string => typeof a === 'string')),
+    );
+    // Every `xxx_acme-foods_yyy` id the CLI writes as a literal must appear as a
+    // bound value on this side. Ids only — the free text differs in escaping.
+    const cliIds = new Set(
+      cliStatements.flatMap((sql) => [...sql.matchAll(/'((?:dt|req|clm|ctr|dtr|dtei|spt|spl)_acme-foods_[^']*)'/g)].map((m) => m[1])),
+    );
+    expect(cliIds.size).toBeGreaterThan(50);
+    for (const id of cliIds) {
+      expect(bound.has(id), `id missing from the in-portal applier: ${id}`).toBe(true);
+    }
   });
 });

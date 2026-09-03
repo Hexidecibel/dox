@@ -4,7 +4,12 @@ import type { Env, User } from '../lib/types';
 
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  // PATCH was missing here while two endpoints already used it — the records
+  // cell editor and the setup wizard's autosave. It has never bitten because
+  // the portal is same-origin and browsers only preflight cross-origin, but a
+  // preflight that omits a verb the API answers is a trap for the first
+  // integrator who hits it from elsewhere.
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
 };
 

@@ -276,3 +276,54 @@ export {
   DOCUMENT_REQUEST_STATUSES,
   REQUEST_LINE_STATUSES,
 } from '../../shared/types';
+
+// Modules (migration 0099). The vocabulary lives in `shared/modules.ts` and
+// nowhere else; `shared/types.ts` re-exports `ModuleKey` and adds the API
+// envelopes around it, which the nav, the router and the Settings screen all
+// read.
+export type {
+  ModuleKey,
+  ModuleSummary,
+  ModuleListResponse,
+  UpdateModuleRequest,
+  ModuleUpdateResponse,
+  ModuleVisibilityFunction,
+  ModuleVisibilityResponse,
+  UpdateModuleVisibilityRequest,
+  ModuleVisibilityUpdateResponse,
+  ModuleAccessResponse,
+} from '../../shared/types';
+
+// Value export: the module vocabulary itself, so a screen that renders one
+// column per module iterates the same list the resolver does. Re-exported
+// here rather than imported from `shared/modules.ts` all over `src/` for the
+// same reason as above — one door out of `shared/`.
+export { MODULE_KEYS, MODULES, isModuleKey } from '../../shared/modules';
+
+// ---------------------------------------------------------------------------
+// The first-run setup wizard (migration 0101).
+//
+// Re-exported here for the same reason as everything above: `src/` imports its
+// API shapes from one place, and a type that reaches shared/types.ts and
+// api.ts but not this file compiles under tsc and breaks `npm run build`.
+// ---------------------------------------------------------------------------
+export type {
+  TenantSetupStatus,
+  TenantSetupRun,
+  TenantSetupApplied,
+  TenantSetupPackApplication,
+  TenantSetupNeedReason,
+  TenantSetupResponse,
+  TenantSetupRunResponse,
+  CreateTenantSetupRequest,
+  UpdateTenantSetupRequest,
+  StarterPackSection,
+  StarterPackCatalogEntry,
+  StarterPackCatalogResponse,
+  ApplyStarterPackRequest,
+  ApplyStarterPackResponse,
+} from '../../shared/types';
+
+// Value export: how many screens the wizard has, so the stepper and the
+// server-side clamp cannot disagree about what step 6 means.
+export { TENANT_SETUP_STEPS } from '../../shared/types';

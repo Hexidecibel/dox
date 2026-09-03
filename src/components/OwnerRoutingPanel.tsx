@@ -62,6 +62,17 @@ import {
 import { api } from '../lib/api';
 import type { OwnerLabelInUse, OwnerRoute, User } from '../lib/types';
 
+/**
+ * The same fold the server matches on — `normalizeOwnerKey` in
+ * functions/lib/alert-routing.ts. Restated rather than imported because that
+ * module is a Pages Function and pulling it into the bundle would drag D1 types
+ * in with it. The rule is two lines and pinned by the panel's own test; the
+ * server remains authoritative, since it re-normalizes every label it stores.
+ */
+function normalizeOwnerKey(label: string): string {
+  return label.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 /** One owner label as the panel renders it: the label, who it reaches, and why it matters. */
 export interface OwnerLabelRow {
   owner_key: string;
@@ -75,6 +86,21 @@ export interface OwnerLabelRow {
   unrouted: boolean;
   /** Routed, but no document carries the label. Configured and idle — not a fault. */
   unused: boolean;
+  /**
+   * Proposed by a starter pack rather than discovered on a document. A fresh
+   * tenant has no documents at all, so without this the setup wizard's routing
+   * screen would open on "no owner labels yet" and route nothing — the pack
+   * already knows which departments own which certificates.
+   */
+  proposed: boolean;
+  /** One sentence saying what routing this label actually buys. */
+  note?: string;
+}
+
+/** A department a starter pack proposes, with the sentence to show beside it. */
+export interface ProposedOwnerLabel {
+  owner_label: string;
+  note?: string;
 }
 
 /**
@@ -90,10 +116,31 @@ export interface OwnerLabelRow {
 export function mergeOwnerLabels(
   routes: OwnerRoute[],
   labelsInUse: OwnerLabelInUse[],
+  proposed: ProposedOwnerLabel[] = [],
 ): OwnerLabelRow[] {
   const byKey = new Map<string, OwnerLabelRow>();
 
+  // Proposals go in FIRST so a label that is also on documents overwrites the
+  // placeholder counts with the real ones and keeps its sentence.
+  for (const p of proposed) {
+    const key = normalizeOwnerKey(p.owner_label);
+    if (!key) continue;
+    byKey.set(key, {
+      owner_key: key,
+      owner_label: p.owner_label,
+      spellings: [],
+      document_count: 0,
+      renewal_count: 0,
+      routes: [],
+      unrouted: true,
+      unused: false,
+      proposed: true,
+      note: p.note,
+    });
+  }
+
   for (const label of labelsInUse) {
+    const existing = byKey.get(label.owner_key);
     byKey.set(label.owner_key, {
       owner_key: label.owner_key,
       owner_label: label.owner_label,
@@ -103,6 +150,8 @@ export function mergeOwnerLabels(
       routes: [],
       unrouted: true,
       unused: false,
+      proposed: existing?.proposed ?? false,
+      note: existing?.note,
     });
   }
 
@@ -122,6 +171,7 @@ export function mergeOwnerLabels(
         routes: [route],
         unrouted: false,
         unused: true,
+        proposed: false,
       });
     }
   }
@@ -157,9 +207,24 @@ interface AddDialogState {
 export interface OwnerRoutingPanelProps {
   /** super_admin acting inside a chosen tenant. */
   tenantId?: string;
+  /**
+   * Drop the "X of Y labels have somebody behind them" header. The setup
+   * wizard embeds this panel under its own heading and progress, and two
+   * progress bars stacked on one screen read as two different measurements.
+   */
+  hideSummary?: boolean;
+  /**
+   * Departments a starter pack proposes. Shown as rows even when no document
+   * carries the label yet, each with its own sentence.
+   */
+  proposedLabels?: ProposedOwnerLabel[];
 }
 
-export default function OwnerRoutingPanel({ tenantId }: OwnerRoutingPanelProps) {
+export default function OwnerRoutingPanel({
+  tenantId,
+  hideSummary = false,
+  proposedLabels,
+}: OwnerRoutingPanelProps) {
   const [routes, setRoutes] = useState<OwnerRoute[]>([]);
   const [labelsInUse, setLabelsInUse] = useState<OwnerLabelInUse[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -201,7 +266,10 @@ export default function OwnerRoutingPanel({ tenantId }: OwnerRoutingPanelProps) 
       .catch(() => setUsers([]));
   }, [load]);
 
-  const rows = useMemo(() => mergeOwnerLabels(routes, labelsInUse), [routes, labelsInUse]);
+  const rows = useMemo(
+    () => mergeOwnerLabels(routes, labelsInUse, proposedLabels ?? []),
+    [routes, labelsInUse, proposedLabels],
+  );
 
   const inUse = rows.filter((r) => !r.unused);
   const gaps = inUse.filter((r) => r.unrouted);
@@ -269,6 +337,7 @@ export default function OwnerRoutingPanel({ tenantId }: OwnerRoutingPanelProps) 
         </Alert>
       )}
 
+      {!hideSummary && (
       <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1, flexWrap: 'wrap', gap: 1 }}>
           <Typography variant="body2" fontWeight={600}>
@@ -290,6 +359,7 @@ export default function OwnerRoutingPanel({ tenantId }: OwnerRoutingPanelProps) 
           </Typography>
         )}
       </Paper>
+      )}
 
       {rows.length === 0 ? (
         <Alert severity="info">
@@ -317,7 +387,11 @@ export default function OwnerRoutingPanel({ tenantId }: OwnerRoutingPanelProps) 
                 <Typography variant="body1" fontWeight={700}>
                   {row.owner_label}
                 </Typography>
-                {row.unused ? (
+                {row.proposed && row.document_count === 0 ? (
+                  <Typography variant="caption" color="text.secondary">
+                    proposed by the starter pack
+                  </Typography>
+                ) : row.unused ? (
                   <Typography variant="caption" color="text.secondary">
                     no documents use this label
                   </Typography>
@@ -344,6 +418,11 @@ export default function OwnerRoutingPanel({ tenantId }: OwnerRoutingPanelProps) 
               <ArrowIcon fontSize="small" color="disabled" />
 
               <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                {row.note && (
+                  <Typography variant="body2" color="text.secondary">
+                    {row.note}
+                  </Typography>
+                )}
                 {row.unrouted ? (
                   <Typography variant="body2" color="warning.main" fontWeight={600}>
                     Nobody is routed — records with this owner are reported as unowned and no

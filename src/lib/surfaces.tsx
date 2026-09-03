@@ -26,10 +26,19 @@
  * here agrees with it, so a renamed module or a re-homed path fails a test
  * rather than drifting quietly.
  *
- * THIS FILE DOES NOT APPLY THE TENANT MODULE GATE. `module` is declared here
- * and used today only to GROUP the nav. Reading `tenant_modules` and hiding
- * disabled modules is a later pass; this one is a pure refactor plus the four
- * deliberate gating fixes above.
+ * THE TENANT MODULE GATE IS APPLIED HERE, AS A PARAMETER, NOT A LOOKUP. This
+ * file stays free of React context and `fetch`: `navGroupsForRole` takes the
+ * visible module set as an argument, so it remains a pure function of (role,
+ * modules) that a test can call without a provider or a server. The set comes
+ * from `ModuleAccessContext`, which is the only thing that talks to
+ * `GET /api/module-access`.
+ *
+ * OMITTING THE SET MEANS NO MODULE FILTER, AND THAT IS THE FAIL-OPEN
+ * DIRECTION. A caller that has not resolved visibility yet — or could not —
+ * sees every module, matching the deliberate fail-open in
+ * `functions/lib/module-access.ts`: module visibility is a scope control, not
+ * a confidentiality boundary, and the server gates every request again
+ * regardless of what the rail chose to draw.
  */
 
 import { MODULE_KEYS, MODULES } from '../../shared/modules';
@@ -102,6 +111,7 @@ import { FormBuilder } from '../pages/records/FormBuilder';
 import { WorkflowBuilder } from '../pages/records/WorkflowBuilder';
 import { Approvals } from '../pages/Approvals';
 import { Help } from '../pages/Help';
+import { SetupWizard } from '../pages/setup/SetupWizard';
 import { Settings } from '../pages/Settings';
 
 /** Where a surface sits in the rail, when it has a rail entry at all. */
@@ -327,6 +337,13 @@ export const SURFACES: Surface[] = [
     nav: { label: 'Settings', icon: <SettingsIcon />, order: 100 },
   },
   { path: '/settings/:section', element: <Settings />, module: null, roles: ADMIN },
+  // The first-run setup wizard. Always-on and deliberately module-less: it is
+  // how a tenant DECIDES which modules it has, so a module could not own it.
+  // No nav entry — it is reached from a dismissible Layout banner and a
+  // Dashboard card, never a forced modal: TenantContext lets a super_admin
+  // scope into any tenant, and hijacking that would break a live demo.
+  { path: '/setup', element: <SetupWizard />, module: null, roles: ADMIN },
+  { path: '/setup/:step', element: <SetupWizard />, module: null, roles: ADMIN },
   { path: '/admin/users', element: <Users />, module: null, roles: ADMIN },
   { path: '/admin/api-keys', element: <ApiKeys />, module: null, roles: ADMIN },
   { path: '/admin/audit', element: <AuditLog />, module: null, roles: ADMIN },
@@ -370,18 +387,32 @@ export interface NavGroup {
  * EMPTY GROUPS DROP THEIR HEADING — a lone "Compliance" subheader with
  * nothing beneath it is worse than no grouping at all. Same shape as
  * `Settings.tsx`'s `.map(...).filter(s => s.items.length > 0)`, which is the
- * codebase's existing precedent for computing a visible surface list.
+ * codebase's existing precedent for computing a visible surface list. This is
+ * also what makes a switched-off module disappear cleanly rather than leaving
+ * a heading advertising something nobody can open.
+ *
+ * `visibleModules` is the set from `GET /api/module-access`. Passing
+ * `undefined` applies NO module filter — see the file header; that is the
+ * fail-open path, and it is also what every module-agnostic caller (the
+ * snapshot test, anything reasoning about roles alone) wants.
  *
  * Pinned surfaces are excluded; Layout renders those itself at the bottom.
  */
-export function navGroupsForRole(role: Role | undefined): NavGroup[] {
+export function navGroupsForRole(
+  role: Role | undefined,
+  visibleModules?: readonly ModuleKey[]
+): NavGroup[] {
   if (!role) return [];
 
   const visible = SURFACES.filter(
     (s) =>
       s.nav !== undefined &&
       !PINNED_NAV_PATHS.includes(s.path) &&
-      (s.roles === undefined || s.roles.includes(role))
+      (s.roles === undefined || s.roles.includes(role)) &&
+      // `module === null` is always on and is never filtered: a tenant with
+      // every module switched off still has a Dashboard, a Search and a way
+      // into Settings to switch one back on.
+      (visibleModules === undefined || s.module === null || visibleModules.includes(s.module))
   );
 
   const groups: NavGroup[] = [
@@ -409,4 +440,24 @@ export function pinnedNavSurfaces(role: Role | undefined): Surface[] {
       PINNED_NAV_PATHS.includes(s.path) &&
       (s.roles === undefined || s.roles.includes(role))
   );
+}
+
+/**
+ * The rail labels one module owns, in rail order.
+ *
+ * Exists for the "are you sure?" on the Settings ▸ Modules toggle. A
+ * confirmation that says "are you sure?" tells the admin nothing they did not
+ * already know; one that says "Orders, Lots, Customers and COA Fulfillment
+ * will disappear from everyone's sidebar" is a decision they can actually
+ * make. Reading it from the surface table rather than a hand-written list is
+ * the whole reason the table exists — a surface added to `fulfillment`
+ * tomorrow is counted by that dialog with no second edit.
+ *
+ * Role is NOT applied here on purpose: the dialog is about what the
+ * ORGANIZATION loses, not about what the admin looking at it happens to see.
+ */
+export function navLabelsForModule(module: ModuleKey): string[] {
+  return SURFACES.filter((s) => s.module === module && s.nav !== undefined)
+    .sort((a, b) => a.nav!.order - b.nav!.order)
+    .map((s) => s.nav!.label);
 }

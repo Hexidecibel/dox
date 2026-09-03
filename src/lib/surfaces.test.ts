@@ -22,15 +22,18 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { SURFACES, navGroupsForRole, pinnedNavSurfaces } from './surfaces';
+import { SURFACES, navGroupsForRole, navLabelsForModule, pinnedNavSurfaces } from './surfaces';
 import appSource from '../App.tsx?raw';
 import { MODULE_KEYS, MODULES, moduleForUiPath } from '../../shared/modules';
+import type { ModuleKey } from '../../shared/modules';
 import type { Role } from './types';
 
 /**
  * Every `<Route path=...>` in `src/App.tsx` at commit caa3e5e, in source
- * order. 63 paths: 51 surfaces inside the authenticated shell, 10 public
+ * order. 65 paths: 53 surfaces inside the authenticated shell, 10 public
  * no-shell routes, and the two redirects.
+ *
+ * The two added since: `/setup` and `/setup/:step`, the first-run wizard.
  */
 const ROUTE_SNAPSHOT: readonly string[] = [
   '/login',
@@ -73,6 +76,10 @@ const ROUTE_SNAPSHOT: readonly string[] = [
   '/help/:module',
   '/settings',
   '/settings/:section',
+  // Added deliberately with the first-run setup wizard: two surfaces, both
+  // admin-gated, neither with a nav entry.
+  '/setup',
+  '/setup/:step',
   '/spec-alerts',
   '/admin/users',
   '/admin/api-keys',
@@ -140,7 +147,7 @@ describe('SURFACES — the path-set snapshot', () => {
   });
 
   it('accounts for every snapshot path exactly once', () => {
-    expect(ROUTE_SNAPSHOT.length).toBe(63);
+    expect(ROUTE_SNAPSHOT.length).toBe(65);
     expect(new Set(ROUTE_SNAPSHOT).size).toBe(ROUTE_SNAPSHOT.length);
     expect(SURFACES.length).toBe(ROUTE_SNAPSHOT.length - NON_SURFACE_PATHS.length);
   });
@@ -203,6 +210,8 @@ describe('SURFACES — the path-set snapshot', () => {
       '/requests/new',
       '/settings',
       '/settings/:section',
+      '/setup',
+      '/setup/:step',
     ]);
 
     expect(at('super_admin+org_admin+user')).toEqual([
@@ -352,6 +361,93 @@ describe('SURFACES — the four drift fixes', () => {
       for (const surface of linked) {
         expect(surface.roles === undefined || surface.roles.includes(role), `${role} → ${surface.path}`).toBe(true);
       }
+    }
+  });
+});
+
+describe('SURFACES — the tenant module gate', () => {
+  const headings = (role: Role, modules?: readonly ModuleKey[]): (string | null)[] =>
+    navGroupsForRole(role, modules).map((g) => g.heading);
+
+  it('drops a switched-off module\'s whole group AND its heading', () => {
+    // The `Settings.tsx` shape: filter, then drop the section that emptied.
+    // A heading left behind advertises a section that opens onto nothing,
+    // which is worse than never having grouped the rail at all.
+    const withFulfillment = navGroupsForRole('org_admin');
+    expect(withFulfillment.map((g) => g.module)).toContain('fulfillment');
+    expect(headings('org_admin')).toContain(MODULES.fulfillment.label);
+
+    const without = navGroupsForRole(
+      'org_admin',
+      MODULE_KEYS.filter((k) => k !== 'fulfillment')
+    );
+    expect(without.map((g) => g.module)).not.toContain('fulfillment');
+    expect(headings('org_admin', MODULE_KEYS.filter((k) => k !== 'fulfillment'))).not.toContain(
+      MODULES.fulfillment.label
+    );
+    // And nothing else moved: the gate narrows, it never re-homes.
+    expect(without.map((g) => g.module)).toEqual(
+      withFulfillment.map((g) => g.module).filter((m) => m !== 'fulfillment')
+    );
+  });
+
+  it('leaves a portal to log into when every module is off', () => {
+    // A tenant with nothing switched on still has Dashboard, Search, Activity
+    // and (for an admin) the pinned Settings entry that switches one back on.
+    const groups = navGroupsForRole('org_admin', []);
+    expect(groups.map((g) => g.module)).toEqual([null]);
+    expect(groups[0].items.map((s) => s.nav!.label)).toEqual(['Dashboard', 'Search', 'Activity']);
+    expect(pinnedNavSurfaces('org_admin').map((s) => s.path)).toEqual(['/settings']);
+  });
+
+  it('shows the UNION of a person\'s functions, not the intersection', () => {
+    // `resolveVisibleModules` unions several scoped functions; the rail has to
+    // render that union rather than quietly picking one. A QA lead who is also
+    // on the Purchasing route keeps both sections.
+    const union: ModuleKey[] = ['library', 'fulfillment'];
+    const groups = navGroupsForRole('org_admin', union);
+    expect(groups.map((g) => g.module)).toEqual([null, 'library', 'fulfillment']);
+  });
+
+  it('applies no module filter at all when the set is omitted', () => {
+    // The fail-open path. Module visibility is a scope control, not a
+    // confidentiality boundary, so a caller that could not resolve it draws
+    // everything and lets the server refuse — see functions/lib/module-access.ts.
+    expect(navGroupsForRole('org_admin', undefined)).toEqual(navGroupsForRole('org_admin'));
+    expect(navGroupsForRole('org_admin', MODULE_KEYS)).toEqual(navGroupsForRole('org_admin'));
+  });
+
+  it('gates on module and role together, never one or the other', () => {
+    // Filtering only the nav leaves every route reachable by URL; filtering
+    // only on module would put an admin-only screen in a reader's rail.
+    for (const role of ALL_ROLES) {
+      for (const group of navGroupsForRole(role, ['library'])) {
+        for (const surface of group.items) {
+          expect(surface.module === null || surface.module === 'library', surface.path).toBe(true);
+          expect(surface.roles === undefined || surface.roles.includes(role), surface.path).toBe(
+            true
+          );
+        }
+      }
+    }
+  });
+
+  it('names what a tenant loses by switching a module off', () => {
+    // The Settings confirmation reads this. Role is deliberately NOT applied:
+    // the dialog is about what the ORGANIZATION loses, not about what the
+    // admin looking at it happens to see.
+    expect(navLabelsForModule('fulfillment')).toEqual([
+      'Orders',
+      'Lots',
+      'Customers',
+      'COA Fulfillment',
+    ]);
+    expect(navLabelsForModule('compliance')).toEqual(['Renewals', 'Out of Spec']);
+
+    for (const key of MODULE_KEYS) {
+      // Every module owns at least one rail entry, so the dialog can never
+      // degrade into "some pages will stop working".
+      expect(navLabelsForModule(key).length, key).toBeGreaterThan(0);
     }
   });
 });

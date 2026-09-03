@@ -93,6 +93,11 @@ import type {
   ExpirationNotifyResponse,
   OwnerRoute,
   OwnerRouteListResponse,
+  TenantSetupResponse,
+  TenantSetupRunResponse,
+  TenantSetupStatus,
+  StarterPackCatalogResponse,
+  ApplyStarterPackResponse,
   ApiSupplierRequirement,
   SupplierRequirementTier,
   LotMatchListResponse,
@@ -315,6 +320,22 @@ import type {
   UpdateRequestLineRequest,
 } from '../../shared/types';
 import type { SupplierGapListResponse } from '../../shared/requirementGap';
+
+// ---------------------------------------------------------------------------
+// Modules (migration 0099). Its own import block for the same reason as the
+// composer's above: these shapes are read as a set, by the nav, the router and
+// the Settings screen.
+// ---------------------------------------------------------------------------
+import type {
+  ModuleKey,
+  ModuleAccessResponse,
+  ModuleListResponse,
+  ModuleUpdateResponse,
+  ModuleVisibilityResponse,
+  ModuleVisibilityUpdateResponse,
+  UpdateModuleRequest,
+  UpdateModuleVisibilityRequest,
+} from '../../shared/types';
 
 export const api = {
   auth: {
@@ -1676,6 +1697,160 @@ export const api = {
     /** DELETE /api/owner-routes/:id */
     remove: (id: string): Promise<{ success: boolean }> =>
       fetchApi<{ success: boolean }>(`/owner-routes/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * The first-run setup wizard (migration 0101).
+   *
+   * The run row is a POSITION, not a staging area — every screen writes its
+   * real configuration through the endpoint that owns it (the pack through
+   * `starterPacks.apply`, the departments through `ownerRoutes.create`), and
+   * this only records which screen somebody was on. So a failed autosave costs
+   * a re-click and never a setting.
+   */
+  tenantSetup: {
+    /**
+     * GET /api/tenant-setup[?tenant_id=]
+     *
+     * `needed` is true only when the tenant has NO completed run AND zero
+     * active documents. `reason` says which of the two disqualified it, so a
+     * banner can explain itself instead of silently not rendering.
+     */
+    get: (params?: { tenantId?: string }): Promise<TenantSetupResponse> => {
+      const query = new URLSearchParams();
+      if (params?.tenantId) query.set('tenant_id', params.tenantId);
+      const qs = query.toString();
+      return fetchApi<TenantSetupResponse>(`/tenant-setup${qs ? `?${qs}` : ''}`);
+    },
+
+    /**
+     * POST /api/tenant-setup — returns the EXISTING draft when there is one, so
+     * a second tab resumes rather than forking. `restart` abandons the draft
+     * and opens a fresh run; it does not un-seed anything already written.
+     */
+    start: (params?: {
+      tenantId?: string;
+      restart?: boolean;
+      pack?: string;
+    }): Promise<TenantSetupRunResponse> =>
+      fetchApi<TenantSetupRunResponse>('/tenant-setup', {
+        method: 'POST',
+        body: JSON.stringify({
+          tenant_id: params?.tenantId,
+          restart: params?.restart,
+          pack: params?.pack,
+        }),
+      }),
+
+    /** PATCH /api/tenant-setup/:id — the debounced autosave target. */
+    update: (
+      id: string,
+      data: {
+        current_step?: number;
+        state?: Record<string, unknown>;
+        status?: TenantSetupStatus;
+        pack?: string | null;
+      },
+    ): Promise<TenantSetupRunResponse> =>
+      fetchApi<TenantSetupRunResponse>(`/tenant-setup/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+  },
+
+  /**
+   * Starter packs — the registry vocabulary a fresh tenant begins life with.
+   *
+   * The catalog carries the packs' own counts and three real example rows each,
+   * never a marketing blurb: `functions/api/starter-packs/index.ts` builds every
+   * number out of the pack JSON.
+   */
+  starterPacks: {
+    /** GET /api/starter-packs */
+    list: (): Promise<StarterPackCatalogResponse> =>
+      fetchApi<StarterPackCatalogResponse>('/starter-packs'),
+
+    /**
+     * POST /api/starter-packs/apply — the same seeding `bin/create-tenant
+     * --pack` performs, from inside the portal. Every write is INSERT OR IGNORE
+     * on a deterministic id, so re-running adds what is missing and overwrites
+     * nothing.
+     */
+    apply: (params: {
+      pack: string;
+      tenantId?: string;
+      runId?: string;
+    }): Promise<ApplyStarterPackResponse> =>
+      fetchApi<ApplyStarterPackResponse>('/starter-packs/apply', {
+        method: 'POST',
+        body: JSON.stringify({
+          pack: params.pack,
+          tenant_id: params.tenantId,
+          run_id: params.runId,
+        }),
+      }),
+  },
+
+  /**
+   * Modules (migration 0099) — which parts of the portal a tenant uses, and
+   * which of those each department is expected to work in.
+   *
+   * Three endpoints, three different questions, deliberately not merged:
+   *   - `list`/`update` answer about the ORGANIZATION and are admin-only.
+   *   - `visibility` answers about its DEPARTMENTS, also admin-only.
+   *   - `access` answers about the CALLER, and is open to every role because
+   *     the caller is the nav bar. See functions/api/module-access/index.ts.
+   */
+  modules: {
+    /** GET /api/modules — the full vocabulary, each entry carrying its resolved state. */
+    list: (params?: { tenantId?: string }): Promise<ModuleListResponse> => {
+      const qs = new URLSearchParams();
+      if (params?.tenantId) qs.set('tenant_id', params.tenantId);
+      const suffix = qs.toString() ? `?${qs.toString()}` : '';
+      return fetchApi<ModuleListResponse>(`/modules${suffix}`);
+    },
+
+    /** PUT /api/modules/:key — switch one module on or off for one tenant. */
+    update: (key: ModuleKey, body: UpdateModuleRequest): Promise<ModuleUpdateResponse> =>
+      fetchApi<ModuleUpdateResponse>(`/modules/${key}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }),
+
+    /** GET /api/module-visibility — the function x module grid, plus the ceiling. */
+    visibility: (params?: { tenantId?: string }): Promise<ModuleVisibilityResponse> => {
+      const qs = new URLSearchParams();
+      if (params?.tenantId) qs.set('tenant_id', params.tenantId);
+      const suffix = qs.toString() ? `?${qs.toString()}` : '';
+      return fetchApi<ModuleVisibilityResponse>(`/module-visibility${suffix}`);
+    },
+
+    /**
+     * PUT /api/module-visibility/:ownerKey
+     *
+     * `{ constrained: false }` deletes every row for the function — absence
+     * means unconstrained. `{ constrained: true, modules: [] }` is a 400 by
+     * design: "sees nothing" is a deactivated account, not a role. The UI is
+     * responsible for never sending it; see `src/pages/admin/Modules.tsx`.
+     */
+    setVisibility: (
+      ownerKey: string,
+      body: UpdateModuleVisibilityRequest,
+    ): Promise<ModuleVisibilityUpdateResponse> =>
+      fetchApi<ModuleVisibilityUpdateResponse>(
+        `/module-visibility/${encodeURIComponent(ownerKey)}`,
+        { method: 'PUT', body: JSON.stringify(body) },
+      ),
+
+    /**
+     * GET /api/module-access — what the signed-in user may see.
+     *
+     * Never cached client-side: a stale answer would keep showing a surface
+     * the tenant has since switched off, and the whole point of not putting
+     * this in the JWT is that a toggle takes effect on the next page load
+     * rather than in 24 hours.
+     */
+    access: (): Promise<ModuleAccessResponse> => fetchApi<ModuleAccessResponse>('/module-access'),
   },
 
   bundles: {
