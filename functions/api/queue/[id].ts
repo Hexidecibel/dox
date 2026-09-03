@@ -17,6 +17,13 @@ import {
   type RejectionReason,
 } from '../../../shared/types';
 import { approveQueueItem, approveMultiProductQueueItem } from '../../lib/queue-approve';
+import {
+  loadTypeRenewalConfig,
+  resolveRenewalDecision,
+  withRenewalProposal,
+  type RenewalDecisionInput,
+  type RenewalWrite,
+} from '../../lib/renewal-proposal';
 import type { QueueItem, FieldPickCapture, FieldDismissalCapture, TableEditCapture } from '../../lib/queue-approve';
 import type { Env, User } from '../../lib/types';
 import { parseCoaRecords } from '../../../shared/types';
@@ -51,6 +58,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // document_type_id) pair. The join can't match when supplier_id is NULL.
     const item = await context.env.DB.prepare(
       `SELECT pq.*, dt.name as document_type_name, dt.slug as document_type_slug,
+              dt.renewal_policy as type_renewal_policy,
+              dt.renewal_interval_months as type_renewal_interval_months,
               t.name as tenant_name, t.slug as tenant_slug,
               u.name as created_by_name, r.name as reviewed_by_name,
               CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists
@@ -76,11 +85,17 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     const { profile_exists, ...rest } = item as Record<string, unknown>;
     const specConfig = await loadSpecConfig(context.env.DB, String(item.tenant_id));
+    // The renewal proposal is advisory in exactly the sense the other two
+    // passes are: computed from this row's own data, shown pre-filled and
+    // editable, never blocking. What the reviewer confirms is recomputed and
+    // frozen at approve time — this is only the starting value.
     const enriched = withSpecConfig(
-      withInvariantWarnings({
-        ...rest,
-        profile_exists: profile_exists === 1,
-      }),
+      withRenewalProposal(
+        withInvariantWarnings({
+          ...rest,
+          profile_exists: profile_exists === 1,
+        })
+      ),
       specConfig,
       {
         supplier_id: item.supplier_id == null ? null : String(item.supplier_id),
@@ -165,6 +180,19 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
        */
       supplier_id?: string;
       supplier_name?: string;
+      /**
+       * The renewal date the reviewer confirmed on the approve screen
+       * (migration 0097).
+       *
+       * A NESTED OBJECT, NOT A BARE `renewal_due_date`, because absent and null
+       * mean opposite things here and a bare nullable field cannot tell them
+       * apart. Present → a human answered the question, and `due_date: null` is
+       * the real answer "this document does not renew". Absent → nobody
+       * answered (an older client, or a path with no renewal UI), and the
+       * approval writes no renewal columns at all rather than inventing a
+       * decision nobody made.
+       */
+      renewal?: RenewalDecisionInput;
       /**
        * Review Queue v2: human-EDITED structured records for order/shipment
        * kinds. The producer runs against THESE records on approve (not the
@@ -255,22 +283,45 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       // back to the persisted worker output for older items. Only dispatch when
       // it actually parses as a CoaRecordsPayload — otherwise fall through to
       // the flat single/multi-product paths below.
-      {
-        const coaPayload =
-          parseCoaRecords(body.records as string | null | undefined) ??
-          parseCoaRecords(item.ai_records);
-        if (kind === 'coa' && coaPayload) {
-          return await handleCoaRecordsApprove(
-            context,
-            user,
-            item,
-            coaPayload,
-            body.record_decisions,
-            selectedSource,
-            { supplierId: body.supplier_id, supplierName: body.supplier_name },
-            body.product_maps
-          );
-        }
+      const coaPayload =
+        parseCoaRecords(body.records as string | null | undefined) ??
+        parseCoaRecords(item.ai_records);
+
+      // The renewal decision is settled ONCE, here, for every producer below:
+      // they all turn one piece of paper into one or more documents, and one
+      // piece of paper has one renewal answer.
+      //
+      // The proposal it is compared against is recomputed server-side from the
+      // fields the reviewer actually submitted — deliberately not from a copy
+      // echoed back by the client. The snapshot this produces is an audit
+      // record, and an audit record assembled out of values supplied by the
+      // party being audited is not one.
+      const renewalFieldSource: Record<string, unknown> =
+        body.fields ??
+        body.shared_fields ??
+        (coaPayload?.page_metadata as Record<string, unknown> | undefined) ??
+        {};
+      const renewal: RenewalWrite | null = body.renewal
+        ? resolveRenewalDecision(
+            body.renewal,
+            renewalFieldSource,
+            await loadTypeRenewalConfig(context.env.DB, item.document_type_id),
+            user.id
+          )
+        : null;
+
+      if (kind === 'coa' && coaPayload) {
+        return await handleCoaRecordsApprove(
+          context,
+          user,
+          item,
+          coaPayload,
+          body.record_decisions,
+          selectedSource,
+          { supplierId: body.supplier_id, supplierName: body.supplier_name },
+          body.product_maps,
+          renewal
+        );
       }
       const captures = {
         fieldPicks: body.field_picks,
@@ -282,9 +333,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         supplierName: body.supplier_name,
       };
       if (body.products && body.products.length > 0) {
-        return await handleMultiProductApprove(context, user, item, body.shared_fields, body.products, body.save_template, selectedSource, captures, supplierOverride);
+        return await handleMultiProductApprove(context, user, item, body.shared_fields, body.products, body.save_template, selectedSource, captures, supplierOverride, renewal);
       }
-      return await handleApprove(context, user, item, body.fields, body.product_name, body.save_template, selectedSource, captures, supplierOverride);
+      return await handleApprove(context, user, item, body.fields, body.product_name, body.save_template, selectedSource, captures, supplierOverride, renewal);
     };
 
     if (body.status === 'approved') {
@@ -527,7 +578,13 @@ async function handleApprove(
   supplierOverride?: {
     supplierId?: string;
     supplierName?: string;
-  }
+  },
+  /**
+   * The reviewer's confirmed renewal, already resolved against the
+   * server-recomputed proposal. Null when nobody answered — the producer then
+   * writes no renewal columns.
+   */
+  renewal: RenewalWrite | null = null
 ): Promise<Response> {
   const result = await approveQueueItem(
     context.env.DB,
@@ -544,6 +601,7 @@ async function handleApprove(
       tableEdits: captures?.tableEdits,
       supplierId: supplierOverride?.supplierId,
       supplierName: supplierOverride?.supplierName,
+      renewal: renewal ?? undefined,
     }
   );
 
@@ -625,7 +683,13 @@ async function handleMultiProductApprove(
   supplierOverride?: {
     supplierId?: string;
     supplierName?: string;
-  }
+  },
+  /**
+   * The reviewer's confirmed renewal, already resolved against the
+   * server-recomputed proposal. Null when nobody answered — the producer then
+   * writes no renewal columns.
+   */
+  renewal: RenewalWrite | null = null
 ): Promise<Response> {
   const result = await approveMultiProductQueueItem(
     context.env.DB,
@@ -646,6 +710,7 @@ async function handleMultiProductApprove(
       tableEdits: captures?.tableEdits,
       supplierId: supplierOverride?.supplierId,
       supplierName: supplierOverride?.supplierName,
+      renewal: renewal ?? undefined,
     }
   );
 
@@ -1019,7 +1084,13 @@ async function handleCoaRecordsApprove(
   rawDecisions: Record<string, CoaRecordDecision> | undefined,
   selectedSource: 'text' | 'vlm',
   supplierOverride: { supplierId?: string; supplierName?: string },
-  productMaps?: ProductMapInput
+  productMaps?: ProductMapInput,
+  /**
+   * The reviewer's confirmed renewal, already resolved against the
+   * server-recomputed proposal. Null when nobody answered — the producer then
+   * writes no renewal columns.
+   */
+  renewal: RenewalWrite | null = null
 ): Promise<Response> {
   const decisions = normalizeRecordDecisions(rawDecisions);
 
@@ -1033,6 +1104,7 @@ async function handleCoaRecordsApprove(
       selectedSource,
       supplierId: supplierOverride.supplierId,
       supplierName: supplierOverride.supplierName,
+      renewal: renewal ?? undefined,
     });
   } catch (err) {
     throw new BadRequestError(

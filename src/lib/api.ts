@@ -29,6 +29,7 @@ import type {
   ApiRequirement,
   ApiSpecTest,
   ApiSpecLimit,
+  SpecCriticality,
   ApiSpecCheck,
   ApiClaimType,
   ClaimSubjectGrain,
@@ -65,6 +66,9 @@ import type {
   SupplierExtractionInstructionsGetResponse,
   SupplierExtractionInstructionsPutResponse,
   SupplierExtractionInstructionsListResponse,
+  DocumentTypeExtractionInstructionsGetResponse,
+  DocumentTypeExtractionInstructionsListResponse,
+  DocumentTypeExtractionInstructionsPutResponse,
   TeachExample,
   TeachSessionCreateResponse,
   TeachMessageResponse,
@@ -97,6 +101,7 @@ import type {
   RejectionReason,
 } from './types';
 import type { ParsedCustomer, ParsedOrder, ParsedShipment } from '../../shared/connectorOutput';
+import type { TypeRenewalPolicy, RenewalDecisionPayload } from '../../shared/types';
 import { AUTH_TOKEN_KEY } from './types';
 
 const API_BASE = '/api';
@@ -303,6 +308,7 @@ import type {
   RequestLineInput,
   RequestLineRow,
   RequestLineWithClosure,
+  RequestLinkView,
   RequestTemplateListResponse,
   RequestTemplateResponse,
   SupplierRequestView,
@@ -1071,7 +1077,7 @@ export const api = {
      * POST /api/document-types
      * Returns: { documentType: ApiDocumentType }
      */
-    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number }) =>
+    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy }) =>
       fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -1081,7 +1087,7 @@ export const api = {
      * PUT /api/document-types/:id
      * Returns: { documentType: ApiDocumentType }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy }) =>
       fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1202,6 +1208,8 @@ export const api = {
       supplier_id?: string | null;
       document_type_id?: string | null;
       severity?: string;
+      /** Ranking only (migration 0095); omitted means the default tier. */
+      criticality?: SpecCriticality;
       notes?: string | null;
       tenant_id?: string;
     }) =>
@@ -1220,6 +1228,7 @@ export const api = {
         supplier_id?: string | null;
         document_type_id?: string | null;
         severity?: string;
+        criticality?: SpecCriticality;
         notes?: string | null;
         active?: boolean;
       }
@@ -1869,6 +1878,14 @@ export const api = {
         distributor_sku?: string | null;
         coa_product_id?: string | null;
       }>;
+      /**
+       * The renewal date the reviewer confirmed (migration 0097). SEND IT
+       * WHENEVER THE RENEWAL FIELD WAS SHOWN, including when it is empty:
+       * `{ due_date: null }` is the answer "this document does not renew", and
+       * omitting the key entirely means "nobody answered", which the server
+       * records as no decision at all rather than as a decision to skip.
+       */
+      renewal?: RenewalDecisionPayload;
     }) =>
       fetchApi<{ document?: any; documents?: any[]; summary?: string; item?: any }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     /**
@@ -2017,6 +2034,49 @@ export const api = {
       if (params.tenant_id) qs.set('tenant_id', params.tenant_id);
       return fetchApi<SupplierExtractionInstructionsListResponse>(
         `/extraction-instructions/by-supplier?${qs.toString()}`,
+      );
+    },
+  },
+
+  /**
+   * Per-DOCUMENT-TYPE extraction instructions (migration 0098) — the middle
+   * layer of the prompt stack, between the tenant's industry context and the
+   * (supplier, document_type) guidance above.
+   *
+   * Written once per type and applied to every supplier that sends that kind of
+   * document, including one nobody has configured yet. The supplier layer
+   * REFINES this; it does not replace it.
+   */
+  documentTypeInstructions: {
+    /** One type, with the suppliers that refine it. */
+    get: (params: { document_type_id: string; tenant_id?: string }) => {
+      const qs = new URLSearchParams({ document_type_id: params.document_type_id });
+      if (params.tenant_id) qs.set('tenant_id', params.tenant_id);
+      return fetchApi<DocumentTypeExtractionInstructionsGetResponse>(
+        `/document-type-instructions?${qs.toString()}`,
+      );
+    },
+    /** Every active type in the tenant, authored or not, in one round trip. */
+    list: (params?: { tenant_id?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.tenant_id) qs.set('tenant_id', params.tenant_id);
+      const suffix = qs.toString() ? `?${qs.toString()}` : '';
+      return fetchApi<DocumentTypeExtractionInstructionsListResponse>(
+        `/document-type-instructions${suffix}`,
+      );
+    },
+    put: (data: { document_type_id: string; instructions: string; tenant_id?: string }) =>
+      fetchApi<DocumentTypeExtractionInstructionsPutResponse>('/document-type-instructions', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    /** Removes the layer outright. PUTting '' only blanks it. */
+    remove: (params: { document_type_id: string; tenant_id?: string }) => {
+      const qs = new URLSearchParams({ document_type_id: params.document_type_id });
+      if (params.tenant_id) qs.set('tenant_id', params.tenant_id);
+      return fetchApi<{ deleted: boolean }>(
+        `/document-type-instructions?${qs.toString()}`,
+        { method: 'DELETE' },
       );
     },
   },
@@ -2830,6 +2890,27 @@ export const api = {
      */
     external: (id: string) =>
       fetchApi<{ view: SupplierRequestView }>(`/document-requests/${id}/external`),
+
+    /**
+     * GET /api/document-requests/:id/link — the URL to send the supplier.
+     *
+     * `null` is an ordinary answer, not an error: a draft has no door yet, and
+     * a link can expire or be revoked out from under an issued ask.
+     */
+    link: (id: string) =>
+      fetchApi<{ link: RequestLinkView | null }>(`/document-requests/${id}/link`),
+
+    /**
+     * POST /api/document-requests/:id/link — ROTATES.
+     *
+     * The server revokes the live link before minting the replacement, so any
+     * URL already in a supplier's inbox is dead the moment this returns. Only
+     * call it behind a confirmation that says so.
+     */
+    rotateLink: (id: string) =>
+      fetchApi<{ link: { url: string } }>(`/document-requests/${id}/link`, {
+        method: 'POST',
+      }),
   },
 
   /**

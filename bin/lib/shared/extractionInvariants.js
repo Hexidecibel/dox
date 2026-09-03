@@ -49,6 +49,11 @@ var SUBLOT_KEYS = ["sub_lot_code", "sub_lot_number", "sublot_code"];
 var DATE_KEYS = [
   "code_date",
   "expiration_date",
+  // The DOCUMENT's own expiry (a certificate of insurance, a certification),
+  // distinct from expiration_date, which is the PRODUCT's shelf life. Listed
+  // here so a new date field gets the same parse/plausibility checking as
+  // every other one rather than arriving unvalidated.
+  "document_expires_on",
   "production_date",
   "mfg_date",
   "best_by_date",
@@ -57,6 +62,12 @@ var DATE_KEYS = [
   "invoice_date",
   "issue_date",
   "date_of_issue",
+  // The date THIS VERSION of a versioned document (an SDS, a specification)
+  // was issued or revised. Added with the certificate field set (2026-09-02)
+  // and listed here for the same reason document_expires_on is: a new date
+  // field that skips this list arrives unparsed and unbounded, and a revision
+  // date of "2201-03-04" would sail through.
+  "revision_date",
   "packaging_date",
   "test_date",
   "buffer_exp"
@@ -98,7 +109,13 @@ var SCALAR_KEYS = /* @__PURE__ */ new Set([
   // A batch printed alongside a separate lot (2026-08-20). Scalar like the
   // rest, and just as capable of arriving as a placeholder or a comma-joined
   // pair, so it gets the same checks.
-  "batch_number"
+  "batch_number",
+  // A certificate's own number (2026-09-02). Strictly scalar, and "N/A" is a
+  // value certificates genuinely print, so the placeholder check earns its
+  // keep here. The other new certificate fields are deliberately NOT listed:
+  // `allergens` is legitimately multi-valued and its correct answer is
+  // sometimes literally "None", which this check would report as a sentinel.
+  "certificate_number"
 ]);
 function safeParse(raw) {
   if (raw == null || raw === "") return null;

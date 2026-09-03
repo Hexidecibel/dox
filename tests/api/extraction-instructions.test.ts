@@ -104,10 +104,21 @@ describe('GET /api/extraction-instructions', () => {
     expect(body.updated_by).toBeNull();
   });
 
-  it('400s when supplier_id is missing', async () => {
-    const qs = `document_type_id=${docTypeId}`;
-    const { status } = await doGet(user(), qs);
+  it('400s when BOTH supplier_id and document_type_id are missing', async () => {
+    // supplier_id alone used to be mandatory. Since 0098 a document_type_id is
+    // a legitimate key on its own — it asks for the document-type layer, which
+    // is exactly the question the worker has when a supplier does not resolve.
+    // A lookup with NEITHER key is still nonsense.
+    const { status } = await doGet(user(), '');
     expect(status).toBe(400);
+  });
+
+  it('answers a document_type_id with no supplier_id, returning only the type layer', async () => {
+    const { status, body } = await doGet(user(), `document_type_id=${docTypeId}`);
+    expect(status).toBe(200);
+    // No supplier was asked about, so there is no supplier row to report.
+    expect(body.instructions).toBeNull();
+    expect(body.field_mappings).toBeNull();
   });
 
   it('returns supplier-wide instructions when document_type_id is omitted', async () => {

@@ -2,6 +2,12 @@ import { generateId } from '../../lib/db';
 import { logAudit, getClientIp } from '../../lib/db';
 import { requireRole, errorToResponse } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
+import {
+  defaultRenewalMonthsForTypeName,
+  defaultRenewalPolicyForTypeName,
+  type TypeRenewalPolicy,
+} from '../../../shared/renewalPeriod';
+import { parseRenewalIntervalMonths, parseTypeRenewalSetting } from '../../lib/registry';
 import type { Env, User } from '../../lib/types';
 
 function slugify(text: string): string {
@@ -128,6 +134,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       supplier_id?: string | null;
       auto_ingest?: number;
       extract_tables?: number;
+      renewal_interval_months?: number | null;
+      /** 'inherit' | 'period' | 'none' — see migration 0097. */
+      renewal_policy?: string | null;
     };
 
     if (!body.name || !body.name.trim()) {
@@ -198,11 +207,56 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const autoIngest = body.auto_ingest === 1 ? 1 : 0;
     const extractTables = body.extract_tables === 0 ? 0 : 1;
 
+    // Renewal period. When the caller says nothing we PROPOSE one from the
+    // name: a type that reads as a specification sheet starts at three years,
+    // because both major food-safety schemes define a current spec sheet that
+    // way. Everything else starts NULL, meaning the annual default applies.
+    // The guess is written once into a column an admin can see and change on
+    // the Document Types screen — it is never re-derived at read time.
+    let renewalIntervalMonths: number | null;
+    let renewalPolicy: TypeRenewalPolicy;
+    if (body.renewal_interval_months !== undefined || body.renewal_policy !== undefined) {
+      const parsedMonths = parseRenewalIntervalMonths(body.renewal_interval_months ?? null);
+      if (!parsedMonths.ok) {
+        return new Response(
+          JSON.stringify({ error: parsedMonths.error }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      const parsed = parseTypeRenewalSetting(body.renewal_policy, parsedMonths.value);
+      if (!parsed.ok) {
+        return new Response(
+          JSON.stringify({ error: parsed.error }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      renewalIntervalMonths = parsed.months;
+      renewalPolicy = parsed.policy;
+    } else {
+      // Nothing submitted: propose both from the name. A COA type starts at
+      // 'none' — it does not renew — and a spec sheet at three years. Same
+      // contract as before: a guess written once into a setting an admin can
+      // see and change, never re-derived on read.
+      renewalIntervalMonths = defaultRenewalMonthsForTypeName(body.name);
+      renewalPolicy = defaultRenewalPolicyForTypeName(body.name);
+    }
+
     await context.env.DB.prepare(
-      `INSERT INTO document_types (id, tenant_id, name, slug, description, supplier_id, active, auto_ingest, extract_tables)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`
+      `INSERT INTO document_types (id, tenant_id, name, slug, description, supplier_id, active, auto_ingest, extract_tables, renewal_interval_months, renewal_policy)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`
     )
-      .bind(id, tenantId, body.name, slug, body.description || null, supplierId, autoIngest, extractTables)
+      .bind(
+        id,
+        tenantId,
+        body.name,
+        slug,
+        body.description || null,
+        supplierId,
+        autoIngest,
+        extractTables,
+        renewalIntervalMonths,
+        renewalPolicy
+      )
       .run();
 
     await logAudit(
@@ -212,7 +266,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'document_type_created',
       'document_type',
       id,
-      JSON.stringify({ name: body.name, slug }),
+      JSON.stringify({
+        name: body.name,
+        slug,
+        renewal_interval_months: renewalIntervalMonths,
+        renewal_policy: renewalPolicy,
+      }),
       getClientIp(context.request)
     );
 

@@ -56,7 +56,7 @@ import {
   SpecRowMarker,
   specVerdictsForTableRow,
   specVerdictsForGroup,
-  outOfSpecRowSx,
+  specRowSx,
 } from './SpecWarnings';
 import type { SpecVerdict } from '../lib/types';
 import {
@@ -177,7 +177,7 @@ function GroupCells({
             const cellVerdicts = verdicts?.[key];
             const failed = (cellVerdicts || []).some((v) => v.verdict === 'out_of_spec');
             return (
-              <TableRow key={key} sx={failed ? outOfSpecRowSx : undefined}>
+              <TableRow key={key} sx={specRowSx(cellVerdicts)}>
                 <TableCell>{key.replace(/_/g, ' ')}</TableCell>
                 <TableCell sx={failed ? { fontWeight: 700 } : undefined}>{cell.value ?? '—'}</TableCell>
                 <TableCell>{cell.unit ?? '—'}</TableCell>
@@ -226,7 +226,7 @@ function RecordTable({
               const rowVerdicts = verdicts?.[ri];
               const failed = (rowVerdicts || []).some((v) => v.verdict === 'out_of_spec');
               return (
-                <TableRow key={ri} sx={failed ? outOfSpecRowSx : undefined}>
+                <TableRow key={ri} sx={specRowSx(rowVerdicts)}>
                   {row.map((cell, ci) => (
                     <TableCell key={ci} sx={failed ? { fontWeight: 700 } : undefined}>
                       {cell}

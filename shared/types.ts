@@ -8,6 +8,11 @@ export type { InvariantFailure, InvariantCheck } from './extractionInvariants';
 import type { InvariantFailure } from './extractionInvariants';
 export type { SpecVerdict, SpecVerdictKind, SpecTarget, SpecLimit, SpecOperator } from './specCheck';
 import type { SpecVerdict, SpecVerdictKind, SpecOperator } from './specCheck';
+// Criticality (migration 0095) lives in its own module because the vocabulary
+// is not final — see shared/specCriticality.ts. Nothing outside that file may
+// write one of its literals.
+export type { SpecCriticality } from './specCriticality';
+import type { SpecCriticality } from './specCriticality';
 
 // === Roles & Enums ===
 export type Role = 'super_admin' | 'org_admin' | 'user' | 'reader';
@@ -131,6 +136,20 @@ export interface SupplierExtractionInstructionsGetResponse {
   field_mappings?: unknown | null;
   updated_at: string | null;
   updated_by: string | null;
+  /**
+   * The document-type layer (migration 0098) that sits ABOVE this pair —
+   * "how to read this kind of document, from anybody". null when none is
+   * authored, or when the lookup carried no document_type_id (no type, no
+   * type layer). Broken out so a UI can label it as inherited rather than
+   * letting an editor save it back into the narrower supplier row.
+   */
+  document_type_instructions?: string | null;
+  /**
+   * Type layer + supplier layer composed general -> specific. This is what the
+   * extraction prompt should carry; `instructions` above is only the supplier
+   * row. null when neither layer has anything.
+   */
+  effective_instructions?: string | null;
 }
 
 export interface SupplierExtractionInstructionsPutResponse {
@@ -148,6 +167,13 @@ export interface SupplierExtractionInstructionsListRow {
   instructions: string | null;
   updated_at: string | null;
   updated_by: string | null;
+  /**
+   * The document-type layer (0098) for the same type — INHERITED, shared with
+   * every other supplier, and not editable from the supplier page. Present so
+   * the tab can show what this supplier's guidance refines rather than
+   * presenting the narrow box as if it were the whole instruction.
+   */
+  type_instructions?: string | null;
 }
 
 /**
@@ -159,6 +185,74 @@ export interface SupplierExtractionInstructionsListResponse {
   supplier_id: string;
   tenant_id: string;
   document_types: SupplierExtractionInstructionsListRow[];
+}
+
+// === Document-type extraction instructions (migration 0098) ===
+//
+// The MIDDLE layer of the prompt stack: tenant industry context -> THIS ->
+// (supplier, document_type). "How to read a Certificate of Insurance" written
+// once, for every supplier that sends one. It COMPOSES with the supplier layer
+// (which refines it) rather than being replaced by it; the composition rule
+// lives in functions/lib/extractionInstructionStack.ts.
+
+/** A stored type-level instruction row. */
+export interface DocumentTypeExtractionInstructions {
+  id: string;
+  tenant_id: string;
+  document_type_id: string;
+  instructions: string;
+  created_at: string;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+/**
+ * A supplier that has authored its own guidance for the same document type.
+ * Returned alongside the type-level row so the editor can SHOW the layering
+ * instead of hiding the narrower text behind the broader one.
+ */
+export interface DocumentTypeInstructionsSupplierOverride {
+  supplier_id: string;
+  supplier_name: string;
+  updated_at: string | null;
+}
+
+/** GET /api/document-type-instructions?document_type_id=… */
+export interface DocumentTypeExtractionInstructionsGetResponse {
+  tenant_id: string;
+  document_type_id: string;
+  document_type_name: string;
+  /** null when no type-level guidance is authored yet (the normal first state). */
+  instructions: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+  supplier_overrides: DocumentTypeInstructionsSupplierOverride[];
+}
+
+/**
+ * One row of the whole-tenant listing. Every ACTIVE document type appears,
+ * `instructions` null where nothing has been written — the empty types are
+ * exactly what the admin came to fill in, so they must be visible.
+ */
+export interface DocumentTypeExtractionInstructionsListRow {
+  document_type_id: string;
+  document_type_name: string;
+  instructions: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+  /** How many suppliers refine this type. 0 means the type layer is the whole story. */
+  supplier_override_count: number;
+}
+
+/** GET /api/document-type-instructions (no document_type_id). */
+export interface DocumentTypeExtractionInstructionsListResponse {
+  tenant_id: string;
+  document_types: DocumentTypeExtractionInstructionsListRow[];
+}
+
+/** PUT /api/document-type-instructions. */
+export interface DocumentTypeExtractionInstructionsPutResponse {
+  instructions: DocumentTypeExtractionInstructions;
 }
 
 // === Learning Interface (teach-chat) ===
@@ -274,6 +368,22 @@ export interface DocumentTypeRow {
   auto_ingest_threshold: number | null; // deprecated, unused
   auto_ingest: number;       // 0 or 1
   extract_tables: number;    // 0 or 1
+  /**
+   * Renewal period for documents of this type, in months (migration 0096).
+   * NULL = the annual default applies. Spec-sheet types are seeded to 36
+   * because both major food-safety schemes define a current spec sheet as one
+   * revised or reviewed inside three years. A document that states its own
+   * expiry overrides this — see shared/renewalPeriod.ts.
+   */
+  renewal_interval_months: number | null;
+  /**
+   * Whether documents of this type renew AT ALL (migration 0097). The third
+   * state `renewal_interval_months` cannot express: `none` is a Certificate of
+   * Analysis, superseded by the next lot's certificate rather than re-collected
+   * on any cadence. `renewal_interval_months` is read only under `period`, so
+   * the two columns cannot contradict each other. See shared/renewalPeriod.ts.
+   */
+  renewal_policy: TypeRenewalPolicy;
   active: number;
   created_at: string;
   updated_at: string;
@@ -317,6 +427,16 @@ export interface DocumentRow {
   renewal_type?: RenewalType | null;
   renewal_interval_months?: number | null;
   renewal_due_date?: string | null;
+  // The approval-time renewal decision (migration 0097). A non-null
+  // `renewal_decision` with a null `renewal_due_date` means a human answered
+  // "this does not renew" — NOT that nobody looked, which is all-null.
+  // `renewal_snapshot` freezes the proposal, its rule and the type
+  // configuration in force, the same way limit_snapshot (0085) freezes a
+  // threshold, so reconfiguring the type later cannot rewrite the decision.
+  renewal_decision?: RenewalDecision | null;
+  renewal_snapshot?: string | null; // JSON string<RenewalSnapshot>
+  renewal_decided_at?: string | null;
+  renewal_decided_by?: string | null;
   // Classification lifecycle (migration 0081).
   classification_status?: ClassificationStatus;
   classification_reviewed_at?: string | null;
@@ -610,7 +730,14 @@ export interface ApiSpecLimit {
   value_min: number | null;
   value_max: number | null;
   unit: string | null;
+  /** Routes the notification: 'alert' mails the owner, 'warn' is queue-only. */
   severity: 'warn' | 'alert';
+  /**
+   * How much this limit MATTERS (migration 0095) — ranking and colour only,
+   * never a verdict input. Most parameters on a spec sheet are tracked rather
+   * than acted on, and a flat list of them is a list nobody reads.
+   */
+  criticality: SpecCriticality;
   notes: string | null;
   active: number;
   version: number;
@@ -1624,6 +1751,14 @@ export interface ProcessingQueueItem {
    * so it is rendered as a quiet count.
    */
   spec_summary?: { out_of_spec: number; not_checked: number; unmatched: number };
+  /**
+   * A third advisory pass, the same shape as the two above: when this document
+   * would next be due, resolved from the extraction and the document type
+   * (functions/lib/renewal-proposal.ts). A PROPOSAL — the review screen shows
+   * it pre-filled and editable with its `reason` beside it, and the value the
+   * reviewer confirms is recomputed and frozen at approve time.
+   */
+  renewal_proposal?: ResolvedRenewal;
 }
 
 /**
@@ -3800,6 +3935,49 @@ export interface CoaFulfillmentResponse {
 
 // === Renewal engine (Phase 4 — IDP Document Registry) ===
 // RenewalType is defined above (registry document fields).
+// The precedence between a stated expiry and a default period lives in
+// shared/renewalPeriod.ts, which owns RenewalRule.
+
+export type {
+  RenewalRule,
+  ResolvedRenewal,
+  TypeRenewalPolicy,
+  RenewalDecision,
+} from './renewalPeriod';
+import type {
+  RenewalRule,
+  ResolvedRenewal,
+  TypeRenewalPolicy,
+  RenewalDecision,
+} from './renewalPeriod';
+
+/**
+ * The frozen record of an approval-time renewal decision, stored as JSON in
+ * `documents.renewal_snapshot` (migration 0097). Deliberately shaped like
+ * `document_spec_checks.limit_snapshot` (0085): everything needed to re-explain
+ * the decision years later, including the type configuration in force at the
+ * time, so a later edit to that configuration cannot rewrite it.
+ */
+export interface RenewalSnapshot {
+  proposed_due_date: string | null;
+  confirmed_due_date: string | null;
+  decision: RenewalDecision;
+  rule: RenewalRule;
+  period_months: number | null;
+  anchor_date: string | null;
+  reason: string;
+  type_renewal_policy: TypeRenewalPolicy | string | null;
+  type_renewal_interval_months: number | null;
+}
+
+/**
+ * What the review screen sends back on approve (`PUT /api/queue/:id`).
+ * PRESENT means a human answered; `due_date: null` inside it is the real
+ * answer "this document does not renew". Absent means nobody answered.
+ */
+export interface RenewalDecisionPayload {
+  due_date: string | null;
+}
 
 /** Computed renewal status for a document, against a look-ahead window. */
 export type ExpirationStatus =
@@ -3822,6 +4000,15 @@ export interface ExpirationRow {
   status: ExpirationStatus;
   /** Whole days from as_of to the due date; negative = past. */
   days_until: number | null;
+  /**
+   * Which renewal rule produced the date — the document's own stated expiry,
+   * a period set on the document, the document type's period, or the annual
+   * default. See shared/renewalPeriod.ts. Optional so a caller written against
+   * the pre-0096 shape still compiles.
+   */
+  renewal_rule?: RenewalRule;
+  /** The renewal period that applied, in months; null when a stated date answered. */
+  renewal_period_months?: number | null;
 }
 
 export interface ExpirationSummary {
@@ -4350,6 +4537,28 @@ export interface DocumentRequestListResponse {
 
 export interface DocumentRequestResponse {
   request: DocumentRequestDetail;
+}
+
+/**
+ * The supplier's door, as the COMPOSER sees it.
+ *
+ * The token itself never appears — only the assembled `url` — because there is
+ * no operation on this screen that takes a bare token, and a value that is
+ * displayed but never used is a value that leaks by accident.
+ *
+ * The engagement counters are here for one question a buyer actually asks
+ * before chasing someone: "have they even opened it?" A link with `view_count`
+ * 0 and a silent supplier is a delivery problem; one with views and no upload
+ * is a supplier problem, and those get different phone calls.
+ */
+export interface RequestLinkView {
+  /** The full https URL to send. Assembled server-side from the request origin. */
+  url: string;
+  expires_at: string;
+  created_at: string;
+  view_count: number;
+  last_viewed_at: string | null;
+  last_upload_at: string | null;
 }
 
 /**

@@ -6,6 +6,7 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
+import { parseRenewalIntervalMonths, parseTypeRenewalSetting } from '../../lib/registry';
 import type { Env, User } from '../../lib/types';
 
 function slugify(text: string): string {
@@ -94,6 +95,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       supplier_id?: string | null;
       auto_ingest?: number;
       extract_tables?: number;
+      renewal_interval_months?: number | null;
+      /** 'inherit' | 'period' | 'none' — see migration 0097. */
+      renewal_policy?: string | null;
     };
 
     const updates: string[] = [];
@@ -177,6 +181,33 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }
       updates.push('extract_tables = ?');
       params.push(body.extract_tables);
+    }
+
+    // Renewal setting for documents of this type: the policy (0097) and, under
+    // 'period' only, the interval (0096). Written as ONE update because they
+    // are one setting with three states — 'inherit' is the annual default,
+    // 'none' is "does not renew", and only 'period' gives the months column any
+    // meaning. Sending months alone is still valid and means 'period', which is
+    // exactly what a pre-0097 client does.
+    if (body.renewal_interval_months !== undefined || body.renewal_policy !== undefined) {
+      const parsedMonths = parseRenewalIntervalMonths(body.renewal_interval_months ?? null);
+      if (!parsedMonths.ok) {
+        return new Response(
+          JSON.stringify({ error: parsedMonths.error }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      const parsed = parseTypeRenewalSetting(body.renewal_policy, parsedMonths.value);
+      if (!parsed.ok) {
+        return new Response(
+          JSON.stringify({ error: parsed.error }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      updates.push('renewal_interval_months = ?');
+      params.push(parsed.months);
+      updates.push('renewal_policy = ?');
+      params.push(parsed.policy);
     }
 
     // supplier_id: present in body sets ownership; null/"" clears to global.

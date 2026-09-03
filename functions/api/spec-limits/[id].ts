@@ -20,6 +20,7 @@ import { validateLimitShape } from '../../../shared/specCheck';
 import {
   badRequest,
   num,
+  readCriticality,
   validateScope,
   findScopeConflict,
   scopeConflictResponse,
@@ -92,6 +93,16 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       if (!SEVERITIES.has(String(body.severity))) return badRequest('severity must be warn or alert');
       push('severity = ?', String(body.severity));
     }
+    // Re-ranking changes no arithmetic — this PUT still bumps `version` for it,
+    // as it does for a notes-only edit, and that is left alone deliberately
+    // rather than special-cased. Verdicts already recorded keep the tier they
+    // were filed under in their own frozen snapshot; the new tier applies from
+    // the next judgement onward.
+    if (body.criticality !== undefined) {
+      const criticality = readCriticality(body.criticality);
+      if ('error' in criticality) return badRequest(criticality.error);
+      push('criticality = ?', criticality.criticality);
+    }
     if (body.notes !== undefined) push('notes = ?', body.notes ? sanitizeString(body.notes) : null);
     if (body.active !== undefined) push('active = ?', body.active ? 1 : 0);
     if (body.supplier_id !== undefined) push('supplier_id = ?', body.supplier_id || null);
@@ -115,8 +126,18 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       'spec_limits',
       limit.id as string,
       JSON.stringify({
-        before: { operator: limit.operator, value_min: limit.value_min, value_max: limit.value_max },
-        after: { operator, value_min: valueMin, value_max: valueMax },
+        before: {
+          operator: limit.operator,
+          value_min: limit.value_min,
+          value_max: limit.value_max,
+          criticality: limit.criticality,
+        },
+        after: {
+          operator,
+          value_min: valueMin,
+          value_max: valueMax,
+          criticality: body.criticality !== undefined ? body.criticality : limit.criticality,
+        },
       }),
       getClientIp(context.request)
     );

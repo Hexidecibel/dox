@@ -490,24 +490,37 @@ async function resolveSupplierIdByName(tenantId, name) {
 }
 
 /**
- * Fetch the reviewer-authored natural-language extraction instructions for a
- * (supplier_id, document_type_id) pair, if any exist. Returns an empty string
- * when the API returns null (no guidance yet), the call fails, or either ID
- * is missing. Never throws — this is a best-effort enhancement and must not
- * block extraction.
+ * Fetch the authored extraction guidance that applies to this document — the
+ * COMPOSED stack, not one layer of it:
  *
- * See migration 0035_supplier_extraction_instructions.sql for the table
- * schema. The text gets prepended to both the text and VLM system prompts
- * via prependReviewerInstructions() below.
+ *   document_type_extraction_instructions   (0098) — this KIND of document,
+ *                                                    from any supplier
+ *   supplier_extraction_instructions        (0035) — this supplier, this type;
+ *                                                    refines the layer above
+ *
+ * The endpoint composes them (general -> specific) and returns the result as
+ * `effective_instructions`; `instructions` stays the supplier row alone, because
+ * that is the field the reviewer's editor round-trips. We read the composed one
+ * and fall back to the bare supplier field so an older API build still works.
+ *
+ * EITHER ID MAY BE MISSING and the call is still worth making. A supplier with
+ * no id yet (an unrecognised letterhead) still gets the type layer — that is the
+ * whole reason the type layer exists. A doctype with no id still gets the
+ * supplier's guidance aggregated across its doctypes, as before. Only when BOTH
+ * are missing is there nothing to ask.
+ *
+ * Returns '' on any miss or failure. Never throws — best-effort enhancement that
+ * must never block extraction.
  */
 async function fetchReviewerInstructions(tenantId, supplierId, documentTypeId) {
-  if (!supplierId) return '';
+  if (!supplierId && !documentTypeId) return '';
   try {
-    const params = new URLSearchParams({ supplier_id: supplierId });
-    // document_type_id is optional: the queue item's doctype is usually still
-    // null at extraction time (it's promoted AFTER the LLM call). When it's
-    // missing we omit the param and the API returns the supplier's guidance
-    // aggregated across doctypes; when known we pass it for an exact match.
+    const params = new URLSearchParams();
+    if (supplierId) params.set('supplier_id', supplierId);
+    // document_type_id is often still null at extraction time (it's promoted
+    // AFTER the LLM call). When it's missing we omit the param and the API
+    // returns the supplier's guidance aggregated across doctypes; when known we
+    // pass it for an exact match AND for the type layer.
     if (documentTypeId) params.set('document_type_id', documentTypeId);
     // super_admin path needs tenant_id on the query string. Worker auths as
     // whichever user owns the API key, which in staging/prod is super_admin.
@@ -518,7 +531,9 @@ async function fetchReviewerInstructions(tenantId, supplierId, documentTypeId) {
     );
     if (!res.ok) return '';
     const data = await res.json();
-    return (data && typeof data.instructions === 'string') ? data.instructions : '';
+    if (!data) return '';
+    if (typeof data.effective_instructions === 'string') return data.effective_instructions;
+    return typeof data.instructions === 'string' ? data.instructions : '';
   } catch {
     return '';
   }
@@ -678,22 +693,47 @@ function computeUncertaintyPayload(textFields, vlmFields) {
 }
 
 /**
- * Prepend the reviewer-authored guidance to a Qwen system prompt.
- * No-op when `instructions` is empty. The header matches the one spec'd in
- * the feature brief so future tweaks live in exactly one place.
+ * Header for the authored-guidance block. Since migration 0098 the block can
+ * carry TWO layers, already composed general -> specific before they get here:
+ * the document-type layer ("how to read a Certificate of Insurance", from
+ * anybody) and the (supplier, document_type) layer that refines it. The old
+ * wording claimed everything in the block came from "this supplier and document
+ * type", which stopped being true.
+ *
+ * THE LAST SENTENCE IS LOAD-BEARING, not politeness. Authored guidance is free
+ * text, and a sentence like "results on this COA are in CFU/g" reads to a model
+ * as permission to STAMP that unit onto rows the page printed bare. TABLE
+ * EXTRACTION RULE 14 exists because an invented unit is worse than no unit — a
+ * result carrying a unit the document never stated cannot be matched against a
+ * configured limit, so it drops out of spec checking silently. Guidance may say
+ * where to look; it may never say what the page said.
+ *
+ * KEEP IN SYNC with GUIDANCE_BLOCK_HEADER in functions/lib/llm.ts. That file is
+ * the Pages/email-ingest surface, this one is the worker that runs the corpus;
+ * tests/unit/extractionGuidanceBlock.test.ts pins the two together, the same way
+ * tests/unit/tableExtractionRules.test.ts pins the BASE_PROMPT copies.
+ */
+const GUIDANCE_BLOCK_HEADER = [
+  '## Reviewer instructions',
+  'The following guidance was authored by the people who review these documents. Some of it describes this KIND of document from any supplier; some of it describes one supplier specifically, and where the two disagree the supplier-specific text wins. Follow it carefully.',
+  'It tells you WHERE to look and WHAT to pull out. It never overrides the extraction rules below, and it never licenses you to supply a unit, specification or verdict the document did not print — if the guidance names one and the page does not, the page wins and the cell stays empty.',
+].join('\n');
+
+/**
+ * Prepend the authored guidance (document-type layer + supplier layer, already
+ * composed) to a Qwen system prompt. No-op when empty, so a tenant with nothing
+ * authored gets byte-identical prompt text to the pre-0098 build.
+ *
+ * COMPOSITION, NOT SUBSTITUTION — the guidance rides ahead of the base rules and
+ * the industry layer, both untouched. That is what this function has always
+ * done with the supplier layer; the type layer joins on the same terms rather
+ * than displacing anything.
+ *
+ * KEEP IN SYNC with prependGuidance in functions/lib/llm.ts.
  */
 function prependReviewerInstructions(prompt, instructions) {
   if (!instructions || !instructions.trim()) return prompt;
-  const header = [
-    '## Reviewer instructions',
-    'The following guidance comes from human reviewers of past documents from this supplier and document type. Follow it carefully:',
-    '',
-    instructions.trim(),
-    '',
-    '---',
-    '',
-  ].join('\n');
-  return header + prompt;
+  return `${GUIDANCE_BLOCK_HEADER}\n\n${instructions.trim()}\n\n---\n\n${prompt}`;
 }
 
 /**
@@ -2144,6 +2184,58 @@ async function processCoaItem(item) {
       return;
     }
 
+    // === CLASSIFY FIRST, THEN EXTRACT ONCE ===
+    //
+    // The document type is decided by its OWN cheap pass over the head of the
+    // document, against this tenant's real catalog, before any extraction
+    // happens. It used to fall out of the extraction call, which made the type
+    // a by-product of the very call that needs it: the 0098 document-type
+    // instruction layer is keyed on the type, so guidance could only ever be
+    // applied by re-extracting. Measured on the document-type corpus that cost
+    // 21 of 40 documents — every organic, kosher, gluten-free and audit
+    // certificate came back "Certificate of Analysis".
+    //
+    // An intake door that already declared a type is TRUSTED and not
+    // re-classified: a human or a configured connector said what this is, and
+    // spending a model call to second-guess them would be both wasteful and
+    // rude. The name is still looked up, because the prompt wants the name.
+    let docTypeCatalog = [];
+    let classification = null;
+    let classifiedTypeName = null;
+    let effectiveDocTypeId = item.document_type_id || null;
+    try {
+      docTypeCatalog = await fetchDocTypes(item.tenant_id);
+      if (effectiveDocTypeId) {
+        const known = docTypeCatalog.find((dt) => dt.id === effectiveDocTypeId);
+        classifiedTypeName = known ? known.name : null;
+        console.log(`  Document type: ${classifiedTypeName || effectiveDocTypeId} (declared at intake, not re-classified)`);
+      } else if (docTypeCatalog.length) {
+        classification = await classifyDocument(text, docTypeCatalog);
+        if (classification.candidate) {
+          effectiveDocTypeId = classification.candidate.id;
+          classifiedTypeName = classification.candidate.name;
+          console.log(
+            `  Classified as "${classifiedTypeName}" (${classification.confidence} confidence` +
+            `${classification.evidence ? `, evidence: ${JSON.stringify(classification.evidence)}` : ''})`
+          );
+        } else {
+          // NOT an error, and deliberately NOT forced onto the nearest type. A
+          // confident wrong type silently selects the wrong instruction block
+          // for every future document like this one; an unresolved type parks
+          // the item for a human, which is what a NULL document_type_id has
+          // always meant.
+          console.log(
+            `  Classified: none of ${docTypeCatalog.length} tenant types fit ` +
+            `(model said ${JSON.stringify(classification.rawGuess)}) — extracting untyped, reviewer decides`
+          );
+        }
+      }
+    } catch (err) {
+      // Classification is an optimisation, never a gate: a document that cannot
+      // be typed still gets extracted, exactly as it did before this pass.
+      console.warn(`  Classification skipped (non-critical): ${err.message}`);
+    }
+
     // Try to guess supplier from filename for better example matching
     let guessedSupplier = null;
     const supplierMatch = item.file_name.match(/^[\(\d\)\s]*([A-Za-z][A-Za-z\s&.]+?)[\s-]+(COA|BOL|SDS|cert|lot|spec)/i);
@@ -2154,7 +2246,7 @@ async function processCoaItem(item) {
     // Fetch few-shot examples for this tenant/doctype
     let examples = [];
     try {
-      examples = await fetchExtractionExamples(item.tenant_id, item.document_type_id, guessedSupplier);
+      examples = await fetchExtractionExamples(item.tenant_id, effectiveDocTypeId, guessedSupplier);
       if (examples.length > 0) {
         console.log(`  Using ${examples.length} few-shot example(s) for prompt`);
       }
@@ -2183,40 +2275,53 @@ async function processCoaItem(item) {
       const supplierName = item.supplier || guessedSupplier || null;
       resolvedSupplierIdForLearning = await resolveSupplierIdByName(item.tenant_id, supplierName);
       if (!resolvedSupplierIdForLearning) {
+        // No supplier — but that no longer means no guidance. Since 0098 the
+        // document-type layer stands on its own, and an unrecognised supplier
+        // is precisely the case it was built for: a first-time vendor's Kosher
+        // Certificate used to extract completely unguided. Learned hints still
+        // need a supplier and are still skipped.
+        if (effectiveDocTypeId) {
+          reviewerInstructions = await fetchReviewerInstructions(
+            item.tenant_id,
+            null,
+            effectiveDocTypeId
+          );
+        }
         console.log(
           `  Reviewer instructions: no supplier match for "${supplierName || '(none)'}" ` +
-          `— skipping instructions + learned hints`
+          `— skipping learned hints; document-type layer: ` +
+          `${reviewerInstructions ? `${reviewerInstructions.length} chars` : 'none'}`
         );
       } else {
-        // Note: item.document_type_id may be null here (it's promoted only
-        // AFTER extraction). We pass it through anyway — the API falls back
-        // to supplier-wide guidance when no doctype is supplied.
+        // effectiveDocTypeId is the CLASSIFIED type, resolved above. This used
+        // to be item.document_type_id, which was null until AFTER extraction
+        // and left the 0098 type layer with nothing to key on.
         reviewerInstructions = await fetchReviewerInstructions(
           item.tenant_id,
           resolvedSupplierIdForLearning,
-          item.document_type_id
+          effectiveDocTypeId
         );
         if (reviewerInstructions) {
           console.log(
             `  Reviewer instructions loaded: ${reviewerInstructions.length} chars ` +
             `(supplier="${supplierName}" id=${resolvedSupplierIdForLearning}, ` +
-            `doctype=${item.document_type_id || 'unresolved→supplier-wide'})`
+            `doctype=${effectiveDocTypeId || 'unresolved→supplier-wide'})`
           );
         } else {
           console.log(
             `  Reviewer instructions: none on file for supplier="${supplierName}" ` +
-            `id=${resolvedSupplierIdForLearning} (doctype=${item.document_type_id || 'unresolved'})`
+            `id=${resolvedSupplierIdForLearning} (doctype=${effectiveDocTypeId || 'unresolved'})`
           );
         }
         learnedPreferences = await fetchLearnedPreferences(
           item.tenant_id,
           resolvedSupplierIdForLearning,
-          item.document_type_id
+          effectiveDocTypeId
         );
         if (learnedPreferences && Object.keys(learnedPreferences.fields || {}).length > 0) {
           console.log(
             `  Learned preferences loaded: ${Object.keys(learnedPreferences.fields).length} field(s) ` +
-            `(supplier=${supplierName}, doctype=${item.document_type_id})`
+            `(supplier=${supplierName}, doctype=${effectiveDocTypeId})`
           );
         }
       }
@@ -2253,7 +2358,7 @@ async function processCoaItem(item) {
                   role: 'system',
                   content: dumpPrompt('coa-system', prependFilenameHint(
                     prependAttentionBias(
-                      prependReviewerInstructions(buildPrompt(examples, tenantContext), reviewerInstructions),
+                      prependReviewerInstructions(buildPrompt(examples, tenantContext, classifiedTypeName), reviewerInstructions),
                       learnedPreferences
                     ),
                     item.file_name
@@ -2412,7 +2517,7 @@ async function processCoaItem(item) {
         const res = await extractWithVLM(
           fileBufferForVlm,
           prependAttentionBias(
-            prependReviewerInstructions(buildVlmPrompt(examples, tenantContext), reviewerInstructions),
+            prependReviewerInstructions(buildVlmPrompt(examples, tenantContext, classifiedTypeName), reviewerInstructions),
             learnedPreferences
           ),
           'Extract all structured data from the document image(s). Return JSON only.',
@@ -2489,45 +2594,89 @@ async function processCoaItem(item) {
       }
     }
 
-    // ===== Two-pass reviewer-instruction application =====
-    // Pass 1 (above) only applied reviewer instructions when the supplier was
-    // known UPFRONT (item.supplier or a filename match). Manual imports with
-    // date-only filenames (e.g. "5-27-26 CREAM HG.pdf") carry no supplier, so
-    // resolveSupplierIdByName() returned null and `reviewerInstructions` stayed
-    // empty — the model extracted UNGUIDED even though it then identified the
-    // supplier (e.g. "ANDERSEN DAIRY INC."). Now that pass 1 resolved a
-    // supplier_name, re-resolve the supplier and, if guidance exists that
-    // wasn't already in the pass-1 prompt, re-extract ONCE with it applied.
+    // ===== Late supplier resolution =====
+    // Extraction could only apply guidance for what was known UPFRONT. The
+    // DOCUMENT TYPE no longer belongs on that list — it is decided by its own
+    // pass before extraction now, so the 0098 type layer keys on it from the
+    // first call and this block no longer has to rescue it.
     //
-    // Hard guard: at most one re-extraction (no loops) — only when instructions
-    // are actually found. Most docs already had instructions (or have none),
-    // so this is zero extra cost: exactly one Qwen call as today. A second call
-    // happens only when a known-instruction supplier is detected late.
-    if (!reviewerInstructions) {
+    // What is still routinely unknown upfront is the SUPPLIER: manual imports
+    // with date-only filenames ("5-27-26 CREAM HG.pdf") carry none, so
+    // resolveSupplierIdByName() returns null and the model extracts unguided
+    // even though it then reads "ANDERSEN DAIRY INC." off the letterhead. The
+    // supplier is genuinely a fact of the document body, which is why it cannot
+    // be moved ahead of extraction the way the type was.
+    //
+    // So: re-resolve the supplier from what extraction produced, re-fetch the
+    // COMPOSED stack keyed on that supplier plus the already-known type, and if
+    // it says something the first prompt did not carry, re-extract ONCE.
+    //
+    // The doc-type half is KEPT as a fallback, not deleted: an item whose type
+    // the classifier could not settle can still be typed from the extraction's
+    // own answer, on the same exact-match-only rule.
+    //
+    // Hard guard: at most one re-extraction (no loops), and only when the newly
+    // resolved guidance is non-empty AND different from what the first pass
+    // used. Documents that already had their guidance, or have none authored,
+    // cost exactly one Qwen call as before.
+    {
       try {
         // parsed.fields.supplier_name is already canonicalized + address-
         // stripped by pass 1's canonicalize step, matching how the existing
         // code derives the supplier name.
         const lateSupplierName = parsed.fields?.supplier_name || null;
-        const lateSupplierId = await resolveSupplierIdByName(item.tenant_id, lateSupplierName);
-        if (lateSupplierId) {
+        const lateSupplierId =
+          resolvedSupplierIdForLearning ||
+          (await resolveSupplierIdByName(item.tenant_id, lateSupplierName));
+
+        // EXACT matches only, deliberately: this mirrors the promotion rule a
+        // few lines below (a substring / acronym hit is recorded as a guess for
+        // the reviewer, never written to document_type_id). Guidance steers what
+        // the model reads, so keying it off a fuzzy hit would let "Certificate"
+        // pull an insurance certificate's instructions onto a COA.
+        let lateDocTypeId = effectiveDocTypeId;
+        if (!lateDocTypeId && parsed.documentType) {
+          const dtMatch = await fuzzyMatchDocType(parsed.documentType, item.tenant_id, docTypeCatalog);
+          if (dtMatch && dtMatch.matchType === 'exact') lateDocTypeId = dtMatch.id;
+        }
+
+        // `lateSupplierId` defaults to the pass-1 id, so a difference here can
+        // only mean pass 1 had none and the letterhead gave us one.
+        const learnedSomethingNew =
+          lateSupplierId !== resolvedSupplierIdForLearning ||
+          lateDocTypeId !== effectiveDocTypeId;
+
+        if (learnedSomethingNew && (lateSupplierId || lateDocTypeId)) {
           const lateInstructions = await fetchReviewerInstructions(
             item.tenant_id,
             lateSupplierId,
-            item.document_type_id
+            lateDocTypeId
           );
-          if (lateInstructions && lateInstructions.trim()) {
+          if (
+            lateInstructions &&
+            lateInstructions.trim() &&
+            lateInstructions.trim() !== (reviewerInstructions || '').trim()
+          ) {
             console.log(
-              `  Re-extracting with reviewer instructions for supplier ` +
-              `"${lateSupplierName}" (resolved post-extraction): ` +
+              `  Re-extracting with guidance resolved post-extraction ` +
+              `(supplier="${lateSupplierName}" id=${lateSupplierId || 'none'}, ` +
+              `doctype=${lateDocTypeId || 'unresolved'}): ` +
               `${lateInstructions.length} chars`
             );
             // Promote the late-resolved supplier for learned-preference capture
             // and feed the guidance into the (lexically-closed-over) prompt
             // builders used by runTextPath()/runVlmSafe().
             reviewerInstructions = lateInstructions;
-            if (!resolvedSupplierIdForLearning) {
+            if (!resolvedSupplierIdForLearning && lateSupplierId) {
               resolvedSupplierIdForLearning = lateSupplierId;
+            }
+            // A type the classifier could not settle but the extraction named
+            // exactly: promote it so the re-extraction's prompt carries the
+            // type as well as the guidance, and so the result body posts it.
+            if (lateDocTypeId && lateDocTypeId !== effectiveDocTypeId) {
+              effectiveDocTypeId = lateDocTypeId;
+              const late = docTypeCatalog.find((dt) => dt.id === lateDocTypeId);
+              classifiedTypeName = late ? late.name : classifiedTypeName;
             }
             // Re-run the SAME path that produced the primary parsed, with the
             // instructions now in scope. Exactly one re-extraction.
@@ -2556,17 +2705,23 @@ async function processCoaItem(item) {
     // Compute confidence score (on primary path only)
     const confidenceScore = computeConfidenceScore(parsed.confidence, parsed.fields || {}, parsed.tables || []);
 
-    // Resolve document type if AI guessed one and queue item has no doc type set.
+    // Resolve the document type, if the classification pass did not already.
     // Only PROMOTE (write document_type_id) on an exact name/slug match —
     // substring / acronym hits are still recorded in document_type_guess for
     // the reviewer to confirm but won't silently rewrite the queue row.
-    let resolvedDocTypeId = item.document_type_id || null;
+    //
+    // `document_type_guess` (migration 0024) is the reviewer's window onto what
+    // the machine thought. It now carries the CLASSIFIER's raw answer when one
+    // ran — including an answer that resolved to nothing, which is precisely
+    // the case a human needs to see — and falls back to the extraction's own
+    // guess otherwise.
+    let resolvedDocTypeId = effectiveDocTypeId;
     let docTypeMatchType = null;
-    const docTypeGuess = parsed.documentType || null;
+    const docTypeGuess = (classification && classification.rawGuess) || parsed.documentType || null;
 
     if (docTypeGuess && !resolvedDocTypeId) {
       try {
-        const match = await fuzzyMatchDocType(docTypeGuess, item.tenant_id);
+        const match = await fuzzyMatchDocType(docTypeGuess, item.tenant_id, docTypeCatalog);
         if (match) {
           docTypeMatchType = match.matchType;
           if (match.matchType === 'exact') {
@@ -2752,8 +2907,13 @@ async function processCoaItem(item) {
 // === Field canonicalization ===
 
 const FIELD_ALIASES = {
-  supplier_name: ['supplier', 'vendor', 'manufacturer', 'company', 'from', 'shipped_by'],
-  customer_name: ['customer', 'sold_to', 'ship_to', 'buyer', 'consignee'],
+  // The certificate wordings ('insured', 'guarantor', 'certified_operation', …)
+  // are here because on a certificate the SUBJECT is the supplier for filing
+  // purposes — see FIELD EXTRACTION rule 6. A certificate filed under the
+  // certifying body instead of the company it certifies is invisible to the
+  // gap engine, which only ever asks "what do we hold for THIS supplier".
+  supplier_name: ['supplier', 'vendor', 'manufacturer', 'company', 'from', 'shipped_by', 'insured', 'insured_name', 'named_insured', 'guarantor', 'certified_operation', 'certified_company', 'certified_site', 'audited_site', 'registered_organization'],
+  customer_name: ['customer', 'sold_to', 'ship_to', 'buyer', 'consignee', 'certificate_holder', 'addressee'],
   // 'batch*' is deliberately NOT here — see batch_number below and the
   // promotion step in canonicalizeFields. A COA printing a Lot AND a Batch
   // prints two different identifiers, and collapsing them loses one.
@@ -2769,6 +2929,10 @@ const FIELD_ALIASES = {
   product_name: ['product', 'item', 'material', 'description', 'item_description'],
   product_code: ['item_code', 'sku', 'material_code', 'item_number', 'item_no'],
   expiration_date: ['exp_date', 'best_by', 'use_by', 'best_before', 'sell_by', 'bb_date'],
+  // Certificate-validity wordings ONLY. Deliberately no generic 'exp_date' /
+  // 'expiry' here: those are the PRODUCT's shelf life and must stay on
+  // expiration_date, or every COA acquires a document expiry again.
+  document_expires_on: ['valid_until', 'valid_through', 'valid_to', 'certificate_expiry', 'certificate_expiration', 'certificate_valid_until', 'policy_expiration', 'policy_expiry'],
   // production_date is NOT listed here. It used to be an alias of code_date,
   // which made the two the SAME field — so a COA printing both (Andersen's
   // 2026 layout: 'Production Date 7-31-26' and 'Code Date (Expiration)
@@ -2781,6 +2945,21 @@ const FIELD_ALIASES = {
   order_number: ['order_no', 'sales_order', 'reference_number', 'ref_number'],
   grade: ['quality_grade', 'usda_grade'],
   plant_number: ['plant_no', 'facility_number', 'facility_id', 'plant_id'],
+  // Certificate / statement fields (2026-09-02). Deliberately NARROW: only
+  // spellings that can mean nothing else. Generic keys a model reaches for —
+  // 'origin', 'country', 'standard', 'status', 'threshold', 'limit',
+  // 'contains', 'result' — are left alone, because folding one of those onto a
+  // canonical name silently rewrites a value whose meaning we did not check.
+  // KEEP IN SYNC with functions/lib/llm.ts.
+  issuing_body: ['issued_by', 'certifying_body', 'certification_body', 'certifier', 'certifying_agent', 'certification_agent', 'certification_agency', 'issuer', 'registrar'],
+  certificate_number: ['certificate_no', 'certificate_num', 'cert_number', 'cert_no', 'certificate_id'],
+  allergens: ['allergen', 'allergen_statement', 'allergen_declaration', 'declared_allergens', 'allergens_present'],
+  country_of_origin: ['origin_country', 'country_of_manufacture'],
+  scheme: ['certification_scheme', 'audit_standard', 'certification_standard', 'certification_program'],
+  kosher_status: ['kosher_designation'],
+  gluten_threshold: ['gluten_limit', 'gluten_ppm'],
+  revision_date: ['revised', 'date_revised', 'sds_revision_date', 'version_date'],
+  signatory: ['signed_by', 'signer', 'signer_name', 'authorized_by', 'authorised_by', 'authorized_representative', 'approved_by', 'signature'],
 };
 
 function canonicalizeFields(fields) {
@@ -2860,6 +3039,186 @@ function isTextGarbled(text) {
   return avgWordLen > 15 || whitespaceRatio < 0.08;
 }
 
+// === Document type classification (pre-extraction) ===
+//
+// WHY THIS RUNS BEFORE EXTRACTION. `document_type` used to fall out of the
+// extraction call, which made it a by-product of the very call that most needs
+// it: the document-type instruction layer (migration 0098) is KEYED on the
+// type, so guidance could only be applied by RE-extracting, and the pass that
+// decided the type was by definition the unguided one. Measured on the
+// document-type corpus that cost 21 of 40 documents — every organic, kosher,
+// gluten-free and audit certificate came back "Certificate of Analysis", so the
+// guidance missed exactly the documents written for it. Deciding the type first
+// breaks the cycle: one classification call, then ONE guided extraction.
+//
+// KEEP IN SYNC with functions/lib/llm.ts (CLASSIFIER_PROMPT, CLASSIFIER_TEXT_
+// BUDGET, normalizeTypeName, matchCandidate, classifiedTypeBlock);
+// tests/unit/documentClassifier.test.ts pins the shared text.
+
+/**
+ * How much of the document the classifier reads. A document announces what it
+ * is in its title block and first operative sentence; paying 35B prefill for
+ * page 4 to decide "this is a Kosher Certificate" is waste.
+ */
+const CLASSIFIER_TEXT_BUDGET = 3000;
+
+const CLASSIFIER_PROMPT = `You are a document classifier for a food-safety and supply-chain document library.
+
+You are given the beginning of ONE document and the list of document types this organisation actually files. Decide which ONE type names what this document IS.
+
+HOW TO DECIDE:
+- Read the title block, the letterhead and the operative sentence ("This is to certify that...", "We hereby guarantee...", "Results of analysis for the lot below...").
+- Classify by what the document DOES, not by what it mentions. A certificate that names a product is still a certificate. An audit certificate that cites test standards is not a Certificate of Analysis.
+- A Certificate of Analysis reports MEASURED RESULTS for a specific lot or batch. If the page reports no measured results for a lot, it is NOT a Certificate of Analysis, however often the word "certificate" appears.
+- The organisation on the letterhead of a certificate is usually the body that ISSUED it, not the company it is about. Its line of business does not decide the type.
+- Choose the name from the list VERBATIM. Do not invent a name, do not abbreviate one, and do not merge two.
+
+WHEN NOTHING FITS:
+Answer "none". An honest "none" sends the document to a human, which is correct. A confident wrong type is worse than no type: it silently applies the wrong reading instructions to every document like this one.
+
+Return JSON only:
+{
+  "document_type": "<exact name from the list>" | "none",
+  "confidence": "high" | "medium" | "low",
+  "evidence": "<up to 12 words quoted from the document that decided it>"
+}`;
+
+/** The block that tells extraction what classification already decided. */
+function classifiedTypeBlock(documentType) {
+  return [
+    '',
+    'DOCUMENT TYPE — ALREADY DETERMINED:',
+    `A separate classification pass read this page against this organisation's own list of document types and identified it as: ${documentType}.`,
+    'Read the page as that kind of document, and return that exact name in "document_type".',
+    'If the page is plainly not that kind of document, extract what the page actually says and report the type it really is. The classification tells you where to look; it never licenses a value the page does not print (FIELD EXTRACTION rule 7).',
+  ].join('\n');
+}
+
+/** Case/punctuation-fold a type name. Same normalization as fuzzyMatchDocType. */
+function normalizeTypeName(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * Resolve the model's answer to one of the offered candidates — EXACT
+ * (normalized) name or slug only. Deliberately not fuzzy: the answer was picked
+ * from a list we supplied, so one that is not in it is evidence the model went
+ * its own way, and matching it back would manufacture the confident wrong type
+ * this pass exists to avoid.
+ */
+function matchDocTypeCandidate(guess, candidates) {
+  const g = normalizeTypeName(guess);
+  if (!g || g === 'none') return null;
+  for (const c of candidates) {
+    if (normalizeTypeName(c.name) === g) return c;
+    if (c.slug && normalizeTypeName(c.slug) === g) return c;
+  }
+  return null;
+}
+
+/** The tenant's active document types — the closed list the classifier picks from. */
+async function fetchDocTypes(tenantId) {
+  const res = await fetch(
+    `${DOX_API_URL}/api/document-types?tenant_id=${encodeURIComponent(tenantId)}&active=1`,
+    { headers }
+  );
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.documentTypes || [];
+}
+
+/**
+ * Classify one document against the tenant's own catalog.
+ *
+ * Runs on the `fast` chain: a short prompt, a one-line answer, and a human
+ * waiting at the review queue. Today `fast` and `best` resolve to the same
+ * weights on the same host, so the tag states intent rather than saving money —
+ * the saving is the input (a page, not a document) and the output (a line, not
+ * an extraction).
+ *
+ * The FILENAME is deliberately not supplied. Filenames belong to whoever sent
+ * the file ("scan0043.pdf", or a broker's mailer that says COA about a kosher
+ * certificate); FIELD EXTRACTION rule 4 already restricts them to supplier
+ * context for that reason. Classification reads the page.
+ *
+ * Never throws for a classification reason: an unreadable or unparseable answer
+ * is "no type", which is what document_type_id staying NULL already means.
+ */
+async function classifyDocument(text, candidates) {
+  const out = { documentType: null, candidate: null, rawGuess: null, confidence: 'low', evidence: null, servedModel: null };
+  if (!text || !text.trim() || !candidates.length) return out;
+
+  const list = candidates.map((c) => `- ${c.name}`).join('\n');
+  const systemPrompt = `${CLASSIFIER_PROMPT}\n\nDOCUMENT TYPES THIS ORGANISATION FILES:\n${list}\n- none`;
+
+  const failedModels = new Set();
+  let data = null;
+  for (let attempt = 1; attempt <= 2 && !data; attempt++) {
+    const model = await pickModel('fast', failedModels);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120_000);
+    try {
+      const res = await fetch(`${QWEN_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(QWEN_SECRET ? { Authorization: `Bearer ${QWEN_SECRET}` } : {}),
+        },
+        signal: controller.signal,
+        dispatcher: llmDispatcher,
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          max_tokens: 200,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            {
+              role: 'user',
+              content: `<document>\n${text.substring(0, CLASSIFIER_TEXT_BUDGET)}\n</document>\n\nWhich ONE of the listed document types is this? Return JSON only.`,
+            },
+          ],
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok || body.error) throw new Error(body.error?.message || `HTTP ${res.status}`);
+      data = body;
+      out.servedModel = body.model || model;
+    } catch (err) {
+      failedModels.add(model);
+      if (attempt === 2) {
+        console.warn(`  Classification failed (non-critical, extracting untyped): ${err.message}`);
+        return out;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  let content = (data.choices?.[0]?.message?.content || '')
+    .replace(/<think>[\s\S]*?<\/think>\s*/g, '')
+    .trim();
+  const fence = content.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/);
+  if (fence) content = fence[1].trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return out;
+  }
+
+  out.rawGuess = typeof parsed.document_type === 'string' && parsed.document_type.trim()
+    ? parsed.document_type.trim()
+    : null;
+  out.candidate = matchDocTypeCandidate(out.rawGuess, candidates);
+  // The CATALOG's spelling, not the model's echo of it — downstream code
+  // matches this against the catalog.
+  out.documentType = out.candidate ? out.candidate.name : null;
+  if (['high', 'medium', 'low'].includes(parsed.confidence)) out.confidence = parsed.confidence;
+  if (typeof parsed.evidence === 'string') out.evidence = parsed.evidence.trim().slice(0, 200);
+  return out;
+}
+
 // === Document type fuzzy matching ===
 
 /**
@@ -2872,15 +3231,11 @@ function isTextGarbled(text) {
  * the queue item's document_type_id on 'exact' — substring/acronym hits are
  * informative but not safe to commit unattended.
  */
-async function fuzzyMatchDocType(guess, tenantId) {
-  const res = await fetch(
-    `${DOX_API_URL}/api/document-types?tenant_id=${encodeURIComponent(tenantId)}&active=1`,
-    { headers }
-  );
-  if (!res.ok) return null;
-
-  const data = await res.json();
-  const docTypes = data.documentTypes || [];
+async function fuzzyMatchDocType(guess, tenantId, preloaded) {
+  // `preloaded` is the catalog the classification pass already fetched for this
+  // item — passing it avoids a second identical GET per document, and (more
+  // importantly) guarantees both passes reason about the SAME list.
+  const docTypes = preloaded || await fetchDocTypes(tenantId);
   if (docTypes.length === 0) return null;
 
   const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -2923,6 +3278,7 @@ DOCUMENT TYPES:
 - Spec Sheet: Product specification with allowable ranges for tests.
 - Invoice / PO: Purchase order or invoice with line items, quantities, prices.
 - Safety Data Sheet (SDS): Chemical safety information.
+- Certificates and statements: certificate of insurance, letter of guarantee, allergen statement, organic / kosher / gluten-free / non-GMO certificate, third-party audit certificate, country-of-origin statement, specification sheet. These attest something about a company, a site or a product LINE; they carry no measured lot results. A document is a Certificate of Analysis ONLY when it reports MEASURED RESULTS for a specific lot or batch — the word "certificate" in a title is not enough, and misreading a certificate as a COA is the single most common document-type error.
 
 FIELD EXTRACTION RULES:
 1. Use these EXACT canonical field names (snake_case):
@@ -2936,20 +3292,34 @@ FIELD EXTRACTION RULES:
    - po_number — purchase order number
    - code_date — the code/pack date printed on the product. On many dairy COAs this IS the production date; when a COA prints BOTH a production date and a separate code date, they are DIFFERENT fields — do not copy one into the other.
    - production_date — the date the product was actually made, when the document labels it separately (e.g. "Production Date"). Leave null if the COA prints only a code date.
-   - expiration_date — expiration, best-by, use-by, or sell-by date
+   - expiration_date — the PRODUCT's expiration, best-by, use-by, or sell-by date. This is SHELF LIFE: when the material stops being good. It says nothing about how long the paperwork is valid.
+   - document_expires_on — the date THE DOCUMENT ITSELF stops being valid, when the document states one. ONLY certificates carry this: a certificate of insurance (the "Expiration Date" of the policy period), a certification (organic, kosher, halal, non-GMO, GFSI/SQF/BRC), a third-party audit certificate, a licence or registration. A COA, spec sheet, BOL or invoice does NOT have one — a COA's printed expiry is the PRODUCT's shelf life and belongs in expiration_date, never here. Never put the same date in both fields, and never infer this one: if the document is not a certificate stating its own validity period, return null.
    - ship_date — date shipped
    - grade — quality grade (e.g., "Grade A", "Grade AA", "US Extra")
    - plant_number — facility ID or plant number
    - net_weight — net weight with units
    - order_number — sales order or reference number
+   - issuing_body — on a CERTIFICATE, the organisation that ISSUED it: the certifying agent, certification body, registrar, auditing firm, insurer or insurance broker whose name is on the letterhead. It is NOT the company being certified — that is supplier_name (rule 6). An ACCREDITATION body, which accredits the certifier rather than issuing this certificate (ANAB, IAF, a national accreditation service), is not the issuer.
+   - certificate_number — the certificate's OWN number, as printed and labelled ("Certificate No.", "Cert #", "Certificate ID"). A policy number, a form number, an audit report number, a customer's item number and a document revision number are NOT certificate numbers. When the page prints none, this is null however many other numbers it prints.
+   - scheme — the standard or programme a certification was granted against, as printed (e.g. "SQF Food Safety Code for Manufacturing Edition 9", "BRCGS Food Safety Issue 9", "FSSC 22000 v6", "USDA National Organic Program").
+   - kosher_status — the kosher designation the certificate gives the certified products (e.g. "Dairy", "Pareve", "Meat", "Dairy Equipment"). Null when none is printed.
+   - gluten_threshold — the gluten threshold the certification was granted against, EXACTLY as printed, with its unit ("10 ppm", "< 20 ppm"). A citation of a regulation or standard (21 CFR 101.91, Codex Alimentarius) is NOT a threshold — a document may cite the rule and print no figure at all. If no figure is printed this is null: rule 7 governs, and the well-known regulatory number is exactly the value you must not supply.
+   - allergens — the allergens present IN the product's formulation, as printed, comma-separated. An allergen named only to say it is ABSENT ("contains no peanut"), and an allergen named only as a shared-line, shared-facility or cross-contact risk, is not present in the formulation.
+   - country_of_origin — the country the document declares the GOODS THEMSELVES originate in. The origin of the packaging, the address of a testing laboratory, a port of transhipment, a corporate head office and a market the goods may not be exported to are NOT the origin of the goods.
+   - revision_date — the date THIS VERSION of the document was issued or revised ("Revision Date", "Revised", "Version date"), on documents that carry versions — a safety data sheet, a specification. A print date, a page-footer date and a supersedes date are not revision dates.
+   - signatory — the PRINTED NAME of the person who signed or authorised the document ("Jane Ruiz, QA Manager" gives "Jane Ruiz"). Rule 3 still bars the signature MARK: take a name that is typed or printed on the page, never one read out of a handwritten squiggle, and return null when no name is printed.
 
 2. For dates: normalize to YYYY-MM-DD. Two-digit years mean 2000s (e.g., '26 = 2026, 03/08/26 = 2026-03-08). Julian dates (e.g., "6094") mean day 094 of 2026 — convert when identifiable. If ambiguous, keep as-is.
 
-3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signatures, titles, disclaimers, individual test values (those go in tables).
+3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signature marks, titles, disclaimers, individual test values (those go in tables). The one carve-out is the signer's PRINTED NAME, which goes in signatory (rule 1): a name typed under a signature line is data a reviewer needs to chase a document, while the handwritten mark above it is not, and reading a name out of a squiggle is invention.
 
 4. FILENAME CONTEXT: The filename hint (<filename_hint> in the system prompt) is provided ONLY for supplier identification context. NEVER extract lot_number, code_date, production_date, expiration_date, product_code, or sub_lot_number from the filename. If those values aren't in the document body, return null.
 
 5. SUPPLIER vs CUSTOMER: A common error is confusing supplier and customer. The supplier PRODUCES the product; the customer RECEIVES it. If "MEDOSWEET FARMS" appears after "Ship To:", it is the customer_name, not the supplier_name. The company at the TOP of the document (letterhead, header) is usually the supplier.
+
+6. ON A CERTIFICATE THE LETTERHEAD IS THE ISSUER, NOT THE SUPPLIER. Rule 5's "company at the TOP is usually the supplier" is a COA heuristic and it is backwards here: an insurance certificate is printed on the broker's or insurer's paper, an organic or kosher certificate on the certifying agency's, an audit certificate on the certification body's. The SUBJECT of the certificate — the insured, the guarantor, the certified operation, the audited site, the company the statement is made ABOUT — is the supplier_name, and it is usually named in the body after "issued to", "this is to certify that", "certifies that", "the insured is", "certified operation" or "audited site". The organisation on the letterhead goes in issuing_body, so both are captured and neither is filed under the other's name. If you cannot tell which company is the subject, leave supplier_name null rather than falling back to the letterhead.
+
+7. NEVER SUPPLY A FIELD VALUE THE DOCUMENT DID NOT PRINT. This is TABLE EXTRACTION RULE 14 applied to fields. If the page states no certificate number, no threshold, no expiry, no origin, the field is null — do not fill it from a regulation you know, from a different number printed elsewhere on the page, or from what documents of this kind usually say. A field a reviewer can see is empty is a gap somebody can close; a plausible value the page does not contain is a false record nobody will ever re-check.
 
 TABLE EXTRACTION RULES:
 1. Extract ALL tabular data found in the document. Preserve every column present — do not drop columns.
@@ -3171,9 +3541,10 @@ function buildFewShotBlock(examples = []) {
   return header + body + footer;
 }
 
-function buildPrompt(examples = [], tenantContext = null) {
+function buildPrompt(examples = [], tenantContext = null, classifiedType = null) {
   return (
     BASE_PROMPT +
+    (classifiedType ? '\n' + classifiedTypeBlock(classifiedType) : '') +
     '\n\n' +
     stripUnfilledPlaceholders(tenantContext || DAIRY_FOOD_INDUSTRY_PROMPT) +
     buildFewShotBlock(examples)
@@ -3248,7 +3619,7 @@ async function renderPdfPagesToPng(pdfBuffer, maxPages) {
  * VLM-specific rules that lean on the model's ability to read the image
  * directly (no OCR garble to worry about).
  */
-function buildVlmPrompt(examples = [], tenantContext = null) {
+function buildVlmPrompt(examples = [], tenantContext = null, classifiedType = null) {
   const VLM_HEADER = `You are a document data extraction assistant looking at an IMAGE of the document (no OCR text — you read the pixels directly).
 
 VLM-SPECIFIC RULES:
@@ -3265,6 +3636,7 @@ DOCUMENT TYPES:
 - Spec Sheet: Product specification with allowable ranges for tests.
 - Invoice / PO: Purchase order or invoice with line items, quantities, prices.
 - Safety Data Sheet (SDS): Chemical safety information.
+- Certificates and statements: certificate of insurance, letter of guarantee, allergen statement, organic / kosher / gluten-free / non-GMO certificate, third-party audit certificate, country-of-origin statement, specification sheet. These attest something about a company, a site or a product LINE; they carry no measured lot results. A document is a Certificate of Analysis ONLY when it reports MEASURED RESULTS for a specific lot or batch — the word "certificate" in a title is not enough, and misreading a certificate as a COA is the single most common document-type error.
 
 FIELD EXTRACTION RULES:
 1. Use these EXACT canonical field names (snake_case):
@@ -3278,20 +3650,34 @@ FIELD EXTRACTION RULES:
    - po_number — purchase order number. ONLY populate if an explicit "PO", "P.O.", or "Purchase Order" label is visible in the image. Do NOT infer or fabricate from adjacent columns.
    - code_date — the code/pack date printed on the product. On many dairy COAs this IS the production date; when a COA prints BOTH a production date and a separate code date, they are DIFFERENT fields — do not copy one into the other.
    - production_date — the date the product was actually made, when the document labels it separately (e.g. "Production Date"). Leave null if the COA prints only a code date.
-   - expiration_date — expiration, best-by, use-by, or sell-by date
+   - expiration_date — the PRODUCT's expiration, best-by, use-by, or sell-by date. This is SHELF LIFE: when the material stops being good. It says nothing about how long the paperwork is valid.
+   - document_expires_on — the date THE DOCUMENT ITSELF stops being valid, when the document states one. ONLY certificates carry this: a certificate of insurance (the "Expiration Date" of the policy period), a certification (organic, kosher, halal, non-GMO, GFSI/SQF/BRC), a third-party audit certificate, a licence or registration. A COA, spec sheet, BOL or invoice does NOT have one — a COA's printed expiry is the PRODUCT's shelf life and belongs in expiration_date, never here. Never put the same date in both fields, and never infer this one: if the document is not a certificate stating its own validity period, return null.
    - ship_date — date shipped
    - grade — quality grade (e.g., "Grade A", "Grade AA", "US Extra")
    - plant_number — facility ID or plant number
    - net_weight — net weight with units
    - order_number — sales order or reference number
+   - issuing_body — on a CERTIFICATE, the organisation that ISSUED it: the certifying agent, certification body, registrar, auditing firm, insurer or insurance broker whose name is on the letterhead. It is NOT the company being certified — that is supplier_name (rule 6). An ACCREDITATION body, which accredits the certifier rather than issuing this certificate (ANAB, IAF, a national accreditation service), is not the issuer.
+   - certificate_number — the certificate's OWN number, as printed and labelled ("Certificate No.", "Cert #", "Certificate ID"). A policy number, a form number, an audit report number, a customer's item number and a document revision number are NOT certificate numbers. When the page prints none, this is null however many other numbers it prints.
+   - scheme — the standard or programme a certification was granted against, as printed (e.g. "SQF Food Safety Code for Manufacturing Edition 9", "BRCGS Food Safety Issue 9", "FSSC 22000 v6", "USDA National Organic Program").
+   - kosher_status — the kosher designation the certificate gives the certified products (e.g. "Dairy", "Pareve", "Meat", "Dairy Equipment"). Null when none is printed.
+   - gluten_threshold — the gluten threshold the certification was granted against, EXACTLY as printed, with its unit ("10 ppm", "< 20 ppm"). A citation of a regulation or standard (21 CFR 101.91, Codex Alimentarius) is NOT a threshold — a document may cite the rule and print no figure at all. If no figure is printed this is null: rule 7 governs, and the well-known regulatory number is exactly the value you must not supply.
+   - allergens — the allergens present IN the product's formulation, as printed, comma-separated. An allergen named only to say it is ABSENT ("contains no peanut"), and an allergen named only as a shared-line, shared-facility or cross-contact risk, is not present in the formulation.
+   - country_of_origin — the country the document declares the GOODS THEMSELVES originate in. The origin of the packaging, the address of a testing laboratory, a port of transhipment, a corporate head office and a market the goods may not be exported to are NOT the origin of the goods.
+   - revision_date — the date THIS VERSION of the document was issued or revised ("Revision Date", "Revised", "Version date"), on documents that carry versions — a safety data sheet, a specification. A print date, a page-footer date and a supersedes date are not revision dates.
+   - signatory — the PRINTED NAME of the person who signed or authorised the document ("Jane Ruiz, QA Manager" gives "Jane Ruiz"). Rule 3 still bars the signature MARK: take a name that is typed or printed on the page, never one read out of a handwritten squiggle, and return null when no name is printed.
 
 2. For dates: normalize to YYYY-MM-DD. Two-digit years mean 2000s (e.g., '26 = 2026, 03/08/26 = 2026-03-08). Julian dates (e.g., "6094") mean day 094 of 2026 — convert when identifiable. If ambiguous, keep as-is.
 
-3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signatures, titles, disclaimers, individual test values (those go in tables).
+3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signature marks, titles, disclaimers, individual test values (those go in tables). The one carve-out is the signer's PRINTED NAME, which goes in signatory (rule 1): a name typed under a signature line is data a reviewer needs to chase a document, while the handwritten mark above it is not, and reading a name out of a squiggle is invention.
 
 4. FILENAME CONTEXT: The filename hint (<filename_hint> in the system prompt) is provided ONLY for supplier identification context. NEVER extract lot_number, code_date, production_date, expiration_date, product_code, or sub_lot_number from the filename. If those values aren't in the image body, return null.
 
 5. SUPPLIER vs CUSTOMER: A common error is confusing supplier and customer. The supplier PRODUCES the product; the customer RECEIVES it. The company at the TOP of the document (letterhead, header) is usually the supplier.
+
+6. ON A CERTIFICATE THE LETTERHEAD IS THE ISSUER, NOT THE SUPPLIER. Rule 5's "company at the TOP is usually the supplier" is a COA heuristic and it is backwards here: an insurance certificate is printed on the broker's or insurer's paper, an organic or kosher certificate on the certifying agency's, an audit certificate on the certification body's. The SUBJECT of the certificate — the insured, the guarantor, the certified operation, the audited site, the company the statement is made ABOUT — is the supplier_name, and it is usually named in the body after "issued to", "this is to certify that", "certifies that", "the insured is", "certified operation" or "audited site". The organisation on the letterhead goes in issuing_body, so both are captured and neither is filed under the other's name. If you cannot tell which company is the subject, leave supplier_name null rather than falling back to the letterhead.
+
+7. NEVER SUPPLY A FIELD VALUE THE DOCUMENT DID NOT PRINT. This is TABLE EXTRACTION RULE 14 applied to fields. If the page states no certificate number, no threshold, no expiry, no origin, the field is null — do not fill it from a regulation you know, from a different number printed elsewhere on the page, or from what documents of this kind usually say. A field a reviewer can see is empty is a gap somebody can close; a plausible value the page does not contain is a false record nobody will ever re-check.
 
 TABLE EXTRACTION RULES:
 1. Extract ALL tabular data visible in the image. Preserve every column present — do not drop columns.
@@ -3335,9 +3721,13 @@ Return JSON with:
 }`;
 
   // Same industry-layer + few-shot assembly as the text path (buildPrompt) —
-  // shared helpers so the two prompt surfaces cannot drift apart.
+  // shared helpers so the two prompt surfaces cannot drift apart. The
+  // classification block is shared too: the classifier reads the TEXT layer, so
+  // on a dual run the vision pass gets the same answer rather than re-deciding
+  // the type from pixels and disagreeing with its own text path.
   const prompt =
     VLM_HEADER +
+    (classifiedType ? '\n' + classifiedTypeBlock(classifiedType) : '') +
     '\n\n' +
     stripUnfilledPlaceholders(tenantContext || DAIRY_FOOD_INDUSTRY_PROMPT) +
     buildFewShotBlock(examples);

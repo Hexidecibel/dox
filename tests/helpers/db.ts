@@ -91,6 +91,10 @@ import m0091 from '../../migrations/0091_renewal_routing_and_alert_state.sql?raw
 import m0092 from '../../migrations/0092_supplier_request_portal.sql?raw';
 import m0093 from '../../migrations/0093_tenant_spec_unit_equivalence.sql?raw';
 import m0094 from '../../migrations/0094_request_upload_queue_link.sql?raw';
+import m0095 from '../../migrations/0095_spec_limit_criticality.sql?raw';
+import m0096 from '../../migrations/0096_document_type_renewal_period.sql?raw';
+import m0097 from '../../migrations/0097_renewal_policy_and_decision.sql?raw';
+import m0098 from '../../migrations/0098_document_type_extraction_instructions.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -102,7 +106,8 @@ const migrations: string[] = [
   m0064, m0065, m0066, m0067, m0068, m0069, m0070, m0071,
   m0072, m0073, m0074, m0075,
   m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
-  m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094,
+  m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094, m0095,
+  m0096, m0097, m0098,
 ];
 
 /**
@@ -364,6 +369,9 @@ export async function cleanTables(db: D1Database): Promise<void> {
     'request_template_lines', 'request_templates',
     'order_items', 'orders', 'document_versions', 'document_products', 'documents',
     'requirements', 'claim_types',
+    // 0098 type-level extraction guidance FKs document_types + tenants, so it
+    // clears ahead of both.
+    'document_type_extraction_instructions',
     'document_types', 'naming_templates', 'email_domain_mappings',
     'bundle_documents', 'bundles', 'api_keys', 'sessions',
     'password_resets', 'rate_limits', 'users', 'lots', 'products',

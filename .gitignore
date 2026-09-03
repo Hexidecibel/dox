@@ -55,3 +55,10 @@ pending/
 # Generated spec-corpus PDFs — the HTML in tests/fixtures/spec-corpus/html is
 # the source of truth; rebuild with bin/render-spec-corpus.
 tests/fixtures/spec-corpus/pdf/
+
+# Generated doctype-corpus PDFs, scanned variants, the freshly-bundled llm.ts,
+# and saved measurement runs. The HTML in tests/fixtures/doctype-corpus/html is
+# the source of truth; rebuild with bin/render-doctype-corpus.
+tests/fixtures/doctype-corpus/pdf/
+tests/fixtures/doctype-corpus/.build/
+tests/fixtures/doctype-corpus/runs/

@@ -1,5 +1,6 @@
 import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
 import { produceCoa, produceMultiProductCoa } from './kinds/coa';
+import type { RenewalWrite } from './renewal-proposal';
 
 /**
  * Public entry points for approving COA queue items. The canonical-entity
@@ -93,6 +94,15 @@ export interface ApproveOptions {
    */
   supplierId?: string;
   supplierName?: string;
+  /**
+   * The renewal decision a reviewer confirmed on the approve screen
+   * (migration 0097), already compared against the server-recomputed proposal
+   * by `resolveRenewalDecision`. Absent means nobody answered the question, and
+   * the producer then writes NO renewal columns at all — which is the honest
+   * record of "not reviewed" and is distinct from a reviewer answering "this
+   * does not renew".
+   */
+  renewal?: RenewalWrite;
 }
 
 export interface ApproveResult {
@@ -134,6 +144,15 @@ export interface MultiProductApproveOptions {
    */
   supplierId?: string;
   supplierName?: string;
+  /**
+   * The renewal decision a reviewer confirmed on the approve screen
+   * (migration 0097), already compared against the server-recomputed proposal
+   * by `resolveRenewalDecision`. Absent means nobody answered the question, and
+   * the producer then writes NO renewal columns at all — which is the honest
+   * record of "not reviewed" and is distinct from a reviewer answering "this
+   * does not renew".
+   */
+  renewal?: RenewalWrite;
 }
 
 export interface MultiProductApproveResult {

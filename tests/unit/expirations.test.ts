@@ -24,8 +24,11 @@ function input(partial: Partial<RenewalInput>): RenewalInput {
     renewal_type: null,
     renewal_due_date: null,
     renewal_interval_months: null,
-    meta_expiration_date: null,
+    renewal_decision: null,
+    meta_document_expires_on: null,
     meta_effective_date: null,
+    type_renewal_policy: null,
+    type_renewal_interval_months: null,
     ...partial,
   };
 }
@@ -114,8 +117,8 @@ describe('computeStatus — keep_current (never alerts)', () => {
 });
 
 describe('computeStatus — null/unknown renewal_type (bare legacy expiry)', () => {
-  it('treats a bare primary_metadata expiration as a hard drop-dead date → expired', () => {
-    const r = computeStatus(input({ renewal_type: null, meta_expiration_date: '2026-06-01' }), AS_OF, WINDOW);
+  it('treats a bare document expiry as a hard drop-dead date → expired', () => {
+    const r = computeStatus(input({ renewal_type: null, meta_document_expires_on: '2026-06-01' }), AS_OF, WINDOW);
     expect(r.status).toBe('expired');
   });
   it('no resolvable date at all → status null (excluded)', () => {
@@ -127,10 +130,10 @@ describe('computeStatus — null/unknown renewal_type (bare legacy expiry)', () 
 
 describe('resolveDueDate precedence', () => {
   it('canonical renewal_due_date wins over metadata', () => {
-    expect(resolveDueDate(input({ renewal_due_date: '2027-05-05', meta_expiration_date: '2026-01-01' }))).toBe('2027-05-05');
+    expect(resolveDueDate(input({ renewal_due_date: '2027-05-05', meta_document_expires_on: '2026-01-01' }))).toBe('2027-05-05');
   });
-  it('falls back to primary_metadata expiration when canonical is null', () => {
-    expect(resolveDueDate(input({ meta_expiration_date: '2026-01-01' }))).toBe('2026-01-01');
+  it("falls back to the document's own printed expiry when canonical is null", () => {
+    expect(resolveDueDate(input({ meta_document_expires_on: '2026-01-01' }))).toBe('2026-01-01');
   });
   it('strips a time component to a bare date', () => {
     expect(resolveDueDate(input({ renewal_due_date: '2027-05-05T12:00:00Z' }))).toBe('2027-05-05');

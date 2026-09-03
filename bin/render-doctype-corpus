@@ -1,0 +1,250 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/render-doctype-corpus — turn the document-TYPE corpus HTML into PDFs,
+ * prove the text layer says what the manifest claims, and build the SCANNED
+ * variants that the clean tier is measured against.
+ *
+ * WHY IT MIRRORS bin/render-spec-corpus. Same reasoning, same discipline: a
+ * committed binary fixture is unreadable and unreviewable, so the HTML in
+ * `tests/fixtures/doctype-corpus/html/` is the source of truth and the PDFs are
+ * gitignored build output. And a fixture whose text layer is wrong tests the
+ * wrong thing silently, so every claim the manifest makes about the printed
+ * page is asserted here before anything is measured.
+ *
+ * WHAT IS ASSERTED, beyond spec-corpus's `pdf_text_must_contain`:
+ *   * every graded field whose ground truth is a PRINTED STRING must be
+ *     findable in the text layer (the truth itself, or one of its `accept`
+ *     variants, or all of its `tokens_all`). Ground truth for this corpus is
+ *     authored BEFORE the model runs, so this is the only thing standing
+ *     between "the answer is X" and "the page actually says X".
+ *   * whitespace is flattened before comparison, which is deliberate: several
+ *     nasty fixtures SPLIT a value across a line break on purpose. Flattening
+ *     lets the fixture check pass while the model still faces the break.
+ *
+ * WHY THERE IS A SCAN STEP. Synthetic PDFs have a perfect text layer; real
+ * supplier documents are frequently scans. Measuring only the clean text layer
+ * would report a number that does not exist in production. Each document marked
+ * `"scan": true` is therefore ALSO rasterised at 150 dpi, degraded (slight
+ * rotation, blur, gaussian noise, reduced contrast) and rebuilt as an
+ * IMAGE-ONLY PDF, which drives bin/process-worker's real OCR branch
+ * (pdftoppm -gray -r 300 | tesseract --psm 1) instead of its text branch. The
+ * scanned variant carries the SAME ground truth as its source, so the delta
+ * between the two is the scanner tax, isolated.
+ *
+ * Usage:
+ *   bin/render-doctype-corpus                 # render + scan + verify all
+ *   bin/render-doctype-corpus --doc coi-nasty # one document
+ *   bin/render-doctype-corpus --no-scan       # skip the scanned variants
+ *   bin/render-doctype-corpus --verify-only   # re-check existing PDFs
+ *   bin/render-doctype-corpus --text          # dump the extracted text
+ *
+ * Requires the Playwright chromium used by the e2e suite, `pdftotext` and
+ * `pdftoppm` (poppler-utils), and ImageMagick `convert` for the scan step.
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { execFileSync } = require('node:child_process');
+
+const ROOT = path.resolve(__dirname, '..');
+const DIR = path.join(ROOT, 'tests/fixtures/doctype-corpus');
+const CORPUS = path.join(DIR, 'corpus.json');
+
+const C = process.stdout.isTTY
+  ? { g: '\x1b[32m', r: '\x1b[31m', y: '\x1b[33m', d: '\x1b[2m', b: '\x1b[1m', x: '\x1b[0m' }
+  : { g: '', r: '', y: '', d: '', b: '', x: '' };
+
+function parseArgs(argv) {
+  const o = { doc: null, text: false, verifyOnly: false, scan: true, help: false };
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
+      case '--doc': o.doc = argv[++i]; break;
+      case '--text': o.text = true; break;
+      case '--verify-only': o.verifyOnly = true; break;
+      case '--no-scan': o.scan = false; break;
+      case '-h': case '--help': o.help = true; break;
+      default: console.error(`unknown flag: ${argv[i]}`); process.exit(2);
+    }
+  }
+  return o;
+}
+
+function pdfText(file, layout = true) {
+  const args = layout ? ['-layout', file, '-'] : [file, '-'];
+  return execFileSync('pdftotext', args, { encoding: 'utf8' });
+}
+
+/**
+ * Whitespace-flattened, case-folded, and dash/quote-folded. The last part is
+ * not cosmetic: the fixtures are HTML, so an em dash written as `&mdash;` comes
+ * back out of the text layer as U+2014 while the manifest is typed with an
+ * ASCII hyphen. Folding them together compares what a reader would call the
+ * same string. Nothing else is smoothed over.
+ */
+function flat(s) {
+  return String(s)
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Build the image-only "scanned" PDF: rasterise, degrade, re-wrap. The
+ * degradation is mild on purpose — heavy noise would measure tesseract's
+ * breaking point rather than a realistic office scan.
+ */
+function makeScan(srcPdf, outPdf) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'doctype-scan-'));
+  try {
+    execFileSync('pdftoppm', ['-gray', '-r', '150', srcPdf, path.join(tmp, 'p')], { stdio: 'pipe' });
+    const pages = fs.readdirSync(tmp).filter((f) => /\.(pgm|ppm)$/.test(f)).sort();
+    if (!pages.length) throw new Error('pdftoppm produced no pages');
+    const degraded = [];
+    for (const p of pages) {
+      const out = path.join(tmp, `${p}.png`);
+      execFileSync('convert', [
+        path.join(tmp, p),
+        '-rotate', '0.35',
+        '-blur', '0x0.5',
+        '-attenuate', '0.35', '+noise', 'Gaussian',
+        '-level', '8%,94%',
+        '-colorspace', 'Gray',
+        '-quality', '80',
+        out,
+      ], { stdio: 'pipe', timeout: 120000 });
+      degraded.push(out);
+    }
+    execFileSync('convert', [...degraded, '-compress', 'JPEG', outPdf], { stdio: 'pipe', timeout: 120000 });
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+/** Every printed string the manifest's ground truth commits to. */
+function printedClaims(doc) {
+  const claims = [];
+  for (const f of doc.fields || []) {
+    if (f.truth === null || f.truth === undefined) continue;
+    if (f.match === 'date') continue;              // ISO truth, printed in some other format
+    if (f.match === 'tokens') {
+      for (const t of f.tokens_all || []) claims.push({ field: f.name, any: [t] });
+      if (!(f.tokens_all || []).length && (f.tokens_any || []).length) {
+        claims.push({ field: f.name, any: f.tokens_any });
+      }
+      continue;
+    }
+    claims.push({ field: f.name, any: [f.truth, ...(f.accept || [])] });
+  }
+  for (const s of doc.tables_must_contain || []) claims.push({ field: 'tables_must_contain', any: [s] });
+  return claims;
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(3, 44).join('\n').replace(/^ ?\*\/?/gm, ''));
+    return 0;
+  }
+
+  const corpus = JSON.parse(fs.readFileSync(CORPUS, 'utf8'));
+  const docs = corpus.documents.filter((d) => !opts.doc || d.id === opts.doc);
+  if (!docs.length) {
+    console.error(`no document matched ${JSON.stringify(opts.doc)}`);
+    return 2;
+  }
+  fs.mkdirSync(path.join(DIR, 'pdf'), { recursive: true });
+
+  let browser = null;
+  if (!opts.verifyOnly) {
+    const { chromium } = require('@playwright/test');
+    browser = await chromium.launch();
+  }
+
+  let failures = 0;
+  let scans = 0;
+  for (const doc of docs) {
+    const html = path.join(DIR, doc.html);
+    const pdf = path.join(DIR, doc.pdf);
+
+    if (browser) {
+      const page = await browser.newPage();
+      await page.goto(`file://${html}`, { waitUntil: 'load' });
+      await page.pdf({ path: pdf, printBackground: true });
+      await page.close();
+    } else if (!fs.existsSync(pdf)) {
+      console.log(`${C.r}✗${C.x} ${doc.id} ${C.d}— no PDF to verify; run without --verify-only${C.x}`);
+      failures++;
+      continue;
+    }
+
+    // BOTH readings of the page. `-layout` preserves columns (what the
+    // geometry serializer approximates for the model); the plain reading gives
+    // content-stream order, in which a value wrapped inside a narrow table cell
+    // is still contiguous. A claim satisfied by EITHER is printed on the page —
+    // which is the only thing this check is entitled to assert. Whether the
+    // model can then reassemble it is the measurement, not the fixture.
+    const text = pdfText(pdf);
+    const flatText = flat(text);
+    const flatRaw = flat(pdfText(pdf, false));
+    const seen = (s) => flatText.includes(flat(s)) || flatRaw.includes(flat(s));
+    const missing = (doc.pdf_text_must_contain || []).filter((s) => !seen(s));
+    const unprinted = printedClaims(doc)
+      .filter((c) => !c.any.some(seen))
+      .map((c) => `${c.field}: ${JSON.stringify(c.any[0])}`);
+
+    // The scanned variant. Built from the just-rendered PDF so the two are the
+    // same document, and asserted to carry NO usable text layer — if it did,
+    // the run would silently measure the text path twice and report it as OCR.
+    let scanNote = '';
+    if (doc.scan && opts.scan && !opts.verifyOnly) {
+      const scanPdf = pdf.replace(/\.pdf$/, '.scan.pdf');
+      try {
+        makeScan(pdf, scanPdf);
+        const leftover = pdfText(scanPdf).replace(/\s/g, '');
+        if (leftover.length > 40) {
+          failures++;
+          console.log(`${C.r}✗${C.x} ${doc.id} ${C.d}— scanned variant still has a ${leftover.length}-char text layer; it would not exercise OCR${C.x}`);
+        } else {
+          scans++;
+          scanNote = `, scan ${(fs.statSync(scanPdf).size / 1024).toFixed(0)}kb (no text layer)`;
+        }
+      } catch (err) {
+        failures++;
+        console.log(`${C.r}✗${C.x} ${doc.id} ${C.d}— scan build failed: ${err.message}${C.x}`);
+      }
+    }
+
+    if (missing.length || unprinted.length) {
+      failures++;
+      console.log(`${C.r}✗${C.x} ${C.b}${doc.id}${C.x} ${C.d}(${fs.statSync(pdf).size} bytes)${C.x}`);
+      for (const m of missing) console.log(`    ${C.r}text layer does not contain${C.x} ${JSON.stringify(m)}`);
+      for (const u of unprinted) console.log(`    ${C.r}ground truth claims a value the page never prints${C.x} — ${u}`);
+      console.log(`    ${C.d}ground truth that is not on the page is not ground truth${C.x}`);
+    } else {
+      console.log(
+        `${C.g}✓${C.x} ${C.b}${doc.id}${C.x} ${C.d}(${fs.statSync(pdf).size} bytes, ` +
+          `${(doc.pdf_text_must_contain || []).length} text assertions, ` +
+          `${printedClaims(doc).length} printed ground-truth values found${scanNote})${C.x}`
+      );
+    }
+    if (opts.text) console.log(`${C.d}${text.replace(/^/gm, '    │ ')}${C.x}`);
+  }
+
+  if (browser) await browser.close();
+  console.log(
+    failures
+      ? `\n${C.r}FAILED${C.x} — ${failures} of ${docs.length} fixtures do not print what they claim.`
+      : `\n${C.g}PASSED${C.x} — ${docs.length} fixtures rendered and verified, ${scans} scanned variants built.`
+  );
+  return failures ? 1 : 0;
+}
+
+main().then(
+  (code) => process.exit(code),
+  (err) => { console.error(err); process.exit(2); }
+);

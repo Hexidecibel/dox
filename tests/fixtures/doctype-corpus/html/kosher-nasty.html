@@ -1,0 +1,47 @@
+<!--
+  Kosher Certificate — NASTY tier. The traps:
+   1. THERE IS NO CERTIFICATE NUMBER. The page prints an account number, a
+      plant number and a form revision, none of which is one. The correct
+      answer is null.
+   2. The company's name is SPLIT ACROSS A LINE BREAK ("GREAT NORTHERN" /
+      "PROTEIN COMPANY") in a narrow identity column.
+   3. Two dates and only the second is the expiry: a "supervision commenced"
+      date and an "in force until" date, the latter printed only in the closing
+      paragraph in yet another format (30/09/2026, day-first).
+   4. The product table repeats its header row mid-table, and one row is a
+      NON-CERTIFIED product listed for clarity ("not under supervision") that
+      must not be read as certified.
+-->
+<style>@page{size:letter;margin:0.7in}body{font-family:'Times New Roman',Times,serif;font-size:9.5pt;color:#111;line-height:1.35}
+.top{display:flex;justify-content:space-between;border-bottom:1px solid #444;padding-bottom:6px;font-size:8.8pt;color:#333}
+.grid{display:flex;border:1px solid #444;margin:10px 0}
+.grid > div{border-right:1px solid #444;padding:5px 8px}
+table{border-collapse:collapse;width:100%;margin:8px 0}
+td,th{border:1px solid #666;padding:2px 6px;font-size:8.8pt}
+th{background:#eee;text-align:left}
+p{margin:7px 0;text-align:justify;font-size:9.2pt}</style>
+<div class="top"><div>KEHILLA KOSHER SUPERVISION SERVICE &mdash; 6221 Wilshire Boulevard, Los Angeles, CA 90048</div>
+<div>Form KK-9 rev 3</div></div>
+<div style="text-align:center;font-weight:bold;font-size:11.5pt;margin:10px 0 8px">CERTIFICATE OF KOSHER SUPERVISION</div>
+<div class="grid">
+<div style="width:132px"><b>Company</b><br>GREAT NORTHERN<br>PROTEIN COMPANY</div>
+<div style="width:118px"><b>Plant</b><br>Jerome, ID<br>Plant no. ID-27</div>
+<div style="width:118px"><b>Account</b><br>KK-ACCT-88210</div>
+<div style="width:150px;border-right:none"><b>Supervision commenced</b><br>1 October 2021</div>
+</div>
+<table>
+<tr><th>Product</th><th>Designation</th><th>Under supervision</th></tr>
+<tr><td>Whey Protein Concentrate 34%, Instantised</td><td>Dairy</td><td>Yes</td></tr>
+<tr><td>Whey Permeate, Food Grade</td><td>Dairy</td><td>Yes</td></tr>
+<tr><th>Product</th><th>Designation</th><th>Under supervision</th></tr>
+<tr><td>Deproteinised Whey Powder</td><td>Dairy</td><td>Yes</td></tr>
+<tr><td>Hydrolysed Vegetable Protein Blend</td><td>Pareve</td><td>No &mdash; not under supervision</td></tr>
+</table>
+<p>The products marked as under supervision are produced under the continuous supervision of this office at the plant named
+above and may bear our symbol. The final item is listed at the company's request for clarity only; it is produced on separate
+equipment, is not inspected by this office, and may not bear any kosher marking.</p>
+<p>No certificate number is assigned to supervision letters issued on form KK-9; the account number above is the reference for
+all correspondence. This letter is in force until 30/09/2026, after which a replacement letter is issued following the annual
+inspection, and is void earlier upon any change of formulation, equipment or ownership.</p>
+<div style="margin-top:20px;font-size:9pt">__________________________<br><b>Rabbi Yaakov Sterngold</b>, Rabbinic
+Administrator, Kehilla Kosher Supervision Service</div>

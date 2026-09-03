@@ -1,0 +1,48 @@
+<!--
+  Specification Sheet — NASTY tier. The traps:
+   1. The PRODUCT CODE IS ABSENT. The page prints a document number
+      (FSQ-SPEC-0442), a plant code (ID-27) and a customer's own item number in
+      a footnote; none of them is the supplier's product code, so the correct
+      answer is null.
+   2. The specification range is SPLIT ACROSS A LINE BREAK in a narrow column
+      ("34.0 &ndash;" / "36.0").
+   3. The specification table repeats its header row mid-table.
+   4. Two dates and neither is an expiry (issue date, supersedes date).
+-->
+<style>@page{size:letter;margin:0.65in}body{font-family:Arial,Helvetica,sans-serif;font-size:8.8pt;color:#111;line-height:1.3}
+.top{display:flex;justify-content:space-between;border-bottom:1px solid #666;padding-bottom:5px;font-size:8.4pt;color:#333}
+.idbox{display:flex;border:1px solid #444;margin:9px 0}
+.idbox > div{border-right:1px solid #444;padding:5px 7px}
+table{border-collapse:collapse;width:100%;margin:7px 0}
+td,th{border:1px solid #666;padding:2px 5px;font-size:8.3pt}
+th{background:#e6e6e6;text-align:left}
+.nc{width:52px}
+.fine{font-size:8pt;color:#222;text-align:justify;line-height:1.3}</style>
+<div class="top"><div>GREAT NORTHERN PROTEIN COMPANY &mdash; Jerome, ID plant ID-27</div><div>FSQ-SPEC-0442 rev 9</div></div>
+<div style="text-align:center;font-weight:bold;font-size:11pt;margin:9px 0 4px">RAW MATERIAL SPECIFICATION</div>
+<div class="idbox">
+<div style="width:190px"><b>Product</b><br>Whey Protein Concentrate 34%,<br>Instantised</div>
+<div style="width:120px"><b>Process</b><br>Ultrafiltration, spray dried</div>
+<div style="width:110px"><b>Issued</b><br>07 January 2026</div>
+<div style="width:130px;border-right:none"><b>Supersedes</b><br>rev 8 of 19 March 2024</div>
+</div>
+<table>
+<tr><th>Attribute</th><th class="nc">Min</th><th class="nc">Max</th><th>Unit</th><th>Method</th></tr>
+<tr><td>Protein, dry basis</td><td>34.0 &ndash;</td><td>36.0</td><td>%</td><td>AOAC 991.20</td></tr>
+<tr><td>Moisture</td><td></td><td>4.5</td><td>%</td><td>AOAC 927.05</td></tr>
+<tr><td>Fat</td><td></td><td>4.0</td><td>%</td><td>Mojonnier</td></tr>
+<tr><th>Attribute</th><th class="nc">Min</th><th class="nc">Max</th><th>Unit</th><th>Method</th></tr>
+<tr><td>Ash</td><td></td><td>8.0</td><td>%</td><td>AOAC 930.30</td></tr>
+<tr><td>Lactose</td><td>48.0</td><td>52.0</td><td>%</td><td>Enzymatic</td></tr>
+<tr><td>pH, 10% solution</td><td>6.10</td><td>6.60</td><td></td><td>Potentiometric</td></tr>
+<tr><td>Standard Plate Count</td><td></td><td>30,000</td><td>CFU/g</td><td>AOAC 989.10</td></tr>
+<tr><td>Coliform</td><td></td><td>10</td><td>CFU/g</td><td>AOAC 989.10</td></tr>
+<tr><td>Salmonella</td><td colspan="2">Negative in 375 g</td><td></td><td>AOAC 2003.09</td></tr>
+</table>
+<div class="fine">Sensory: bland, clean dairy flavour, free of scorched or oxidised notes; colour cream to light cream; powder free
+flowing with no lumps that do not break under light pressure. Sieve: 95% through a US 30 mesh screen.</div>
+<div class="fine" style="margin-top:6px">This specification defines acceptance limits only. It does not report analytical
+results, and no lot may be released against it without the corresponding certificate of analysis. Shelf life is 24 months from
+manufacture when stored below 27&deg;C at less than 65% RH. This document does not itself expire; it is reissued on revision.</div>
+<div class="fine" style="margin-top:6px">Footnote: this material is received by one customer under their own internal item
+number 44-2210-CU, which is not a Great Northern product code and must not be used on purchase orders.</div>

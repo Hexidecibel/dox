@@ -30,6 +30,12 @@ interface SupplierInstructionsRow {
   field_mappings: string | null;
   updated_at: string | null;
   updated_by: string | null;
+  /**
+   * The document-type layer (0098) for the same type — inherited, NOT this
+   * supplier's. Joined in here so the tab can show what a supplier's guidance
+   * is refining instead of presenting the narrow box as the whole instruction.
+   */
+  type_instructions: string | null;
 }
 
 export interface ListBySupplierResponse {
@@ -84,6 +90,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // same row shape for both states. Filtered to active doctypes only —
     // an admin removing a doctype shouldn't keep showing it on the
     // supplier page.
+    //
+    // The second LEFT JOIN pulls the type-level layer (0098) alongside. Two
+    // joins, one round trip: the tab renders one section per doctype and each
+    // section has to show BOTH layers, so fetching them separately would just
+    // reintroduce the N+1 this endpoint was created to avoid.
     const rows = await context.env.DB.prepare(
       `SELECT
          dt.id AS document_type_id,
@@ -91,17 +102,21 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          sei.instructions AS instructions,
          sei.field_mappings AS field_mappings,
          sei.updated_at AS updated_at,
-         sei.updated_by AS updated_by
+         sei.updated_by AS updated_by,
+         dtei.instructions AS type_instructions
        FROM document_types dt
        LEFT JOIN supplier_extraction_instructions sei
          ON sei.document_type_id = dt.id
         AND sei.supplier_id = ?
         AND sei.tenant_id = ?
+       LEFT JOIN document_type_extraction_instructions dtei
+         ON dtei.document_type_id = dt.id
+        AND dtei.tenant_id = ?
        WHERE dt.tenant_id = ?
          AND dt.active = 1
        ORDER BY dt.name COLLATE NOCASE`,
     )
-      .bind(supplierId, tenantId, tenantId)
+      .bind(supplierId, tenantId, tenantId, tenantId)
       .all<SupplierInstructionsRow>();
 
     const body: ListBySupplierResponse = {

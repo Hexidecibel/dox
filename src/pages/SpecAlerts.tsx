@@ -50,6 +50,12 @@ import {
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
+import {
+  SPEC_CRITICALITY_COLOR,
+  SPEC_CRITICALITY_LABELS,
+  isSpecCriticality,
+} from '../../shared/specCriticality';
+import type { SpecCriticality } from '../../shared/specCriticality';
 import type { ApiSpecCheck } from '../lib/types';
 import { EmptyState } from '../components/EmptyState';
 
@@ -84,6 +90,27 @@ function snapshotText(check: ApiSpecCheck): string {
     return `${s.operator}${bound} ${s.unit ?? ''}`.trim();
   } catch {
     return '—';
+  }
+}
+
+/**
+ * The tier this result was FILED UNDER, read out of the frozen snapshot rather
+ * than from the limit as it stands today (migration 0095). That is the same
+ * argument the thresholds make: someone may have promoted or demoted the limit
+ * since, and a register that re-labelled old rows to match today's ranking
+ * would be answering a different question than the one an auditor asked.
+ *
+ * null for a result judged against the COA's own printed spec, and for anything
+ * recorded before the tier existed — neither has a ranking to show, and
+ * inventing one would be a claim about a decision nobody made.
+ */
+function snapshotCriticality(check: ApiSpecCheck): SpecCriticality | null {
+  if (!check.limit_snapshot) return null;
+  try {
+    const parsed = JSON.parse(check.limit_snapshot) as { criticality?: unknown };
+    return isSpecCriticality(parsed.criticality) ? parsed.criticality : null;
+  } catch {
+    return null;
   }
 }
 
@@ -238,6 +265,23 @@ export function SpecAlerts() {
                           <NotCheckedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
                         )}
                         <span>{c.spec_test_name || c.test_name_raw}</span>
+                        {(() => {
+                          const tier = snapshotCriticality(c);
+                          if (!tier) return null;
+                          return (
+                            <Tooltip
+                              arrow
+                              title="How this limit was ranked when the result was judged. Re-ranking it since does not change this row."
+                            >
+                              <Chip
+                                size="small"
+                                variant={tier === 'high' ? 'filled' : 'outlined'}
+                                color={SPEC_CRITICALITY_COLOR[tier]}
+                                label={SPEC_CRITICALITY_LABELS[tier]}
+                              />
+                            </Tooltip>
+                          );
+                        })()}
                       </Stack>
                     </TableCell>
                     <TableCell

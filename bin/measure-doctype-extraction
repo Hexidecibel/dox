@@ -1,0 +1,562 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/measure-doctype-extraction — run the REAL extraction path over the
+ * document-TYPE corpus and score it against ground truth that was written
+ * before the model ever saw the page.
+ *
+ * WHY THIS EXISTS. Production is 139 COAs out of 200 documents. Every accuracy
+ * number this project has ever quoted — the 90.6% corpus figure, the reviewer
+ * accept rate, the Mac/Spark bake-off — was measured on COAs, and the client's
+ * working assumption is that "COAs are the worst case and everything else is
+ * prose with a few tables". That is a HYPOTHESIS, and it was never tested. A
+ * certificate of insurance and a letter of guarantee have no result grid at
+ * all; what matters on them is one date, one issuing body, one signatory, and
+ * whether the model keeps quiet when the page does not say.
+ *
+ * WHAT IS ACTUALLY MEASURED. The production text path, end to end:
+ *   PDF -> unpdf text layer -> garbled guard -> tesseract OCR fallback ->
+ *   geometry-aware re-serialization (shared/pdfTextSerializer) -> 6K truncation
+ *   -> functions/lib/llm.ts#classifyDocumentType (the pre-extraction
+ *   classification pass, against the FSQA starter pack's 27 real document
+ *   types, on the `fast` chain) -> functions/lib/llm.ts#extractFields (its
+ *   prompt, its dairy industry layer, its canonicalizeFields, its model
+ *   resolution via the `best` chain), told what the classifier decided.
+ * llm.ts is bundled fresh on every run rather than copied, so this can never
+ * measure a stale duplicate of the prompt. What is NOT measured: the VLM path,
+ * supplier/document-type extraction instructions (no tenant here), few-shot
+ * examples, and everything downstream of extraction.
+ *
+ * THE FOUR TIERS. clean / moderate / nasty are three renderings of each type,
+ * increasingly like a real document (multi-column, letterhead, mixed date
+ * formats, a value split across a line break, a repeated header row, a field
+ * that is GENUINELY ABSENT). `scanned` is the clean document rasterised,
+ * degraded and rebuilt with no text layer, so it goes through OCR — the delta
+ * between clean and scanned is the scanner tax with everything else held equal.
+ * Synthetic documents are easier than real ones; the ladder is what stops this
+ * harness from reporting a comfortable number and teaching us nothing.
+ *
+ * FABRICATION IS THE POINT. 30 of the graded rows have NULL ground truth — the
+ * page genuinely does not state that value. Emitting one is scored as its own
+ * failure, split into `fabricated_misfiled` (the value IS on the page, under a
+ * different meaning) and `fabricated_invented` (the value is nowhere on the
+ * page — supplied from world knowledge). Neither is ever folded into a generic
+ * "incorrect": in this product a wrong value a reviewer can check beats a
+ * confident value the document does not contain.
+ *
+ * THE SECOND ARM (--instructions). The baseline's dominant failure is not that
+ * the model misreads these pages; it is that llm.ts rule 1's canonical field
+ * list is COA-shaped, so an issuing body, a certificate number, an allergen
+ * list or a country of origin has no slot to land in. A schema gap and a model
+ * gap have entirely different fixes, so `--instructions` re-runs the identical
+ * documents with the manifest's per-type field list appended to the industry
+ * layer — the shape a per-document-type extraction-instructions row would take
+ * — and scores them the same way. The delta answers "if we name the field, can
+ * the model find it?". The instruction strings name FIELDS only and never a
+ * value; see `_type_instructions_why` in corpus.json.
+ *
+ * READ-ONLY. Talks to the model router and nothing else. No dox API, no D1, no
+ * R2, no Cloudflare credentials, no writes of any kind.
+ *
+ * Usage:
+ *   bin/measure-doctype-extraction                      # all 30 + 10 scanned
+ *   bin/measure-doctype-extraction --tier clean         # one tier
+ *   bin/measure-doctype-extraction --type coi,sds       # some types
+ *   bin/measure-doctype-extraction --doc gf-nasty
+ *   bin/measure-doctype-extraction --instructions      # the guided arm (below)
+ *   bin/measure-doctype-extraction --classify-model best   # fast (default) | best | off
+ *   bin/measure-doctype-extraction --classify-only         # classification alone, no extraction
+ *   bin/measure-doctype-extraction --no-scanned
+ *   bin/measure-doctype-extraction --concurrency 3
+ *   bin/measure-doctype-extraction --out runs/2026-09-02.json
+ *   bin/measure-doctype-extraction --rescore runs/2026-09-02.json   # no model calls
+ *   bin/measure-doctype-extraction --json
+ *
+ * Env:
+ *   QWEN_URL     model router (default https://qwen.cush.rocks)
+ *   QWEN_SECRET  bearer token. If unset, it is read from
+ *                /etc/systemd/system/dox-process-worker.service, the same
+ *                credential bin/process-worker runs with. Never printed.
+ */
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const { pathToFileURL } = require('node:url');
+
+const ROOT = path.resolve(__dirname, '..');
+const DIR = path.join(ROOT, 'tests/fixtures/doctype-corpus');
+const CORPUS = path.join(DIR, 'corpus.json');
+const BUILD = path.join(DIR, '.build');
+const SCORER = path.join(DIR, 'score.mjs');
+const WORKER_UNIT = '/etc/systemd/system/dox-process-worker.service';
+const STARTER_PACK = path.join(ROOT, 'starter-packs/fsqa.json');
+
+/**
+ * The candidate list the classifier chooses from — the FSQA starter pack's 27
+ * document types, which is what a real tenant is seeded with, not a list
+ * tailored to this corpus. All ten corpus types are in it; the other seventeen
+ * are distractors that a production tenant genuinely has, several of them
+ * adjacent enough to hurt ("3rd Party Food Safety Audit Report" sits next to
+ * "3rd Party Audit Certificate"). Using the real pack is the point: a
+ * classifier measured against a ten-item list built from the answer key would
+ * report a number that does not survive contact with a tenant.
+ */
+function loadCandidates() {
+  const pack = JSON.parse(fs.readFileSync(STARTER_PACK, 'utf8'));
+  return (pack.document_types || []).map((d) => ({ name: d.name, slug: d.slug || null }));
+}
+
+const C = process.stdout.isTTY
+  ? { g: '\x1b[32m', r: '\x1b[31m', y: '\x1b[33m', c: '\x1b[36m', d: '\x1b[2m', b: '\x1b[1m', x: '\x1b[0m' }
+  : { g: '', r: '', y: '', c: '', d: '', b: '', x: '' };
+
+function parseArgs(argv) {
+  const o = { doc: null, type: null, tier: null, scanned: true, concurrency: 2, json: false, out: null, rescore: null, instructions: false, classifyModel: 'fast', classifyOnly: false, help: false };
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
+      case '--doc': o.doc = argv[++i]; break;
+      case '--type': o.type = argv[++i].split(',').map((s) => s.trim()); break;
+      case '--tier': o.tier = argv[++i].split(',').map((s) => s.trim()); break;
+      case '--no-scanned': o.scanned = false; break;
+      case '--instructions': o.instructions = true; break;
+      case '--classify-model': o.classifyModel = argv[++i]; break;
+      case '--classify-only': o.classifyOnly = true; break;
+      case '--concurrency': o.concurrency = Math.max(1, parseInt(argv[++i], 10) || 1); break;
+      case '--json': o.json = true; break;
+      case '--out': o.out = argv[++i]; break;
+      case '--rescore': o.rescore = argv[++i]; break;
+      case '-h': case '--help': o.help = true; break;
+      default: console.error(`unknown flag: ${argv[i]}`); process.exit(2);
+    }
+  }
+  return o;
+}
+
+/** The bearer, from the environment or from the worker's own unit file. Never logged. */
+function resolveSecret() {
+  if (process.env.QWEN_SECRET) return process.env.QWEN_SECRET;
+  try {
+    const unit = fs.readFileSync(WORKER_UNIT, 'utf8');
+    const m = unit.match(/^Environment=QWEN_SECRET=(.*)$/m);
+    if (m) return m[1].trim();
+  } catch { /* fall through */ }
+  return '';
+}
+
+/**
+ * Bundle functions/lib/llm.ts fresh. The alternative — a copy of the prompt in
+ * this script — is how bin/process-worker's BASE_PROMPT and llm.ts's drifted
+ * apart in the first place, and a harness measuring a stale prompt is worse
+ * than no harness.
+ */
+function buildLlmBundle() {
+  fs.mkdirSync(BUILD, { recursive: true });
+  const out = path.join(BUILD, 'llm.cjs');
+  execFileSync('npx', [
+    'esbuild', path.join(ROOT, 'functions/lib/llm.ts'),
+    '--bundle', '--platform=node', '--format=cjs', '--target=node20',
+    `--outfile=${out}`,
+  ], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Text extraction — the same sequence bin/process-worker runs, in the same order
+// ---------------------------------------------------------------------------
+
+const {
+  serializePages: serializePdfPages,
+  shouldUseSerializedPages,
+  looksLikeBrokenEncoding,
+  countLetters,
+} = require('./lib/shared/pdfTextSerializer');
+
+/** bin/process-worker#isTextGarbled, verbatim. */
+function isTextGarbled(text) {
+  if (!text || text.length < 100) return false;
+  const words = text.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length === 0) return false;
+  const avgWordLen = words.reduce((s, w) => s + w.length, 0) / words.length;
+  const whitespaceRatio = (text.match(/\s/g) || []).length / text.length;
+  return avgWordLen > 15 || whitespaceRatio < 0.08;
+}
+
+/** bin/process-worker#ocrPdf, minus the temp-dir bookkeeping. */
+function ocrPdf(pdfPath) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doctype-ocr-'));
+  try {
+    execFileSync('pdftoppm', ['-gray', '-r', '300', pdfPath, path.join(tmpDir, 'page')], { timeout: 60_000, stdio: 'pipe' });
+    const pages = fs.readdirSync(tmpDir).filter((f) => /^page.*\.(pgm|ppm)$/.test(f)).sort();
+    const texts = [];
+    for (const p of pages) {
+      const res = execFileSync('tesseract', [path.join(tmpDir, p), 'stdout', '--psm', '1'], { timeout: 120_000, stdio: ['pipe', 'pipe', 'pipe'] });
+      texts.push(res.toString('utf-8'));
+    }
+    const combined = texts.join('\n\n').trim();
+    return combined.length > 0 ? combined : null;
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+async function extractPdfText(pdfPath) {
+  const buf = fs.readFileSync(pdfPath);
+  const geomBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  let text = null;
+  let pages = [];
+  let route = 'text-layer';
+
+  try {
+    const { extractText } = await import('unpdf');
+    const result = await extractText(new Uint8Array(buf), { mergePages: false });
+    const rawPages = Array.isArray(result.text) ? result.text.map((p) => (p == null ? '' : String(p))) : (result.text ? [String(result.text)] : []);
+    if (rawPages.length && rawPages.some((p) => p.trim().length > 0)) {
+      pages = rawPages;
+      text = rawPages.join('\n').replace(/\s+/g, ' ').substring(0, 100000);
+    }
+  } catch { /* falls through to OCR */ }
+
+  if (text && isTextGarbled(text)) { text = null; pages = []; }
+  if (!text || !text.trim()) {
+    route = 'ocr';
+    const ocr = ocrPdf(pdfPath);
+    if (ocr) { text = ocr.substring(0, 100000); pages = [text]; }
+  }
+
+  // Geometry pass LAST, exactly as in the worker: the OCR routing above is
+  // decided on the original text, and this is a no-op when the guard declines.
+  try {
+    const { getDocumentProxy } = await import('unpdf');
+    const doc = await getDocumentProxy(new Uint8Array(geomBuffer));
+    const items = [];
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const tc = await page.getTextContent();
+      items.push((tc && tc.items) || []);
+    }
+    const serialized = serializePdfPages(items);
+    if (shouldUseSerializedPages(serialized)) {
+      pages = serialized;
+      text = serialized.join('\n').substring(0, 100000);
+      route = route === 'ocr' ? 'ocr' : 'geometry';
+    } else if (route !== 'ocr') {
+      const joined = serialized.join('\n');
+      route = looksLikeBrokenEncoding(joined) ? `text-layer (serializer declined: broken encoding, ${countLetters(joined)} letters)` : route;
+    }
+  } catch { /* keep what we have */ }
+
+  return { text: text || '', pages, route };
+}
+
+// ---------------------------------------------------------------------------
+// Report
+// ---------------------------------------------------------------------------
+
+const pct = (v) => (v === null || v === undefined ? '  —  ' : `${(v * 100).toFixed(1)}%`.padStart(6));
+
+function row(label, r, width = 26) {
+  const c = r.counts;
+  return `${label.padEnd(width)} ${String(c.correct).padStart(4)} ${String(c.wrong_value).padStart(5)} ${String(c.missed).padStart(4)}  ${pct(r.value_accuracy)}  ` +
+    `${String(c.correct_null).padStart(4)} ${String(c.fabricated_misfiled).padStart(5)} ${String(c.fabricated_invented).padStart(5)}  ${pct(r.null_accuracy)}`;
+}
+
+const HEAD = `${''.padEnd(26)} ${'ok'.padStart(4)} ${'wrong'.padStart(5)} ${'miss'.padStart(4)}  ${'value'.padStart(6)}  ${'null'.padStart(4)} ${'misfl'.padStart(5)} ${'invnt'.padStart(5)}  ${'null%'.padStart(6)}`;
+
+function report(summary, documents, meta) {
+  console.log(`${C.b}Document-type extraction accuracy${C.x} ${C.d}— ${summary.documents} documents, ` +
+    `${summary.overall.present_n + summary.overall.absent_n} graded fields, arm: ${meta.arm}${C.x}`);
+  console.log(`${C.d}model: ${meta.served_models.join(', ') || 'unknown'} · route: ${meta.routes.join(', ')} · ${meta.elapsed}${C.x}\n`);
+
+  const o = summary.overall;
+  console.log(`${C.b}OVERALL${C.x}`);
+  console.log(`  value accuracy (fields that HAVE an answer)  ${C.b}${pct(o.value_accuracy)}${C.x}  ${C.d}${o.counts.correct}/${o.present_n}  (wrong ${o.counts.wrong_value}, missed ${o.counts.missed})${C.x}`);
+  console.log(`  null accuracy  (fields whose answer is NONE) ${C.b}${pct(o.null_accuracy)}${C.x}  ${C.d}${o.counts.correct_null}/${o.absent_n}${C.x}`);
+  console.log(`  ${C.r}fabricated${C.x}                                   ${C.b}${o.fabricated}${C.x}  ${C.d}(${o.counts.fabricated_misfiled} misfiled from the page, ${o.counts.fabricated_invented} invented outright)${C.x}`);
+  console.log(`  document_type classified correctly           ${C.b}${summary.document_type.correct}/${summary.document_type.of}${C.x}` +
+    (meta.classifier
+      ? `  ${C.d}(${meta.classifier.unresolved} left unresolved for a human, of which ${meta.classifier.off_list} answered off-list; ` +
+        `tag "${meta.classifier.model_tag}", median ${meta.classifier.median_seconds}s, ${meta.classifier.total_seconds}s total)${C.x}`
+      : `  ${C.d}(no classification pass — extraction's own guess)${C.x}`));
+  console.log(`  declared table values found                  ${summary.tables.found}/${summary.tables.of}\n`);
+
+  console.log(`${C.b}BY TIER${C.x}\n${C.d}${HEAD}${C.x}`);
+  for (const tier of ['clean', 'moderate', 'nasty', 'scanned']) {
+    if (summary.by_tier[tier]) console.log(`  ${row(tier, summary.by_tier[tier], 24)}`);
+  }
+  console.log(`\n${C.b}BY SCHEMA SLOT${C.x} ${C.d}— does llm.ts even HAVE a canonical field for this answer?${C.x}\n${C.d}${HEAD}${C.x}`);
+  for (const [k, v] of Object.entries(summary.by_schema)) {
+    if (v.present_n || v.absent_n) console.log(`  ${row(k === 'canonical' ? 'canonical field' : 'no field in schema', v, 24)}`);
+  }
+
+  console.log(`\n${C.b}BY TYPE${C.x}\n${C.d}${HEAD}${C.x}`);
+  for (const [slug, t] of Object.entries(summary.by_type)) {
+    console.log(`  ${row(`${t.type}`.slice(0, 24), t, 24)}`);
+  }
+  console.log(`\n${C.b}BY FIELD${C.x}\n${C.d}${HEAD}${C.x}`);
+  const fields = Object.entries(summary.by_field).sort((a, b) => (b[1].counts.wrong_value + b[1].counts.missed + b[1].fabricated) - (a[1].counts.wrong_value + a[1].counts.missed + a[1].fabricated));
+  for (const [name, f] of fields) console.log(`  ${row(name.slice(0, 24), f, 24)}`);
+
+  const fabrications = [];
+  const errors = [];
+  for (const d of documents) {
+    for (const r of d.rows) {
+      if (r.bucket.startsWith('fabricated')) fabrications.push({ d, r });
+      else if (r.bucket === 'wrong_value' || r.bucket === 'missed') errors.push({ d, r });
+    }
+  }
+  if (fabrications.length) {
+    console.log(`\n${C.r}${C.b}EVERY FABRICATION${C.x} ${C.d}(ground truth null, model emitted a value)${C.x}`);
+    for (const { d, r } of fabrications) {
+      const tag = r.bucket === 'fabricated_invented' ? `${C.r}INVENTED${C.x}` : `${C.y}misfiled${C.x}`;
+      console.log(`  ${tag} ${C.b}${d.id}${C.x} ${C.d}[${d.tier}]${C.x} ${r.field} = ${JSON.stringify(r.emitted)} ${C.d}(as ${r.emitted_key}; ${r.detail})${C.x}`);
+      if (r.why) console.log(`      ${C.d}${r.why}${C.x}`);
+    }
+  }
+  if (errors.length) {
+    console.log(`\n${C.y}${C.b}WRONG OR MISSED${C.x}`);
+    for (const { d, r } of errors) {
+      const slot = r.canonical ? '' : `${C.d} [no canonical slot]${C.x}`;
+      console.log(`  ${r.bucket === 'missed' ? 'missed  ' : 'wrong   '} ${C.b}${d.id}${C.x} ${C.d}[${d.tier}]${C.x} ${r.field}: expected ${JSON.stringify(r.truth)}, got ${JSON.stringify(r.emitted)}${r.emitted_key ? C.d + ` (as ${r.emitted_key})` + C.x : ''}${slot}`);
+    }
+  }
+  const badType = documents.filter((d) => !d.document_type.ok);
+  if (badType.length) {
+    console.log(`\n${C.y}${C.b}DOCUMENT TYPE MISREAD${C.x}`);
+    for (const d of badType) {
+      const raw = d.classification && d.classification.rawGuess;
+      const said = raw && raw !== d.document_type.guess ? ` ${C.d}(model said ${JSON.stringify(raw)})${C.x}` : '';
+      console.log(`  ${C.b}${d.id}${C.x} ${C.d}[${d.tier}]${C.x} guessed ${JSON.stringify(d.document_type.guess)}${said}, expected one of ${JSON.stringify(d.document_type.accept.slice(0, 3))}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(3, 76).join('\n').replace(/^ ?\*\/?/gm, ''));
+    return 0;
+  }
+
+  const corpus = JSON.parse(fs.readFileSync(CORPUS, 'utf8'));
+  const scorer = await import(pathToFileURL(SCORER).href);
+  // In --json mode stdout is the machine-readable document and nothing else;
+  // progress goes to stderr so `... --json > out.json` is always parseable.
+  const note = opts.json ? console.error : console.log;
+
+  // Build the run list: every selected document, plus a `scanned` entry for
+  // each one that has a scanned variant. The scanned entry carries the SAME
+  // ground truth — that is what makes the delta readable.
+  const selected = corpus.documents.filter((d) =>
+    (!opts.doc || d.id === opts.doc) &&
+    (!opts.type || opts.type.includes(d.type_slug)) &&
+    (!opts.tier || opts.tier.includes(d.tier) || (opts.tier.includes('scanned') && d.scan)));
+
+  const runs = [];
+  for (const d of selected) {
+    if (!opts.tier || opts.tier.includes(d.tier)) runs.push({ doc: d, tier: d.tier, pdf: path.join(DIR, d.pdf), key: d.id });
+    if (d.scan && opts.scanned && (!opts.tier || opts.tier.includes('scanned'))) {
+      const scanPdf = path.join(DIR, d.pdf.replace(/\.pdf$/, '.scan.pdf'));
+      if (fs.existsSync(scanPdf)) runs.push({ doc: d, tier: 'scanned', pdf: scanPdf, key: `${d.id}#scanned` });
+    }
+  }
+  if (!runs.length) { console.error('nothing selected'); return 2; }
+
+  let extractions;
+  const started = Date.now();
+
+  if (opts.rescore) {
+    const saved = JSON.parse(fs.readFileSync(path.resolve(ROOT, opts.rescore), 'utf8'));
+    extractions = new Map(saved.runs.map((r) => [r.key, r]));
+    note(`${C.d}re-scoring ${extractions.size} saved extractions from ${opts.rescore} — no model calls${C.x}\n`);
+  } else {
+    const bundle = buildLlmBundle();
+    const { extractFields, classifyDocumentType, DEFAULT_DAIRY_CONTEXT } = require(bundle);
+    const candidates = loadCandidates();
+    const env = { QWEN_URL: process.env.QWEN_URL || 'https://qwen.cush.rocks', QWEN_SECRET: resolveSecret() };
+    if (!env.QWEN_SECRET) console.warn(`${C.y}warning: no QWEN_SECRET found (env or ${WORKER_UNIT}); the router will probably refuse${C.x}`);
+    note(`${C.d}extracting ${runs.length} documents via ${env.QWEN_URL} (concurrency ${opts.concurrency})…${C.x}`);
+
+    extractions = new Map();
+    let done = 0;
+    const queue = runs.slice();
+    const workers = Array.from({ length: opts.concurrency }, async () => {
+      for (;;) {
+        const run = queue.shift();
+        if (!run) return;
+        const t0 = Date.now();
+        const { text, route } = await extractPdfText(run.pdf);
+        // Same 6K truncation the worker applies to a single-page document.
+        const llmText = text.substring(0, 6000);
+
+        // CLASSIFICATION PASS — production runs this BEFORE extraction, over
+        // the head of the document only, against the tenant's own catalog. It
+        // is measured here rather than assumed: the doc-type number in the
+        // report is this pass's answer, and the type it settles on is what
+        // extraction is then told it is reading.
+        //
+        // The FILENAME is deliberately withheld, in the harness for the same
+        // reason as in production and with one extra bite here: these fixtures
+        // are named organic-clean.pdf / gf-nasty.pdf, so passing the filename
+        // would hand the classifier the answer key and report a number that
+        // means nothing.
+        let classification = null;
+        let classifySeconds = 0;
+        if (opts.classifyModel !== 'off') {
+          const c0 = Date.now();
+          try {
+            classification = await classifyDocumentType(llmText, candidates, env, { modelTag: opts.classifyModel });
+          } catch (err) {
+            classification = { documentType: null, candidate: null, rawGuess: null, confidence: 'low', evidence: null, error: err.message };
+          }
+          classifySeconds = +((Date.now() - c0) / 1000).toFixed(1);
+        }
+        // The guided arm appends the type's field list to the industry layer,
+        // where a per-document-type instructions row would sit. Same universal
+        // null clause for every type, so this measures the SLOT, not the wording.
+        const instr = opts.instructions ? corpus.type_instructions[run.doc.type_slug] : null;
+        const industryPrompt = instr
+          ? `${DEFAULT_DAIRY_CONTEXT}\n\nDOCUMENT-TYPE GUIDANCE:\n${instr}\nReturn null for any of these fields the document does not state. Never supply a value the document did not print.`
+          : undefined;
+        let result = null;
+        let error = null;
+        // --classify-only exists so the classifier can be re-tuned WITHOUT
+        // paying for 40 extractions: classification is a 2-3s call and
+        // extraction is a 30s one, and the two questions are independent.
+        for (let attempt = 1; attempt <= 2 && !result && !opts.classifyOnly; attempt++) {
+          try {
+            result = await extractFields(llmText, env, {
+              fileName: path.basename(run.pdf),
+              industryPrompt,
+              documentType: classification ? classification.documentType : null,
+            });
+          } catch (err) {
+            error = err.message;
+            if (attempt === 2) break;
+          }
+        }
+        extractions.set(run.key, {
+          key: run.key, doc_id: run.doc.id, tier: run.tier, route, arm: instr ? 'instructed' : 'baseline',
+          text_chars: text.length, truncated: text.length > 6000,
+          text: llmText, extraction: result, error,
+          classification, classify_model: opts.classifyModel, classify_seconds: classifySeconds,
+          seconds: +((Date.now() - t0) / 1000).toFixed(1),
+        });
+        done++;
+        if (opts.classifyOnly) {
+          const ok = classification && classification.documentType;
+          note(`  ${ok ? C.g + '✓' + C.x : C.y + '·' + C.x} ${String(done).padStart(2)}/${runs.length} ${run.key.padEnd(24)} ` +
+            `${C.d}${route}, ${classifySeconds}s → ${JSON.stringify(classification && classification.rawGuess)}${C.x}`);
+          continue;
+        }
+        const label = result ? `${C.g}✓${C.x}` : `${C.r}✗${C.x}`;
+        note(`  ${label} ${String(done).padStart(2)}/${runs.length} ${run.key.padEnd(24)} ${C.d}${route}, ${text.length} chars, ${((Date.now() - t0) / 1000).toFixed(1)}s${result ? `, ${Object.keys(result.fields || {}).length} fields` : `, ${error}`}${C.x}`);
+      }
+    });
+    await Promise.all(workers);
+    note('');
+  }
+
+  if (opts.classifyOnly) {
+    const rows = runs.map((run) => {
+      const e = extractions.get(run.key);
+      const guess = e && e.classification ? e.classification.documentType : null;
+      const accept = run.doc.document_type_accept || [];
+      const g = scorer.normalize(guess);
+      const ok = !!g && accept.some((a) => {
+        const n = scorer.normalize(a);
+        return g === n || g.includes(n) || n.includes(g);
+      });
+      return { key: run.key, ok, guess, raw: e && e.classification ? e.classification.rawGuess : null, seconds: e ? e.classify_seconds : null };
+    });
+    const times = rows.map((r) => r.seconds).filter((v) => typeof v === 'number').sort((a, b) => a - b);
+    const correct = rows.filter((r) => r.ok).length;
+    console.log(`${C.b}Document-type classification${C.x} ${C.d}— tag "${opts.classifyModel}", ${rows.length} documents${C.x}\n`);
+    console.log(`  correct                ${C.b}${correct}/${rows.length}${C.x}`);
+    console.log(`  unresolved (for human) ${rows.filter((r) => !r.guess).length}`);
+    console.log(`  median seconds         ${times.length ? times[Math.floor(times.length / 2)] : '—'}`);
+    console.log(`  total seconds          ${times.reduce((a, b) => a + b, 0).toFixed(1)}\n`);
+    for (const r of rows.filter((x) => !x.ok)) {
+      console.log(`  ${C.y}miss${C.x} ${r.key.padEnd(24)} ${JSON.stringify(r.raw)}`);
+    }
+    return 0;
+  }
+
+  const scored = [];
+  for (const run of runs) {
+    const e = extractions.get(run.key);
+    if (!e || !e.extraction) continue;
+    const doc = { ...run.doc, tier: run.tier, id: run.key };
+    // The document type under test is the CLASSIFIER's answer when one ran —
+    // that is the value production stores and promotes from. A run saved before
+    // the classifier existed has none, and falls back to the extraction's own
+    // guess so old runs stay re-scorable.
+    const extraction = e.classification
+      ? { ...e.extraction, documentType: e.classification.documentType }
+      : e.extraction;
+    scored.push({
+      ...scorer.scoreDocument(doc, corpus.key_groups, extraction, e.text),
+      route: e.route,
+      seconds: e.seconds,
+      classify_seconds: e.classify_seconds ?? null,
+      classification: e.classification || null,
+    });
+  }
+  const summary = scorer.summarize(scored);
+  // Classifier stats, kept as their OWN block. Classification correctness is
+  // not an extraction score and must never be averaged into one: a document
+  // whose type is wrong has the wrong instruction block applied to every field
+  // on it, which is a different failure from misreading a date.
+  const classifyTimes = scored.map((d) => d.classify_seconds).filter((v) => typeof v === 'number' && v > 0).sort((a, b) => a - b);
+  const classified = scored.filter((d) => d.classification);
+  const classifier = classified.length ? {
+    model_tag: [...new Set([...extractions.values()].map((e) => e.classify_model).filter(Boolean))].join(', ') || 'unknown',
+    served_models: [...new Set(classified.map((d) => d.classification.served_model).filter(Boolean))],
+    // "none of these" and "answered something that is not on the list" are both
+    // unresolved, and both correctly leave the type for a human.
+    unresolved: classified.filter((d) => !d.classification.documentType).length,
+    off_list: classified.filter((d) => !d.classification.documentType && d.classification.rawGuess && !/^none$/i.test(d.classification.rawGuess)).length,
+    median_seconds: classifyTimes.length ? classifyTimes[Math.floor(classifyTimes.length / 2)] : null,
+    total_seconds: +classifyTimes.reduce((a, b) => a + b, 0).toFixed(1),
+  } : null;
+
+  const meta = {
+    // On a re-score the arm is a property of the SAVED run, not of this
+    // invocation's flags — otherwise re-scoring an instructed run would label
+    // itself baseline and quietly mis-attribute every number in the report.
+    arm: (() => {
+      const arms = [...new Set([...extractions.values()].map((e) => e.arm).filter(Boolean))];
+      if (opts.rescore) return arms.length ? arms.join(' + ') : 'unrecorded (run saved before arms existed)';
+      return opts.instructions ? 'instructed (per-type field list appended)' : 'baseline (production prompt, unmodified)';
+    })(),
+    elapsed: `${((Date.now() - started) / 1000 / 60).toFixed(1)} min`,
+    routes: [...new Set(scored.map((s) => s.route))],
+    served_models: [...new Set(scored.map((s) => s.served_model).filter(Boolean))],
+    classifier,
+    failed: runs.filter((r) => { const e = extractions.get(r.key); return !e || !e.extraction; }).map((r) => r.key),
+  };
+
+  if (opts.out) {
+    const outPath = path.resolve(ROOT, opts.out);
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify({ generated_at: new Date().toISOString(), meta, summary, documents: scored, runs: [...extractions.values()] }, null, 2));
+    note(`${C.d}saved raw run to ${opts.out} (re-score it with --rescore)${C.x}\n`);
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify({ meta, summary, documents: scored }, null, 2));
+    return 0;
+  }
+
+  report(summary, scored, meta);
+  if (meta.failed.length) console.log(`\n${C.r}${meta.failed.length} extraction(s) failed outright and are excluded: ${meta.failed.join(', ')}${C.x}`);
+  return 0;
+}
+
+main().then(
+  (code) => process.exit(code),
+  (err) => { console.error(err); process.exit(2); }
+);

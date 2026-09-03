@@ -101,6 +101,10 @@ Triggers: `trg_document_versions_ai_fts`, `trg_document_versions_au_fts`
   classification_status TEXT NOT NULL DEFAULT 'unclassified' CHECK (classification_status IN ('unclassified','needs_review','classified','unclassifiable'))
   classification_reviewed_at TEXT
   classification_reviewed_by TEXT
+  renewal_decision TEXT CHECK (renewal_decision IN ('accepted', 'overridden', 'cleared'))
+  renewal_snapshot TEXT
+  renewal_decided_at TEXT
+  renewal_decided_by TEXT
 ```
 
 Indexes: `idx_documents_category`, `idx_documents_classification_status`, `idx_documents_document_type`, `idx_documents_lot_number`, `idx_documents_po_number`, `idx_documents_renewal_due_date`, `idx_documents_renewal_type`, `idx_documents_status`, `idx_documents_tenant`, `idx_documents_tenant_external_ref`
@@ -143,6 +147,8 @@ Triggers: `trg_document_categories_ad_fts`, `trg_document_categories_ai_fts`
   auto_ingest INTEGER DEFAULT 0
   extract_tables INTEGER DEFAULT 1
   supplier_id TEXT
+  renewal_interval_months INTEGER
+  renewal_policy TEXT NOT NULL DEFAULT 'inherit' CHECK (renewal_policy IN ('inherit', 'period', 'none'))
   UNIQUE(tenant_id, slug)
 ```
 
@@ -1681,6 +1687,7 @@ Indexes: `idx_requirements_checklist`, `idx_requirements_tenant`
   created_at TEXT DEFAULT (datetime('now'))
   updated_at TEXT DEFAULT (datetime('now'))
   updated_by TEXT REFERENCES users(id)
+  criticality TEXT NOT NULL DEFAULT 'medium' CHECK (criticality IN ('high', 'medium', 'low'))
 ```
 
 Indexes: `idx_spec_limits_product`, `idx_spec_limits_scope`, `idx_spec_limits_supplier`, `idx_spec_limits_tenant_test`

@@ -22,6 +22,14 @@
  *     past verdicts are frozen deliberately and this script does not disturb
  *     them).
  *
+ *  4. IT COUNTS THE CATCHES. A certificate that asserts a PASS on a row whose
+ *     extracted value breaches a limit is the one finding a human reviewer
+ *     cannot make — nobody re-reads a certificate that claims compliance. The
+ *     count gets its own line and every catch is listed individually, because
+ *     seven named certificates persuade where the number seven does not, and
+ *     folding it into an accuracy percentage hides the only figure here a
+ *     competitor cannot also quote. A `not_checked` NEVER counts toward it.
+ *
  * WHAT IT DOES NOT DO: backfill the register. Writing rows would mean bypassing
  * the read-only guarantee in bin/lib/d1.js, and a retroactive alert nobody
  * expected is worse than no alert. The register fills going forward, on every
@@ -51,7 +59,11 @@
  */
 
 const { query, queryPaged } = require('./lib/d1');
-const { checkPrintedSpecs, checkConfiguredLimits } = require('./lib/shared/specCheck');
+const {
+  checkPrintedSpecs,
+  checkConfiguredLimits,
+  findSpecDisagreements,
+} = require('./lib/shared/specCheck');
 
 function parseArgs(argv) {
   const opts = {
@@ -94,7 +106,7 @@ function parseArgs(argv) {
 
 function printHelp() {
   const src = require('fs').readFileSync(__filename, 'utf8');
-  console.log(src.split('\n').slice(2, 51).join('\n').replace(/^ \* ?/gm, ''));
+  console.log(src.split('\n').slice(2, 58).join('\n').replace(/^ \* ?/gm, ''));
 }
 
 /**
@@ -225,9 +237,22 @@ function main() {
 
   const findings = [];
   const unmatched = new Map();
+  /**
+   * THE CATCHES. A certificate asserted a pass on a row whose extracted value
+   * breaches a limit — the one finding a human reviewer cannot make, because
+   * nobody re-reads a certificate that claims compliance. Kept in its own list
+   * rather than mixed into `findings`: folded into an accuracy percentage it
+   * disappears, and accuracy is a claim every vendor makes.
+   */
+  const catches = [];
+  /** The other direction. Interesting, counted, and never added to the above. */
+  const reverse = [];
   let examined = 0;
   let withResults = 0;
   let inSpec = 0;
+  let assertedPass = 0;
+  let assertedPassJudged = 0;
+  let assertedFail = 0;
 
   for (const doc of docs) {
     examined++;
@@ -260,7 +285,50 @@ function main() {
       unmatched.set(name, (unmatched.get(name) || 0) + 1);
     }
 
-    for (const v of [...printed, ...configured.verdicts]) {
+    const allVerdicts = [...printed, ...configured.verdicts];
+
+    /**
+     * Read the same verdicts a second time, asking a different question: which
+     * of them contradict what the document itself claimed? Nothing is re-judged
+     * here — `findSpecDisagreements` only pairs a judgement with the claim
+     * printed on the same cell, and a `not_checked` can never become a catch.
+     */
+    const disagreements = findSpecDisagreements(sources, allVerdicts, { unitPolicy });
+    assertedPass += disagreements.asserted_pass;
+    assertedPassJudged += disagreements.asserted_pass_judged;
+    assertedFail += disagreements.asserted_fail;
+    const provenance = {
+      document_id: doc.id,
+      document_title: doc.title,
+      supplier: doc.supplier_name || null,
+    };
+    for (const c of disagreements.catches) {
+      catches.push({
+        ...provenance,
+        test: c.test_name_raw,
+        value: c.value_raw,
+        unit: c.unit_raw,
+        limit: c.limit_text,
+        judged_by: c.judged_by,
+        judged_by_all: c.judged_by_all,
+        asserted_by: c.asserted_by,
+        assertion: c.assertion_text,
+        message: c.message,
+        unit_equivalence_applied: c.verdict.unit_equivalence_applied === true,
+      });
+    }
+    for (const r of disagreements.reverse) {
+      reverse.push({
+        ...provenance,
+        test: r.test_name_raw,
+        value: r.value_raw,
+        limit: r.limit_text,
+        assertion: r.assertion_text,
+        message: r.message,
+      });
+    }
+
+    for (const v of allVerdicts) {
       if (v.verdict === 'in_spec') {
         inSpec++;
         continue;
@@ -294,6 +362,11 @@ function main() {
           active_limits: limits.length,
           in_spec: inSpec,
           unit_policy: unitPolicy,
+          asserted_pass: assertedPass,
+          asserted_pass_judged: assertedPassJudged,
+          asserted_fail: assertedFail,
+          catches,
+          reverse,
           out_of_spec: outOfSpec,
           not_checked: notChecked,
           unmatched: [...unmatched.entries()]
@@ -330,6 +403,39 @@ function main() {
   console.log(`OUT OF SPEC .............. ${outOfSpec.length}`);
   console.log(`COULD NOT BE JUDGED ...... ${notChecked.length}`);
   console.log('');
+  // Deliberately its OWN line, above the failure detail and separate from the
+  // accuracy figure. Accuracy is table stakes; this is the number that says
+  // what the product found that a person reading the paper could not.
+  console.log(`CATCHES .................. ${catches.length}`);
+  console.log(
+    `  (certificate asserted a PASS, extracted value breaches a limit —\n` +
+    `   out of ${assertedPassJudged} claimed passes a limit could be applied to,\n` +
+    `   of ${assertedPass} claimed passes in total. Refusals never count here.)`
+  );
+  if (reverse.length > 0) {
+    console.log(`Certificate said FAIL, we judge it a pass ... ${reverse.length}`);
+    console.log('  (the other direction — a conservative supplier, or a misread. Not a catch.)');
+  }
+  console.log('');
+
+  if (catches.length > 0) {
+    // Every catch listed individually: seven specific certificates are more
+    // persuasive than the number seven, and each line is checkable against the
+    // document it names.
+    console.log('CATCHES — the document said this was fine');
+    console.log('-'.repeat(72));
+    for (const c of catches) {
+      console.log(`  ${c.supplier || '—'} · ${c.document_title}`);
+      console.log(
+        `     ${c.test}: ${c.value}${c.unit ? ` ${c.unit}` : ''}` +
+        ` vs ${c.limit || '—'} (${c.judged_by === 'printed' ? "the COA's own limit" : 'our limit'})` +
+        `${c.asserted_by === 'verdict_cell' ? `, marked "${c.assertion}"` : `, within its printed ${c.assertion}`}`
+      );
+      console.log(`     ${c.message}`);
+      console.log(`     document ${c.document_id}`);
+    }
+    console.log('');
+  }
 
   if (outOfSpec.length > 0) {
     console.log('Out of spec');

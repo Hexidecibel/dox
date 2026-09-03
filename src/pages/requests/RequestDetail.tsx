@@ -60,6 +60,9 @@ import {
   Visibility as PreviewIcon,
   Delete as DeleteIcon,
   Save as SaveIcon,
+  ContentCopy as CopyIcon,
+  Check as CheckIcon,
+  Autorenew as RotateIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
 import type {
@@ -68,6 +71,7 @@ import type {
   DocumentRequestDetail,
   RequestLineStatus,
   RequestLineWithClosure,
+  RequestLinkView,
   SupplierRequestView,
   User,
 } from '../../lib/types';
@@ -146,6 +150,12 @@ export function RequestDetail() {
   const [cancelOpen, setCancelOpen] = useState(false);
   const [preview, setPreview] = useState<SupplierRequestView | null>(null);
 
+  const [link, setLink] = useState<RequestLinkView | null>(null);
+  const [linkLoading, setLinkLoading] = useState(false);
+  const [linkError, setLinkError] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [rotateOpen, setRotateOpen] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -163,6 +173,31 @@ export function RequestDetail() {
   useEffect(() => {
     load();
   }, [load]);
+
+  const loadLink = useCallback(async () => {
+    setLinkLoading(true);
+    setLinkError('');
+    try {
+      const res = await api.documentRequests.link(id);
+      setLink(res.link);
+    } catch (err) {
+      setLinkError(err instanceof Error ? err.message : 'Could not read the supplier link');
+    } finally {
+      setLinkLoading(false);
+    }
+  }, [id]);
+
+  // A draft has no door, so nothing is fetched for one. `null` from the GET is
+  // an ordinary answer for an issued ask too — the link can expire or have been
+  // revoked — and is rendered as its own state rather than as an error.
+  const status = request?.status;
+  useEffect(() => {
+    if (status !== 'issued') {
+      setLink(null);
+      return;
+    }
+    loadLink();
+  }, [status, loadLink]);
 
   useEffect(() => {
     if (!canCompose) return;
@@ -232,6 +267,36 @@ export function RequestDetail() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save the lines');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyLink = async () => {
+    if (!link) return;
+    try {
+      await navigator.clipboard.writeText(link.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard blocked (insecure context, or the browser refused). The URL
+      // is rendered in a selectable field precisely so this is survivable.
+    }
+  };
+
+  // One call for both buttons because it is one server operation. The WORDS
+  // differ — there is nothing to break when there is no live link — but a
+  // second endpoint for "create" would be a lie about what the POST does.
+  const rotateLink = async () => {
+    setBusy(true);
+    setLinkError('');
+    try {
+      await api.documentRequests.rotateLink(request.id);
+      setRotateOpen(false);
+      await loadLink();
+    } catch (err) {
+      setRotateOpen(false);
+      setLinkError(err instanceof Error ? err.message : 'Failed to mint a new link');
     } finally {
       setBusy(false);
     }
@@ -405,6 +470,108 @@ export function RequestDetail() {
           </Box>
         )}
       </Paper>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* The supplier's door.                                                */}
+      {/* ------------------------------------------------------------------ */}
+      {isIssued && (
+        <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
+            <Typography variant="h6" fontWeight={700} sx={{ flexGrow: 1 }}>
+              Supplier link
+            </Typography>
+            {canCompose && link && (
+              <Button
+                size="small"
+                color="warning"
+                startIcon={<RotateIcon />}
+                onClick={() => setRotateOpen(true)}
+              >
+                Rotate link
+              </Button>
+            )}
+          </Box>
+
+          {linkError && (
+            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setLinkError('')}>
+              {linkError}
+            </Alert>
+          )}
+
+          {linkLoading && !link ? (
+            <CircularProgress size={20} />
+          ) : link ? (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Send this to {request.supplier_name ?? 'the supplier'}. It needs no account, and
+                it belongs to the ask rather than to this version — amending does not change it.
+                Nothing is emailed from here.
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+                <TextField
+                  size="small"
+                  value={link.url}
+                  label="URL"
+                  sx={{ flexGrow: 1, minWidth: 280 }}
+                  InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
+                  onFocus={(e) => e.target.select()}
+                />
+                <Button
+                  variant="contained"
+                  startIcon={copied ? <CheckIcon /> : <CopyIcon />}
+                  onClick={copyLink}
+                >
+                  {copied ? 'Copied' : 'Copy'}
+                </Button>
+              </Box>
+
+              {/* Deliberately no "open it yourself" button: every view is
+                  counted, and the counters below are only worth reading if the
+                  buyer cannot inflate them by clicking around. */}
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', mt: 2 }}>
+                <Fact label="Expires">{link.expires_at}</Fact>
+                <Fact label="Opened">
+                  {link.view_count === 0
+                    ? 'Never'
+                    : `${link.view_count} time${link.view_count === 1 ? '' : 's'}`}
+                </Fact>
+                <Fact label="Last opened">{link.last_viewed_at ?? '—'}</Fact>
+                <Fact label="Last upload">{link.last_upload_at ?? 'Nothing sent yet'}</Fact>
+              </Box>
+
+              {link.view_count === 0 && (
+                <Typography variant="caption" color="text.secondary" display="block">
+                  They have not opened it. Check the address it went to before chasing the
+                  documents — an unopened link is usually a delivery problem, not a supplier one.
+                </Typography>
+              )}
+              {superseded && (
+                <Typography variant="caption" color="text.secondary" display="block">
+                  This is an earlier version. The link is per-ask, so it opens whichever version
+                  is current — this one is on the record, not on their screen.
+                </Typography>
+              )}
+            </>
+          ) : (
+            <>
+              <Alert severity="info" sx={{ mb: canCompose ? 2 : 0 }}>
+                <AlertTitle>There is no live link for this ask</AlertTitle>
+                Issuing normally mints one, so this means it expired, was revoked, or could not
+                be written at issue time. Until one exists the supplier has no way in.
+              </Alert>
+              {canCompose && (
+                <Button
+                  variant="contained"
+                  startIcon={<RotateIcon />}
+                  onClick={() => setRotateOpen(true)}
+                >
+                  Create a link
+                </Button>
+              )}
+            </>
+          )}
+        </Paper>
+      )}
 
       {request.intro && (
         <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
@@ -738,6 +905,47 @@ export function RequestDetail() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setPreview(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Rotation is destructive to something already in someone's inbox, so
+          it gets the same treatment as issuing: the consequence in words,
+          before the button, not a toast afterwards. */}
+      <Dialog
+        open={rotateOpen}
+        onClose={busy ? undefined : () => setRotateOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>{link ? 'Replace the supplier link?' : 'Create a supplier link?'}</DialogTitle>
+        <DialogContent dividers>
+          {link ? (
+            <Alert severity="warning">
+              <AlertTitle>The current URL stops working immediately</AlertTitle>
+              Anyone already holding it — the contact you emailed, and anyone they forwarded it
+              to — gets an error instead of the request, and will need the new URL from you.
+              Nothing they have already sent is lost. Do this when the link went to the wrong
+              person, or the right person has left.
+            </Alert>
+          ) : (
+            <DialogContentText>
+              This mints a fresh URL that {request.supplier_name ?? 'the supplier'} can open
+              without an account. Nothing is emailed from here — copy it and send it yourself.
+            </DialogContentText>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRotateOpen(false)} color="inherit" disabled={busy}>
+            {link ? 'Keep the current link' : 'Cancel'}
+          </Button>
+          <Button
+            color={link ? 'warning' : 'primary'}
+            variant="contained"
+            disabled={busy}
+            onClick={rotateLink}
+          >
+            {link ? 'Replace it' : 'Create link'}
+          </Button>
         </DialogActions>
       </Dialog>
 

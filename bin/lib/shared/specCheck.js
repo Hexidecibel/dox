@@ -23,8 +23,11 @@ __export(specCheck_exports, {
   STRICT_UNIT_POLICY: () => STRICT_UNIT_POLICY,
   checkConfiguredLimits: () => checkConfiguredLimits,
   checkPrintedSpecs: () => checkPrintedSpecs,
+  classifySpecDisagreement: () => classifySpecDisagreement,
+  collectPrintedAssertions: () => collectPrintedAssertions,
   compareToLimit: () => compareToLimit,
   detectTableShape: () => detectTableShape,
+  findSpecDisagreements: () => findSpecDisagreements,
   formatLimit: () => formatLimit,
   isControlRowLabel: () => isControlRowLabel,
   matchSpecTest: () => matchSpecTest,
@@ -34,6 +37,7 @@ __export(specCheck_exports, {
   resolveSpecLimits: () => resolveSpecLimits,
   resolveUnits: () => resolveUnits,
   resultRestatesSpec: () => resultRestatesSpec,
+  specResultKey: () => specResultKey,
   specVerdictKey: () => specVerdictKey,
   toSpecLimit: () => toSpecLimit,
   unitEquivalenceNote: () => unitEquivalenceNote,
@@ -41,9 +45,24 @@ __export(specCheck_exports, {
   validateLimitShape: () => validateLimitShape
 });
 module.exports = __toCommonJS(specCheck_exports);
+
+// shared/specCriticality.ts
+var SPEC_CRITICALITY_VALUES = ["high", "medium", "low"];
+var DEFAULT_SPEC_CRITICALITY = "medium";
+function isSpecCriticality(value) {
+  return typeof value === "string" && SPEC_CRITICALITY_VALUES.includes(value);
+}
+function parseSpecCriticality(value) {
+  return isSpecCriticality(value) ? value : DEFAULT_SPEC_CRITICALITY;
+}
+
+// shared/specCheck.ts
+function specResultKey(scope, target) {
+  const where = target.kind === "table" ? `t${target.table_index}r${target.row_index}${target.col_index === void 0 ? "" : `c${target.col_index}`}` : `g${target.group}/${target.cell}`;
+  return `${scope}::${where}`;
+}
 function specVerdictKey(v) {
-  const where = v.target.kind === "table" ? `t${v.target.table_index}r${v.target.row_index}${v.target.col_index === void 0 ? "" : `c${v.target.col_index}`}` : `g${v.target.group}/${v.target.cell}`;
-  return `${v.scope}::${where}::${v.source}`;
+  return `${specResultKey(v.scope, v.target)}::${v.source}`;
 }
 var UNKNOWN_UNIT = { family: "unknown", perBasis: 1, canonical: "" };
 function norm(s) {
@@ -489,6 +508,15 @@ var PASS_VERDICT_TOKENS = /* @__PURE__ */ new Set([
   "withinspec",
   "meetsspec"
 ]);
+function printedClaim(row) {
+  const cell = row.verdictRaw || row.resultRaw;
+  const key = norm(cell);
+  return {
+    cell,
+    pass: !!cell && PASS_VERDICT_TOKENS.has(key),
+    fail: !!cell && FAIL_VERDICT_TOKENS.has(key)
+  };
+}
 function judgePrinted(scope, target, row, policy = STRICT_UNIT_POLICY) {
   const { testName, resultRaw, specRaw, verdictRaw, unitRaw } = row;
   if (!testName) return null;
@@ -500,9 +528,7 @@ function judgePrinted(scope, target, row, policy = STRICT_UNIT_POLICY) {
     unit_raw: unitRaw || null,
     source: "printed"
   };
-  const verdictCell = verdictRaw || resultRaw;
-  const printedFail = !!verdictCell && FAIL_VERDICT_TOKENS.has(norm(verdictCell));
-  const printedPass = !!verdictCell && PASS_VERDICT_TOKENS.has(norm(verdictCell));
+  const { cell: verdictCell, pass: printedPass, fail: printedFail } = printedClaim(row);
   const resultIsVerdict = !verdictRaw && !!resultRaw && (printedFail || printedPass);
   const limit = parseLimitExpression(specRaw);
   const value = parseMeasuredValue(applyRowUnit(resultRaw, unitRaw));
@@ -557,16 +583,14 @@ function judgePrinted(scope, target, row, policy = STRICT_UNIT_POLICY) {
   }
   return null;
 }
-function checkPrintedSpecs(sources, opts = {}) {
-  const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
-  const out = [];
+function forEachPrintedRow(sources, visit) {
   for (const src of sources) {
     (src.tables ?? []).forEach((table, ti) => {
       const shape = detectTableShape(table.headers || []);
       if (shape.result === -1 && shape.verdict === -1) return;
       (table.rows || []).forEach((row, ri) => {
         const cell = (i) => i >= 0 ? String(row[i] ?? "").trim() : "";
-        const v = judgePrinted(
+        visit(
           src.scope,
           { kind: "table", table_index: ti, row_index: ri, table_name: table.name || "" },
           {
@@ -575,17 +599,15 @@ function checkPrintedSpecs(sources, opts = {}) {
             specRaw: cell(shape.spec),
             verdictRaw: cell(shape.verdict),
             unitRaw: cell(shape.unit)
-          },
-          policy
+          }
         );
-        if (v) out.push(v);
       });
     });
     for (const [groupName, cells] of Object.entries(src.groups ?? {})) {
       if (!cells || typeof cells !== "object") continue;
       for (const [cellName, cell] of Object.entries(cells)) {
         if (!cell || typeof cell !== "object") continue;
-        const v = judgePrinted(
+        visit(
           src.scope,
           { kind: "group", group: groupName, cell: cellName },
           {
@@ -595,13 +617,19 @@ function checkPrintedSpecs(sources, opts = {}) {
             specRaw: String(cell.spec ?? "").trim(),
             verdictRaw: "",
             unitRaw: String(cell.unit ?? "").trim()
-          },
-          policy
+          }
         );
-        if (v) out.push(v);
       }
     }
   }
+}
+function checkPrintedSpecs(sources, opts = {}) {
+  const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
+  const out = [];
+  forEachPrintedRow(sources, (scope, target, row) => {
+    const v = judgePrinted(scope, target, row, policy);
+    if (v) out.push(v);
+  });
   return out;
 }
 function isBlankResult(raw) {
@@ -758,6 +786,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
         limit_text: limitTextOnly,
         spec_test_id: test.id,
         limit_id: configured.id,
+        criticality: parseSpecCriticality(configured.criticality),
         value_num: null,
         reason: RESTATED_SPEC_REASON,
         verdict: "not_checked",
@@ -781,6 +810,9 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       limit_text: limitText,
       spec_test_id: test.id,
       limit_id: configured.id,
+      // Ranking only — it rides along with every verdict this limit produces,
+      // pass and fail alike, so the reviewer UI can sort without a second read.
+      criticality: parseSpecCriticality(configured.criticality),
       value_num: cmp.value_num,
       reason: cmp.reason,
       ...cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {}
@@ -895,13 +927,130 @@ function validateLimitShape(input) {
       return `Unknown operator "${operator}".`;
   }
 }
+var NO_ASSERTION = { assertion: "none", basis: null, basis_text: null };
+function claimForRow(row, policy) {
+  const { cell, pass, fail } = printedClaim(row);
+  if (fail) return { assertion: "fail", basis: "verdict_cell", basis_text: cell };
+  if (pass) return { assertion: "pass", basis: "verdict_cell", basis_text: cell };
+  const limit = parseLimitExpression(row.specRaw);
+  if (!limit) return NO_ASSERTION;
+  if (isBlankResult(row.resultRaw)) return NO_ASSERTION;
+  if (resultRestatesSpec(row.resultRaw, row.specRaw, row.unitRaw)) return NO_ASSERTION;
+  const value = parseMeasuredValue(applyRowUnit(row.resultRaw, row.unitRaw));
+  const cmp = compareToLimit(value, withUnit(limit, row.unitRaw), policy);
+  const text = formatLimit(limit);
+  if (cmp.verdict === "in_spec") return { assertion: "pass", basis: "printed_limit", basis_text: text };
+  if (cmp.verdict === "out_of_spec") return { assertion: "fail", basis: "printed_limit", basis_text: text };
+  return NO_ASSERTION;
+}
+function collectPrintedAssertions(sources, opts = {}) {
+  const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
+  const out = [];
+  forEachPrintedRow(sources, (scope, target, row) => {
+    if (!row.testName) return;
+    const claim = claimForRow(row, policy);
+    const where = {
+      scope,
+      target,
+      test_name_raw: row.testName,
+      value_raw: row.resultRaw
+    };
+    out.push(
+      claim.assertion === "none" ? { ...where, assertion: "none", basis: null, basis_text: null } : { ...where, assertion: claim.assertion, basis: claim.basis, basis_text: claim.basis_text }
+    );
+  });
+  return out;
+}
+function classifySpecDisagreement(assertion, verdict) {
+  if (assertion.assertion === "none") return null;
+  if (verdict.verdict === "not_checked") return null;
+  if (specResultKey(assertion.scope, assertion.target) !== specResultKey(verdict.scope, verdict.target)) {
+    return null;
+  }
+  if (assertion.assertion === "pass" && verdict.verdict === "out_of_spec") {
+    return "asserted_pass_extracted_fail";
+  }
+  if (assertion.assertion === "fail" && verdict.verdict === "in_spec") {
+    return "asserted_fail_extracted_pass";
+  }
+  return null;
+}
+function preferredVerdict(a, b) {
+  if (a.source === b.source) return a;
+  return a.source === "printed" ? a : b;
+}
+function findSpecDisagreements(sources, verdicts, opts = {}) {
+  const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
+  const assertions = collectPrintedAssertions(sources, { unitPolicy: policy });
+  const byResult = /* @__PURE__ */ new Map();
+  for (const v of verdicts) {
+    const key = specResultKey(v.scope, v.target);
+    const bucket = byResult.get(key);
+    if (bucket) bucket.push(v);
+    else byResult.set(key, [v]);
+  }
+  const report = {
+    catches: [],
+    reverse: [],
+    asserted_pass: 0,
+    asserted_pass_judged: 0,
+    asserted_fail: 0,
+    asserted_fail_judged: 0
+  };
+  for (const a of assertions) {
+    if (a.assertion === "none") continue;
+    const judged = byResult.get(specResultKey(a.scope, a.target)) ?? [];
+    const decided = judged.filter((v) => v.verdict !== "not_checked");
+    if (a.assertion === "pass") {
+      report.asserted_pass++;
+      if (decided.length > 0) report.asserted_pass_judged++;
+    } else {
+      report.asserted_fail++;
+      if (decided.length > 0) report.asserted_fail_judged++;
+    }
+    let kind = null;
+    let chosen = null;
+    const agreeing = [];
+    for (const v of decided) {
+      const k = classifySpecDisagreement(a, v);
+      if (!k) continue;
+      kind = k;
+      agreeing.push(v.source);
+      chosen = chosen ? preferredVerdict(chosen, v) : v;
+    }
+    if (!kind || !chosen) continue;
+    const whose = chosen.source === "printed" ? "the certificate's own" : "our";
+    const message = kind === "asserted_pass_extracted_fail" ? a.basis === "verdict_cell" ? `${a.test_name_raw}: the certificate says "${a.basis_text}", but ${a.value_raw} is outside ${whose} limit of ${chosen.limit_text}.` : `${a.test_name_raw}: ${a.value_raw} meets the certificate's own printed ${a.basis_text}, but is outside our limit of ${chosen.limit_text}.` : `${a.test_name_raw}: the certificate says "${a.basis_text}", but ${a.value_raw} is within ${whose} limit of ${chosen.limit_text}.`;
+    const entry = {
+      kind,
+      scope: a.scope,
+      target: a.target,
+      test_name_raw: a.test_name_raw,
+      value_raw: a.value_raw,
+      unit_raw: chosen.unit_raw,
+      limit_text: chosen.limit_text,
+      judged_by: chosen.source,
+      judged_by_all: [...new Set(agreeing)],
+      asserted_by: a.basis,
+      assertion_text: a.basis_text,
+      message,
+      verdict: chosen
+    };
+    if (kind === "asserted_pass_extracted_fail") report.catches.push(entry);
+    else report.reverse.push(entry);
+  }
+  return report;
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   STRICT_UNIT_POLICY,
   checkConfiguredLimits,
   checkPrintedSpecs,
+  classifySpecDisagreement,
+  collectPrintedAssertions,
   compareToLimit,
   detectTableShape,
+  findSpecDisagreements,
   formatLimit,
   isControlRowLabel,
   matchSpecTest,
@@ -911,6 +1060,7 @@ function validateLimitShape(input) {
   resolveSpecLimits,
   resolveUnits,
   resultRestatesSpec,
+  specResultKey,
   specVerdictKey,
   toSpecLimit,
   unitEquivalenceNote,

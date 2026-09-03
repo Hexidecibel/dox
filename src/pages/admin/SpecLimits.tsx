@@ -33,6 +33,18 @@
  * are the same quantity for counting purposes — and that is not a claim code
  * should make on anyone's behalf. Off by default.
  *
+ * CRITICALITY RANKS WHAT THIS SCREEN SHOWS (migration 0095). A spec sheet is
+ * mostly parameters written tighter than the plant can consistently hit, to
+ * support a nutrition-panel claim — they are TRACKED, not acted on, and only a
+ * few would ever stop a load. Listing all of them flat is how the owner of this
+ * page stops reading it, and how the reviewer downstream stops reading the
+ * warnings it produces. So each limit carries a tier, every new limit starts on
+ * the middle one, and the list can be grouped by tier to put the load-stopping
+ * few above the tracked many.
+ *
+ * The tier changes NO verdict — the same results are judged, the same way. See
+ * shared/specCriticality.ts, which owns the vocabulary (still provisional).
+ *
  * NOTHING HERE BLOCKS AN APPROVAL. These rows produce warnings.
  */
 
@@ -63,6 +75,8 @@ import {
   TableHead,
   TableRow,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -73,6 +87,16 @@ import {
   Science as AnalyteIcon,
 } from '@mui/icons-material';
 import { api } from '../../lib/api';
+import {
+  DEFAULT_SPEC_CRITICALITY,
+  SPEC_CRITICALITY_COLOR,
+  SPEC_CRITICALITY_HELP,
+  SPEC_CRITICALITY_LABELS,
+  SPEC_CRITICALITY_VALUES,
+  compareSpecCriticality,
+  parseSpecCriticality,
+} from '../../../shared/specCriticality';
+import type { SpecCriticality } from '../../../shared/specCriticality';
 import type { ApiSpecTest, ApiSpecLimit, ApiSupplier, ApiDocumentType } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
@@ -110,6 +134,109 @@ function limitText(l: ApiSpecLimit): string {
     default:
       return `${l.value_min}${u}`;
   }
+}
+
+/** The tier a stored limit sits in, tolerating a row written before 0095. */
+function criticalityOf(l: ApiSpecLimit): SpecCriticality {
+  return parseSpecCriticality(l.criticality);
+}
+
+/** Most critical first — the whole reason this attribute exists. */
+function byCriticality(a: ApiSpecLimit, b: ApiSpecLimit): number {
+  return compareSpecCriticality(criticalityOf(a), criticalityOf(b));
+}
+
+/** One tier, worded and coloured the same way everywhere it appears. */
+function CriticalityChip({ limit }: { limit: ApiSpecLimit }) {
+  const tier = criticalityOf(limit);
+  return (
+    <Tooltip arrow title={SPEC_CRITICALITY_HELP[tier]}>
+      <Chip
+        size="small"
+        variant={tier === 'high' ? 'filled' : 'outlined'}
+        color={SPEC_CRITICALITY_COLOR[tier]}
+        label={SPEC_CRITICALITY_LABELS[tier]}
+      />
+    </Tooltip>
+  );
+}
+
+/**
+ * The limit rows themselves. One renderer for both layouts so the analyte view
+ * and the criticality view can never drift into showing different facts about
+ * the same limit. Module scope, handlers passed in — a component redefined on
+ * every render would remount this table on every keystroke elsewhere.
+ */
+function LimitTable({
+  rows,
+  showAnalyte = false,
+  onEdit,
+  onRemove,
+}: {
+  rows: ApiSpecLimit[];
+  /** Adds the analyte column and drops the tier chip (the section is the tier). */
+  showAnalyte?: boolean;
+  onEdit: (l: ApiSpecLimit) => void;
+  onRemove: (l: ApiSpecLimit) => void;
+}) {
+  return (
+    <TableContainer sx={{ mt: 1.5 }}>
+      <Table size="small">
+        <TableHead>
+          <TableRow>
+            {showAnalyte && <TableCell sx={{ fontWeight: 600 }}>Analyte</TableCell>}
+            <TableCell sx={{ fontWeight: 600 }}>Limit</TableCell>
+            <TableCell sx={{ fontWeight: 600 }}>Applies to</TableCell>
+            {!showAnalyte && (
+              <TableCell sx={{ fontWeight: 600 }}>
+                <Tooltip
+                  arrow
+                  title="How much this parameter matters. It ranks and colours the warning; it never changes the verdict."
+                >
+                  <span>How much it matters</span>
+                </Tooltip>
+              </TableCell>
+            )}
+            <TableCell sx={{ fontWeight: 600 }}>On failure</TableCell>
+            <TableCell align="right" />
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {rows.map((l) => (
+            <TableRow key={l.id} sx={{ opacity: l.active ? 1 : 0.5 }}>
+              {showAnalyte && <TableCell>{l.test_name}</TableCell>}
+              <TableCell sx={{ fontWeight: 600 }}>{limitText(l)}</TableCell>
+              <TableCell>{scopeText(l)}</TableCell>
+              {/* Grouped by tier, the chip on every row would repeat the
+                  section heading, so it is dropped there instead of shown
+                  twice. */}
+              {!showAnalyte && (
+                <TableCell>
+                  <CriticalityChip limit={l} />
+                </TableCell>
+              )}
+              <TableCell>
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  color={l.severity === 'alert' ? 'error' : 'default'}
+                  label={l.severity === 'alert' ? 'Notify owner' : 'Queue only'}
+                />
+              </TableCell>
+              <TableCell align="right">
+                <IconButton size="small" onClick={() => onEdit(l)}>
+                  <EditIcon fontSize="small" />
+                </IconButton>
+                <IconButton size="small" onClick={() => onRemove(l)}>
+                  <DeleteIcon fontSize="small" />
+                </IconButton>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </TableContainer>
+  );
 }
 
 function scopeText(l: ApiSpecLimit): string {
@@ -156,7 +283,14 @@ export function SpecLimits() {
   const [limitSupplier, setLimitSupplier] = useState('');
   const [limitDocType, setLimitDocType] = useState('');
   const [limitSeverity, setLimitSeverity] = useState('alert');
+  const [limitCriticality, setLimitCriticality] = useState<SpecCriticality>(DEFAULT_SPEC_CRITICALITY);
   const [saving, setSaving] = useState(false);
+
+  // How the list is laid out. 'analyte' is the original shape and stays the
+  // default — it is how the person maintaining aliases thinks. 'criticality'
+  // answers the other question this page has never been able to answer at a
+  // glance: which of these would actually stop a load?
+  const [groupBy, setGroupBy] = useState<'analyte' | 'criticality'>('analyte');
 
   const load = async () => {
     setLoading(true);
@@ -189,6 +323,25 @@ export function SpecLimits() {
   const limitsByTest = useMemo(() => {
     const out: Record<string, ApiSpecLimit[]> = {};
     for (const l of limits) (out[l.spec_test_id] ||= []).push(l);
+    // Critical first inside every analyte, even in the analyte view — a tenant
+    // with a tenant-wide tracked limit and one supplier-specific critical
+    // override should not have to read past the softer row to find the hard one.
+    for (const rows of Object.values(out)) rows.sort(byCriticality);
+    return out;
+  }, [limits]);
+
+  /**
+   * The same limits, bucketed by tier. Every tier gets a bucket even when it is
+   * empty: "nothing is marked critical" is itself worth seeing on this page,
+   * and a silently missing section reads as "no such thing" instead.
+   */
+  const limitsByCriticality = useMemo(() => {
+    const out = {} as Record<SpecCriticality, ApiSpecLimit[]>;
+    for (const tier of SPEC_CRITICALITY_VALUES) out[tier] = [];
+    for (const l of limits) out[criticalityOf(l)].push(l);
+    for (const tier of SPEC_CRITICALITY_VALUES) {
+      out[tier].sort((a, b) => (a.test_name || '').localeCompare(b.test_name || ''));
+    }
     return out;
   }, [limits]);
 
@@ -284,6 +437,7 @@ export function SpecLimits() {
     setLimitSupplier('');
     setLimitDocType('');
     setLimitSeverity('alert');
+    setLimitCriticality(DEFAULT_SPEC_CRITICALITY);
     setLimitDialog(true);
   };
 
@@ -297,6 +451,7 @@ export function SpecLimits() {
     setLimitSupplier(l.supplier_id || '');
     setLimitDocType(l.document_type_id || '');
     setLimitSeverity(l.severity);
+    setLimitCriticality(criticalityOf(l));
     setLimitDialog(true);
   };
 
@@ -313,6 +468,7 @@ export function SpecLimits() {
         supplier_id: limitSupplier || null,
         document_type_id: limitDocType || null,
         severity: limitSeverity,
+        criticality: limitCriticality,
       };
       if (editingLimit) {
         await api.specLimits.update(editingLimit.id, payload);
@@ -382,11 +538,29 @@ export function SpecLimits() {
         </Stack>
       </Box>
 
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         A result outside one of these limits is flagged for the reviewer when the
         COA arrives. Limits never block an approval — they ask for eyes. A limit
         with no supplier applies everywhere; add a narrower one to override it.
+        Mark the few that would actually stop a load as{' '}
+        <strong>{SPEC_CRITICALITY_LABELS.high}</strong> so they are not read at
+        the same volume as the many you simply track.
       </Typography>
+
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 3 }}>
+        <Typography variant="caption" color="text.secondary">
+          Group by
+        </Typography>
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={groupBy}
+          onChange={(_e, v: 'analyte' | 'criticality' | null) => v && setGroupBy(v)}
+        >
+          <ToggleButton value="analyte">Analyte</ToggleButton>
+          <ToggleButton value="criticality">How much it matters</ToggleButton>
+        </ToggleButtonGroup>
+      </Stack>
 
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
@@ -447,6 +621,40 @@ export function SpecLimits() {
           actionLabel="Add Analyte"
           onAction={openCreateTest}
         />
+      ) : groupBy === 'criticality' ? (
+        <Stack spacing={2}>
+          {SPEC_CRITICALITY_VALUES.map((tier) => {
+            const rows = limitsByCriticality[tier];
+            return (
+              <Paper key={tier} variant="outlined" sx={{ p: 2 }}>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Chip
+                    size="small"
+                    variant={tier === 'high' ? 'filled' : 'outlined'}
+                    color={SPEC_CRITICALITY_COLOR[tier]}
+                    label={SPEC_CRITICALITY_LABELS[tier]}
+                  />
+                  <Typography variant="body2" color="text.secondary">
+                    {SPEC_CRITICALITY_HELP[tier]}
+                  </Typography>
+                  <Box sx={{ flexGrow: 1 }} />
+                  <Typography variant="caption" color="text.secondary">
+                    {rows.length} {rows.length === 1 ? 'limit' : 'limits'}
+                  </Typography>
+                </Stack>
+                {rows.length === 0 ? (
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                    {tier === 'high'
+                      ? 'Nothing is marked critical yet — every limit is being read at the same volume.'
+                      : 'Nothing in this tier.'}
+                  </Typography>
+                ) : (
+                  <LimitTable rows={rows} showAnalyte onEdit={openEditLimit} onRemove={removeLimit} />
+                )}
+              </Paper>
+            );
+          })}
+        </Stack>
       ) : (
         <Stack spacing={2}>
           {specTests.map((t) => {
@@ -508,42 +716,7 @@ export function SpecLimits() {
                     </Button>
                   </Alert>
                 ) : (
-                  <TableContainer sx={{ mt: 1.5 }}>
-                    <Table size="small">
-                      <TableHead>
-                        <TableRow>
-                          <TableCell sx={{ fontWeight: 600 }}>Limit</TableCell>
-                          <TableCell sx={{ fontWeight: 600 }}>Applies to</TableCell>
-                          <TableCell sx={{ fontWeight: 600 }}>On failure</TableCell>
-                          <TableCell align="right" />
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {rows.map((l) => (
-                          <TableRow key={l.id} sx={{ opacity: l.active ? 1 : 0.5 }}>
-                            <TableCell sx={{ fontWeight: 600 }}>{limitText(l)}</TableCell>
-                            <TableCell>{scopeText(l)}</TableCell>
-                            <TableCell>
-                              <Chip
-                                size="small"
-                                variant="outlined"
-                                color={l.severity === 'alert' ? 'error' : 'default'}
-                                label={l.severity === 'alert' ? 'Notify owner' : 'Queue only'}
-                              />
-                            </TableCell>
-                            <TableCell align="right">
-                              <IconButton size="small" onClick={() => openEditLimit(l)}>
-                                <EditIcon fontSize="small" />
-                              </IconButton>
-                              <IconButton size="small" onClick={() => removeLimit(l)}>
-                                <DeleteIcon fontSize="small" />
-                              </IconButton>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
+                  <LimitTable rows={rows} onEdit={openEditLimit} onRemove={removeLimit} />
                 )}
               </Paper>
             );
@@ -687,6 +860,27 @@ export function SpecLimits() {
                 </MenuItem>
               ))}
             </Select>
+          </FormControl>
+
+          <FormControl fullWidth margin="normal">
+            <InputLabel>How much it matters</InputLabel>
+            <Select
+              label="How much it matters"
+              value={limitCriticality}
+              onChange={(e) => setLimitCriticality(e.target.value as SpecCriticality)}
+            >
+              {SPEC_CRITICALITY_VALUES.map((tier) => (
+                <MenuItem key={tier} value={tier}>
+                  {SPEC_CRITICALITY_LABELS[tier]} — {SPEC_CRITICALITY_HELP[tier]}
+                </MenuItem>
+              ))}
+            </Select>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+              Ranks and colours the warning a reviewer sees. It changes nothing
+              about the check itself — the same result is judged the same way,
+              whichever tier this is. New limits start on{' '}
+              {SPEC_CRITICALITY_LABELS[DEFAULT_SPEC_CRITICALITY]}.
+            </Typography>
           </FormControl>
 
           <FormControl fullWidth margin="normal">

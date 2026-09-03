@@ -1266,6 +1266,32 @@ export function SupplierDetail() {
                 <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 0.5 }}>
                   {row.document_type_name}
                 </Typography>
+                {/* The layer ABOVE this box (migration 0098), shown read-only. */}
+                {/* Without it the narrow box reads as the whole instruction,   */}
+                {/* and a reviewer re-types type-level guidance per supplier —  */}
+                {/* which is exactly the 567-row duplication that layer exists  */}
+                {/* to remove. Edited on the Document Types admin screen,       */}
+                {/* deliberately not here: it belongs to every supplier.        */}
+                {row.type_instructions && row.type_instructions.trim() && (
+                  <Box
+                    sx={{
+                      mt: 1,
+                      p: 1.5,
+                      borderRadius: 1,
+                      bgcolor: 'action.hover',
+                      borderLeft: 3,
+                      borderColor: 'primary.main',
+                    }}
+                  >
+                    <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
+                      Applies to every supplier for {row.document_type_name} — the box below
+                      refines it
+                    </Typography>
+                    <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', mt: 0.5 }}>
+                      {row.type_instructions}
+                    </Typography>
+                  </Box>
+                )}
                 <ExtractionInstructionsBox
                   supplierId={supplier.id}
                   supplierName={supplier.name}

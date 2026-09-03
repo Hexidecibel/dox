@@ -30,6 +30,10 @@ import {
   resultRestatesSpec,
   specVerdictKey,
   isControlRowLabel,
+  collectPrintedAssertions,
+  classifySpecDisagreement,
+  findSpecDisagreements,
+  specResultKey,
   type SpecLimit,
 } from '../../shared/specCheck';
 
@@ -1358,5 +1362,205 @@ describe('unit equivalence through the checkers', () => {
       expect(verdicts[0].unit_equivalence_applied).toBeUndefined();
       expect(verdicts[0].reason).toMatch(/not comparable/);
     }
+  });
+});
+
+/**
+ * "Asserted pass, extracted fail" — the catch metric.
+ *
+ * This is the number the product is actually sold on: a certificate that CLAIMS
+ * compliance on a row whose value breaches a limit. A human reviewer misses it
+ * precisely because the paper says it is fine, so the tests below pin the two
+ * boundaries that decide whether the number can be trusted at all:
+ *
+ *   * `not_checked` NEVER counts. It is the engine refusing to judge, and a
+ *     refusal counted as a finding is the same lie as a two-state verdict.
+ *   * a result the document made no claim about is not in the denominator, so it
+ *     can never become a catch however badly it fails.
+ */
+describe('catches — the certificate said pass, the value says otherwise', () => {
+  const tests = [{ id: 'st_coliform', name: 'Coliform', aliases: ['Total Coliform'] }];
+  const ours = {
+    id: 'l1',
+    spec_test_id: 'st_coliform',
+    operator: '<=' as const,
+    value_min: null,
+    value_max: 10,
+    unit: 'CFU/g',
+    severity: 'alert' as const,
+    active: true,
+    supplier_id: null,
+    document_type_id: null,
+    product_id: null,
+  };
+  /** test | specification | result | units | pass/fail — every column a COA prints. */
+  const src = (rows: string[][]) => [
+    {
+      scope: 'ai_fields',
+      tables: [
+        {
+          name: 'micro',
+          headers: ['test', 'specification', 'result', 'units', 'pass/fail'],
+          rows,
+        },
+      ],
+    },
+  ];
+  /** Both passes, exactly as the register and the recheck script ask for them. */
+  const judgeAll = (rows: string[][]) => {
+    const sources = src(rows);
+    const printed = checkPrintedSpecs(sources);
+    const configured = checkConfiguredLimits(sources, tests, [ours], {}, { includePasses: true });
+    return findSpecDisagreements(sources, [...printed, ...configured.verdicts]);
+  };
+
+  it('counts a row the COA marked Pass that our limit fails', () => {
+    // The supplier certifies against ≤50 and ticks Pass; we hold ≤10 and the
+    // value is 40. Nobody re-reads a certificate that says Pass — this is the
+    // catch.
+    const report = judgeAll([['Coliform', '<50', '40', 'CFU/g', 'Pass']]);
+    expect(report.catches).toHaveLength(1);
+    expect(report.catches[0]).toMatchObject({
+      kind: 'asserted_pass_extracted_fail',
+      judged_by: 'limit',
+      asserted_by: 'verdict_cell',
+      assertion_text: 'Pass',
+      test_name_raw: 'Coliform',
+      value_raw: '40',
+    });
+    expect(report.catches[0].message).toMatch(/the certificate says "Pass", but 40 is outside our limit of ≤10 CFU\/g/);
+    expect(report.asserted_pass).toBe(1);
+    expect(report.asserted_pass_judged).toBe(1);
+    expect(report.reverse).toEqual([]);
+  });
+
+  it('counts a certificate that contradicts its OWN printed limit', () => {
+    // No configuration involved: the document prints ≤10, reports 40, and still
+    // ticks Pass. The printed judgement is preferred for the report line
+    // because it needs nothing of ours to be true.
+    const report = judgeAll([['Coliform', '≤10', '40', 'CFU/g', 'Pass']]);
+    expect(report.catches).toHaveLength(1);
+    expect(report.catches[0].judged_by).toBe('printed');
+    // Our ≤10 limit fails it too — one result, one catch, both sources listed.
+    expect(report.catches[0].judged_by_all.sort()).toEqual(['limit', 'printed']);
+  });
+
+  it('counts a value inside the certificate\'s own spec that breaks ours', () => {
+    // No pass/fail column at all. Printing 40 against its own ≤50 IS the
+    // document asserting conformance, arithmetically rather than in words.
+    const sources = src([['Coliform', '≤50', '40', 'CFU/g', '']]);
+    const configured = checkConfiguredLimits(sources, tests, [ours], {}, { includePasses: true });
+    const report = findSpecDisagreements(sources, [
+      ...checkPrintedSpecs(sources),
+      ...configured.verdicts,
+    ]);
+    expect(report.catches).toHaveLength(1);
+    expect(report.catches[0]).toMatchObject({ asserted_by: 'printed_limit', judged_by: 'limit' });
+    expect(report.catches[0].message).toMatch(
+      /meets the certificate's own printed ≤50, but is outside our limit of ≤10 CFU\/g/
+    );
+  });
+
+  it('NEVER counts not_checked, however loudly the COA claims a pass', () => {
+    // `<50` against a ≤10 limit straddles: the true value could be 2 or 49. The
+    // engine refuses, and a refusal is not a finding — if this ever counted,
+    // the headline number would be inflated by exactly the cases we were honest
+    // enough not to judge.
+    const report = judgeAll([['Coliform', '', '<50', 'CFU/g', 'Pass']]);
+    expect(report.catches).toEqual([]);
+    expect(report.reverse).toEqual([]);
+    // Still in the denominator as a claim, but not as a claim we could test.
+    expect(report.asserted_pass).toBe(1);
+    expect(report.asserted_pass_judged).toBe(0);
+  });
+
+  it('refuses a not_checked verdict at the classifier itself', () => {
+    const sources = src([['Coliform', '', '<50', 'CFU/g', 'Pass']]);
+    const [assertion] = collectPrintedAssertions(sources);
+    const { verdicts } = checkConfiguredLimits(sources, tests, [ours], {}, { includePasses: true });
+    expect(verdicts[0].verdict).toBe('not_checked');
+    expect(assertion.assertion).toBe('pass');
+    expect(classifySpecDisagreement(assertion, verdicts[0])).toBeNull();
+  });
+
+  it('leaves a result the document claimed nothing about out of the metric', () => {
+    // "Report" states no limit and there is no pass/fail column, so the
+    // certificate asserted nothing. 40 still fails our limit — it is a finding,
+    // it is simply not a CATCH, and it is not in this denominator either.
+    const report = judgeAll([['Coliform', 'Report', '40', 'CFU/g', '']]);
+    expect(report.catches).toEqual([]);
+    expect(report.asserted_pass).toBe(0);
+    expect(report.asserted_fail).toBe(0);
+    expect(collectPrintedAssertions(src([['Coliform', 'Report', '40', 'CFU/g', '']]))[0]).toMatchObject({
+      assertion: 'none',
+      basis: null,
+    });
+  });
+
+  it('counts the reverse direction separately and never as a catch', () => {
+    // The COA declares a failure and our limit passes the value. Interesting —
+    // a conservative supplier, or an extraction error — but it is not a catch
+    // and must never be added to one.
+    const report = judgeAll([['Coliform', '', '5', 'CFU/g', 'Fail']]);
+    expect(report.catches).toEqual([]);
+    expect(report.reverse).toHaveLength(1);
+    expect(report.reverse[0]).toMatchObject({
+      kind: 'asserted_fail_extracted_pass',
+      judged_by: 'limit',
+      assertion_text: 'Fail',
+    });
+    expect(report.asserted_fail).toBe(1);
+    expect(report.asserted_pass).toBe(0);
+  });
+
+  it('has no reverse to report when passes were not asked for', () => {
+    // The review queue omits in_spec verdicts by design. Nothing to compare a
+    // printed failure against, so the list is legitimately empty rather than
+    // wrong.
+    const sources = src([['Coliform', '', '5', 'CFU/g', 'Fail']]);
+    const configured = checkConfiguredLimits(sources, tests, [ours], {});
+    const report = findSpecDisagreements(sources, [
+      ...checkPrintedSpecs(sources),
+      ...configured.verdicts,
+    ]);
+    expect(report.reverse).toEqual([]);
+    expect(report.catches).toEqual([]);
+  });
+
+  it('never pairs a claim with a judgement from a different result', () => {
+    const sources = src([
+      ['Coliform', '', '40', 'CFU/g', 'Pass'],
+      ['Coliform', '', '1', 'CFU/g', 'Pass'],
+    ]);
+    const assertions = collectPrintedAssertions(sources);
+    const { verdicts } = checkConfiguredLimits(sources, tests, [ours], {}, { includePasses: true });
+    const failing = verdicts.find((v) => v.verdict === 'out_of_spec');
+    expect(failing).toBeDefined();
+    // Row 0's failure against row 1's claim is not a catch, it is two unrelated
+    // cells.
+    expect(specResultKey(assertions[1].scope, assertions[1].target)).not.toBe(
+      specResultKey(failing!.scope, failing!.target)
+    );
+    expect(classifySpecDisagreement(assertions[1], failing!)).toBeNull();
+    // …and the real pairing still is one.
+    expect(classifySpecDisagreement(assertions[0], failing!)).toBe('asserted_pass_extracted_fail');
+  });
+
+  it('reads claims out of the records path too, not only flat tables', () => {
+    const sources = [
+      {
+        scope: 'record[0]',
+        groups: {
+          micro: { Coliform: { value: '40', unit: 'CFU/g', spec: '≤50 CFU/g' } },
+        },
+      },
+    ];
+    const configured = checkConfiguredLimits(sources, tests, [ours], {}, { includePasses: true });
+    const report = findSpecDisagreements(sources, [
+      ...checkPrintedSpecs(sources),
+      ...configured.verdicts,
+    ]);
+    expect(report.catches).toHaveLength(1);
+    expect(report.catches[0]).toMatchObject({ scope: 'record[0]', asserted_by: 'printed_limit' });
   });
 });

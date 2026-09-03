@@ -20,6 +20,12 @@ import { generateId, logAudit, getClientIp } from '../../lib/db';
 import { requireRole, errorToResponse } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import { validateLimitShape } from '../../../shared/specCheck';
+import {
+  DEFAULT_SPEC_CRITICALITY,
+  SPEC_CRITICALITY_VALUES,
+  isSpecCriticality,
+} from '../../../shared/specCriticality';
+import type { SpecCriticality } from '../../../shared/specCriticality';
 import type { Env, User } from '../../lib/types';
 
 export interface LimitBody {
@@ -32,12 +38,34 @@ export interface LimitBody {
   value_max?: number | null;
   unit?: string | null;
   severity?: string;
+  /** Presentation rank (migration 0095). Absent means "leave it on the default". */
+  criticality?: string;
   notes?: string | null;
   active?: boolean | number;
   tenant_id?: string;
 }
 
 const SEVERITIES = new Set(['warn', 'alert']);
+
+/**
+ * Read the criticality off a body, or say why it cannot be.
+ *
+ * A submitted-but-unrecognised tier is a 400, NOT a silent fall back to the
+ * default the way `severity` behaves. The two are not the same risk: severity
+ * has always defaulted to the louder value ('alert'), while quietly defaulting
+ * a typo'd criticality would DEMOTE a limit somebody deliberately marked as
+ * load-stopping, and nothing in the UI would ever show that it had happened.
+ *
+ * Returns the default when the field is absent — a client that knows nothing
+ * about ranking must keep working unchanged.
+ */
+export function readCriticality(
+  value: string | undefined
+): { criticality: SpecCriticality } | { error: string } {
+  if (value === undefined) return { criticality: DEFAULT_SPEC_CRITICALITY };
+  if (isSpecCriticality(value)) return { criticality: value };
+  return { error: `criticality must be one of ${SPEC_CRITICALITY_VALUES.join(', ')}` };
+}
 
 export function badRequest(message: string): Response {
   return new Response(JSON.stringify({ error: message }), {
@@ -227,6 +255,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const severity = body.severity && SEVERITIES.has(body.severity) ? body.severity : 'alert';
 
+    const criticality = readCriticality(body.criticality);
+    if ('error' in criticality) return badRequest(criticality.error);
+
     const scopeError = await validateScope(context.env.DB, tenantId, body);
     if (scopeError) return badRequest(scopeError);
 
@@ -237,8 +268,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     await context.env.DB.prepare(
       `INSERT INTO spec_limits
          (id, tenant_id, spec_test_id, supplier_id, document_type_id, product_id,
-          operator, value_min, value_max, unit, severity, notes, active, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          operator, value_min, value_max, unit, severity, criticality, notes, active, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         id,
@@ -252,6 +283,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         valueMax,
         body.unit ? sanitizeString(body.unit) : null,
         severity,
+        criticality.criticality,
         body.notes ? sanitizeString(body.notes) : null,
         body.active === false || body.active === 0 ? 0 : 1,
         user.id
@@ -265,7 +297,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'spec_limit.created',
       'spec_limits',
       id,
-      JSON.stringify({ spec_test_id: body.spec_test_id, operator, valueMin, valueMax, unit: body.unit }),
+      JSON.stringify({
+        spec_test_id: body.spec_test_id,
+        operator,
+        valueMin,
+        valueMax,
+        unit: body.unit,
+        criticality: criticality.criticality,
+      }),
       getClientIp(context.request)
     );
 

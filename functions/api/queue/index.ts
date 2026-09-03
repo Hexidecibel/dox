@@ -6,6 +6,7 @@ import {
 import type { Env, User } from '../../lib/types';
 import { withInvariantWarnings } from '../../lib/queue-warnings';
 import { specConfigLoader, withSpecConfig } from '../../lib/spec-warnings';
+import { withRenewalProposal } from '../../lib/renewal-proposal';
 
 /**
  * GET /api/queue
@@ -85,6 +86,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // when pq.supplier_id is NULL, since the ON condition can't match).
     const results = await context.env.DB.prepare(
       `SELECT pq.*, dt.name as document_type_name, dt.slug as document_type_slug,
+              dt.renewal_policy as type_renewal_policy,
+              dt.renewal_interval_months as type_renewal_interval_months,
               t.name as tenant_name, t.slug as tenant_slug,
               u.name as created_by_name, r.name as reviewed_by_name,
               CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists
@@ -108,6 +111,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // Two independent advisory passes, both computed from the item's own data:
     //   invariant_warnings — the extraction looks wrong (functions/lib/queue-warnings.ts)
     //   spec_results       — the RESULT looks wrong (functions/lib/spec-warnings.ts)
+    //   renewal_proposal   — when this document is next due (functions/lib/renewal-proposal.ts)
     // Neither blocks an approval; they are kept separate because an extraction
     // defect is a data chore and an out-of-spec micro result is a safety event.
     // One spec-config read per tenant per request, not per row.
@@ -117,7 +121,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         const { profile_exists, ...rest } = row as Record<string, unknown>;
         const config = await loadSpecConfigFor(String(rest.tenant_id ?? ''));
         return withSpecConfig(
-          withInvariantWarnings({ ...rest, profile_exists: profile_exists === 1 }),
+          withRenewalProposal(
+            withInvariantWarnings({ ...rest, profile_exists: profile_exists === 1 })
+          ),
           config,
           {
             supplier_id: rest.supplier_id == null ? null : String(rest.supplier_id),

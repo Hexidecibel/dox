@@ -1,0 +1,415 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/seed-doctype-extraction-instructions — starter guidance for the
+ * DOCUMENT-TYPE layer of the extraction prompt stack (migration 0098).
+ *
+ * WHY A SCRIPT AND NOT A MIGRATION
+ * --------------------------------
+ * These are OPINIONS about how to read a document, not schema. A tenant is
+ * meant to edit them, and a migration that overwrote an edited row on the next
+ * deploy would be worse than no seed at all. So: run it once, deliberately, per
+ * tenant — the same reason starter packs are rendered by bin/render-starter-pack
+ * rather than applied by 0080.
+ *
+ * WHAT IT WRITES
+ * --------------
+ * One row per matched document type in `document_type_extraction_instructions`.
+ * Ten types, chosen because the incoming corpus is heaviest in them:
+ * Certificate of Insurance, Letter of Guarantee, Allergen Statement,
+ * Specification Sheet, Organic Certificate, Kosher Certificate, Gluten-Free
+ * Certificate, 3rd Party Audit Certificate, Safety Data Sheet, Country of
+ * Origin Statement.
+ *
+ * WHAT IT WILL NOT DO
+ *   - Overwrite guidance somebody has already written. A type that already has
+ *     a non-empty row is reported as "kept" and skipped. --overwrite forces it,
+ *     knowingly.
+ *   - Create a document type. A type the tenant does not have is reported and
+ *     skipped: inventing one would put an unused type in the picker forever.
+ *   - Write anything without --apply.
+ *
+ * WHAT THE TEXT MAY AND MAY NOT SAY
+ * ---------------------------------
+ * Every string below describes WHERE a value sits and WHAT to pull out. None of
+ * them tells the model what a page says. That boundary is not stylistic: TABLE
+ * EXTRACTION RULE 14 ("never supply a unit, spec or verdict the document did not
+ * print") exists because a result carrying an invented unit cannot be matched
+ * against a configured limit and is dropped from spec checking with nobody
+ * told. Guidance that reads as "results on this certificate are in ppm" would
+ * hand the model exactly that licence, so where a threshold or unit is involved
+ * these texts say "as printed" and say it explicitly.
+ *
+ * Usage:
+ *   bin/seed-doctype-extraction-instructions --tenant <id>                  # dry run
+ *   bin/seed-doctype-extraction-instructions --tenant <id> --apply          # LOCAL write
+ *   bin/seed-doctype-extraction-instructions --tenant <id> --remote --apply # PROD
+ *
+ * Flags:
+ *   --tenant ID    tenant to seed (required)
+ *   --apply        actually write. Without it this is a dry run.
+ *   --remote, -r   target PRODUCTION D1 (with --apply, prompts first)
+ *   --overwrite    replace existing non-empty guidance too
+ *   --sql          print the SQL it would run and exit
+ *   -h, --help     this help
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { execFileSync } = require('child_process');
+
+const { query, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+
+/**
+ * The starter pack itself.
+ *
+ * `match` is the list of document-type names this entry claims, normalized
+ * before comparison. More than one spelling is listed where the starter packs
+ * and real tenants disagree ("Spec Sheet" vs "Specification Sheet"); a type is
+ * claimed by the FIRST entry that matches it, so the lists must not overlap.
+ */
+const PACK = [
+  {
+    label: 'Certificate of Insurance',
+    match: ['certificate of insurance', 'coi', 'insurance certificate'],
+    instructions: [
+      'This is almost always an ACORD 25 form.',
+      '',
+      '- supplier_name is the company in the INSURED box (left column, under the producer). The PRODUCER box is the insurance BROKER and is not the supplier. The CERTIFICATE HOLDER box at the bottom is the customer_name — it is who the certificate was issued to, usually us.',
+      '- The carriers are listed as INSURER A / B / C with their NAIC numbers; those are the issuing bodies.',
+      '- The coverage grid runs one row per coverage (General Liability, Automobile, Umbrella, Workers Compensation) with POLICY NUMBER, POLICY EFF and POLICY EXP. Capture that grid as a table named "coverage" using the column headings printed on the form.',
+      '- document_expires_on is the policy expiry: the EARLIEST POLICY EXP date on the form, because that is when the certificate stops covering everything it claims. Do not average, extend or round dates.',
+      '- There is no product on this document, so expiration_date, lot_number, code_date and product_code are all null.',
+      '- Limits (Each Occurrence, General Aggregate, Products-Completed Operations) belong in the coverage table exactly as printed. Do not add a currency symbol the form did not print and do not restate a limit in different units.',
+    ].join('\n'),
+  },
+  {
+    label: 'Letter of Guarantee',
+    match: ['letter of guarantee', 'continuing guarantee', 'guaranty letter'],
+    instructions: [
+      'A continuing guarantee is a one-page signed letter, not a form. Nearly everything is prose.',
+      '',
+      '- supplier_name is the company that SIGNED it — the letterhead at the top and the signature block at the bottom will agree. customer_name is the addressee after "To:" or "Dear".',
+      '- Capture the date the letter was signed under the label the letter prints for it ("Date", "Dated", "Effective"). Do not put it in code_date: nothing here was produced or packed.',
+      '- Capture the signatory name and title, and the products or product categories the guarantee covers, as printed.',
+      '- document_expires_on is null unless the letter states its own validity ("valid through", "expires", "for calendar year 2026"). A continuing guarantee usually has none by design — leave it null rather than inventing one a year out.',
+      '- There is no lot, no test table and no product expiry on this document.',
+    ].join('\n'),
+  },
+  {
+    label: 'Allergen Statement',
+    match: ['allergen statement', 'allergen declaration', 'allergen matrix'],
+    instructions: [
+      'The substance of this document is a MATRIX, not fields: allergens down the side, a declaration per row.',
+      '',
+      '- Emit the matrix as a table named "allergen_statement" using the column headings the document prints (commonly Allergen, Present / Contains, May Contain / Cross Contact, Same Line, Same Facility).',
+      '- Copy each cell exactly as printed. "May contain" and "contains" are DIFFERENT declarations and must never be collapsed into each other, and "may contain" must never be read as a yes or a no.',
+      '- A blank or unmarked cell stays empty. An unmarked allergen is an unanswered question, not a declaration of absence.',
+      '- Never add an allergen row the document did not list, including one you would expect for the product.',
+      '- product_name and product_code come from the header block; supplier_name from the letterhead.',
+      '- document_expires_on only when the statement prints its own review or valid-through date.',
+    ].join('\n'),
+  },
+  {
+    label: 'Specification Sheet',
+    match: ['specification sheet', 'spec sheet', 'product specification'],
+    instructions: [
+      'A spec sheet describes a PRODUCT, not a lot. This is the single most common confusion on this type.',
+      '',
+      '- lot_number, batch_number and code_date are null. If the sheet prints a revision or issue date, capture it under that label — it is the paperwork\'s date, not a production date.',
+      '- The analytical table holds LIMITS, not measurements. Put each printed limit in "specification" and leave "result" EMPTY. A spec sheet has nothing to report as a result, and copying the limit across makes the product look tested when it was not.',
+      '- Only fill "unit" where the sheet prints one on that row or in its column heading.',
+      '- Capture product_name, product_code, pack size / net_weight, grade, shelf life and storage conditions as printed.',
+      '- Ingredient and nutritional blocks are separate tables — name them "ingredients" and "nutrition" and keep the document\'s own columns.',
+      '- document_expires_on is null: a specification does not expire on a date, it is superseded by a later revision.',
+    ].join('\n'),
+  },
+  {
+    label: 'Organic Certificate',
+    match: ['organic certificate', 'organic certification', 'nop certificate'],
+    instructions: [
+      'A USDA/NOP organic certificate names two parties: keep them apart.',
+      '',
+      '- supplier_name is the CERTIFIED OPERATION (the company being certified). The CERTIFYING AGENT — Oregon Tilth, QAI, CCOF, Global Organic Alliance — is the issuing body, not the supplier.',
+      '- Capture the certificate number and the scope category the form prints (Crops, Livestock, Wild Crops, Handling/Processing).',
+      '- Dates: NOP certificates often print an EFFECTIVE date and an ANNIVERSARY date rather than an expiry. Capture what is printed, each under its own label. Only set document_expires_on when the certificate actually prints a "valid through" / "expires" date — never compute one from an anniversary or an effective date plus a year.',
+      '- The certified products are usually an appended list; put each one in products.',
+      '- There is no lot and no test table.',
+    ].join('\n'),
+  },
+  {
+    label: 'Kosher Certificate',
+    match: ['kosher certificate', 'kosher certification', 'kosher letter'],
+    instructions: [
+      'A kosher certificate (a "letter of certification") is issued by an agency to a plant, for a list of products.',
+      '',
+      '- supplier_name is the certified company or plant. The AGENCY — OU, OK, Star-K, KOF-K, cRc — is the issuing body; capture it and the certification symbol under their own labels.',
+      '- Capture the certificate / UKD number as printed.',
+      '- document_expires_on: these almost always print an explicit "expiration date" or "valid until". Use it.',
+      '- The product list usually carries a STATUS per product (Pareve, Dairy, Dairy Equipment, Cholov Yisroel, Passover). Emit that list as a table named "certified_products" with the printed columns. Never infer a status for a product the certificate lists without one, and never carry one product\'s status down onto the next row.',
+      '- There is no lot, no product expiry and no test table.',
+    ].join('\n'),
+  },
+  {
+    label: 'Gluten-Free Certificate',
+    match: ['gluten-free certificate', 'gluten free certificate', 'gluten-free certification'],
+    instructions: [
+      'A gluten-free certificate attests a THRESHOLD, and the threshold is the part most often mis-read.',
+      '',
+      '- Capture the threshold exactly as the certificate prints it, with its unit only if that unit is printed on the page. Schemes differ (GFCO certifies at 10 ppm, the FDA rule is 20 ppm) — never supply the number or the unit from what you know of the scheme. If the page shows a bare number, the number is what you record and the unit stays empty.',
+      '- supplier_name is the certified company or facility; the CERTIFYING BODY (GFCO/GIG, NSF, BRCGS, Intertek) is the issuing body.',
+      '- Capture the certificate or licence number.',
+      '- document_expires_on is the "valid through" / "expires" date on the certificate.',
+      '- The products in scope go in products; when they are printed as a table, keep the document\'s own columns.',
+    ].join('\n'),
+  },
+  {
+    label: '3rd Party Audit Certificate',
+    match: [
+      '3rd party audit certificate',
+      'third party audit certificate',
+      'gfsi certificate',
+      'audit certificate',
+    ],
+    instructions: [
+      'This is the one-page CERTIFICATE issued on passing an audit — not the audit report. If the document runs to findings, non-conformances and corrective actions, it is the report and this guidance does not apply.',
+      '',
+      '- Three parties, all printed: the AUDITED SITE (supplier_name, with its address and often a site or GLN code), the CERTIFICATION BODY that issued it (NSF, SGS, Eurofins, Kiwa — the issuing body), and the SCHEME it was audited against (SQF, BRCGS, FSSC 22000, PrimusGFS, SQF Food Safety Code Edition 9).',
+      '- Capture the grade or score EXACTLY as printed — "A", "AA", "Excellent", "95". Do not convert a score into a grade or a grade into a score, and do not add a scale the certificate did not print.',
+      '- Two different dates usually appear: the AUDIT DATE and the certificate\'s own expiry. Keep them under their printed labels, and set document_expires_on from the certificate expiry / "valid until" only.',
+      '- Capture the scope statement (the products and processes covered) and the certificate number.',
+      '- There is no lot and no product expiry on this document.',
+    ].join('\n'),
+  },
+  {
+    label: 'Safety Data Sheet',
+    match: ['safety data sheet', 'sds', 'msds', 'material safety data sheet'],
+    instructions: [
+      'A GHS Safety Data Sheet has 16 numbered sections and the section number tells you what a value is.',
+      '',
+      '- Section 1 gives the product identifier (product_name, product_code) and the supplier / manufacturer (supplier_name). Skip the emergency telephone number.',
+      '- Section 2 is the hazard identification: capture the classification, signal word, hazard (H) statements and precautionary (P) statements as a table named "hazards" with the printed columns.',
+      '- Section 9 is physical and chemical properties. Emit it as a table with the property, the value and the unit AS PRINTED. Many rows read "Not available", "Not applicable" or "No data" — those are empty cells, not values, and never a licence to fill in a figure for the property.',
+      '- The revision date and version live in section 16 or the footer. Capture them under those labels.',
+      '- An SDS does not expire and is not lot-specific: document_expires_on, expiration_date, lot_number and code_date are all null. A revision date is not an expiry.',
+    ].join('\n'),
+  },
+  {
+    label: 'Country of Origin Statement',
+    match: ['country of origin statement', 'country of origin', 'coo statement', 'origin statement'],
+    instructions: [
+      'A short signed attestation naming where a product comes from.',
+      '',
+      '- Emit the origin declaration as a table named "origins" using the columns printed (commonly Product, Item Code, Country of Origin, and sometimes a percentage or a Country of Processing).',
+      '- Never infer a country from the supplier\'s own address, from the product name, or from a plant code. Only a country the statement prints as an origin is an origin.',
+      '- Where a product lists several origins, keep every one, in the order printed. Do not reduce a list to its first entry and do not add a percentage the statement did not print.',
+      '- supplier_name is the signing company on the letterhead; customer_name is the addressee.',
+      '- Capture the statement / signature date under its printed label. document_expires_on only when the statement prints its own validity period.',
+      '- There is no lot and no test table.',
+    ].join('\n'),
+  },
+];
+
+// --- args -------------------------------------------------------------------
+
+const opts = { apply: false, remote: false, overwrite: false, sql: false };
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  switch (argv[i]) {
+    case '--tenant':
+      opts.tenant = argv[++i];
+      break;
+    case '--apply':
+      opts.apply = true;
+      break;
+    case '--remote':
+    case '-r':
+      opts.remote = true;
+      break;
+    case '--overwrite':
+      opts.overwrite = true;
+      break;
+    case '--sql':
+      opts.sql = true;
+      break;
+    case '-h':
+    case '--help':
+      opts.help = true;
+      break;
+    default:
+      console.error(`Unknown arg: ${argv[i]}`);
+      process.exit(2);
+  }
+}
+
+if (opts.help) {
+  console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(2, 55).join('\n'));
+  process.exit(0);
+}
+if (!opts.tenant) {
+  console.error('--tenant <id> is required. Use --help for usage.');
+  process.exit(2);
+}
+
+// --- helpers ----------------------------------------------------------------
+
+/** Same normalization the doc-type fuzzy matcher uses: case and punctuation out. */
+function normalize(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/** SQLite string literal. Everything here is authored text, but quote it anyway. */
+function sqlStr(s) {
+  return `'${String(s).replace(/'/g, "''")}'`;
+}
+
+/** Matches functions/lib/db.ts generateId() closely enough for a seed row. */
+function generateId() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+function assertTenant(tenant, remote) {
+  const rows = query(`SELECT id, name FROM tenants WHERE id = '${tenant}'`, { remote });
+  if (rows.length === 0) {
+    console.error(`No tenant "${tenant}" in this database. Check the id, or the --remote flag.`);
+    process.exit(1);
+  }
+  return rows[0];
+}
+
+/**
+ * The write path. bin/lib/d1.js is READ-ONLY by design; this mirrors
+ * bin/import-spec-limits — render to a file and hand it to wrangler, so no SQL
+ * is glued into a shell command line.
+ */
+function execSql(statements, remote) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-dt-instructions-'));
+  const file = path.join(dir, 'seed-doctype-extraction-instructions.sql');
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  try {
+    execFileSync(
+      'npx',
+      ['wrangler', 'd1', 'execute', DEFAULT_DB, remote ? '--remote' : '--local', `--file=${file}`],
+      { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 }
+    );
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString() : '';
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${stderr || err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function promptSync(question) {
+  process.stdout.write(question);
+  const buf = Buffer.alloc(1024);
+  let bytes = 0;
+  try {
+    bytes = fs.readSync(0, buf, 0, buf.length, null);
+  } catch {
+    return '';
+  }
+  return buf.slice(0, bytes).toString('utf8');
+}
+
+// --- plan -------------------------------------------------------------------
+
+const tenantRow = assertTenant(opts.tenant, opts.remote);
+
+const docTypes = query(
+  `SELECT id, name, active FROM document_types WHERE tenant_id = '${opts.tenant}'`,
+  { remote: opts.remote }
+);
+const existing = query(
+  `SELECT document_type_id, instructions FROM document_type_extraction_instructions
+    WHERE tenant_id = '${opts.tenant}'`,
+  { remote: opts.remote }
+);
+const existingByType = new Map(existing.map((r) => [r.document_type_id, r.instructions || '']));
+
+const plan = { create: [], replace: [], keep: [], missing: [] };
+const claimed = new Set();
+
+for (const entry of PACK) {
+  const wanted = new Set(entry.match.map(normalize));
+  const hit = docTypes.find((dt) => !claimed.has(dt.id) && wanted.has(normalize(dt.name)));
+  if (!hit) {
+    plan.missing.push(entry.label);
+    continue;
+  }
+  claimed.add(hit.id);
+  const current = existingByType.get(hit.id);
+  const target = { entry, docType: hit };
+  if (current === undefined) plan.create.push(target);
+  else if (!current.trim() || opts.overwrite) plan.replace.push(target);
+  else plan.keep.push(target);
+}
+
+const writes = [...plan.create, ...plan.replace];
+
+const statements = writes.map(({ entry, docType }) =>
+  // ON CONFLICT on the plain UNIQUE(tenant_id, document_type_id) from 0098 —
+  // re-running the script is a no-op rather than a constraint error.
+  `INSERT INTO document_type_extraction_instructions
+     (id, tenant_id, document_type_id, instructions, created_at, updated_at)
+   VALUES (${sqlStr(generateId())}, ${sqlStr(opts.tenant)}, ${sqlStr(docType.id)}, ${sqlStr(
+     entry.instructions
+   )}, datetime('now'), datetime('now'))
+   ON CONFLICT(tenant_id, document_type_id) DO UPDATE SET
+     instructions = excluded.instructions,
+     updated_at   = datetime('now');`
+);
+
+if (opts.sql) {
+  console.log(statements.join('\n\n'));
+  process.exit(0);
+}
+
+console.log(`Tenant: ${tenantRow.name} (${opts.tenant})${opts.remote ? '  [REMOTE / PRODUCTION]' : ''}`);
+console.log('');
+for (const { entry, docType } of plan.create) {
+  console.log(`  create   ${entry.label}  ->  ${docType.name}${docType.active ? '' : '  (INACTIVE type)'}`);
+}
+for (const { entry, docType } of plan.replace) {
+  console.log(`  replace  ${entry.label}  ->  ${docType.name}`);
+}
+for (const { entry } of plan.keep) {
+  console.log(`  keep     ${entry.label}  (already authored — use --overwrite to replace)`);
+}
+for (const label of plan.missing) {
+  console.log(`  skip     ${label}  (no such document type in this tenant)`);
+}
+console.log('');
+console.log(
+  `${plan.create.length} to create, ${plan.replace.length} to replace, ` +
+    `${plan.keep.length} kept, ${plan.missing.length} with no matching type.`
+);
+
+if (!opts.apply) {
+  console.log('\nDry run. Re-run with --apply to write (add --sql to see the statements).');
+  process.exit(0);
+}
+
+if (writes.length === 0) {
+  console.log('\nNothing to write.');
+  process.exit(0);
+}
+
+if (opts.remote) {
+  const answer = promptSync(
+    `\nAbout to WRITE to PRODUCTION D1 for tenant ${opts.tenant}: ` +
+      `${plan.create.length} created, ${plan.replace.length} replaced.\n` +
+      'Type the tenant id to continue: '
+  );
+  if (answer.trim() !== opts.tenant) {
+    console.error('That did not match. Nothing was written.');
+    process.exit(1);
+  }
+}
+
+execSql(statements, opts.remote);
+console.log(`\nWrote ${writes.length} row(s).`);

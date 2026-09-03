@@ -21,6 +21,7 @@
  */
 
 import { checkPrintedSpecs, checkConfiguredLimits, STRICT_UNIT_POLICY } from '../../shared/specCheck';
+import { parseSpecCriticality } from '../../shared/specCriticality';
 import type {
   SpecSource,
   SpecVerdict,
@@ -163,6 +164,48 @@ async function loadUnitPolicy(db: D1Database, tenantId: string): Promise<UnitPol
 }
 
 /**
+ * The columns every environment has held since migration 0084. `criticality`
+ * (0095) is asked for separately below.
+ */
+const LIMIT_COLUMNS =
+  `id, spec_test_id, operator, value_min, value_max, unit, severity, active,
+   supplier_id, document_type_id, product_id, updated_at`;
+
+/**
+ * Read the tenant's active limits, degrading to the pre-0095 column list if
+ * `criticality` is not there yet.
+ *
+ * The retry is not defensive habit: migrations reach prod surgically here, and
+ * a SELECT naming a column that does not exist throws. Without the fallback
+ * that throw would be caught by `loadSpecConfig` and turn spec checking OFF
+ * entirely — trading every limit for a ranking, which is the worst possible
+ * exchange. A missing column costs the ranking only; those rows land on
+ * `DEFAULT_SPEC_CRITICALITY` at the mapping step below.
+ */
+async function loadLimitRows(
+  db: D1Database,
+  tenantId: string
+): Promise<Record<string, unknown>[]> {
+  const read = async (columns: string): Promise<Record<string, unknown>[]> => {
+    const res = await db
+      .prepare(`SELECT ${columns} FROM spec_limits WHERE tenant_id = ? AND active = 1`)
+      .bind(tenantId)
+      .all();
+    return (res.results ?? []) as Record<string, unknown>[];
+  };
+  try {
+    return await read(`${LIMIT_COLUMNS}, criticality`);
+  } catch (err) {
+    console.error(
+      '[spec-warnings] reading spec_limits.criticality failed (migration 0095 not applied?), ' +
+        'falling back to unranked limits:',
+      err instanceof Error ? err.message : String(err)
+    );
+    return read(LIMIT_COLUMNS);
+  }
+}
+
+/**
  * Load a tenant's analytes and limits. One query each — the queue list endpoint
  * renders many rows and must not issue a query per row.
  *
@@ -179,15 +222,7 @@ export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<
         .prepare('SELECT id, name, aliases, default_unit FROM spec_tests WHERE tenant_id = ?')
         .bind(tenantId)
         .all(),
-      db
-        .prepare(
-          `SELECT id, spec_test_id, operator, value_min, value_max, unit, severity, active,
-                  supplier_id, document_type_id, product_id, updated_at
-             FROM spec_limits
-            WHERE tenant_id = ? AND active = 1`
-        )
-        .bind(tenantId)
-        .all(),
+      loadLimitRows(db, tenantId),
     ]);
 
     const tests: SpecTestDef[] = (testRows.results ?? []).map((r) => {
@@ -207,8 +242,7 @@ export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<
       };
     });
 
-    const limits: ConfiguredLimit[] = (limitRows.results ?? []).map((r) => {
-      const row = r as Record<string, unknown>;
+    const limits: ConfiguredLimit[] = limitRows.map((row) => {
       return {
         id: String(row.id),
         spec_test_id: String(row.spec_test_id),
@@ -217,6 +251,9 @@ export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<
         value_max: row.value_max == null ? null : Number(row.value_max),
         unit: row.unit == null ? null : String(row.unit),
         severity: (row.severity as 'warn' | 'alert') ?? 'alert',
+        // Absent on a pre-0095 row; the parser lands it on the middle tier
+        // rather than inventing a rank for it.
+        criticality: parseSpecCriticality(row.criticality),
         active: Number(row.active ?? 1) === 1,
         supplier_id: row.supplier_id == null ? null : String(row.supplier_id),
         document_type_id: row.document_type_id == null ? null : String(row.document_type_id),

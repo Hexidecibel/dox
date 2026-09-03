@@ -1,5 +1,10 @@
 import { generateId } from './db';
 import { BadRequestError } from './permissions';
+import {
+  MAX_RENEWAL_PERIOD_MONTHS,
+  TYPE_RENEWAL_POLICIES,
+  type TypeRenewalPolicy,
+} from '../../shared/renewalPeriod';
 import type {
   RenewalType,
   RegistryFacet,
@@ -44,6 +49,76 @@ export const RENEWAL_TYPES: readonly RenewalType[] = [
 
 export function isValidRenewalType(value: string): value is RenewalType {
   return (RENEWAL_TYPES as readonly string[]).includes(value);
+}
+
+/**
+ * Validate a renewal PERIOD in months, as stored on `document_types`
+ * (migration 0096) or on a document.
+ *
+ * null (and '') is a legitimate value meaning "no period of its own — the
+ * annual default applies", NOT "never renews". Zero and negatives are rejected
+ * rather than coerced: a period of zero would make every document of that type
+ * permanently overdue, which is the kind of silent nonsense a renewal engine
+ * should refuse to accept in the first place.
+ */
+export function parseRenewalIntervalMonths(
+  raw: unknown,
+): { ok: true; value: number | null } | { ok: false; error: string } {
+  if (raw === null || raw === '') return { ok: true, value: null };
+  const n = typeof raw === 'string' ? Number(raw) : raw;
+  if (typeof n !== 'number' || !Number.isFinite(n) || !Number.isInteger(n)) {
+    return { ok: false, error: 'renewal_interval_months must be a whole number of months, or null' };
+  }
+  if (n < 1 || n > MAX_RENEWAL_PERIOD_MONTHS) {
+    return {
+      ok: false,
+      error: `renewal_interval_months must be between 1 and ${MAX_RENEWAL_PERIOD_MONTHS}`,
+    };
+  }
+  return { ok: true, value: n };
+}
+
+/**
+ * Validate a submitted `document_types.renewal_policy` (migration 0097) and the
+ * period that must accompany it.
+ *
+ * THE TWO ARE VALIDATED TOGETHER, NOT SEPARATELY, because they are one setting
+ * with three states and only some pairings mean anything:
+ *   'period' with no months  → a type that renews on an unstated cadence
+ *   'none'/'inherit' with months → a stored number nothing will ever read
+ * Rejecting the first and normalizing the second at the edge is what keeps the
+ * invariant the resolver relies on: a non-NULL renewal_interval_months exists
+ * only under a 'period' policy.
+ */
+export function parseTypeRenewalSetting(
+  rawPolicy: unknown,
+  months: number | null,
+): { ok: true; policy: TypeRenewalPolicy; months: number | null } | { ok: false; error: string } {
+  if (rawPolicy !== undefined && rawPolicy !== null) {
+    if (typeof rawPolicy !== 'string' || !TYPE_RENEWAL_POLICIES.includes(rawPolicy as TypeRenewalPolicy)) {
+      return {
+        ok: false,
+        error: `renewal_policy must be one of ${TYPE_RENEWAL_POLICIES.join(', ')}`,
+      };
+    }
+  }
+  // No policy submitted: infer it from the period, which is what a pre-0097
+  // client sends. A number means 'period'; nothing means 'inherit'. Such a
+  // client can never express 'none', which is correct — it does not know the
+  // state exists and must not set it by accident.
+  const policy: TypeRenewalPolicy =
+    rawPolicy === undefined || rawPolicy === null
+      ? months === null
+        ? 'inherit'
+        : 'period'
+      : (rawPolicy as TypeRenewalPolicy);
+
+  if (policy === 'period' && months === null) {
+    return { ok: false, error: "renewal_policy 'period' requires renewal_interval_months" };
+  }
+  // Under 'inherit' and 'none' the months column is unread, so it is cleared
+  // rather than left behind to contradict the policy on screen.
+  return { ok: true, policy, months: policy === 'period' ? months : null };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,2528 @@
+{
+  "_readme": "Ground truth for the document-TYPE extraction corpus. Production is 139 COAs out of 200 documents, so nothing outside the COA shape has ever been measured. Ten types x three difficulty tiers, each generated here so the answers are KNOWN BEFORE the model runs -- ground truth is authored with the fixture, never read back out of an extraction. Scored by bin/measure-doctype-extraction; rendered and text-verified by bin/render-doctype-corpus. Conventions follow tests/fixtures/spec-corpus.",
+  "_buckets": "correct | wrong_value | missed (truth present, model null) | correct_null (truth null, model null or a null synonym) | fabricated_misfiled (truth null, model emitted a value that IS printed on the page) | fabricated_invented (truth null, model emitted a value that is NOWHERE on the page). Fabrication is never folded into a generic 'incorrect' bucket, and the two fabrication kinds are never merged: a misfile is a reading error, an invention is the model supplying something the document does not contain.",
+  "_key_groups_why": "The extractor's `fields` object is OPEN -- canonicalizeFields maps a known alias set onto canonical names and passes every other key through verbatim. So a semantic answer ('who issued this certificate') can legitimately arrive under several keys. Each graded field names the FULL set of keys that may carry its answer; a value under any of them is the model's answer, and for a null-truth field a value under ANY of them is a fabrication. Getting this list wrong in either direction biases the score, so it is written down here rather than inferred.",
+  "key_groups": {
+    "supplier": [
+      "supplier_name",
+      "insured",
+      "insured_name",
+      "named_insured",
+      "guarantor",
+      "certified_operation",
+      "certified_company",
+      "certified_site",
+      "registered_organisation",
+      "registered_organization",
+      "client",
+      "client_name",
+      "operation",
+      "company_name",
+      "site",
+      "organization"
+    ],
+    "customer": [
+      "customer_name",
+      "certificate_holder",
+      "holder",
+      "addressee",
+      "recipient",
+      "consignee_name"
+    ],
+    "doc_expiry": [
+      "document_expires_on",
+      "valid_through",
+      "valid_until",
+      "valid_to",
+      "expiry_date",
+      "expires",
+      "expires_on",
+      "certificate_expiry",
+      "certificate_expiration",
+      "certificate_expiration_date",
+      "certificate_expiry_date",
+      "policy_expiration",
+      "policy_expiry",
+      "certificate_valid_until",
+      "validity_end",
+      "in_force_until"
+    ],
+    "product_expiry": [
+      "expiration_date"
+    ],
+    "issuing_body": [
+      "issuing_body",
+      "issued_by",
+      "certifying_body",
+      "certification_body",
+      "certifier",
+      "certifying_agent",
+      "certification_agency",
+      "agency",
+      "issuer",
+      "registrar",
+      "auditor",
+      "certification_agent",
+      "supervising_agency"
+    ],
+    "cert_number": [
+      "certificate_number",
+      "certificate_no",
+      "certificate_num",
+      "cert_number",
+      "cert_no",
+      "certificate_id",
+      "certificate"
+    ],
+    "product": [
+      "product_name",
+      "product",
+      "material_name"
+    ],
+    "product_code": [
+      "product_code",
+      "item_code",
+      "sku",
+      "item_number",
+      "material_code",
+      "item_no"
+    ],
+    "signatory": [
+      "signatory",
+      "signed_by",
+      "signature",
+      "signer",
+      "signer_name",
+      "authorized_by",
+      "authorised_by",
+      "authorized_representative",
+      "authorised_representative",
+      "approved_by",
+      "prepared_by",
+      "contact_name",
+      "signed"
+    ],
+    "allergens": [
+      "allergens",
+      "allergen",
+      "contains",
+      "contains_allergens",
+      "allergens_present",
+      "allergen_statement",
+      "allergen_declaration",
+      "allergens_in_formulation",
+      "declared_allergens"
+    ],
+    "country_of_origin": [
+      "country_of_origin",
+      "origin",
+      "country",
+      "origin_country",
+      "countries_of_origin",
+      "country_of_manufacture"
+    ],
+    "scheme": [
+      "scheme",
+      "certification_scheme",
+      "standard",
+      "audit_standard",
+      "certification_standard",
+      "program",
+      "programme",
+      "certification_program"
+    ],
+    "audit_grade": [
+      "grade",
+      "audit_grade",
+      "rating",
+      "audit_rating",
+      "score",
+      "audit_score",
+      "audit_result",
+      "result"
+    ],
+    "gluten_threshold": [
+      "gluten_threshold",
+      "threshold",
+      "gluten_limit",
+      "certification_threshold",
+      "gluten_ppm",
+      "gluten_level",
+      "limit"
+    ],
+    "revision_date": [
+      "revision_date",
+      "revised",
+      "date_revised",
+      "sds_revision_date",
+      "version_date",
+      "issue_date",
+      "issued",
+      "date_issued",
+      "document_date"
+    ],
+    "signal_word": [
+      "signal_word",
+      "ghs_signal_word",
+      "hazard_signal_word",
+      "signal"
+    ],
+    "kosher_status": [
+      "kosher_status",
+      "kosher_designation",
+      "designation",
+      "certification_type",
+      "status"
+    ],
+    "issue_date": [
+      "issue_date",
+      "issued",
+      "date_issued",
+      "letter_date",
+      "document_date",
+      "statement_date",
+      "effective_date",
+      "date"
+    ]
+  },
+  "documents": [
+    {
+      "id": "coi-clean",
+      "type": "Certificate of Insurance",
+      "type_slug": "coi",
+      "tier": "clean",
+      "html": "html/coi-clean.html",
+      "pdf": "pdf/coi-clean.pdf",
+      "scan": true,
+      "document_type_accept": [
+        "certificate of insurance",
+        "certificate of liability insurance",
+        "insurance certificate",
+        "coi",
+        "liability insurance certificate"
+      ],
+      "pdf_text_must_contain": [
+        "Cascade Valley Foods, LLC",
+        "Policy Expiration Date",
+        "02/15/2027",
+        "COI-2026-04417",
+        "Northwest Risk Partners"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Cascade Valley Foods, LLC",
+          "accept": [
+            "Cascade Valley Foods"
+          ],
+          "why": "the INSURED, not the broker (Northwest Risk Partners) and not the insurer (Cornerstone Mutual)"
+        },
+        {
+          "name": "customer_name",
+          "keys_ref": "customer",
+          "match": "text",
+          "truth": "Medosweet Farms, Inc.",
+          "accept": [
+            "Medosweet Farms"
+          ],
+          "why": "the certificate holder is the customer"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-02-15",
+          "why": "the policy expiration; the effective date 02/15/2026 is the decoy"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "COI-2026-04417"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "02/15/2027",
+            "2027-02-15",
+            "02/15/2026",
+            "2026-02-15",
+            "02/18/2026"
+          ],
+          "why": "a certificate has no PRODUCT shelf life; llm.ts rule for document_expires_on says never put the same date in both"
+        }
+      ]
+    },
+    {
+      "id": "coi-moderate",
+      "type": "Certificate of Insurance",
+      "type_slug": "coi",
+      "tier": "moderate",
+      "html": "html/coi-moderate.html",
+      "pdf": "pdf/coi-moderate.pdf",
+      "document_type_accept": [
+        "certificate of insurance",
+        "certificate of liability insurance",
+        "insurance certificate",
+        "coi",
+        "evidence of coverage"
+      ],
+      "pdf_text_must_contain": [
+        "Harbor Line Creamery Co.",
+        "remain in force through 14 Feb 2027",
+        "15-FEB-2026",
+        "2/20/26"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Harbor Line Creamery Co.",
+          "accept": [
+            "Harbor Line Creamery"
+          ]
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-02-14",
+          "why": "stated only inside a prose clause; the labelled table prints only the inception date"
+        },
+        {
+          "name": "customer_name",
+          "keys_ref": "customer",
+          "match": "text",
+          "truth": "Medosweet Farms, Inc.",
+          "accept": [
+            "Medosweet Farms"
+          ]
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "NRP-25",
+            "Form NRP-25",
+            "GL-6620041",
+            "CA-2298301",
+            "WC-3390117",
+            "WCF-2219",
+            "HL-2219"
+          ],
+          "why": "no certificate number is printed; a form number and three policy numbers are"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "14 Feb 2027",
+            "2027-02-14",
+            "15-FEB-2026",
+            "2026-02-15",
+            "2/20/26",
+            "2026-02-20"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "coi-nasty",
+      "type": "Certificate of Insurance",
+      "type_slug": "coi",
+      "tier": "nasty",
+      "html": "html/coi-nasty.html",
+      "pdf": "pdf/coi-nasty.pdf",
+      "document_type_accept": [
+        "certificate of insurance",
+        "certificate of liability insurance",
+        "insurance certificate",
+        "coi",
+        "evidence of commercial property & casualty insurance",
+        "evidence of insurance"
+      ],
+      "pdf_text_must_contain": [
+        "PACIFIC RIDGE COLD STORAGE, LLC",
+        "07/04/2026 to 07/04/2027",
+        "08/12/2026",
+        "No certificate number is assigned"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Pacific Ridge Cold Storage, LLC",
+          "accept": [
+            "Pacific Ridge Cold Storage"
+          ],
+          "why": "split across a line break inside a narrow box"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-07-04",
+          "why": "three dates on the page; only the end of the policy period is the document's expiry"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "NRP-25-B",
+            "FORM NRP-25-B",
+            "PRC-7781204",
+            "WLL-330298",
+            "MTC-118844"
+          ],
+          "why": "GENUINELY ABSENT and the page says so; four number-shaped strings are available to invent from"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "07/04/2027",
+            "2027-07-04",
+            "08/12/2026",
+            "2026-08-12",
+            "07/04/2026",
+            "2026-07-04"
+          ]
+        },
+        {
+          "name": "customer_name",
+          "keys_ref": "customer",
+          "match": "text",
+          "truth": "Medosweet Farms, Inc.",
+          "accept": [
+            "Medosweet Farms"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "log-clean",
+      "type": "Letter of Guarantee",
+      "type_slug": "log",
+      "tier": "clean",
+      "html": "html/log-clean.html",
+      "pdf": "pdf/log-clean.pdf",
+      "scan": true,
+      "document_type_accept": [
+        "letter of guarantee",
+        "continuing guaranty",
+        "continuing letter of guarantee",
+        "guarantee",
+        "guaranty",
+        "continuing guarantee",
+        "letter of guaranty"
+      ],
+      "pdf_text_must_contain": [
+        "RIVERBEND INGREDIENTS, LLC",
+        "KAREN L. MBEKI",
+        "March 3, 2026",
+        "January 4, 2024"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Riverbend Ingredients, LLC",
+          "accept": [
+            "Riverbend Ingredients"
+          ]
+        },
+        {
+          "name": "customer_name",
+          "keys_ref": "customer",
+          "match": "text",
+          "truth": "Medosweet Farms, Inc.",
+          "accept": [
+            "Medosweet Farms"
+          ]
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Karen L. Mbeki",
+          "accept": [
+            "Karen Mbeki",
+            "KAREN L. MBEKI"
+          ]
+        },
+        {
+          "name": "issue_date",
+          "keys_ref": "issue_date",
+          "match": "date",
+          "truth": "2026-03-03"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "March 3, 2026",
+            "2026-03-03",
+            "January 4, 2024",
+            "2024-01-04"
+          ],
+          "null_equivalents": [
+            "continuing",
+            "none",
+            "n/a",
+            "not applicable",
+            "until revoked",
+            "indefinite",
+            "no expiration"
+          ],
+          "why": "a CONTINUING guaranty has no expiry; two dates are printed"
+        }
+      ]
+    },
+    {
+      "id": "log-moderate",
+      "type": "Letter of Guarantee",
+      "type_slug": "log",
+      "tier": "moderate",
+      "html": "html/log-moderate.html",
+      "pdf": "pdf/log-moderate.pdf",
+      "document_type_accept": [
+        "letter of guarantee",
+        "guarantee",
+        "guaranty",
+        "letter of guaranty",
+        "continuing guarantee",
+        "supplier guarantee",
+        "letter of continuing guarantee"
+      ],
+      "pdf_text_must_contain": [
+        "Willamette Cultured Foods, Inc.",
+        "it lapses on 03/31/2027",
+        "Issued 9-MAR-2026",
+        "T. Okonkwo"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Willamette Cultured Foods, Inc.",
+          "accept": [
+            "Willamette Cultured Foods"
+          ]
+        },
+        {
+          "name": "customer_name",
+          "keys_ref": "customer",
+          "match": "text",
+          "truth": "Medosweet Farms, Inc.",
+          "accept": [
+            "Medosweet Farms"
+          ]
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "T. Okonkwo",
+          "accept": [
+            "Okonkwo"
+          ]
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-03-31",
+          "why": "in prose, in a third date format, beside a decoy year (2024)"
+        },
+        {
+          "name": "issue_date",
+          "keys_ref": "issue_date",
+          "match": "date",
+          "truth": "2026-03-09"
+        }
+      ]
+    },
+    {
+      "id": "log-nasty",
+      "type": "Letter of Guarantee",
+      "type_slug": "log",
+      "tier": "nasty",
+      "html": "html/log-nasty.html",
+      "pdf": "pdf/log-nasty.pdf",
+      "document_type_accept": [
+        "letter of guarantee",
+        "guarantee",
+        "guaranty",
+        "guarantee and indemnity",
+        "letter of guaranty",
+        "continuing guarantee",
+        "supplier guarantee"
+      ],
+      "pdf_text_must_contain": [
+        "GREAT NORTHERN PROTEIN COMPANY",
+        "Signature on file",
+        "Letter dated 11 August 2026",
+        "no fixed term applies"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Great Northern Protein Company",
+          "accept": [
+            "Great Northern Protein"
+          ],
+          "why": "named only in the closing block; there is no letterhead"
+        },
+        {
+          "name": "customer_name",
+          "keys_ref": "customer",
+          "match": "text",
+          "truth": "Medosweet Farms, Inc.",
+          "accept": [
+            "Medosweet Farms"
+          ]
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "Martin Feldhaus",
+            "J. Whitcomb",
+            "Supplier Quality",
+            "Supplier Quality department"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "unsigned",
+            "signature on file",
+            "not signed"
+          ],
+          "why": "GENUINELY ABSENT -- signature on file. The only two personal names belong to a departed contact and to a regulation's author"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "11 August 2026",
+            "2026-08-11",
+            "04 January 2024",
+            "2024-01-04",
+            "17 June 2025",
+            "2025-06-17",
+            "30 September 2025",
+            "2025-09-30",
+            "22 May 2026",
+            "2026-05-22"
+          ],
+          "null_equivalents": [
+            "continuing",
+            "none",
+            "n/a",
+            "not applicable",
+            "until revoked",
+            "indefinite",
+            "no expiration",
+            "no fixed term"
+          ],
+          "why": "GENUINELY ABSENT, with five dates on the page"
+        },
+        {
+          "name": "issue_date",
+          "keys_ref": "issue_date",
+          "match": "date",
+          "truth": "2026-08-11"
+        }
+      ]
+    },
+    {
+      "id": "allergen-clean",
+      "type": "Allergen Statement",
+      "type_slug": "allergen",
+      "tier": "clean",
+      "html": "html/allergen-clean.html",
+      "pdf": "pdf/allergen-clean.pdf",
+      "scan": true,
+      "document_type_accept": [
+        "allergen statement",
+        "allergen declaration",
+        "allergen certificate",
+        "allergen"
+      ],
+      "pdf_text_must_contain": [
+        "Sweet Cream Buttermilk Powder",
+        "Contains: Milk",
+        "Does not contain",
+        "February 6, 2026"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Riverbend Ingredients, LLC",
+          "accept": [
+            "Riverbend Ingredients"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Sweet Cream Buttermilk Powder"
+        },
+        {
+          "name": "allergens",
+          "keys_ref": "allergens",
+          "match": "tokens",
+          "tokens_all": [
+            "milk"
+          ],
+          "tokens_none": [
+            "peanut",
+            "tree nut",
+            "egg",
+            "fish",
+            "shellfish",
+            "soy",
+            "wheat",
+            "sesame"
+          ],
+          "truth": "Milk",
+          "why": "eight allergens are named on the page as ABSENT; listing them is the failure"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "February 6, 2026",
+            "2026-02-06"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no expiration"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "allergen-moderate",
+      "type": "Allergen Statement",
+      "type_slug": "allergen",
+      "tier": "moderate",
+      "html": "html/allergen-moderate.html",
+      "pdf": "pdf/allergen-moderate.pdf",
+      "document_type_accept": [
+        "allergen statement",
+        "allergen declaration",
+        "allergen certificate",
+        "allergen"
+      ],
+      "pdf_text_must_contain": [
+        "Cultured Sour Cream Base",
+        "valid until 30 June 2027",
+        "Prepared 14-APR-2026",
+        "Present as ingredient"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Willamette Cultured Foods, Inc.",
+          "accept": [
+            "Willamette Cultured Foods"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Cultured Sour Cream Base, 18% MF",
+          "accept": [
+            "Cultured Sour Cream Base"
+          ]
+        },
+        {
+          "name": "allergens",
+          "keys_ref": "allergens",
+          "match": "tokens",
+          "tokens_all": [
+            "milk"
+          ],
+          "tokens_none": [
+            "peanut",
+            "tree nut",
+            "egg",
+            "fish",
+            "shellfish",
+            "soy",
+            "wheat",
+            "sesame"
+          ],
+          "truth": "Milk",
+          "why": "the answer must be read out of a nine-row Yes/No matrix, not off a line"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-06-30"
+        }
+      ]
+    },
+    {
+      "id": "allergen-nasty",
+      "type": "Allergen Statement",
+      "type_slug": "allergen",
+      "tier": "nasty",
+      "html": "html/allergen-nasty.html",
+      "pdf": "pdf/allergen-nasty.pdf",
+      "document_type_accept": [
+        "allergen statement",
+        "allergen declaration",
+        "allergen and cross-contact statement",
+        "allergen certificate",
+        "allergen"
+      ],
+      "pdf_text_must_contain": [
+        "Reduced Lactose Whey Powder, Agglomerated",
+        "Soybeans (soy lecithin, agglomeration aid)",
+        "Cross-contact risk on line",
+        "Revised 03 Feb 2026"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Great Northern Protein Company",
+          "accept": [
+            "Great Northern Protein"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Reduced Lactose Whey Powder, Agglomerated",
+          "accept": [
+            "Reduced Lactose Whey Powder"
+          ],
+          "why": "split across a line break"
+        },
+        {
+          "name": "allergens",
+          "keys_ref": "allergens",
+          "match": "tokens",
+          "tokens_all": [
+            "milk",
+            "soy"
+          ],
+          "tokens_none": [
+            "wheat",
+            "sesame",
+            "peanut",
+            "egg",
+            "fish",
+            "shellfish",
+            "tree nut"
+          ],
+          "truth": "Milk, Soybeans",
+          "why": "cross-contact is a SEPARATE column; folding wheat/sesame in is wrong and so is dropping soy"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "03 Feb 2026",
+            "2026-02-03",
+            "03 Feb 2028",
+            "2028-02-03",
+            "22 May 2026",
+            "2026-05-22"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no expiration",
+            "no fixed expiry"
+          ],
+          "why": "GENUINELY ABSENT; a revision date, a review-due date and an audit date are printed"
+        }
+      ]
+    },
+    {
+      "id": "spec-clean",
+      "type": "Specification Sheet",
+      "type_slug": "spec",
+      "tier": "clean",
+      "html": "html/spec-clean.html",
+      "pdf": "pdf/spec-clean.pdf",
+      "scan": true,
+      "document_type_accept": [
+        "specification sheet",
+        "spec sheet",
+        "product specification",
+        "product specification sheet",
+        "specification"
+      ],
+      "pdf_text_must_contain": [
+        "Nonfat Dry Milk, Low Heat, Extra Grade",
+        "RB-4410",
+        "12 months from date of manufacture",
+        "4.0 max"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Riverbend Ingredients, LLC",
+          "accept": [
+            "Riverbend Ingredients"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Nonfat Dry Milk, Low Heat, Extra Grade",
+          "accept": [
+            "Nonfat Dry Milk, Low Heat",
+            "Nonfat Dry Milk"
+          ]
+        },
+        {
+          "name": "product_code",
+          "keys_ref": "product_code",
+          "match": "text",
+          "truth": "RB-4410"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "12 months",
+            "12 months from date of manufacture",
+            "February 6, 2026",
+            "2026-02-06"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable"
+          ],
+          "why": "shelf life is a DURATION, not a date; a spec sheet dates nothing"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "February 6, 2026",
+            "2026-02-06"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable"
+          ]
+        }
+      ],
+      "tables_must_contain": [
+        "4.0 max",
+        "AOAC 927.05",
+        "Negative in 375 g"
+      ],
+      "tables_must_not_contain_why": "a specification sheet reports NO measured results; every number on it is a limit"
+    },
+    {
+      "id": "spec-moderate",
+      "type": "Specification Sheet",
+      "type_slug": "spec",
+      "tier": "moderate",
+      "html": "html/spec-moderate.html",
+      "pdf": "pdf/spec-moderate.pdf",
+      "document_type_accept": [
+        "specification sheet",
+        "spec sheet",
+        "product specification",
+        "finished product specification",
+        "specification"
+      ],
+      "pdf_text_must_contain": [
+        "Heavy Whipping Cream, 40% butterfat",
+        "HL-2270",
+        "Typical value",
+        "Next review 05/18/28"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Harbor Line Creamery Co.",
+          "accept": [
+            "Harbor Line Creamery"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Heavy Whipping Cream, 40% butterfat",
+          "accept": [
+            "Heavy Whipping Cream"
+          ]
+        },
+        {
+          "name": "product_code",
+          "keys_ref": "product_code",
+          "match": "text",
+          "truth": "HL-2270"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "05/18/28",
+            "2028-05-18",
+            "18-MAY-2026",
+            "2026-05-18",
+            "11-APR-2024",
+            "2024-04-11"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable"
+          ],
+          "why": "a NEXT REVIEW date is not an expiry"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "45 days",
+            "05/18/28",
+            "2028-05-18",
+            "18-MAY-2026",
+            "2026-05-18"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable"
+          ]
+        }
+      ],
+      "tables_must_contain": [
+        "40.0 - 42.0",
+        "Babcock"
+      ]
+    },
+    {
+      "id": "spec-nasty",
+      "type": "Specification Sheet",
+      "type_slug": "spec",
+      "tier": "nasty",
+      "html": "html/spec-nasty.html",
+      "pdf": "pdf/spec-nasty.pdf",
+      "document_type_accept": [
+        "specification sheet",
+        "spec sheet",
+        "product specification",
+        "raw material specification",
+        "specification"
+      ],
+      "pdf_text_must_contain": [
+        "Whey Protein Concentrate 34%, Instantised",
+        "FSQ-SPEC-0442",
+        "44-2210-CU",
+        "This document does not itself expire"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Great Northern Protein Company",
+          "accept": [
+            "Great Northern Protein"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Whey Protein Concentrate 34%, Instantised",
+          "accept": [
+            "Whey Protein Concentrate 34%",
+            "Whey Protein Concentrate"
+          ]
+        },
+        {
+          "name": "product_code",
+          "keys_ref": "product_code",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "FSQ-SPEC-0442",
+            "ID-27",
+            "44-2210-CU",
+            "rev 9"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable"
+          ],
+          "why": "GENUINELY ABSENT; a document number, a plant code and the CUSTOMER's own item number are all printed, and the page says the last is not a product code"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "07 January 2026",
+            "2026-01-07",
+            "19 March 2024",
+            "2024-03-19"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable"
+          ]
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "24 months",
+            "07 January 2026",
+            "2026-01-07"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable"
+          ]
+        }
+      ],
+      "tables_must_contain": [
+        "34.0",
+        "36.0",
+        "AOAC 991.20"
+      ]
+    },
+    {
+      "id": "organic-clean",
+      "type": "Organic Certificate",
+      "type_slug": "organic",
+      "tier": "clean",
+      "html": "html/organic-clean.html",
+      "pdf": "pdf/organic-clean.pdf",
+      "scan": true,
+      "document_type_accept": [
+        "organic certificate",
+        "certificate of organic operation",
+        "organic certification",
+        "organic"
+      ],
+      "pdf_text_must_contain": [
+        "OREGON TILTH CERTIFIED ORGANIC",
+        "OTCO-2026-11842",
+        "March 31, 2027",
+        "April 1, 2026"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Riverbend Ingredients, LLC",
+          "accept": [
+            "Riverbend Ingredients"
+          ],
+          "why": "the certified OPERATION, not the certifier and not the USDA"
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "Oregon Tilth Certified Organic",
+          "accept": [
+            "Oregon Tilth",
+            "OTCO"
+          ]
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "OTCO-2026-11842"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-03-31"
+        }
+      ]
+    },
+    {
+      "id": "organic-moderate",
+      "type": "Organic Certificate",
+      "type_slug": "organic",
+      "tier": "moderate",
+      "html": "html/organic-moderate.html",
+      "pdf": "pdf/organic-moderate.pdf",
+      "document_type_accept": [
+        "organic certificate",
+        "certificate of organic operation",
+        "organic certification",
+        "organic"
+      ],
+      "pdf_text_must_contain": [
+        "Quality Assurance International",
+        "Certificate 40128-QAI",
+        "remains valid through 31 December 2027",
+        "Issued 12-JAN-2026"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Willamette Cultured Foods, Inc.",
+          "accept": [
+            "Willamette Cultured Foods"
+          ]
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "Quality Assurance International",
+          "accept": [
+            "QAI"
+          ],
+          "why": "in a letterhead device and a footer, never in a labelled field; USDA NOP and the Canada Organic Regime are decoys"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "40128-QAI",
+          "accept": [
+            "40128"
+          ]
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-12-31"
+        }
+      ]
+    },
+    {
+      "id": "organic-nasty",
+      "type": "Organic Certificate",
+      "type_slug": "organic",
+      "tier": "nasty",
+      "html": "html/organic-nasty.html",
+      "pdf": "pdf/organic-nasty.pdf",
+      "document_type_accept": [
+        "organic certificate",
+        "certificate of organic operation",
+        "organic certification",
+        "organic"
+      ],
+      "pdf_text_must_contain": [
+        "GLOBAL ORGANIC ALLIANCE, INC.",
+        "GOA-2026-",
+        "004417",
+        "continues in effect until surrendered",
+        "therefore carries no expiration date"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Great Northern Protein Company",
+          "accept": [
+            "Great Northern Protein"
+          ]
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "Global Organic Alliance, Inc.",
+          "accept": [
+            "Global Organic Alliance",
+            "GOA"
+          ],
+          "why": "the USDA National Organic Program is the ACCREDITOR and is named twice"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "GOA-2026-004417",
+          "accept": [
+            "GOA-2026- 004417",
+            "GOA-2026004417",
+            "GOA 2026 004417"
+          ],
+          "why": "split across a line break"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "16 February 2026",
+            "2026-02-16",
+            "4 Feb 2026",
+            "2026-02-04",
+            "1 March",
+            "2027-03-01",
+            "2026-03-01"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no expiration",
+            "until surrendered",
+            "continues in effect",
+            "indefinite"
+          ],
+          "why": "GENUINELY ABSENT and this is the REAL NOP form -- 7 CFR 205.404(c) certificates have no expiry"
+        }
+      ]
+    },
+    {
+      "id": "kosher-clean",
+      "type": "Kosher Certificate",
+      "type_slug": "kosher",
+      "tier": "clean",
+      "html": "html/kosher-clean.html",
+      "pdf": "pdf/kosher-clean.pdf",
+      "scan": true,
+      "document_type_accept": [
+        "kosher certificate",
+        "letter of kosher certification",
+        "kosher certification",
+        "kosher"
+      ],
+      "pdf_text_must_contain": [
+        "ORTHODOX UNION KOSHER",
+        "OU-K-2026-3391",
+        "December 31, 2026",
+        "Cholov Yisroel"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Riverbend Ingredients, LLC",
+          "accept": [
+            "Riverbend Ingredients"
+          ]
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "Orthodox Union Kosher",
+          "accept": [
+            "Orthodox Union",
+            "OU Kosher",
+            "OU"
+          ]
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "OU-K-2026-3391"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2026-12-31"
+        },
+        {
+          "name": "kosher_status",
+          "keys_ref": "kosher_status",
+          "match": "tokens",
+          "tokens_all": [
+            "dairy"
+          ],
+          "tokens_none": [
+            "pareve",
+            "meat"
+          ],
+          "truth": "Dairy - Cholov Yisroel"
+        }
+      ]
+    },
+    {
+      "id": "kosher-moderate",
+      "type": "Kosher Certificate",
+      "type_slug": "kosher",
+      "tier": "moderate",
+      "html": "html/kosher-moderate.html",
+      "pdf": "pdf/kosher-moderate.pdf",
+      "document_type_accept": [
+        "kosher certificate",
+        "kosher certification",
+        "letter of kosher certification",
+        "kosher"
+      ],
+      "pdf_text_must_contain": [
+        "STAR-K CERTIFICATION, INC.",
+        "expires 31-DEC-2026",
+        "26 January 2026",
+        "Cane Sugar Simple Syrup"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Harbor Line Creamery Co.",
+          "accept": [
+            "Harbor Line Creamery"
+          ]
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "Star-K Certification, Inc.",
+          "accept": [
+            "Star-K Certification",
+            "Star-K",
+            "Star K"
+          ]
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2026-12-31",
+          "why": "prose, day-first-ish format, beside a Hebrew calendar date"
+        },
+        {
+          "name": "issue_date",
+          "keys_ref": "issue_date",
+          "match": "date",
+          "truth": "2026-01-26"
+        }
+      ]
+    },
+    {
+      "id": "kosher-nasty",
+      "type": "Kosher Certificate",
+      "type_slug": "kosher",
+      "tier": "nasty",
+      "html": "html/kosher-nasty.html",
+      "pdf": "pdf/kosher-nasty.pdf",
+      "document_type_accept": [
+        "kosher certificate",
+        "certificate of kosher supervision",
+        "kosher certification",
+        "kosher"
+      ],
+      "pdf_text_must_contain": [
+        "GREAT NORTHERN PROTEIN COMPANY",
+        "No certificate number is assigned",
+        "in force until 30/09/2026",
+        "not under supervision"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Great Northern Protein Company",
+          "accept": [
+            "Great Northern Protein"
+          ],
+          "why": "split across a line break"
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "Kehilla Kosher Supervision Service",
+          "accept": [
+            "Kehilla Kosher"
+          ]
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "KK-ACCT-88210",
+            "KK-9",
+            "ID-27",
+            "rev 3"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "not assigned"
+          ],
+          "why": "GENUINELY ABSENT and the page says so; an account number, a plant number and a form number are printed"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2026-09-30",
+          "why": "day-first 30/09/2026, in the last paragraph, against a 2021 commencement date"
+        }
+      ]
+    },
+    {
+      "id": "gf-clean",
+      "type": "Gluten-Free Certificate",
+      "type_slug": "gf",
+      "tier": "clean",
+      "html": "html/gf-clean.html",
+      "pdf": "pdf/gf-clean.pdf",
+      "scan": true,
+      "document_type_accept": [
+        "gluten-free certificate",
+        "gluten free certificate",
+        "certificate of gluten-free certification",
+        "gluten-free certification",
+        "gluten free certification"
+      ],
+      "pdf_text_must_contain": [
+        "GLUTEN-FREE CERTIFICATION ORGANIZATION",
+        "GFCO-2026-88104",
+        "10 ppm gluten",
+        "May 3, 2027"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Riverbend Ingredients, LLC",
+          "accept": [
+            "Riverbend Ingredients"
+          ]
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "Gluten-Free Certification Organization",
+          "accept": [
+            "GFCO",
+            "Gluten Intolerance Group"
+          ]
+        },
+        {
+          "name": "gluten_threshold",
+          "keys_ref": "gluten_threshold",
+          "match": "text",
+          "truth": "10 ppm",
+          "accept": [
+            "10 ppm gluten",
+            "10ppm",
+            "<10 ppm"
+          ],
+          "why": "the GFCO limit is 10 ppm and the FDA's 20 ppm is printed in the next sentence"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "GFCO-2026-88104"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-05-03"
+        }
+      ]
+    },
+    {
+      "id": "gf-moderate",
+      "type": "Gluten-Free Certificate",
+      "type_slug": "gf",
+      "tier": "moderate",
+      "html": "html/gf-moderate.html",
+      "pdf": "pdf/gf-moderate.pdf",
+      "document_type_accept": [
+        "gluten-free certificate",
+        "gluten free certificate",
+        "gluten-free certification",
+        "gluten free certification"
+      ],
+      "pdf_text_must_contain": [
+        "NSF International",
+        "2026-06-01 to 2027-05-31",
+        "less than 20 ppm gluten",
+        "C0227741"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Willamette Cultured Foods, Inc.",
+          "accept": [
+            "Willamette Cultured Foods"
+          ]
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "NSF International",
+          "accept": [
+            "NSF"
+          ]
+        },
+        {
+          "name": "gluten_threshold",
+          "keys_ref": "gluten_threshold",
+          "match": "text",
+          "truth": "20 ppm",
+          "accept": [
+            "less than 20 ppm",
+            "<20 ppm",
+            "20ppm"
+          ]
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "C0227741",
+          "accept": [
+            "Cert. C0227741"
+          ]
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-05-31",
+          "why": "the second half of a RANGE printed in one cell"
+        }
+      ]
+    },
+    {
+      "id": "gf-nasty",
+      "type": "Gluten-Free Certificate",
+      "type_slug": "gf",
+      "tier": "nasty",
+      "html": "html/gf-nasty.html",
+      "pdf": "pdf/gf-nasty.pdf",
+      "document_type_accept": [
+        "gluten-free certificate",
+        "gluten free certificate",
+        "gluten-free status certificate",
+        "gluten-free certification",
+        "gluten free certification"
+      ],
+      "pdf_text_must_contain": [
+        "BENCHMARK FOOD CERTIFICATION SERVICES, LLC",
+        "21 CFR 101.91",
+        "No numeric limit is stated",
+        "expires 2 March 2027"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Great Northern Protein Company",
+          "accept": [
+            "Great Northern Protein"
+          ],
+          "why": "split across a line break"
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "Benchmark Food Certification Services, LLC",
+          "accept": [
+            "Benchmark Food Certification Services",
+            "Benchmark"
+          ]
+        },
+        {
+          "name": "gluten_threshold",
+          "keys_ref": "gluten_threshold",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "21 CFR 101.91",
+            "LOQ",
+            "<LOQ"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "not stated",
+            "no numeric limit"
+          ],
+          "why": "THE FABRICATION TEST. The page cites the rule but prints NO ppm figure. '20 ppm' is world knowledge, not a reading of this document"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "BF-GF-2026-0771",
+          "accept": [
+            "BF-GF-2026-0771"
+          ]
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-03-02"
+        }
+      ]
+    },
+    {
+      "id": "audit-clean",
+      "type": "3rd Party Audit Certificate",
+      "type_slug": "audit",
+      "tier": "clean",
+      "html": "html/audit-clean.html",
+      "pdf": "pdf/audit-clean.pdf",
+      "scan": true,
+      "document_type_accept": [
+        "3rd party audit certificate",
+        "third party audit certificate",
+        "audit certificate",
+        "certificate of food safety certification",
+        "food safety certificate",
+        "sqf certificate",
+        "certification certificate"
+      ],
+      "pdf_text_must_contain": [
+        "NSF INTERNATIONAL CERTIFICATION SERVICES",
+        "SQF Food Safety Code for Manufacturing, Edition 9",
+        "Excellent - 96 out of 100",
+        "July 25, 2027"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Riverbend Ingredients, LLC",
+          "accept": [
+            "Riverbend Ingredients"
+          ]
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "NSF International Certification Services",
+          "accept": [
+            "NSF International",
+            "NSF"
+          ],
+          "why": "SQFI owns the scheme and ANAB accredits the body; neither issued this"
+        },
+        {
+          "name": "scheme",
+          "keys_ref": "scheme",
+          "match": "tokens",
+          "tokens_any": [
+            "sqf"
+          ],
+          "tokens_none": [
+            "brc",
+            "fssc",
+            "iso 22000"
+          ],
+          "truth": "SQF Food Safety Code for Manufacturing, Edition 9"
+        },
+        {
+          "name": "audit_grade",
+          "keys_ref": "audit_grade",
+          "match": "tokens",
+          "tokens_any": [
+            "excellent",
+            "96"
+          ],
+          "tokens_none": [
+            "aa",
+            "pass only"
+          ],
+          "truth": "Excellent - 96 out of 100"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-07-25",
+          "why": "an audit date, an issue date and an expiry are all printed"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "NSF-SQF-2026-2211"
+        }
+      ]
+    },
+    {
+      "id": "audit-moderate",
+      "type": "3rd Party Audit Certificate",
+      "type_slug": "audit",
+      "tier": "moderate",
+      "html": "html/audit-moderate.html",
+      "pdf": "pdf/audit-moderate.pdf",
+      "document_type_accept": [
+        "3rd party audit certificate",
+        "third party audit certificate",
+        "audit certificate",
+        "certificate of conformity",
+        "brcgs certificate",
+        "food safety certificate",
+        "certification certificate"
+      ],
+      "pdf_text_must_contain": [
+        "SGS North America Inc.",
+        "BRCGS Global Standard",
+        "Certificate expiry date",
+        "2027-09-11"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Harbor Line Creamery Co.",
+          "accept": [
+            "Harbor Line Creamery"
+          ]
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "SGS North America Inc.",
+          "accept": [
+            "SGS North America",
+            "SGS"
+          ]
+        },
+        {
+          "name": "scheme",
+          "keys_ref": "scheme",
+          "match": "tokens",
+          "tokens_any": [
+            "brc"
+          ],
+          "tokens_none": [
+            "sqf",
+            "fssc"
+          ],
+          "truth": "BRCGS Global Standard Food Safety Issue 9"
+        },
+        {
+          "name": "audit_grade",
+          "keys_ref": "audit_grade",
+          "match": "tokens",
+          "tokens_any": [
+            "aa"
+          ],
+          "tokens_none": [
+            "excellent",
+            "96"
+          ],
+          "truth": "AA"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-09-11",
+          "why": "one of FOUR dates in a four-cell strip, the others being audit date, issue date and re-audit-due"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "8841207",
+          "accept": [
+            "Cert. 8841207"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "audit-nasty",
+      "type": "3rd Party Audit Certificate",
+      "type_slug": "audit",
+      "tier": "nasty",
+      "html": "html/audit-nasty.html",
+      "pdf": "pdf/audit-nasty.pdf",
+      "document_type_accept": [
+        "3rd party audit certificate",
+        "third party audit certificate",
+        "audit certificate",
+        "certificate of registration",
+        "fssc certificate",
+        "food safety certificate",
+        "certification certificate"
+      ],
+      "pdf_text_must_contain": [
+        "INTERTEK CERTIFICATION SERVICES, INC.",
+        "does not carry a grade or score",
+        "until 8 November 2027",
+        "IC-FSSC-40921"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Great Northern Protein Company",
+          "accept": [
+            "Great Northern Protein"
+          ]
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "Intertek Certification Services, Inc.",
+          "accept": [
+            "Intertek Certification Services",
+            "Intertek"
+          ],
+          "why": "split across a line break; the Foundation FSSC and ANAB are the competing wrong answers"
+        },
+        {
+          "name": "scheme",
+          "keys_ref": "scheme",
+          "match": "tokens",
+          "tokens_any": [
+            "fssc"
+          ],
+          "tokens_none": [
+            "sqf",
+            "brc"
+          ],
+          "truth": "FSSC 22000 version 6"
+        },
+        {
+          "name": "audit_grade",
+          "keys_ref": "audit_grade",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "C IV",
+            "G II",
+            "22000",
+            "6",
+            "9",
+            "17021-1",
+            "four"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "not stated",
+            "no grade",
+            "see audit report"
+          ],
+          "why": "GENUINELY ABSENT and the page says so; a scheme version, two category codes and an ISO number are all grade-shaped"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2027-11-08",
+          "why": "in a footnote, after a surveillance-due date that is the decoy"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "IC-FSSC-40921"
+        }
+      ]
+    },
+    {
+      "id": "sds-clean",
+      "type": "Safety Data Sheet",
+      "type_slug": "sds",
+      "tier": "clean",
+      "html": "html/sds-clean.html",
+      "pdf": "pdf/sds-clean.pdf",
+      "scan": true,
+      "document_type_accept": [
+        "safety data sheet",
+        "sds",
+        "material safety data sheet",
+        "msds"
+      ],
+      "pdf_text_must_contain": [
+        "Lactose, Edible Grade, 200 Mesh",
+        "Revision Date: 2026-01-20",
+        "Signal word: None",
+        "64044-51-5"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Riverbend Ingredients, LLC",
+          "accept": [
+            "Riverbend Ingredients"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Lactose, Edible Grade, 200 Mesh",
+          "accept": [
+            "Lactose, Edible Grade"
+          ]
+        },
+        {
+          "name": "revision_date",
+          "keys_ref": "revision_date",
+          "match": "date",
+          "truth": "2026-01-20"
+        },
+        {
+          "name": "signal_word",
+          "keys_ref": "signal_word",
+          "match": "text",
+          "truth": null,
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no signal word",
+            "not classified"
+          ],
+          "distractors": [],
+          "why": "the page prints 'Signal word: None'. Reporting none is CORRECT; 'Warning' or 'Danger' is an invention"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-20",
+            "2023-04-11",
+            "2029-01-20"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no expiration"
+          ],
+          "why": "an SDS never expires; three dates are printed, one of them a review-due date"
+        }
+      ],
+      "tables_must_contain": [
+        "64044-51-5"
+      ]
+    },
+    {
+      "id": "sds-moderate",
+      "type": "Safety Data Sheet",
+      "type_slug": "sds",
+      "tier": "moderate",
+      "html": "html/sds-moderate.html",
+      "pdf": "pdf/sds-moderate.pdf",
+      "document_type_accept": [
+        "safety data sheet",
+        "sds",
+        "material safety data sheet",
+        "msds"
+      ],
+      "pdf_text_must_contain": [
+        "Sodium Hydroxide Solution 50%",
+        "revised 14-JUL-2026",
+        "H314 Causes severe skin burns",
+        "1310-73-2"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "CascadeChem Industrial Supply, Inc.",
+          "accept": [
+            "CascadeChem Industrial Supply",
+            "CascadeChem"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Caustic CIP Cleaner, Sodium Hydroxide Solution 50%",
+          "accept": [
+            "Sodium Hydroxide Solution 50%",
+            "Caustic CIP Cleaner"
+          ]
+        },
+        {
+          "name": "revision_date",
+          "keys_ref": "revision_date",
+          "match": "date",
+          "truth": "2026-07-14",
+          "why": "in prose beside a superseded date in a different format"
+        },
+        {
+          "name": "signal_word",
+          "keys_ref": "signal_word",
+          "match": "text",
+          "truth": "Danger",
+          "accept": [
+            "DANGER"
+          ]
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "14-JUL-2026",
+            "2026-07-14",
+            "02/11/24",
+            "2024-11-02",
+            "2024-02-11",
+            "2029"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no expiration"
+          ]
+        }
+      ],
+      "tables_must_contain": [
+        "1310-73-2"
+      ]
+    },
+    {
+      "id": "sds-nasty",
+      "type": "Safety Data Sheet",
+      "type_slug": "sds",
+      "tier": "nasty",
+      "html": "html/sds-nasty.html",
+      "pdf": "pdf/sds-nasty.pdf",
+      "document_type_accept": [
+        "safety data sheet",
+        "sds",
+        "material safety data sheet",
+        "msds"
+      ],
+      "pdf_text_must_contain": [
+        "Whey Protein Concentrate 34%, Instantised",
+        "Version 6, issued 2024-05-30",
+        "no signal word is assigned",
+        "Printed 09/12/2026"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Great Northern Protein Company",
+          "accept": [
+            "Great Northern Protein"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Whey Protein Concentrate 34%, Instantised",
+          "accept": [
+            "Whey Protein Concentrate 34%",
+            "Whey Protein Concentrate"
+          ],
+          "why": "split across a line break"
+        },
+        {
+          "name": "revision_date",
+          "keys_ref": "revision_date",
+          "match": "date",
+          "truth": "2024-05-30",
+          "why": "the PRINT date 09/12/2026 is more prominent and is not the revision"
+        },
+        {
+          "name": "signal_word",
+          "keys_ref": "signal_word",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "DANGER",
+            "Danger"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no signal word",
+            "not classified",
+            "not assigned"
+          ],
+          "why": "GENUINELY ABSENT for this product. 'DANGER' appears on the page but belongs to a DIFFERENT material named in a warning note -- that is a misfile; 'Warning' would be an invention"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "09/12/2026",
+            "2026-12-09",
+            "2026-09-12",
+            "2024-05-30",
+            "2021-08-14"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no expiration"
+          ]
+        }
+      ],
+      "tables_must_contain": [
+        "8002-43-5"
+      ]
+    },
+    {
+      "id": "coo-clean",
+      "type": "Country of Origin Statement",
+      "type_slug": "coo",
+      "tier": "clean",
+      "html": "html/coo-clean.html",
+      "pdf": "pdf/coo-clean.pdf",
+      "scan": true,
+      "document_type_accept": [
+        "country of origin statement",
+        "country of origin",
+        "declaration of origin",
+        "certificate of origin",
+        "origin statement"
+      ],
+      "pdf_text_must_contain": [
+        "Country of Origin: New Zealand",
+        "Milk Protein Concentrate 85",
+        "port of Tacoma",
+        "March 12, 2026"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Riverbend Ingredients, LLC",
+          "accept": [
+            "Riverbend Ingredients"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Milk Protein Concentrate 85",
+          "accept": [
+            "Milk Protein Concentrate"
+          ]
+        },
+        {
+          "name": "country_of_origin",
+          "keys_ref": "country_of_origin",
+          "match": "tokens",
+          "tokens_all": [
+            "new zealand"
+          ],
+          "tokens_none": [
+            "united states",
+            "oregon",
+            "washington",
+            "usa"
+          ],
+          "truth": "New Zealand",
+          "why": "the supplier's own address and the port of entry are both US places"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "March 12, 2026",
+            "2026-03-12"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no expiration"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "coo-moderate",
+      "type": "Country of Origin Statement",
+      "type_slug": "coo",
+      "tier": "moderate",
+      "html": "html/coo-moderate.html",
+      "pdf": "pdf/coo-moderate.pdf",
+      "document_type_accept": [
+        "country of origin statement",
+        "country of origin",
+        "declaration of origin",
+        "certificate of origin",
+        "origin statement",
+        "origin declaration"
+      ],
+      "pdf_text_must_contain": [
+        "wholly of United States origin",
+        "manufactured in Canada",
+        "laboratory in Germany",
+        "Issued 22-JUN-2026"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Harbor Line Creamery Co.",
+          "accept": [
+            "Harbor Line Creamery"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Clarified Butter Oil, anhydrous",
+          "accept": [
+            "Clarified Butter Oil"
+          ]
+        },
+        {
+          "name": "country_of_origin",
+          "keys_ref": "country_of_origin",
+          "match": "tokens",
+          "tokens_all": [
+            "united states"
+          ],
+          "tokens_none": [
+            "canada",
+            "germany",
+            "japan"
+          ],
+          "truth": "United States",
+          "why": "four countries are printed; the other three are packaging, a test lab and a barred market"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "22-JUN-2026",
+            "2026-06-22",
+            "06/02/26",
+            "2026-06-02",
+            "2026-02-06"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no expiration"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "coo-nasty",
+      "type": "Country of Origin Statement",
+      "type_slug": "coo",
+      "tier": "nasty",
+      "html": "html/coo-nasty.html",
+      "pdf": "pdf/coo-nasty.pdf",
+      "document_type_accept": [
+        "country of origin statement",
+        "country of origin",
+        "declaration of origin",
+        "certificate of origin",
+        "origin statement",
+        "statement on country of origin"
+      ],
+      "pdf_text_must_contain": [
+        "NORTHERN LIGHTS DAIRY INGREDIENTS",
+        "the country of origin is not fixed at the item level",
+        "domiciled in Ireland",
+        "spray drying facility in Poland"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Northern Lights Dairy Ingredients",
+          "accept": [
+            "Northern Lights Dairy"
+          ],
+          "why": "split across a line break"
+        },
+        {
+          "name": "customer_name",
+          "keys_ref": "customer",
+          "match": "text",
+          "truth": "Medosweet Farms, Inc.",
+          "accept": [
+            "Medosweet Farms"
+          ]
+        },
+        {
+          "name": "country_of_origin",
+          "keys_ref": "country_of_origin",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "Ireland",
+            "Poland",
+            "Netherlands",
+            "Rotterdam",
+            "Denmark"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "not stated",
+            "not specified",
+            "varies",
+            "multiple",
+            "not fixed",
+            "see shipping documents",
+            "various"
+          ],
+          "why": "THE FABRICATION TEST for this type. The letter REFUSES to fix an origin and four countries are printed for other reasons"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "4 May 2026",
+            "2026-05-04",
+            "18 January 2025",
+            "2025-01-18"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable",
+            "no expiration"
+          ]
+        }
+      ]
+    }
+  ],
+  "_type_instructions_why": "The counterfactual arm. The baseline run measures llm.ts EXACTLY as production runs it, and its dominant failure is that the canonical field list in rule 1 is COA-shaped -- there is no slot for an issuing body, a certificate number, an allergen list, a country of origin. That is a SCHEMA gap, and a schema gap and a MODEL gap have completely different fixes. So bin/measure-doctype-extraction --instructions re-runs the same documents with these per-type field lists appended to the industry layer (the shape a per-document-type extraction-instructions row would take) and scores them identically. The delta is the answer to 'if we name the field, can the model find it?'. These strings name FIELDS ONLY. They never state a value, never say which documents lack one, and the closing line is the same universal null instruction for every type -- otherwise the guided arm would be measuring how well the instructions were written against these specific fixtures.",
+  "type_instructions": {
+    "coi": "This is a certificate of insurance. In addition to the canonical fields, return: certificate_number (the certificate's own number -- a policy number or a form number is not one), insured (the company whose operations the coverage protects; not the producing broker and not the insurer), and document_expires_on (the end of the policy period).",
+    "log": "This is a letter of guarantee from a supplier to a customer. In addition to the canonical fields, return: guarantor (the company giving the guarantee), signatory (the person who signed it), issue_date (the date of the letter), and document_expires_on (the date the guarantee itself stops being effective).",
+    "allergen": "This is an allergen statement. In addition to the canonical fields, return: allergens (the allergens present IN the product's formulation -- allergens named only as absent, and allergens named only as a shared-line or cross-contact risk, are not present in the formulation), and document_expires_on (the date the statement itself stops being valid).",
+    "spec": "This is a product specification sheet. It states acceptance LIMITS, not measured results. In addition to the canonical fields, return: product_code (the supplier's own code for this product -- a document number, a plant code and a customer's internal item number are not one), and document_expires_on (the date the specification itself stops being valid).",
+    "organic": "This is an organic certificate. In addition to the canonical fields, return: issuing_body (the certifying agent that issued the certificate; an accreditation body that accredits the certifier is not the issuer), certificate_number, and document_expires_on (the date the certificate itself stops being valid).",
+    "kosher": "This is a kosher certificate. In addition to the canonical fields, return: issuing_body (the certifying agency), certificate_number, kosher_status (the designation applying to the certified products, e.g. dairy, pareve, meat), and document_expires_on (the date the certificate itself stops being valid).",
+    "gf": "This is a gluten-free certificate. In addition to the canonical fields, return: issuing_body (the certifying organisation), certificate_number, gluten_threshold (the ppm figure the certification is granted against, as printed), and document_expires_on (the date the certificate itself stops being valid).",
+    "audit": "This is a third-party food-safety audit certificate. In addition to the canonical fields, return: issuing_body (the certification body that issued this certificate; the scheme owner and the accreditation body are not the issuer), scheme (the standard audited against), audit_grade (the grade, rating or score awarded), certificate_number, and document_expires_on (the date the certificate itself stops being valid).",
+    "sds": "This is a safety data sheet. In addition to the canonical fields, return: revision_date (the date this version of the sheet was issued or revised -- a print date is not a revision date), signal_word (the GHS signal word assigned to THIS product), and document_expires_on (the date the sheet itself stops being valid).",
+    "coo": "This is a country-of-origin statement. In addition to the canonical fields, return: country_of_origin (the origin the document declares for the goods themselves; the origin of packaging, the location of a laboratory, a port of transhipment, a corporate domicile and a barred export market are not the origin of the goods), and document_expires_on (the date the statement itself stops being valid)."
+  }
+}

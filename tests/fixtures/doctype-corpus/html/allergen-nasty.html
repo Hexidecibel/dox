@@ -1,0 +1,49 @@
+<!--
+  Allergen Statement — NASTY tier. The traps:
+   1. The product's own name is SPLIT ACROSS A LINE BREAK in a narrow column
+      ("Reduced Lactose Whey" / "Powder, Agglomerated").
+   2. The matrix header row REPEATS mid-table.
+   3. Cross-contact is a SEPARATE COLUMN from ingredient presence, and three
+      allergens are Yes for cross-contact only. The correct "contains" answer
+      is Milk and Soy; anything that folds the cross-contact column in
+      (wheat, sesame) is wrong, and so is anything that drops soy.
+   4. NO EXPIRY EXISTS. The page prints a revision date, a review-due date and
+      an audit date; document_expires_on is null.
+-->
+<style>@page{size:letter;margin:0.7in}body{font-family:Arial,Helvetica,sans-serif;font-size:9pt;color:#111;line-height:1.3}
+.top{display:flex;justify-content:space-between;font-size:8.5pt;color:#333;border-bottom:1px solid #999;padding-bottom:5px}
+.two{display:flex;gap:0;margin:10px 0;border:1px solid #444}
+.two > div{border-right:1px solid #444;padding:6px 8px}
+.nar{width:120px}
+table{border-collapse:collapse;width:100%;margin:8px 0}
+td,th{border:1px solid #666;padding:2px 5px;font-size:8.5pt}
+th{background:#e4e4e4;text-align:left}
+.fine{font-size:8.2pt;color:#222;text-align:justify;line-height:1.35}</style>
+<div class="top"><div>GREAT NORTHERN PROTEIN COMPANY &mdash; Food Safety &amp; Quality Systems</div>
+<div>FSQ-ALG-118 rev 12</div></div>
+<div style="text-align:center;font-weight:bold;font-size:11pt;margin:10px 0 6px">ALLERGEN AND CROSS-CONTACT STATEMENT</div>
+<div class="two">
+<div class="nar"><b>Product</b><br>Reduced Lactose Whey<br>Powder, Agglomerated</div>
+<div style="width:110px"><b>Item</b><br>51-8817</div>
+<div style="width:120px"><b>Plant</b><br>Jerome, ID</div>
+<div style="width:150px;border-right:none"><b>Dates</b><br>Revised 03 Feb 2026<br>Review due 03 Feb 2028<br>Last audit 22 May 2026</div>
+</div>
+<table>
+<tr><th>Allergen</th><th>In formulation</th><th>Cross-contact risk on line</th></tr>
+<tr><td>Milk</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Soybeans (soy lecithin, agglomeration aid)</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Wheat</td><td>No</td><td>Yes</td></tr>
+<tr><th>Allergen</th><th>In formulation</th><th>Cross-contact risk on line</th></tr>
+<tr><td>Sesame</td><td>No</td><td>Yes</td></tr>
+<tr><td>Egg</td><td>No</td><td>No</td></tr>
+<tr><td>Peanuts</td><td>No</td><td>No</td></tr>
+<tr><td>Tree nuts</td><td>No</td><td>No</td></tr>
+<tr><td>Fish</td><td>No</td><td>No</td></tr>
+<tr><td>Crustacean shellfish</td><td>No</td><td>No</td></tr>
+</table>
+<div class="fine">Declaration of allergens on the finished pack follows the "in formulation" column. The cross-contact column
+records what else is run on the same dryer train and drives the sanitation and swab programme; it is not a label declaration and
+must not be read as one. Wheat and sesame appear in the cross-contact column solely because a bakery blend is produced on the same
+train on Fridays; validated wet clean with ATP and protein swab verification separates the runs.</div>
+<div class="fine" style="margin-top:8px">This statement is issued without a fixed expiry. It is reviewed on the cycle shown above
+or on any change of formulation, and remains the current statement until superseded. Questions: Supplier Quality mailbox.</div>

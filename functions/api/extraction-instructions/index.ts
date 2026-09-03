@@ -8,9 +8,20 @@
  * specifically so reviewers have an explicit "teach the model" surface.
  *
  * See migration 0035_supplier_extraction_instructions.sql for the schema.
+ *
+ * SINCE 0098 this endpoint also SERVES the layer above it. `instructions` is
+ * still exactly the supplier row and nothing else — the editing UI PUTs that
+ * value straight back, so folding anything into it would let a broader layer's
+ * text be saved into a narrower row on the next blur. The composed stack is a
+ * separate field, `effective_instructions`, and that is what the worker sends
+ * to the model.
  */
 
 import { generateId, logAudit, getClientIp } from '../../lib/db';
+import {
+  composeInstructions,
+  loadTypeInstructions,
+} from '../../lib/extractionInstructionStack';
 import {
   requireRole,
   requireTenantAccess,
@@ -55,8 +66,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const documentTypeId = url.searchParams.get('document_type_id');
     const tenantIdParam = url.searchParams.get('tenant_id');
 
-    if (!supplierId) {
-      throw new BadRequestError('supplier_id is required');
+    // supplier_id used to be unconditionally required. Since 0098 it is not:
+    // a document_type_id ALONE is a legitimate question ("what do we know
+    // about reading this kind of document, from anybody"), and it is the exact
+    // question the worker has to ask when a document arrives from a supplier it
+    // cannot resolve — which is the case this whole layer exists for. One of
+    // the two is still required; neither is a lookup with no key.
+    if (!supplierId && !documentTypeId) {
+      throw new BadRequestError('supplier_id or document_type_id is required');
     }
 
     // Tenant resolution: super_admin may pass ?tenant_id= to query any tenant;
@@ -77,25 +94,38 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // doctype is already resolved. No supplier-wide fallback here: that would
     // mis-fill the editing textarea with another doctype's guidance.
     if (documentTypeId) {
-      const row = await context.env.DB.prepare(
-        `SELECT instructions, field_mappings, updated_at, updated_by
+      // Layer 2 (0098) — resolved whether or not a supplier is known. When the
+      // supplier is unknown this is the ONLY guidance there is, and returning
+      // it is the point of the layer.
+      const typeInstructions = await loadTypeInstructions(
+        context.env.DB,
+        tenantId,
+        documentTypeId
+      );
+
+      const row = supplierId
+        ? await context.env.DB.prepare(
+            `SELECT instructions, field_mappings, updated_at, updated_by
          FROM supplier_extraction_instructions
          WHERE tenant_id = ? AND supplier_id = ? AND document_type_id = ?`
-      )
-        .bind(tenantId, supplierId, documentTypeId)
-        .first<{ instructions: string; field_mappings: string | null; updated_at: string; updated_by: string | null }>();
+          )
+            .bind(tenantId, supplierId, documentTypeId)
+            .first<{ instructions: string; field_mappings: string | null; updated_at: string; updated_by: string | null }>()
+        : null;
 
       return new Response(
-        JSON.stringify(
-          row
-            ? {
-                instructions: row.instructions,
-                field_mappings: parseFieldMappings(row.field_mappings),
-                updated_at: row.updated_at,
-                updated_by: row.updated_by,
-              }
-            : { instructions: null, field_mappings: null, updated_at: null, updated_by: null }
-        ),
+        JSON.stringify({
+          // The supplier row, verbatim. The editor round-trips this.
+          instructions: row ? row.instructions : null,
+          field_mappings: row ? parseFieldMappings(row.field_mappings) : null,
+          updated_at: row ? row.updated_at : null,
+          updated_by: row ? row.updated_by : null,
+          // The layer above, broken out so a UI can label it as inherited.
+          document_type_instructions: typeInstructions || null,
+          // What the model should actually be told: general -> specific.
+          effective_instructions:
+            composeInstructions(typeInstructions, row?.instructions ?? '') || null,
+        }),
         { headers: { 'Content-Type': 'application/json' } }
       );
     }
@@ -120,7 +150,16 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const list = agg.results || [];
     if (list.length === 0) {
       return new Response(
-        JSON.stringify({ instructions: null, updated_at: null, updated_by: null }),
+        JSON.stringify({
+          instructions: null,
+          updated_at: null,
+          updated_by: null,
+          // No document type in the question, so no type layer can be resolved.
+          // Deliberately NOT "every type layer this tenant has": that would send
+          // 27 types' worth of guidance for one document.
+          document_type_instructions: null,
+          effective_instructions: null,
+        }),
         { headers: { 'Content-Type': 'application/json' } }
       );
     }
@@ -137,6 +176,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         instructions,
         updated_at: list[0].updated_at,
         updated_by: list[0].updated_by,
+        document_type_instructions: null,
+        effective_instructions: instructions,
       }),
       { headers: { 'Content-Type': 'application/json' } }
     );

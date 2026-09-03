@@ -66,6 +66,7 @@ import { AUTH_TOKEN_KEY } from '../lib/types';
 import { api } from '../lib/api';
 import type { ProcessingQueueItem, ApiDocumentType, TemplateFieldMapping, ExtractedTable } from '../lib/types';
 import { renameTableHeader as renameTableHeaderPure } from './reviewTableActions';
+import { renewalRuleLabel } from '../../shared/renewalPeriod';
 import {
   shouldShowDualCompare,
   readTextPayload,
@@ -281,6 +282,14 @@ export default function ReviewQueue() {
   const [reExtractText, setReExtractText] = useState<Record<string, string>>({});
   const [reExtractLoading, setReExtractLoading] = useState<Record<string, boolean>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
+  /**
+   * The renewal date the reviewer has in the box, per item. An ABSENT key means
+   * "not edited", in which case the server's proposal is shown; an EMPTY STRING
+   * means the reviewer emptied the box, which is the answer "this does not
+   * renew". Those are different states, so this map is deliberately keyed on
+   * presence rather than initialised from the proposal up front.
+   */
+  const [renewalEdits, setRenewalEdits] = useState<Record<string, string>>({});
 
   // Human-verified supplier per queue item. Seeded in loadQueue from the
   // item's pre-resolved supplier_id (VERIFIED) or raw supplier text
@@ -692,6 +701,14 @@ export default function ReviewQueue() {
     return () => clearInterval(interval);
   }, [hasInFlight]);
 
+  /**
+   * The renewal date currently in the reviewer's box. Falls back to the
+   * server's proposal until they touch it; '' means they emptied it, which is
+   * the answer "this document does not renew".
+   */
+  const renewalValueFor = (item: ProcessingQueueItem): string =>
+    renewalEdits[item.id] ?? (item.renewal_proposal?.due_date ?? '');
+
   const handleApprove = async (id: string) => {
     // Hard gate: never approve without a human-verified supplier. The button is
     // disabled in this state, but guard here too in case of a programmatic call.
@@ -773,12 +790,22 @@ export default function ReviewQueue() {
         originalTables,
       });
 
+      // The renewal answer. Sent on BOTH branches and sent even when empty:
+      // `{ due_date: null }` is the reviewer saying "this does not renew",
+      // which the server records as a decision. Omitting the key would mean
+      // nobody answered — a different thing, and not what happened here,
+      // because the field was on screen in front of them.
+      const renewalPayload = item
+        ? { renewal: { due_date: renewalValueFor(item) || null } }
+        : {};
+
       if (isMultiProduct(id)) {
         // Multi-product approval
         const products = multiProducts[id] || [];
         const tables = editedTables[id] || originalTables;
         await api.queue.approve(id, {
           ...supplierPayload,
+          ...renewalPayload,
           shared_fields: primaryFields,
           products: products.map(p => ({
             product_name: p.product_name,
@@ -794,6 +821,7 @@ export default function ReviewQueue() {
       } else {
         await api.queue.approve(id, {
           ...supplierPayload,
+          ...renewalPayload,
           fields: primaryFields,
           product_name: productName || undefined,
           selected_source: selectedSource,
@@ -2903,6 +2931,48 @@ export default function ReviewQueue() {
                         </AccordionDetails>
                       </Accordion>
                     )}
+
+                    {/* Renewal (migration 0097). A PROPOSAL, pre-filled and
+                        editable, with the rule that produced it stated in plain
+                        words. Whatever is in the box when Approve is pressed is
+                        what gets stored and frozen on the document — including
+                        an empty box, which means "this does not renew". */}
+                    <Paper variant="outlined" sx={{ p: 1.5, mt: 2 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+                        <Typography variant="subtitle2">Renewal</Typography>
+                        <InfoTooltip text="When this document is next due. Pre-filled from the document type's renewal period, or from an expiry printed on the document itself. Change it if the document says otherwise, or clear it to record that this document does not renew — a certificate of analysis is superseded by the next lot's, so it never comes due." />
+                      </Box>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+                        <TextField
+                          type="date"
+                          size="small"
+                          label="Next due"
+                          value={renewalValueFor(item)}
+                          onChange={(e) =>
+                            setRenewalEdits((prev) => ({ ...prev, [item.id]: e.target.value }))
+                          }
+                          disabled={item.status !== 'pending' || isActioning || isProcessing}
+                          InputLabelProps={{ shrink: true }}
+                          sx={{ minWidth: 190 }}
+                        />
+                        {item.renewal_proposal && (
+                          <Typography variant="caption" color="text.secondary">
+                            {renewalValueFor(item)
+                              ? `Suggested: ${renewalRuleLabel(item.renewal_proposal)}`
+                              : 'Empty — recorded as "does not renew".'}
+                          </Typography>
+                        )}
+                      </Box>
+                      {item.renewal_proposal?.reason && (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ display: 'block', mt: 0.75 }}
+                        >
+                          {item.renewal_proposal.reason}
+                        </Typography>
+                      )}
+                    </Paper>
 
                     {/* Notes */}
                     <TextField

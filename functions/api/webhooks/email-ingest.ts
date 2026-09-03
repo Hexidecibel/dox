@@ -1,7 +1,9 @@
 import { generateId, logAudit } from '../../lib/db';
 import { uploadFile } from '../../lib/r2';
 import { extractText } from '../../lib/extract';
-import { extractFields } from '../../lib/llm';
+import { extractFields, classifyDocumentType } from '../../lib/llm';
+import type { DocumentTypeCandidate } from '../../lib/llm';
+import { loadTypeInstructions } from '../../lib/extractionInstructionStack';
 import { computeConfidenceScore } from '../../lib/confidence';
 import { sendEmail, buildEmailIngestSummaryEmail } from '../../lib/email';
 import { resolveExistingSupplierId } from '../../lib/suppliers';
@@ -185,6 +187,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         let confidence: 'high' | 'medium' | 'low' = 'low';
         let confidenceScore = 0.3;
         let supplier: string | null = null;
+        // Hoisted out of the extraction block: the queue row records the type
+        // too, and the reviewer should see what the classifier decided even
+        // when the attachment yielded no text to extract from.
+        let resolvedTypeId: string | null = documentTypeId;
+        let classifiedTypeName: string | null = null;
 
         if (text) {
           // The tenant's editable extraction_context occupies the industry-layer
@@ -195,9 +202,50 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           // Bounded copy for the model only — `text` stays whole for storage.
           const llmText = text.substring(0, EMAIL_LLM_TEXT_CHAR_LIMIT);
 
+          // CLASSIFY BEFORE EXTRACTING, when the mapping did not already say
+          // what arrives on this address. A domain mapping's default doctype is
+          // a standing declaration ("everything from this broker is a COA") and
+          // is trusted as-is; without one, this door used to extract every
+          // attachment untyped, which meant the 0098 type layer — the layer
+          // built for mail from suppliers nobody has configured — could never
+          // fire on the door that needs it most.
+          //
+          // Best-effort throughout: a classifier that cannot answer leaves the
+          // type null, which is exactly what this path did before.
+          if (!resolvedTypeId) {
+            try {
+              const catalog = await context.env.DB.prepare(
+                'SELECT id, name, slug FROM document_types WHERE tenant_id = ? AND active = 1'
+              ).bind(mapping.tenant_id).all<DocumentTypeCandidate>();
+              const candidates = catalog.results || [];
+              if (candidates.length > 0) {
+                const classified = await classifyDocumentType(llmText, candidates, context.env);
+                if (classified.candidate?.id) {
+                  resolvedTypeId = classified.candidate.id;
+                  classifiedTypeName = classified.candidate.name;
+                }
+              }
+            } catch {
+              // Non-critical — extract untyped, the reviewer decides.
+            }
+          } else {
+            const row = await context.env.DB.prepare(
+              'SELECT name FROM document_types WHERE id = ? AND tenant_id = ?'
+            ).bind(resolvedTypeId, mapping.tenant_id).first<{ name: string }>();
+            classifiedTypeName = row?.name ?? null;
+          }
+
+          // Document-type guidance (migration 0098), keyed on the type resolved
+          // above. Best-effort; a lookup failure must not block ingest.
+          const typeInstructions = resolvedTypeId
+            ? await loadTypeInstructions(context.env.DB, mapping.tenant_id, resolvedTypeId)
+            : '';
+
           // Initial extraction (no few-shot — need supplier first)
           const initialExtraction = await extractFields(llmText, context.env, {
             industryPrompt: tenantContext,
+            instructions: typeInstructions || null,
+            documentType: classifiedTypeName,
           });
 
           // Detect supplier from extracted fields
@@ -206,13 +254,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
           // Fetch supplier-aware few-shot examples
           let fewShotExamples: { input_text: string; corrected_output: string }[] = [];
-          if (documentTypeId) {
+          if (resolvedTypeId) {
             if (supplier) {
               const supplierExResult = await context.env.DB.prepare(
                 `SELECT input_text, corrected_output FROM extraction_examples
                  WHERE document_type_id = ? AND tenant_id = ? AND supplier = ? AND score >= 0.7
                  ORDER BY score DESC, created_at DESC LIMIT 3`
-              ).bind(documentTypeId, mapping.tenant_id, supplier).all();
+              ).bind(resolvedTypeId, mapping.tenant_id, supplier).all();
               fewShotExamples = (supplierExResult.results || []).map(e => ({
                 input_text: e.input_text as string,
                 corrected_output: e.corrected_output as string,
@@ -225,7 +273,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 `SELECT input_text, corrected_output FROM extraction_examples
                  WHERE document_type_id = ? AND tenant_id = ? AND (supplier IS NULL OR supplier != ?) AND score >= 0.7
                  ORDER BY score DESC, created_at DESC LIMIT ?`
-              ).bind(documentTypeId, mapping.tenant_id, supplier || '', remaining).all();
+              ).bind(resolvedTypeId, mapping.tenant_id, supplier || '', remaining).all();
               fewShotExamples = [...fewShotExamples, ...(otherExResult.results || []).map(e => ({
                 input_text: e.input_text as string,
                 corrected_output: e.corrected_output as string,
@@ -238,6 +286,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             ? await extractFields(llmText, context.env, {
                 examples: fewShotExamples.map(e => ({ text: e.input_text, result: e.corrected_output })),
                 industryPrompt: tenantContext,
+                instructions: typeInstructions || null,
+                documentType: classifiedTypeName,
               })
             : initialExtraction;
 
@@ -282,7 +332,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             .bind(
               queueId,
               mapping.tenant_id,
-              documentTypeId || '',
+              resolvedTypeId || '',
               r2Key,
               fileName,
               file.size,

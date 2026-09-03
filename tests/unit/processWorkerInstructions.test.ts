@@ -24,10 +24,22 @@ describe('process-worker — reviewer instructions wiring', () => {
     // The header text is load-bearing — the worker prepends exactly this
     // block before the system prompt so reviewers see their guidance
     // surface first in the Qwen context.
+    //
+    // Since migration 0098 the block can carry TWO layers (document-type and
+    // supplier), so the header names both and no longer claims everything in
+    // it came from "this supplier and document type". The byte-for-byte
+    // agreement with functions/lib/llm.ts is pinned separately, in
+    // tests/unit/extractionGuidanceBlock.test.ts.
     expect(processWorkerSource).toMatch(/function prependReviewerInstructions\s*\(/);
     expect(processWorkerSource).toContain('## Reviewer instructions');
     expect(processWorkerSource).toContain(
-      'The following guidance comes from human reviewers of past documents from this supplier and document type. Follow it carefully:'
+      'The following guidance was authored by the people who review these documents.'
+    );
+    // The rule-14 guard: authored guidance can never become licence to invent a
+    // unit, because a result carrying an invented unit is dropped from spec
+    // checking silently.
+    expect(processWorkerSource).toContain(
+      'never licenses you to supply a unit, specification or verdict the document did not print'
     );
   });
 
@@ -56,8 +68,11 @@ describe('process-worker — reviewer instructions wiring', () => {
     // buildPrompt now also takes the tenant-level extraction context as its
     // 2nd arg (the editable per-tenant industry layer); combo reviewer
     // instructions still stack on top.
+    // Third arg (2026-09-03): the type the pre-extraction classification pass
+    // settled on. It is what lets the prompt say what the document IS on the
+    // FIRST call instead of after a re-extract.
     expect(processWorkerSource).toMatch(
-      /prependReviewerInstructions\(buildPrompt\(examples, tenantContext\), reviewerInstructions\)/
+      /prependReviewerInstructions\(buildPrompt\(examples, tenantContext, classifiedTypeName\), reviewerInstructions\)/
     );
   });
 
@@ -65,7 +80,7 @@ describe('process-worker — reviewer instructions wiring', () => {
     // Same requirement for the VLM path — dual mode sends the same doc to
     // both models and both need the guidance.
     expect(processWorkerSource).toMatch(
-      /prependReviewerInstructions\(buildVlmPrompt\(examples, tenantContext\), reviewerInstructions\)/
+      /prependReviewerInstructions\(buildVlmPrompt\(examples, tenantContext, classifiedTypeName\), reviewerInstructions\)/
     );
   });
 
@@ -89,24 +104,31 @@ describe('process-worker — reviewer instructions wiring', () => {
   });
 });
 
-describe('process-worker — two-pass post-extraction instruction application', () => {
-  // The two-pass block lives in processCoaItem, AFTER the primary extraction
-  // produces `parsed`. We slice from the supplier_name read to the end of the
-  // re-extract guard so assertions target that region, not the unrelated
-  // pass-1 wiring.
+describe('process-worker — late supplier resolution and re-extraction', () => {
+  // This block lives in processCoaItem, AFTER the primary extraction produces
+  // `parsed`. We slice from its heading to the supplier_name read so assertions
+  // target that region, not the unrelated first-pass wiring.
+  //
+  // It used to rescue the DOCUMENT TYPE as well. Since 2026-09-03 the type is
+  // decided by its own pass BEFORE extraction, so the type half survives here
+  // only as a fallback for an item the classifier could not settle; what this
+  // block is really for now is the supplier, which is genuinely a fact of the
+  // document body and cannot be known any earlier.
   const twoPass = (() => {
-    const start = processWorkerSource.indexOf('Two-pass reviewer-instruction application');
+    const start = processWorkerSource.indexOf('Late supplier resolution');
     const end = processWorkerSource.indexOf('const supplier = parsed.fields?.supplier_name', start);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     return processWorkerSource.slice(start, end);
   })();
 
-  it('only attempts pass 2 when pass 1 applied NO instructions', () => {
-    // Gating on !reviewerInstructions means suppliers known upfront keep
-    // today's single-call behavior; pass 2 is reserved for the late-resolved
-    // case. This is the zero-extra-cost guard.
-    expect(twoPass).toMatch(/if \(!reviewerInstructions\)/);
+  it('only attempts pass 2 when pass 1 learned something it did not have', () => {
+    // The zero-extra-cost guard. Pass 1 may already have had the supplier, the
+    // document type, both or neither; pass 2 fetches again only when one of
+    // them was resolved late, and re-extracts only when the guidance that comes
+    // back actually differs from what pass 1 already sent.
+    expect(twoPass).toContain('const learnedSomethingNew');
+    expect(twoPass).toMatch(/if \(learnedSomethingNew && \(lateSupplierId \|\| lateDocTypeId\)\)/);
   });
 
   it('resolves the supplier from the post-extraction supplier_name', () => {
@@ -117,18 +139,32 @@ describe('process-worker — two-pass post-extraction instruction application', 
     expect(twoPass).toMatch(/resolveSupplierIdByName\(item\.tenant_id,\s*lateSupplierName\)/);
   });
 
-  it('fetches reviewer instructions for the late-resolved supplier', () => {
-    // doctype may be null here — fetchReviewerInstructions falls back to
-    // supplier-wide guidance, which is already supported.
+  it('fetches guidance for BOTH the late-resolved supplier and the late-resolved type', () => {
+    // Either may still be null; the endpoint answers on whichever key it gets.
     expect(twoPass).toMatch(
-      /fetchReviewerInstructions\(\s*item\.tenant_id,\s*lateSupplierId,\s*item\.document_type_id\s*\)/
+      /fetchReviewerInstructions\(\s*item\.tenant_id,\s*lateSupplierId,\s*lateDocTypeId\s*\)/
     );
   });
 
-  it('only re-extracts when non-empty instructions come back', () => {
-    // The re-extract is gated on instructions actually being found (and
-    // non-whitespace) so docs with no guidance pay zero extra cost.
-    expect(twoPass).toMatch(/if \(lateInstructions && lateInstructions\.trim\(\)\)/);
+  it('resolves the document type from the model\'s own guess, EXACT matches only', () => {
+    // The document type is promoted only AFTER extraction, so the 0098 type
+    // layer usually has nothing to key on in pass 1 — for a mixed corpus of
+    // certificates that is the normal case. A substring / acronym hit is
+    // deliberately not good enough: guidance steers what the model reads, and
+    // "Certificate" must not pull an insurance certificate's instructions onto
+    // a COA. This mirrors the promotion rule, which is also exact-only.
+    expect(twoPass).toContain('fuzzyMatchDocType(parsed.documentType, item.tenant_id, docTypeCatalog)');
+    expect(twoPass).toMatch(/dtMatch\.matchType === 'exact'/);
+  });
+
+  it('only re-extracts when non-empty, DIFFERENT instructions come back', () => {
+    // Gated on the guidance actually being found (and non-whitespace) so docs
+    // with none pay zero extra cost — and on it differing from what pass 1
+    // used, so re-resolving to the same text never costs a second Qwen call.
+    expect(twoPass).toContain('lateInstructions.trim()');
+    expect(twoPass).toMatch(
+      /lateInstructions\.trim\(\) !== \(reviewerInstructions \|\| ''\)\.trim\(\)/
+    );
   });
 
   it('re-runs the SAME path that produced the primary parsed', () => {
@@ -154,8 +190,11 @@ describe('process-worker — two-pass post-extraction instruction application', 
   });
 
   it('logs the post-extraction re-extract clearly', () => {
-    expect(twoPass).toMatch(/Re-extracting with reviewer instructions for supplier/);
-    expect(twoPass).toContain('(resolved post-extraction)');
+    expect(twoPass).toMatch(/Re-extracting with guidance resolved post-extraction/);
+    // Both resolved keys are named in the line: an operator reading it has to
+    // be able to tell WHICH layer arrived late.
+    expect(twoPass).toContain('doctype=');
+    expect(twoPass).toContain('supplier=');
   });
 
   it('treats the post-extraction re-extract as best-effort (never throws)', () => {

@@ -1,0 +1,58 @@
+-- Migration 0095: how much a limit MATTERS, kept apart from what it says.
+--
+-- WHY (AJ Conner, 2026-09-02)
+-- --------------------------
+-- Food companies write specs TIGHTER than they can consistently hit batch to
+-- batch, because the numbers have to support a nutrition-panel claim. The
+-- consequence is that most parameters on a spec sheet are TRACKED rather than
+-- ACTED ON -- only a few would ever actually stop a load. The limits screen
+-- renders every row flat, which teaches a reviewer to skim past all of them,
+-- and that costs us the few that matter. That is a defect in the feature, not
+-- a cosmetic one: a warning nobody reads is the same false negative that
+-- migration 0084 and 0085 exist to prevent, wearing a different hat.
+--
+-- So a limit carries its own rank.
+--
+-- A PER-LIMIT ATTRIBUTE WITH A DEFAULT, NOT A SECOND CONFIGURATION SURFACE.
+-- A tenant that never opens this control still gets sensible behaviour: every
+-- existing row, and every row written by a client that does not know the
+-- column, lands on the middle tier.
+--
+-- THE DEFAULT IS THE MIDDLE TIER ON PURPOSE. Defaulting to the top one would
+-- recreate the flat screen in a new costume -- everything critical is the same
+-- information as nothing critical. Defaulting to the bottom one would silently
+-- demote limits a tenant wrote deliberately. 'medium' says the honest thing:
+-- we are watching this and nobody has told us how much it matters yet.
+--
+-- IT NEVER CHANGES A VERDICT. `shared/specCheck.ts` decides
+-- in_spec / out_of_spec / not_checked from the numbers, and this column is not
+-- an input to that. It orders and colours what a human sees afterwards. A rank
+-- that could suppress a check would be a false negative with a priority badge
+-- on it.
+--
+-- DISTINCT FROM `severity`, WHICH IS ALREADY ON THIS TABLE. `severity` routes
+-- the notification ('alert' mails the owner, 'warn' stays in the queue);
+-- criticality ranks the finding for whoever reads it. A tenant can reasonably
+-- want a tracked parameter to still email someone while the routing is being
+-- set up, or a critical one to stay in-app. Folding the two into one column
+-- would force that choice on everybody.
+--
+-- THE VOCABULARY IS NOT SETTLED. AJ has not chosen between low/medium/high and
+-- essential/warn/ignore. low/medium/high ships, for one concrete reason beyond
+-- taste: `severity` on this very table already stores the literal 'warn', and
+-- two columns using one word for two different things is a trap for whoever
+-- reads a frozen limit_snapshot in a year. The words live in exactly one place
+-- in the code (`shared/specCriticality.ts`); renaming them is that file plus a
+-- NEW migration to restate this CHECK, because SQLite cannot alter one in
+-- place.
+--
+-- NO INDEX. Sorting and grouping happen in the admin UI over one tenant's
+-- limits -- tens of rows, already fetched -- so an index here would cost every
+-- write and buy nothing.
+--
+-- ADD COLUMN with NOT NULL + a constant DEFAULT + a CHECK is legal in SQLite;
+-- migrations 0077 and 0081 already established the pattern. Existing rows are
+-- backfilled with the default by the ALTER itself.
+
+ALTER TABLE spec_limits ADD COLUMN criticality TEXT NOT NULL DEFAULT 'medium'
+  CHECK (criticality IN ('high', 'medium', 'low'));

@@ -41,6 +41,8 @@
  */
 
 import type { ExtractedTable } from './types';
+import { parseSpecCriticality } from './specCriticality';
+import type { SpecCriticality } from './specCriticality';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -144,17 +146,38 @@ export interface SpecVerdict {
    * the UI can badge. Absent means the units lined up on their own.
    */
   unit_equivalence_applied?: boolean;
+  /**
+   * How much the configured limit behind this verdict MATTERS (migration 0095).
+   * Carried so the reviewer UI can rank a load-stopping failure above a tracked
+   * one without re-resolving limits it never loaded — it is NOT an input to the
+   * verdict, which is decided from the numbers alone.
+   *
+   * Absent on `source: 'printed'` verdicts: those are judged against the COA's
+   * own text, and we hold no configured limit to rank them by. A reader treats
+   * absent as `DEFAULT_SPEC_CRITICALITY`.
+   */
+  criticality?: SpecCriticality;
+}
+
+/**
+ * Stable identity for one RESULT — a place in the payload, independent of which
+ * limit judged it. Two verdicts on the same row (the COA's own printed limit and
+ * ours) share this key, which is what lets the catch metric line a judgement up
+ * against what the document claimed for the same cell.
+ */
+export function specResultKey(scope: string, target: SpecTarget): string {
+  const where =
+    target.kind === 'table'
+      ? `t${target.table_index}r${target.row_index}${
+          target.col_index === undefined ? '' : `c${target.col_index}`
+        }`
+      : `g${target.group}/${target.cell}`;
+  return `${scope}::${where}`;
 }
 
 /** Stable identity for a verdict, so UI state survives refetch. */
 export function specVerdictKey(v: SpecVerdict): string {
-  const where =
-    v.target.kind === 'table'
-      ? `t${v.target.table_index}r${v.target.row_index}${
-          v.target.col_index === undefined ? '' : `c${v.target.col_index}`
-        }`
-      : `g${v.target.group}/${v.target.cell}`;
-  return `${v.scope}::${where}::${v.source}`;
+  return `${specResultKey(v.scope, v.target)}::${v.source}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,6 +1030,27 @@ interface PrintedRow {
 }
 
 /**
+ * What the document CLAIMS about this row, before anything is measured.
+ *
+ * Factored out of `judgePrinted` because two callers need exactly the same
+ * reading of it: the judgement below, and the catch metric at the foot of this
+ * file, which is a statement about the document's claim and must not be allowed
+ * to drift from what the judgement understood that claim to be.
+ */
+function printedClaim(row: PrintedRow): { cell: string; pass: boolean; fail: boolean } {
+  // Some COAs put the claim in a dedicated column and others put it in the
+  // result column itself ("Coliform | <10 | Pass"). Both are the document
+  // asserting conformance rather than reporting a measurement.
+  const cell = row.verdictRaw || row.resultRaw;
+  const key = norm(cell);
+  return {
+    cell,
+    pass: !!cell && PASS_VERDICT_TOKENS.has(key),
+    fail: !!cell && FAIL_VERDICT_TOKENS.has(key),
+  };
+}
+
+/**
  * Judge one printed row. Returns null when there is nothing worth saying —
  * which is most rows, and deliberately so.
  *
@@ -1034,13 +1078,8 @@ function judgePrinted(
     source: 'printed' as const,
   };
 
-  // 1. The document's own verdict — which some COAs put in a dedicated column
-  //    and others put in the result column itself ("Coliform | <10 | Pass").
-  //    Both are the document asserting conformance, not a measurement, so
-  //    neither is ever parsed as a value.
-  const verdictCell = verdictRaw || resultRaw;
-  const printedFail = !!verdictCell && FAIL_VERDICT_TOKENS.has(norm(verdictCell));
-  const printedPass = !!verdictCell && PASS_VERDICT_TOKENS.has(norm(verdictCell));
+  // 1. The document's own verdict. A claim is never parsed as a value.
+  const { cell: verdictCell, pass: printedPass, fail: printedFail } = printedClaim(row);
   const resultIsVerdict = !verdictRaw && !!resultRaw && (printedFail || printedPass);
 
   // 2. Result against the printed specification.
@@ -1115,6 +1154,64 @@ function judgePrinted(
 }
 
 /**
+ * Walk every printed row, in ONE place.
+ *
+ * Two readers need the identical set of rows and the identical `PrintedRow` for
+ * each: the judgement (`checkPrintedSpecs`) and the claim reader that the catch
+ * metric is built on. If those two walks could disagree about which rows exist,
+ * the metric would be counting claims against judgements made somewhere else —
+ * so they share this iterator rather than each keeping their own copy.
+ *
+ * Covers both shapes COAs arrive in: free-form `tables`, and the records
+ * assembler's structured `groups`.
+ */
+function forEachPrintedRow(
+  sources: SpecSource[],
+  visit: (scope: string, target: SpecTarget, row: PrintedRow) => void
+): void {
+  for (const src of sources) {
+    (src.tables ?? []).forEach((table, ti) => {
+      const shape = detectTableShape(table.headers || []);
+      // Nothing to judge without a result column or a verdict column.
+      if (shape.result === -1 && shape.verdict === -1) return;
+      (table.rows || []).forEach((row, ri) => {
+        const cell = (i: number) => (i >= 0 ? String(row[i] ?? '').trim() : '');
+        visit(
+          src.scope,
+          { kind: 'table', table_index: ti, row_index: ri, table_name: table.name || '' },
+          {
+            testName: cell(shape.test),
+            resultRaw: cell(shape.result),
+            specRaw: cell(shape.spec),
+            verdictRaw: cell(shape.verdict),
+            unitRaw: cell(shape.unit),
+          }
+        );
+      });
+    });
+
+    for (const [groupName, cells] of Object.entries(src.groups ?? {})) {
+      if (!cells || typeof cells !== 'object') continue;
+      for (const [cellName, cell] of Object.entries(cells)) {
+        if (!cell || typeof cell !== 'object') continue;
+        visit(
+          src.scope,
+          { kind: 'group', group: groupName, cell: cellName },
+          {
+            // The cell key IS the analyte name in the records payload.
+            testName: cellName.replace(/_/g, ' '),
+            resultRaw: String(cell.value ?? '').trim(),
+            specRaw: String(cell.spec ?? '').trim(),
+            verdictRaw: '',
+            unitRaw: String(cell.unit ?? '').trim(),
+          }
+        );
+      }
+    }
+  }
+}
+
+/**
  * Check every extracted test result against the limit the COA itself prints,
  * plus its own pass/fail column. Needs no configuration and runs on every
  * supplier from day one.
@@ -1134,50 +1231,10 @@ export function checkPrintedSpecs(
 ): SpecVerdict[] {
   const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
   const out: SpecVerdict[] = [];
-  for (const src of sources) {
-    (src.tables ?? []).forEach((table, ti) => {
-      const shape = detectTableShape(table.headers || []);
-      // Nothing to judge without a result column or a verdict column.
-      if (shape.result === -1 && shape.verdict === -1) return;
-      (table.rows || []).forEach((row, ri) => {
-        const cell = (i: number) => (i >= 0 ? String(row[i] ?? '').trim() : '');
-        const v = judgePrinted(
-          src.scope,
-          { kind: 'table', table_index: ti, row_index: ri, table_name: table.name || '' },
-          {
-            testName: cell(shape.test),
-            resultRaw: cell(shape.result),
-            specRaw: cell(shape.spec),
-            verdictRaw: cell(shape.verdict),
-            unitRaw: cell(shape.unit),
-          },
-          policy
-        );
-        if (v) out.push(v);
-      });
-    });
-
-    for (const [groupName, cells] of Object.entries(src.groups ?? {})) {
-      if (!cells || typeof cells !== 'object') continue;
-      for (const [cellName, cell] of Object.entries(cells)) {
-        if (!cell || typeof cell !== 'object') continue;
-        const v = judgePrinted(
-          src.scope,
-          { kind: 'group', group: groupName, cell: cellName },
-          {
-            // The cell key IS the analyte name in the records payload.
-            testName: cellName.replace(/_/g, ' '),
-            resultRaw: String(cell.value ?? '').trim(),
-            specRaw: String(cell.spec ?? '').trim(),
-            verdictRaw: '',
-            unitRaw: String(cell.unit ?? '').trim(),
-          },
-          policy
-        );
-        if (v) out.push(v);
-      }
-    }
-  }
+  forEachPrintedRow(sources, (scope, target, row) => {
+    const v = judgePrinted(scope, target, row, policy);
+    if (v) out.push(v);
+  });
   return out;
 }
 
@@ -1316,6 +1373,13 @@ export interface ConfiguredLimit {
   value_max: number | null;
   unit: string | null;
   severity: 'warn' | 'alert';
+  /**
+   * Presentation rank (migration 0095), never a verdict input. OPTIONAL because
+   * a row read from a database that predates 0095 — or from the fallback query
+   * in `loadSpecConfig` — genuinely has no value; every read goes through
+   * `parseSpecCriticality`, which lands on the middle tier.
+   */
+  criticality?: SpecCriticality | null;
   active: boolean;
   supplier_id: string | null;
   document_type_id: string | null;
@@ -1589,6 +1653,7 @@ export function checkConfiguredLimits(
         limit_text: limitTextOnly,
         spec_test_id: test.id,
         limit_id: configured.id,
+        criticality: parseSpecCriticality(configured.criticality),
         value_num: null,
         reason: RESTATED_SPEC_REASON,
         verdict: 'not_checked',
@@ -1621,6 +1686,9 @@ export function checkConfiguredLimits(
       limit_text: limitText,
       spec_test_id: test.id,
       limit_id: configured.id,
+      // Ranking only — it rides along with every verdict this limit produces,
+      // pass and fail alike, so the reviewer UI can sort without a second read.
+      criticality: parseSpecCriticality(configured.criticality),
       value_num: cmp.value_num,
       reason: cmp.reason,
       ...(cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {}),
@@ -1761,4 +1829,353 @@ export function validateLimitShape(input: {
     default:
       return `Unknown operator "${operator}".`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Catches — the certificate claimed a pass, the number says otherwise
+// ---------------------------------------------------------------------------
+
+/**
+ * THE METRIC THIS PRODUCT IS ACTUALLY SOLD ON.
+ *
+ * Across the production corpus, seven certificates asserted a PASS on a row
+ * whose extracted value breaches a limit. That is a category of error a human
+ * reviewer misses PRECISELY BECAUSE the document says it is fine — nobody
+ * re-reads a certificate that claims compliance. Folded into an overall accuracy
+ * percentage it disappears; accuracy is a table-stakes claim every vendor makes,
+ * and catches is the one nobody else can show. So it is counted on its own.
+ *
+ * THIS SECTION READS. It derives nothing new about whether a result passes: it
+ * takes verdicts the engine above already produced and asks which of them
+ * contradict the document's own claim. No verdict is computed, changed or
+ * re-graded here, and nothing here can make a `not_checked` into a finding.
+ *
+ * THE THREE-STATE RULE CARRIES THROUGH. `not_checked` is an honest refusal, not
+ * a finding, and it can NEVER be a catch — see `classifySpecDisagreement`, which
+ * refuses it before anything else. A metric that quietly counted refusals would
+ * be the same lie as a two-state verdict, told at the level of the number a
+ * customer is shown.
+ *
+ * WHAT IT CANNOT SEE, stated rather than left to be discovered: a crosstab table
+ * (one column per analyte) prints neither a specification nor a pass/fail
+ * column, so it carries no claim, and its results can never be catches however
+ * badly they fail. That is the correct answer — there is nothing for the
+ * document to have been wrong about — but it means the count is a floor, not a
+ * ceiling.
+ */
+
+/** What the document itself claims about a result. */
+export type PrintedAssertionKind = 'pass' | 'fail' | 'none';
+
+/**
+ * Which cell carried the claim:
+ *   'verdict_cell'  an explicit Pass/Fail the document printed
+ *   'printed_limit' no explicit verdict, but the value sits inside the
+ *                   specification the document printed for that row — the
+ *                   document is still asserting conformance, just arithmetically
+ */
+export type PrintedAssertionBasis = 'verdict_cell' | 'printed_limit';
+
+/** Where in the payload the claim was read, shared by both variants below. */
+interface PrintedAssertionBase {
+  scope: string;
+  target: SpecTarget;
+  test_name_raw: string;
+  value_raw: string;
+}
+
+/**
+ * A UNION rather than three nullable fields: "there is a basis exactly when
+ * there is a claim" is then enforced by the compiler instead of asserted in a
+ * comment, and the consumer below needs no non-null cast to read it.
+ */
+export type PrintedAssertion =
+  | (PrintedAssertionBase & { assertion: 'none'; basis: null; basis_text: null })
+  | (PrintedAssertionBase & {
+      assertion: 'pass' | 'fail';
+      basis: PrintedAssertionBasis;
+      /** The claim verbatim: "Pass", or the printed limit the value met ("≤10 CFU/g"). */
+      basis_text: string;
+    });
+
+/** The claim half of a `PrintedAssertion`, before it is placed. */
+type Claim =
+  | { assertion: 'none'; basis: null; basis_text: null }
+  | { assertion: 'pass' | 'fail'; basis: PrintedAssertionBasis; basis_text: string };
+
+const NO_ASSERTION: Claim = { assertion: 'none', basis: null, basis_text: null };
+
+/**
+ * Read one row's claim. Deliberately narrower than `judgePrinted`: it answers
+ * "what does the paper say about this row?", never "is the row acceptable?".
+ *
+ * An explicit verdict cell WINS over the arithmetic. A row marked "Pass" whose
+ * value breaches the document's own printed limit has still asserted a pass —
+ * that self-contradiction is the strongest catch there is, and reading the
+ * arithmetic first would erase it.
+ *
+ * A comparison that comes back `not_checked` yields NO claim. The document
+ * printed a limit we could not apply, which is not the document saying the
+ * result is fine.
+ */
+function claimForRow(row: PrintedRow, policy: UnitPolicy): Claim {
+  const { cell, pass, fail } = printedClaim(row);
+  if (fail) return { assertion: 'fail', basis: 'verdict_cell', basis_text: cell };
+  if (pass) return { assertion: 'pass', basis: 'verdict_cell', basis_text: cell };
+
+  const limit = parseLimitExpression(row.specRaw);
+  if (!limit) return NO_ASSERTION;
+  if (isBlankResult(row.resultRaw)) return NO_ASSERTION;
+  // The result cell is the spec restated, so it is not a measurement and the
+  // document has claimed nothing about an actual value.
+  if (resultRestatesSpec(row.resultRaw, row.specRaw, row.unitRaw)) return NO_ASSERTION;
+
+  const value = parseMeasuredValue(applyRowUnit(row.resultRaw, row.unitRaw));
+  const cmp = compareToLimit(value, withUnit(limit, row.unitRaw), policy);
+  const text = formatLimit(limit);
+  if (cmp.verdict === 'in_spec') return { assertion: 'pass', basis: 'printed_limit', basis_text: text };
+  if (cmp.verdict === 'out_of_spec') return { assertion: 'fail', basis: 'printed_limit', basis_text: text };
+  return NO_ASSERTION;
+}
+
+/**
+ * What every printed row CLAIMS, whether or not anything was judged.
+ *
+ * Rows with no claim come back as 'none' rather than being dropped: the caller
+ * needs the full walk to know its own denominator, and a result the document
+ * said nothing about is not in the denominator of a metric about broken claims.
+ */
+export function collectPrintedAssertions(
+  sources: SpecSource[],
+  opts: { unitPolicy?: UnitPolicy } = {}
+): PrintedAssertion[] {
+  const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
+  const out: PrintedAssertion[] = [];
+  forEachPrintedRow(sources, (scope, target, row) => {
+    if (!row.testName) return;
+    const claim = claimForRow(row, policy);
+    const where = {
+      scope,
+      target,
+      test_name_raw: row.testName,
+      value_raw: row.resultRaw,
+    };
+    // Spelled out per variant rather than spread: a spread widens back into
+    // "kind | none" and loses exactly the guarantee the union is here for.
+    out.push(
+      claim.assertion === 'none'
+        ? { ...where, assertion: 'none', basis: null, basis_text: null }
+        : { ...where, assertion: claim.assertion, basis: claim.basis, basis_text: claim.basis_text }
+    );
+  });
+  return out;
+}
+
+/**
+ * The two directions in which a document and a measured value can disagree.
+ * Kept as separate kinds, never summed: one is a missed failure and the other is
+ * a document being conservative (or an extraction error), and a customer reading
+ * a single blended number would learn nothing from it.
+ */
+export type SpecDisagreementKind =
+  /** The document said it passed; our judgement of the extracted value says it did not. */
+  | 'asserted_pass_extracted_fail'
+  /** The document said it failed; our judgement of the extracted value says it passed. */
+  | 'asserted_fail_extracted_pass';
+
+export interface SpecDisagreement {
+  kind: SpecDisagreementKind;
+  scope: string;
+  target: SpecTarget;
+  test_name_raw: string;
+  value_raw: string;
+  unit_raw: string | null;
+  /** The limit that produced the judgement, rendered. */
+  limit_text: string | null;
+  /** Whose limit judged it: the COA's own printed one, or one of ours. */
+  judged_by: 'printed' | 'limit';
+  /**
+   * Every source that reached the same judgement on this result. One result is
+   * ONE catch however many limits agree on it — a document that breaches both
+   * its own printed spec and ours was not caught twice.
+   */
+  judged_by_all: Array<'printed' | 'limit'>;
+  asserted_by: PrintedAssertionBasis;
+  assertion_text: string;
+  /** One-line plain-English sentence, same contract as `SpecVerdict.message`. */
+  message: string;
+  /** The judged verdict this was derived from. Carried verbatim, never edited. */
+  verdict: SpecVerdict;
+}
+
+/**
+ * Classify ONE judged result against what the document claimed for it.
+ *
+ * The whole definition lives here, in one place, so it can be tested as one
+ * thing:
+ *
+ *   * `not_checked` is never a catch, in either direction. It is the engine
+ *     saying it could not honestly judge, and a refusal counted as a finding
+ *     would make the headline number dishonest in exactly the way the
+ *     three-state verdict exists to prevent.
+ *   * a result the document made no claim about is not in the denominator, so it
+ *     cannot produce a disagreement either.
+ *   * the assertion and the verdict must describe the SAME result. Checked, not
+ *     assumed — a mismatched pairing would invent a catch out of two unrelated
+ *     rows.
+ */
+export function classifySpecDisagreement(
+  assertion: PrintedAssertion,
+  verdict: SpecVerdict
+): SpecDisagreementKind | null {
+  if (assertion.assertion === 'none') return null;
+  // The refusal guard, first and unconditional.
+  if (verdict.verdict === 'not_checked') return null;
+  if (specResultKey(assertion.scope, assertion.target) !== specResultKey(verdict.scope, verdict.target)) {
+    return null;
+  }
+  if (assertion.assertion === 'pass' && verdict.verdict === 'out_of_spec') {
+    return 'asserted_pass_extracted_fail';
+  }
+  if (assertion.assertion === 'fail' && verdict.verdict === 'in_spec') {
+    return 'asserted_fail_extracted_pass';
+  }
+  return null;
+}
+
+export interface SpecDisagreementReport {
+  /**
+   * THE metric: the document asserted a pass, the extracted value breaches a
+   * limit. One entry per RESULT, not per limit.
+   */
+  catches: SpecDisagreement[];
+  /**
+   * The other direction, counted separately and never folded into the line
+   * above. Worth having — it is either a supplier being conservative or an
+   * extraction error, and both are worth knowing — but it is not a catch.
+   *
+   * Only reachable when the caller asked for passes (`includePasses`); without
+   * `in_spec` verdicts in hand there is nothing to compare a printed failure to,
+   * and this list is legitimately empty rather than zero-because-checked.
+   */
+  reverse: SpecDisagreement[];
+  /** Results where the document claimed conformance. */
+  asserted_pass: number;
+  /**
+   * Of those, the ones some limit could actually be applied to. This is the
+   * honest denominator for a catch RATE: a claim nothing judged was never given
+   * the chance to be caught, and quoting a rate against all claims would
+   * understate the check rather than the risk.
+   *
+   * COUNTED FROM THE VERDICTS THE CALLER HOLDS, and `checkPrintedSpecs` never
+   * emits `in_spec` — that is its noise contract, not an omission. So a claim
+   * that only the certificate's own limit judged, and passed, does not appear
+   * here. With configured limits and `includePasses` on, it does.
+   */
+  asserted_pass_judged: number;
+  /** Results where the document itself declared a failure. */
+  asserted_fail: number;
+  asserted_fail_judged: number;
+}
+
+/** Which of two equally valid judgements to show for one catch. */
+function preferredVerdict(a: SpecVerdict, b: SpecVerdict): SpecVerdict {
+  // The COA's own printed limit wins: "the document contradicts itself" needs no
+  // configuration to be true, and is the sharper thing to put in front of a
+  // customer. Ours is still listed in `judged_by_all`.
+  if (a.source === b.source) return a;
+  return a.source === 'printed' ? a : b;
+}
+
+/**
+ * Line every judged verdict up against the document's own claim for the same
+ * cell, and report the disagreements.
+ *
+ * `verdicts` is whatever the caller already computed — printed, configured, or
+ * both. Pass them ALL: a catch is defined by the pairing of a claim with a
+ * judgement, and handing over only half the judgements silently shrinks the
+ * number without shrinking the risk.
+ *
+ * `unitPolicy` must be the same one the verdicts were computed under. It decides
+ * which comparisons are possible at all, so reading the claims under different
+ * rules would compare two different worlds.
+ */
+export function findSpecDisagreements(
+  sources: SpecSource[],
+  verdicts: SpecVerdict[],
+  opts: { unitPolicy?: UnitPolicy } = {}
+): SpecDisagreementReport {
+  const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
+  const assertions = collectPrintedAssertions(sources, { unitPolicy: policy });
+
+  const byResult = new Map<string, SpecVerdict[]>();
+  for (const v of verdicts) {
+    const key = specResultKey(v.scope, v.target);
+    const bucket = byResult.get(key);
+    if (bucket) bucket.push(v);
+    else byResult.set(key, [v]);
+  }
+
+  const report: SpecDisagreementReport = {
+    catches: [],
+    reverse: [],
+    asserted_pass: 0,
+    asserted_pass_judged: 0,
+    asserted_fail: 0,
+    asserted_fail_judged: 0,
+  };
+
+  for (const a of assertions) {
+    if (a.assertion === 'none') continue;
+    const judged = byResult.get(specResultKey(a.scope, a.target)) ?? [];
+    // A row judged only as `not_checked` was not judged, for this purpose.
+    const decided = judged.filter((v) => v.verdict !== 'not_checked');
+    if (a.assertion === 'pass') {
+      report.asserted_pass++;
+      if (decided.length > 0) report.asserted_pass_judged++;
+    } else {
+      report.asserted_fail++;
+      if (decided.length > 0) report.asserted_fail_judged++;
+    }
+
+    let kind: SpecDisagreementKind | null = null;
+    let chosen: SpecVerdict | null = null;
+    const agreeing: Array<'printed' | 'limit'> = [];
+    for (const v of decided) {
+      const k = classifySpecDisagreement(a, v);
+      if (!k) continue;
+      kind = k;
+      agreeing.push(v.source);
+      chosen = chosen ? preferredVerdict(chosen, v) : v;
+    }
+    if (!kind || !chosen) continue;
+
+    const whose = chosen.source === 'printed' ? "the certificate's own" : 'our';
+    const message =
+      kind === 'asserted_pass_extracted_fail'
+        ? a.basis === 'verdict_cell'
+          ? `${a.test_name_raw}: the certificate says "${a.basis_text}", but ${a.value_raw} is outside ${whose} limit of ${chosen.limit_text}.`
+          : `${a.test_name_raw}: ${a.value_raw} meets the certificate's own printed ${a.basis_text}, but is outside our limit of ${chosen.limit_text}.`
+        : `${a.test_name_raw}: the certificate says "${a.basis_text}", but ${a.value_raw} is within ${whose} limit of ${chosen.limit_text}.`;
+
+    const entry: SpecDisagreement = {
+      kind,
+      scope: a.scope,
+      target: a.target,
+      test_name_raw: a.test_name_raw,
+      value_raw: a.value_raw,
+      unit_raw: chosen.unit_raw,
+      limit_text: chosen.limit_text,
+      judged_by: chosen.source,
+      judged_by_all: [...new Set(agreeing)],
+      asserted_by: a.basis,
+      assertion_text: a.basis_text,
+      message,
+      verdict: chosen,
+    };
+    if (kind === 'asserted_pass_extracted_fail') report.catches.push(entry);
+    else report.reverse.push(entry);
+  }
+
+  return report;
 }

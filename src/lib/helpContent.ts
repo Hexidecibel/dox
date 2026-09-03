@@ -859,6 +859,8 @@ const documentTypes: ModuleHelpExpanded = {
       tenant: 'Which tenant owns this document type. Document types are tenant-scoped — every tenant maintains its own catalog.',
       status: 'Active types show up in pickers and accept new ingests. Inactive types are hidden from new flows but keep their existing documents.',
       created: 'When the document type was first created.',
+      renewalPeriod:
+        "How long a document of this type stays current. Annual unless you change it; specification sheets default to three years, because both major food-safety schemes define a current spec sheet as one revised or reviewed inside that window. A document that states its own expiry date always overrides this — a certificate of insurance reading 'expires 09/01/2027' expires then, whatever the type says. 'Does not renew' is for types that are never re-collected on a cadence: a Certificate of Analysis is superseded by the next lot's certificate, so it is never overdue and stays off the renewal dashboard entirely.",
       autoIngest:
         "When on, documents the AI extracts as this type with confidence >= the auto-ingest threshold skip the Review Queue and land in the library directly. Requires a few approved examples to calibrate, so the toggle is a no-op for the first 3 ingests of each (supplier, type) pair.",
       extractTables:

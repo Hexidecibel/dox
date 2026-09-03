@@ -10,6 +10,7 @@ import { normalizeLotNumber, normalizeSubLotCode, applyLotScheme, type LotScheme
 import { getLearnedPreferences } from '../learnedPreferences';
 import type { CoaRecordsPayload } from '../../../shared/types';
 import { buildFlatExtendedMetadata } from '../../../shared/coaExtendedMetadata';
+import type { RenewalWrite } from '../renewal-proposal';
 import type {
   QueueItem,
   ApproveOptions,
@@ -299,13 +300,89 @@ async function persistReviewerCaptures(
  */
 export { buildFlatExtendedMetadata };
 
+/**
+ * The five renewal columns an approval writes (migration 0097), or empty when
+ * no reviewer answered the question.
+ *
+ * Every producer below inserts documents with a fixed column list, so this
+ * returns a SQL fragment plus its bindings rather than a values object: it has
+ * to be appended to three different INSERTs and getting the two halves out of
+ * step is exactly the class of bug a shared pair prevents.
+ *
+ * Nothing is written when `renewal` is absent. A document nobody answered the
+ * question for must keep all-NULL renewal columns — that absence is what the
+ * resolver reads as "not reviewed", and faking an 'accepted' would claim a
+ * human decision that never happened.
+ */
+function renewalColumns(renewal: RenewalWrite | undefined): {
+  columns: string;
+  placeholders: string;
+  values: Array<string | null>;
+} {
+  if (!renewal) return { columns: '', placeholders: '', values: [] };
+  return {
+    columns: ', renewal_due_date, renewal_decision, renewal_snapshot, renewal_decided_at, renewal_decided_by',
+    placeholders: ', ?, ?, ?, ?, ?',
+    values: [
+      renewal.due_date,
+      renewal.decision,
+      renewal.snapshot,
+      renewal.decided_at,
+      renewal.decided_by,
+    ],
+  };
+}
+
+/**
+ * Audit the approval-time renewal decision, one row per document produced.
+ *
+ * A separate row from `queue_item.approved` on purpose: a multi-product or
+ * records approve yields N documents from one queue item, and "when did this
+ * DOCUMENT get its renewal date, and did the human take our suggestion?" is a
+ * question asked of a document, not of a queue item. Best-effort — a failed
+ * audit write must never fail an approval that already happened.
+ */
+async function auditRenewalDecision(
+  db: D1Database,
+  userId: string,
+  tenantId: string,
+  documentId: string,
+  queueItemId: string,
+  renewal: RenewalWrite | undefined,
+  clientIp: string | null
+): Promise<void> {
+  if (!renewal) return;
+  try {
+    await logAudit(
+      db,
+      userId,
+      tenantId,
+      'document.renewal_decided',
+      'document',
+      documentId,
+      JSON.stringify({
+        queue_item_id: queueItemId,
+        decision: renewal.decision,
+        renewal_due_date: renewal.due_date,
+        snapshot: renewal.snapshot,
+      }),
+      clientIp
+    );
+  } catch (err) {
+    console.warn(
+      `[queue-approve] renewal audit failed for document ${documentId}:`,
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+}
+
 export async function produceCoa(
   db: D1Database,
   files: R2Bucket,
   item: QueueItem,
   options: ApproveOptions
 ): Promise<ApproveResult> {
-  const { fields, productName, userId, clientIp, autoIngested, selectedSource = 'text', fieldPicks, dismissals, tableEdits, supplierId: overrideSupplierId, supplierName: overrideSupplierName } = options;
+  const { fields, productName, userId, clientIp, autoIngested, selectedSource = 'text', fieldPicks, dismissals, tableEdits, supplierId: overrideSupplierId, supplierName: overrideSupplierName, renewal } = options;
 
   // Download file from pending R2 location
   const pendingFile = await downloadFile(files, item.file_r2_key);
@@ -386,10 +463,12 @@ export async function produceCoa(
     }
   }
 
-  // Insert document
+  // Insert document. The renewal columns (0097) are appended only when a
+  // reviewer actually answered the renewal question — see renewalColumns.
+  const renewalCols = renewalColumns(renewal);
   await db.prepare(
-    `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata, extended_metadata)
-     VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata, extended_metadata${renewalCols.columns})
+     VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?, ?${renewalCols.placeholders})`
   )
     .bind(
       docId,
@@ -402,9 +481,12 @@ export async function produceCoa(
       item.document_type_id,
       supplierId,
       primaryMetadataStr,
-      extendedMetadataStr
+      extendedMetadataStr,
+      ...renewalCols.values
     )
     .run();
+
+  await auditRenewalDecision(db, userId, item.tenant_id, docId, item.id, renewal, clientIp || null);
 
   // Insert document version
   const versionId = generateId();
@@ -603,7 +685,7 @@ export async function produceMultiProductCoa(
   item: QueueItem,
   options: MultiProductApproveOptions
 ): Promise<MultiProductApproveResult> {
-  const { sharedFields = {}, products, userId, clientIp, selectedSource = 'text', fieldPicks, dismissals, tableEdits, supplierId: overrideSupplierId, supplierName: overrideSupplierName } = options;
+  const { sharedFields = {}, products, userId, clientIp, selectedSource = 'text', fieldPicks, dismissals, tableEdits, supplierId: overrideSupplierId, supplierName: overrideSupplierName, renewal } = options;
 
   // Download file from pending R2 location ONCE
   const pendingFile = await downloadFile(files, item.file_r2_key);
@@ -679,10 +761,12 @@ export async function produceMultiProductCoa(
 
     const primaryMetadataStr = Object.keys(primaryMetadata).length > 0 ? JSON.stringify(primaryMetadata) : null;
 
-    // Insert document
+    // Insert document. One reviewer decision covers every product document
+    // split out of the one source file — they are the same piece of paper.
+    const renewalCols = renewalColumns(renewal);
     await db.prepare(
-      `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata, extended_metadata)
-       VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata, extended_metadata${renewalCols.columns})
+       VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?, ?${renewalCols.placeholders})`
     )
       .bind(
         docId,
@@ -695,9 +779,12 @@ export async function produceMultiProductCoa(
         item.document_type_id,
         supplierId,
         primaryMetadataStr,
-        extendedMetadata
+        extendedMetadata,
+        ...renewalCols.values
       )
       .run();
+
+    await auditRenewalDecision(db, userId, item.tenant_id, docId, item.id, renewal, clientIp || null);
 
     // Insert document version
     const versionId = generateId();
@@ -932,6 +1019,8 @@ export interface CoaRecordsApproveOptions {
   selectedSource?: 'text' | 'vlm';
   supplierId?: string;
   supplierName?: string;
+  /** See ApproveOptions.renewal — the reviewer's confirmed renewal (0097). */
+  renewal?: RenewalWrite;
 }
 
 export interface CoaRecordsApproveResult {
@@ -962,6 +1051,7 @@ export async function produceCoaRecords(
     selectedSource = 'text',
     supplierId: overrideSupplierId,
     supplierName: overrideSupplierName,
+    renewal,
   } = options;
 
   const pageMetadata = payload.page_metadata ?? {};
@@ -1121,10 +1211,13 @@ export async function produceCoaRecords(
       const extendedMetadataStr =
         Object.keys(extended).length > 0 ? JSON.stringify(extended) : null;
 
+      // Same single reviewer decision across every sublot record produced
+      // from this one certificate.
+      const renewalCols = renewalColumns(renewal);
       await db
         .prepare(
-          `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata, extended_metadata)
-           VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata, extended_metadata${renewalCols.columns})
+           VALUES (?, ?, ?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, ?, ?${renewalCols.placeholders})`
         )
         .bind(
           docId,
@@ -1137,9 +1230,12 @@ export async function produceCoaRecords(
           item.document_type_id,
           supplierId,
           primaryMetadataStr,
-          extendedMetadataStr
+          extendedMetadataStr,
+          ...renewalCols.values
         )
         .run();
+
+      await auditRenewalDecision(db, userId, item.tenant_id, docId, item.id, renewal, clientIp || null);
 
       const versionId = generateId();
       await db

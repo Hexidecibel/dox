@@ -37,8 +37,24 @@ describe('format date helpers', () => {
       expect(formatDate(null)).toBe('Never');
     });
 
-    it('returns "Invalid date" for garbage', () => {
-      expect(formatDate('not a date')).toBe('Invalid date');
+    it('returns an unrecognised value VERBATIM rather than "Invalid date"', () => {
+      // These columns are TEXT and hold whatever the certificate printed.
+      // Discarding the value hid real data behind a rendering complaint.
+      expect(formatDate('not a date')).toBe('not a date');
+      expect(formatDate("7/1/'26")).toBe("7/1/'26");
+    });
+
+    it('never lets Date() guess at a lot code', () => {
+      // new Date('129') is the year 129. A bare code must survive untouched.
+      expect(formatDate('129')).toBe('129');
+      expect(formatDate('128')).toBe('128');
+    });
+
+    it('does not shift a date-only value across a timezone', () => {
+      // A calendar date has no time zone. Stamping it UTC and rendering it
+      // locally showed every expiration a day early west of Greenwich.
+      const d = new Date(2026, 4, 3);
+      expect(formatDate('2026-05-03')).toBe(d.toLocaleDateString());
     });
   });
 

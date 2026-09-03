@@ -29,6 +29,7 @@ import { resolveAlertRouting } from './alert-routing';
 import type { AlertRecipient } from './alert-routing';
 import type { SpecVerdict } from '../../shared/specCheck';
 import type { ConfiguredLimit } from '../../shared/specCheck';
+import { compareSpecCriticality, parseSpecCriticality } from '../../shared/specCriticality';
 
 export interface RegisterContext {
   tenantId: string;
@@ -56,6 +57,14 @@ export interface RegisterContext {
  * absent = the units lined up on their own). The verdict's `reason` says the
  * same thing in words and is stored beside it, so the record reads correctly
  * whether a person or a query is doing the reading.
+ *
+ * SO DOES THE CRITICALITY (migration 0095). It does not decide the verdict, but
+ * it decided how loudly the verdict was PUT IN FRONT OF SOMEBODY, and that is
+ * half of what a reader months later is trying to reconstruct: "this failed and
+ * nobody chased it" reads very differently once you can see it was filed as a
+ * tracked parameter at the time. Ranks get re-tuned exactly like thresholds do,
+ * so the same freeze argument applies — a pointer to today's tier would rewrite
+ * that history the moment someone promoted the limit.
  */
 function snapshotFor(verdict: SpecVerdict, limits: ConfiguredLimit[]): string | null {
   const equated = verdict.unit_equivalence_applied ? { unit_equivalence: 'volume_mass' } : {};
@@ -78,6 +87,7 @@ function snapshotFor(verdict: SpecVerdict, limits: ConfiguredLimit[]): string | 
     value_max: l.value_max,
     unit: l.unit,
     severity: l.severity,
+    criticality: parseSpecCriticality(l.criticality),
     text: verdict.limit_text,
     ...equated,
   });
@@ -245,12 +255,22 @@ export async function notifySpecFailures(
       documentId: ctx.documentId,
     });
 
+    // Critical parameters first inside the one email. Nothing is dropped and
+    // nothing is added — a tracked deviation still gets listed — but a reader
+    // skimming on a phone sees the load-stopping analyte before the four
+    // parameters the plant tracks and rarely acts on. Ordering is the only
+    // lever criticality is allowed to pull here; WHICH failures are reported
+    // stays exactly what the engine judged.
+    const ranked = [...failures].sort((a, b) =>
+      compareSpecCriticality(a.criticality, b.criticality)
+    );
+
     const { subject, html } = buildSpecAlertEmail({
       tenantName: ctx.tenantName,
       documentTitle: ctx.documentTitle,
       documentId: ctx.documentId,
       supplierName: ctx.supplierName,
-      failures: failures.map((f) => ({
+      failures: ranked.map((f) => ({
         test: f.test_name_raw,
         value: f.value_raw,
         limit: f.limit_text,

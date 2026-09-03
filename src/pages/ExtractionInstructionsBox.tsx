@@ -44,6 +44,14 @@ export default function ExtractionInstructionsBox({
   // Snapshot of what's currently persisted on the server — we only save when
   // `value` differs from this (avoids a no-op PUT every blur).
   const [persistedValue, setPersistedValue] = useState('');
+  /**
+   * The document-type layer (migration 0098) this box refines — read-only, and
+   * shared with every other supplier. Shown because a reviewer who cannot see
+   * it will re-type it here per supplier, which is the duplication the layer
+   * exists to remove. Editing it is deliberately elsewhere (Document Types
+   * admin): a change here would silently alter every other supplier's prompt.
+   */
+  const [typeInstructions, setTypeInstructions] = useState('');
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -67,11 +75,13 @@ export default function ExtractionInstructionsBox({
         const text = res.instructions || '';
         setValue(text);
         setPersistedValue(text);
+        setTypeInstructions(res.document_type_instructions || '');
       } catch (err) {
         if (cancelled) return;
         // Non-fatal — treat as empty, user can still create a new row.
         setValue('');
         setPersistedValue('');
+        setTypeInstructions('');
         console.warn('Failed to load extraction instructions:', err);
       } finally {
         if (!cancelled) setLoading(false);
@@ -152,6 +162,25 @@ export default function ExtractionInstructionsBox({
           </Typography>
         )}
       </Box>
+      {typeInstructions.trim() && (
+        <Box
+          sx={{
+            mb: 1,
+            p: 1.5,
+            borderRadius: 1,
+            bgcolor: 'action.hover',
+            borderLeft: 3,
+            borderColor: 'primary.main',
+          }}
+        >
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
+            Applies to every {docTypeName} — the box below refines it
+          </Typography>
+          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', mt: 0.5 }}>
+            {typeInstructions}
+          </Typography>
+        </Box>
+      )}
       <TextField
         multiline
         rows={3}
@@ -162,7 +191,11 @@ export default function ExtractionInstructionsBox({
         onBlur={handleBlur}
         disabled={disabled || loading}
         placeholder={'e.g., "COAG values go in column A, not column B"'}
-        helperText="Natural-language guidance for this supplier + document type. Applied to every future extraction."
+        helperText={
+          typeInstructions.trim()
+            ? 'Guidance for this supplier + document type. Read after the shared instructions above, and wins where the two disagree.'
+            : 'Natural-language guidance for this supplier + document type. Applied to every future extraction.'
+        }
       />
     </Box>
   );
