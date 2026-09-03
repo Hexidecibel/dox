@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 125 tables, 2 views, 201 indexes, 36 triggers.
+Objects: 129 tables, 2 views, 203 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -1456,6 +1456,21 @@ Indexes: `idx_document_requirements_document`, `idx_document_requirements_requir
 
 Indexes: `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_tenant_verdict`
 
+### `document_type_extraction_instructions`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  document_type_id TEXT NOT NULL REFERENCES document_types(id) ON DELETE CASCADE
+  instructions TEXT NOT NULL
+  created_at TEXT DEFAULT (datetime('now'))
+  updated_at TEXT DEFAULT (datetime('now'))
+  updated_by TEXT REFERENCES users(id)
+  UNIQUE (tenant_id, document_type_id)
+```
+
+Indexes: `idx_dtei_tenant_doctype`
+
 ### `entity_notes`
 
 ```sql
@@ -1471,6 +1486,31 @@ Indexes: `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_tenant_verdict`
 ```
 
 Indexes: `idx_entity_notes_author`, `idx_entity_notes_entity`
+
+### `module_visibility`
+
+```sql
+  tenant_id TEXT NOT NULL
+  owner_key TEXT NOT NULL
+  module_key TEXT NOT NULL
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  PRIMARY KEY (tenant_id, owner_key, module_key)
+  FOREIGN KEY (tenant_id, owner_key) REFERENCES owner_labels(tenant_id, owner_key) ON DELETE CASCADE
+```
+
+### `owner_labels`
+
+```sql
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  owner_key TEXT NOT NULL
+  owner_label TEXT NOT NULL
+  active INTEGER NOT NULL DEFAULT 1
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  PRIMARY KEY (tenant_id, owner_key)
+```
 
 ### `owner_routes`
 
@@ -1488,7 +1528,7 @@ Indexes: `idx_entity_notes_author`, `idx_entity_notes_entity`
   CHECK ((user_id IS NOT NULL) <> (email IS NOT NULL))
 ```
 
-Indexes: `idx_owner_routes_lookup`, `idx_owner_routes_unique`
+Indexes: `idx_owner_routes_by_user`, `idx_owner_routes_lookup`, `idx_owner_routes_unique`
 
 ### `renewal_alert_state`
 
@@ -1708,6 +1748,17 @@ Indexes: `idx_spec_limits_product`, `idx_spec_limits_scope`, `idx_spec_limits_su
 ```
 
 Indexes: `idx_spec_tests_tenant`
+
+### `tenant_modules`
+
+```sql
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  module_key TEXT NOT NULL
+  enabled INTEGER NOT NULL DEFAULT 1
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_by TEXT
+  PRIMARY KEY (tenant_id, module_key)
+```
 
 ## Views
 
