@@ -31,7 +31,8 @@ import { MODULES } from '../../shared/modules';
 import type { AlertRecipient } from './alert-routing';
 import type { SpecVerdict } from '../../shared/specCheck';
 import type { ConfiguredLimit } from '../../shared/specCheck';
-import { compareSpecCriticality, parseSpecCriticality } from '../../shared/specCriticality';
+import { buildLimitSnapshot } from '../../shared/specSnapshot';
+import { compareSpecCriticality } from '../../shared/specCriticality';
 
 export interface RegisterContext {
   tenantId: string;
@@ -44,56 +45,12 @@ export interface RegisterContext {
 }
 
 /**
- * The frozen copy of a limit stored alongside a verdict.
- *
- * THE UNIT EQUIVALENCE BELONGS IN HERE, and it is not a detail. When a tenant
- * has said CFU/mL may be judged as CFU/g (migration 0093), the thing a result
- * was actually judged against is not "≤20000 CFU/g" — it is "≤20000 CFU/g, with
- * a millilitre basis accepted as a gram basis". Someone can turn that setting
- * off next month, and this table exists precisely so that moving a threshold
- * cannot rewrite history; a snapshot that omitted the equivalence would leave a
- * verdict that can no longer be re-explained, or worse, one that looks like it
- * was reached under rules that were never applied to it.
- *
- * Recorded only when it was actually USED on this row (`unit_equivalence`
- * absent = the units lined up on their own). The verdict's `reason` says the
- * same thing in words and is stored beside it, so the record reads correctly
- * whether a person or a query is doing the reading.
- *
- * SO DOES THE CRITICALITY (migration 0095). It does not decide the verdict, but
- * it decided how loudly the verdict was PUT IN FRONT OF SOMEBODY, and that is
- * half of what a reader months later is trying to reconstruct: "this failed and
- * nobody chased it" reads very differently once you can see it was filed as a
- * tracked parameter at the time. Ranks get re-tuned exactly like thresholds do,
- * so the same freeze argument applies — a pointer to today's tier would rewrite
- * that history the moment someone promoted the limit.
+ * The frozen copy of a limit stored alongside a verdict now lives in
+ * shared/specSnapshot.ts, because `bin/backfill-spec-register` writes register
+ * rows too and a backfilled row has to freeze the limit on exactly the same
+ * terms as an approval-written one. See that file for the argument about unit
+ * equivalence (0093) and criticality (0095) belonging inside the snapshot.
  */
-function snapshotFor(verdict: SpecVerdict, limits: ConfiguredLimit[]): string | null {
-  const equated = verdict.unit_equivalence_applied ? { unit_equivalence: 'volume_mass' } : {};
-  if (verdict.source !== 'limit' || !verdict.limit_id) {
-    // A printed-spec verdict's "limit" is the document's own text, which is
-    // already captured verbatim in limit_text.
-    return verdict.limit_text
-      ? JSON.stringify({ printed: verdict.limit_text, ...equated })
-      : null;
-  }
-  const l = limits.find((x) => x.id === verdict.limit_id);
-  if (!l) {
-    return verdict.limit_text
-      ? JSON.stringify({ printed: verdict.limit_text, ...equated })
-      : null;
-  }
-  return JSON.stringify({
-    operator: l.operator,
-    value_min: l.value_min,
-    value_max: l.value_max,
-    unit: l.unit,
-    severity: l.severity,
-    criticality: parseSpecCriticality(l.criticality),
-    text: verdict.limit_text,
-    ...equated,
-  });
-}
 
 /**
  * Persist a document's spec verdicts. Returns the rows written, so the caller
@@ -122,13 +79,21 @@ export async function registerSpecChecks(
       .bind(ctx.documentId, ctx.versionNumber ?? null, ctx.versionNumber ?? -1)
       .run();
 
+    // `judgement_origin` is the literal 'approval' and not a parameter (0103).
+    // This function IS the approval-time writer: it is reached from the queue
+    // approval route with a reviewer's id in hand. The other producer of
+    // register rows, `bin/backfill-spec-register`, is a Node CLI that renders
+    // its own SQL and stamps 'bulk_recheck' + `bulk_run_at` itself, so an
+    // origin parameter here would be a setting nobody could ever pass. Anything
+    // that DID pass it would be claiming a human judgement it did not make.
     const stmt = db.prepare(
       `INSERT INTO document_spec_checks
          (id, tenant_id, document_id, version_number, queue_item_id,
           spec_test_id, test_name_raw, value_raw, value_num, unit_raw,
           verdict, reason, source, limit_id, limit_snapshot,
-          acknowledged_by, acknowledged_at, acknowledgement_note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          acknowledged_by, acknowledged_at, acknowledgement_note,
+          judgement_origin, bulk_run_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approval', NULL)`
     );
 
     // An approval that goes ahead over a failing result IS the acknowledgement.
@@ -153,7 +118,7 @@ export async function registerSpecChecks(
         v.reason ?? null,
         v.source,
         v.limit_id ?? null,
-        snapshotFor(v, limits),
+        buildLimitSnapshot(v, limits),
         v.verdict === 'out_of_spec' ? ctx.acknowledgedBy ?? null : null,
         v.verdict === 'out_of_spec' ? ackAt : null,
         v.verdict === 'out_of_spec' ? ctx.acknowledgementNote ?? null : null

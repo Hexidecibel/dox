@@ -90,6 +90,25 @@ beforeAll(async () => {
 }, 30_000);
 
 describe('registerSpecChecks', () => {
+  it('says a human was judging — the approval path is the only thing that may', async () => {
+    // Migration 0103. `bin/backfill-spec-register` writes rows too, and the two
+    // producers mean different things: this one had a reviewer looking at the
+    // result, the bulk one did not. A row that could not say which it was would
+    // let a script's arithmetic read as a person's sign-off.
+    const documentId = await makeDocument('Provenance COA');
+    await registerSpecChecks(db, { tenantId: seed.tenantId, documentId, versionNumber: 1 }, [verdict()], [
+      LIMIT,
+    ]);
+
+    const row = await db
+      .prepare('SELECT judgement_origin, bulk_run_at FROM document_spec_checks WHERE document_id = ?')
+      .bind(documentId)
+      .first<{ judgement_origin: string | null; bulk_run_at: string | null }>();
+
+    expect(row!.judgement_origin).toBe('approval');
+    expect(row!.bulk_run_at).toBeNull();
+  });
+
   it('freezes the limit into the row', async () => {
     const documentId = await makeDocument('Frozen limit COA');
     await registerSpecChecks(db, { tenantId: seed.tenantId, documentId, versionNumber: 1 }, [verdict()], [

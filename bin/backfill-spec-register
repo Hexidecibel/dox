@@ -1,0 +1,577 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/backfill-spec-register — write the out-of-spec register for the history
+ * that was approved before the register existed.
+ *
+ * THE GAP THIS CLOSES
+ *
+ * `document_spec_checks` (migration 0085) fills FORWARD, one document at a time,
+ * at approval. That is deliberate and stays that way: a row freezes the limit it
+ * was judged against so moving a threshold cannot rewrite history. The
+ * consequence, measured on production, is that the Out-of-Spec page shows
+ * THIRTEEN documents out of five hundred and seventy-six, with zero failures on
+ * it — while `bin/recheck-spec-limits`, computing fresh over the same corpus,
+ * finds forty-one out-of-spec results and twelve catches. That evidence exists
+ * only in a terminal, and the customer is waiting on precisely it: their
+ * configured limits, run over every certificate they have.
+ *
+ * So this script runs THE SAME ENGINE — `checkPrintedSpecs` and
+ * `checkConfiguredLimits` from the compiled shared/specCheck.ts, the functions
+ * the review queue and the approval path call — and writes what it finds.
+ *
+ * WHAT MAKES A BACKFILLED ROW HONEST
+ *
+ *  - It says so. `judgement_origin = 'bulk_recheck'` and `bulk_run_at` = this
+ *    pass's timestamp (migration 0103). Nobody can mistake it for a reviewer's
+ *    sign-off, because a reviewer's row says 'approval' and this one does not.
+ *  - `acknowledged_by` / `acknowledged_at` / `acknowledgement_note` are NULL. No
+ *    human approved a document with this verdict in front of them; that is the
+ *    whole difference between the two producers.
+ *  - `notified_at` is NULL, and stays NULL. Nobody was told, and the register
+ *    must not claim otherwise.
+ *  - The limit is frozen through the PRODUCER'S OWN function,
+ *    `buildLimitSnapshot` from shared/specSnapshot.ts (compiled to
+ *    bin/lib/shared/), criticality (0095) and unit equivalence (0093) included.
+ *    There is no second implementation to drift.
+ *
+ * NOBODY IS EMAILED. NOT BY ANY FLAG.
+ *
+ * This is the single most dangerous property of a script like this: forty-one
+ * out-of-spec results firing alerts at real recipients would be unforgivable.
+ * Three independent reasons it cannot happen, any one of which is sufficient:
+ *
+ *   1. Registering and notifying are separate functions in
+ *      functions/lib/spec-register.ts. `registerSpecChecks` writes;
+ *      `notifySpecFailures` sends. This script calls NEITHER — it renders SQL —
+ *      and it does not import that module, or `email.ts`, or `alert-links.ts`,
+ *      or `alert-routing.ts`. There is no code path from here to a send.
+ *   2. The only statements it can emit are INSERTs into document_spec_checks
+ *      plus one audit row (and, under --prune-artifacts, DELETEs of rows it has
+ *      printed). See `planToSql` in bin/lib/specRegisterBackfill.js.
+ *   3. Sending is a Worker-side action driven by an approval. Nothing in the
+ *      codebase scans the register for unnotified failures — `notified_at` is
+ *      written in exactly one place, immediately after a send, and read nowhere.
+ *      Filling the table cannot cause mail later, either.
+ *
+ * WHAT IT WILL NOT DO
+ *   - Overwrite a row written at approval. A document that already has register
+ *     rows is skipped WHOLE and reported. There is no flag for this.
+ *   - Write a second time. A document with rows from an earlier pass is skipped
+ *     too, so a second --apply writes nothing.
+ *   - Write a verdict about a value that parses as a date or a clock time. That
+ *     is an incubation log read as a results crosstab, and a verdict about it —
+ *     pass, fail or refusal — asserts a measurement that never happened.
+ *   - Delete anything, unless you pass --prune-artifacts, which prints every row
+ *     it would remove first.
+ *   - Write anything at all without --apply.
+ *
+ * SCOPE RESOLUTION MATCHES THE APPROVAL PATH, including its one conservatism:
+ * `product_ids` is empty, exactly as functions/api/queue/[id].ts passes it, so a
+ * product-pinned limit does not apply here either. A backfilled verdict is
+ * therefore the verdict approval WOULD have reached, not a better one.
+ *
+ * Usage:
+ *   bin/backfill-spec-register --tenant <id>                    # dry run, LOCAL
+ *   bin/backfill-spec-register --tenant <id> --apply            # LOCAL write
+ *   bin/backfill-spec-register --tenant <id> --remote           # dry run, PRODUCTION
+ *   bin/backfill-spec-register --tenant <id> --remote --apply   # prompts first
+ *   bin/backfill-spec-register --tenant <id> --prune-artifacts --apply
+ *
+ * Flags:
+ *   --tenant ID        tenant to backfill (required)
+ *   --apply            actually write. Without it this is a dry run.
+ *   --remote, -r       target PRODUCTION D1 (with --apply, prompts first)
+ *   --yes, -y          skip the production confirmation prompt
+ *   --prune-artifacts  ALSO delete existing register rows whose stored value is
+ *                      a date or a clock time. Prints every row first. Never
+ *                      happens as part of a plain backfill.
+ *   --limit N          cap documents examined (prints that it was capped)
+ *   --page-size N      D1 paging size (default 50)
+ *   --json             emit the plan as JSON instead of prose
+ *   -h, --help         this help
+ *
+ * Re-running after a successful --apply reports 0 documents to write.
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { execFileSync } = require('child_process');
+
+const { query, queryPaged, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+const { checkPrintedSpecs, checkConfiguredLimits } = require('./lib/shared/specCheck');
+const { buildLimitSnapshot } = require('./lib/shared/specSnapshot');
+const {
+  buildPlan,
+  planToSql,
+  auditSql,
+  pruneToSql,
+  pruneAuditSql,
+  batchStatements,
+  formatPlan,
+  formatArtifacts,
+  findArtifactRows,
+} = require('./lib/specRegisterBackfill');
+
+function parseArgs(argv) {
+  const opts = {
+    tenant: null,
+    apply: false,
+    remote: false,
+    yes: false,
+    pruneArtifacts: false,
+    limit: null,
+    pageSize: 50,
+    json: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenant = argv[++i]; break;
+      case '--apply': opts.apply = true; break;
+      case '--remote':
+      case '-r': opts.remote = true; break;
+      case '--yes':
+      case '-y': opts.yes = true; break;
+      case '--prune-artifacts': opts.pruneArtifacts = true; break;
+      case '--limit': opts.limit = Number(argv[++i]); break;
+      case '--page-size': opts.pageSize = Number(argv[++i]); break;
+      case '--json': opts.json = true; break;
+      case '-h':
+      case '--help': printHelp(); process.exit(0); break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  if (!opts.tenant) {
+    console.error('--tenant <id> is required. Run with --help for usage.');
+    process.exit(2);
+  }
+  // The d1 helper takes a raw command string, so the one interpolated value gets
+  // a hard shape check rather than trust.
+  if (!/^[A-Za-z0-9_-]+$/.test(opts.tenant)) {
+    console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+    process.exit(2);
+  }
+  return opts;
+}
+
+function printHelp() {
+  const src = fs.readFileSync(__filename, 'utf8');
+  console.log(src.split('\n').slice(3, 94).join('\n').replace(/^ \* ?/gm, ''));
+}
+
+/**
+ * A query whose table or column may not exist yet. The register arrives with
+ * 0085 and its provenance with 0103; an environment that has not taken them
+ * should get a sentence, not a stack trace.
+ */
+function queryOrExit(sql, opts, hint) {
+  try {
+    return query(sql, opts);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table|no such column/i.test(msg)) {
+      console.error(`${hint}\n${msg}`);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+function assertTenant(tenant, remote) {
+  const rows = query(`SELECT id, name FROM tenants WHERE id = '${tenant}'`, { remote });
+  if (rows.length === 0) {
+    console.error(`No tenant "${tenant}" in this database. Check the id, or the --remote flag.`);
+    process.exit(1);
+  }
+  return rows[0];
+}
+
+function safeParse(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Rebuild the engine's source list from an approved document's metadata.
+ * Identical to bin/recheck-spec-limits — the two scripts must see the same
+ * document the same way, or the preview stops predicting the backfill.
+ */
+function sourcesFor(doc) {
+  const extended = safeParse(doc.extended_metadata);
+  if (!extended) return [];
+  const sources = [];
+  if (Array.isArray(extended.tables) && extended.tables.length > 0) {
+    sources.push({ scope: 'ai_fields', tables: extended.tables });
+  }
+  if (extended.groups && typeof extended.groups === 'object') {
+    sources.push({ scope: 'ai_fields', groups: extended.groups });
+  }
+  return sources;
+}
+
+function loadTests(tenant, remote) {
+  const rows = queryOrExit(
+    `SELECT id, name, aliases, default_unit FROM spec_tests WHERE tenant_id = '${tenant}'`,
+    { remote },
+    'This database has no spec_tests table — apply migrations 0084/0085 first.'
+  );
+  return (rows || []).map((r) => {
+    let aliases = [];
+    try {
+      const parsed = JSON.parse(r.aliases || '[]');
+      if (Array.isArray(parsed)) aliases = parsed.map(String);
+    } catch {
+      // A corrupt blob costs this analyte its synonyms, nothing more.
+    }
+    return { id: r.id, name: r.name, aliases, default_unit: r.default_unit };
+  });
+}
+
+/**
+ * The tenant's active limits, CRITICALITY INCLUDED.
+ *
+ * `bin/recheck-spec-limits` does not select it, because a preview only reports
+ * verdicts and criticality never changes one. This script FREEZES the limit into
+ * a row that has to stay re-explainable for years, and 0095's rank is part of
+ * what a reader is reconstructing — so it is loaded here, with the same
+ * pre-0095 fallback `loadSpecConfig` uses (the parser lands a missing rank on
+ * the middle tier rather than inventing one).
+ */
+function loadLimits(tenant, remote) {
+  const base = `id, spec_test_id, operator, value_min, value_max, unit, severity, active,
+            supplier_id, document_type_id, product_id, updated_at`;
+  let rows;
+  try {
+    rows = query(
+      `SELECT ${base}, criticality FROM spec_limits WHERE tenant_id = '${tenant}' AND active = 1`,
+      { remote }
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such column/i.test(msg)) throw err;
+    console.error(
+      'This database predates migration 0095 — limits will be frozen without a\n' +
+      'criticality rank, which is what they are running.'
+    );
+    rows = queryOrExit(
+      `SELECT ${base} FROM spec_limits WHERE tenant_id = '${tenant}' AND active = 1`,
+      { remote },
+      'This database has no spec_limits table — apply migrations 0084/0085 first.'
+    );
+  }
+  return (rows || []).map((r) => ({
+    ...r,
+    active: Number(r.active) === 1,
+    value_min: r.value_min == null ? null : Number(r.value_min),
+    value_max: r.value_max == null ? null : Number(r.value_max),
+  }));
+}
+
+/** Migration 0093. Read for the same reason the review queue reads it. */
+function loadUnitPolicy(tenant, remote) {
+  try {
+    const rows = query(
+      `SELECT spec_volume_mass_equivalent FROM tenants WHERE id = '${tenant}'`,
+      { remote }
+    );
+    return { volume_mass_equivalent: Number((rows || [])[0]?.spec_volume_mass_equivalent ?? 0) === 1 };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such column|no such table/i.test(msg)) throw err;
+    console.error(
+      'This database predates migration 0093 — checking with strict units, which\n' +
+      'is what it is running.'
+    );
+    return {};
+  }
+}
+
+/** Every register row this tenant already has. The idempotency input. */
+function loadExistingRows(tenant, remote, pageSize) {
+  const { rows } = queryPaged(
+    (limit, offset) =>
+      `SELECT c.id, c.document_id, c.version_number, c.test_name_raw, c.value_raw,
+              c.verdict, c.source, c.judgement_origin, c.bulk_run_at, c.created_at,
+              d.title AS document_title
+         FROM document_spec_checks c
+         LEFT JOIN documents d ON d.id = c.document_id
+        WHERE c.tenant_id = '${tenant}'
+        ORDER BY c.created_at, c.id
+        LIMIT ${limit} OFFSET ${offset}`,
+    { remote, pageSize: pageSize * 4 }
+  );
+  return rows;
+}
+
+function loadDocuments(tenant, opts) {
+  return queryPaged(
+    (pageSize, offset) =>
+      `SELECT d.id, d.title, d.supplier_id, d.document_type_id, d.current_version,
+              d.extended_metadata, s.name AS supplier_name
+         FROM documents d
+         LEFT JOIN suppliers s ON s.id = d.supplier_id
+        WHERE d.tenant_id = '${tenant}'
+          AND d.status = 'active'
+          AND d.extended_metadata IS NOT NULL
+        ORDER BY d.created_at DESC, d.id
+        LIMIT ${pageSize} OFFSET ${offset}`,
+    { remote: opts.remote, pageSize: opts.pageSize, maxRows: opts.limit || undefined }
+  );
+}
+
+/**
+ * Apply a batch. bin/lib/d1.js is READ-ONLY by design and stays that way — the
+ * write path is here, and it mirrors bin/migrate, bin/import-spec-limits and
+ * bin/backfill-coa-extended-metadata: render the statements to a file and hand
+ * it to `wrangler d1 execute --file`, so nothing is glued into a shell command
+ * line and a long plan cannot overflow one.
+ */
+function execSql(statements, remote, label) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-spec-register-backfill-'));
+  const file = path.join(dir, `${label}.sql`);
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  try {
+    execFileSync(
+      'npx',
+      ['wrangler', 'd1', 'execute', DEFAULT_DB, remote ? '--remote' : '--local', `--file=${file}`],
+      { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 }
+    );
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString() : '';
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${stderr || err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function confirmProduction(tenant, plan, pruneCount) {
+  const answer = promptSync(
+    `\nAbout to WRITE to PRODUCTION D1 for tenant ${tenant}:\n` +
+      `  ${plan.rows.length} register row(s) across ${plan.counts.documents_written} document(s)\n` +
+      `  (${plan.counts.rows_out_of_spec} out of spec, ${plan.counts.rows_in_spec} in spec, ` +
+      `${plan.counts.rows_not_checked} not checked)\n` +
+      (pruneCount ? `  and DELETE ${pruneCount} artifact row(s) listed above\n` : '') +
+      'Nobody is emailed. Type the tenant id to continue: '
+  );
+  if (answer.trim() !== tenant) {
+    console.error('That did not match. Nothing was written.');
+    process.exit(1);
+  }
+}
+
+/** Blocking one-line read from the terminal; no dependency needed. */
+function promptSync(question) {
+  process.stdout.write(question);
+  let fd;
+  try {
+    fd = fs.openSync('/dev/tty', 'rs');
+  } catch {
+    console.error('\nNo terminal to confirm on. Re-run interactively, or pass --yes.');
+    process.exit(1);
+  }
+  const buf = Buffer.alloc(256);
+  let out = '';
+  for (;;) {
+    const n = fs.readSync(fd, buf, 0, buf.length, null);
+    if (n === 0) break;
+    out += buf.toString('utf8', 0, n);
+    if (out.includes('\n')) break;
+  }
+  fs.closeSync(fd);
+  return out.split('\n')[0];
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const remote = opts.remote;
+  const targetLabel = remote ? 'PRODUCTION' : 'local';
+  const runAt = new Date().toISOString();
+
+  const tenant = assertTenant(opts.tenant, remote);
+
+  const tests = loadTests(opts.tenant, remote);
+  const limits = loadLimits(opts.tenant, remote);
+  const unitPolicy = loadUnitPolicy(opts.tenant, remote);
+  // Probe for the provenance column BEFORE anything else touches the register.
+  // Without 0103 a backfilled row would be indistinguishable from a reviewer's
+  // sign-off, which is the one thing this script must never produce — so a
+  // database that lacks it gets a sentence and no writes, not a best effort.
+  queryOrExit(
+    `SELECT judgement_origin, bulk_run_at FROM document_spec_checks WHERE tenant_id = '${opts.tenant}' LIMIT 1`,
+    { remote },
+    'This database has no document_spec_checks.judgement_origin — apply migration\n' +
+      '0103_spec_check_provenance.sql first.'
+  );
+  const existingRows = loadExistingRows(opts.tenant, remote, opts.pageSize);
+
+  if (limits.length === 0) {
+    console.log(
+      'No active spec limits for this tenant. Only the certificates\' own printed\n' +
+      'specs will be judged — see bin/recheck-spec-limits --printed-only.\n'
+    );
+  }
+
+  const { rows: docs } = loadDocuments(opts.tenant, opts);
+
+  const judged = [];
+  for (const doc of docs) {
+    const sources = sourcesFor(doc);
+    if (sources.length === 0) {
+      judged.push({ document: doc, verdicts: [] });
+      continue;
+    }
+    const printed = checkPrintedSpecs(sources, { unitPolicy });
+    const configured = checkConfiguredLimits(
+      sources,
+      tests,
+      limits,
+      {
+        supplier_id: doc.supplier_id || null,
+        document_type_id: doc.document_type_id || null,
+        // Empty, exactly as the approval path passes it. See the header.
+        product_ids: [],
+      },
+      // Passes included, exactly as the approve-time register does: "checked and
+      // passed" is the record a QA buyer is paying for, and a register of
+      // failures alone would imply everything absent from it was never judged.
+      { unitPolicy, includePasses: true }
+    );
+    judged.push({ document: doc, verdicts: [...printed, ...configured.verdicts] });
+  }
+
+  const plan = buildPlan({
+    tenantId: opts.tenant,
+    runAt,
+    judged,
+    existingRows,
+    limits,
+    buildLimitSnapshot,
+    newId: () => crypto.randomUUID().replace(/-/g, ''),
+  });
+
+  const artifacts = findArtifactRows(existingRows);
+  const prunable = artifacts.filter((a) => a.confidence === 'confident');
+
+  const statements = planToSql(plan);
+  const batches = batchStatements(statements);
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          tenant: opts.tenant,
+          tenant_name: tenant.name,
+          target: targetLabel,
+          applied: opts.apply,
+          run_at: runAt,
+          unit_policy: unitPolicy,
+          analytes: tests.length,
+          active_limits: limits.length,
+          counts: plan.counts,
+          rows: plan.rows.length,
+          skipped: plan.skipped,
+          refused: plan.refused,
+          artifacts,
+          prunable: prunable.length,
+          prune_requested: opts.pruneArtifacts,
+          statements: statements.length,
+          batches: batches.length,
+        },
+        null,
+        2
+      )
+    );
+  } else {
+    for (const line of formatPlan(plan, {
+      targetLabel: `${tenant.name}, ${targetLabel}`,
+      capped: opts.limit && docs.length >= opts.limit ? opts.limit : null,
+    })) {
+      console.log(line);
+    }
+    console.log(
+      `CFU/mL judged as CFU/g ... ${unitPolicy.volume_mass_equivalent ? 'YES (tenant setting)' : 'no'}`
+    );
+    console.log('');
+    for (const line of formatArtifacts(artifacts)) console.log(line);
+    if (artifacts.length > 0 && !opts.pruneArtifacts) {
+      console.log(
+        `  ${prunable.length} of these can be removed with --prune-artifacts. Deleting from a\n` +
+        '  compliance register is a separate, explicit act; it is never part of a backfill.'
+      );
+      console.log('');
+    }
+  }
+
+  const pruneStatements = opts.pruneArtifacts ? pruneToSql(artifacts) : [];
+
+  if (!opts.apply) {
+    if (!opts.json) {
+      console.log(
+        statements.length === 0
+          ? 'DRY RUN — nothing to write. Every examined document is already accounted for.'
+          : `DRY RUN — ${statements.length} row(s) not written (${batches.length} batch(es)). ` +
+              'Re-run with --apply to write.'
+      );
+      if (opts.pruneArtifacts) {
+        console.log(
+          pruneStatements.length === 0
+            ? 'DRY RUN — no artifact rows to remove.'
+            : `DRY RUN — ${prunable.length} artifact row(s) NOT deleted. Every one is listed above. ` +
+                'Re-run with --apply to remove them.'
+        );
+      }
+      console.log('Nothing was written and nobody was emailed.');
+      console.log('');
+    }
+    return;
+  }
+
+  if (statements.length === 0 && pruneStatements.length === 0) {
+    console.log('Nothing to do — no document needs a register row, and no artifact was found.');
+    return;
+  }
+
+  if (remote && !opts.yes) confirmProduction(opts.tenant, plan, prunable.length);
+
+  let written = 0;
+  for (let i = 0; i < batches.length; i++) {
+    execSql(batches[i], remote, `spec-register-${i + 1}`);
+    written += batches[i].length;
+    console.log(`  batch ${i + 1}/${batches.length} — ${batches[i].length} row(s) written`);
+  }
+
+  if (pruneStatements.length > 0) {
+    execSql([...pruneStatements, pruneAuditSql(opts.tenant, runAt, artifacts)], remote, 'prune');
+    console.log(`  pruned ${prunable.length} artifact row(s)`);
+  }
+
+  // ONE audit row for the pass — never one per document. Written last, so it
+  // describes work that actually landed.
+  if (written > 0) {
+    execSql([auditSql(plan, { pruned: opts.pruneArtifacts ? prunable.length : 0 })], remote, 'audit');
+  }
+
+  console.log('');
+  console.log(
+    `Wrote ${written} register row(s) for ${plan.counts.documents_written} document(s) in ` +
+      `${targetLabel} D1, stamped judgement_origin='bulk_recheck', bulk_run_at='${runAt}'.`
+  );
+  console.log('Nobody was emailed. No alert link was minted. No approval was implied.');
+  console.log('');
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+}

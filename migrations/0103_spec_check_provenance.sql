@@ -1,0 +1,103 @@
+-- Migration 0103: WHO judged a spec result — a reviewer at a keyboard, or a
+-- bulk pass over history.
+--
+-- ═══════════════════════════════════════════════════════════════════════════
+-- WHY THIS EXISTS
+-- ═══════════════════════════════════════════════════════════════════════════
+-- `document_spec_checks` (0085) fills FORWARD, one document at a time, at the
+-- moment a human approves it. That is what makes a row mean something: the
+-- limit is frozen, and somebody was looking at the result when it was written.
+--
+-- It is about to stop being the only way a row gets there.
+-- `bin/backfill-spec-register` runs the same engine over the HISTORICAL corpus
+-- and writes what it finds, because the alternative — an Out-of-Spec page that
+-- shows thirteen documents out of five hundred and seventy-six while a
+-- read-only re-check finds forty-one failures nobody has ever seen — is a
+-- register that tells the customer nothing about their own history.
+--
+-- Once both producers exist, a row alone cannot say which one wrote it, and the
+-- two mean genuinely different things:
+--
+--   approval     a person had this document open, saw this verdict, and went
+--                ahead. `acknowledged_by` may name them.
+--   bulk_recheck a script judged a document that was approved months earlier,
+--                under limits that may not have existed at the time. Nobody
+--                saw it, nobody was emailed, and no approval decision was made
+--                with this verdict in front of them.
+--
+-- Conflating those would let a backfilled row be read as a human sign-off. This
+-- column exists to make that impossible.
+--
+-- ═══════════════════════════════════════════════════════════════════════════
+-- NULLABLE, NO DEFAULT — AND THE EXISTING ROWS ARE LABELLED EXPLICITLY
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 0102 (`supplier_requirements.source`) left its column NULLABLE and refused a
+-- `NOT NULL DEFAULT 'human'`, because the rows already in that table included
+-- bulk-written ones and the default would have asserted that a person chose
+-- each of them. The falsehood was the problem, not the default.
+--
+-- Here the history is different, and it is PROVABLE rather than assumed. The
+-- only code that has ever inserted into this table is `registerSpecChecks` in
+-- functions/lib/spec-register.ts, and its only caller is
+-- `registerAndNotifyForApproval` from the queue-approval route
+-- (functions/api/queue/[id].ts). `bin/recheck-spec-limits` is read-only by
+-- construction — bin/lib/d1.js refuses any statement that is not a SELECT — and
+-- says so in its own header. So every row that exists when this migration runs
+-- WAS written at approval, and saying so is a statement of fact, not a guess.
+--
+-- Hence the split decision, which agrees with 0102 on the column and differs on
+-- what to do about the rows already there:
+--
+--   * NO DEFAULT. A future writer that forgets this column produces NULL —
+--     "nobody recorded why" — rather than silently claiming 'approval'. A
+--     default would re-create the exact falsehood 0102 was avoiding, just aimed
+--     at rows that do not exist yet, which are the ones this column is FOR.
+--   * The existing rows are stamped 'approval' by an explicit UPDATE below,
+--     because we can demonstrate that is what they are. Leaving them NULL would
+--     be honest but needlessly vague: it would put every row written before
+--     today into the same bucket as a row written tomorrow by a producer that
+--     did not bother to say. NULL keeps its meaning precisely because nothing
+--     that can be identified is left in it.
+--
+-- No CHECK on the values, for the reason 0102 and 0100 already record: the set
+-- of producers grows, SQLite cannot alter a CHECK in place, and each new one
+-- would cost a table rebuild. The vocabulary is 'approval' | 'bulk_recheck',
+-- and it is enforced where it is written.
+--
+-- ═══════════════════════════════════════════════════════════════════════════
+-- `bulk_run_at` — WHEN, AND WHICH RUN
+-- ═══════════════════════════════════════════════════════════════════════════
+-- NULL on every approval-written row; on a backfilled row it carries the ISO
+-- timestamp of the PASS, identical across every row that pass wrote. That makes
+-- it the run's identity as well as its clock: "show me what the 2026-09-04 run
+-- wrote" is `WHERE bulk_run_at = ...`, and undoing one bad pass does not need a
+-- separate id column to be safe.
+--
+-- It is deliberately NOT `created_at`. `created_at` says when the ROW appeared,
+-- which for a backfill is today no matter which March certificate it describes;
+-- `bulk_run_at` says that today is when the JUDGEMENT was made, retroactively.
+-- A reader who cannot tell those apart will misread every backfilled row as a
+-- contemporaneous finding.
+--
+-- NOTHING READS THESE TO DECIDE ANYTHING. The Out-of-Spec page's queries, the
+-- alert-link projection and the acknowledgement path are byte-identical before
+-- and after this migration. Both columns are for discovery: the register has to
+-- be able to answer "was a person actually looking at this?" without the answer
+-- depending on who remembers the deployment history.
+
+ALTER TABLE document_spec_checks ADD COLUMN judgement_origin TEXT;
+ALTER TABLE document_spec_checks ADD COLUMN bulk_run_at TEXT;
+
+-- Every row that exists right now was written by the approval path. See the
+-- argument above — this is the one moment at which that can be asserted from
+-- the code rather than inferred from the data, so it is asserted here and never
+-- again. Guarded by IS NULL so a re-run cannot relabel a bulk row.
+UPDATE document_spec_checks SET judgement_origin = 'approval' WHERE judgement_origin IS NULL;
+
+-- "What did the backfill write, and when?" — the one question these columns were
+-- added to answer. Partial, on the non-NULL side, because after the UPDATE above
+-- every existing row has a NULL here and an index over those is an index over
+-- nothing (the same shape as 0102's packet index and 0094's queue_id index).
+CREATE INDEX IF NOT EXISTS idx_dsc_bulk_run
+  ON document_spec_checks(tenant_id, bulk_run_at)
+  WHERE bulk_run_at IS NOT NULL;

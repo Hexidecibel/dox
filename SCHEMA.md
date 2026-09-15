@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 130 tables, 2 views, 204 indexes, 36 triggers.
+Objects: 131 tables, 2 views, 208 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -310,10 +310,12 @@ Indexes: `idx_supplier_product_map_lookup`
   created_by TEXT
   updated_at TEXT DEFAULT (datetime('now'))
   updated_by TEXT
+  source TEXT
+  packet_slug TEXT
   UNIQUE(tenant_id, supplier_id, requirement_id)
 ```
 
-Indexes: `idx_supplier_requirements_requirement`, `idx_supplier_requirements_supplier`
+Indexes: `idx_supplier_requirements_packet`, `idx_supplier_requirements_requirement`, `idx_supplier_requirements_supplier`
 
 ### `suppliers`
 
@@ -1453,9 +1455,11 @@ Indexes: `idx_document_requirements_document`, `idx_document_requirements_requir
   acknowledgement_note TEXT
   notified_at TEXT
   created_at TEXT DEFAULT (datetime('now'))
+  judgement_origin TEXT
+  bulk_run_at TEXT
 ```
 
-Indexes: `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_tenant_verdict`
+Indexes: `idx_dsc_bulk_run`, `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_tenant_verdict`
 
 ### `document_type_extraction_instructions`
 
@@ -1775,6 +1779,25 @@ Indexes: `idx_spec_tests_tenant`
   updated_by TEXT
   PRIMARY KEY (tenant_id, module_key)
 ```
+
+### `tenant_setup_runs`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'completed', 'abandoned'))
+  current_step INTEGER NOT NULL DEFAULT 1
+  pack TEXT
+  state TEXT NOT NULL DEFAULT '{}'
+  applied TEXT NOT NULL DEFAULT '{}'
+  started_by TEXT
+  started_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  completed_at TEXT
+  completed_by TEXT
+```
+
+Indexes: `idx_tenant_setup_runs_one_draft`, `idx_tenant_setup_runs_tenant`
 
 ## Views
 

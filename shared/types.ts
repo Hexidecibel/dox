@@ -791,6 +791,16 @@ export interface ApiSpecCheck {
   acknowledged_at: string | null;
   acknowledgement_note: string | null;
   notified_at: string | null;
+  /**
+   * WHO judged this (migration 0103). 'approval' means a reviewer had the
+   * document open and this verdict in front of them; 'bulk_recheck' means
+   * `bin/backfill-spec-register` computed it over history, with nobody looking
+   * and nobody emailed. NULL only on a row written before the column existed by
+   * a producer that did not say. Never render the two as the same event.
+   */
+  judgement_origin: 'approval' | 'bulk_recheck' | null;
+  /** The bulk pass's timestamp, shared by every row it wrote. NULL at approval. */
+  bulk_run_at: string | null;
   created_at: string;
   /** Joined for display. */
   document_title?: string | null;
