@@ -392,13 +392,14 @@ describe('POST /api/documents/search/natural — FTS5', () => {
   });
 
   // ------------------------------------------------------------------
-  // Loosen-and-retry: soft structured filters + inline expiry/version.
+  // Constraints, not silent loosening. The loosen-and-retry ladder these
+  // tests used to pin DROPPED a failing predicate and returned the keyword
+  // hit as if it answered the question. The keyword hit still comes back —
+  // but labelled as a candidate that does not match, with the reason.
   // ------------------------------------------------------------------
-  it('loosen-and-retry: keyword match survives an over-constraining supplier the old hard-AND would have zeroed', async () => {
+  it('keyword hit survives an over-constraining supplier — listed as a non-matching candidate, never silently loosened', async () => {
     // keywords match docDarigoldCoaId (via supplier_text), but the parsed
-    // supplier_name points at a supplier NO doc is linked to. The OLD handler
-    // hard-ANDed the supplier predicate -> 0 rows. The new handler drops the
-    // supplier group on retry and returns the keyword hit.
+    // supplier_name points at a supplier NO doc is linked to.
     installLlmMock({
       ...DEFAULT_PARSED,
       keywords: ['darigold5'],
@@ -408,13 +409,21 @@ describe('POST /api/documents/search/natural — FTS5', () => {
     const res = await naturalSearch(
       makeContext({ query: 'get me the darigold5 report', tenant_id: seed.tenantId }, orgAdmin),
     );
-    const body = (await res.json()) as { results: Array<{ id: string }>; total: number };
+    const body = (await res.json()) as {
+      results: Array<{ id: string; match_status?: string; match_reason?: string }>;
+      total: number;
+      coverage: string;
+    };
     const ids = body.results.map((r) => r.id);
     expect(ids).toContain(docDarigoldCoaId);
     expect(body.total).toBeGreaterThan(0);
+    const row = body.results.find((r) => r.id === docDarigoldCoaId)!;
+    expect(row.match_status).toBe('candidate_not_matching');
+    expect(row.match_reason).toMatch(/Supplier on this document is Darigold5/);
+    expect(body.coverage).toBe('none');
   });
 
-  it('loosen-and-retry: drops multiple over-constraining predicates (doc_type + product) before giving up', async () => {
+  it('over-constraining doc_type + product: the unknown type is dropped out loud, the hit is still listed', async () => {
     installLlmMock({
       ...DEFAULT_PARSED,
       keywords: ['darigold5'],
@@ -425,9 +434,15 @@ describe('POST /api/documents/search/natural — FTS5', () => {
     const res = await naturalSearch(
       makeContext({ query: 'darigold5 anything', tenant_id: seed.tenantId }, orgAdmin),
     );
-    const body = (await res.json()) as { results: Array<{ id: string }> };
+    const body = (await res.json()) as {
+      results: Array<{ id: string }>;
+      dropped_constraints: Array<{ kind: string }>;
+      coverage: string;
+    };
     const ids = body.results.map((r) => r.id);
     expect(ids).toContain(docDarigoldCoaId);
+    expect(body.dropped_constraints.map((d) => d.kind)).toEqual(['document_type']);
+    expect(body.coverage).toBe('none');
   });
 
   it('never dumps the whole corpus when a keyword genuinely matches nothing (no structured filters)', async () => {
@@ -465,7 +480,7 @@ describe('POST /api/documents/search/natural — FTS5', () => {
     expect(row).toHaveProperty('primary_category_name');
   });
 
-  it('structured-only fallback: an expiry ask returns results even when the leftover keywords match no FTS token (the prior zero-result case)', async () => {
+  it('an expiry ask returns results even when the leftover keywords match no FTS token (the prior zero-result case)', async () => {
     // "which documents expire before 2027" -> the LLM leaves noise keywords
     // that match nothing in FTS, but the real intent is the expiration_filter.
     // OLD behavior ANDed the noise into MATCH -> 0. NEW: MATCH ladder empties

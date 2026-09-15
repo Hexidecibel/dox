@@ -576,7 +576,14 @@ const FIELD_ALIASES: Record<string, string[]> = {
   // an issue date, and a period counted from the wrong day is a renewal alert
   // sent on the wrong day. KEEP IN SYNC with bin/process-worker.
   effective_date: ['issue_date', 'date_issued', 'issued', 'issued_on', 'date_of_issue', 'certificate_issue_date', 'certificate_date', 'statement_date', 'letter_date', 'valid_from', 'effective', 'effective_from', 'effective_on', 'policy_effective_date', 'inception', 'inception_date'],
-  code_date: ['production_date', 'pack_date', 'mfg_date', 'manufacture_date', 'date_of_manufacture'],
+  // production_date is NOT an alias of code_date. It used to be here, which made
+  // the two the SAME field, so a COA printing both (Andersen's 2026 layout:
+  // 'Production Date 7-31-26' and 'Code Date (Expiration) 8-22-26', three weeks
+  // apart) could not represent them separately — and a production-date search
+  // matched a code date. bin/process-worker split them first; this copy had
+  // drifted. KEEP IN SYNC with bin/process-worker.
+  code_date: ['pack_date', 'code_dt'],
+  production_date: ['mfg_date', 'manufacture_date', 'date_of_manufacture', 'prod_date'],
   ship_date: ['shipping_date', 'date_shipped'],
   net_weight: ['weight', 'net_wt'],
   order_number: ['order_no', 'sales_order', 'reference_number', 'ref_number'],
@@ -840,6 +847,8 @@ export async function extractFields(
   return { fields: canonicalized, tables, products, summary, confidence, documentType, served_model: servedModel };
 }
 
+const DATE_ROLES: ReadonlyArray<unknown> = ['production', 'code', 'expiration', 'ship', 'uploaded'];
+
 export async function parseNaturalQuery(
   query: string,
   documentTypes: { slug: string; name: string }[],
@@ -875,7 +884,8 @@ export async function parseNaturalQuery(
     '- order_number: sales order / reference number',
     '- expiration_date: PRODUCT expiration / shelf life (YYYY-MM-DD)',
     '- document_expires_on: the date the DOCUMENT itself stops being valid — a certificate of insurance, a certification, an audit certificate (YYYY-MM-DD). Never a COA.',
-    '- code_date: production/pack date (YYYY-MM-DD)',
+    '- production_date: the date the product was MADE — "production date", "produced", "manufactured", "mfg", "pack date", "packed" (YYYY-MM-DD)',
+    '- code_date: the CODE date printed on the product — only when the query says "code date" (YYYY-MM-DD). It is NOT the production date.',
     '- ship_date: shipping date (YYYY-MM-DD)',
     '- grade: quality grade (e.g., "Grade A", "Grade AA")',
     '- plant_number: facility ID',
@@ -892,6 +902,7 @@ export async function parseNaturalQuery(
     '  "supplier_name": string|null,   // best-matching supplier name from list, or user\'s text if no match',
     '  "date_from": string|null,       // YYYY-MM-DD, resolve relative: "last month" → first day of prev month',
     '  "date_to": string|null,         // YYYY-MM-DD, resolve relative: "last month" → last day of prev month',
+    '  "date_role": "production"|"code"|"expiration"|"ship"|"uploaded"|null, // WHICH date date_from/date_to mean',
     '  "metadata_filters": [           // structured field queries',
     '    { "field": "lot_number", "operator": "equals"|"contains"|"gt"|"lt", "value": "..." }',
     '  ],',
@@ -909,7 +920,8 @@ export async function parseNaturalQuery(
     '1. Fuzzy product matching: "butter" matches any product with "butter" in the name. Return ALL matches.',
     '2. Fuzzy supplier matching: "darigold" matches "Darigold, Inc." — pick the closest match.',
     '3. Temporal reasoning: "expiring soon" = expiration_date within 30 days. "expiring" without qualifier = within 30 days.',
-    '4. "from last month" or "in March" → set date_from and date_to to that range.',
+    '4. "from last month" or "in March" → set date_from and date_to to that range. date_role says WHICH date: "produced in March" → "production"; "code date in March" → "code"; "uploaded / added / received last month" → "uploaded". A date printed on the document is never "uploaded".',
+    '4a. A single production date ("produced 7/31/26", "production date 22-Jul-2026", "packed on 9/2") → metadata_filters with field=production_date, operator=equals, value YYYY-MM-DD. Use code_date ONLY when the query says "code date". Never put a production date in date_from/date_to with date_role "uploaded".',
     '5. Lot/PO numbers: "lot 776764" → metadata_filters with field=lot_number, operator=equals.',
     '6. If query mentions test results, coliform, bacteria, etc. → use content_search.',
     '7. Always provide intent_summary — a clear one-line description of what was understood.',
@@ -982,6 +994,7 @@ export async function parseNaturalQuery(
         (parsed.product_name ? [parsed.product_name] : []),
       date_from: parsed.date_from || null,
       date_to: parsed.date_to || null,
+      date_role: DATE_ROLES.includes(parsed.date_role) ? parsed.date_role : null,
       supplier_name: parsed.supplier_name || null,
       metadata_filters: Array.isArray(parsed.metadata_filters) ? parsed.metadata_filters : [],
       expiration_filter: parsed.expiration_filter || null,
@@ -996,6 +1009,7 @@ export async function parseNaturalQuery(
       product_names: [],
       date_from: null,
       date_to: null,
+      date_role: null,
       supplier_name: null,
       metadata_filters: [],
       expiration_filter: null,

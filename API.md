@@ -1384,6 +1384,36 @@ The search term is wrapped in `%..%` wildcards. Only active documents are return
 
 For more advanced search, use the GraphQL `searchDocuments` query which provides the same functionality with typed parameters.
 
+### Coverage: covering documents vs. near misses
+
+`GET /api/search` (instant) and `POST /api/documents/search/natural` (AI) answer a *document request* differently from a text search. The rule, from the client's retrieval spec: **a confident wrong answer is worse than a null.**
+
+When a query states something a document must BE, it becomes a **constraint**:
+
+| Typed | Constraint | Checked against |
+|---|---|---|
+| `1042620303`, `10426203-03`, `lot 10426203 sublot 03` | lot | linked lot records + extracted `lot_number` / `sub_lot_*` |
+| `production date 7/31/2026`, `produced 7/22/26`, `packed 9/2` | date, role `production` | `production_date`, `mfg_date`, `pack_date`, ... |
+| `code date 03/01/2026` | date, role `code` | `code_date` only |
+| `exp 31-Jul-2026`, `best by Jul 31 2026` | date, role `expiration` | `expiration_date`, `document_expires_on`, `renewal_due_date` |
+| a bare `2026-07-31` | date, role `any` | any document date (the result says which) |
+| a supplier name next to a lot/date | supplier | linked supplier + aliases |
+| the words left over | text | the full-text index |
+
+Each document is classified against its **own** fields:
+
+- `covering`: every constraint verified;
+- `candidate_not_matching`: nearby, with `match_reason` naming what failed ("The production date on this document is Jul 22, 2026; you asked for production date Jul 31, 2026.");
+- `unreviewed_candidate`: a pending Review Queue file (in `unreviewed_candidates`, with `review_url`). Never covering.
+
+The response adds `coverage` (`covered` / `none` / `unconstrained`), `constraints`, `dropped_constraints`, `coverage_summary`, `covering_count`, `candidate_count`, `unreviewed_candidates`. Existing fields are unchanged.
+
+What is deliberately **not** a match: a lot the query only prefixes (`partial_lot`); the same base lot with a different sublot (`near`); a date under a different role (`role_mismatch`: a code date is not a production date); a stored date that reads two ways, like `02/07/2026` (`ambiguous`, unless the same document writes another date whose order is unmistakable); a field holding several dates (`multiple_values`). A typed ambiguous date such as `9/2/2026` is read month/day and the constraint's `note` says so.
+
+The natural-language endpoint never loosens: an unknown document type or an uncomparable filter goes into `dropped_constraints`, and coverage is then `none`. A date phrase typed with a role ("produced 7/31/2026") overrides the model's reading, so a production date is never applied to upload time.
+
+Query-time folding (no index rebuild): simple plurals (`bags` -> `bag`) and `gal/gallon`, `lb/lbs/pound`, `oz/ounce`.
+
 ---
 
 ## Error Handling

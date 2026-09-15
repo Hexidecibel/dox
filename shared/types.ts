@@ -1900,6 +1900,13 @@ export interface ParsedQuery {
   supplier_name: string | null;
   date_from: string | null;
   date_to: string | null;
+  /**
+   * WHICH date `date_from`/`date_to` constrain. `uploaded` (or absent, for
+   * parsers that predate the field) is when the file entered the portal —
+   * `documents.created_at`. Every other value names a date printed ON the
+   * document, so "produced in July" never quietly filters on upload time.
+   */
+  date_role?: SearchDateRole | null;
   metadata_filters: MetadataFilter[];
   expiration_filter: {
     operator: 'before' | 'after' | 'between';
@@ -1915,9 +1922,151 @@ export interface SearchMatchContext {
   snippet: string;
 }
 
-export interface NaturalSearchResponse {
+// === Coverage-aware search ===
+//
+// "A confident wrong answer is worse than a null" (AJ Conner, Any-Field COA
+// Retrieval, D6/R9). When a query states something a document must BE — a lot,
+// a production date, a supplier — each result is checked against that
+// document's OWN structured fields and labelled: it covers the query, or it is
+// a nearby candidate that does not, with the reason. A pending Review Queue item
+// is never counted as covering, however well it matches. Logic lives in
+// `shared/searchCoverage.ts`; retrieval in `functions/lib/search-coverage.ts`.
+
+/** `unconstrained` = the query stated nothing to verify, so nothing was judged. */
+export type SearchCoverage = 'covered' | 'none' | 'unconstrained';
+
+/**
+ * The role of a date. `production` covers production / manufacture / pack date;
+ * `code` is the code date, a different printed field; `any` is a date typed
+ * with no role, which matches any document date and says which one it hit.
+ */
+export type SearchDateRole = 'production' | 'code' | 'expiration' | 'ship' | 'uploaded' | 'any';
+
+export type SearchConstraintKind =
+  | 'lot'
+  | 'date'
+  | 'supplier'
+  | 'product'
+  | 'document_type'
+  | 'metadata'
+  | 'text';
+
+export interface SearchConstraint {
+  id: string;
+  kind: SearchConstraintKind;
+  /** What we understood, in words: "production date Jul 31, 2026". */
+  label: string;
+  /** What the person typed, or the parser's value. */
+  raw: string;
+  /** Normalized value compared against documents. */
+  value: string;
+  /** The document fields this constraint is checked against. */
+  fields: string[];
+  role?: SearchDateRole;
+  /** Inclusive ISO bounds for a date constraint (equal for a single day). */
+  date_from?: string | null;
+  date_to?: string | null;
+  /** Set for a year-less date ("9/2"): matches that month/day in any year. */
+  month_day?: { month: number; day: number } | null;
+  /** For metadata constraints: exact (normalized) or substring comparison. */
+  match?: 'equals' | 'contains';
+  /** Where the constraint came from. */
+  source: 'query_text' | 'ai_parse';
+  /** Anything the reader should know about how it was read. */
+  note?: string | null;
+}
+
+export interface SearchDroppedConstraint {
+  kind: SearchConstraintKind | 'unknown';
+  label: string;
+  raw: string;
+  /** Why it could not be applied — shown to the person. */
+  reason: string;
+}
+
+export type SearchMatchStatus = 'covering' | 'candidate_not_matching' | 'unreviewed_candidate';
+
+export type SearchCheckOutcome =
+  | 'match'
+  /** Same role, different value close by (a date within two weeks, a sibling sublot). */
+  | 'near'
+  /** The value is on the document, but under a different date role. */
+  | 'role_mismatch'
+  /** A stored date that reads two ways, one of which is the asked date. */
+  | 'ambiguous'
+  /** The query is a strict prefix of the document's lot (or vice versa). */
+  | 'partial_lot'
+  /** The field holds several values, one of which matches. */
+  | 'multiple_values'
+  | 'mismatch'
+  /** The document has no value for this field at all. */
+  | 'missing'
+  /** The constraint could not be checked against this document. */
+  | 'unverified';
+
+export type SearchFieldProvenance = 'extracted' | 'linked_record' | 'system';
+
+export interface SearchConstraintCheck {
+  constraint_id: string;
+  outcome: SearchCheckOutcome;
+  /** Machine field name the outcome is about (`production_date`, `lot`). */
+  field: string | null;
+  field_label: string | null;
+  /** The value as stored on the document. */
+  value: string | null;
+  /**
+   * `extracted` = read off the document and confirmed at review; `linked_record`
+   * = a lot / supplier / product record the document is linked to; `system` =
+   * recorded by the portal (upload time).
+   */
+  provenance: SearchFieldProvenance | null;
+  /** One sentence from the reader's side. */
+  message: string;
+  /** For a nearby date: how many days from the asked day. */
+  distance_days?: number | null;
+}
+
+/** Per-result annotation, added to document rows on constrained searches. */
+export interface SearchResultCoverage {
+  match_status?: SearchMatchStatus;
+  match_checks?: SearchConstraintCheck[];
+  /** The failing checks' messages joined — null when covering. */
+  match_reason?: string | null;
+}
+
+export interface SearchUnreviewedCandidate {
+  queue_id: string;
+  file_name: string;
+  supplier: string | null;
+  created_at: string | null;
+  /** `/review?item=<queue_id>` */
+  review_url: string;
+  match_status: 'unreviewed_candidate';
+  /** True when every constraint matched — still not covering until approved. */
+  matches_all_constraints: boolean;
+  /** Which extracted record matched best ("record 2 of 4"). */
+  record_label: string | null;
+  match_checks: SearchConstraintCheck[];
+  match_reason: string;
+}
+
+/** Added to both the universal and the natural-language search responses. */
+export interface SearchCoverageFields {
+  coverage?: SearchCoverage;
+  constraints?: SearchConstraint[];
+  dropped_constraints?: SearchDroppedConstraint[];
+  /** One line from the reader's side: "No document on file covers production date Jul 31, 2026." */
+  coverage_summary?: string | null;
+  covering_count?: number;
+  candidate_count?: number;
+  unreviewed_candidates?: SearchUnreviewedCandidate[];
+  /** The structured scan hit its row cap; a covering document could be past it. */
+  coverage_scan_truncated?: boolean;
+}
+
+export interface NaturalSearchResponse extends SearchCoverageFields {
   parsed_query: ParsedQuery;
-  results: (Document & {
+  results: (Document & SearchResultCoverage & {
     relevance_score?: number;
     match_context?: SearchMatchContext[];
   })[];
@@ -3616,7 +3765,7 @@ export interface UniversalSearchOrder extends UniversalSearchEntityBase {
 // Kept loose (Record<string, unknown>) here so future projection tweaks
 // don't force a type migration; the frontend cards already accept the
 // loose Document shape from the list endpoint.
-export interface UniversalSearchDocument {
+export interface UniversalSearchDocument extends SearchResultCoverage {
   id: string;
   title?: string;
   description?: string | null;
@@ -3643,7 +3792,7 @@ export interface UniversalSearchBlock<T> {
   results: T[];
 }
 
-export interface UniversalSearchResponse {
+export interface UniversalSearchResponse extends SearchCoverageFields {
   documents: UniversalSearchBlock<UniversalSearchDocument>;
   suppliers: UniversalSearchBlock<UniversalSearchSupplier>;
   products: UniversalSearchBlock<UniversalSearchProduct>;

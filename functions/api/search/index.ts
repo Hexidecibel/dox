@@ -41,7 +41,9 @@
 
 import { errorToResponse, BadRequestError } from '../../lib/permissions';
 import { buildMatchExpr, buildMatchExprWithLot, DOCUMENTS_FTS_COLS, documentsBm25Expr } from '../../lib/search-fts';
+import { planInstantSearch, runCoverageSearch, unreviewedTextCandidates } from '../../lib/search-coverage';
 import type { Env, User } from '../../lib/types';
+import type { SearchCoverageFields } from '../../../shared/types';
 
 const DEFAULT_LIMIT_PER_TYPE = 5;
 const MAX_LIMIT_PER_TYPE = 25;
@@ -53,7 +55,7 @@ interface PerEntityBlock<T> {
   results: T[];
 }
 
-interface UniversalResponse {
+interface UniversalResponse extends SearchCoverageFields {
   documents: PerEntityBlock<Record<string, unknown>> & { facets?: Record<string, unknown> };
   suppliers: PerEntityBlock<Record<string, unknown>>;
   products: PerEntityBlock<Record<string, unknown>>;
@@ -320,6 +322,45 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       orders: blockFromPair(10, 11, (r) => r as Record<string, unknown>),
       documents: blockFromPair(12, 13, (r) => r as Record<string, unknown>),
     };
+
+    // ----------------------------------------------------------------
+    // Coverage. A query that states a lot or a dated role ("production
+    // date 7/31/2026", "1042620303") is asking for the document that
+    // COVERS it, not for the nearest text hit. The documents block is then
+    // the covering documents followed by labelled non-matching candidates,
+    // and pending Review Queue files ride along as unreviewed candidates.
+    // An ordinary search keeps the FTS block above untouched.
+    // ----------------------------------------------------------------
+    const plan = await planInstantSearch(context.env.DB, tenantId, q);
+    if (plan) {
+      const run = await runCoverageSearch(context.env.DB, tenantId, {
+        constraints: plan.constraints,
+        dropped: plan.dropped,
+        corpus: plan.corpus,
+        poolText: plan.residual || null,
+        limit: docLimit,
+        offset: docOffset,
+      });
+      responseBody.documents = { total: run.total, results: run.rows };
+      Object.assign(responseBody, {
+        coverage: run.coverage,
+        constraints: run.constraints,
+        dropped_constraints: run.dropped_constraints,
+        coverage_summary: run.coverage_summary,
+        covering_count: run.covering_count,
+        candidate_count: run.candidate_count,
+        unreviewed_candidates: run.unreviewed_candidates,
+        coverage_scan_truncated: run.coverage_scan_truncated,
+      } satisfies SearchCoverageFields);
+    } else {
+      Object.assign(responseBody, {
+        coverage: 'unconstrained',
+        constraints: [],
+        dropped_constraints: [],
+        coverage_summary: null,
+        unreviewed_candidates: await unreviewedTextCandidates(context.env.DB, tenantId, q.trim()),
+      } satisfies SearchCoverageFields);
+    }
 
     return new Response(JSON.stringify(responseBody), {
       headers: { 'Content-Type': 'application/json' },
