@@ -338,6 +338,17 @@ import type { SupplierGapListResponse } from '../../shared/requirementGap';
 import type { ProductIdentifier, ProductIdentifierKind } from '../../shared/types';
 import type { SupplierLotSchemeResponse } from '../../shared/types';
 import type { LotSchemeSpec } from '../../shared/lotScheme';
+import type {
+  BulkApplyPacketRequest,
+  BulkApplyPacketResponse,
+  RequirementPacketCatalogResponse,
+  SupplierListImportRequest,
+  SupplierListImportResponse,
+  SupplierListImportRun,
+  SupplierListImportRunDetail,
+  SupplierRequirementReviewRequest,
+  SupplierRequirementReviewResponse,
+} from '../../shared/types';
 
 // ---------------------------------------------------------------------------
 // Modules (migration 0099). Its own import block for the same reason as the
@@ -1456,6 +1467,8 @@ export const api = {
       supplier_id?: string;
       requirement_id?: string;
       tier?: SupplierRequirementTier;
+      /** The worklist: unconfirmed seed rows, flagged derived rows, or either. */
+      review?: 'unconfirmed' | 'flagged' | 'any';
       tenant_id?: string;
       limit?: number;
       offset?: number;
@@ -1464,6 +1477,7 @@ export const api = {
       if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
       if (params?.requirement_id) query.set('requirement_id', params.requirement_id);
       if (params?.tier) query.set('tier', params.tier);
+      if (params?.review) query.set('review', params.review);
       if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
       if (params?.limit) query.set('limit', String(params.limit));
       if (params?.offset !== undefined) query.set('offset', String(params.offset));
@@ -1484,7 +1498,10 @@ export const api = {
      * report configured suppliers as unconfigured, which is the one wrong
      * answer this surface must not give.
      */
-    listAll: async (params?: { tenant_id?: string }): Promise<ApiSupplierRequirement[]> => {
+    listAll: async (params?: {
+      tenant_id?: string;
+      review?: 'unconfirmed' | 'flagged' | 'any';
+    }): Promise<ApiSupplierRequirement[]> => {
       const page = 500;
       const rows: ApiSupplierRequirement[] = [];
       for (let offset = 0; ; offset += page) {
@@ -1521,6 +1538,48 @@ export const api = {
     /** DELETE /api/supplier-requirements/:id — detach. Hard delete, no tombstone. */
     detach: (id: string) =>
       fetchApi<{ success: boolean }>(`/supplier-requirements/${id}`, { method: 'DELETE' }),
+
+    /** GET /api/supplier-requirements/packets — the tenant pack's requirement packets. */
+    packets: (params?: { tenant_id?: string }) =>
+      fetchApi<RequirementPacketCatalogResponse>(
+        `/supplier-requirements/packets${params?.tenant_id ? `?tenant_id=${encodeURIComponent(params.tenant_id)}` : ''}`,
+      ),
+
+    /**
+     * POST /api/supplier-requirements/apply-packet — named suppliers. Dry run
+     * unless `dry_run: false`; the response is the per-supplier preview either way.
+     */
+    applyPacket: (data: BulkApplyPacketRequest) =>
+      fetchApi<BulkApplyPacketResponse>('/supplier-requirements/apply-packet', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /** POST /api/supplier-requirements/review — worklist confirm / remove. */
+    review: (data: SupplierRequirementReviewRequest) =>
+      fetchApi<SupplierRequirementReviewResponse>('/supplier-requirements/review', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  },
+
+  /** The verified supplier list import (migration 0111). */
+  supplierList: {
+    /** POST /api/supplier-list/import — dry run unless `dry_run: false`. */
+    import: (data: SupplierListImportRequest) =>
+      fetchApi<SupplierListImportResponse>('/supplier-list/import', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    imports: (params?: { tenant_id?: string; limit?: number }) => {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.limit) query.set('limit', String(params.limit));
+      const qs = query.toString();
+      return fetchApi<{ imports: SupplierListImportRun[] }>(`/supplier-list/imports${qs ? `?${qs}` : ''}`);
+    },
+    getImport: (id: string) =>
+      fetchApi<{ import: SupplierListImportRunDetail }>(`/supplier-list/imports/${encodeURIComponent(id)}`),
   },
 
   /**
