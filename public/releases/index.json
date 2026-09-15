@@ -1,6 +1,11 @@
 {
-  "current": "2.16.0",
+  "current": "2.16.1",
   "versions": [
+    {
+      "version": "2.16.1",
+      "date": "2026-09-15",
+      "title": "Spec checks read more of how certificates write units"
+    },
     {
       "version": "2.16.0",
       "date": "2026-09-15",
