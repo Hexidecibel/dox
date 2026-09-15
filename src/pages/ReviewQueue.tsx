@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { SupplierClaimPanel } from '../components/SupplierClaimPanel';
+import { SupplierClaimPanel, arrivalDecisionFor, type ArrivalDraft } from '../components/SupplierClaimPanel';
 import {
   Box,
   Typography,
@@ -95,7 +95,7 @@ import {
 import { SpecAlertChip, SpecWarningBanner } from '../components/SpecWarnings';
 import RejectQueueItemDialog from '../components/RejectQueueItemDialog';
 import { REJECTION_REASON_LABELS } from '../lib/types';
-import type { RejectionReason } from '../lib/types';
+import type { QueueArrivalDecisionInput, QueueArrivalDecisionOutcome, RejectionReason, RequestArrival } from '../lib/types';
 import type { LearnedFieldHint } from '../../shared/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -196,6 +196,16 @@ function VlmReadonlyTableList({ tables, label }: { tables: ExtractedTable[]; lab
   );
 }
 
+/** The Approve button says what the click will also do to the supplier request. */
+function approveLabel(draft: ArrivalDraft | undefined): string {
+  const decision = arrivalDecisionFor(draft);
+  if (!decision) return 'Approve';
+  const n = decision.decisions.length;
+  return decision.decisions[0]?.decision === 'accepted'
+    ? `Approve & accept ${n}`
+    : `Approve & send ${n} back`;
+}
+
 export default function ReviewQueue() {
   const { isSuperAdmin } = useAuth();
   const { tenants, selectedTenantId } = useTenant();
@@ -215,6 +225,10 @@ export default function ReviewQueue() {
   const [editedFields, setEditedFields] = useState<Record<string, Record<string, string>>>({});
   const [productNames, setProductNames] = useState<Record<string, string>>({});
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
+  // Supplier-portal items: the arrival each came from, and what the reviewer
+  // has chosen to decide about it in the same action as approving.
+  const [arrivalsByItem, setArrivalsByItem] = useState<Record<string, RequestArrival>>({});
+  const [arrivalDrafts, setArrivalDrafts] = useState<Record<string, ArrivalDraft>>({});
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
   // Supplier-scoped doctype options for the Save-Template dialog. The
   // shared `documentTypes` above backs the queue FILTER (which spans every
@@ -746,7 +760,41 @@ export default function ReviewQueue() {
   const renewalValueFor = (item: ProcessingQueueItem): string =>
     renewalEdits[item.id] ?? (item.renewal_proposal?.due_date ?? '');
 
+  /**
+   * A supplier-portal item whose arrival is decidable is waiting on the
+   * reviewer's accept / send back / decide-later choice. Approve waits for it:
+   * nothing is accepted just because the supplier ticked a box.
+   */
+  const arrivalChoicePending = (itemId: string): boolean => {
+    const arrival = arrivalsByItem[itemId];
+    if (!arrival || arrival.current_request_status !== 'issued') return false;
+    return (arrivalDrafts[itemId]?.mode ?? null) === null;
+  };
+
+  /** Snackbar text for the decision half of a combined action. */
+  const arrivalOutcomeMessage = (
+    base: string,
+    outcome: QueueArrivalDecisionOutcome | undefined,
+    decision: QueueArrivalDecisionInput | undefined
+  ): { message: string; severity: 'success' | 'error' } => {
+    if (!outcome || !decision) return { message: base, severity: 'success' };
+    if (!outcome.applied) {
+      return {
+        message: `${base}, but the request was not updated: ${outcome.error} It is still waiting on Requests › Arrivals.`,
+        severity: 'error',
+      };
+    }
+    const n = decision.decisions.length;
+    const noun = n === 1 ? 'requirement' : 'requirements';
+    const verb = decision.decisions[0]?.decision === 'accepted' ? 'accepted' : 'sent back to the supplier';
+    return { message: `${base}; ${n} ${noun} ${verb}`, severity: 'success' };
+  };
+
   const handleApprove = async (id: string) => {
+    if (arrivalChoicePending(id)) {
+      setSnackbar({ open: true, message: 'Choose what to do with the supplier request first.', severity: 'error' });
+      return;
+    }
     // Hard gate: never approve without a human-verified supplier. The button is
     // disabled in this state, but guard here too in case of a programmatic call.
     if (!isSupplierVerified(id)) {
@@ -836,13 +884,17 @@ export default function ReviewQueue() {
         ? { renewal: { due_date: renewalValueFor(item) || null } }
         : {};
 
+      const arrivalDecision = arrivalDecisionFor(arrivalDrafts[id]);
+      const arrivalPayload = arrivalDecision ? { arrival_decision: arrivalDecision } : {};
+
       if (isMultiProduct(id)) {
         // Multi-product approval
         const products = multiProducts[id] || [];
         const tables = editedTables[id] || originalTables;
-        await api.queue.approve(id, {
+        const res = await api.queue.approve(id, {
           ...supplierPayload,
           ...renewalPayload,
+          ...arrivalPayload,
           shared_fields: primaryFields,
           products: products.map(p => ({
             product_name: p.product_name,
@@ -854,11 +906,15 @@ export default function ReviewQueue() {
           dismissals: dismissalCaptures,
           table_edits: tableEditCaptures,
         });
-        setSnackbar({ open: true, message: `${products.length} documents created from multi-product approval`, severity: 'success' });
+        setSnackbar({
+          open: true,
+          ...arrivalOutcomeMessage(`${products.length} documents created from multi-product approval`, res.arrival_decision, arrivalDecision),
+        });
       } else {
-        await api.queue.approve(id, {
+        const res = await api.queue.approve(id, {
           ...supplierPayload,
           ...renewalPayload,
+          ...arrivalPayload,
           fields: primaryFields,
           product_name: productName || undefined,
           selected_source: selectedSource,
@@ -866,7 +922,10 @@ export default function ReviewQueue() {
           dismissals: dismissalCaptures,
           table_edits: tableEditCaptures,
         });
-        setSnackbar({ open: true, message: 'Item approved and imported', severity: 'success' });
+        setSnackbar({
+          open: true,
+          ...arrivalOutcomeMessage('Item approved and imported', res.arrival_decision, arrivalDecision),
+        });
       }
 
       // Prompt to save template if no template existed
@@ -945,11 +1004,20 @@ export default function ReviewQueue() {
    * Rejecting always goes through the reason dialog. A rejection with no reason
    * is a bare fact nobody can learn from later — see RejectQueueItemDialog.
    */
-  const handleReject = async (id: string, reason: RejectionReason, note: string) => {
+  const handleReject = async (
+    id: string,
+    reason: RejectionReason,
+    note: string,
+    arrivalDecision?: QueueArrivalDecisionInput
+  ) => {
     setActionLoading(prev => ({ ...prev, [id]: true }));
     try {
-      await api.queue.reject(id, { rejection_reason: reason, rejection_note: note || undefined });
-      setSnackbar({ open: true, message: 'Item rejected', severity: 'success' });
+      const res = await api.queue.reject(id, {
+        rejection_reason: reason,
+        rejection_note: note || undefined,
+        ...(arrivalDecision ? { arrival_decision: arrivalDecision } : {}),
+      });
+      setSnackbar({ open: true, ...arrivalOutcomeMessage('Item rejected', res.arrival_decision, arrivalDecision) });
       setRejectTarget(null);
       loadQueue();
     } catch (err) {
@@ -1756,6 +1824,17 @@ export default function ReviewQueue() {
                         tenantId={item.tenant_id}
                         asSuperAdmin={isSuperAdmin}
                         onOpenRequest={(requestId) => navigate(`/requests/${requestId}`)}
+                        onArrivalLoaded={(arrival) =>
+                          setArrivalsByItem((prev) => ({ ...prev, [item.id]: arrival }))
+                        }
+                        {...(item.status === 'pending' && (item.output_kind || 'coa') === 'coa'
+                          ? {
+                              draft: arrivalDrafts[item.id],
+                              onDraftChange: (draft: ArrivalDraft) =>
+                                setArrivalDrafts((prev) => ({ ...prev, [item.id]: draft })),
+                            }
+                          : {})}
+                        disabled={isActioning}
                       />
                     )}
                     <Box sx={{ display: 'flex', gap: 2, flexDirection: { xs: 'column', md: 'row' }, mb: 2 }}>
@@ -1891,6 +1970,8 @@ export default function ReviewQueue() {
                           <CoaRecordsReviewTile
                             item={item}
                             onApproved={() => loadQueue()}
+                            arrivalDecision={arrivalDecisionFor(arrivalDrafts[item.id])}
+                            arrivalChoicePending={arrivalChoicePending(item.id)}
                             onPageChange={(page) =>
                               setCoaPdfPage((prev) => ({ ...prev, [item.id]: page }))
                             }
@@ -3037,7 +3118,13 @@ export default function ReviewQueue() {
                     {item.status === 'pending' && (
                       <CardActions sx={{ px: 0, pt: 0 }}>
                         <Tooltip
-                          title={!isSupplierVerified(item.id) ? 'Verify the supplier before approving.' : ''}
+                          title={
+                            !isSupplierVerified(item.id)
+                              ? 'Verify the supplier before approving.'
+                              : arrivalChoicePending(item.id)
+                                ? 'Choose what to do with the supplier request above.'
+                                : ''
+                          }
                           arrow
                         >
                           {/* span wrapper so the tooltip still shows on a disabled button */}
@@ -3047,10 +3134,10 @@ export default function ReviewQueue() {
                               color="success"
                               size="small"
                               onClick={(e) => { e.stopPropagation(); handleApprove(item.id); }}
-                              disabled={isActioning || isProcessing || !isSupplierVerified(item.id)}
+                              disabled={isActioning || isProcessing || !isSupplierVerified(item.id) || arrivalChoicePending(item.id)}
                               startIcon={isActioning ? <CircularProgress size={16} color="inherit" /> : <CheckIcon />}
                             >
-                              Approve
+                              {approveLabel(arrivalDrafts[item.id])}
                             </Button>
                           </span>
                         </Tooltip>
@@ -3099,8 +3186,9 @@ export default function ReviewQueue() {
         fileName={rejectTarget?.file_name}
         submitting={!!rejectTarget && !!actionLoading[rejectTarget.id]}
         onClose={() => setRejectTarget(null)}
-        onConfirm={(reason, note) => {
-          if (rejectTarget) handleReject(rejectTarget.id, reason, note);
+        arrival={rejectTarget ? arrivalsByItem[rejectTarget.id] ?? null : null}
+        onConfirm={(reason, note, arrivalDecision) => {
+          if (rejectTarget) handleReject(rejectTarget.id, reason, note, arrivalDecision);
         }}
       />
 

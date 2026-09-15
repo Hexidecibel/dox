@@ -58,7 +58,7 @@ import {
   specVerdictsForGroup,
   specRowSx,
 } from './SpecWarnings';
-import type { SpecVerdict } from '../lib/types';
+import type { SpecVerdict, QueueArrivalDecisionInput } from '../lib/types';
 import {
   COA_RECORD_LOT_KEYS,
   COA_RECORD_SUBLOT_KEYS,
@@ -247,9 +247,18 @@ export default function CoaRecordsReviewTile({
   item,
   onApproved,
   onPageChange,
+  arrivalDecision,
+  arrivalChoicePending = false,
 }: {
   item: ProcessingQueueItem;
   onApproved: () => void;
+  /**
+   * Supplier-portal items: what the reviewer chose to decide in the same
+   * action (see SupplierClaimPanel). Undefined = decide nothing.
+   */
+  arrivalDecision?: QueueArrivalDecisionInput;
+  /** True while a supplier-portal item still needs its accept/send-back choice. */
+  arrivalChoicePending?: boolean;
   /**
    * Fired with the currently-reviewed source PDF page (1-based) whenever the
    * page navigator moves. ReviewQueue feeds this into the left-side PdfViewer
@@ -463,13 +472,18 @@ export default function CoaRecordsReviewTile({
         record_decisions: recordDecisions,
         ...(Object.keys(productMapsBody).length > 0 ? { product_maps: productMapsBody } : {}),
         selected_source: 'text',
+        ...(arrivalDecision ? { arrival_decision: arrivalDecision } : {}),
       });
-      setSuccess(
+      const approvedMsg =
         res.summary ||
-          (outcome === 'approve_all'
-            ? `All ${records.length} record(s) approved`
-            : `${approveCount} record(s) approved; held records keep this item pending`),
-      );
+        (outcome === 'approve_all'
+          ? `All ${records.length} record(s) approved`
+          : `${approveCount} record(s) approved; held records keep this item pending`);
+      if (res.arrival_decision && !res.arrival_decision.applied) {
+        setError(`${approvedMsg}, but the supplier request was not updated: ${res.arrival_decision.error}`);
+      } else {
+        setSuccess(approvedMsg);
+      }
       onApproved();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Approval failed');
@@ -918,7 +932,7 @@ export default function CoaRecordsReviewTile({
             color={outcome === 'approve_all' ? 'success' : 'warning'}
             startIcon={submitting ? <CircularProgress size={16} color="inherit" /> : <CheckIcon />}
             onClick={handleApprove}
-            disabled={submitting || records.length === 0 || !supplierVerified}
+            disabled={submitting || records.length === 0 || !supplierVerified || arrivalChoicePending}
           >
             {outcome === 'approve_all'
               ? `Approve ${records.length} record${records.length === 1 ? '' : 's'}`

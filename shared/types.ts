@@ -1821,6 +1821,14 @@ export const REJECTION_REASONS = [
   'extraction_defect',
   'duplicate',
   'wrong_document_type',
+  // A supplier's marketing sheet sent where a specification sheet was asked
+  // for. The client's most common send-back (14 Sep 2026): a sales sheet
+  // carries no dates and is not a controlled document, so it can never stand
+  // in for a spec sheet. Its own value rather than `wrong_document_type` plus a
+  // note, because "how many sales sheets did we bounce" is a question someone
+  // will ask, and a note is not countable. No migration: 0083 put no CHECK on
+  // `processing_queue.rejection_reason`, so this enum is the only gate.
+  'sales_sheet',
   'unreadable',
   'other',
 ] as const;
@@ -1843,6 +1851,10 @@ export const REJECTION_REASON_LABELS: Record<
   wrong_document_type: {
     label: 'Not the right kind of document',
     help: "It isn't a COA (or whatever this queue expects).",
+  },
+  sales_sheet: {
+    label: 'Sales sheet, not a spec sheet',
+    help: 'Marketing material: no dates, not a controlled document. The supplier needs to send the specification sheet.',
   },
   unreadable: {
     label: "Can't be read",
@@ -4913,6 +4925,48 @@ export interface DecideArrivalLine {
 export interface DecideArrivalRequest {
   decisions: DecideArrivalLine[];
 }
+
+/**
+ * Ready-made send-back sentences. The supplier reads `attention_reason` as free
+ * text (0092 has no enum there, and should not: most send-backs are specific),
+ * so a preset only fills the box — the reviewer can still edit it.
+ */
+export const ATTENTION_REASON_PRESETS = [
+  {
+    key: 'sales_sheet',
+    label: 'Sales sheet, not a spec sheet',
+    text:
+      'This is a sales sheet, not a specification sheet. Sales sheets carry no dates and are not ' +
+      'controlled documents, so we cannot accept one in place of a spec sheet. Please send the ' +
+      'current, dated specification sheet.',
+  },
+] as const;
+
+/**
+ * PUT /api/queue/:id `arrival_decision` — decide a supplier-portal arrival in
+ * the same action that approves (or rejects) its queue item. Line ids are on
+ * the CURRENT version of the request. `document_id` cannot be chosen: accepted
+ * lines are accepted from the document this approval creates.
+ */
+export interface QueueArrivalDecisionInput {
+  decisions: Array<Omit<DecideArrivalLine, 'document_id'>>;
+}
+
+/**
+ * What happened to the decision half of a combined action.
+ *
+ * `applied: false` means the queue half DID happen (the response's `item` says
+ * how) and the arrival is untouched and still waiting on the arrivals screen.
+ */
+export type QueueArrivalDecisionOutcome =
+  | ({ applied: true } & DecideArrivalResponse)
+  | {
+      applied: false;
+      /** The HTTP status the decision alone would have returned. */
+      status: number;
+      error: string;
+      upload_id: string;
+    };
 
 export interface DecideArrivalResponse {
   arrival: RequestArrival;

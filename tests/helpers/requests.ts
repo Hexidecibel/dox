@@ -213,14 +213,10 @@ export async function queuePut(
 }
 
 /**
- * Stand in for the worker, then approve the queue item a portal upload
- * produced. Returns the document the approval created.
+ * Stand in for the worker: give a portal upload's queue item a type and an
+ * extraction, so it can be approved. Returns the document type id.
  */
-export async function extractAndApprove(
-  fx: RequestFixture,
-  queueId: string,
-  user: TestUser,
-): Promise<string> {
+export async function markExtracted(fx: RequestFixture, queueId: string): Promise<string> {
   const db = env.DB;
   let docTypeId = (
     await db
@@ -252,6 +248,20 @@ export async function extractAndApprove(
       queueId,
     )
     .run();
+  return docTypeId;
+}
+
+/**
+ * Stand in for the worker, then approve the queue item a portal upload
+ * produced. Returns the document the approval created.
+ */
+export async function extractAndApprove(
+  fx: RequestFixture,
+  queueId: string,
+  user: TestUser,
+): Promise<string> {
+  const db = env.DB;
+  await markExtracted(fx, queueId);
 
   const resp = await queuePut(
     queueId,
