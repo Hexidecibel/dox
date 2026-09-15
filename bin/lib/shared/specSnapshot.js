@@ -84,7 +84,10 @@ function uniqueByRegisterIdentity(verdicts) {
   return { kept, dropped };
 }
 function buildLimitSnapshot(verdict, limits) {
-  const equated = verdict.unit_equivalence_applied ? { unit_equivalence: "volume_mass" } : {};
+  const equated = {
+    ...verdict.unit_equivalence_applied ? { unit_equivalence: "volume_mass" } : {},
+    ...verdict.conversion ? { conversion: verdict.conversion } : {}
+  };
   if (verdict.source !== "limit" || !verdict.limit_id) {
     return verdict.limit_text ? JSON.stringify({ printed: verdict.limit_text, ...equated }) : null;
   }

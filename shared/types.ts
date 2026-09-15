@@ -6,7 +6,15 @@
 // re-exported here so the frontend gets it with the rest of the API shapes.
 export type { InvariantFailure, InvariantCheck } from './extractionInvariants';
 import type { InvariantFailure } from './extractionInvariants';
-export type { SpecVerdict, SpecVerdictKind, SpecTarget, SpecLimit, SpecOperator } from './specCheck';
+export type {
+  SpecVerdict,
+  SpecVerdictKind,
+  SpecTarget,
+  SpecLimit,
+  SpecOperator,
+  UnitConversion,
+  UnitConversionRule,
+} from './specCheck';
 import type { SpecVerdict, SpecVerdictKind, SpecOperator } from './specCheck';
 // Criticality (migration 0095) lives in its own module because the vocabulary
 // is not final — see shared/specCriticality.ts. Nothing outside that file may

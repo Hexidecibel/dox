@@ -26,9 +26,11 @@ __export(specCheck_exports, {
   classifySpecDisagreement: () => classifySpecDisagreement,
   collectPrintedAssertions: () => collectPrintedAssertions,
   compareToLimit: () => compareToLimit,
+  describeUnitConversion: () => describeUnitConversion,
   detectTableShape: () => detectTableShape,
   findSpecDisagreements: () => findSpecDisagreements,
   formatLimit: () => formatLimit,
+  formatUnitConversion: () => formatUnitConversion,
   isControlRowLabel: () => isControlRowLabel,
   matchSpecTest: () => matchSpecTest,
   normalizeUnit: () => normalizeUnit,
@@ -41,9 +43,11 @@ __export(specCheck_exports, {
   specResultKey: () => specResultKey,
   specVerdictKey: () => specVerdictKey,
   toSpecLimit: () => toSpecLimit,
+  unitConversionNote: () => unitConversionNote,
   unitEquivalenceNote: () => unitEquivalenceNote,
   unitFactor: () => unitFactor,
   unitInferenceNote: () => unitInferenceNote,
+  unitRefusalNote: () => unitRefusalNote,
   validateLimitShape: () => validateLimitShape
 });
 module.exports = __toCommonJS(specCheck_exports);
@@ -75,7 +79,8 @@ function normalizeUnit(raw) {
   if (!s) return UNKNOWN_UNIT;
   const n = norm(s);
   if (n === "percent" || n === "pct" || s.includes("%")) {
-    return { family: "percent", perBasis: 1, canonical: "%" };
+    const basis = percentBasis(s);
+    return basis ? { family: `percent:${basis}`, perBasis: 1, canonical: `% ${basis}` } : { family: "percent", perBasis: 1, canonical: "%" };
   }
   if (isEmptyCell(s)) return UNKNOWN_UNIT;
   if (!n) return UNKNOWN_UNIT;
@@ -96,6 +101,13 @@ function normalizeUnit(raw) {
     return { family: `${method}:${basis}`, perBasis, canonical: s };
   }
   return { family: `other:${n}`, perBasis: 1, canonical: s };
+}
+function percentBasis(raw) {
+  const t = raw.toLowerCase().replace(/\s+/g, "");
+  if (/w\/v|wt\/vol|m\/v/.test(t)) return "w/v";
+  if (/w\/w|wt\/wt|m\/m/.test(t)) return "w/w";
+  if (/v\/v|vol\/vol/.test(t)) return "v/v";
+  return null;
 }
 var ENUMERATION_METHOD_RE = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?$/;
 var ENUMERATION_BASIS_RE = /^(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/;
@@ -119,6 +131,9 @@ var STRICT_UNIT_POLICY = {};
 function resolveUnits(from, to, policy = STRICT_UNIT_POLICY) {
   if (from.family === "unknown" || to.family === "unknown") return { factor: 1, equated: false };
   if (from.family === to.family) return { factor: to.perBasis / from.perBasis, equated: false };
+  if (from.family.startsWith("percent") && to.family.startsWith("percent")) {
+    return from.family === "percent" || to.family === "percent" ? { factor: 1, equated: false } : null;
+  }
   const [fMethod, fBasis] = from.family.split(":");
   const [tMethod, tBasis] = to.family.split(":");
   if (fMethod !== tMethod) return null;
@@ -139,6 +154,45 @@ function unitEquivalenceNote(value, limit) {
   const v = value.canonical || "the printed unit";
   const l = limit.canonical || "the limit unit";
   return `${v} judged as ${l}, per this tenant's setting`;
+}
+function roundFactor(x) {
+  return Number(x.toPrecision(6));
+}
+function describeUnitConversion(from, to, match) {
+  const scaled = Math.abs(match.factor - 1) > 1e-9;
+  if (!match.equated && !scaled) return null;
+  const operation = !scaled ? "1:1" : match.factor < 1 ? `\xF7 ${roundFactor(1 / match.factor)}` : `\xD7 ${roundFactor(match.factor)}`;
+  return {
+    from: from.canonical || "the printed unit",
+    to: to.canonical || "the limit unit",
+    rule: match.equated ? "tenant_volume_mass" : "sample_basis",
+    factor: roundFactor(match.factor),
+    operation
+  };
+}
+function unitConversionNote(c) {
+  if (c.rule === "tenant_volume_mass") {
+    return `${c.from} judged as ${c.to}, per this tenant's setting${c.operation === "1:1" ? "" : `, ${c.operation}`}`;
+  }
+  return `${c.from} converted to ${c.to}, ${c.operation}`;
+}
+function formatUnitConversion(c) {
+  const how = c.rule === "tenant_volume_mass" ? c.operation === "1:1" ? "tenant setting" : `tenant setting, ${c.operation}` : c.operation;
+  return `Converted: ${c.from} \u2192 ${c.to} (${how})`;
+}
+function unitRefusalNote(from, to) {
+  const [fm, fb] = from.family.split(":");
+  const [tm, tb] = to.family.split(":");
+  if (fm === "percent" && tm === "percent") {
+    return " (a % w/w, % v/v or % w/v comparison depends on the product, so it is left for a person to verify)";
+  }
+  if (fm === tm && (fb === "volume" && tb === "mass" || fb === "mass" && tb === "volume")) {
+    return " (per-volume against per-mass depends on the product, so it is left for a person to verify \u2014 a tenant whose products make them the same number can say so in Settings \u203A Spec Limits)";
+  }
+  if (fm !== tm && (fm === "cfu" || fm === "mpn") && (tm === "cfu" || tm === "mpn")) {
+    return " (different counting methods)";
+  }
+  return "";
 }
 function isKnownUnit(raw) {
   const u = normalizeUnit(raw);
@@ -407,16 +461,21 @@ function compareToLimit(value, limit, policy = STRICT_UNIT_POLICY) {
   if (match === null) {
     return {
       verdict: "not_checked",
-      reason: `result is in ${vu.canonical || "an unknown unit"} but the limit is in ${lu.canonical || "another unit"} \u2014 not comparable`,
+      reason: `result is in ${vu.canonical || "an unknown unit"} but the limit is in ${lu.canonical || "another unit"} \u2014 not comparable${unitRefusalNote(vu, lu)}`,
       value_num: null
     };
   }
   const v = value.value * match.factor;
-  const say = (c) => match.equated ? {
-    ...c,
-    reason: `${c.reason} (${unitEquivalenceNote(vu, lu)})`,
-    unit_equivalence_applied: true
-  } : c;
+  const conversion = describeUnitConversion(vu, lu, match);
+  const say = (c) => {
+    if (!conversion) return c;
+    return {
+      ...c,
+      reason: `${c.reason} (${unitConversionNote(conversion)})`,
+      ...match.equated ? { unit_equivalence_applied: true } : {},
+      conversion
+    };
+  };
   const exceedsCeiling = (bound, inclusive) => inclusive ? v > bound : v >= bound;
   const belowFloor = (bound, inclusive) => inclusive ? v < bound : v <= bound;
   switch (limit.operator) {
@@ -594,8 +653,11 @@ function judgePrinted(scope, target, row, policy = STRICT_UNIT_POLICY) {
   }
   if (!cmp) return null;
   const limitText = formatLimit(limit);
-  const equatedSuffix = cmp.unit_equivalence_applied ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(withUnit(limit, unitRaw).unit))})` : "";
-  const equated = cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {};
+  const equatedSuffix = cmp.conversion ? ` (${unitConversionNote(cmp.conversion)})` : "";
+  const equated = {
+    ...cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {},
+    ...cmp.conversion ? { conversion: cmp.conversion } : {}
+  };
   if (cmp.verdict === "out_of_spec") {
     return {
       ...base,
@@ -889,7 +951,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
     const cmp = compareToLimit(value, effectiveLimit, policy);
     if (cmp.verdict === "in_spec" && !opts.includePasses) return;
     const limitText = formatLimit(limit);
-    const equatedSuffix = cmp.unit_equivalence_applied ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(effectiveLimit.unit))})` : "";
+    const equatedSuffix = cmp.conversion ? ` (${unitConversionNote(cmp.conversion)})` : "";
     const reason = inferred ? `${cmp.reason} (${inferenceNote})` : cmp.reason;
     const base = {
       scope,
@@ -907,6 +969,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       value_num: cmp.value_num,
       reason,
       ...cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {},
+      ...cmp.conversion ? { conversion: cmp.conversion } : {},
       ...inferred ? { unit_inferred_from: inferred.from } : {}
     };
     if (cmp.verdict === "out_of_spec") {
@@ -1172,9 +1235,11 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   classifySpecDisagreement,
   collectPrintedAssertions,
   compareToLimit,
+  describeUnitConversion,
   detectTableShape,
   findSpecDisagreements,
   formatLimit,
+  formatUnitConversion,
   isControlRowLabel,
   matchSpecTest,
   normalizeUnit,
@@ -1187,8 +1252,10 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   specResultKey,
   specVerdictKey,
   toSpecLimit,
+  unitConversionNote,
   unitEquivalenceNote,
   unitFactor,
   unitInferenceNote,
+  unitRefusalNote,
   validateLimitShape
 });

@@ -66,6 +66,7 @@ import {
 import type { SpecCriticality } from '../../shared/specCriticality';
 import type { ApiSpecCheck } from '../lib/types';
 import { EmptyState } from '../components/EmptyState';
+import { ConversionChip, conversionFromSnapshot } from '../components/SpecWarnings';
 
 type TabKey = 'open' | 'acknowledged' | 'not_checked';
 
@@ -340,6 +341,7 @@ export function SpecAlerts() {
                     >
                       {c.value_raw || '—'}
                       {c.unit_raw ? ` ${c.unit_raw}` : ''}
+                      <ConversionChip conversion={conversionFromSnapshot(c.limit_snapshot, c.unit_raw)} />
                     </TableCell>
                     <TableCell>
                       {snapshotText(c)}

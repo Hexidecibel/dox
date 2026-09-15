@@ -11,6 +11,8 @@ import {
   parseSpecCriticality,
 } from '../../shared/specCriticality';
 import type { SpecCriticality } from '../../shared/specCriticality';
+import { formatUnitConversion } from '../../shared/specCheck';
+import type { UnitConversion } from '../../shared/specCheck';
 
 /**
  * Conformance warnings on a COA's TEST RESULTS, rendered where the reviewer is
@@ -137,6 +139,67 @@ export function specVerdictsForGroup(
   return out;
 }
 
+/**
+ * "Converted: cfu/mL → CFU/g (tenant setting)" — the conversion a comparison
+ * rested on, as a visible attribute of the value rather than a clause buried in
+ * a sentence (SME ruling, 2026-09-14). Rendered wherever a judged value is, so
+ * the review queue, the register and the document view all read the same
+ * words, which come from `formatUnitConversion`.
+ */
+export function ConversionChip({ conversion }: { conversion: UnitConversion | null | undefined }) {
+  if (!conversion) return null;
+  const label = formatUnitConversion(conversion);
+  const title =
+    conversion.rule === 'tenant_volume_mass'
+      ? "Judged across per-volume and per-mass because this tenant's Spec Limits setting says they are the same number for its products."
+      : 'The printed sample basis was converted to the basis the limit is written in before comparing.';
+  return (
+    <Tooltip arrow title={title}>
+      <Chip
+        size="small"
+        variant="outlined"
+        color={conversion.rule === 'tenant_volume_mass' ? 'secondary' : 'default'}
+        label={label}
+        data-testid="spec-conversion-chip"
+        sx={{ height: 20, fontSize: 11, ml: 0.5, verticalAlign: 'middle' }}
+      />
+    </Tooltip>
+  );
+}
+
+/**
+ * The conversion a REGISTER row was judged under, read from its frozen
+ * snapshot. A row written before `conversion` was frozen but under the 0093
+ * equivalence still says so — its snapshot carries `unit_equivalence` — and is
+ * rebuilt from the printed unit and the limit's unit rather than shown bare.
+ */
+export function conversionFromSnapshot(
+  snapshot: string | null | undefined,
+  unitRaw: string | null | undefined
+): UnitConversion | null {
+  if (!snapshot) return null;
+  try {
+    const s = JSON.parse(snapshot) as {
+      conversion?: UnitConversion;
+      unit_equivalence?: string;
+      unit?: string | null;
+    };
+    if (s.conversion && typeof s.conversion === 'object' && s.conversion.rule) return s.conversion;
+    if (s.unit_equivalence === 'volume_mass') {
+      return {
+        from: unitRaw || 'the printed unit',
+        to: s.unit || 'the limit unit',
+        rule: 'tenant_volume_mass',
+        factor: 1,
+        operation: '1:1',
+      };
+    }
+  } catch {
+    // A corrupt snapshot shows no chip; the reason text still carries the note.
+  }
+  return null;
+}
+
 /** Row/cell-level marker: a small icon plus the sentence, in error colour. */
 export function SpecRowMarker({ verdicts }: { verdicts: SpecVerdict[] | undefined }) {
   const live = liveSpecVerdicts(verdicts);
@@ -164,6 +227,7 @@ export function SpecRowMarker({ verdicts }: { verdicts: SpecVerdict[] | undefine
                   while scanning a results table. */}
               {critical && <strong>{SPEC_CRITICALITY_LABELS.high}: </strong>}
               {v.message}
+              <ConversionChip conversion={v.conversion} />
             </Typography>
           </Box>
         );
@@ -263,6 +327,7 @@ export function SpecWarningBanner({
                 {SPEC_CRITICALITY_LABELS[specCriticalityOf(v)]}:
               </Box>
               {v.message}
+              <ConversionChip conversion={v.conversion} />
             </Typography>
           ))}
         </Box>
@@ -278,6 +343,7 @@ export function SpecWarningBanner({
               sx={{ display: 'list-item' }}
             >
               {v.message}
+              <ConversionChip conversion={v.conversion} />
             </Typography>
           ))}
         </Box>

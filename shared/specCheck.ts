@@ -147,6 +147,13 @@ export interface SpecVerdict {
    */
   unit_equivalence_applied?: boolean;
   /**
+   * The unit conversion this comparison rested on — original unit, the unit it
+   * was judged in, and the operation. Present on EVERY verdict whose printed
+   * magnitude was scaled or equated, whatever the outcome; absent when the value
+   * was compared as printed. See `UnitConversion`.
+   */
+  conversion?: UnitConversion;
+  /**
    * Where the unit came from, when it was NOT printed on the result or in the
    * row's own unit column and had to be read off the page instead (a column
    * header, a units row). Absent means the result carried its own unit, or
@@ -260,7 +267,14 @@ export function normalizeUnit(raw: unknown): UnitInfo {
   // away from the placeholder rule below.
   const n = norm(s);
   if (n === 'percent' || n === 'pct' || s.includes('%')) {
-    return { family: 'percent', perBasis: 1, canonical: '%' };
+    // "% w/w" and "% v/v" are different quantities for any product whose
+    // density is not 1, so the basis is kept when the lab states one. A bare
+    // "%" states none and stays `percent`, agreeing with any of them — the same
+    // rule an unspecified CFU basis already follows.
+    const basis = percentBasis(s);
+    return basis
+      ? { family: `percent:${basis}`, perBasis: 1, canonical: `% ${basis}` }
+      : { family: 'percent', perBasis: 1, canonical: '%' };
   }
 
   if (isEmptyCell(s)) return UNKNOWN_UNIT;
@@ -290,7 +304,16 @@ export function normalizeUnit(raw: unknown): UnitInfo {
   return { family: `other:${n}`, perBasis: 1, canonical: s };
 }
 
-const ENUMERATION_METHOD_RE = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?$/;
+/** The stated basis of a percentage, or null when it states none. */
+function percentBasis(raw: string): 'w/w' | 'v/v' | 'w/v' | null {
+  const t = raw.toLowerCase().replace(/\s+/g, '');
+  if (/w\/v|wt\/vol|m\/v/.test(t)) return 'w/v';
+  if (/w\/w|wt\/wt|m\/m/.test(t)) return 'w/w';
+  if (/v\/v|vol\/vol/.test(t)) return 'v/v';
+  return null;
+}
+
+const ENUMERATION_METHOD_RE =/^(cfu|mpn|apc|spc|tpc|count|ct)(per)?$/;
 const ENUMERATION_BASIS_RE = /^(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/;
 
 /**
@@ -389,6 +412,13 @@ export function resolveUnits(
   if (from.family === 'unknown' || to.family === 'unknown') return { factor: 1, equated: false };
   if (from.family === to.family) return { factor: to.perBasis / from.perBasis, equated: false };
 
+  // Percentages: a stated w/w against a stated v/v is product-dependent and is
+  // refused outright. No tenant setting reaches this — 0093 is volume-vs-mass
+  // for COUNTS only. A bare "%" states no basis and agrees with either.
+  if (from.family.startsWith('percent') && to.family.startsWith('percent')) {
+    return from.family === 'percent' || to.family === 'percent' ? { factor: 1, equated: false } : null;
+  }
+
   // An unspecified basis still tells us the method; allow it against either basis.
   const [fMethod, fBasis] = from.family.split(':');
   const [tMethod, tBasis] = to.family.split(':');
@@ -430,6 +460,120 @@ export function unitEquivalenceNote(value: UnitInfo, limit: UnitInfo): string {
   const v = value.canonical || 'the printed unit';
   const l = limit.canonical || 'the limit unit';
   return `${v} judged as ${l}, per this tenant's setting`;
+}
+
+// ---------------------------------------------------------------------------
+// Conversions are shown, never silent
+// ---------------------------------------------------------------------------
+
+/**
+ * Which rule put a printed magnitude onto the limit's footing.
+ *
+ * `sample_basis`        arithmetic on the stated sample amount — CFU/100 g to
+ *                       CFU/g, CFU/0.1 g to CFU/g, CFU/L to CFU/mL. True for
+ *                       every product, so it needs no setting.
+ * `tenant_volume_mass`  a per-mL result judged as per-g (or the reverse) because
+ *                       THIS tenant said so (migration 0093). Product-dependent,
+ *                       which is why it is a setting at all.
+ */
+export type UnitConversionRule = 'sample_basis' | 'tenant_volume_mass';
+
+/**
+ * A conversion applied to ONE compared value (SME ruling, 2026-09-14: "any unit
+ * conversion applied to a comparison must be a visible attribute of the
+ * compared value, not a log line"). Carried on the verdict, frozen into
+ * `limit_snapshot`, and rendered as a chip beside the value in the review queue
+ * and the register. Absent means the printed magnitude was compared as printed.
+ */
+export interface UnitConversion {
+  /** The unit as printed on the result ("cfu/mL", "CFU/100g"). */
+  from: string;
+  /** The unit it was judged in — the limit's ("CFU/g"). */
+  to: string;
+  rule: UnitConversionRule;
+  /** Multiplier applied to the printed magnitude. 1 for a pure equivalence. */
+  factor: number;
+  /** The operation in words: "÷ 100", "× 10", "1:1". */
+  operation: string;
+}
+
+function roundFactor(x: number): number {
+  return Number(x.toPrecision(6));
+}
+
+/**
+ * Describe the conversion `resolveUnits` made, or null when none was made (the
+ * units already agreed, or one side stated none — neither is a conversion).
+ */
+export function describeUnitConversion(
+  from: UnitInfo,
+  to: UnitInfo,
+  match: UnitMatch
+): UnitConversion | null {
+  const scaled = Math.abs(match.factor - 1) > 1e-9;
+  if (!match.equated && !scaled) return null;
+  const operation = !scaled
+    ? '1:1'
+    : match.factor < 1
+      ? `÷ ${roundFactor(1 / match.factor)}`
+      : `× ${roundFactor(match.factor)}`;
+  return {
+    from: from.canonical || 'the printed unit',
+    to: to.canonical || 'the limit unit',
+    rule: match.equated ? 'tenant_volume_mass' : 'sample_basis',
+    factor: roundFactor(match.factor),
+    operation,
+  };
+}
+
+/**
+ * A conversion in a sentence, for `reason` and `message`. An equivalence keeps
+ * the wording 0093 shipped with ("cfu/mL judged as CFU/g, per this tenant's
+ * setting") so the register reads the same before and after this field.
+ */
+export function unitConversionNote(c: UnitConversion): string {
+  if (c.rule === 'tenant_volume_mass') {
+    return `${c.from} judged as ${c.to}, per this tenant's setting${c.operation === '1:1' ? '' : `, ${c.operation}`}`;
+  }
+  return `${c.from} converted to ${c.to}, ${c.operation}`;
+}
+
+/**
+ * The one label for a conversion, used by every surface that shows one so the
+ * review queue and the register read the same: "Converted: cfu/mL → CFU/g
+ * (tenant setting)", "Converted: CFU/100g → CFU/g (÷ 100)".
+ */
+export function formatUnitConversion(c: UnitConversion): string {
+  const how =
+    c.rule === 'tenant_volume_mass'
+      ? c.operation === '1:1'
+        ? 'tenant setting'
+        : `tenant setting, ${c.operation}`
+      : c.operation;
+  return `Converted: ${c.from} → ${c.to} (${how})`;
+}
+
+/**
+ * Why two units were NOT compared, in words, from the rule that refused them.
+ * Appended to the "not comparable" reason so a reviewer reading "could not
+ * check" knows whether to verify by hand or to fix a setting.
+ */
+export function unitRefusalNote(from: UnitInfo, to: UnitInfo): string {
+  const [fm, fb] = from.family.split(':');
+  const [tm, tb] = to.family.split(':');
+  if (fm === 'percent' && tm === 'percent') {
+    return ' (a % w/w, % v/v or % w/v comparison depends on the product, so it is left for a person to verify)';
+  }
+  if (fm === tm && ((fb === 'volume' && tb === 'mass') || (fb === 'mass' && tb === 'volume'))) {
+    return (
+      ' (per-volume against per-mass depends on the product, so it is left for a person to verify — ' +
+      'a tenant whose products make them the same number can say so in Settings › Spec Limits)'
+    );
+  }
+  if (fm !== tm && (fm === 'cfu' || fm === 'mpn') && (tm === 'cfu' || tm === 'mpn')) {
+    return ' (different counting methods)';
+  }
+  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -850,6 +994,8 @@ export interface Comparison {
    * is the machine-readable copy, for the register and the UI.
    */
   unit_equivalence_applied?: boolean;
+  /** The conversion the comparison rested on, when there was one. */
+  conversion?: UnitConversion;
 }
 
 /**
@@ -933,26 +1079,32 @@ export function compareToLimit(
   if (match === null) {
     return {
       verdict: 'not_checked',
-      reason: `result is in ${vu.canonical || 'an unknown unit'} but the limit is in ${lu.canonical || 'another unit'} — not comparable`,
+      reason: `result is in ${vu.canonical || 'an unknown unit'} but the limit is in ${lu.canonical || 'another unit'} — not comparable${unitRefusalNote(vu, lu)}`,
       value_num: null,
     };
   }
   const v = (value.value as number) * match.factor;
+  const conversion = describeUnitConversion(vu, lu, match);
 
   /**
    * Every verdict below passes through here. When the tenant's unit-equivalence
    * setting is the only reason a comparison happened at all, the reason text
    * has to carry that — a bare "120 is within the 20000 limit" would be the
    * silent pass this module is built to refuse.
+   *
+   * A sample-basis conversion (CFU/100 g → CFU/g) is named the same way: the
+   * number in the reason is the CONVERTED one, and "5 is within the 10 limit"
+   * beside a printed "500" is unreadable unless the conversion is on the line.
    */
-  const say = (c: Comparison): Comparison =>
-    match.equated
-      ? {
-          ...c,
-          reason: `${c.reason} (${unitEquivalenceNote(vu, lu)})`,
-          unit_equivalence_applied: true,
-        }
-      : c;
+  const say = (c: Comparison): Comparison => {
+    if (!conversion) return c;
+    return {
+      ...c,
+      reason: `${c.reason} (${unitConversionNote(conversion)})`,
+      ...(match.equated ? { unit_equivalence_applied: true } : {}),
+      conversion,
+    };
+  };
 
   const exceedsCeiling = (bound: number, inclusive: boolean) => (inclusive ? v > bound : v >= bound);
   const belowFloor = (bound: number, inclusive: boolean) => (inclusive ? v < bound : v <= bound);
@@ -1261,10 +1413,11 @@ function judgePrinted(
   const limitText = formatLimit(limit as SpecLimit);
   // A `not_checked` message already ends with `cmp.reason`, which carries the
   // note; appending it again would say it twice.
-  const equatedSuffix = cmp.unit_equivalence_applied
-    ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(withUnit(limit as SpecLimit, unitRaw).unit))})`
-    : '';
-  const equated = cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {};
+  const equatedSuffix = cmp.conversion ? ` (${unitConversionNote(cmp.conversion)})` : '';
+  const equated = {
+    ...(cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {}),
+    ...(cmp.conversion ? { conversion: cmp.conversion } : {}),
+  };
 
   if (cmp.verdict === 'out_of_spec') {
     return {
@@ -1987,9 +2140,7 @@ export function checkConfiguredLimits(
     // CFU/g" while the COA printed CFU/mL would be the quiet answer this
     // module refuses to give. `not_checked` already ends with `cmp.reason`,
     // which carries the note, so it is not repeated there.
-    const equatedSuffix = cmp.unit_equivalence_applied
-      ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(effectiveLimit.unit))})`
-      : '';
+    const equatedSuffix = cmp.conversion ? ` (${unitConversionNote(cmp.conversion)})` : '';
     // An inferred unit names itself in `reason` as well as in the sentence, so
     // the register — which stores `reason` verbatim — records a comparison that
     // rested on a heading rather than on the result's own line.
@@ -2010,6 +2161,7 @@ export function checkConfiguredLimits(
       value_num: cmp.value_num,
       reason,
       ...(cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {}),
+      ...(cmp.conversion ? { conversion: cmp.conversion } : {}),
       ...(inferred ? { unit_inferred_from: inferred.from } : {}),
     };
 
