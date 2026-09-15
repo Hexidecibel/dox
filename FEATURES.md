@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.18.0](releases/v2.18.0.md) — 2026-09-15 — One place for product identity
 - [v2.17.0](releases/v2.17.0.md) — 2026-09-15 — Renewal warnings on your schedule, and requirements from your supplier list
 - [v2.16.1](releases/v2.16.1.md) — 2026-09-15 — Spec checks read more of how certificates write units
 - [v2.16.0](releases/v2.16.0.md) — 2026-09-15 — Each supplier's lot format, declared
