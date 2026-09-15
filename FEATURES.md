@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.9.0](releases/v2.9.0.md) — 2026-09-14 — Review what suppliers send back
 - [v2.8.0](releases/v2.8.0.md) — 2026-09-14 — A tenant that sets itself up, and a checklist that closes itself
 - [v2.7.0](releases/v2.7.0.md) — 2026-08-20 — The portal stops taking a document's word for it
 - [v2.6.0](releases/v2.6.0.md) — 2026-04-28 — Records module — collaborative trackers, forms, update requests, and workflows
