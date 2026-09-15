@@ -8,6 +8,7 @@ import {
   type TypeRenewalPolicy,
 } from '../../../shared/renewalPeriod';
 import { parseRenewalIntervalMonths, parseTypeRenewalSetting } from '../../lib/registry';
+import { parseRenewalAlertLeadDays } from '../../../shared/renewalLeadTime';
 import type { Env, User } from '../../lib/types';
 
 function slugify(text: string): string {
@@ -137,6 +138,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       renewal_interval_months?: number | null;
       /** 'inherit' | 'period' | 'none' — see migration 0097. */
       renewal_policy?: string | null;
+      /** Days of renewal-alert warning for this type; null/absent = inherit (0111). */
+      renewal_alert_lead_days?: number | null;
     };
 
     if (!body.name || !body.name.trim()) {
@@ -241,9 +244,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       renewalPolicy = defaultRenewalPolicyForTypeName(body.name);
     }
 
+    // Renewal alert lead time override (0111). Absent or null = inherit the
+    // organization's setting, which is what every existing type does.
+    let renewalAlertLeadDays: number | null = null;
+    if (body.renewal_alert_lead_days !== undefined) {
+      const parsedLead = parseRenewalAlertLeadDays(body.renewal_alert_lead_days);
+      if (!parsedLead.ok) {
+        return new Response(
+          JSON.stringify({ error: parsedLead.error }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      renewalAlertLeadDays = parsedLead.value;
+    }
+
     await context.env.DB.prepare(
-      `INSERT INTO document_types (id, tenant_id, name, slug, description, supplier_id, active, auto_ingest, extract_tables, renewal_interval_months, renewal_policy)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`
+      `INSERT INTO document_types (id, tenant_id, name, slug, description, supplier_id, active, auto_ingest, extract_tables, renewal_interval_months, renewal_policy,
+                                   renewal_alert_lead_days, renewal_alert_lead_updated_at, renewal_alert_lead_updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, ?)`
     )
       .bind(
         id,
@@ -255,7 +273,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         autoIngest,
         extractTables,
         renewalIntervalMonths,
-        renewalPolicy
+        renewalPolicy,
+        renewalAlertLeadDays,
+        renewalAlertLeadDays,
+        renewalAlertLeadDays === null ? null : user.id
       )
       .run();
 
@@ -271,6 +292,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         slug,
         renewal_interval_months: renewalIntervalMonths,
         renewal_policy: renewalPolicy,
+        renewal_alert_lead_days: renewalAlertLeadDays,
       }),
       getClientIp(context.request)
     );

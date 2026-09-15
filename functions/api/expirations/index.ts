@@ -1,5 +1,6 @@
 import { requireTenantAccess, BadRequestError, errorToResponse } from '../../lib/permissions';
-import { computeExpirations, DEFAULT_WINDOW_DAYS } from '../../lib/expirations';
+import { computeExpirations, loadTenantAlertLeadDays } from '../../lib/expirations';
+import { resolveRenewalAlertLead } from '../../../shared/renewalLeadTime';
 import type { Env, User } from '../../lib/types';
 
 /**
@@ -12,8 +13,14 @@ import type { Env, User } from '../../lib/types';
  *
  * Tenant-scoped: super_admin may pass ?tenant_id=, org_admin/user are pinned to
  * their own tenant. `as_of` keeps classification deterministic/testable;
- * defaults to the server's current UTC date. `window_days` (default 60) is the
- * "expiring soon" look-ahead.
+ * defaults to the server's current UTC date. `window_days` is the dashboard's
+ * "expiring soon" look-ahead and defaults to the tenant's renewal alert lead
+ * time (migration 0111; 60 when unset).
+ *
+ * `window_days` is a VIEW filter. It changes which rows read `expiring` here
+ * and nothing else: the alert engine judges each document against its own
+ * lead time, carried on every row as `alert_lead_days` / `alert_lead_source`
+ * with the resulting `alert_status`, so the dashboard can show both.
  */
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -31,14 +38,20 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     requireTenantAccess(user, tenantId);
 
     // ── params ──────────────────────────────────────────────────────────────
-    const windowRaw = parseInt(url.searchParams.get('window_days') || String(DEFAULT_WINDOW_DAYS), 10);
-    const windowDays = Number.isFinite(windowRaw) && windowRaw >= 0 ? windowRaw : DEFAULT_WINDOW_DAYS;
+    const tenantLead = resolveRenewalAlertLead(
+      null,
+      await loadTenantAlertLeadDays(context.env.DB, tenantId),
+    );
+    const windowRaw = parseInt(url.searchParams.get('window_days') || String(tenantLead.days), 10);
+    const windowDays = Number.isFinite(windowRaw) && windowRaw >= 0 ? windowRaw : tenantLead.days;
     const asOf = url.searchParams.get('as_of') || new Date().toISOString().slice(0, 10);
 
-    const { rows, summary } = await computeExpirations(context.env.DB, tenantId, asOf, windowDays);
+    const { rows, summary } = await computeExpirations(context.env.DB, tenantId, asOf, windowDays, {
+      tenantLeadDays: tenantLead.source === 'tenant' ? tenantLead.days : null,
+    });
 
     return new Response(
-      JSON.stringify({ rows, summary, window_days: windowDays, as_of: asOf }),
+      JSON.stringify({ rows, summary, window_days: windowDays, as_of: asOf, tenant_lead: tenantLead }),
       { headers: { 'Content-Type': 'application/json' } },
     );
   } catch (err) {

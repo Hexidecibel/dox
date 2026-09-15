@@ -51,7 +51,6 @@
 
 import type { Env } from '../../lib/types';
 import { runRenewalAlerts, type RenewalAlertResult } from '../../lib/renewal-alerts';
-import { DEFAULT_WINDOW_DAYS } from '../../lib/expirations';
 import { isModuleEnabledForTenant } from '../../lib/module-access';
 import { MODULES } from '../../../shared/modules';
 
@@ -162,8 +161,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   const param = (k: string): string | null =>
     (body[k] != null ? String(body[k]) : null) ?? url.searchParams.get(k);
 
-  const windowRaw = parseInt(param('window_days') || String(DEFAULT_WINDOW_DAYS), 10);
-  const windowDays = Number.isFinite(windowRaw) && windowRaw >= 0 ? windowRaw : DEFAULT_WINDOW_DAYS;
+  // No run-wide window since 0111: every document is judged against its own
+  // resolved lead time. An operator passing window_days is told it was ignored.
+  const windowDaysIgnored = param('window_days') !== null;
   const asOf = param('as_of') || new Date().toISOString().slice(0, 10);
   // Scoping to one tenant is for operator debugging ("re-run just Medosweet"),
   // not for normal operation. Absent = every active tenant.
@@ -213,7 +213,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           await runRenewalAlerts(context.env.DB, context.env.RESEND_API_KEY, {
             tenantId,
             asOf,
-            windowDays,
             // The link a recipient clicks has to be the PUBLIC origin of the
             // request that produced it - the Worker POSTs to the real
             // hostname, so this is the real hostname.
@@ -236,7 +235,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const summary = {
       ran_at: new Date().toISOString(),
       as_of: asOf,
-      window_days: windowDays,
+      ...(windowDaysIgnored ? { window_days_ignored: true } : {}),
       tenants_checked: tenantIds.length,
       tenants_completed: results.length,
       // Reported rather than silent: an operator reading a run that alerted
@@ -256,6 +255,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         document_count: r.document_count,
         alerting_count: r.alerting_count,
         suppressed_count: r.suppressed_count,
+        tenant_lead_days: r.tenant_lead.days,
+        tenant_lead_source: r.tenant_lead.source,
         unrouted_count: r.unrouted.count,
         unrouted_owner_labels: r.unrouted.owner_labels,
         groups: r.groups.map((g) => ({
@@ -263,6 +264,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           via: g.via,
           recipient_count: g.recipients.length,
           document_count: g.document_count,
+          // Per document so the log answers "why was this mailed today".
+          documents: g.documents.map((d) => ({
+            id: d.id,
+            status: d.status,
+            days_until: d.days_until,
+            alert_lead_days: d.alert_lead_days,
+            alert_lead_source: d.alert_lead_source,
+          })),
           sent: g.sent,
         })),
         reason: r.reason,

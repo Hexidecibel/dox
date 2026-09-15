@@ -7,6 +7,7 @@ import {
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import { parseRenewalIntervalMonths, parseTypeRenewalSetting } from '../../lib/registry';
+import { parseRenewalAlertLeadDays } from '../../../shared/renewalLeadTime';
 import type { Env, User } from '../../lib/types';
 
 function slugify(text: string): string {
@@ -98,10 +99,14 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       renewal_interval_months?: number | null;
       /** 'inherit' | 'period' | 'none' — see migration 0097. */
       renewal_policy?: string | null;
+      /** Days of renewal-alert warning for this type; null = the organization's setting (0111). */
+      renewal_alert_lead_days?: number | null;
     };
 
     const updates: string[] = [];
     const params: (string | number | null)[] = [];
+    /** Set when this request actually changes the alert lead time, for its own audit row. */
+    let leadTimeChange: { from: number | null; to: number | null } | null = null;
 
     if (body.name !== undefined) {
       const name = sanitizeString(body.name);
@@ -210,6 +215,29 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       params.push(parsed.policy);
     }
 
+    // Renewal alert lead time override (migration 0111). Stamped and audited
+    // on its own only when the value CHANGES, so re-saving the dialog does
+    // not leave a trail of no-op "changes" to a setting that decides when
+    // suppliers get chased.
+    if (body.renewal_alert_lead_days !== undefined) {
+      const parsedLead = parseRenewalAlertLeadDays(body.renewal_alert_lead_days);
+      if (!parsedLead.ok) {
+        return new Response(
+          JSON.stringify({ error: parsedLead.error }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      const previous = (documentType.renewal_alert_lead_days as number | null | undefined) ?? null;
+      if (previous !== parsedLead.value) {
+        leadTimeChange = { from: previous, to: parsedLead.value };
+        updates.push('renewal_alert_lead_days = ?');
+        params.push(parsedLead.value);
+        updates.push("renewal_alert_lead_updated_at = datetime('now')");
+        updates.push('renewal_alert_lead_updated_by = ?');
+        params.push(user.id);
+      }
+    }
+
     // supplier_id: present in body sets ownership; null/"" clears to global.
     if (body.supplier_id !== undefined) {
       const supplierId = body.supplier_id ? body.supplier_id : null;
@@ -256,6 +284,22 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       JSON.stringify({ changes: body }),
       getClientIp(context.request)
     );
+
+    if (leadTimeChange) {
+      await logAudit(
+        context.env.DB,
+        user.id,
+        documentType.tenant_id as string,
+        'document_type.renewal_alert_lead_time_updated',
+        'document_type',
+        docTypeId,
+        JSON.stringify({
+          renewal_alert_lead_days: leadTimeChange.to,
+          previous_renewal_alert_lead_days: leadTimeChange.from,
+        }),
+        getClientIp(context.request)
+      );
+    }
 
     const updated = await context.env.DB.prepare(
       'SELECT * FROM document_types WHERE id = ?'

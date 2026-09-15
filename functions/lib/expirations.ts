@@ -24,6 +24,13 @@
  * date that function returns, and carries its `rule` through so a caller can
  * say WHY a row is due when it is.
  *
+ * ── Two windows, one date ────────────────────────────────────────────────────
+ * Every row is classified twice. `status` uses the caller's window (the
+ * dashboard's look-ahead, a VIEW filter). `alert_status` uses the document's
+ * own alert lead time (migration 0111: type override -> tenant -> default),
+ * and is the only one the alert engine mails on, via LEAD_TIME_WINDOW. So
+ * widening the dashboard to 180 days shows more rows and mails nobody extra.
+ *
  * ── Per-renewal_type status rules (window = look-ahead in days) ──────────────
  *   hard_expiry         drop-dead date.
  *                         due < today            → expired
@@ -60,6 +67,12 @@ import {
   addMonths,
   type RenewalRule,
 } from '../../shared/renewalPeriod';
+import {
+  DEFAULT_RENEWAL_ALERT_LEAD_DAYS,
+  resolveRenewalAlertLead,
+  type RenewalAlertLeadSource,
+  type ResolvedRenewalAlertLead,
+} from '../../shared/renewalLeadTime';
 
 // Re-exported so the date helper keeps its long-standing import path.
 export { addMonths };
@@ -92,8 +105,24 @@ export function isAlertStatus(status: ExpirationStatus): boolean {
 /** A keep_current record older than this (days past its resolved date) is `stale`. */
 export const STALE_DAYS = 365;
 
-/** Default look-ahead window for "expiring soon", in days. */
-export const DEFAULT_WINDOW_DAYS = 60;
+/**
+ * Default look-ahead window for "expiring soon", in days.
+ *
+ * The same number as the renewal alert lead-time default (migration 0111), and
+ * defined in terms of it so the two cannot drift. Since 0111 the MAIL path no
+ * longer uses a single window at all: each document is judged against its own
+ * resolved lead time (type override -> tenant -> this default). This constant
+ * survives as the dashboard's view default for callers that pass no window.
+ */
+export const DEFAULT_WINDOW_DAYS = DEFAULT_RENEWAL_ALERT_LEAD_DAYS;
+
+/**
+ * Pass as the window to `computeExpirations` to classify every row against
+ * ITS OWN resolved lead time instead of one window for the whole tenant. This
+ * is what the alert engine (manual and scheduled) uses.
+ */
+export const LEAD_TIME_WINDOW = 'lead_time' as const;
+export type ExpirationWindow = number | typeof LEAD_TIME_WINDOW;
 
 /** The raw fields the classifier needs, straight off a `documents` row. */
 export interface RenewalInput {
@@ -165,6 +194,21 @@ export interface ExpirationRow {
   renewal_rule: RenewalRule;
   /** The renewal period that applied, in months; null when a stated date answered. */
   renewal_period_months: number | null;
+  /**
+   * How many days before its due date THIS document's owner is warned
+   * (migration 0111): the document type's override, else the tenant's
+   * setting, else the default. Carried on every row so an admin can predict
+   * when a record will first be mailed.
+   */
+  alert_lead_days: number;
+  /** Which rung answered `alert_lead_days`. */
+  alert_lead_source: RenewalAlertLeadSource;
+  /**
+   * The status judged against `alert_lead_days` rather than the caller's view
+   * window. This, not `status`, is what the alert engine mails on; the two are
+   * equal when `computeExpirations` was called with LEAD_TIME_WINDOW.
+   */
+  alert_status: ExpirationStatus;
 }
 
 export interface ExpirationSummary {
@@ -228,31 +272,38 @@ export function computeStatus(
   const daysUntil = daysBetween(asOf, due);
   if (daysUntil === null) return { due_date: due, days_until: null, status: null, ...provenance };
 
+  const status = classifyDaysUntil(input.renewal_type, daysUntil, windowDays);
+  return { due_date: due, days_until: daysUntil, status, ...provenance };
+}
+
+/**
+ * The per-renewal_type status rules, given whole days until the due date and a
+ * window. Split out of `computeStatus` so one resolved date can be classified
+ * against two windows (the dashboard's view window and the document's own
+ * alert lead time) without resolving it twice.
+ */
+export function classifyDaysUntil(
+  renewalType: RenewalType | string | null,
+  daysUntil: number,
+  windowDays: number,
+): ExpirationStatus {
   const past = daysUntil < 0; // due < today
   const withinWindow = daysUntil <= windowDays; // due <= today + window
 
-  let status: ExpirationStatus;
-  switch (input.renewal_type) {
+  switch (renewalType) {
     case 'keep_current':
       // Informational only. Never alerts. Very old → stale.
-      status = daysUntil < -STALE_DAYS ? 'stale' : 'current';
-      break;
+      return daysUntil < -STALE_DAYS ? 'stale' : 'current';
     case 'renewal_application':
     case 'review_cycle':
-      if (past) status = 'overdue';
-      else if (withinWindow) status = 'expiring';
-      else status = 'current';
-      break;
+      if (past) return 'overdue';
+      return withinWindow ? 'expiring' : 'current';
     case 'hard_expiry':
     default:
       // hard_expiry + null/unknown renewal_type: a drop-dead date.
-      if (past) status = 'expired';
-      else if (withinWindow) status = 'expiring';
-      else status = 'current';
-      break;
+      if (past) return 'expired';
+      return withinWindow ? 'expiring' : 'current';
   }
-
-  return { due_date: due, days_until: daysUntil, status, ...provenance };
 }
 
 /** Normalize renewal_type into the summary bucket key. */
@@ -298,6 +349,8 @@ interface RawDocRow {
   meta_effective_date: string | null;
   type_renewal_policy: string | null;
   type_renewal_interval_months: number | null;
+  type_renewal_alert_lead_days: number | null;
+  document_type_id: string | null;
 }
 
 const DOC_SQL = `
@@ -306,6 +359,7 @@ const DOC_SQL = `
     d.title                       AS title,
     dt.name                       AS primary_category_name,
     d.owner                       AS owner,
+    d.document_type_id            AS document_type_id,
     d.renewal_type                AS renewal_type,
     d.renewal_due_date            AS renewal_due_date,
     d.renewal_interval_months     AS renewal_interval_months,
@@ -315,7 +369,8 @@ const DOC_SQL = `
     json_extract(d.primary_metadata, '$.document_expires_on') AS meta_document_expires_on,
     json_extract(d.primary_metadata, '$.effective_date')      AS meta_effective_date,
     dt.renewal_policy             AS type_renewal_policy,
-    dt.renewal_interval_months    AS type_renewal_interval_months
+    dt.renewal_interval_months    AS type_renewal_interval_months,
+    dt.renewal_alert_lead_days    AS type_renewal_alert_lead_days
   FROM documents d
   LEFT JOIN document_types dt ON dt.id = d.document_type_id
   WHERE d.tenant_id = ? AND d.status = 'active'
@@ -324,6 +379,39 @@ const DOC_SQL = `
 export interface ExpirationResult {
   rows: ExpirationRow[];
   summary: ExpirationSummary;
+  /** The tenant-level lead time (setting or default) the rows inherited from. */
+  tenant_lead: ResolvedRenewalAlertLead;
+}
+
+/**
+ * The tenant's own lead-time setting (0111), or null. A database that has not
+ * run 0111 yields null, which resolves to the default: exactly the behaviour
+ * before the setting existed.
+ */
+export async function loadTenantAlertLeadDays(
+  db: D1Database,
+  tenantId: string,
+): Promise<number | null> {
+  try {
+    const row = await db
+      .prepare('SELECT renewal_alert_lead_days FROM tenants WHERE id = ?')
+      .bind(tenantId)
+      .first<{ renewal_alert_lead_days: number | null }>();
+    return row?.renewal_alert_lead_days ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A hypothetical lead-time configuration, for the "what would this change"
+ * preview. `tenantLeadDays` replaces the tenant's stored value; `typeLeadDays`
+ * replaces one document type's stored override. `undefined` = keep stored.
+ */
+export interface LeadTimeOverride {
+  tenantLeadDays?: number | null;
+  documentTypeId?: string;
+  typeLeadDays?: number | null;
 }
 
 /**
@@ -335,10 +423,17 @@ export async function computeExpirations(
   db: D1Database,
   tenantId: string,
   asOf: string,
-  windowDays: number = DEFAULT_WINDOW_DAYS,
+  window: ExpirationWindow = DEFAULT_WINDOW_DAYS,
+  override: LeadTimeOverride = {},
 ): Promise<ExpirationResult> {
   const res = await db.prepare(DOC_SQL).bind(tenantId).all<RawDocRow>();
   const raw = res.results ?? [];
+
+  const tenantLeadDays =
+    override.tenantLeadDays !== undefined
+      ? override.tenantLeadDays
+      : await loadTenantAlertLeadDays(db, tenantId);
+  const tenantLead = resolveRenewalAlertLead(null, tenantLeadDays);
 
   const rows: ExpirationRow[] = [];
   const summary: ExpirationSummary = {
@@ -349,6 +444,15 @@ export async function computeExpirations(
   };
 
   for (const r of raw) {
+    const typeLeadDays =
+      override.documentTypeId !== undefined &&
+      override.typeLeadDays !== undefined &&
+      r.document_type_id === override.documentTypeId
+        ? override.typeLeadDays
+        : r.type_renewal_alert_lead_days;
+    const lead = resolveRenewalAlertLead(typeLeadDays, tenantLeadDays);
+    const viewWindow = window === LEAD_TIME_WINDOW ? lead.days : window;
+
     const { due_date, days_until, status, rule, period_months } = computeStatus(
       {
         renewal_type: r.renewal_type,
@@ -361,9 +465,11 @@ export async function computeExpirations(
         type_renewal_interval_months: r.type_renewal_interval_months,
       },
       asOf,
-      windowDays,
+      viewWindow,
     );
     if (!status || !due_date) continue; // no resolvable date → skip
+    const alertStatus =
+      days_until === null ? status : classifyDaysUntil(r.renewal_type, days_until, lead.days);
 
     const bucket = typeBucket(r.renewal_type);
     rows.push({
@@ -377,6 +483,9 @@ export async function computeExpirations(
       days_until,
       renewal_rule: rule,
       renewal_period_months: period_months,
+      alert_lead_days: lead.days,
+      alert_lead_source: lead.source,
+      alert_status: alertStatus,
     });
 
     summary.total += 1;
@@ -391,7 +500,7 @@ export async function computeExpirations(
     return av - bv;
   });
 
-  return { rows, summary };
+  return { rows, summary, tenant_lead: tenantLead };
 }
 
 /** The subset of rows that warrant an alert (expiring/expired/overdue). */

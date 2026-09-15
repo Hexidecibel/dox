@@ -62,6 +62,35 @@
  *   - an `unrouted` block in the API response the caller can display.
  * Same suppression rules apply to it, so the gap notice is also not a daily
  * drumbeat.
+ *
+ * ---------------------------------------------------------------------------
+ * LEAD TIME IS PER DOCUMENT (migration 0111)
+ * ---------------------------------------------------------------------------
+ * There is no run-wide window any more. Each document enters the alert set
+ * when days_until_due <= ITS lead time, resolved type override -> tenant
+ * setting -> 60-day default (shared/renewalLeadTime.ts). One run can therefore
+ * warn about an audit certificate 90 days out and a letter of guarantee 30
+ * days out. Neither caller can pass a window: the dashboard's look-ahead is a
+ * view filter and must never decide who is mailed.
+ *
+ * Changing a lead time cannot cause a burst re-send, and the reasoning is
+ * worth writing down because it follows from the ledger, not from a guard:
+ *   - The ledger (renewal_alert_state) is keyed on the DOCUMENT and stores the
+ *     status last mailed. It knows nothing about lead times, so a change
+ *     leaves every stamp in place.
+ *   - LENGTHENING the lead time (60 -> 90) adds documents 61-90 days out to the
+ *     alert set. Those never alerted are "first" - a first warning is exactly
+ *     what the admin asked for, and the preview endpoint counts them before
+ *     saving. Those already mailed within 7 days (a toggle back and forth)
+ *     are "suppressed": the status is still `expiring`, no escalation.
+ *   - SHORTENING it (90 -> 30) only removes documents from the set. Nothing is
+ *     sent for them; when they re-enter at 30 days the ordinary cooldown
+ *     applies to their existing stamp.
+ *   - A lead time can only move a document between `current` and `expiring`.
+ *     `current` is never stamped (only alerting statuses are), and escalation
+ *     is `expiring -> overdue/expired`, which depends on the date passing, not
+ *     on the window. So a lead-time change can never manufacture an
+ *     "escalated" send that skips the cooldown.
  */
 
 import type { D1Database } from '@cloudflare/workers-types';
@@ -69,9 +98,13 @@ import {
   computeExpirations,
   alertingRows,
   daysBetween,
-  DEFAULT_WINDOW_DAYS,
+  LEAD_TIME_WINDOW,
   type ExpirationRow,
 } from './expirations';
+import type {
+  RenewalAlertLeadSource,
+  ResolvedRenewalAlertLead,
+} from '../../shared/renewalLeadTime';
 import {
   resolveAlertRouting,
   resolveTenantAdmins,
@@ -142,6 +175,21 @@ export function decideSend(
   return elapsed >= cooldownDays ? 'cooldown_elapsed' : 'suppressed';
 }
 
+/**
+ * One document in a digest (or the gap bucket), with the lead time that put
+ * it there. The lead time is what lets an admin predict the next run: "this
+ * certificate was mailed because its type warns 90 days ahead".
+ */
+export interface AlertedDocument {
+  id: string;
+  title: string;
+  status: string;
+  renewal_due_date: string | null;
+  days_until: number | null;
+  alert_lead_days: number;
+  alert_lead_source: RenewalAlertLeadSource;
+}
+
 export interface OwnerGroupResult {
   /** documents.owner as stored, or null for records that name no owner. */
   owner_label: string | null;
@@ -150,14 +198,34 @@ export interface OwnerGroupResult {
   recipients: string[];
   document_count: number;
   document_ids: string[];
+  /** The same documents as `document_ids`, with status and resolved lead time. */
+  documents: AlertedDocument[];
   sent: boolean;
+}
+
+export function toAlertedDocument(r: ExpirationRow): AlertedDocument {
+  return {
+    id: r.id,
+    title: r.title,
+    status: r.status,
+    renewal_due_date: r.renewal_due_date,
+    days_until: r.days_until,
+    alert_lead_days: r.alert_lead_days,
+    alert_lead_source: r.alert_lead_source,
+  };
 }
 
 export interface UnroutedResult {
   count: number;
   /** Distinct owner labels that had no route; null entries mean "no owner set". */
   owner_labels: Array<string | null>;
-  documents: Array<{ id: string; title: string; owner: string | null }>;
+  documents: Array<{
+    id: string;
+    title: string;
+    owner: string | null;
+    alert_lead_days: number;
+    alert_lead_source: RenewalAlertLeadSource;
+  }>;
   /** Admins told about the GAP (not about the renewal). Empty if none exist. */
   notified: string[];
   /** Whether the gap notice actually went out. */
@@ -196,13 +264,19 @@ export interface RenewalAlertResult {
   suppressed_count: number;
   groups: OwnerGroupResult[];
   unrouted: UnroutedResult;
+  /**
+   * The tenant-level lead time in force for this run (its setting, or the
+   * default). Per-type overrides show on each document.
+   */
+  tenant_lead: ResolvedRenewalAlertLead;
   reason?: RenewalNoSendReason;
 }
 
 export interface RunRenewalAlertsOptions {
   tenantId: string;
   asOf?: string;
-  windowDays?: number;
+  /* No window option, on purpose (0111): each document's own lead time
+     decides whether it is alerting. See the header block. */
   /** Origin used to build the /alert/<token> link. */
   appUrl?: string;
   /**
@@ -220,12 +294,22 @@ function emptyUnrouted(): UnroutedResult {
   return { count: 0, owner_labels: [], documents: [], notified: [], notice_sent: false };
 }
 
+function unroutedDocuments(rows: ExpirationRow[]): UnroutedResult['documents'] {
+  return rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    owner: r.owner,
+    alert_lead_days: r.alert_lead_days,
+    alert_lead_source: r.alert_lead_source,
+  }));
+}
+
 /**
  * Load the ledger for a tenant, keyed by document id.
  * A missing table (an environment that has not run 0091) yields an empty map,
  * which degrades to "alert everything once" rather than to a 500.
  */
-async function loadAlertState(
+export async function loadAlertState(
   db: D1Database,
   tenantId: string,
 ): Promise<Map<string, RenewalAlertStateRow>> {
@@ -330,7 +414,6 @@ export async function runRenewalAlerts(
   opts: RunRenewalAlertsOptions,
 ): Promise<RenewalAlertResult> {
   const asOf = opts.asOf || new Date().toISOString().slice(0, 10);
-  const windowDays = opts.windowDays ?? DEFAULT_WINDOW_DAYS;
   const cooldownDays = opts.cooldownDays ?? DEFAULT_COOLDOWN_DAYS;
 
   const tenantRow = await db
@@ -338,6 +421,9 @@ export async function runRenewalAlerts(
     .bind(opts.tenantId)
     .first<{ name: string }>();
   const tenantName = tenantRow?.name ?? 'your organization';
+
+  // Every row judged against ITS OWN lead time, never a run-wide window.
+  const { rows, tenant_lead } = await computeExpirations(db, opts.tenantId, asOf, LEAD_TIME_WINDOW);
 
   const base: RenewalAlertResult = {
     tenant_id: opts.tenantId,
@@ -349,9 +435,9 @@ export async function runRenewalAlerts(
     suppressed_count: 0,
     groups: [],
     unrouted: emptyUnrouted(),
+    tenant_lead,
   };
 
-  const { rows } = await computeExpirations(db, opts.tenantId, asOf, windowDays);
   const alerts = alertingRows(rows);
   base.alerting_count = alerts.length;
   if (alerts.length === 0) {
@@ -400,6 +486,7 @@ export async function runRenewalAlerts(
       recipients: routing.recipients.map((r) => r.email),
       document_count: g.rows.length,
       document_ids: g.rows.map((r) => r.id),
+      documents: g.rows.map(toAlertedDocument),
       sent: false,
     };
     groups.push(group);
@@ -417,7 +504,7 @@ export async function runRenewalAlerts(
       unrouted: {
         count: unroutedRows.length,
         owner_labels: [...new Set(unroutedRows.map((r) => r.owner ?? null))],
-        documents: unroutedRows.map((r) => ({ id: r.id, title: r.title, owner: r.owner })),
+        documents: unroutedDocuments(unroutedRows),
         notified: [],
         notice_sent: false,
       },
@@ -518,7 +605,7 @@ async function reportRoutingGap(
   const result: UnroutedResult = {
     count: rows.length,
     owner_labels: [...new Set(rows.map((r) => r.owner ?? null))],
-    documents: rows.map((r) => ({ id: r.id, title: r.title, owner: r.owner })),
+    documents: unroutedDocuments(rows),
     notified: [],
     notice_sent: false,
   };
