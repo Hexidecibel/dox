@@ -105,6 +105,14 @@ is drifted (0059-0067 applied-but-unstamped). Apply new migrations to prod
 surgically and stamp them — never bulk `migrate:remote`. New migrations must also
 be added to `tests/helpers/db.ts`.
 
+⚠️ **A table rebuild (`PRAGMA defer_foreign_keys` + DROP/CREATE) must be applied with `bin/migrate-prod-one`,
+never a raw `wrangler d1 execute --file`.** D1's import API lost the deferral when 0110's comment header held
+non-ASCII characters (staging failed twice with "FOREIGN KEY constraint failed" and rolled back); the script
+uploads a copy with full-line comments stripped. Rehearse a rebuild on a populated database first
+(`tests/api/migration-0110-lots-rebuild.test.ts` uses the empty `MIGRATION_DB` binding), and check that every
+foreign key pointing at the rebuilt table has no ON DELETE action — deferral does not stop CASCADE/SET NULL.
+Roll back with `bin/restore` (Time Travel bookmark from `bin/backup`).
+
 | # | File | Purpose |
 |---|------|---------|
 | 0001 | initial_schema | Core tables: users, tenants, documents, document_versions, audit_log, sessions |

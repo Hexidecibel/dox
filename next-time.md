@@ -4,7 +4,36 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-15 (overnight, latest): v2.15.0 ON PROD — supplier spec watch shipped.** Merge fc3a6ab
+**2026-09-15 (overnight, latest): v2.16.0 ON PROD — Phase 4 declared lot formats + API key expiry fix.**
+Merges of `worktree-agent-a2d8dd9678f829c7c` (conflicts: CLAUDE.md, tests/helpers/db.ts — 0110 after 0109,
+SupplierDetail tabs — Lot format index 8, Spec watch stays last at 9, SCHEMA.md regenerated) and
+`worktree-agent-a072e795a09da8f61` (conflict: todo.md). Release 47ee178, Pages deploy `e7facc37`, staging
+deploy `12a7d133`; gate: vitest 256 files / 3545 tests, Playwright 7 passed, 1 skipped; typecheck 56
+(baseline). New test `tests/api/migration-0110-lots-rebuild.test.ts` rehearses the rebuild on a populated
+pre-0110 DB (second D1 binding `MIGRATION_DB`). **Migration 0110 (the `lots` rebuild) is on prod, stamped,
+verified row for row:** lots 414 (Cush Co 397, Q8 17), document_lots 503, order_items 19 (18 with lot_id),
+lot_match_suggestions 46 (44 pending / 2 accepted, all with lot_id), documents_fts 600 (MATCH coa 204,
+darigold 61), production-date source/status breakdown, every lots row, every FTS lot_text, trigger,
+indexes and `documents_fts_source` view SQL — all byte-identical before/after; `foreign_key_check` empty;
+only new objects are `supplier_lot_schemes` + its index and `lots.production_date_scheme_id` (all NULL). No
+restore needed. Backup: `~/drops/dox-backups/doc-upload-db-20260915T114711Z.timetravel.json` (bookmark
+`000016e9-000012e3-000050e7-e950aab9b7ba158b75dc176f9083aa74`) + table exports of lots, document_lots,
+lot_match_suggestions, order_items at `...20260915T114638Z.*.sql`. **FOUND: D1's import API loses
+`PRAGMA defer_foreign_keys` when the file's comment header holds non-ASCII (em dash, box drawing, §, ›)** —
+0110 as written failed twice on staging ("D1 DB was reset and rolled back ... FOREIGN KEY constraint
+failed", fully rolled back); identical statements under an ASCII header succeeded. `bin/migrate-prod-one`
+now uploads a copy with full-line comments stripped; new `bin/restore` (Time Travel) put staging back
+between rehearsals. **Seed applied** (`bin/seed-supplier-lot-schemes`, matching its dry run): Darigold
+plant·YY·Julian v1 (32 lots, 29 fit, 3 do not, 0 decoded-vs-stated disagreements), Country Morning
+best-by MMDDYY+suffix v1 (93/93), Andersen declared none v1 (47); 3 `supplier.lot_scheme_declared` audit
+rows; re-run writes nothing. **Key report (report only, awaiting a human):** Darigold 28 of 32 match —
+1 `split_composite` (1032603623 → lot 10326036 + sublot 23), 1 `sublot_not_a_sublot` (10326102/sublot
+10326102 → would MERGE into lot 5191665e…), 2 `does_not_fit` ("10326076, 10326051, 10326051" and
+K134889); Andersen 47/47, CMF 93/93. **Tenant data left for you:** Cush Co and Q8 Darigold Review stored
+`extraction_context` still says "Code dates may use Julian format". **Process-worker restart needed** for
+the prompt changes from v2.13.0 and v2.16.0: `sudo systemctl restart dox-process-worker.service`.
+
+**2026-09-15 (overnight, earlier): v2.15.0 ON PROD — supplier spec watch shipped.** Merge fc3a6ab
 (conflicts: CLAUDE.md, tests/helpers/db.ts, todo.md, DocumentDetail.tsx imports, ReviewQueue.tsx chips,
 SCHEMA.md), renumber 10fc37a (`0107_supplier_spec_watch` → **0109**, every reference), release 81263ec,
 Pages deploy `7eee3c22`, staging deploy `72ae6f59`; gate: vitest 245 files / 3425 tests, Playwright 7
