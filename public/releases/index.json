@@ -1,6 +1,11 @@
 {
-  "current": "2.9.0",
+  "current": "2.10.0",
   "versions": [
+    {
+      "version": "2.10.0",
+      "date": "2026-09-14",
+      "title": "Out of Spec says who judged a result, and where"
+    },
     {
       "version": "2.9.0",
       "date": "2026-09-14",
