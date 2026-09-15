@@ -1,0 +1,276 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/backfill-lot-production-dates — give existing lot rows the production
+ * date their certificates state, with provenance (migration 0106), and give
+ * existing split certificates their row-scoped search text.
+ *
+ * THE GAP THIS CLOSES
+ *
+ * Approval now writes `lots.production_date` (+ raw, source, status, document)
+ * for every new lot row. Every lot approved before that has none: on production
+ * `lots.mfg_date` was NULL on all 397 rows and the production date sat in
+ * `lots.code_date` or in the document's metadata. A production-date search reads
+ * the lot row first, so without this pass the history answers only through the
+ * old document scan.
+ *
+ * WHAT IT READS, IN ORDER (bin/lib/lotProductionBackfill.js, rules from the
+ * compiled shared/lotProductionDate.ts — the approve path's own functions)
+ *
+ *   1. The linked certificate's own production-date field -> 'extracted'.
+ *   2. Only when a certificate has none: its `code_date`, and only when the page
+ *      prints that value under a production / manufacture label and never prints
+ *      a "code date" label -> 'extracted_code_date_legacy'. Search shows such a
+ *      value as "likely — confirm", never as covering.
+ *   3. A value that reads two ways is stored raw with NO day ('ambiguous'), and
+ *      certificates that disagree are 'conflict'. Every such row is printed.
+ *
+ * WHAT IT WILL NOT DO
+ *   - Touch a lot that already has any production date state. The UPDATE itself
+ *     says `AND production_date_status IS NULL`, so a second --apply writes
+ *     nothing, and neither does a stale plan.
+ *   - Read `lots.code_date`. That column held production dates in mixed shapes
+ *     with no record of which; the certificate is the evidence, not the copy.
+ *   - Decode a lot number into a date. That is a declared per-supplier scheme
+ *     (Phase 4), never an inference made here.
+ *   - Write anything without --apply.
+ *
+ * SIBLING TEXT
+ *   Split certificates (one document per lot row, all carrying the whole
+ *   certificate's text) get `document_versions.search_text` with the other rows'
+ *   lot numbers and dates blanked. The 0106 update trigger reindexes each such
+ *   document as it is written; nothing is rebuilt tenant-wide.
+ *
+ * Usage:
+ *   bin/backfill-lot-production-dates --tenant <id>                   # dry run, LOCAL
+ *   bin/backfill-lot-production-dates --tenant <id> --apply           # LOCAL write
+ *   bin/backfill-lot-production-dates --tenant <id> --remote          # dry run, PRODUCTION
+ *   bin/backfill-lot-production-dates --tenant <id> --remote --apply  # prompts first
+ *
+ * Flags:
+ *   --tenant ID     tenant to backfill (required)
+ *   --apply         actually write. Without it this is a dry run.
+ *   --remote, -r    target PRODUCTION D1 (with --apply, asks you to type the tenant id)
+ *   --yes, -y       skip the production confirmation prompt
+ *   --no-search-text  do not write sibling search_text
+ *   --page-size N   D1 paging size (default 50)
+ *   --json          emit the plan as JSON instead of prose
+ *   -h, --help      this help
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const { query, queryPaged, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+const production = require('./lib/shared/lotProductionDate');
+const { rowScopedSearchText } = require('./lib/shared/rowScopedText');
+const { normalizeLotNumber, normalizeSubLotCode } = require('./lib/shared/lotNormalize');
+const { buildPlan, planToSql, searchTextToSql, auditSql, batchStatements, formatPlan } = require('./lib/lotProductionBackfill');
+
+function parseArgs(argv) {
+  const opts = { tenant: null, apply: false, remote: false, yes: false, searchText: true, pageSize: 50, json: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenant = argv[++i]; break;
+      case '--apply': opts.apply = true; break;
+      case '--remote':
+      case '-r': opts.remote = true; break;
+      case '--yes':
+      case '-y': opts.yes = true; break;
+      case '--no-search-text': opts.searchText = false; break;
+      case '--page-size': opts.pageSize = Number(argv[++i]); break;
+      case '--json': opts.json = true; break;
+      case '-h':
+      case '--help': printHelp(); process.exit(0); break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  if (!opts.tenant) {
+    console.error('--tenant <id> is required. Run with --help for usage.');
+    process.exit(2);
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(opts.tenant)) {
+    console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+    process.exit(2);
+  }
+  return opts;
+}
+
+function printHelp() {
+  const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+  const end = lines.findIndex((l, i) => i > 2 && l.trim() === '*/');
+  console.log(lines.slice(3, end).join('\n').replace(/^ \* ?/gm, ''));
+}
+
+function hasColumn(table, column, remote) {
+  const rows = query(
+    `SELECT COUNT(*) AS n FROM pragma_table_info('${table}') WHERE name = '${column}'`,
+    { remote }
+  );
+  return Number((rows || [])[0]?.n ?? 0) > 0;
+}
+
+function execSql(statements, remote, label) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-lot-production-backfill-'));
+  const file = path.join(dir, `${label}.sql`);
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  try {
+    execFileSync(
+      'npx',
+      ['wrangler', 'd1', 'execute', DEFAULT_DB, remote ? '--remote' : '--local', `--file=${file}`],
+      { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 }
+    );
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString() : '';
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${stderr || err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function promptSync(question) {
+  process.stdout.write(question);
+  let fd;
+  try {
+    fd = fs.openSync('/dev/tty', 'rs');
+  } catch {
+    console.error('\nNo terminal to confirm on. Re-run interactively, or pass --yes.');
+    process.exit(1);
+  }
+  const buf = Buffer.alloc(256);
+  let out = '';
+  for (;;) {
+    const n = fs.readSync(fd, buf, 0, buf.length, null);
+    if (n === 0) break;
+    out += buf.toString('utf8', 0, n);
+    if (out.includes('\n')) break;
+  }
+  fs.closeSync(fd);
+  return out.split('\n')[0];
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const remote = opts.remote;
+  const targetLabel = remote ? 'PRODUCTION' : 'local';
+  const runAt = new Date().toISOString();
+  const t = opts.tenant;
+
+  const tenantRows = query(`SELECT id, name FROM tenants WHERE id = '${t}'`, { remote });
+  if (tenantRows.length === 0) {
+    console.error(`No tenant "${t}" in this database. Check the id, or the --remote flag.`);
+    process.exit(1);
+  }
+  const tenant = tenantRows[0];
+
+  // Probed, not assumed: the dry run is useful against a database that has not
+  // taken 0106 yet (it predicts what --apply would write once it has), but the
+  // writes must never name a column that is not there.
+  const has0106 = hasColumn('lots', 'production_date_status', remote) && hasColumn('document_versions', 'search_text', remote);
+  if (!has0106) {
+    (opts.json ? console.error : console.log)(
+      'This database predates migration 0106 — every lot reads as having no production\n' +
+      'date yet and no document has search_text. Dry run only; --apply needs 0106 first.\n'
+    );
+    if (opts.apply) {
+      console.error('--apply needs migrations/0106_lot_production_date.sql on the target first.');
+      process.exit(1);
+    }
+  }
+
+  const { rows: lots } = queryPaged(
+    (limit, offset) =>
+      `SELECT id, lot_number, sub_lot_code, lot_key, first_seen_source,
+              ${has0106 ? 'production_date_status' : 'NULL AS production_date_status'}
+         FROM lots WHERE tenant_id = '${t}' ORDER BY id LIMIT ${limit} OFFSET ${offset}`,
+    { remote, pageSize: opts.pageSize * 10 }
+  );
+  const { rows: links } = queryPaged(
+    (limit, offset) =>
+      `SELECT dl.lot_id, dl.document_id FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
+        WHERE l.tenant_id = '${t}' ORDER BY dl.lot_id, dl.document_id LIMIT ${limit} OFFSET ${offset}`,
+    { remote, pageSize: opts.pageSize * 10 }
+  );
+  const { rows: docs } = queryPaged(
+    (limit, offset) =>
+      `SELECT d.id, d.title, d.external_ref, d.primary_metadata, s.name AS supplier_name,
+              dv.id AS version_id, dv.extracted_text,
+              ${has0106 ? 'dv.search_text' : 'NULL AS search_text'}
+         FROM documents d
+         LEFT JOIN suppliers s ON s.id = d.supplier_id
+         LEFT JOIN document_versions dv ON dv.document_id = d.id AND dv.version_number = d.current_version
+        WHERE d.tenant_id = '${t}' AND d.status = 'active'
+        ORDER BY d.id LIMIT ${limit} OFFSET ${offset}`,
+    { remote, pageSize: opts.pageSize }
+  );
+
+  const plan = buildPlan(
+    { tenantId: t, runAt, lots, links, docs },
+    { ...production, rowScopedSearchText, normalizeLotNumber, normalizeSubLotCode }
+  );
+  if (!opts.searchText) plan.searchText = [];
+
+  const lotStatements = planToSql(plan);
+  const textStatements = searchTextToSql(plan);
+
+  if (opts.json) {
+    console.log(JSON.stringify({
+      tenant: t, tenant_name: tenant.name, target: targetLabel, applied: opts.apply, run_at: runAt,
+      has_0106: has0106, counts: plan.counts, updates: plan.updates, skipped: plan.skipped.length,
+      refusals: plan.refusals, search_text: plan.searchText.map(({ search_text: _t, ...s }) => s),
+      too_large: plan.tooLarge,
+    }, null, 2));
+  } else {
+    for (const line of formatPlan(plan, { targetLabel: `${tenant.name}, ${targetLabel}` })) console.log(line);
+  }
+
+  if (!opts.apply) {
+    if (!opts.json) {
+      console.log(
+        lotStatements.length + textStatements.length === 0
+          ? 'DRY RUN — nothing to write.'
+          : `DRY RUN — ${lotStatements.length} lot row(s) and ${textStatements.length} search_text value(s) not written. Re-run with --apply to write.`
+      );
+      console.log('');
+    }
+    return;
+  }
+
+  if (lotStatements.length + textStatements.length === 0) {
+    console.log('Nothing to do — every lot is already accounted for and every split certificate is already scoped.');
+    return;
+  }
+
+  if (remote && !opts.yes) {
+    const answer = promptSync(
+      `\nAbout to WRITE to PRODUCTION D1 for tenant ${t}:\n` +
+        `  ${lotStatements.length} lot production date(s), ${textStatements.length} search_text value(s)\n` +
+        'Type the tenant id to continue: '
+    );
+    if (answer.trim() !== t) {
+      console.error('That did not match. Nothing was written.');
+      process.exit(1);
+    }
+  }
+
+  const batches = batchStatements([...lotStatements, ...textStatements]);
+  batches.forEach((b, i) => {
+    execSql(b, remote, `lot-production-${i + 1}`);
+    console.log(`  batch ${i + 1}/${batches.length} — ${b.length} statement(s)`);
+  });
+  execSql([auditSql(plan)], remote, 'audit');
+  console.log('');
+  console.log(`Wrote ${lotStatements.length} lot production date(s) and ${textStatements.length} search_text value(s) in ${targetLabel} D1.`);
+  console.log('');
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+}

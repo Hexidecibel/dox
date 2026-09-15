@@ -1,0 +1,161 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/seed-lot-rows-demo — AJ's Darigold fixture (Any-Field COA Retrieval §8),
+ * seeded into a LOCAL tenant so Search can be walked through A1-A4 and A11.
+ *
+ * WHAT IT CREATES (idempotent: fixed ids, INSERT OR REPLACE)
+ *
+ *   Supplier   Darigold, Inc. (demo)
+ *   Certificate PO K135797 / EDI187653, split one document per lot row the way
+ *   approval splits it — each carrying the whole certificate as extracted_text
+ *   and the row-scoped search_text approval now writes:
+ *     10426203-02 / -03 / -04  produced 2026-07-22   50 EA / 2755.75 LB
+ *     10426204-13              produced 2026-07-23  100 EA / 5511.5 LB
+ *   An older Darigold certificate whose production date an earlier extraction
+ *   filed as code_date (lot row source 'extracted_code_date_legacy').
+ *   A West Point certificate with code date 2026-07-31 and no production date.
+ *
+ * WHY SQL AND NOT THE APPROVE ENDPOINT: a multi-record approval needs the
+ * worker's page-scoped PDF inputs this repo does not ship. The two derived
+ * values are therefore computed by the SAME compiled functions approval calls
+ * (bin/lib/shared/rowScopedText.js, bin/lib/shared/lotProductionDate.js), so
+ * what Search reads matches what an approval writes.
+ *
+ * LOCAL ONLY. There is no --remote.
+ *
+ * Usage:
+ *   bin/seed-lot-rows-demo                     # tenant medosweet_demo
+ *   bin/seed-lot-rows-demo --tenant <id>
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const { query, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+const { rowScopedSearchText } = require('./lib/shared/rowScopedText');
+const { resolveProductionDate, legacyCodeDateAsProduction } = require('./lib/shared/lotProductionDate');
+
+let tenant = 'medosweet_demo';
+for (let i = 2; i < process.argv.length; i++) {
+  const a = process.argv[i];
+  if (a === '--tenant') tenant = process.argv[++i];
+  else if (a === '--remote' || a === '-r') {
+    console.error('bin/seed-lot-rows-demo is local only.');
+    process.exit(2);
+  } else if (a === '-h' || a === '--help') {
+    const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+    console.log(lines.slice(3, lines.findIndex((l, j) => j > 2 && l.trim() === '*/')).join('\n').replace(/^ \* ?/gm, ''));
+    process.exit(0);
+  } else {
+    console.error(`Unknown argument: ${a}`);
+    process.exit(2);
+  }
+}
+if (!/^[A-Za-z0-9_-]+$/.test(tenant)) {
+  console.error('--tenant must be an id.');
+  process.exit(2);
+}
+if (query(`SELECT id FROM tenants WHERE id = '${tenant}'`).length === 0) {
+  console.error(`No tenant "${tenant}" in the local database.`);
+  process.exit(1);
+}
+const user = query(`SELECT id FROM users WHERE active = 1 ORDER BY role = 'super_admin' DESC LIMIT 1`)[0];
+
+const q = (v) => (v === null || v === undefined ? 'NULL' : `'${String(v).replace(/'/g, "''")}'`);
+const P = `lrd-${tenant}`;
+const SUP = `${P}-sup-dg`;
+const SUP_WP = `${P}-sup-wp`;
+
+const BUNDLE =
+  'DARIGOLD, INC. CERTIFICATE OF ANALYSIS Customer: 10127 MEDOSWEET FARMS INC Sales Order/Transfer Order #: EDI187653 ' +
+  'USDA Plant: 53-48 Trailer #: T-18 Purchase Order #: K135797 Shipment Number: 6381882 Seal#: 6729535 ' +
+  'Product: SWEET CREAM BUTTER - Btr NS Gr AA 25kg Item Number: 810004 ' +
+  'Lot Number 10426204 Sub Lot Number 13 Weight – LB 5511.5 Quantity 100 Production Date 23-Jul-2026 ' +
+  'Lot Number 10426203 Sub Lot Number 04 Weight – LB 2755.75 Quantity 50 Production Date 22-Jul-2026 ' +
+  'Lot Number 10426203 Sub Lot Number 03 Weight – LB 2755.75 Quantity 50 Production Date 22-Jul-2026 ' +
+  'Lot Number 10426203 Sub Lot Number 02 Weight – LB 2755.75 Quantity 50 Production Date 22-Jul-2026 ' +
+  'Moisture 16.1 Butterfat 82.3 Coliform <10 Y&M <10';
+
+const page = { supplier_name: 'Darigold, Inc.', po_number: 'K135797', order_number: 'EDI187653', product_code: '810004', product_name: 'SWEET CREAM BUTTER - Btr NS Gr AA 25kg' };
+const rows = [
+  { lot_code: '10426204', sub_lot_code: '13', production_date: '23-Jul-2026', quantity: '100 EA', net_weight: '5511.5 LB' },
+  { lot_code: '10426203', sub_lot_code: '04', production_date: '22-Jul-2026', quantity: '50 EA', net_weight: '2755.75 LB' },
+  { lot_code: '10426203', sub_lot_code: '03', production_date: '22-Jul-2026', quantity: '50 EA', net_weight: '2755.75 LB' },
+  { lot_code: '10426203', sub_lot_code: '02', production_date: '22-Jul-2026', quantity: '50 EA', net_weight: '2755.75 LB' },
+].map((r) => ({ ...page, ...r }));
+
+const sql = [];
+sql.push(`INSERT OR IGNORE INTO suppliers (id, tenant_id, name, slug, active) VALUES (${q(SUP)}, ${q(tenant)}, 'Darigold, Inc. (demo)', ${q(SUP)}, 1);`);
+sql.push(`INSERT OR IGNORE INTO suppliers (id, tenant_id, name, slug, active) VALUES (${q(SUP_WP)}, ${q(tenant)}, 'West Point (demo)', ${q(SUP_WP)}, 1);`);
+
+function doc({ id, title, supplier, metadata, text, searchText, fileName, lots }) {
+  sql.push(`DELETE FROM document_lots WHERE document_id = ${q(id)};`);
+  sql.push(`DELETE FROM document_versions WHERE document_id = ${q(id)};`);
+  sql.push(`DELETE FROM documents WHERE id = ${q(id)};`);
+  sql.push(
+    `INSERT INTO documents (id, tenant_id, title, tags, current_version, status, created_by, supplier_id, primary_metadata, external_ref) ` +
+      `VALUES (${q(id)}, ${q(tenant)}, ${q(title)}, '[]', 1, 'active', ${q(user && user.id)}, ${q(supplier)}, ${q(JSON.stringify(metadata))}, ${q(`demo-${id}`)});`
+  );
+  sql.push(
+    `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, extracted_text, search_text, uploaded_by) ` +
+      `VALUES (${q(`${id}-v1`)}, ${q(id)}, 1, ${q(fileName)}, 1024, 'application/pdf', ${q(`demo/${id}.pdf`)}, 'demo', ${q(text)}, ${q(searchText)}, ${q(user && user.id)});`
+  );
+  for (const l of lots) {
+    const lotId = `${id}-lot-${l.lot}${l.sub}`;
+    sql.push(`DELETE FROM lots WHERE id = ${q(lotId)};`);
+    sql.push(
+      `INSERT INTO lots (id, tenant_id, supplier_id, lot_number, sub_lot_code, lot_key, first_seen_source, production_date, production_date_raw, production_date_source, production_date_status, production_date_document_id) ` +
+        `VALUES (${q(lotId)}, ${q(tenant)}, ${q(supplier)}, ${q(l.lot)}, ${q(l.sub)}, ${q(l.lot + l.sub)}, 'coa', ${q(l.pd && l.pd.iso)}, ${q(l.pd && l.pd.raw)}, ${q(l.pd && l.pd.source)}, ${q(l.pd && l.pd.status)}, ${q(l.pd ? id : null)});`
+    );
+    sql.push(`INSERT INTO document_lots (id, document_id, lot_id) VALUES (${q(`${lotId}-dl`)}, ${q(id)}, ${q(lotId)});`);
+  }
+}
+
+rows.forEach((r, i) => {
+  const siblings = rows.filter((_, j) => j !== i);
+  doc({
+    id: `${P}-dg-${r.sub_lot_code}`,
+    title: 'SWEET CREAM BUTTER - Btr NS Gr AA 25kg',
+    supplier: SUP,
+    metadata: r,
+    text: BUNDLE,
+    searchText: (rowScopedSearchText(BUNDLE, r, siblings) || {}).text || null,
+    fileName: '2235 310348 1042620413 US BULK BUTTER MFG 072326.pdf',
+    lots: [{ lot: r.lot_code, sub: r.sub_lot_code, pd: resolveProductionDate(r) }],
+  });
+});
+
+const legacyText = 'DARIGOLD, INC. CERTIFICATE OF ANALYSIS Product: DG Btr Elg 30-1lb Lot Number 10426150 Sub Lot Number 01 Production Date 30-May-2026 Moisture 16.9';
+const legacyFields = { supplier_name: 'Darigold, Inc.', lot_number: '10426150', sub_lot_number: '01', code_date: '05/30/2026' };
+const legacy = legacyCodeDateAsProduction(legacyFields, legacyText);
+doc({
+  id: `${P}-dg-legacy`,
+  title: 'DG Btr Elg 30-1lb (older extraction)',
+  supplier: SUP,
+  metadata: legacyFields,
+  text: legacyText,
+  searchText: null,
+  fileName: 'Darigold COA EDI173556.pdf',
+  lots: [{ lot: '10426150', sub: '01', pd: legacy.ok ? legacy.resolution : null }],
+});
+
+doc({
+  id: `${P}-wp`,
+  title: 'West Point Butter Solids',
+  supplier: SUP_WP,
+  metadata: { supplier_name: 'West Point', lot_number: 'WP-A7', code_date: '2026-07-31' },
+  text: 'West Point Dairy butter certificate code date 07/31/2026',
+  searchText: null,
+  fileName: 'West Point COA 073126.pdf',
+  lots: [{ lot: 'WP-A7', sub: '', pd: null }],
+});
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-lot-rows-demo-'));
+const file = path.join(dir, 'seed.sql');
+fs.writeFileSync(file, `${sql.join('\n')}\n`);
+execFileSync('npx', ['wrangler', 'd1', 'execute', DEFAULT_DB, '--local', `--file=${file}`], { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'inherit'] });
+fs.rmSync(dir, { recursive: true, force: true });
+console.log(`Seeded the Darigold lot-row fixture into local tenant ${tenant}.`);
+console.log('Try: "1042620303", "10426203 03", Lot / sublot 10426203 + 03, "production date 22-Jul-2026", "production date 5/30/2026", "production date 7/31/2026".');
