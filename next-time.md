@@ -4,7 +4,23 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-15 (latest): v2.17.0 ON PROD — renewal alert lead time + supplier list import / packets / Needs review.**
+**2026-09-15 (latest): v2.18.0 ON PROD — one store for product identity (migration 0113).**
+Merge b086829 of `worktree-agent-a6a4f0a93347d00ea` (worktree + branch now removed), SCHEMA.md 38798f5,
+release e031012 (tag v2.18.0 pushed). Pages deploy `ec313b9e`, staging `5ee2be28`; gate: vitest 273 files /
+3716 tests, Playwright 7 passed (1 skipped). The first prod `bin/deploy` passed its gate and then failed at
+`wrangler pages deploy` with `Authentication error [code: 10000]` — the Cloudflare token had rolled; a fresh
+token went into `.env` and the re-run deployed. Prod backup bookmark
+`000016eb-0000026c-000050e7-70b0419dcb215cefe5b6a92d75724da5`. **Prod verified after 0113:**
+product_identifiers 22 → 25 (all 22 existing rows identical; 3 new: supplier_name "HALF AND HALF" on
+H&H 5 GL DISP, our_sku 0708 on H&H 5 GL DISP, our_sku 30417 on MS WHOLE 5 GL BAG); supplier_product_map 3 rows,
+unchanged and no longer read; lot_match_suggestions 46 with `match_note` added; `foreign_key_check` empty.
+Prod smoke: releases index current 2.18.0; unauthenticated `/api/suppliers/x/product-identifiers` → 401 JSON;
+`/api/product-map` → 401.
+**Open decision:** the pack vocabulary treats a bag as different from a dispenser, so CMF "5 Gallon Bag"
+Half-and-Half certificates no longer resolve to 0708 "H&H 5 GL DISP". If CMF's 5-gallon bag IS our dispenser
+SKU, add a pack or supplier_item identifier to 0708.
+
+**2026-09-15: v2.17.0 ON PROD — renewal alert lead time + supplier list import / packets / Needs review.**
 Merges of `worktree-agent-abec86af04085b09e` (lead time, 0111; no conflicts) and
 `worktree-agent-ad009e3bac9b67d80` (supplier list derivation; conflicts CLAUDE.md + tests/helpers/db.ts; its
 migration also said 0111 → **renumbered 0112**, every reference updated). 0112 is ADDITIVE (new
