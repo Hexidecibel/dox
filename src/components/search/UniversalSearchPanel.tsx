@@ -158,7 +158,7 @@ export function UniversalSearchPanel({
     if (aiMode && trimmed) runAi(trimmed);
   };
 
-  const constrained = data.coverage === 'covered' || data.coverage === 'likely' || data.coverage === 'none';
+  const constrained = data.coverage === 'covered' || data.coverage === 'likely' || data.coverage === 'none' || data.coverage === 'ambiguous';
   const hasQuery = state.q.trim() !== '' || (lotOpen && lotBase.trim() !== '');
   const coverageProps = {
     documents: data.documents.results,

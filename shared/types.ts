@@ -1909,6 +1909,13 @@ export interface ParsedQuery {
   keywords: string[];
   document_type_slug: string | null;
   product_names: string[];
+  /**
+   * The product exactly as the person named it, pack and attributes included
+   * ("bulk unsalted butter", "300 gal tote", "2235"). Resolved through the
+   * product identifier graph (migration 0107); `product_names` is the model's
+   * guess from the catalog and is used only when this does not resolve.
+   */
+  product_text?: string | null;
   supplier_name: string | null;
   date_from: string | null;
   date_to: string | null;
@@ -1947,10 +1954,15 @@ export interface SearchMatchContext {
 /**
  * `unconstrained` = the query stated nothing to verify, so nothing was judged.
  * `likely` = nothing on file is VERIFIED to cover it, but at least one document
- * would, on a value an older extraction filed under another field (a production
- * date read from the code date). A person confirms those; the page says so.
+ * would, on evidence a person has not confirmed (a production date an older
+ * extraction filed under the code date; a product reached through an
+ * unconfirmed identifier; a suggested order match). A person confirms those;
+ * the page says so.
+ * `ambiguous` = a product phrase could mean more than one product ("5 gallon
+ * bag"). Nothing is picked: coverage is reported per product
+ * (`SearchProductCandidate.covering_count`).
  */
-export type SearchCoverage = 'covered' | 'likely' | 'none' | 'unconstrained';
+export type SearchCoverage = 'covered' | 'likely' | 'none' | 'unconstrained' | 'ambiguous';
 
 /**
  * The role of a date. `production` covers production / manufacture / pack date;
@@ -1966,7 +1978,9 @@ export type SearchConstraintKind =
   | 'product'
   | 'document_type'
   | 'metadata'
-  | 'text';
+  | 'text'
+  /** A WMS order number (A7): followed order_items -> lots -> documents. */
+  | 'order';
 
 export interface SearchConstraint {
   id: string;
@@ -1996,6 +2010,108 @@ export interface SearchConstraint {
   source: 'query_text' | 'ai_parse' | 'structured';
   /** Anything the reader should know about how it was read. */
   note?: string | null;
+  /**
+   * Set on a `product` constraint resolved through the product identifier graph
+   * (migration 0107): what the phrase resolved to, and how. With more than one
+   * candidate the constraint is AMBIGUOUS and each document is judged against
+   * every candidate — nothing is picked.
+   */
+  product_resolution?: SearchProductResolution | null;
+  /** Set on an `order` constraint: the order and what links each line to a certificate. */
+  order?: SearchOrderEvidence | null;
+}
+
+/** Kinds of product identifier (migration 0107). */
+export type ProductIdentifierKind = 'our_sku' | 'supplier_item' | 'supplier_name' | 'alias' | 'gtin' | 'pack';
+export type ProductIdentifierSource = 'seed' | 'reviewer' | 'extracted' | 'import';
+
+export interface ProductIdentifier {
+  id: string;
+  tenant_id: string;
+  product_id: string;
+  kind: ProductIdentifierKind;
+  value: string;
+  value_norm: string;
+  supplier_id: string | null;
+  supplier_name?: string | null;
+  superseded: 0 | 1;
+  confirmed: 0 | 1;
+  source: ProductIdentifierSource;
+  note: string | null;
+  created_by: string | null;
+  created_at: string;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+  updated_at: string;
+}
+
+/** One route by which a phrase reached a product. */
+export interface SearchProductMatchedVia {
+  kind: ProductIdentifierKind | 'product_name' | 'attribute';
+  value: string;
+  confirmed: boolean;
+  superseded?: boolean;
+  supplier_name?: string | null;
+  note?: string | null;
+}
+
+export interface SearchProductCandidate {
+  product_id: string;
+  product_name: string;
+  /** "40% CREAM 300GL (Country Morning Farms item 30904, our SKU 10286)" */
+  label: string;
+  our_skus: string[];
+  supplier_items: Array<{ supplier_id: string; supplier_name: string | null; value: string; superseded: boolean; confirmed: boolean }>;
+  supplier_names: Array<{ supplier_id: string; supplier_name: string | null; value: string; confirmed: boolean }>;
+  /** The pack this product is known by, described ("300 gal tote"). */
+  pack: string | null;
+  matched_via: SearchProductMatchedVia[];
+  /** False when the phrase reached this product only through an unconfirmed identifier. */
+  confirmed: boolean;
+  /** Set when the phrase's pack matched this product's only after a unit conversion. */
+  conversion_note: string | null;
+  /** One sentence: "'300 gal tote' → 40% CREAM 300GL (…) via its pack 300 Gallon Tote." */
+  explanation: string;
+  /** Filled by the search run. */
+  covering_count?: number;
+  likely_count?: number;
+}
+
+export interface SearchProductResolution {
+  /** The words that were resolved, as typed. */
+  phrase: string;
+  candidates: SearchProductCandidate[];
+  ambiguous: boolean;
+  /** "'5 gallon bag' could mean: WHIP 5 GL BAG (…); MS WHOLE 5 GL BAG (…)." */
+  message: string;
+}
+
+export interface SearchOrderLine {
+  order_item_id: string;
+  product_code: string | null;
+  product_name: string | null;
+  lot_number: string | null;
+  /** A person accepted a lot-match suggestion linking this line to the document. */
+  accepted_document_ids: string[];
+  /** Linked before suggest-only (14 Sep 2026) with no person's accept on record. */
+  legacy_document_ids: string[];
+  /** Pending suggestions — shown "suggested match — confirm", never covering. */
+  suggested: Array<{ document_id: string; basis: string | null; confidence: number | null }>;
+  rejected_document_ids: string[];
+  /**
+   * The line's product code resolved through the identifier graph (0107), when
+   * it resolves to exactly one product. A certificate linked to the line that is
+   * plainly a DIFFERENT product (another item number from the same supplier) is
+   * then flagged rather than offered.
+   */
+  product_resolution?: SearchProductResolution | null;
+}
+
+export interface SearchOrderEvidence {
+  order_id: string;
+  order_number: string;
+  customer_name: string | null;
+  lines: SearchOrderLine[];
 }
 
 export interface SearchDroppedConstraint {
@@ -2057,6 +2173,8 @@ export interface SearchConstraintCheck {
   message: string;
   /** For a nearby date: how many days from the asked day. */
   distance_days?: number | null;
+  /** For a product check: which resolved product this outcome is about. */
+  candidate_product_id?: string | null;
 }
 
 /**

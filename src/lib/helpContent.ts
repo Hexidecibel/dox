@@ -823,6 +823,13 @@ const search: ModuleHelpExpanded = {
           "The production date comes from the lot row, with where it came from. A date an older extraction stored as the code date, which the certificate prints under its production date label, shows under Likely covering — confirm: open it and check before sending it. A date that reads two ways (04-05-2026) is never counted as a match.",
       },
       {
+        heading: 'Products by any name, and orders',
+        body:
+          "Name a product the way you know it: our SKU (2235), the supplier's item number (810004), a pack (300 gal tote, 5 gallon bags, 25 kg) or words next to a date (bulk unsalted butter produced 7/22/26). Search says what it understood, for example \"2235 → DG BTR BULK U/S 55.115# (Darigold, Inc. item 810004, our SKU 2235)\". U/S, NS and unsalted mean the same thing, and a pack in another unit (55.115 lb and 25 kg) matches with the conversion shown. " +
+          "When a phrase could mean more than one product, such as \"300 gal tote\" for whole milk and heavy cream, Search does not pick one. It lists each product with its own answer. A result found through an identifier nobody has confirmed shows under Likely covering — confirm. The identifiers are managed on each product's page. " +
+          "Type a WMS order number (1797062) to see the certificates for its lots. A certificate counts as covering only when a person accepted the lot match or one of its lot rows is exactly the shipped lot. A suggested match shows as \"confirm\".",
+      },
+      {
         heading: 'Keyword vs. AI mode',
         body:
           "Keyword search is fast and matches the words you type. Plurals and common unit spellings (gal / gallon) match each other. " +

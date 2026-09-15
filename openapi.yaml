@@ -585,7 +585,7 @@ components:
     SearchCoverageFields:
       type: object
       properties:
-        coverage: { type: string, enum: [covered, none, unconstrained] }
+        coverage: { type: string, enum: [covered, likely, ambiguous, none, unconstrained] }
         constraints: { type: array, items: { $ref: '#/components/schemas/SearchConstraint' } }
         dropped_constraints:
           type: array
@@ -1392,6 +1392,16 @@ paths:
         lot is never covering; a code date never covers a production date; a stored date that reads
         two ways (`02/07/2026`) is reported as unverifiable. Pending Review Queue files that match are
         returned in `unreviewed_candidates` and are never covering.
+
+        **Products and orders (migration 0107).** A product named the way a person knows it — our SKU
+        (`2235`), the supplier's item (`810004`), a pack (`300 gal tote`), or words next to another
+        constraint (`bulk unsalted butter produced 7/22/26`) — resolves through the product identifier
+        graph into a `product` constraint carrying `product_resolution` (what it resolved to, and how).
+        A phrase that fits several products is `coverage: ambiguous`: nothing is picked, and each
+        candidate carries its own `covering_count`. Anything reached through an unconfirmed identifier,
+        a pending lot-match suggestion, or an older auto-link is `likely` ("confirm"), never covering.
+        A WMS order number (`1797062`) becomes an `order` constraint that follows its lines to the lots
+        they shipped; a certificate covers only through a person's accepted match or an exact lot row.
 
         Query-time folding: simple singular/plural and `gal/gallon`, `lb/lbs/pound`, `oz/ounce`.
         **Requires any authenticated user.**

@@ -333,6 +333,7 @@ import type {
   UpdateRequestLineRequest,
 } from '../../shared/types';
 import type { SupplierGapListResponse } from '../../shared/requirementGap';
+import type { ProductIdentifier, ProductIdentifierKind } from '../../shared/types';
 
 // ---------------------------------------------------------------------------
 // Modules (migration 0099). Its own import block for the same reason as the
@@ -933,6 +934,27 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
+
+    /**
+     * Product identifier graph (migration 0107): what this product goes by.
+     * GET/POST /api/products/:id/identifiers, PUT/DELETE /api/product-identifiers/:id
+     */
+    identifiers: {
+      list: (productId: string) =>
+        fetchApi<{ identifiers: ProductIdentifier[] }>(`/products/${productId}/identifiers`),
+      add: (productId: string, data: { kind: ProductIdentifierKind; value: string; supplier_id?: string | null; superseded?: boolean; confirmed?: boolean; note?: string | null }) =>
+        fetchApi<{ identifier: ProductIdentifier; created: boolean }>(`/products/${productId}/identifiers`, {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+      update: (identifierId: string, data: { confirmed?: boolean; superseded?: boolean; note?: string | null }) =>
+        fetchApi<{ identifier: ProductIdentifier }>(`/product-identifiers/${identifierId}`, {
+          method: 'PUT',
+          body: JSON.stringify(data),
+        }),
+      remove: (identifierId: string) =>
+        fetchApi<{ success: boolean }>(`/product-identifiers/${identifierId}`, { method: 'DELETE' }),
+    },
   },
 
   lots: {
