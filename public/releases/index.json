@@ -1,6 +1,11 @@
 {
-  "current": "2.16.1",
+  "current": "2.17.0",
   "versions": [
+    {
+      "version": "2.17.0",
+      "date": "2026-09-15",
+      "title": "Renewal warnings on your schedule, and requirements from your supplier list"
+    },
     {
       "version": "2.16.1",
       "date": "2026-09-15",
