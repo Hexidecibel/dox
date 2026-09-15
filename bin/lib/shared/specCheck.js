@@ -34,6 +34,7 @@ __export(specCheck_exports, {
   normalizeUnit: () => normalizeUnit,
   parseLimitExpression: () => parseLimitExpression,
   parseMeasuredValue: () => parseMeasuredValue,
+  readVerdictWord: () => readVerdictWord,
   resolveSpecLimits: () => resolveSpecLimits,
   resolveUnits: () => resolveUnits,
   resultRestatesSpec: () => resultRestatesSpec,
@@ -42,6 +43,7 @@ __export(specCheck_exports, {
   toSpecLimit: () => toSpecLimit,
   unitEquivalenceNote: () => unitEquivalenceNote,
   unitFactor: () => unitFactor,
+  unitInferenceNote: () => unitInferenceNote,
   validateLimitShape: () => validateLimitShape
 });
 module.exports = __toCommonJS(specCheck_exports);
@@ -121,6 +123,22 @@ function unitEquivalenceNote(value, limit) {
   const v = value.canonical || "the printed unit";
   const l = limit.canonical || "the limit unit";
   return `${v} judged as ${l}, per this tenant's setting`;
+}
+function isKnownUnit(raw) {
+  const u = normalizeUnit(raw);
+  return u.family !== "unknown" && !u.family.startsWith("other:");
+}
+function unitFromHeader(header) {
+  const s = String(header ?? "").trim();
+  if (!s) return null;
+  const m = /[([{]([^)\]}]+)[)\]}]\s*$/.exec(s) || /,\s*([^,]+)$/.exec(s) || /\bin\s+([A-Za-z%][A-Za-z0-9/%.\s]*)$/i.exec(s);
+  if (!m) return null;
+  const candidate = m[1].trim().replace(/^in\s+/i, "");
+  return isKnownUnit(candidate) ? candidate : null;
+}
+function unitInferenceNote(unit, from) {
+  const where = from === "column_header" ? "the column header" : "the table's units row";
+  return `unit ${unit} read from ${where}, not printed on the result`;
 }
 var ABSENT_TOKENS = /* @__PURE__ */ new Set([
   "absent",
@@ -508,14 +526,17 @@ var PASS_VERDICT_TOKENS = /* @__PURE__ */ new Set([
   "withinspec",
   "meetsspec"
 ]);
+function readVerdictWord(cell) {
+  const key = norm(cell);
+  if (!key) return null;
+  if (FAIL_VERDICT_TOKENS.has(key)) return "fail";
+  if (PASS_VERDICT_TOKENS.has(key)) return "pass";
+  return null;
+}
 function printedClaim(row) {
   const cell = row.verdictRaw || row.resultRaw;
-  const key = norm(cell);
-  return {
-    cell,
-    pass: !!cell && PASS_VERDICT_TOKENS.has(key),
-    fail: !!cell && FAIL_VERDICT_TOKENS.has(key)
-  };
+  const word = readVerdictWord(cell);
+  return { cell, pass: word === "pass", fail: word === "fail" };
 }
 function judgePrinted(scope, target, row, policy = STRICT_UNIT_POLICY) {
   const { testName, resultRaw, specRaw, verdictRaw, unitRaw } = row;
@@ -753,14 +774,37 @@ function isControlRowLabel(label) {
   const key = norm(label);
   return !!key && CONTROL_ROW_LABELS.has(key);
 }
+var CLOCK_SRC = String.raw`\d{1,2}:\d{2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?`;
+var CALENDAR_SRC = String.raw`\d{1,4}[/.\-]\d{1,2}[/.\-]'?\d{2,4}`;
+var DATE_OR_TIME_RE = new RegExp(
+  `^(?:${CLOCK_SRC}|${CALENDAR_SRC}(?:\\s+${CLOCK_SRC})?)$`,
+  "i"
+);
+function isDateOrTimeCell(raw) {
+  const s = String(raw ?? "").trim();
+  return !!s && DATE_OR_TIME_RE.test(s);
+}
+function isNonMeasurementRow(cells) {
+  const stated = cells.filter((c) => c && !isEmptyCell(c));
+  if (stated.length === 0) return false;
+  return stated.every(isDateOrTimeCell);
+}
+function isUnitsRow(cells) {
+  const stated = cells.filter((c) => c && !isEmptyCell(c));
+  if (stated.length === 0) return false;
+  return stated.every((c) => isKnownUnit(c) && parseMeasuredValue(c).kind === "unparseable");
+}
 function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
   const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
   const resolved = resolveSpecLimits(limits, ctx);
   const verdicts = [];
   const unmatched = /* @__PURE__ */ new Set();
   const controlRows = /* @__PURE__ */ new Set();
-  if (tests.length === 0) return { verdicts, unmatched: [], control_rows: [] };
-  const judge = (scope, target, testName, valueRaw, unitRaw, specRaw = "") => {
+  const nonMeasurementRows = /* @__PURE__ */ new Set();
+  if (tests.length === 0) {
+    return { verdicts, unmatched: [], control_rows: [], non_measurement_rows: [] };
+  }
+  const judge = (scope, target, testName, valueRaw, unitRaw, specRaw = "", unitHint = null) => {
     if (!testName) return;
     const test = matchSpecTest(testName, tests);
     if (!test) {
@@ -794,12 +838,43 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       });
       return;
     }
-    const effectiveLimit = withUnit(limit, unitRaw);
-    const value = parseMeasuredValue(applyRowUnit(valueRaw, unitRaw));
+    const labVerdict = readVerdictWord(valueRaw);
+    if (labVerdict) {
+      const limitTextOnly = formatLimit(limit);
+      const reason2 = `the lab reported "${valueRaw}" \u2014 a verdict with no number behind it, so there is nothing to compare with our limit`;
+      verdicts.push({
+        scope,
+        target,
+        test_name_raw: testName,
+        value_raw: valueRaw,
+        unit_raw: unitRaw || null,
+        source: "limit",
+        limit_text: limitTextOnly,
+        spec_test_id: test.id,
+        limit_id: configured.id,
+        criticality: parseSpecCriticality(configured.criticality),
+        value_num: null,
+        lab_verdict: labVerdict,
+        verdict: "not_checked",
+        reason: reason2,
+        message: `${test.name}: the lab reported "${valueRaw}" and printed no number, so it could not be judged against our limit of ${limitTextOnly}.`
+      });
+      return;
+    }
+    const rowUnitStated = !!unitRaw && !isEmptyCell(unitRaw);
+    const hint = rowUnitStated ? null : unitHint;
+    const effectiveUnitRaw = hint ? hint.unit : unitRaw;
+    const valueWithUnit = applyRowUnit(valueRaw, effectiveUnitRaw);
+    const inferred = hint && valueWithUnit !== valueRaw ? hint : null;
+    const inferenceNote = inferred ? unitInferenceNote(inferred.unit, inferred.from) : "";
+    const inferredSuffix = inferred ? ` (${inferenceNote})` : "";
+    const effectiveLimit = withUnit(limit, effectiveUnitRaw);
+    const value = parseMeasuredValue(valueWithUnit);
     const cmp = compareToLimit(value, effectiveLimit, policy);
     if (cmp.verdict === "in_spec" && !opts.includePasses) return;
     const limitText = formatLimit(limit);
     const equatedSuffix = cmp.unit_equivalence_applied ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(effectiveLimit.unit))})` : "";
+    const reason = inferred ? `${cmp.reason} (${inferenceNote})` : cmp.reason;
     const base = {
       scope,
       target,
@@ -814,26 +889,27 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       // pass and fail alike, so the reviewer UI can sort without a second read.
       criticality: parseSpecCriticality(configured.criticality),
       value_num: cmp.value_num,
-      reason: cmp.reason,
-      ...cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {}
+      reason,
+      ...cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {},
+      ...inferred ? { unit_inferred_from: inferred.from } : {}
     };
     if (cmp.verdict === "out_of_spec") {
       verdicts.push({
         ...base,
         verdict: "out_of_spec",
-        message: `${test.name} is ${valueRaw}, outside our limit of ${limitText}${equatedSuffix}.`
+        message: `${test.name} is ${valueRaw}, outside our limit of ${limitText}${equatedSuffix}${inferredSuffix}.`
       });
     } else if (cmp.verdict === "not_checked") {
       verdicts.push({
         ...base,
         verdict: "not_checked",
-        message: `${test.name} could not be judged against our limit of ${limitText} \u2014 ${cmp.reason}.`
+        message: `${test.name} could not be judged against our limit of ${limitText} \u2014 ${reason}.`
       });
     } else {
       verdicts.push({
         ...base,
         verdict: "in_spec",
-        message: `${test.name} is ${valueRaw}, within our limit of ${limitText}${equatedSuffix}.`
+        message: `${test.name} is ${valueRaw}, within our limit of ${limitText}${equatedSuffix}${inferredSuffix}.`
       });
     }
   };
@@ -844,14 +920,27 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       if (shape.result === -1 && shape.spec === -1) {
         const cross = detectCrosstab(headers, tests);
         if (cross) {
-          (table.rows || []).forEach((row, ri) => {
+          const rows = table.rows || [];
+          const cellsOf = (row, idx) => idx.map((i) => String(row[i] ?? "").trim());
+          const unitRows = rows.filter((r) => isUnitsRow(cellsOf(r, cross.resultIndexes)));
+          const unitsRow = unitRows.length === 1 ? unitRows[0] : null;
+          rows.forEach((row, ri) => {
             const cell = (i) => i >= 0 ? String(row[i] ?? "").trim() : "";
             const label = cell(cross.labelIndex);
             if (isControlRowLabel(label)) {
               controlRows.add(label);
               return;
             }
+            const resultCells = cellsOf(row, cross.resultIndexes);
+            if (isNonMeasurementRow(resultCells) || row === unitsRow) {
+              nonMeasurementRows.add(label || `row ${ri + 1}`);
+              return;
+            }
             for (const ci of cross.resultIndexes) {
+              if (isDateOrTimeCell(cell(ci))) {
+                nonMeasurementRows.add(label || `row ${ri + 1}`);
+                continue;
+              }
               judge(
                 src.scope,
                 {
@@ -867,7 +956,11 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
                 // A crosstab carries its unit inside the cell ("<10 CFU/g",
                 // "33.09%") and prints no spec of its own.
                 "",
-                ""
+                "",
+                // …and when it does not, the page may still say so somewhere:
+                // this column's own heading, or a units row. Never our limit's
+                // unit.
+                unitHintFor(headers[ci], unitsRow ? String(unitsRow[ci] ?? "") : "")
               );
             }
           });
@@ -875,6 +968,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
         }
       }
       if (shape.result === -1) return;
+      const headerHint = unitHintFor(headers[shape.result], "");
       (table.rows || []).forEach((row, ri) => {
         const cell = (i) => i >= 0 ? String(row[i] ?? "").trim() : "";
         judge(
@@ -883,7 +977,8 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
           cell(shape.test),
           cell(shape.result),
           cell(shape.unit),
-          cell(shape.spec)
+          cell(shape.spec),
+          headerHint
         );
       });
     });
@@ -902,7 +997,19 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       }
     }
   }
-  return { verdicts, unmatched: [...unmatched], control_rows: [...controlRows] };
+  return {
+    verdicts,
+    unmatched: [...unmatched],
+    control_rows: [...controlRows],
+    non_measurement_rows: [...nonMeasurementRows]
+  };
+}
+function unitHintFor(header, unitsRowCell) {
+  const fromHeader = unitFromHeader(header);
+  if (fromHeader) return { unit: fromHeader, from: "column_header" };
+  const cell = unitsRowCell.trim();
+  if (cell && isKnownUnit(cell)) return { unit: cell, from: "units_row" };
+  return null;
 }
 function validateLimitShape(input) {
   const { operator } = input;
@@ -1057,6 +1164,7 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   normalizeUnit,
   parseLimitExpression,
   parseMeasuredValue,
+  readVerdictWord,
   resolveSpecLimits,
   resolveUnits,
   resultRestatesSpec,
@@ -1065,5 +1173,6 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   toSpecLimit,
   unitEquivalenceNote,
   unitFactor,
+  unitInferenceNote,
   validateLimitShape
 });

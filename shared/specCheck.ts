@@ -147,6 +147,27 @@ export interface SpecVerdict {
    */
   unit_equivalence_applied?: boolean;
   /**
+   * Where the unit came from, when it was NOT printed on the result or in the
+   * row's own unit column and had to be read off the page instead (a column
+   * header, a units row). Absent means the result carried its own unit, or
+   * none was found and none was invented.
+   *
+   * Recorded because an inferred unit is a weaker fact than a printed one: it
+   * is the difference between "the lab wrote CFU/g beside this number" and "the
+   * only place on this page that says CFU/g is the heading three rows up".
+   * `reason` and `message` both say so in words; this is the machine-readable
+   * copy for the register and the UI.
+   */
+  unit_inferred_from?: UnitOrigin;
+  /**
+   * The conformance word the LAB printed where a number belongs ("Pass",
+   * "Fail"). Set only on `not_checked` verdicts from the configured-limit path:
+   * we know what the lab concluded, we just have no measurement to compare to
+   * our own limit or to trend. NEVER converted into `in_spec` / `out_of_spec` —
+   * see the `lab_verdict` branch in `checkConfiguredLimits`.
+   */
+  lab_verdict?: 'pass' | 'fail';
+  /**
    * How much the configured limit behind this verdict MATTERS (migration 0095).
    * Carried so the reviewer UI can rank a load-stopping failure above a tracked
    * one without re-resolving limits it never loaded — it is NOT an input to the
@@ -375,6 +396,74 @@ export function unitEquivalenceNote(value: UnitInfo, limit: UnitInfo): string {
   const v = value.canonical || 'the printed unit';
   const l = limit.canonical || 'the limit unit';
   return `${v} judged as ${l}, per this tenant's setting`;
+}
+
+// ---------------------------------------------------------------------------
+// A unit that is on the PAGE but not on the RESULT
+// ---------------------------------------------------------------------------
+
+/**
+ * WHERE A UNIT WAS FOUND when the result cell did not carry one.
+ *
+ * `'column_header'`  the heading of the column the result sits in
+ *                    ("Result (CFU/g)", "Aerobic, cfu/mL")
+ * `'units_row'`      a row of the same table that declares each column's unit
+ *                    rather than reporting a measurement
+ *
+ * The row's own unit COLUMN is not in this enumeration on purpose: that unit is
+ * printed on the result's own line, it has always been read (`applyRowUnit`),
+ * and calling it "inferred" would devalue the one case where the lab actually
+ * stated the unit for this number.
+ */
+export type UnitOrigin = 'column_header' | 'units_row';
+
+/**
+ * A unit we RECOGNISE, as opposed to one we merely failed to parse.
+ *
+ * This is the gate on every inferred unit, and it is what keeps inference from
+ * becoming invention. `normalizeUnit` returns `other:<text>` for anything it
+ * does not understand and `unknown` for a blank or a placeholder; neither is
+ * evidence of anything, and attaching one to a number would either refuse a
+ * comparison for no reason or — far worse — make it look like the unit question
+ * had been settled.
+ */
+function isKnownUnit(raw: unknown): boolean {
+  const u = normalizeUnit(raw);
+  return u.family !== 'unknown' && !u.family.startsWith('other:');
+}
+
+/**
+ * Read a unit off a COLUMN HEADER: "Result (CFU/g)", "Aerobic [cfu/mL]",
+ * "Coliform, CFU/g", "Plate count in CFU/g".
+ *
+ * ONLY FROM A DELIMITED POSITION, and that is the whole safety argument. A
+ * heading is mostly prose, so scanning it for anything unit-shaped would read
+ * "Coliform Count" as a count-per-unspecified-basis and "Total Plate Count" as
+ * one too — a unit conjured out of an analyte's name, which is precisely the
+ * invention the brief forbids ("Never assume"). A bracket, a trailing comma
+ * clause or a trailing "in ..." is the lab deliberately annotating the column;
+ * anything else is left alone. The candidate must then survive `isKnownUnit`,
+ * so "Result (dry basis)" and "Aerobic (confirmed)" yield nothing.
+ */
+function unitFromHeader(header: unknown): string | null {
+  const s = String(header ?? '').trim();
+  if (!s) return null;
+  const m =
+    /[([{]([^)\]}]+)[)\]}]\s*$/.exec(s) ||
+    /,\s*([^,]+)$/.exec(s) ||
+    /\bin\s+([A-Za-z%][A-Za-z0-9/%.\s]*)$/i.exec(s);
+  if (!m) return null;
+  // "Result (in CFU/g)" — the preposition is part of the annotation, not of the
+  // unit, and leaving it on makes `normalizeUnit` fail to recognise a unit it
+  // otherwise knows perfectly well.
+  const candidate = m[1].trim().replace(/^in\s+/i, '');
+  return isKnownUnit(candidate) ? candidate : null;
+}
+
+/** How an inferred unit explains itself, in one phrasing used by every reader. */
+export function unitInferenceNote(unit: string, from: UnitOrigin): string {
+  const where = from === 'column_header' ? 'the column header' : "the table's units row";
+  return `unit ${unit} read from ${where}, not printed on the result`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,6 +1091,29 @@ const PASS_VERDICT_TOKENS = new Set([
   'meetsspec',
 ]);
 
+/**
+ * THE conformance vocabulary, read in ONE place.
+ *
+ * A cell either states a verdict the lab reached or it does not. Both readers
+ * of that question go through here: `printedClaim`, which asks it of the COA's
+ * own pass/fail column, and `checkConfiguredLimits`, which meets the same words
+ * sitting where a measurement should be ("COLIFORMS | Pass"). A second parser
+ * for the second reader would be a vocabulary that could drift, and then the
+ * same word would be a verdict on one code path and unreadable noise on the
+ * other — which is exactly what it was.
+ *
+ * EXACT on the normalized cell, never substring: "Pass" is a verdict, "Passed
+ * visual inspection after re-plating" is a sentence, and a result cell that
+ * merely CONTAINS the word must not be allowed to assert its own conformance.
+ */
+export function readVerdictWord(cell: unknown): 'pass' | 'fail' | null {
+  const key = norm(cell);
+  if (!key) return null;
+  if (FAIL_VERDICT_TOKENS.has(key)) return 'fail';
+  if (PASS_VERDICT_TOKENS.has(key)) return 'pass';
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 0 — the document's own printed spec
 // ---------------------------------------------------------------------------
@@ -1042,12 +1154,8 @@ function printedClaim(row: PrintedRow): { cell: string; pass: boolean; fail: boo
   // result column itself ("Coliform | <10 | Pass"). Both are the document
   // asserting conformance rather than reporting a measurement.
   const cell = row.verdictRaw || row.resultRaw;
-  const key = norm(cell);
-  return {
-    cell,
-    pass: !!cell && PASS_VERDICT_TOKENS.has(key),
-    fail: !!cell && FAIL_VERDICT_TOKENS.has(key),
-  };
+  const word = readVerdictWord(cell);
+  return { cell, pass: word === 'pass', fail: word === 'fail' };
 }
 
 /**
@@ -1494,6 +1602,17 @@ export interface ConfiguredCheckResult {
    * to itself.
    */
   control_rows: string[];
+  /**
+   * Labels of crosstab rows that were not results at all — an incubation log's
+   * timing steps, a row declaring the columns' units. Distinct from
+   * `control_rows`, which IS a measurement, just not of the product.
+   *
+   * Same quiet-count contract, and here it carries more weight than usual:
+   * these rows produce NO verdict, not even `not_checked`, so this list is the
+   * only trace that the engine looked at them and decided they held nothing to
+   * judge. An unlabelled row appears as `row N` rather than being omitted.
+   */
+  non_measurement_rows: string[];
 }
 
 /**
@@ -1587,6 +1706,90 @@ export function isControlRowLabel(label: unknown): boolean {
 }
 
 /**
+ * Does this cell record a POINT IN TIME rather than a quantity?
+ *
+ * Clock times ("12:08 PM", "11:00", "9:05:30") and calendar dates ("8/14/'26",
+ * "08/14/2026", "2026-08-14"), with a date optionally followed by a time.
+ * Deliberately anchored at both ends: a cell that is a date AND something else
+ * is not a date, it is a cell we failed to read, and those are already handled.
+ */
+const CLOCK_SRC = String.raw`\d{1,2}:\d{2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?`;
+const CALENDAR_SRC = String.raw`\d{1,4}[/.\-]\d{1,2}[/.\-]'?\d{2,4}`;
+const DATE_OR_TIME_RE = new RegExp(
+  `^(?:${CLOCK_SRC}|${CALENDAR_SRC}(?:\\s+${CLOCK_SRC})?)$`,
+  'i'
+);
+
+function isDateOrTimeCell(raw: unknown): boolean {
+  const s = String(raw ?? '').trim();
+  return !!s && DATE_OR_TIME_RE.test(s);
+}
+
+/**
+ * A crosstab row that is not a MEASUREMENT — no verdict of any kind is produced
+ * for it, `not_checked` included, because nothing here was ever a result.
+ *
+ * WHY THIS EXISTS. Andersen Dairy COAs carry an incubation log whose column
+ * headers are the analyte names, so `detectCrosstab` reads it as a results
+ * crosstab and grades the process steps beneath them:
+ *
+ *     Step      Coliform    Aerobic
+ *     Date In   8/14/'26    8/14/'26
+ *     Time In   12:08 PM    12:08 PM
+ *     Date Out  8/15/'26    8/16/'26
+ *     Time Out  12:56 PM    11:00 AM
+ *
+ * On production that produced 48 spurious "could not be checked" across 12
+ * documents from the clock rows — and, worse and unreported, a silent PASS from
+ * each date row, because `parseMeasuredValue("8/14/'26")` reads a leading 8 and
+ * 8 is comfortably inside a ≤10 coliform limit. A false in-spec on the supplier
+ * under sanitation scrutiny is the exact failure the three-state design exists
+ * to prevent, and it was arriving from a table that reports no results at all.
+ *
+ * THE RULE IS ON THE CELLS, NOT ON THE LABEL, and that is the decision worth
+ * defending. "Date In" / "Time Out" could have been four more strings beside
+ * CONTROL_ROW_LABELS, and that would fix Andersen and leave the next lab's
+ * "Plated At", "Read At" or "Incubación desde" to be discovered in production
+ * the same way this was. A row whose cells are all clock times or calendar dates
+ * is a timing log in any lab's table, in any wording, in any language — no
+ * vocabulary to maintain and nothing to keep in step with reality.
+ *
+ * EVERY non-empty cell must agree, which is what makes this safe in the
+ * direction that matters. The asymmetry is the same one CONTROL_ROW_LABELS
+ * argues: mistaking a timing row for product costs a dismissible alert, while
+ * mistaking product for a timing row silently drops a real result. So a row
+ * carrying even one genuine measurement fails this test and is judged in full.
+ *
+ * AND IT IS NOT TAUGHT TO `parseMeasuredValue`. Refusing a date there would turn
+ * these 96 cells into 96 `not_checked` rows — honest, and still noise about a
+ * table that never held a result. Silence is the correct output here, and it is
+ * only correct because we can say WHICH rows we were silent about: the labels
+ * come back in `non_measurement_rows`.
+ */
+function isNonMeasurementRow(cells: string[]): boolean {
+  const stated = cells.filter((c) => c && !isEmptyCell(c));
+  if (stated.length === 0) return false;
+  return stated.every(isDateOrTimeCell);
+}
+
+/**
+ * Is this crosstab row DECLARING the columns' units rather than reporting
+ * results? ("Units | CFU/g | CFU/g", or an unlabelled row of bare units.)
+ *
+ * Same cells-not-labels rule as `isNonMeasurementRow`, for the same reason, and
+ * every cell must be a unit we actually RECOGNISE — a row of `other:<text>` is
+ * a row we failed to read, not a units row. Two things follow from spotting it:
+ * the row itself stops being graded (a cell reading "CFU/g" was previously an
+ * unreadable "result"), and it becomes the unit for its column — see
+ * `UnitOrigin`.
+ */
+function isUnitsRow(cells: string[]): boolean {
+  const stated = cells.filter((c) => c && !isEmptyCell(c));
+  if (stated.length === 0) return false;
+  return stated.every((c) => isKnownUnit(c) && parseMeasuredValue(c).kind === 'unparseable');
+}
+
+/**
  * Check every extracted test result against OUR configured limits.
  *
  * `includePasses` controls whether `in_spec` verdicts come back. The review
@@ -1611,7 +1814,10 @@ export function checkConfiguredLimits(
   const verdicts: SpecVerdict[] = [];
   const unmatched = new Set<string>();
   const controlRows = new Set<string>();
-  if (tests.length === 0) return { verdicts, unmatched: [], control_rows: [] };
+  const nonMeasurementRows = new Set<string>();
+  if (tests.length === 0) {
+    return { verdicts, unmatched: [], control_rows: [], non_measurement_rows: [] };
+  }
 
   const judge = (
     scope: string,
@@ -1621,7 +1827,15 @@ export function checkConfiguredLimits(
     unitRaw: string,
     /** The row's own printed spec cell, when it has one. Only used to spot a
      *  result that is that spec restated — our limits are never read from it. */
-    specRaw = ''
+    specRaw = '',
+    /**
+     * A unit found ELSEWHERE ON THE PAGE, used only when this result carries
+     * none of its own and the row's unit column is blank. Never the limit's own
+     * unit: falling back to that would make every unitless number silently
+     * comparable to the very thing it is being judged against, which is the
+     * failure the refusal exists to prevent.
+     */
+    unitHint: { unit: string; from: UnitOrigin } | null = null
   ) => {
     if (!testName) return;
     const test = matchSpecTest(testName, tests);
@@ -1662,8 +1876,74 @@ export function checkConfiguredLimits(
       return;
     }
 
-    const effectiveLimit = withUnit(limit, unitRaw);
-    const value = parseMeasuredValue(applyRowUnit(valueRaw, unitRaw));
+    /**
+     * THE LAB GAVE A VERDICT WHERE A NUMBER BELONGS ("COLIFORMS | Pass").
+     *
+     * Recorded, not discarded. Until this branch existed the row came back
+     * `result "Pass" could not be read as a value`, which throws away the one
+     * fact the certificate did state — the lab's own conclusion — and reads to a
+     * reviewer like an extraction failure rather than a lab that reports
+     * qualitatively.
+     *
+     * IT STAYS `not_checked`, AND THAT IS THE POINT. We know what the lab
+     * concluded; we have no measurement, so there is nothing to compare against
+     * OUR limit (which is usually tighter than whatever the lab passed it
+     * against) and nothing to trend. Turning the word into `in_spec` would
+     * launder the lab's judgement into ours, and "Pass" is not evidence that a
+     * count of 40 would have cleared a ≤10 ceiling. The word rides along in
+     * `lab_verdict` for anyone who wants to act on it.
+     *
+     * The printed-spec path is untouched by this: a "Fail" there is already
+     * reported as `out_of_spec` under `source: 'printed'`, which is correct —
+     * that IS the document's own claim about its own limit.
+     */
+    const labVerdict = readVerdictWord(valueRaw);
+    if (labVerdict) {
+      const limitTextOnly = formatLimit(limit);
+      const reason =
+        `the lab reported "${valueRaw}" — a verdict with no number behind it, ` +
+        `so there is nothing to compare with our limit`;
+      verdicts.push({
+        scope,
+        target,
+        test_name_raw: testName,
+        value_raw: valueRaw,
+        unit_raw: unitRaw || null,
+        source: 'limit',
+        limit_text: limitTextOnly,
+        spec_test_id: test.id,
+        limit_id: configured.id,
+        criticality: parseSpecCriticality(configured.criticality),
+        value_num: null,
+        lab_verdict: labVerdict,
+        verdict: 'not_checked',
+        reason,
+        message:
+          `${test.name}: the lab reported "${valueRaw}" and printed no number, ` +
+          `so it could not be judged against our limit of ${limitTextOnly}.`,
+      });
+      return;
+    }
+
+    /**
+     * The unit, in order of how well the page evidences it: printed on the
+     * result itself (handled inside `applyRowUnit`), then the row's own unit
+     * column, then whatever the caller found elsewhere on the page. If none of
+     * those produced one, nothing is attached — an invented unit is worse than
+     * no unit, because it makes a result silently comparable when it is not.
+     */
+    const rowUnitStated = !!unitRaw && !isEmptyCell(unitRaw);
+    const hint = rowUnitStated ? null : unitHint;
+    const effectiveUnitRaw = hint ? hint.unit : unitRaw;
+    const valueWithUnit = applyRowUnit(valueRaw, effectiveUnitRaw);
+    // Only claim inference when it actually changed what was judged: a value
+    // carrying its own trailing unit is returned untouched by `applyRowUnit`.
+    const inferred = hint && valueWithUnit !== valueRaw ? hint : null;
+    const inferenceNote = inferred ? unitInferenceNote(inferred.unit, inferred.from) : '';
+    const inferredSuffix = inferred ? ` (${inferenceNote})` : '';
+
+    const effectiveLimit = withUnit(limit, effectiveUnitRaw);
+    const value = parseMeasuredValue(valueWithUnit);
     const cmp = compareToLimit(value, effectiveLimit, policy);
     if (cmp.verdict === 'in_spec' && !opts.includePasses) return;
 
@@ -1676,6 +1956,10 @@ export function checkConfiguredLimits(
     const equatedSuffix = cmp.unit_equivalence_applied
       ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(effectiveLimit.unit))})`
       : '';
+    // An inferred unit names itself in `reason` as well as in the sentence, so
+    // the register — which stores `reason` verbatim — records a comparison that
+    // rested on a heading rather than on the result's own line.
+    const reason = inferred ? `${cmp.reason} (${inferenceNote})` : cmp.reason;
     const base = {
       scope,
       target,
@@ -1690,27 +1974,28 @@ export function checkConfiguredLimits(
       // pass and fail alike, so the reviewer UI can sort without a second read.
       criticality: parseSpecCriticality(configured.criticality),
       value_num: cmp.value_num,
-      reason: cmp.reason,
+      reason,
       ...(cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {}),
+      ...(inferred ? { unit_inferred_from: inferred.from } : {}),
     };
 
     if (cmp.verdict === 'out_of_spec') {
       verdicts.push({
         ...base,
         verdict: 'out_of_spec',
-        message: `${test.name} is ${valueRaw}, outside our limit of ${limitText}${equatedSuffix}.`,
+        message: `${test.name} is ${valueRaw}, outside our limit of ${limitText}${equatedSuffix}${inferredSuffix}.`,
       });
     } else if (cmp.verdict === 'not_checked') {
       verdicts.push({
         ...base,
         verdict: 'not_checked',
-        message: `${test.name} could not be judged against our limit of ${limitText} — ${cmp.reason}.`,
+        message: `${test.name} could not be judged against our limit of ${limitText} — ${reason}.`,
       });
     } else {
       verdicts.push({
         ...base,
         verdict: 'in_spec',
-        message: `${test.name} is ${valueRaw}, within our limit of ${limitText}${equatedSuffix}.`,
+        message: `${test.name} is ${valueRaw}, within our limit of ${limitText}${equatedSuffix}${inferredSuffix}.`,
       });
     }
   };
@@ -1726,7 +2011,20 @@ export function checkConfiguredLimits(
       if (shape.result === -1 && shape.spec === -1) {
         const cross = detectCrosstab(headers, tests);
         if (cross) {
-          (table.rows || []).forEach((row, ri) => {
+          const rows = table.rows || [];
+          const cellsOf = (row: unknown[], idx: number[]) =>
+            idx.map((i) => String(row[i] ?? '').trim());
+
+          /**
+           * The units row, found before anything is graded: it declares the
+           * columns' units, so it is both a row that must not be judged and the
+           * unit for every result beneath it. One per table — a second such row
+           * is a table we are not reading correctly, so neither is trusted.
+           */
+          const unitRows = rows.filter((r) => isUnitsRow(cellsOf(r, cross.resultIndexes)));
+          const unitsRow = unitRows.length === 1 ? unitRows[0] : null;
+
+          rows.forEach((row, ri) => {
             const cell = (i: number) => (i >= 0 ? String(row[i] ?? '').trim() : '');
             const label = cell(cross.labelIndex);
             if (isControlRowLabel(label)) {
@@ -1735,7 +2033,27 @@ export function checkConfiguredLimits(
               controlRows.add(label);
               return;
             }
+            const resultCells = cellsOf(row, cross.resultIndexes);
+            // Not a measurement at all — an incubation log's timing steps, or
+            // the units row itself. No verdict of any kind; see
+            // `isNonMeasurementRow` for why the rule is on the cells.
+            if (isNonMeasurementRow(resultCells) || row === unitsRow) {
+              nonMeasurementRows.add(label || `row ${ri + 1}`);
+              return;
+            }
             for (const ci of cross.resultIndexes) {
+              // BACKSTOP for the row rule above, which needs EVERY cell to
+              // agree before it will skip a row. A single timing cell in an
+              // otherwise ordinary row would still be graded, and a date is not
+              // refused when it is graded — it is READ, as the integer it
+              // starts with ("8/15/'26" → 8), which lands comfortably inside a
+              // ≤10 coliform limit and reports a silent pass. A clock time or a
+              // calendar date is never a measurement, so it never gets a
+              // verdict; the row it came from is reported instead.
+              if (isDateOrTimeCell(cell(ci))) {
+                nonMeasurementRows.add(label || `row ${ri + 1}`);
+                continue;
+              }
               judge(
                 src.scope,
                 {
@@ -1751,7 +2069,11 @@ export function checkConfiguredLimits(
                 // A crosstab carries its unit inside the cell ("<10 CFU/g",
                 // "33.09%") and prints no spec of its own.
                 '',
-                ''
+                '',
+                // …and when it does not, the page may still say so somewhere:
+                // this column's own heading, or a units row. Never our limit's
+                // unit.
+                unitHintFor(headers[ci], unitsRow ? String(unitsRow[ci] ?? '') : '')
               );
             }
           });
@@ -1760,6 +2082,9 @@ export function checkConfiguredLimits(
       }
 
       if (shape.result === -1) return;
+      // The result column's own heading, for rows that print no unit of their
+      // own — "Result (CFU/g)". Computed once: it is a property of the table.
+      const headerHint = unitHintFor(headers[shape.result], '');
       (table.rows || []).forEach((row, ri) => {
         const cell = (i: number) => (i >= 0 ? String(row[i] ?? '').trim() : '');
         judge(
@@ -1768,7 +2093,8 @@ export function checkConfiguredLimits(
           cell(shape.test),
           cell(shape.result),
           cell(shape.unit),
-          cell(shape.spec)
+          cell(shape.spec),
+          headerHint
         );
       });
     });
@@ -1789,7 +2115,27 @@ export function checkConfiguredLimits(
     }
   }
 
-  return { verdicts, unmatched: [...unmatched], control_rows: [...controlRows] };
+  return {
+    verdicts,
+    unmatched: [...unmatched],
+    control_rows: [...controlRows],
+    non_measurement_rows: [...nonMeasurementRows],
+  };
+}
+
+/**
+ * Where on the page a unit was found for a column, in order of how directly it
+ * speaks about it: the column's own heading first, then the table's units row.
+ * `null` when neither said anything we recognise — which stays `null`, because
+ * the next candidate would have to be the limit's own unit and that is not
+ * evidence about the result, it is the answer copied onto the question.
+ */
+function unitHintFor(header: unknown, unitsRowCell: string): { unit: string; from: UnitOrigin } | null {
+  const fromHeader = unitFromHeader(header);
+  if (fromHeader) return { unit: fromHeader, from: 'column_header' };
+  const cell = unitsRowCell.trim();
+  if (cell && isKnownUnit(cell)) return { unit: cell, from: 'units_row' };
+  return null;
 }
 
 /**

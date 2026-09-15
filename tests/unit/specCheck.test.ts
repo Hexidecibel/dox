@@ -30,6 +30,7 @@ import {
   resultRestatesSpec,
   specVerdictKey,
   isControlRowLabel,
+  readVerdictWord,
   collectPrintedAssertions,
   classifySpecDisagreement,
   findSpecDisagreements,
@@ -525,6 +526,7 @@ describe('checkConfiguredLimits — our limit, not theirs', () => {
       verdicts: [],
       unmatched: [],
       control_rows: [],
+      non_measurement_rows: [],
     });
   });
 });
@@ -1562,5 +1564,336 @@ describe('catches — the certificate said pass, the value says otherwise', () =
     ]);
     expect(report.catches).toHaveLength(1);
     expect(report.catches[0]).toMatchObject({ scope: 'record[0]', asserted_by: 'printed_limit' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Three defects measured on a 519-document production run, all of them noise
+// or silence rather than a wrong number: 48 refusals from an incubation log,
+// 5 refusals that threw away the lab's own verdict, and a unit sitting on the
+// page that nothing looked for.
+// ---------------------------------------------------------------------------
+
+describe('a table that records WHEN, not WHAT', () => {
+  // Andersen Dairy COAs carry an incubation log whose column headers are the
+  // analyte names, so the crosstab detector reads it as a results table. On
+  // production that produced 48 spurious "could not be checked" across 12
+  // documents from the clock rows — and a silent PASS from each date row,
+  // because "8/14/'26" reads as 8 and 8 clears a ≤10 coliform limit.
+  const tests = [
+    { id: 'st_coli', name: 'Coliform', aliases: ['Coliforms'] },
+    { id: 'st_aer', name: 'Aerobic', aliases: [] },
+  ];
+  const mk = (id: string, spec_test_id: string) => ({
+    id,
+    spec_test_id,
+    operator: '<=' as const,
+    value_min: null,
+    value_max: 10,
+    unit: 'CFU/g',
+    severity: 'alert' as const,
+    active: true,
+    supplier_id: null,
+    document_type_id: null,
+    product_id: null,
+  });
+  const limits = [mk('l_coli', 'st_coli'), mk('l_aer', 'st_aer')];
+  const table = (headers: string[], rows: string[][]) => [
+    { scope: 'record[0]', tables: [{ name: 'incubation', headers, rows }] },
+  ];
+
+  it('produces NO verdict at all for an incubation log — not even not_checked', () => {
+    const r = checkConfiguredLimits(
+      table(
+        ['Step', 'Coliform', 'Aerobic'],
+        [
+          ['Date In', "8/14/'26", "8/14/'26"],
+          ['Time In', '12:08 PM', '12:08 PM'],
+          ['Date Out', "8/15/'26", "8/16/'26"],
+          ['Time Out', '12:56 PM', '11:00 AM'],
+        ]
+      ),
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    // Silence, because these were never results. `not_checked` would be honest
+    // and still be noise about a table that reports nothing.
+    expect(r.verdicts).toEqual([]);
+    // But never SILENT silence — the rows are named, the way control rows are.
+    expect(r.non_measurement_rows).toEqual(['Date In', 'Time In', 'Date Out', 'Time Out']);
+  });
+
+  it('recognises the timing shape from the CELLS, with no label vocabulary', () => {
+    // The point of the rule: a label this engine has never seen ("Plated At")
+    // costs nothing, because the evidence is the data, not the wording.
+    const r = checkConfiguredLimits(
+      table(['Step', 'Coliform', 'Aerobic'], [['Plated At', '09:30', '09:30']]),
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    expect(r.verdicts).toEqual([]);
+    expect(r.non_measurement_rows).toEqual(['Plated At']);
+  });
+
+  it('never drops a row that carries a real measurement', () => {
+    // The asymmetry CONTROL_ROW_LABELS argues: mistaking a measurement for a
+    // timing step silently loses a result, which is the failure this module
+    // exists to prevent. So the count is still judged...
+    const r = checkConfiguredLimits(
+      table(['Step', 'Coliform', 'Aerobic'], [['Date Out', "8/15/'26", '460']]),
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    expect(r.verdicts).toHaveLength(1);
+    expect(r.verdicts[0]).toMatchObject({ test_name_raw: 'Aerobic', value_raw: '460' });
+    // ...and the date beside it is still not read as the number 8.
+    expect(r.verdicts.some((v) => v.value_raw === "8/15/'26")).toBe(false);
+    expect(r.non_measurement_rows).toEqual(['Date Out']);
+  });
+
+  it('leaves the laboratory-control rule exactly as it was', () => {
+    const r = checkConfiguredLimits(
+      table(
+        ['Sample', 'Coliform', 'Aerobic'],
+        [
+          ['Buffer', '400', '900'],
+          ['Product', '<1', '<1'],
+        ]
+      ),
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    expect(r.control_rows).toEqual(['Buffer']);
+    expect(r.non_measurement_rows).toEqual([]);
+    expect(r.verdicts.every((v) => (v.target as { row_label?: string }).row_label === 'Product')).toBe(true);
+    expect(isControlRowLabel('Buffer')).toBe(true);
+    // …and a timing label is NOT quietly folded into the control vocabulary.
+    expect(isControlRowLabel('Date In')).toBe(false);
+  });
+});
+
+describe('a verdict where a number belongs', () => {
+  // §4b of the client brief: "Pass / Fail with no number → status from the
+  // word, band = N/A, Needs Review. Lab gave a verdict without data. We can't
+  // trend it." 5 rows on the production run were refused as unreadable, which
+  // threw away the one fact the certificate did state.
+  const tests = [{ id: 'st_coli', name: 'Coliform', aliases: ['COLIFORMS'] }];
+  const limits = [
+    {
+      id: 'l_coli',
+      spec_test_id: 'st_coli',
+      operator: '<=' as const,
+      value_min: null,
+      value_max: 10,
+      unit: 'CFU/g',
+      severity: 'alert' as const,
+      active: true,
+      supplier_id: null,
+      document_type_id: null,
+      product_id: null,
+    },
+  ];
+  const src = (rows: string[][]) => [
+    { scope: 'ai_fields', tables: [{ name: 'results', headers: ['Test', 'Result'], rows }] },
+  ];
+
+  it('records the lab’s verdict instead of calling it unreadable', () => {
+    const r = checkConfiguredLimits(src([['COLIFORMS', 'Pass']]), tests, limits, {});
+    expect(r.verdicts).toHaveLength(1);
+    expect(r.verdicts[0]).toMatchObject({ verdict: 'not_checked', lab_verdict: 'pass' });
+    expect(r.verdicts[0].reason).toContain('the lab reported "Pass"');
+    // The old text — an extraction failure, which this is not.
+    expect(r.verdicts[0].reason).not.toContain('could not be read as a value');
+  });
+
+  it('does not manufacture a numeric verdict from a word', () => {
+    // We know what the lab concluded. We do not know whether the number behind
+    // it would have cleared OUR limit, which is usually tighter than theirs.
+    for (const word of ['Pass', 'Conforms', 'Fail', 'Reject']) {
+      const r = checkConfiguredLimits(src([['COLIFORMS', word]]), tests, limits, {}, { includePasses: true });
+      expect(r.verdicts[0].verdict, word).toBe('not_checked');
+      expect(r.verdicts[0].value_num, word).toBeNull();
+    }
+  });
+
+  it('reads the SAME vocabulary the printed pass/fail column reads', () => {
+    // One parser, not two — a second list would drift, and then the same word
+    // would be a verdict on one path and noise on the other.
+    expect(readVerdictWord('Pass')).toBe('pass');
+    expect(readVerdictWord('conforms')).toBe('pass');
+    expect(readVerdictWord('FAILED')).toBe('fail');
+    expect(readVerdictWord('40')).toBeNull();
+    // Exact, never substring: a sentence containing the word is not a verdict.
+    expect(readVerdictWord('Passed visual inspection')).toBeNull();
+  });
+
+  it('leaves the printed path’s own reading of a Fail alone', () => {
+    // The COA's own pass/fail column is the document's claim about its own
+    // limit, and a "Fail" there is still reported as out_of_spec.
+    const printed = checkPrintedSpecs(src([['COLIFORMS', 'Fail']]));
+    expect(printed).toHaveLength(1);
+    expect(printed[0]).toMatchObject({ source: 'printed', verdict: 'out_of_spec' });
+  });
+
+  it('still refuses a result it genuinely cannot read', () => {
+    const r = checkConfiguredLimits(src([['COLIFORMS', 'EA240.0004/24/2026SB1140455']]), tests, limits, {});
+    expect(r.verdicts[0]).toMatchObject({ verdict: 'not_checked' });
+    expect(r.verdicts[0].lab_verdict).toBeUndefined();
+    expect(r.verdicts[0].reason).toContain('could not be read as a value');
+  });
+});
+
+describe('a unit that is on the page but not on the result', () => {
+  // §4a of the brief: "No unit printed (numeric result) → Try the column header
+  // or method line on the same page. If still nothing → Needs Review. Never
+  // assume." The limit's own unit is never a candidate — that would make every
+  // unitless number silently comparable to the thing judging it.
+  const tests = [
+    { id: 'st_coli', name: 'Coliform', aliases: [] },
+    { id: 'st_aer', name: 'Aerobic', aliases: [] },
+  ];
+  const mk = (id: string, spec_test_id: string) => ({
+    id,
+    spec_test_id,
+    operator: '<=' as const,
+    value_min: null,
+    value_max: 10,
+    unit: 'CFU/g',
+    severity: 'alert' as const,
+    active: true,
+    supplier_id: null,
+    document_type_id: null,
+    product_id: null,
+  });
+  const limits = [mk('l_coli', 'st_coli'), mk('l_aer', 'st_aer')];
+  const one = (headers: string[], rows: string[][]) => [
+    { scope: 'ai_fields', tables: [{ name: 'results', headers, rows }] },
+  ];
+
+  it('takes the unit from the result column header, and says that it did', () => {
+    const r = checkConfiguredLimits(
+      one(['Test', 'Result (CFU/mL)'], [['Coliform', '460']]),
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    expect(r.verdicts[0]).toMatchObject({
+      verdict: 'not_checked',
+      unit_inferred_from: 'column_header',
+    });
+    // Named in words as well as in a flag: the register stores `reason`.
+    expect(r.verdicts[0].reason).toContain('unit CFU/mL read from the column header');
+    expect(r.verdicts[0].message).toContain('read from the column header');
+  });
+
+  it('takes it from a units row on a crosstab, and stops grading that row', () => {
+    const r = checkConfiguredLimits(
+      [
+        {
+          scope: 'ai_fields',
+          tables: [
+            {
+              name: 'micro',
+              headers: ['Sample', 'Coliform', 'Aerobic'],
+              rows: [
+                ['Units', 'CFU/g', 'CFU/g'],
+                ['Product', '4', '400'],
+              ],
+            },
+          ],
+        },
+      ],
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    // The units row is a declaration, not a result: no verdict, but named.
+    expect(r.non_measurement_rows).toEqual(['Units']);
+    expect(r.verdicts).toHaveLength(2);
+    expect(r.verdicts[0]).toMatchObject({
+      verdict: 'in_spec',
+      value_raw: '4',
+      unit_inferred_from: 'units_row',
+    });
+    expect(r.verdicts[1]).toMatchObject({ verdict: 'out_of_spec', value_raw: '400' });
+  });
+
+  it('refuses when the page says nothing — and never borrows the limit’s unit', () => {
+    // A heading that carries no unit leaves the result exactly as it was: no
+    // unit, no claim that one was found, and no CFU/g conjured from the limit.
+    for (const header of ['Result', 'Result (dry basis)', 'Result (as received)']) {
+      const r = checkConfiguredLimits(
+        one(['Test', header], [['Coliform', '4']]),
+        tests,
+        limits,
+        {},
+        { includePasses: true }
+      );
+      expect(r.verdicts[0].unit_inferred_from, header).toBeUndefined();
+      expect(r.verdicts[0].reason, header).not.toContain('read from');
+    }
+  });
+
+  it('never invents a unit out of an analyte name in the heading', () => {
+    // "Total Plate Count Result" contains a unit word. Scanning a heading for
+    // anything unit-shaped would read "count" as a count-per-unspecified-basis
+    // — a unit conjured out of a test's name, which is the assumption the brief
+    // forbids. Only a DELIMITED annotation is read, and only when it resolves
+    // to a unit we recognise.
+    const r = checkConfiguredLimits(
+      one(['Test', 'Total Plate Count Result'], [['Coliform', '4']]),
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    expect(r.verdicts).toHaveLength(1);
+    expect(r.verdicts[0].unit_inferred_from).toBeUndefined();
+    const annotated = checkConfiguredLimits(
+      one(['Test', 'Result (Coliform Count)'], [['Coliform', '4']]),
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    expect(annotated.verdicts[0].unit_inferred_from).toBeUndefined();
+  });
+
+  it('prefers the unit printed on the result’s own line over the heading', () => {
+    // The row's unit column is a stronger fact than a heading, so it wins and
+    // nothing is reported as inferred.
+    const r = checkConfiguredLimits(
+      one(['Test', 'Result (CFU/mL)', 'Units'], [['Coliform', '4', 'CFU/g']]),
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    expect(r.verdicts[0]).toMatchObject({ verdict: 'in_spec' });
+    expect(r.verdicts[0].unit_inferred_from).toBeUndefined();
+  });
+
+  it('leaves a censored result below the detection limit exactly as it was', () => {
+    // The 87 rows that must not move: "<50" against ≤10 is indeterminate, and
+    // no amount of unit-hunting makes it anything else.
+    const r = checkConfiguredLimits(
+      one(['Test', 'Result (CFU/g)'], [['Coliform', '<50']]),
+      tests,
+      limits,
+      {},
+      { includePasses: true }
+    );
+    expect(r.verdicts[0]).toMatchObject({ verdict: 'not_checked' });
+    expect(r.verdicts[0].reason).toContain('straddles the 10 limit');
   });
 });
