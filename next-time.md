@@ -4,6 +4,12 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-15 (later): Any-field COA retrieval Phase 2 DONE LOCALLY, not deployed.** Migration **0106**
+(lot production date + provenance, `document_versions.search_text`) applied to local only — needs a
+surgical apply + stamp on prod (`d1_migrations`), then `bin/backfill-lot-production-dates --tenant
+1f03c3e73add44bfafb33bb16508b78b --remote --apply` (dry run: 168 lots, 87 legacy, 1 conflict, 87 search_text).
+Demo fixture for AJ: `bin/seed-lot-rows-demo` (local).
+
 **2026-09-15: v2.11.0 ON PROD** (coverage-aware search + combined approve/arrival decision +
 suggest-only lot matches + `sales_sheet` reject reason). Pages deploy `312baeb4`; gate: vitest
 229 files / 3208 tests, Playwright 7 passed, 1 skipped. No migrations. Plan: "Any-field COA

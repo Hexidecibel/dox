@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### Any-field COA retrieval (AJ 2026-09-08) + Walkthrough 2 follow-ups
 
-**Status:** in-progress — Phase 1 and Phase 5 (part) done, shipping in v2.11.0
+**Status:** in-progress — Phase 1 and Phase 5 (part) shipped in v2.11.0; Phase 2 done locally (migration 0106, undeployed)
 
 **Source:** AJ spec `20260908_IDP_Feature_Request__AnyField_COA_Retrieval_and_Identifier_Graph.docx`
 plus the Walkthrough 2 notes.
@@ -62,11 +62,20 @@ plus the Walkthrough 2 notes.
   "no covering document on file" state first. NL prompt fixes in `functions/lib/llm.ts`;
   plurals and gal/gallon match.
 
-#### Phase 2 — Lot-row retrieval + production_date — **planned**
-- Retrieve at the lot-row level (multi-record COAs), not only the document.
-- `production_date` as a real column, not a metadata key.
-- Backfill older Darigold documents that store production date under `code_date`.
-- Stop sibling text matching (a lot on the same page is not the lot asked for).
+#### Phase 2 — Lot-row retrieval + production_date — **DONE** (local, 2026-09-15; not deployed)
+Lot rows carry their own production date with provenance (migration 0106), search judges and names the row, and split certificates are searched on row-scoped text.
+- Migration 0106: `lots.production_date` + `_raw` / `_source` / `_status` / `_document_id`, partial index
+  `(tenant_id, production_date)`; `document_versions.search_text` read by the FTS view. Not applied to prod/staging.
+- Write path: `produceCoa` / `produceMultiProductCoa` / `produceCoaRecords` / ingest write the row production
+  date (`shared/lotProductionDate.ts`); `production_date` is no longer folded into `lots.code_date`.
+- Retrieval: row-by-row judging + `matched_lot`; indexed lot/production-date seek; lot shapes `1042620303`,
+  `10426203-03`, `10426203 03`, and `?lot=&sublot=` (Search page "Lot / sublot"). Legacy code-date-derived
+  dates are "likely — confirm", never covering.
+- `bin/backfill-lot-production-dates` (dry run default). Prod dry run 2026-09-15, Cush Co: 168 lots
+  (81 extracted, 87 legacy; 167 resolved, 1 conflict, 0 ambiguous after page evidence), 87 search_text.
+  **Waiting on:** 0106 on prod, then `--remote --apply`.
+- Validator: `sublot_production_date_conflict`; row production date after the header expiry.
+- `bin/seed-lot-rows-demo` seeds AJ's fixture into a local tenant.
 
 #### Phase 3 — Product cross-reference + pack/attribute aliases — **planned**
 - Product identifier graph: 2235 ↔ 810004 / 310348, 10286 ↔ CMF 30904,
