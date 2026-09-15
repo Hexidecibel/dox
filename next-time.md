@@ -4,6 +4,23 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-15 (overnight, latest): v2.15.0 ON PROD — supplier spec watch shipped.** Merge fc3a6ab
+(conflicts: CLAUDE.md, tests/helpers/db.ts, todo.md, DocumentDetail.tsx imports, ReviewQueue.tsx chips,
+SCHEMA.md), renumber 10fc37a (`0107_supplier_spec_watch` → **0109**, every reference), release 81263ec,
+Pages deploy `7eee3c22`, staging deploy `72ae6f59`; gate: vitest 245 files / 3425 tests, Playwright 7
+passed; typecheck 56 (baseline). Migration **0109** applied to staging and prod (prod stamped
+2026-09-15 10:55:53; 2 tables + 4 indexes + `spec_limits.review_by` verified; 20 limits unchanged, all
+`review_by` NULL; `supplier_required_analytes` and `document_spec_gaps` empty). Register by
+verdict/origin identical before and after (1306 rows / 432 documents). Backup:
+`~/drops/dox-backups/doc-upload-db-20260915T105526Z.timetravel.json` (bookmark
+`000016e9-000011b1-000050e7-35ba3635e1437ed1c7c99f11c2a4f236`) + `.spec_limits.sql`. **Nothing was
+configured on prod: the Andersen watch is AJ's to set.** Ready-to-run template (AJ chooses the analytes,
+limit and date; dry run first by dropping `--apply`):
+`bin/seed-supplier-watch --tenant 1f03c3e73add44bfafb33bb16508b78b --supplier 5b1b9455070243d5b568c12c1c984f7d --require "Coliform,Standard Plate Count" --limit "Coliform<=1 CFU/g" --review-by <date> --remote --apply`.
+**Found gap:** Andersen prints the unit as `per ml.`, which `normalizeUnit` does not recognise, so those
+rows stay *could not check* (todo.md). Note: the shared local D1 carries Phase 4's 0110 (applied from its
+worktree); it was kept out of SCHEMA.md by hand.
+
 **2026-09-15 (overnight, latest): v2.14.0 ON PROD — intake duplicate detection shipped.** Merge f551756
 (conflicts only in CLAUDE.md migrations table, tests/helpers/db.ts, SCHEMA.md), renumber 9c5cae0
 (`0107_intake_duplicates` → **0108**, every reference), release 915bcde, Pages deploy `984bda95`; gate:
