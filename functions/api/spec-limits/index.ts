@@ -43,12 +43,12 @@ export interface LimitBody {
   notes?: string | null;
   active?: boolean | number;
   tenant_id?: string;
-  /** Watch review-by date, YYYY-MM-DD (migration 0107). Supplier-scoped limits only. */
+  /** Watch review-by date, YYYY-MM-DD (migration 0109). Supplier-scoped limits only. */
   review_by?: string | null;
 }
 
 /**
- * Read a review-by date off a body (migration 0107), or say why it cannot be.
+ * Read a review-by date off a body (migration 0109), or say why it cannot be.
  *
  * A review-by belongs to a SUPPLIER WATCH — a supplier-scoped limit tighter
  * than the company default for a period — so it is refused on a limit with no

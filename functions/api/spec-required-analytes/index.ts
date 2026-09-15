@@ -1,6 +1,6 @@
 /**
  * Required analytes per supplier — what a supplier's certificates MUST report
- * (migration 0107).
+ * (migration 0109).
  *
  * SME ruling (AJ Conner, 2026-09-14): whatever a supplier's COA reports counts
  * as complete by default. The customer can configure ADDITIONAL REQUIRED

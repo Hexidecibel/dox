@@ -93,7 +93,7 @@ const TABS: Array<{ key: TabKey; label: string; hint: string }> = [
   },
 ];
 
-/** The two tabs that read `document_spec_gaps` (0107) rather than the register. */
+/** The two tabs that read `document_spec_gaps` (0109) rather than the register. */
 const GAP_TABS: Partial<Record<TabKey, 'missing_required' | 'unjudged'>> = {
   incomplete: 'missing_required',
   no_limit: 'unjudged',

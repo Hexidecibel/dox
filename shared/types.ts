@@ -29,7 +29,7 @@ export interface OverdueWatchSummary {
   review_by: string;
 }
 
-/** A `supplier_required_analytes` row (migration 0107), joined for display. */
+/** A `supplier_required_analytes` row (migration 0109), joined for display. */
 export interface ApiRequiredAnalyte {
   id: string;
   tenant_id: string;
@@ -48,7 +48,7 @@ export interface ApiRequiredAnalyte {
   created_by_name?: string | null;
 }
 
-/** A `document_spec_gaps` row (migration 0107): something NOT judged on a document. */
+/** A `document_spec_gaps` row (migration 0109): something NOT judged on a document. */
 export interface ApiSpecGap {
   id: string;
   tenant_id: string;
@@ -833,7 +833,7 @@ export interface ApiSpecLimit {
    */
   criticality: SpecCriticality;
   /**
-   * Watch review-by date (migration 0107), supplier-scoped limits only. After
+   * Watch review-by date (migration 0109), supplier-scoped limits only. After
    * it passes the limit STILL applies and is flagged for review.
    */
   review_by?: string | null;
@@ -1871,9 +1871,9 @@ export interface ProcessingQueueItem {
     out_of_spec: number;
     not_checked: number;
     unmatched: number;
-    /** Printed results with no limit in scope and no printed spec (0107 rulings). */
+    /** Printed results with no limit in scope and no printed spec (0109 rulings). */
     unjudged?: number;
-    /** Required analytes (0107) this certificate did not report. */
+    /** Required analytes (0109) this certificate did not report. */
     missing_required?: number;
     /** Supplier watches in force for this document whose review-by has passed. */
     watch_overdue?: number;

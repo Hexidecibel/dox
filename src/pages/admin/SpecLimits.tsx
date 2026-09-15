@@ -293,7 +293,7 @@ export function SpecLimits() {
   const [limitDocType, setLimitDocType] = useState('');
   const [limitSeverity, setLimitSeverity] = useState('alert');
   const [limitCriticality, setLimitCriticality] = useState<SpecCriticality>(DEFAULT_SPEC_CRITICALITY);
-  // Watch review-by (migration 0107) — offered only once a supplier is chosen.
+  // Watch review-by (migration 0109) — offered only once a supplier is chosen.
   const [limitReviewBy, setLimitReviewBy] = useState('');
   const [saving, setSaving] = useState(false);
   // Bumped after every load so the watch panel re-reads what this page changed.

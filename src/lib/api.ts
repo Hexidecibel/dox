@@ -1272,7 +1272,7 @@ export const api = {
       criticality?: SpecCriticality;
       notes?: string | null;
       tenant_id?: string;
-      /** Watch review-by (0107), YYYY-MM-DD. Supplier limits only. */
+      /** Watch review-by (0109), YYYY-MM-DD. Supplier limits only. */
       review_by?: string | null;
     }) =>
       fetchApi<{ specLimit: ApiSpecLimit }>('/spec-limits', {
@@ -1293,7 +1293,7 @@ export const api = {
         criticality?: SpecCriticality;
         notes?: string | null;
         active?: boolean;
-        /** Watch review-by (0107), YYYY-MM-DD; null clears. Supplier limits only. */
+        /** Watch review-by (0109), YYYY-MM-DD; null clears. Supplier limits only. */
         review_by?: string | null;
       }
     ) =>
@@ -1307,7 +1307,7 @@ export const api = {
   },
 
   /**
-   * Required analytes per supplier (migration 0107) — the only thing that can
+   * Required analytes per supplier (migration 0109) — the only thing that can
    * make a COA incomplete. Together with supplier-scoped limits: a "watch".
    */
   specRequiredAnalytes: {
@@ -1342,7 +1342,7 @@ export const api = {
       fetchApi<{ success: boolean }>(`/spec-required-analytes/${id}`, { method: 'DELETE' }),
   },
 
-  /** What was NOT judged on approved documents (0107): incomplete + no limit configured. */
+  /** What was NOT judged on approved documents (0109): incomplete + no limit configured. */
   specGaps: {
     list: (params?: {
       kind?: 'all' | 'missing_required' | 'unjudged';

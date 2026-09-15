@@ -1406,7 +1406,7 @@ async function handleCoaRecordsApprove(
         title: d.title,
         recordIndex: d.recordIndex,
       })),
-      // What was NOT judged goes down beside what was (0107): required
+      // What was NOT judged goes down beside what was (0109): required
       // analytes this certificate did not report, and printed results with no
       // limit configured.
       { unjudged, missing_required }

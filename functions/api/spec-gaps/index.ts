@@ -1,5 +1,5 @@
 /**
- * What was NOT judged on an approved document (migration 0107) — the other half
+ * What was NOT judged on an approved document (migration 0109) — the other half
  * of the register at /api/spec-checks.
  *
  *   kind=missing_required  a required analyte for the supplier the certificate
@@ -96,7 +96,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   } catch (err) {
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;
-    // A database without 0107 has no gaps to show; say so as an empty list
+    // A database without 0109 has no gaps to show; say so as an empty list
     // rather than a 500 that takes the document page's spec panel down with it.
     if (/no such table/i.test(err instanceof Error ? err.message : String(err))) {
       return new Response(JSON.stringify({ specGaps: [], total: 0, limit: 0, offset: 0 }), { headers });

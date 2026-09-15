@@ -169,7 +169,7 @@ export async function registerSpecChecks(
 }
 
 /**
- * WHAT WAS NOT JUDGED, written down beside what was (migration 0107).
+ * WHAT WAS NOT JUDGED, written down beside what was (migration 0109).
  *
  * Two kinds, one table (`document_spec_gaps`), deliberately NOT new verdicts on
  * `document_spec_checks` — see the migration for why a register row must stay a
@@ -181,7 +181,7 @@ export async function registerSpecChecks(
  *                     specification — "No limit configured".
  *
  * Same replace-on-rewrite rule as the register: re-approving a document version
- * replaces its gaps. Same best-effort rule: a database without 0107 loses the
+ * replaces its gaps. Same best-effort rule: a database without 0109 loses the
  * gaps, never the approval or the register.
  */
 export async function registerSpecGaps(
@@ -257,7 +257,7 @@ export async function registerSpecGaps(
     return { written: rows.length };
   } catch (err) {
     console.error(
-      '[spec-register] writing spec gaps failed (migration 0107 not applied?):',
+      '[spec-register] writing spec gaps failed (migration 0109 not applied?):',
       err instanceof Error ? err.message : String(err)
     );
     return { written: 0 };
@@ -339,7 +339,7 @@ export async function notifySpecFailures(
   ctx: NotifyContext,
   failures: SpecVerdict[],
   /**
-   * Required analytes (0107) the certificate did not report. They ride in the
+   * Required analytes (0109) the certificate did not report. They ride in the
    * SAME one-per-document email as the failures — one send path, not a second
    * one — and can open it on their own: a required analyte is a rule somebody
    * wrote for this supplier on purpose (a watch), so a certificate missing it is
@@ -490,7 +490,7 @@ export async function registerAndNotifyForApproval(
   limits: ConfiguredLimit[],
   documentsByRecord: Array<{ documentId: string; title: string; recordIndex: number | null }>,
   /**
-   * What was not judged (0107), addressed by scope exactly like the verdicts.
+   * What was not judged (0109), addressed by scope exactly like the verdicts.
    * Optional: a caller without it registers verdicts only, as before.
    */
   coverage: { unjudged?: UnjudgedResult[]; missing_required?: MissingRequiredAnalyte[] } = {}

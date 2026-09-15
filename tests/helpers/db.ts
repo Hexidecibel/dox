@@ -105,7 +105,7 @@ import m0105 from '../../migrations/0105_spec_check_result_identity.sql?raw';
 import m0106 from '../../migrations/0106_lot_production_date.sql?raw';
 import m0107 from '../../migrations/0107_product_identifiers.sql?raw';
 import m0108 from '../../migrations/0108_intake_duplicates.sql?raw';
-import m0107w from '../../migrations/0107_supplier_spec_watch.sql?raw';
+import m0109 from '../../migrations/0109_supplier_spec_watch.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -119,7 +119,7 @@ const migrations: string[] = [
   m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
   m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094, m0095,
   m0096, m0097, m0098, m0099, m0100, m0101, m0102, m0103, m0104,
-  m0105, m0106, m0107, m0108, m0107w,
+  m0105, m0106, m0107, m0108, m0109,
 ];
 
 /**
@@ -384,7 +384,7 @@ export async function cleanTables(db: D1Database): Promise<void> {
     // and all of them before suppliers/products/documents. 0103 added
     // provenance COLUMNS to document_spec_checks and no new table, and 0105
     // result-identity columns likewise, so this entry already covers both.
-    // 0107 supplier watch: gaps FK documents; required analytes FK suppliers,
+    // 0109 supplier watch: gaps FK documents; required analytes FK suppliers,
     // document_types and spec_tests — all three clear after them.
     'document_spec_gaps', 'supplier_required_analytes',
     'document_spec_checks', 'spec_limits', 'spec_tests',

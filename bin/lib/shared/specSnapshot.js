@@ -104,7 +104,7 @@ function buildLimitSnapshot(verdict, limits) {
     criticality: parseSpecCriticality(l.criticality),
     text: verdict.limit_text,
     ...equated,
-    // A supplier watch (0107) is frozen like criticality: whether the tighter
+    // A supplier watch (0109) is frozen like criticality: whether the tighter
     // limit was inside its review period when this result was judged is part of
     // what it was judged against, and extending the watch later must not
     // rewrite that. Absent = not a watch limit.

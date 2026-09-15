@@ -7,7 +7,7 @@
  *
  * WHAT A "WATCH" IS (AJ Conner, 2026-09-14): supplier-specific limits layered
  * over the company limits (most specific wins) plus extra REQUIRED ANALYTES,
- * for a watch period that ends at a review-by date. Migration 0107.
+ * for a watch period that ends at a review-by date. Migration 0109.
  *
  * Idempotent by construction: a requirement or a supplier limit that already
  * matches is 'unchanged' and renders no SQL, so a re-run of the same command

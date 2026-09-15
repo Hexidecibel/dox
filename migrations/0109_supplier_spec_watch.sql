@@ -1,4 +1,4 @@
--- 0107_supplier_spec_watch.sql
+-- 0109_supplier_spec_watch.sql
 --
 -- A SUPPLIER ON WATCH, AND WHAT A CERTIFICATE DID NOT SAY.
 --
@@ -72,9 +72,9 @@
 --    when the watch ends, and requirement_snapshot (frozen, like limit_snapshot)
 --    is the record of what was required at the time.
 --
--- NUMBERING: written as 0107 while two other worktrees may also claim 0107/0108.
--- If this lands after one of them, renumber the file (and tests/helpers/db.ts,
--- CLAUDE.md, SCHEMA.md); nothing inside depends on the number.
+-- NUMBERING: written as 0107 in its worktree and renumbered to 0109 at merge
+-- (0107 product_identifiers and 0108 intake_duplicates landed first); nothing
+-- inside depends on the number.
 
 CREATE TABLE IF NOT EXISTS supplier_required_analytes (
   id TEXT PRIMARY KEY,

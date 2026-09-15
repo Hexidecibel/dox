@@ -219,7 +219,7 @@ export function SpecRowMarker({
   unjudged,
 }: {
   verdicts: SpecVerdict[] | undefined;
-  /** "No limit configured" results on this row (0107 rulings). */
+  /** "No limit configured" results on this row (0109 rulings). */
   unjudged?: UnjudgedResult[];
 }) {
   const live = liveSpecVerdicts(verdicts);
@@ -396,7 +396,7 @@ export function SpecWarningBanner({
   verdicts: SpecVerdict[] | undefined;
   /** Server-side counts, including the `unmatched` total the array cannot carry. */
   summary?: { out_of_spec: number; not_checked: number; unmatched: number };
-  /** "No limit configured" results (0107 rulings). */
+  /** "No limit configured" results (0109 rulings). */
   unjudged?: UnjudgedResult[];
   /** Required analytes for this supplier the certificate did not report. */
   missingRequired?: MissingRequiredAnalyte[];

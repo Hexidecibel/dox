@@ -151,7 +151,7 @@ export interface SpecConfig {
    */
   unitPolicy: UnitPolicy;
   /**
-   * Required analytes per (supplier, document type) — migration 0107. Optional
+   * Required analytes per (supplier, document type) — migration 0109. Optional
    * so a config built by hand (tests, the arrivals path) keeps compiling; absent
    * means none, which is the SME's "complete by default".
    */
@@ -167,7 +167,7 @@ export const EMPTY_SPEC_CONFIG: SpecConfig = {
 
 /**
  * Read the tenant's required analytes. Its own try/catch for the same reason
- * as the unit policy: an environment without migration 0107 must lose the
+ * as the unit policy: an environment without migration 0109 must lose the
  * completeness check, never the limits.
  */
 async function loadRequiredAnalytes(db: D1Database, tenantId: string): Promise<RequiredAnalyte[]> {
@@ -190,7 +190,7 @@ async function loadRequiredAnalytes(db: D1Database, tenantId: string): Promise<R
     }));
   } catch (err) {
     console.error(
-      '[spec-warnings] loading required analytes failed (migration 0107 not applied?):',
+      '[spec-warnings] loading required analytes failed (migration 0109 not applied?):',
       err instanceof Error ? err.message : String(err)
     );
     return [];
@@ -251,7 +251,7 @@ async function loadLimitRows(
     return (res.results ?? []) as Record<string, unknown>[];
   };
   // Newest column first, each fallback dropping one migration's worth: a
-  // missing review_by (0107) costs the watch flag, a missing criticality (0095)
+  // missing review_by (0109) costs the watch flag, a missing criticality (0095)
   // the ranking — never the limits themselves.
   const attempts = [
     `${LIMIT_COLUMNS}, criticality, review_by`,
@@ -364,7 +364,7 @@ export interface SpecSummary {
   unmatched: number;
   /** Printed results with no limit and no printed spec — "No limit configured". */
   unjudged: number;
-  /** Required analytes (0107) this certificate did not report. */
+  /** Required analytes (0109) this certificate did not report. */
   missing_required: number;
   /** Supplier watches in force for this document whose review-by has passed. */
   watch_overdue: number;

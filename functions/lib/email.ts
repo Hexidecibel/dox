@@ -628,7 +628,7 @@ export function buildSpecAlertEmail(params: {
     source: 'printed' | 'limit';
   }>;
   /**
-   * Required analytes (migration 0107) the certificate did not report. Listed
+   * Required analytes (migration 0109) the certificate did not report. Listed
    * in their own table under the failures — incomplete is a different finding
    * from out of spec and is never counted as one. May be the only content.
    */

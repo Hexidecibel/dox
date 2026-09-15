@@ -1557,7 +1557,7 @@ export function SupplierDetail() {
         )}
       </TabPanel>
 
-      {/* Spec watch (migration 0107): this supplier's limits over the company
+      {/* Spec watch (migration 0109): this supplier's limits over the company
           defaults and the analytes its certificates must report, with their
           review-by dates. The same panel as Settings › Spec Limits, scoped. */}
       {complianceVisible && (

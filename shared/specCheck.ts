@@ -187,7 +187,7 @@ export interface SpecVerdict {
   criticality?: SpecCriticality;
   /**
    * Set when the governing limit is a supplier WATCH with a review-by date
-   * (migration 0107). The limit applied either way; `review_overdue` says the
+   * (migration 0109). The limit applied either way; `review_overdue` says the
    * period ended and a person should extend or remove it.
    */
   watch?: WatchStatus;
@@ -1689,7 +1689,7 @@ export interface ConfiguredLimit {
   updated_at?: string | null;
   /**
    * When a supplier-scoped limit's WATCH PERIOD is due for review (migration
-   * 0107), as YYYY-MM-DD. Passing it never loosens anything — the limit keeps
+   * 0109), as YYYY-MM-DD. Passing it never loosens anything — the limit keeps
    * applying and the verdict is flagged instead. See `watchStatus`.
    */
   review_by?: string | null;
@@ -2462,7 +2462,7 @@ function unitHintFor(header: unknown, unitsRowCell: string): { unit: string; fro
 }
 
 // ---------------------------------------------------------------------------
-// Completeness — required analytes per supplier (migration 0107)
+// Completeness — required analytes per supplier (migration 0109)
 // ---------------------------------------------------------------------------
 
 /**

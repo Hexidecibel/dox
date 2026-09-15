@@ -1,5 +1,5 @@
 /**
- * Extend, re-date or remove one required analyte (migration 0107). See
+ * Extend, re-date or remove one required analyte (migration 0109). See
  * `spec-required-analytes/index.ts`.
  *
  * Only the watch dates and the reason are editable. Changing WHICH analyte or

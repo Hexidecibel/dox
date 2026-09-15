@@ -3,7 +3,7 @@
 /**
  * bin/seed-supplier-watch — put a supplier "on watch" from flags: extra required
  * analytes, tighter supplier-specific limits over the company defaults, and a
- * review-by date (migration 0107).
+ * review-by date (migration 0109).
  *
  * The SME configures real watches himself in Settings › Spec Limits. This is for
  * a demo or a local tenant, and so a watch he describes in a sentence is one
