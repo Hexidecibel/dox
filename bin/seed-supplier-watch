@@ -1,0 +1,273 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/seed-supplier-watch — put a supplier "on watch" from flags: extra required
+ * analytes, tighter supplier-specific limits over the company defaults, and a
+ * review-by date (migration 0107).
+ *
+ * The SME configures real watches himself in Settings › Spec Limits. This is for
+ * a demo or a local tenant, and so a watch he describes in a sentence is one
+ * command away — it writes exactly what the UI would, audit rows included.
+ *
+ * Usage:
+ *   bin/seed-supplier-watch --tenant <id> --supplier <id|name> \
+ *     --require "Coliform,Standard Plate Count" \
+ *     --limit "Coliform<=1 CFU/g" --review-by 2026-12-15 \
+ *     --reason "Sanitation watch after the August finding"          # dry run
+ *   ... --apply                                                      # LOCAL write
+ *   ... --remote --apply                                             # PRODUCTION (typed confirmation)
+ *
+ * Flags:
+ *   --tenant ID          tenant (required)
+ *   --supplier REF       supplier id, or its exact name (case-insensitive) (required)
+ *   --doctype REF        document type id or exact name that required analytes
+ *                        apply to (default: the tenant's "Certificate of Analysis")
+ *   --require LIST       comma-separated analytes (id, name or alias) to require
+ *   --limit SPEC         repeatable: "<analyte><op><number> [unit]" or "<analyte>=absent";
+ *                        written as a SUPPLIER-scoped limit (no document type)
+ *   --review-by DAY      YYYY-MM-DD on every rule this run writes; the rules keep
+ *                        applying after it and are flagged for review
+ *   --effective-from DAY YYYY-MM-DD before which required analytes do not apply
+ *   --reason TEXT        why, stored on the required analytes
+ *   --apply              actually write. Without it this is a dry run.
+ *   --remote, -r         target PRODUCTION D1 (with --apply, asks you to type the tenant id)
+ *   --json               print the plan as JSON
+ *   -h, --help           this help
+ *
+ * Re-running the same command after --apply plans nothing.
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { execFileSync } = require('child_process');
+
+const { query, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+const { normalizeUnit, validateLimitShape } = require('./lib/shared/specCheck');
+const { buildWatchPlan, watchPlanToSql, formatWatchPlan } = require('./lib/supplierWatchPlan');
+
+function printHelp() {
+  const src = fs.readFileSync(__filename, 'utf8');
+  console.log(src.split('\n').slice(3, 38).join('\n').replace(/^ \* ?/gm, ''));
+}
+
+function parseArgs(argv) {
+  const opts = {
+    tenant: null,
+    supplier: null,
+    doctype: null,
+    require: [],
+    limits: [],
+    reviewBy: null,
+    effectiveFrom: null,
+    reason: null,
+    apply: false,
+    remote: false,
+    json: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenant = argv[++i]; break;
+      case '--supplier': opts.supplier = argv[++i]; break;
+      case '--doctype': opts.doctype = argv[++i]; break;
+      case '--require':
+        opts.require.push(...String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean));
+        break;
+      case '--limit': opts.limits.push(argv[++i]); break;
+      case '--review-by': opts.reviewBy = argv[++i]; break;
+      case '--effective-from': opts.effectiveFrom = argv[++i]; break;
+      case '--reason': opts.reason = argv[++i]; break;
+      case '--apply': opts.apply = true; break;
+      case '--remote':
+      case '-r': opts.remote = true; break;
+      case '--json': opts.json = true; break;
+      case '-h':
+      case '--help': printHelp(); process.exit(0); break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  if (!opts.tenant || !opts.supplier) {
+    console.error('--tenant and --supplier are required. Run with --help for usage.');
+    process.exit(2);
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(opts.tenant)) {
+    console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+    process.exit(2);
+  }
+  return opts;
+}
+
+/** Quote a value for the read queries (they go through wrangler --command). */
+function q(v) {
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
+
+function one(rows, what, ref) {
+  if (rows.length === 1) return rows[0];
+  if (rows.length === 0) {
+    console.error(`No ${what} matches "${ref}" in this tenant.`);
+  } else {
+    console.error(`"${ref}" matches ${rows.length} ${what}s — use the id:`);
+    for (const r of rows) console.error(`  ${r.id}  ${r.name}`);
+  }
+  process.exit(1);
+}
+
+function execSql(statements, remote) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-supplier-watch-'));
+  const file = path.join(dir, 'seed-supplier-watch.sql');
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  try {
+    execFileSync('npx', ['wrangler', 'd1', 'execute', DEFAULT_DB, remote ? '--remote' : '--local', `--file=${file}`], {
+      cwd: PROJECT_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString() : '';
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${stderr || err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function promptSync(question) {
+  process.stdout.write(question);
+  let fd;
+  try {
+    fd = fs.openSync('/dev/tty', 'rs');
+  } catch {
+    console.error('\nNo terminal to confirm on. A production write needs an interactive run.');
+    process.exit(1);
+  }
+  const buf = Buffer.alloc(256);
+  let out = '';
+  for (;;) {
+    const n = fs.readSync(fd, buf, 0, buf.length, null);
+    if (n === 0) break;
+    out += buf.toString('utf8', 0, n);
+    if (out.includes('\n')) break;
+  }
+  fs.closeSync(fd);
+  return out.split('\n')[0];
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const remote = opts.remote;
+  const targetLabel = remote ? 'PRODUCTION' : 'local';
+  const t = q(opts.tenant);
+
+  const tenant = one(query(`SELECT id, name FROM tenants WHERE id = ${t}`, { remote }), 'tenant', opts.tenant);
+  const supplier = one(
+    query(
+      `SELECT id, name FROM suppliers WHERE tenant_id = ${t} AND (id = ${q(opts.supplier)} OR lower(name) = lower(${q(opts.supplier)}))`,
+      { remote }
+    ),
+    'supplier',
+    opts.supplier
+  );
+  const documentType = opts.doctype
+    ? one(
+        query(
+          `SELECT id, name FROM document_types WHERE tenant_id = ${t} AND (id = ${q(opts.doctype)} OR lower(name) = lower(${q(opts.doctype)}))`,
+          { remote }
+        ),
+        'document type',
+        opts.doctype
+      )
+    : one(
+        query(
+          `SELECT id, name FROM document_types WHERE tenant_id = ${t} AND lower(name) = 'certificate of analysis'`,
+          { remote }
+        ),
+        'document type',
+        'Certificate of Analysis (pass --doctype)'
+      );
+
+  const tests = query(`SELECT id, name, aliases, default_unit FROM spec_tests WHERE tenant_id = ${t}`, { remote }).map(
+    (r) => {
+      let aliases = [];
+      try {
+        const parsed = JSON.parse(r.aliases || '[]');
+        if (Array.isArray(parsed)) aliases = parsed.map(String);
+      } catch {
+        // A corrupt alias blob costs the analyte its synonyms for matching here.
+      }
+      return { id: r.id, name: r.name, aliases, default_unit: r.default_unit };
+    }
+  );
+  const existingLimits = query(
+    `SELECT id, spec_test_id, supplier_id, document_type_id, product_id, operator, value_min, value_max, unit, active, version, review_by
+       FROM spec_limits WHERE tenant_id = ${t} AND supplier_id = ${q(supplier.id)}`,
+    { remote }
+  );
+  const existingRequired = query(
+    `SELECT id, spec_test_id, document_type_id, effective_from, review_by, reason
+       FROM supplier_required_analytes WHERE tenant_id = ${t} AND supplier_id = ${q(supplier.id)}`,
+    { remote }
+  );
+
+  const plan = buildWatchPlan({
+    tenantId: tenant.id,
+    supplier,
+    documentType,
+    tests,
+    existingLimits,
+    existingRequired,
+    require: opts.require,
+    limits: opts.limits,
+    reviewBy: opts.reviewBy,
+    effectiveFrom: opts.effectiveFrom,
+    reason: opts.reason,
+    newId: () => crypto.randomUUID().replace(/-/g, ''),
+    validateLimitShape,
+    normalizeUnit,
+  });
+
+  if (opts.json) console.log(JSON.stringify({ tenant: tenant.name, target: targetLabel, plan }, null, 2));
+  else for (const line of formatWatchPlan(plan, { targetLabel: `${tenant.name}, ${targetLabel}` })) console.log(line);
+
+  if (plan.errors.length > 0) {
+    console.error(`${plan.errors.length} problem(s). Nothing was written.`);
+    process.exit(1);
+  }
+
+  const statements = watchPlanToSql(plan);
+  if (!opts.apply) {
+    console.log(
+      statements.length === 0
+        ? 'DRY RUN — nothing to do; the database already has this watch.'
+        : `DRY RUN — ${statements.length} statement(s) not executed. Re-run with --apply to write.`
+    );
+    return;
+  }
+  if (statements.length === 0) {
+    console.log('Nothing to do — the database already has this watch.');
+    return;
+  }
+  if (remote) {
+    const s = plan.summary;
+    const answer = promptSync(
+      `\nAbout to WRITE to PRODUCTION D1 for ${tenant.name}: ${s.requiredCreated} required analyte(s) created, ` +
+        `${s.requiredUpdated} updated, ${s.limitsCreated} supplier limit(s) created, ${s.limitsUpdated} updated.\n` +
+        'Type the tenant id to continue: '
+    );
+    if (answer.trim() !== tenant.id) {
+      console.error('That did not match. Nothing was written.');
+      process.exit(1);
+    }
+  }
+  execSql(statements, remote);
+  console.log(`Applied ${statements.length} statement(s) to ${targetLabel} D1.`);
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+}
