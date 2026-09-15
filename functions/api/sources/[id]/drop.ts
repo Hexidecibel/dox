@@ -368,9 +368,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     );
   }
 
-  let queueId: string;
+  let enqueued: Awaited<ReturnType<typeof enqueueDocument>>;
   try {
-    ({ queueId } = await enqueueDocument(context.env.DB, {
+    enqueued = await enqueueDocument(context.env.DB, {
       id: generateId(),
       tenantId: connector.tenant_id,
       documentTypeId: connector.document_type_id,
@@ -388,7 +388,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       sourceId: connector.id,
       supplierId: connector.supplier_id,
       connectorRunId,
-    }));
+      clientIp: context.request.headers.get('cf-connecting-ip'),
+    });
   } catch (err) {
     console.error(`drop: enqueue failed for connector ${connector.id}:`, err);
     return new Response(
@@ -419,8 +420,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   return new Response(
     JSON.stringify({
+      // Still a 200 and still `queued: true` for an exact duplicate: the file
+      // was received and stored, which is what a partner's integration needs
+      // to know. It was not put in front of a reviewer a second time
+      // (migration 0107), so `queue_id` is null and `duplicate` says why. No
+      // document title crosses this boundary.
       queued: true,
-      queue_id: queueId,
+      queue_id: enqueued.queueId,
+      ...(enqueued.outcome === 'duplicate'
+        ? { duplicate: { received_again: true, match_kind: enqueued.duplicate.match_kind } }
+        : {}),
       run_id: connectorRunId,
       file_key: r2Key,
       accepted_at: new Date().toISOString(),

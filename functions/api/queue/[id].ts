@@ -1,4 +1,5 @@
 import { generateId, logAudit, getClientIp } from '../../lib/db';
+import { loadQueueIntakeHistory } from '../../lib/intake/duplicates';
 import type { ParsedCustomer, ParsedOrder, ParsedShipment } from '../../../shared/connectorOutput';
 import {
   requireRole,
@@ -107,8 +108,17 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       }
     );
 
+    const history = await loadQueueIntakeHistory(context.env.DB, [
+      {
+        id: String(item.id),
+        tenant_id: String(item.tenant_id),
+        checksum: item.checksum == null ? null : String(item.checksum),
+        status: String(item.status),
+      },
+    ]);
+
     return new Response(
-      JSON.stringify({ item: enriched }),
+      JSON.stringify({ item: { ...enriched, intake_history: history.get(String(item.id)) } }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (err) {
@@ -527,20 +537,26 @@ async function linkApprovedDocumentToRequestUpload(
   combined = false
 ): Promise<void> {
   try {
-    const upload = await context.env.DB.prepare(
+    // Usually one arrival per queue item. Since 0107 there can be several: a
+    // byte-identical upload that arrived while this item was still waiting is
+    // pointed at this item instead of getting a second card, so every arrival
+    // on it is linked here.
+    const uploadRows = await context.env.DB.prepare(
       `SELECT id, tenant_id, request_id, link_id, supplier_id
          FROM request_uploads
-        WHERE queue_id = ? AND document_id IS NULL`
+        WHERE queue_id = ? AND document_id IS NULL
+        ORDER BY uploaded_at ASC, id ASC`
     )
       .bind(queueItemId)
-      .first<{
+      .all<{
         id: string;
         tenant_id: string;
         request_id: string;
         link_id: string;
         supplier_id: string;
       }>();
-    if (!upload) return;
+    const uploads = uploadRows.results ?? [];
+    if (uploads.length === 0) return;
 
     const payload = (await response.clone().json()) as {
       item?: { status?: string };
@@ -560,35 +576,37 @@ async function linkApprovedDocumentToRequestUpload(
     // order/shipment approvals produce records, not documents. Nothing to link.
     if (documentIds.length === 0) return;
 
-    await context.env.DB.prepare(
-      `UPDATE request_uploads SET document_id = ? WHERE id = ? AND document_id IS NULL`
-    )
-      .bind(documentIds[0], upload.id)
-      .run();
+    for (const upload of uploads) {
+      await context.env.DB.prepare(
+        `UPDATE request_uploads SET document_id = ? WHERE id = ? AND document_id IS NULL`
+      )
+        .bind(documentIds[0], upload.id)
+        .run();
 
-    await logAudit(
-      context.env.DB,
-      user.id,
-      upload.tenant_id,
-      'request_upload.document_linked',
-      'request_upload',
-      upload.id,
-      JSON.stringify({
-        queue_item_id: queueItemId,
-        request_id: upload.request_id,
-        link_id: upload.link_id,
-        supplier_id: upload.supplier_id,
-        document_id: documentIds[0],
-        // The full set, because the column can only hold the first.
-        document_ids: documentIds,
-        document_count: documentIds.length,
-        // Said explicitly so the trail cannot be misread as an acceptance. A
-        // combined action records its decision in its own rows, next.
-        line_status_unchanged: true,
-        ...(combined ? { via: 'review_queue_combined' } : {}),
-      }),
-      getClientIp(context.request)
-    );
+      await logAudit(
+        context.env.DB,
+        user.id,
+        upload.tenant_id,
+        'request_upload.document_linked',
+        'request_upload',
+        upload.id,
+        JSON.stringify({
+          queue_item_id: queueItemId,
+          request_id: upload.request_id,
+          link_id: upload.link_id,
+          supplier_id: upload.supplier_id,
+          document_id: documentIds[0],
+          // The full set, because the column can only hold the first.
+          document_ids: documentIds,
+          document_count: documentIds.length,
+          // Said explicitly so the trail cannot be misread as an acceptance. A
+          // combined action records its decision in its own rows, next.
+          line_status_unchanged: true,
+          ...(combined ? { via: 'review_queue_combined' } : {}),
+        }),
+        getClientIp(context.request)
+      );
+    }
   } catch (err) {
     console.error(
       '[queue] request-upload document link failed:',
@@ -614,7 +632,8 @@ async function preflightCombinedArrivalDecision(
     );
   }
   const upload = await context.env.DB.prepare(
-    `SELECT id FROM request_uploads WHERE queue_id = ? AND tenant_id = ?`
+    `SELECT id FROM request_uploads WHERE queue_id = ? AND tenant_id = ?
+      ORDER BY uploaded_at ASC, id ASC`
   )
     .bind(item.id, item.tenant_id)
     .first<{ id: string }>();

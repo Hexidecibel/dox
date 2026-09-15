@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 131 tables, 2 views, 210 indexes, 36 triggers.
+Objects: 132 tables, 2 views, 216 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -63,7 +63,7 @@ Triggers: `trg_bundles_ad_fts`, `trg_bundles_ai_fts`, `trg_bundles_au_fts`
   UNIQUE(document_id, version_number)
 ```
 
-Indexes: `idx_document_versions_doc`, `idx_document_versions_text`
+Indexes: `idx_document_versions_checksum`, `idx_document_versions_doc`, `idx_document_versions_text`
 
 Triggers: `trg_document_versions_ai_fts`, `trg_document_versions_au_fts`
 
@@ -569,7 +569,7 @@ Indexes: `idx_extraction_templates_lookup`
   file_retain_until TEXT
 ```
 
-Indexes: `idx_pq_output_kind`, `idx_processing_queue_file_retain`, `idx_processing_queue_processing_status`, `idx_processing_queue_rejection`, `idx_processing_queue_status`
+Indexes: `idx_pq_output_kind`, `idx_processing_queue_file_retain`, `idx_processing_queue_processing_status`, `idx_processing_queue_rejection`, `idx_processing_queue_status`, `idx_processing_queue_tenant_checksum`
 
 ### `reviewer_field_dismissals`
 
@@ -1508,6 +1508,34 @@ Indexes: `idx_dtr_tenant_type`
 ```
 
 Indexes: `idx_entity_notes_author`, `idx_entity_notes_entity`
+
+### `intake_duplicates`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  checksum TEXT NOT NULL
+  match_kind TEXT NOT NULL CHECK (match_kind IN ('already_approved', 'already_waiting'))
+  matched_document_id TEXT REFERENCES documents(id) ON DELETE SET NULL
+  matched_queue_id TEXT REFERENCES processing_queue(id) ON DELETE SET NULL
+  source TEXT NOT NULL
+  source_detail TEXT
+  source_id TEXT
+  connector_run_id TEXT
+  request_upload_id TEXT REFERENCES request_uploads(id) ON DELETE SET NULL
+  file_name TEXT NOT NULL
+  file_size INTEGER NOT NULL
+  mime_type TEXT NOT NULL
+  file_r2_key TEXT NOT NULL
+  enqueue_params TEXT NOT NULL
+  received_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL
+  queue_id TEXT REFERENCES processing_queue(id) ON DELETE SET NULL
+  overridden_by TEXT REFERENCES users(id) ON DELETE SET NULL
+  overridden_at TEXT
+```
+
+Indexes: `idx_intake_duplicates_document`, `idx_intake_duplicates_matched_queue`, `idx_intake_duplicates_queue`, `idx_intake_duplicates_tenant_received`
 
 ### `module_visibility`
 

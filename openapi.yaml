@@ -53,6 +53,11 @@ tags:
     description: |
       Files suppliers sent through a request link, as staff see them, and the
       decision about which requirements each one satisfies (migration 0104).
+  - name: Intake Duplicates
+    description: |
+      Files that arrived byte-identical to one already approved or already
+      waiting in the Review Queue, recorded instead of queued a second time,
+      and "Review anyway" (migration 0107).
   - name: Spec Register
     description: |
       The out-of-spec register — every judged COA test result, which limit it
@@ -449,6 +454,38 @@ components:
         supplier_name: { type: string, nullable: true }
         spec_test_name: { type: string, nullable: true }
         acknowledged_by_name: { type: string, nullable: true }
+
+    IntakeDuplicate:
+      type: object
+      description: |
+        One arrival that did not become a review card because the identical
+        file (same SHA-256, same tenant) was already approved or already
+        waiting. Never carries the storage key.
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        checksum: { type: string }
+        match_kind: { type: string, enum: [already_approved, already_waiting] }
+        matched_document_id: { type: string, nullable: true }
+        matched_document_title: { type: string, nullable: true }
+        matched_queue_id: { type: string, nullable: true }
+        matched_queue_file_name: { type: string, nullable: true }
+        matched_queue_status: { type: string, nullable: true, enum: [pending, approved, rejected] }
+        source: { type: string, description: "The door: import, email, api, public_link, s3, manual, request_link" }
+        source_detail: { type: string, nullable: true }
+        source_id: { type: string, nullable: true }
+        connector_run_id: { type: string, nullable: true }
+        request_upload_id: { type: string, nullable: true }
+        file_name: { type: string }
+        file_size: { type: integer }
+        mime_type: { type: string }
+        received_at: { type: string }
+        created_by: { type: string, nullable: true }
+        created_by_name: { type: string, nullable: true }
+        queue_id: { type: string, nullable: true, description: NULL while still suppressed; the queue item Review anyway created. }
+        overridden_by: { type: string, nullable: true }
+        overridden_by_name: { type: string, nullable: true }
+        overridden_at: { type: string, nullable: true }
 
     RequestArrival:
       type: object
@@ -2611,13 +2648,98 @@ paths:
                 type: object
                 properties:
                   arrival: { $ref: '#/components/schemas/RequestArrival' }
+                  intake_duplicate:
+                    type: object
+                    nullable: true
+                    description: |
+                      Set when the file is identical to one already approved or
+                      already waiting (0107); the arrival was linked to that
+                      instead of queued.
         '409':
-          description: Already on the queue
+          description: Already on the queue, or already linked to a document
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '410':
           description: The bytes are gone
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/intake-duplicates:
+    get:
+      tags: [Intake Duplicates]
+      summary: List files received again
+      description: |
+        Any tenant user. Newest first. A super_admin may pass `tenant_id`
+        (omitted = every tenant).
+      parameters:
+        - { name: state, in: query, schema: { type: string, enum: [open, reviewed, all], default: all }, description: open = not sent for review }
+        - { name: document_id, in: query, schema: { type: string }, description: "Everything received again that is this document, including arrivals matched to the queue item it was approved from" }
+        - { name: matched_queue_id, in: query, schema: { type: string } }
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: Suppressed arrivals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  duplicates:
+                    type: array
+                    items: { $ref: '#/components/schemas/IntakeDuplicate' }
+                  total: { type: integer }
+                  open_count: { type: integer, description: Rows not sent for review, same filters without state }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        '404':
+          description: document_id not found in the tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/intake-duplicates/{id}/review:
+    post:
+      tags: [Intake Duplicates]
+      summary: Review anyway
+      description: |
+        super_admin, org_admin or user. Replays the enqueue call the door made
+        with the duplicate check skipped, stamps who sent it and when, and
+        audits `intake_duplicate.review_anyway`. For a supplier-portal arrival
+        the upload is pointed at the new queue item; its link to the existing
+        document is removed only if no claim on it has been decided.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  duplicate: { $ref: '#/components/schemas/IntakeDuplicate' }
+                  queue_id: { type: string }
+        '403':
+          description: Reader
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Not found in the tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Already sent for review
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: The stored file is gone
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

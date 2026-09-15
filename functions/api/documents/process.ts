@@ -9,7 +9,7 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import type { User, Env } from '../../lib/types';
-import type { ExtractionField } from '../../../shared/types';
+import type { ExtractionField, QueuedResponse } from '../../../shared/types';
 
 const ALLOWED_TYPES = [
   'application/pdf',
@@ -169,11 +169,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     // Process each file: validate, upload to R2, create queue entry
-    const queuedItems: Array<{
-      id: string;
-      file_name: string;
-      duplicate?: { document_id: string; document_title: string; file_name: string } | null;
-    }> = [];
+    const queuedItems: QueuedResponse['items'] = [];
 
     for (const file of files) {
       // Validate file type. Recover the canonical mime from the extension when
@@ -215,39 +211,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const fileData = await file.arrayBuffer();
       const checksum = await computeChecksum(fileData);
 
-      // Check for duplicate
-      let duplicate: { document_id: string; document_title: string; file_name: string } | null = null;
-      try {
-        const existingVersion = await context.env.DB.prepare(
-          `SELECT dv.document_id, dv.file_name, d.title
-           FROM document_versions dv
-           JOIN documents d ON d.id = dv.document_id
-           WHERE dv.checksum = ? AND d.tenant_id = ? AND d.status != 'deleted'
-           LIMIT 1`
-        ).bind(checksum, tenantId).first<{
-          document_id: string;
-          file_name: string;
-          title: string;
-        }>();
-
-        if (existingVersion) {
-          duplicate = {
-            document_id: existingVersion.document_id,
-            document_title: existingVersion.title,
-            file_name: existingVersion.file_name,
-          };
-        }
-      } catch {
-        // Non-critical
-      }
-
       // Upload file to R2 under pending path
       const queueId = generateId();
       const r2Key = `pending/${tenant.slug}/${queueId}/${fileName}`;
       await uploadFile(context.env.FILES, r2Key, fileData, mimeType);
 
-      // Create queue entry
-      await enqueueDocument(context.env.DB, {
+      // Create queue entry — unless this exact file is already approved or
+      // already waiting (migration 0107), in which case the shared helper
+      // records it as received again and no second card is made.
+      const enqueued = await enqueueDocument(context.env.DB, {
         id: queueId,
         tenantId,
         documentTypeId: documentTypeId || null,
@@ -261,12 +233,27 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         sourceDetail,
         outputKind,
         sourceId,
+        clientIp: context.request.headers.get('cf-connecting-ip'),
       });
 
+      // `duplicate` keeps its pre-0107 shape (the uploader is staff in this
+      // tenant, so naming the document is fine here).
+      let duplicate: { document_id: string; document_title: string; file_name: string } | null = null;
+      if (enqueued.outcome === 'duplicate' && enqueued.duplicate.matched_document_id) {
+        const doc = await context.env.DB.prepare(
+          `SELECT d.id, d.title,
+                  (SELECT file_name FROM document_versions WHERE document_id = d.id ORDER BY version_number DESC LIMIT 1) AS file_name
+             FROM documents d WHERE d.id = ? AND d.tenant_id = ?`
+        ).bind(enqueued.duplicate.matched_document_id, tenantId).first<{ id: string; title: string; file_name: string | null }>();
+        if (doc) duplicate = { document_id: doc.id, document_title: doc.title, file_name: doc.file_name ?? fileName };
+      }
+
       queuedItems.push({
-        id: queueId,
+        id: enqueued.queueId ?? '',
         file_name: fileName,
         duplicate,
+        intake_duplicate: enqueued.outcome === 'duplicate' ? enqueued.duplicate : null,
+        previously_rejected: enqueued.outcome === 'queued' ? enqueued.previouslyRejected : null,
       });
     }
 

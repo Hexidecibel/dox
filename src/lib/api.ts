@@ -2064,6 +2064,36 @@ export const api = {
       ),
   },
 
+  /**
+   * Files that arrived again, byte-identical to one already approved or
+   * already waiting (migration 0107). Recorded instead of becoming a second
+   * review card; "Review anyway" puts one in the queue.
+   */
+  intakeDuplicates: {
+    list: (params?: {
+      state?: 'open' | 'reviewed' | 'all';
+      document_id?: string;
+      matched_queue_id?: string;
+      tenant_id?: string;
+      limit?: number;
+      offset?: number;
+    }) => {
+      const qs = new URLSearchParams(
+        Object.entries(params || {})
+          .filter(([, v]) => v != null && v !== '')
+          .map(([k, v]) => [k, String(v)]),
+      ).toString();
+      return fetchApi<import('../../shared/types').IntakeDuplicateListResponse>(
+        `/intake-duplicates${qs ? `?${qs}` : ''}`,
+      );
+    },
+    reviewAnyway: (id: string) =>
+      fetchApi<import('../../shared/types').IntakeDuplicateReviewResponse>(
+        `/intake-duplicates/${id}/review`,
+        { method: 'POST' },
+      ),
+  },
+
   queue: {
     list: (params?: { status?: string; processing_status?: string; document_type_id?: string; source?: string; tenant_id?: string; mine?: boolean | 1; limit?: number; offset?: number }) =>
       fetchApi<{ items: ProcessingQueueItem[]; total: number; limit: number; offset: number }>(

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import type { IntakeDuplicateNotice } from '../../shared/types';
 import { useNavigate } from 'react-router-dom';
 import {
   Box,
@@ -12,6 +13,7 @@ import {
   CircularProgress,
   Alert,
   Chip,
+  Tooltip,
   IconButton,
   Paper,
   Card,
@@ -79,6 +81,10 @@ interface QueuedItem {
   processingStatus: string;
   result?: ProcessingQueueItem;
   duplicate?: { document_id: string; document_title: string; file_name: string } | null;
+  /** Not queued: this exact file is already approved or already waiting (0107). */
+  intakeDuplicate?: IntakeDuplicateNotice | null;
+  /** Set once "Review anyway" put it in the queue after all. */
+  sentAnyway?: boolean;
 }
 
 interface EditableResult {
@@ -498,14 +504,15 @@ export function Import() {
       const items: QueuedItem[] = response.items.map(item => ({
         id: item.id,
         fileName: item.file_name,
-        processingStatus: item.id ? 'queued' : 'error',
+        processingStatus: item.id ? 'queued' : item.intake_duplicate ? 'duplicate' : 'error',
         duplicate: item.duplicate,
+        intakeDuplicate: item.intake_duplicate ?? null,
       }));
 
       setQueuedItems(items);
 
-      // If no valid items were queued, go back
-      if (items.every(i => !i.id)) {
+      // If nothing was queued AND nothing was recognised as already here, go back
+      if (items.every(i => !i.id && !i.intakeDuplicate)) {
         setError('No files could be queued for processing');
         setStage('upload');
       } else {
@@ -1046,6 +1053,12 @@ export function Import() {
           <Typography variant="h5" gutterBottom>
             {queuedItems.filter(i => !!i.id).length} document{queuedItems.filter(i => !!i.id).length !== 1 ? 's' : ''} queued for processing
           </Typography>
+          {queuedItems.some(i => i.intakeDuplicate && !i.sentAnyway) && (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              {queuedItems.filter(i => i.intakeDuplicate && !i.sentAnyway).length} file(s) were already here, byte for
+              byte, so they were kept but not added to the Review Queue again.
+            </Typography>
+          )}
           <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
             AI extraction is running in the background. Documents will appear in the Review Queue when ready.
           </Typography>
@@ -1054,15 +1067,51 @@ export function Import() {
           <Box sx={{ mb: 3, textAlign: 'left', maxWidth: 500, mx: 'auto' }}>
             {queuedItems.map((item, i) => (
               <Box key={i} sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 0.5 }}>
-                {item.id ? (
-                  <CheckIcon color="success" fontSize="small" />
+                {item.id || item.intakeDuplicate ? (
+                  <CheckIcon color={item.id ? 'success' : 'disabled'} fontSize="small" />
                 ) : (
                   <ErrorIcon color="error" fontSize="small" />
                 )}
                 <Typography variant="body2">{item.fileName}</Typography>
-                {item.duplicate && (
+                {item.intakeDuplicate && !item.sentAnyway ? (
+                  <>
+                    <Tooltip
+                      title={
+                        item.intakeDuplicate.match_kind === 'already_approved'
+                          ? 'This exact file was already approved, so it was kept but not queued again.'
+                          : 'This exact file is already waiting in the Review Queue, so no second card was made.'
+                      }
+                      arrow
+                    >
+                      <Chip
+                        label={item.intakeDuplicate.match_kind === 'already_approved' ? 'Already approved' : 'Already waiting'}
+                        size="small"
+                        color="info"
+                        variant="outlined"
+                      />
+                    </Tooltip>
+                    {item.duplicate && (
+                      <Button size="small" onClick={() => navigate(`/documents/${item.duplicate!.document_id}`)}>
+                        View
+                      </Button>
+                    )}
+                    <Button
+                      size="small"
+                      onClick={async () => {
+                        try {
+                          const res = await api.intakeDuplicates.reviewAnyway(item.intakeDuplicate!.intake_duplicate_id);
+                          setQueuedItems(prev => prev.map((q, idx) => idx === i ? { ...q, id: res.queue_id, sentAnyway: true, processingStatus: 'queued' } : q));
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : 'Could not send it for review');
+                        }
+                      }}
+                    >
+                      Review anyway
+                    </Button>
+                  </>
+                ) : item.duplicate ? (
                   <Chip label="Duplicate detected" size="small" color="warning" />
-                )}
+                ) : null}
               </Box>
             ))}
           </Box>

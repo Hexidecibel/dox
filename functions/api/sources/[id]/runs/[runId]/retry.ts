@@ -265,7 +265,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       source: runSource,
     });
 
-    const { queueId } = await enqueueDocument(context.env.DB, {
+    const enqueued = await enqueueDocument(context.env.DB, {
       id: generateId(),
       tenantId: connector.tenant_id,
       documentTypeId: connector.document_type_id,
@@ -318,7 +318,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return new Response(
       JSON.stringify({
         queued: true,
-        queue_id: queueId,
+        queue_id: enqueued.queueId,
+        // A retry of a file that has since been approved (or is already
+        // waiting) is recorded as received again, not queued twice (0107).
+        intake_duplicate: enqueued.outcome === 'duplicate' ? enqueued.duplicate : null,
         run_id: connectorRunId,
         retry_of_run_id: run.id,
       }),

@@ -132,7 +132,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // Enqueue into processing_queue — same path manual uploads take. The
     // worker picks it up and routes it into the kind-aware Review Queue.
-    const { queueId } = await enqueueDocument(context.env.DB, {
+    const enqueued = await enqueueDocument(context.env.DB, {
       id: generateId(),
       tenantId: connector.tenant_id as string,
       documentTypeId: (connector.document_type_id as string | null) ?? null,
@@ -148,6 +148,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       sourceId: connector.id as string,
       supplierId: (connector.supplier_id as string | null) ?? null,
       connectorRunId,
+      clientIp: context.request.headers.get('cf-connecting-ip'),
     });
 
     // Mark the R2 key processed so the poller doesn't double-enqueue if the
@@ -167,7 +168,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return new Response(
       JSON.stringify({
         queued: true,
-        queue_id: queueId,
+        queue_id: enqueued.queueId,
+        // An exact duplicate of a file already approved or already waiting is
+        // recorded as received again rather than queued twice (migration 0107).
+        intake_duplicate: enqueued.outcome === 'duplicate' ? enqueued.duplicate : null,
         run_id: connectorRunId,
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },

@@ -1076,6 +1076,42 @@ Response: `{ "arrival": RequestArrival, "counts": DocumentRequestLineCounts }`.
 
 ---
 
+## Files Received Again (exact duplicates)
+
+Every intake door computes a SHA-256 of the bytes. Before a file becomes a Review Queue card it is compared with what **the same tenant** already holds (migration 0107, `functions/lib/intake/duplicates.ts`, called from `enqueueDocument` so every door shares it):
+
+| The identical file is… | What happens |
+|---|---|
+| **already approved** (a live document version with that checksum, or an approved queue item — which covers page-scoped sublot documents and order/shipment approvals) | No card. An `intake_duplicates` row (`match_kind: "already_approved"`) links the arrival to that document. Audit `intake.duplicate_suppressed`. |
+| **already waiting** in the Review Queue (`status: pending`, any processing state) | No second card. Row `already_waiting` against that queue item; the card shows "also received from …". |
+| **rejected** before | Queued normally. The card shows "this exact file was rejected on … for …" (`intake_history.previously_rejected`). Audit `intake.previously_rejected_file`. |
+
+Byte-identical only: a re-scan of the same paper is a different file and is reviewed like any other. Nothing is deleted or rejected; the stored file stays and **Review anyway** puts it in the queue.
+
+What each door returns for a suppressed file:
+
+- `POST /api/documents/process` — the item has `id: ""` and `intake_duplicate: { intake_duplicate_id, match_kind, matched_document_id, matched_queue_id }` (plus the older `duplicate` object naming the document). A queued item identical to a rejected one carries `previously_rejected`.
+- `POST /api/sources/:id/drop` — still `200` and `queued: true` (the file was received), with `queue_id: null` and `duplicate: { received_again: true, match_kind }`. No document title is returned to a partner. The run header is closed as `success`.
+- `POST /api/sources/:id/run`, `POST /api/sources/:id/runs/:runId/retry` — `queue_id: null` and `intake_duplicate`.
+- `POST /api/webhooks/connector-email-ingest` — the attachment's item has `queue_id: null` and `intake_duplicate_id`.
+- `POST /api/webhooks/email-ingest` — result `status: "duplicate"` (checked before any model runs); the summary email says "Already received".
+- Supplier portal upload — **unchanged for the supplier** (200, their items say received). For staff: identical to an approved document → `request_uploads.document_id` is set to it (arrival state `document_linked`, decide it on Arrivals as usual; no requirement is accepted by this); identical to a waiting item → `request_uploads.queue_id` points at that item, and every arrival on it is linked when it is approved.
+- `POST /api/request-uploads/:id/enqueue` — response adds `intake_duplicate` (null when queued); 409 when the arrival is already linked to a document.
+- The S3 poller counts suppressed files in `received_again` per connector.
+
+**`POST /api/documents/ingest` is not checked.** It is not a Review Queue door: it creates a document or adds a version to the one named by `external_ref`, and its caller relies on that upsert returning a document. Sending identical bytes twice still adds a version, exactly as before.
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/intake-duplicates` | any tenant user | `state=open\|reviewed\|all` (default all), `document_id` (the document page's "Received again" list — includes arrivals matched to the queue item the document was approved from), `matched_queue_id`, `limit` (≤200), `offset`; `tenant_id` for super_admin (omitted = all tenants). Response: `{ duplicates, total, open_count, limit, offset }`. |
+| `POST /api/intake-duplicates/:id/review` | super_admin, org_admin, user | **Review anyway.** Replays the door's enqueue with the check skipped, stamps `queue_id`/`overridden_by`/`overridden_at`, audits `intake_duplicate.review_anyway`. For a portal arrival, points `request_uploads.queue_id` at the new item and clears the document link only if no claim on it has been decided. 409 if already sent; 410 if the stored file is gone. Response: `{ duplicate, queue_id }`. |
+
+`GET /api/queue` and `GET /api/queue/:id` add `intake_history` to each item: `also_received[]`, `previously_rejected`, `identical_documents[]` (pending items only), and `sent_anyway` (set on a card created by Review anyway).
+
+Existing surplus copies are reported (never changed) by `bin/audit-duplicate-documents [--tenant <id>] [--remote] [--json]`.
+
+---
+
 ## Out-of-Spec Register
 
 `document_spec_checks` holds every judged COA test result: the verdict (`in_spec` / `out_of_spec` / `not_checked`), the limit it was judged against (frozen in `limit_snapshot`), and who acknowledged it. The Out of Spec page (`/spec-alerts`) reads it.
@@ -1320,7 +1356,7 @@ This structure ensures:
 
 ### Checksums
 
-SHA-256 checksums are computed on upload and stored in the `document_versions` table. The checksum is also returned as an `ETag` header on download.
+SHA-256 checksums are computed on upload and stored in the `document_versions` table. The checksum is also returned as an `ETag` header on download. Intake compares them to recognise a file that arrives again (see [Files Received Again](#files-received-again-exact-duplicates)).
 
 ---
 

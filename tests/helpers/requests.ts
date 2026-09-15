@@ -172,10 +172,20 @@ export async function refsFor(token: string, lineIds: string[]): Promise<string[
 export async function upload(
   token: string,
   refs: string[],
-  opts: { name?: string; type?: string; bytes?: number; label?: string } = {},
+  opts: { name?: string; type?: string; bytes?: number; label?: string; content?: Uint8Array } = {},
 ): Promise<{ status: number; body: unknown }> {
   const form = new FormData();
-  const blob = new Blob([new Uint8Array(opts.bytes ?? 64)], {
+  // Unique bytes by default: since migration 0107 an upload byte-identical to
+  // one already waiting or approved is linked to it instead of queued, so a
+  // fixed buffer would couple every test in a file. Pass `content` to send the
+  // same file twice on purpose.
+  let payload = opts.content;
+  if (!payload) {
+    payload = new Uint8Array(opts.bytes ?? 64);
+    // getRandomValues caps at 64 KiB; a random prefix is enough to be unique.
+    crypto.getRandomValues(payload.subarray(0, Math.min(payload.length, 65536)));
+  }
+  const blob = new Blob([payload], {
     type: opts.type ?? 'application/pdf',
   });
   form.append('file', new File([blob], opts.name ?? 'cert.pdf', {

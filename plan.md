@@ -98,6 +98,22 @@ plus the Walkthrough 2 notes.
 - Presence/absence result normalization.
 - E. coli / MPN handling.
 
+### Exact-duplicate detection at intake (don't spam the Review Queue)
+
+**Status:** done — built locally 2026-09-15 (migration 0107, applied locally only; not deployed)
+
+**Summary:** Intake computed a checksum on every door and never compared it, so one email forwarded twice became two approved documents. Now a byte-identical arrival (same tenant) is compared once, in `enqueueDocument` → `admitIntake` (`functions/lib/intake/duplicates.ts`): identical to an approved file → recorded against that document, no card; identical to a waiting item → recorded against that card ("also received"), no second card; identical to a rejected file → queued with "rejected on … for …" on the card. Every suppression is an `intake_duplicates` row + audit row and is reversible with Review anyway. Supplier portal: supplier response unchanged; arrival linked to the existing document (case 1) or waiting item (case 2). Ingest API not checked (upsert semantics).
+
+**Doors:** smart upload (`documents/process`), legacy email webhook (checked before extraction), connector email webhook, connector drop, source run, run retry, S3 poller, supplier portal upload, arrivals re-enqueue. Review anyway replays through the same helper with the check skipped.
+
+**UI:** Review Queue › "Received again (N)" view with Review anyway; card chips + sentences (Received N×, Rejected before, Already a document, sent for review anyway); document page "Received again" panel; Import shows "Already approved / Already waiting" with Review anyway.
+
+**Cleanup:** `bin/audit-duplicate-documents` — report only (first vs later copy per group, links on each, one-file sublot splits excluded). Prod dry-run 2026-09-15: 61 groups / 74 later copies. The archive decision is a todo.
+
+**Out of scope:** near-duplicates (re-scans, re-exports); a unique index to close the same-instant race.
+
+**Files:** `migrations/0107_intake_duplicates.sql`, `functions/lib/intake/{duplicates,duplicate-ledger,enqueue}.ts`, `functions/api/intake-duplicates/**`, every door above, `functions/api/queue/{index,[id]}.ts`, `functions/lib/request-arrivals.ts`, `src/components/IntakeDuplicateNotes.tsx`, `src/pages/{ReviewQueue,DocumentDetail,Import}.tsx`, `bin/audit-duplicate-documents`, `bin/lib/duplicateDocumentsAudit.js`, `tests/api/intake-duplicates.test.ts`.
+
 ### Supplier-portal arrivals — staff review and accept
 
 **Status:** done — built locally 2026-09-14 (migration 0104; not deployed)

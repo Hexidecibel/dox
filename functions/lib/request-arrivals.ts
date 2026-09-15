@@ -75,6 +75,7 @@ import type {
   RequestLineRow,
   RequestLineStatus,
   SupplierRequirementTier,
+  IntakeDuplicateNotice,
 } from '../../shared/types';
 import type { User } from './types';
 
@@ -154,9 +155,9 @@ export interface EnqueueSupplierUploadArgs {
 export async function enqueueSupplierUpload(
   db: D1Database,
   args: EnqueueSupplierUploadArgs,
-): Promise<string | null> {
+): Promise<EnqueueSupplierUploadResult> {
   try {
-    const { queueId } = await enqueueDocument(db, {
+    const enqueued = await enqueueDocument(db, {
       tenantId: args.tenantId,
       // Unknown, and honestly so. A supplier request packet asks for an
       // allergen statement, an insurance certificate and a spec sheet in the
@@ -190,14 +191,21 @@ export async function enqueueSupplierUpload(
       // worker can load that supplier's extraction instructions instead of
       // extracting blind.
       supplierId: args.supplierId,
+      requestUploadId: args.uploadId,
+      clientIp: args.ip,
     });
+
+    if (enqueued.outcome === 'duplicate') {
+      await linkDuplicateArrival(db, args, enqueued.duplicate);
+      return { queueId: null, duplicate: enqueued.duplicate };
+    }
 
     await db
       .prepare(`UPDATE request_uploads SET queue_id = ? WHERE id = ? AND tenant_id = ?`)
-      .bind(queueId, args.uploadId, args.tenantId)
+      .bind(enqueued.queueId, args.uploadId, args.tenantId)
       .run();
 
-    return queueId;
+    return { queueId: enqueued.queueId, duplicate: null };
   } catch (err) {
     console.error('Supplier request upload: enqueue failed:', err);
     try {
@@ -222,7 +230,78 @@ export async function enqueueSupplierUpload(
       // If even the audit write fails, the console line is what is left.
       // Still not a reason to fail an upload that already succeeded.
     }
-    return null;
+    return { queueId: null, duplicate: null };
+  }
+}
+
+export interface EnqueueSupplierUploadResult {
+  /** The queue item this arrival is now read through; NULL if not queued. */
+  queueId: string | null;
+  /**
+   * Set when the file was byte-identical to one already approved or already
+   * waiting (migration 0107). The arrival was linked to that instead. Both
+   * NULL means the enqueue failed (audited as `request_link.enqueue_failed`).
+   */
+  duplicate: IntakeDuplicateNotice | null;
+}
+
+/**
+ * An exact duplicate still has to exist for staff as an arrival (0107). The
+ * supplier's upload already succeeded and their lines already moved to
+ * `received`; what changes is only which existing thing the arrival points at,
+ * so nobody reviews the same bytes twice:
+ *
+ *   already_approved -> `request_uploads.document_id` = that document. The
+ *                       arrival reads `document_linked`, and a person Decides
+ *                       what it satisfies on Arrivals exactly as for any other
+ *                       approved file. Nothing is accepted by this: a line
+ *                       still moves only when a person decides it.
+ *   already_waiting  -> `request_uploads.queue_id` = the waiting item, so the
+ *                       arrival follows that card and is linked when it is
+ *                       approved.
+ *
+ * An approved order/shipment has no document; the arrival points at the
+ * approved queue item instead, which is the most truthful thing available.
+ */
+async function linkDuplicateArrival(
+  db: D1Database,
+  args: EnqueueSupplierUploadArgs,
+  notice: IntakeDuplicateNotice,
+): Promise<void> {
+  if (notice.match_kind === 'already_approved' && notice.matched_document_id) {
+    await db
+      .prepare(
+        `UPDATE request_uploads SET document_id = ?
+          WHERE id = ? AND tenant_id = ? AND document_id IS NULL`,
+      )
+      .bind(notice.matched_document_id, args.uploadId, args.tenantId)
+      .run();
+    await logAudit(
+      db,
+      args.actorId ?? null,
+      args.tenantId,
+      'request_upload.document_linked',
+      'request_upload',
+      args.uploadId,
+      JSON.stringify({
+        request_id: args.requestId,
+        link_id: args.linkId,
+        supplier_id: args.supplierId,
+        document_id: notice.matched_document_id,
+        intake_duplicate_id: notice.intake_duplicate_id,
+        via: 'intake_duplicate',
+        // Said explicitly, as the approve path says it: linking is not accepting.
+        line_status_unchanged: true,
+      }),
+      args.ip,
+    );
+    return;
+  }
+  if (notice.matched_queue_id) {
+    await db
+      .prepare(`UPDATE request_uploads SET queue_id = ? WHERE id = ? AND tenant_id = ?`)
+      .bind(notice.matched_queue_id, args.uploadId, args.tenantId)
+      .run();
   }
 }
 
