@@ -98,12 +98,14 @@ describe('starter pack seeding — fsqa', () => {
     expect(rows.results[0].slug).not.toBe(rows.results[1].slug);
   });
 
-  it('a GFSI claim opens both audit requirements through the shared lib', async () => {
-    const opened = await requirementsOpenedByClaims(db, FSQA_TENANT.id, [
-      `clm_${FSQA_TENANT.slug}_gfsi-certified`,
-    ]);
-    expect(opened).toContain(`req_${FSQA_TENANT.slug}_third-party-audit-report`);
-    expect(opened).toContain(`req_${FSQA_TENANT.slug}_third-party-audit-certificate`);
+  it('a GFSI claim requires the audit certificate and only recommends the report', async () => {
+    const claim = [`clm_${FSQA_TENANT.slug}_gfsi-certified`];
+    const required = await requirementsOpenedByClaims(db, FSQA_TENANT.id, claim);
+    expect(required).toContain(`req_${FSQA_TENANT.slug}_third-party-audit-certificate`);
+    expect(required).not.toContain(`req_${FSQA_TENANT.slug}_third-party-audit-report`);
+    const all = await requirementsOpenedByClaims(db, FSQA_TENANT.id, claim, false);
+    expect(all).toContain(`req_${FSQA_TENANT.slug}_third-party-audit-report`);
+    expect(all).toContain(`req_${FSQA_TENANT.slug}_third-party-audit-certificate`);
   });
 
   it('seeded advisory rules are excluded from required-only gap reads', async () => {

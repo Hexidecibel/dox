@@ -24,25 +24,69 @@
  * the broker case, which is most of Insurance.
  */
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Alert, AlertTitle, Box, Typography } from '@mui/material';
 import OwnerRoutingPanel from '../../components/OwnerRoutingPanel';
 import type { ProposedOwnerLabel } from '../../components/OwnerRoutingPanel';
+import { api } from '../../lib/api';
+import {
+  DEFAULT_RENEWAL_ALERT_LEAD_DAYS,
+  resolveRenewalAlertLead,
+} from '../../../shared/renewalLeadTime';
 import type { SetupStepProps } from './stepProps';
+
+/**
+ * The tenant's renewal alert lead time as this screen needs it (migration
+ * 0111): the organization's stored setting, and the per-type overrides keyed
+ * by normalized type name. Null values mean "inherit", exactly as in
+ * `resolveRenewalAlertLead`.
+ */
+export interface WizardLeadTime {
+  tenantLeadDays: number | null;
+  typeOverrides: Record<string, number>;
+}
+
+function typeKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/**
+ * "60 days", or "30 to 90 days" when this department's types resolve to
+ * different lead times (a per-type override). Every type the department owns
+ * counts, not only the two the sentence names, so the number cannot understate
+ * the spread. Resolution is the engine's own ladder (type -> tenant -> default).
+ */
+export function leadDaysPhrase(
+  documentTypes: string[],
+  lead: WizardLeadTime | number,
+): string {
+  if (typeof lead === 'number') return `${lead} days`;
+  const days =
+    documentTypes.length === 0
+      ? [resolveRenewalAlertLead(null, lead.tenantLeadDays).days]
+      : documentTypes.map(
+          (t) => resolveRenewalAlertLead(lead.typeOverrides[typeKey(t)], lead.tenantLeadDays).days,
+        );
+  const min = Math.min(...days);
+  const max = Math.max(...days);
+  return min === max ? `${min} days` : `${min} to ${max} days`;
+}
 
 /**
  * "When a 3rd Party Audit Certificate is 60 days from expiring, QA gets the
  * email."
  *
  * Built from the pack's per-type `owner` key, so it names the actual document
- * types rather than describing a department in the abstract. The window comes
- * from the catalog response (`DEFAULT_WINDOW_DAYS` on the server) rather than a
- * literal here, so the sentence cannot state a number the engine has changed.
+ * types rather than describing a department in the abstract. The number is the
+ * tenant's RESOLVED renewal alert lead time (GET /api/expirations/lead-time:
+ * per-type override -> organization setting -> default), so the sentence says
+ * what the engine will actually do for this tenant. A brand-new tenant has
+ * neither setting and reads the default, which the catalog also reports.
  */
 export function ownerSentence(
   documentTypes: string[],
   label: string,
-  windowDays: number,
+  lead: WizardLeadTime | number,
 ): string {
   if (documentTypes.length === 0) {
     return `No document type defaults to ${label} yet — set Owner on a document, or on a document type, and its renewals route here.`;
@@ -52,19 +96,43 @@ export function ownerSentence(
     documentTypes.length > 2
       ? ` (and ${documentTypes.length - 2} other type${documentTypes.length - 2 === 1 ? '' : 's'})`
       : '';
-  return `When a ${named}${rest} is ${windowDays} days from expiring, ${label} gets the email.`;
+  return `When a ${named}${rest} is ${leadDaysPhrase(documentTypes, lead)} from expiring, ${label} gets the email.`;
 }
 
 export function StepOwners({ tenantId, catalog, pack }: SetupStepProps) {
-  const windowDays = catalog?.renewal_window_days ?? 60;
+  const fallbackDays = catalog?.renewal_window_days ?? DEFAULT_RENEWAL_ALERT_LEAD_DAYS;
+  const [leadTime, setLeadTime] = useState<WizardLeadTime | null>(null);
+
+  // Non-fatal: if the read fails (or the Compliance module is off, which gates
+  // /api/expirations), the sentence falls back to the default the catalog
+  // reports rather than blocking the screen.
+  useEffect(() => {
+    let cancelled = false;
+    api.expirations.leadTime
+      .get({ tenantId })
+      .then((res) => {
+        if (cancelled) return;
+        const typeOverrides: Record<string, number> = {};
+        for (const o of res.document_type_overrides ?? []) typeOverrides[typeKey(o.name)] = o.lead_days;
+        setLeadTime({ tenantLeadDays: res.lead_days, typeOverrides });
+      })
+      .catch(() => {
+        if (!cancelled) setLeadTime(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
+
+  const lead: WizardLeadTime | number = leadTime ?? fallbackDays;
 
   const proposed = useMemo<ProposedOwnerLabel[]>(() => {
     if (!pack) return [];
     return pack.owner_labels.map((owner) => ({
       owner_label: owner.label,
-      note: ownerSentence(owner.document_types, owner.label, windowDays),
+      note: ownerSentence(owner.document_types, owner.label, lead),
     }));
-  }, [pack, windowDays]);
+  }, [pack, lead]);
 
   return (
     <Box>

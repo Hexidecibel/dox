@@ -1258,11 +1258,12 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "claim": "gfsi-certified",
         "requires": [
-          "third-party-audit-report",
           "third-party-audit-certificate"
         ],
-        "recommends": [],
-        "notes": "Both documents, not one: the certificate proves the scheme and its valid-through date, the report carries the findings and corrective actions."
+        "recommends": [
+          "third-party-audit-report"
+        ],
+        "notes": "The certificate proves the scheme and its valid-through date, so it is required. The full audit report is usually shared only under NDA, so it is recommended, not required (AJ Conner, 2026-09-14)."
       },
       {
         "claim": "chemical-product",

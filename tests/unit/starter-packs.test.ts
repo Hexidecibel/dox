@@ -120,11 +120,13 @@ describe('fsqa pack — the two audit documents are distinct', () => {
     expect(slugs).toContain('third-party-audit-certificate');
   });
 
-  it('a GFSI-certified claim opens BOTH audit requirements', () => {
+  it('a GFSI-certified claim requires the audit certificate and recommends the report', () => {
+    // AJ Conner, 2026-09-14: the certificate proves the scheme and its
+    // valid-through date; the full report is usually NDA-only.
     const rule = norm.claim_rules.find((r: any) => r.claim === 'gfsi-certified');
     expect(rule).toBeDefined();
-    expect(rule.requires).toContain('third-party-audit-report');
-    expect(rule.requires).toContain('third-party-audit-certificate');
+    expect(rule.requires).toEqual(['third-party-audit-certificate']);
+    expect(rule.recommends).toEqual(['third-party-audit-report']);
   });
 
   it('seeds the claim types a food-safety tenant needs', () => {
