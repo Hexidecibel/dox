@@ -1,6 +1,8 @@
 import { Box, Typography } from '@mui/material';
 import { UniversalSearchPanel } from '../components/search/UniversalSearchPanel';
 import { useTenant } from '../contexts/TenantContext';
+import { useAuth } from '../contexts/AuthContext';
+import { useModuleAccess } from '../contexts/ModuleAccessContext';
 import { HelpWell } from '../components/HelpWell';
 import { helpContent } from '../lib/helpContent';
 
@@ -21,6 +23,14 @@ import { helpContent } from '../lib/helpContent';
  */
 export function Search() {
   const { selectedTenantId } = useTenant();
+  const { user } = useAuth();
+  const { isVisible } = useModuleAccess();
+
+  // Search itself belongs to no module and stays always-on, but taking
+  // documents OUT of it is the supplier-document library's surface — so the
+  // selection bar follows `library`, matching the server gate on
+  // /api/document-exports (shared/modules.ts).
+  const canExport = isVisible('library');
 
   return (
     <Box>
@@ -49,6 +59,10 @@ export function Search() {
       <UniversalSearchPanel
         syncToUrl
         tenantId={selectedTenantId || undefined}
+        enableExport={canExport}
+        exportSender={
+          user ? { name: user.name || user.email, email: user.email } : undefined
+        }
       />
     </Box>
   );

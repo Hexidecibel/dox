@@ -1483,6 +1483,39 @@ The natural-language endpoint never loosens: an unknown document type or an unco
 
 Query-time folding (no index rebuild): simple plurals (`bags` -> `bag`) and `gal/gallon`, `lb/lbs/pound`, `oz/ounce`.
 
+### Getting the documents out (migration 0114)
+
+Search results can be selected and taken out of the portal two ways. Both are
+module-gated under `library` and both are audited with the id list.
+
+**`POST /api/document-exports/zip`** — body `{ document_ids, tenant_id? }`.
+Streams a ZIP of the CURRENT version of each document plus `manifest.csv`
+(file name, document, supplier, document type, lot, production date, version,
+filed-on). Tenant isolation is in the SQL, so another tenant's id is *missing*,
+never a file in the archive; the missing ids appear in the audit row and in the
+`X-Export-Missing` header. Any authenticated user with tenant access may call
+it, **reader included** — the same bar as downloading one document at a time.
+Refused with 413 over **50 documents** or **40 MB**, with the cap in the
+message; an export is never silently truncated. One audit row per export
+(`document_export.zip`).
+
+**`POST /api/document-exports/send`** — body `{ document_ids, recipients[],
+on_behalf_of?, message?, tenant_id? }`. Sends a **token-gated link, never
+attachments**: attachments blow mail size limits and leave no trail. The mail
+comes from the portal's own sender with a **reply-to of the calling user**, and
+`on_behalf_of` is printed as context ("Dana sent these on behalf of Marco in
+Sales") — nothing is sent as a customer's domain. 30 sends per hour per user.
+If the send fails the link is revoked, so a live link never exists for a
+message nobody received. Audited as `document_export.sent` with the recipients.
+
+The recipient's page is `/export/:token`, reading
+`GET /api/document-exports/public/:token` (allow-list projection, no internal
+ids), with `…/download` for the ZIP and `…/file/:index` for one file. **`index`
+is a POSITION in the link's own frozen list**, not a document id, so a
+forwarded link can never be edited into covering something else. Links expire
+in 30 days, carry a `revoked_at` kill switch, and every view and download
+writes an audit row.
+
 ---
 
 ## Error Handling

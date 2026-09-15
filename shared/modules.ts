@@ -108,6 +108,14 @@ export const MODULES: Record<ModuleKey, ModuleDefinition> = {
       // The verified supplier list import creates suppliers and derives what
       // they owe; with Supplier Documents off there are no suppliers to own it.
       '/api/supplier-list',
+      // Getting documents out of search — the ZIP and the "send to an address"
+      // path (migration 0114). Listed even though `/api/documents` deliberately
+      // is not: this prefix serves ONE surface (the supplier-document library's
+      // export), so gating it cannot take a module that is switched ON down
+      // with it. The token-gated recipient routes live under
+      // /api/document-exports/public and reach the gate with no user, so a
+      // recipient is never narrowed by the sender's module settings.
+      '/api/document-exports',
     ],
   },
   compliance: {

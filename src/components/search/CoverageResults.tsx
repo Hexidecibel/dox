@@ -2,6 +2,7 @@ import {
   Alert,
   AlertTitle,
   Box,
+  Button,
   Card,
   CardActionArea,
   CardContent,
@@ -15,6 +16,8 @@ import ReportProblemIcon from '@mui/icons-material/ReportProblem';
 import HourglassTopIcon from '@mui/icons-material/HourglassTop';
 import { Link as RouterLink } from 'react-router-dom';
 import { ResultCardDocument } from './ResultCardDocument';
+import { SelectableResult } from './SelectableResult';
+import type { SearchSelection } from './SelectableResult';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import type {
   SearchConstraint,
@@ -52,6 +55,11 @@ import { formatIsoHuman } from '../../../shared/searchDates';
  */
 export interface CoverageResultsProps extends SearchCoverageFields {
   documents: UniversalSearchDocument[];
+  /**
+   * Selection for export. Absent (the default) renders exactly what this
+   * component rendered before there was an export path at all.
+   */
+  selection?: SearchSelection;
 }
 
 const PROVENANCE_LABEL: Record<SearchFieldProvenance, string> = {
@@ -204,6 +212,7 @@ export function CoverageResults({
   coverage_summary,
   unreviewed_candidates = [],
   coverage_scan_truncated,
+  selection,
 }: CoverageResultsProps) {
   const covering = documents.filter((d) => d.match_status === 'covering');
   const likely = documents.filter((d) => d.match_status === 'likely_covering');
@@ -213,7 +222,11 @@ export function CoverageResults({
     // Nothing was stated to verify, so nothing is labelled: a plain list.
     return (
       <Box data-testid="coverage-results">
-        {documents.map((d) => <ResultCardDocument key={d.id} doc={d} />)}
+        {documents.map((d) => (
+          <SelectableResult key={d.id} doc={d} selection={selection} mode="plain">
+            <ResultCardDocument doc={d} />
+          </SelectableResult>
+        ))}
         {documents.length === 0 && unreviewed_candidates.length === 0 && (
           <Typography variant="body2" color="text.secondary">No documents found.</Typography>
         )}
@@ -292,16 +305,29 @@ export function CoverageResults({
 
       {covering.length > 0 && (
         <Box sx={{ mb: 3 }}>
-          <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>
-            Covering documents ({covering.length})
-          </Typography>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1, flexWrap: 'wrap' }} useFlexGap>
+            <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+              Covering documents ({covering.length})
+            </Typography>
+            {selection && (
+              <Button
+                size="small"
+                onClick={() => selection.onSelectMany(covering)}
+                sx={{ textTransform: 'none' }}
+                data-testid="select-all-covering"
+              >
+                Select all {covering.length}
+              </Button>
+            )}
+          </Stack>
           {covering.map((d) => (
-            <ResultCardDocument
-              key={d.id}
-              doc={d}
-              tone="covering"
-              footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="covering" /></>}
-            />
+            <SelectableResult key={d.id} doc={d} selection={selection} mode="covering">
+              <ResultCardDocument
+                doc={d}
+                tone="covering"
+                footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="covering" /></>}
+              />
+            </SelectableResult>
           ))}
         </Box>
       )}
@@ -315,12 +341,13 @@ export function CoverageResults({
             Each of these would cover your search on evidence no person has confirmed — the reason is under each one. Open it and check before using it.
           </Typography>
           {likely.map((d) => (
-            <ResultCardDocument
-              key={d.id}
-              doc={d}
-              tone="candidate"
-              footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="candidate" /></>}
-            />
+            <SelectableResult key={d.id} doc={d} selection={selection} mode="opt_in">
+              <ResultCardDocument
+                doc={d}
+                tone="candidate"
+                footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="candidate" /></>}
+              />
+            </SelectableResult>
           ))}
         </Box>
       )}
@@ -334,12 +361,13 @@ export function CoverageResults({
             These are close to what you asked for. Each one fails at least one part of your search.
           </Typography>
           {candidates.map((d) => (
-            <ResultCardDocument
-              key={d.id}
-              doc={d}
-              tone="candidate"
-              footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="candidate" /></>}
-            />
+            <SelectableResult key={d.id} doc={d} selection={selection} mode="opt_in">
+              <ResultCardDocument
+                doc={d}
+                tone="candidate"
+                footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="candidate" /></>}
+              />
+            </SelectableResult>
           ))}
         </Box>
       )}
