@@ -111,7 +111,7 @@ A product named by our SKU, supplier item, name, alias or pack resolves through 
 
 ### Exact-duplicate detection at intake (don't spam the Review Queue)
 
-**Status:** done — built locally 2026-09-15 (migration 0108, applied locally only; not deployed)
+**Status:** done — shipped in v2.14.0 (2026-09-15; migration 0108 on staging + prod)
 
 **Summary:** Intake computed a checksum on every door and never compared it, so one email forwarded twice became two approved documents. Now a byte-identical arrival (same tenant) is compared once, in `enqueueDocument` → `admitIntake` (`functions/lib/intake/duplicates.ts`): identical to an approved file → recorded against that document, no card; identical to a waiting item → recorded against that card ("also received"), no second card; identical to a rejected file → queued with "rejected on … for …" on the card. Every suppression is an `intake_duplicates` row + audit row and is reversible with Review anyway. Supplier portal: supplier response unchanged; arrival linked to the existing document (case 1) or waiting item (case 2). Ingest API not checked (upsert semantics).
 

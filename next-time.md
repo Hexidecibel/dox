@@ -4,6 +4,20 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-15 (overnight, latest): v2.14.0 ON PROD — intake duplicate detection shipped.** Merge f551756
+(conflicts only in CLAUDE.md migrations table, tests/helpers/db.ts, SCHEMA.md), renumber 9c5cae0
+(`0107_intake_duplicates` → **0108**, every reference), release 915bcde, Pages deploy `984bda95`; gate:
+vitest 239 files / 3341 tests, Playwright 7 passed, 1 skipped; typecheck 56 (baseline); staging deploy
+`fdaa77ff`. Migration **0108** applied to staging and prod (stamped `d1_migrations` id 91; table + 6
+indexes verified; prod apply 24 ms SQL, 1421 rows written, indexing 802 queue rows / 615 versions). Backup:
+`~/drops/dox-backups/doc-upload-db-20260915T101437Z.timetravel.json` (bookmark
+`000016e9-000010b1-000050e7-42b9223004bd72c7ce34f45c809ac50d`). Local D1 in the main checkout was also
+missing 0107; applied it before regenerating SCHEMA.md. `bin/audit-duplicate-documents --remote`
+(read-only): **61 groups (40 same title), 135 documents, 74 later copies (45 in same-title groups); of
+the later copies 60 carry spec results, 55 lots, 7 lot suggestions, 74 products; 16 one-file record
+splits excluded.** Archiving the surplus copies still **awaits a human decision** (todo.md). Pre-existing
+noise: `ECONNREFUSED 127.0.0.1:3000` printed during vitest, tests unaffected.
+
 **2026-09-15 (overnight, later): v2.13.0 ON PROD — Phase 3 product identity shipped.** Merge 4ca927e,
 release 352a4c6, Pages deploy `dc131fc3`; gate: vitest 237 files / 3321 tests, Playwright 7 passed,
 1 skipped; typecheck 56 (baseline); staging deploy `b20c3080`. Migration **0107_product_identifiers**
