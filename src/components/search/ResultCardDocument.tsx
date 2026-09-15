@@ -26,9 +26,13 @@ export interface ResultCardDocumentProps {
   doc: UniversalSearchDocument;
   /** Optional click handler — defaults to navigating to /documents/:id. */
   onOpen?: (doc: UniversalSearchDocument) => void;
+  /** Rendered under the chips — coverage search puts the match evidence here. */
+  footer?: React.ReactNode;
+  /** Visual treatment for a coverage label; `candidate` mutes the card. */
+  tone?: 'default' | 'covering' | 'candidate';
 }
 
-export function ResultCardDocument({ doc, onOpen }: ResultCardDocumentProps) {
+export function ResultCardDocument({ doc, onOpen, footer, tone = 'default' }: ResultCardDocumentProps) {
   const navigate = useNavigate();
   const open = () =>
     onOpen ? onOpen(doc) : navigate(`/documents/${doc.id}`);
@@ -43,6 +47,8 @@ export function ResultCardDocument({ doc, onOpen }: ResultCardDocumentProps) {
       sx={{
         mb: 1,
         cursor: 'pointer',
+        ...(tone === 'covering' ? { borderLeft: '4px solid', borderLeftColor: 'success.main' } : {}),
+        ...(tone === 'candidate' ? { borderLeft: '4px solid', borderLeftColor: 'warning.main', bgcolor: 'action.hover' } : {}),
         transition: 'border-color 0.15s, box-shadow 0.15s',
         '&:hover': { borderColor: 'primary.light' },
       }}
@@ -103,6 +109,7 @@ export function ResultCardDocument({ doc, onOpen }: ResultCardDocumentProps) {
                 </Typography>
               )}
             </Stack>
+            {footer}
           </Box>
         </Stack>
       </CardContent>

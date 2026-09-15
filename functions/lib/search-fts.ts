@@ -240,14 +240,73 @@ export function buildMatchExpr(input: string | null | undefined): string | null 
 
   if (tokens.length === 0) return null;
 
-  return tokens
-    .map((tok, i) => {
+  // Forgiving input: "5 gallon bags" must find "5 Gallon Bag", and "300 gal
+  // tote" must find "300 Gallon Tote". The index has no stemmer (rebuilding
+  // every FTS table is out of scope), so the folding happens HERE, at query
+  // time, as an OR of spellings per token. On the last (prefix) token a
+  // spelling another spelling already prefixes is redundant and dropped, so a
+  // one-word search that needs no folding ("darigold") keeps exactly the
+  // expression it always had.
+  const groups = tokens.map((tok, i) => {
+    const isLast = i === tokens.length - 1;
+    let variants = queryTokenVariants(tok);
+    if (isLast) {
+      variants = variants.filter((v) => !variants.some((o) => o !== v && v.startsWith(o)));
+    }
+    return variants.map((v) => {
       // Lowercase for parity with the unicode61 tokenizer's case folding.
       // Strip stray `"` defensively — the regex above already handles
       // them but tokens that contain backslash-escaped quotes etc. are
       // never safe inside an FTS5 phrase literal.
-      const quoted = `"${tok.toLowerCase().replace(/"/g, '')}"`;
-      return i === tokens.length - 1 ? `${quoted}*` : quoted;
-    })
-    .join(' ');
+      const quoted = `"${v.replace(/"/g, '')}"`;
+      return isLast ? `${quoted}*` : quoted;
+    });
+  });
+
+  if (groups.every((g) => g.length === 1)) {
+    return groups.map((g) => g[0]).join(' ');
+  }
+  return groups.map((g) => (g.length === 1 ? g[0] : `(${g.join(' OR ')})`)).join(' AND ');
+}
+
+/**
+ * Unit spellings that mean the same thing on a label. Deliberately short:
+ * `#` for pounds and `kg`/`lb` conversions are a product-alias question
+ * (R5), not a spelling one, and folding them here would assert an
+ * equivalence nobody has declared.
+ */
+const UNIT_GROUPS: readonly (readonly string[])[] = [
+  ['gal', 'gals', 'gallon', 'gallons'],
+  ['lb', 'lbs', 'pound', 'pounds'],
+  ['oz', 'ozs', 'ounce', 'ounces'],
+];
+
+/**
+ * The spellings one query token is searched under: itself, its unit
+ * synonyms, and a simple singular/plural fold for plain words. Identifiers
+ * (anything with a digit or a separator) are never folded — "lot-03s" is not
+ * a plural. Exported for tests.
+ */
+export function queryTokenVariants(token: string): string[] {
+  const t = token.toLowerCase().replace(/\.+$/, '');
+  if (!t) return [token.toLowerCase()];
+  const out = new Set<string>([t]);
+  const unit = UNIT_GROUPS.find((g) => g.includes(t));
+  if (unit) {
+    unit.forEach((u) => out.add(u));
+    return [...out];
+  }
+  if (!/^[a-z]{3,}$/.test(t)) return [...out];
+  if (/[^aeiou]ies$/.test(t) && t.length > 4) {
+    out.add(`${t.slice(0, -3)}y`);
+  } else if (/(ches|shes|xes|zes|sses)$/.test(t)) {
+    out.add(t.slice(0, -2));
+  } else if (/s$/.test(t) && !/(ss|us|is)$/.test(t) && t.length > 3) {
+    out.add(t.slice(0, -1));
+  } else if (!/s$/.test(t)) {
+    if (/[^aeiou]y$/.test(t)) out.add(`${t.slice(0, -1)}ies`);
+    else if (/(ch|sh|x|z)$/.test(t)) out.add(`${t}es`);
+    else out.add(`${t}s`);
+  }
+  return [...out];
 }

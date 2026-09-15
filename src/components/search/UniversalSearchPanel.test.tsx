@@ -84,6 +84,27 @@ describe('UniversalSearchPanel', () => {
     expect(screen.queryByText('Doc A')).not.toBeInTheDocument();
   });
 
+  it('a constrained search with no coverage shows the banner before any candidate', async () => {
+    mocks.universal.mockResolvedValue({
+      ...RESPONSE,
+      orders: { total: 0, results: [] },
+      customers: { total: 0, results: [] },
+      documents: {
+        total: 1,
+        results: [{ id: 'wp', title: 'West Point Butter', match_status: 'candidate_not_matching', match_checks: [] }],
+      },
+      coverage: 'none',
+      constraints: [{ id: 'c1', kind: 'date', label: 'production date Jul 31, 2026', raw: '7/31/2026', value: '2026-07-31', fields: ['production_date'], source: 'query_text' }],
+      dropped_constraints: [],
+      coverage_summary: 'No document on file covers production date Jul 31, 2026.',
+      unreviewed_candidates: [],
+    });
+    render(wrap(<UniversalSearchPanel />, '/?q=production%20date%207%2F31%2F2026&type=all'));
+    expect(await screen.findByText('No covering document on file')).toBeInTheDocument();
+    expect(screen.getByTestId('candidates-section')).toHaveTextContent('West Point Butter');
+    expect(screen.queryByText(/Covering documents/)).not.toBeInTheDocument();
+  });
+
   it('captures errors', async () => {
     mocks.universal.mockRejectedValue(new Error('500'));
     render(wrap(<UniversalSearchPanel />, '/?q=foo'));

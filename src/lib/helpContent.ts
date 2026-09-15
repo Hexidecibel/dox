@@ -793,7 +793,7 @@ const search: ModuleHelpExpanded = {
   list: {
     headline: 'Search',
     well:
-      "Cross-cutting search over your tenant's documents and orders. Two tabs: Documents (titles, tags, file content, metadata) and Orders (order #, customer, PO, line items). Each tab supports keyword search by default and an AI mode that takes natural language and converts it to structured filters.",
+      "Cross-cutting search over your tenant's documents and orders. Type a lot (1042620303) or a dated phrase (production date 7/31/2026) and search checks each document's own fields: covering documents come first, nearby documents that do not match are listed separately with the reason, and files still in the Review Queue are shown as not on file yet. When nothing covers the search, it says so. The AI button takes a question in plain words and answers it the same way.",
     columnTooltips: {
       aiToggle: "Switch between keyword search (exact match) and natural-language search (LLM parses your query into filters). Keyword is faster; AI is more forgiving when you don't know the exact words used.",
       docCategory: 'Filter docs by the legacy category field — being phased out in favor of document_type. Most tenants leave this alone.',

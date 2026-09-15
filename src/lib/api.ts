@@ -2878,6 +2878,17 @@ export const api = {
     },
 
     /**
+     * POST /api/documents/search/natural — the AI-parsed question, answered
+     * with coverage (covering documents, labelled non-matching candidates,
+     * unreviewed queue files, and anything that could not be applied).
+     */
+    natural: (query: string, tenantId?: string): Promise<NaturalSearchResponse> =>
+      fetchApi<NaturalSearchResponse>('/documents/search/natural', {
+        method: 'POST',
+        body: JSON.stringify({ query, tenant_id: tenantId }),
+      }),
+
+    /**
      * Document Search v2 — saved-searches CRUD (Phase 3).
      *
      * Recent searches stay client-side (localStorage). These are the
