@@ -11,6 +11,8 @@ import { getLearnedPreferences } from '../learnedPreferences';
 import { applyDocumentTypeRequirementDefaults } from '../requirement-defaults';
 import type { CoaRecordsPayload } from '../../../shared/types';
 import { buildFlatExtendedMetadata } from '../../../shared/coaExtendedMetadata';
+import { resolveProductionDate } from '../../../shared/lotProductionDate';
+import { rowScopedSearchText } from '../../../shared/rowScopedText';
 import type { RenewalWrite } from '../renewal-proposal';
 import type {
   QueueItem,
@@ -565,13 +567,14 @@ export async function produceCoa(
         subLotCode,
         productId: linkedProductId,
         supplierId,
-        // production_date is a FALLBACK for code_date, never a replacement. Most dairy
-        // COAs print one date and it means both; only a document that prints BOTH (e.g.
-        // Andersen's 2026 layout) separates them. Before production_date became a
-        // first-class field it was an ALIAS of code_date, so single-date docs landed in
-        // code_date. Without this fallback those docs would now create lots with a null
-        // code date — a silent regression in lot identity.
-        codeDate: approvedFields.code_date || approvedFields.production_date || null,
+        // A code date is a code date. The production date used to be folded in
+        // here as a fallback (it was once an alias of code_date), which turned
+        // every production date into a code date the moment it reached a lot row
+        // and made it unsearchable as a production date. It now has its own
+        // columns with provenance (migration 0106); `code_date` holds only a
+        // code date. Lot identity never depended on either — it is lot_key.
+        codeDate: approvedFields.code_date || null,
+        productionDate: resolveProductionDate(approvedFields),
         expirationDate: approvedFields.expiration_date || null,
         mfgDate: approvedFields.mfg_date || null,
         source: 'coa',
@@ -809,11 +812,18 @@ export async function produceMultiProductCoa(
 
     // Insert document version
     const versionId = generateId();
+    // Searched on this product's own lot numbers and dates only (0106) — every
+    // product document split from this file carries the whole file's text.
+    const scoped = rowScopedSearchText(
+      item.extracted_text,
+      mergedFields,
+      products.filter((_, j) => j !== i).map((p) => ({ ...sharedFields, ...p.fields }) as Record<string, unknown>)
+    );
     await db.prepare(
-      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, uploaded_by, extracted_text)
-       VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, uploaded_by, extracted_text, search_text)
+       VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-      .bind(versionId, docId, item.file_name, item.file_size, item.mime_type, r2Key, checksum, userId, item.extracted_text)
+      .bind(versionId, docId, item.file_name, item.file_size, item.mime_type, r2Key, checksum, userId, item.extracted_text, scoped ? scoped.text : null)
       .run();
 
     // Link product via the shared resolver (lookup/create + supplier_id
@@ -843,7 +853,9 @@ export async function produceMultiProductCoa(
           subLotCode,
           productId: perProductId,
           supplierId,
-          codeDate: mergedFields.code_date || mergedFields.production_date || null,
+          // Production date in its own columns (0106), never as a code date.
+          codeDate: mergedFields.code_date || null,
+          productionDate: resolveProductionDate(mergedFields),
           expirationDate: mergedFields.expiration_date || null,
           mfgDate: mergedFields.mfg_date || null,
           source: 'coa',
@@ -1268,11 +1280,19 @@ export async function produceCoaRecords(
         actorId: userId,
       });
 
+      // The text this row is SEARCHED on (0106): the certificate's text with the
+      // other rows' lot numbers and dates blanked, so a sibling printed on the
+      // same page cannot make this row match. extracted_text stays the file's.
+      const siblingFields = payload.records
+        .filter((r) => r.record_index !== record.record_index)
+        .map((r) => ({ ...pageMetadata, ...r.fields }) as Record<string, unknown>);
+      const scoped = rowScopedSearchText(item.extracted_text, mergedFields, siblingFields);
+
       const versionId = generateId();
       await db
         .prepare(
-          `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, uploaded_by, extracted_text)
-           VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, uploaded_by, extracted_text, search_text)
+           VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           versionId,
@@ -1283,7 +1303,8 @@ export async function produceCoaRecords(
           r2Key,
           recordChecksum,
           userId,
-          item.extracted_text
+          item.extracted_text,
+          scoped ? scoped.text : null
         )
         .run();
     }
@@ -1311,7 +1332,10 @@ export async function produceCoaRecords(
         subLotCode: lot.subLotCode,
         productId: perProductId,
         supplierId,
-        codeDate: (mergedFields.code_date as string) || (mergedFields.production_date as string) || null,
+        // This ROW's production date, in its own columns (0106) — never folded
+        // into code_date, which is what made it unsearchable before.
+        codeDate: (mergedFields.code_date as string) || null,
+        productionDate: resolveProductionDate(mergedFields),
         expirationDate: (mergedFields.expiration_date as string) || null,
         mfgDate: (mergedFields.mfg_date as string) || null,
         source: 'coa',

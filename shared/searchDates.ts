@@ -221,6 +221,24 @@ export function readStoredDates(value: unknown, order: DateOrder | null = null):
 }
 
 /**
+ * Every date written in a longer text, with WHERE it is. Same reading rules as
+ * `readStoredDates`; shared/rowScopedText.ts uses the positions to blank one
+ * lot row's dates out of the text another row is searched on.
+ */
+export function findStoredDateSpans(
+  text: string,
+  order: DateOrder | null = null,
+): Array<{ index: number; length: number; reading: StoredDateReading }> {
+  if (!text) return [];
+  const out: Array<{ index: number; length: number; reading: StoredDateReading }> = [];
+  for (const h of scan(text, PATTERNS, [])) {
+    const r = resolveStored(h, order);
+    if (r) out.push({ index: h.index, length: h.length, reading: r });
+  }
+  return out;
+}
+
+/**
  * The day/month order a document's own dates prove, or null. Only the
  * all-numeric d/m/y shapes can be ambiguous, so only those vote; a document
  * that votes both ways proves nothing.

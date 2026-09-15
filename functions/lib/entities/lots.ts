@@ -19,6 +19,7 @@ import {
   normalizeSubLotCode,
   normalizeProductNameKey,
 } from '../../../shared/lotNormalize';
+import type { ProductionDateResolution } from '../../../shared/lotProductionDate';
 
 /**
  * The pure normalization rules now live in `shared/lotNormalize.ts` so the
@@ -101,6 +102,13 @@ export interface FindOrCreateLotOpts {
   codeDate?: string | null;
   expirationDate?: string | null;
   mfgDate?: string | null;
+  /**
+   * The lot row's production date as the certificate states it (migration
+   * 0106), with its provenance. Written onto a lot that has none; a lot that
+   * already holds a DIFFERENT day becomes 'conflict' rather than either value
+   * winning. See writeProductionDate.
+   */
+  productionDate?: (ProductionDateResolution & { documentId: string | null }) | null;
   metadata?: string | null;
   source?: string | null;
   /**
@@ -161,13 +169,13 @@ export async function findOrCreateLot(
   const existing = productId
     ? await db
         .prepare(
-          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date FROM lots WHERE tenant_id = ? AND lot_key = ? AND sub_lot_code = ? AND product_id = ?'
+          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date, production_date, production_date_raw, production_date_status FROM lots WHERE tenant_id = ? AND lot_key = ? AND sub_lot_code = ? AND product_id = ?'
         )
         .bind(tenantId, lotKey, subLotCode, productId)
         .first<LotRow>()
     : await db
         .prepare(
-          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date FROM lots WHERE tenant_id = ? AND lot_key = ? AND sub_lot_code = ? AND product_id IS NULL'
+          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date, production_date, production_date_raw, production_date_status FROM lots WHERE tenant_id = ? AND lot_key = ? AND sub_lot_code = ? AND product_id IS NULL'
         )
         .bind(tenantId, lotKey, subLotCode)
         .first<LotRow>();
@@ -196,6 +204,9 @@ export async function findOrCreateLot(
       sets.push('mfg_date = ?');
       binds.push(mfgDate);
     }
+    const production = productionDateSets(existing, opts.productionDate ?? null);
+    sets.push(...production.sets);
+    binds.push(...production.binds);
     if (sets.length > 0) {
       sets.push("updated_at = datetime('now')");
       binds.push(existing.id);
@@ -209,12 +220,15 @@ export async function findOrCreateLot(
 
   // 2. Create.
   const id = generateId();
+  const pd = opts.productionDate ?? null;
   await db
     .prepare(
       `INSERT INTO lots
          (id, tenant_id, supplier_id, product_id, lot_number, sub_lot_code, lot_key,
-          code_date, expiration_date, mfg_date, primary_metadata, first_seen_source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          code_date, expiration_date, mfg_date, primary_metadata, first_seen_source,
+          production_date, production_date_raw, production_date_source, production_date_status,
+          production_date_document_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -228,11 +242,88 @@ export async function findOrCreateLot(
       expirationDate,
       mfgDate,
       metadata,
-      source
+      source,
+      pd ? pd.iso : null,
+      pd ? pd.raw : null,
+      pd ? pd.source : null,
+      pd ? pd.status : null,
+      pd ? pd.documentId : null
     )
     .run();
 
   return { id };
+}
+
+/**
+ * The production-date columns to set on an EXISTING lot (migration 0106).
+ *
+ *   - nothing stored yet            -> store the new value as stated
+ *   - same day already resolved     -> leave it (the first certificate stays
+ *                                      the named source)
+ *   - a different stated value      -> 'conflict': the day is cleared, raw names
+ *                                      both, and nothing picks between them
+ *   - already 'conflict'            -> the new value is appended to raw if new
+ *
+ * An unresolved new value never displaces a resolved one, but one that cannot
+ * be the stored day (an ambiguous reading that excludes it) is a conflict too.
+ */
+export function productionDateSets(
+  existing: Pick<LotRow, 'production_date' | 'production_date_raw' | 'production_date_status'>,
+  next: (ProductionDateResolution & { documentId: string | null }) | null
+): { sets: string[]; binds: (string | null)[] } {
+  if (!next) return { sets: [], binds: [] };
+  if (!existing.production_date_status) {
+    return {
+      sets: [
+        'production_date = ?',
+        'production_date_raw = ?',
+        'production_date_source = ?',
+        'production_date_status = ?',
+        'production_date_document_id = ?',
+      ],
+      binds: [next.iso, next.raw, next.source, next.status, next.documentId],
+    };
+  }
+  const oldRaw = existing.production_date_raw ?? '';
+  const sameRaw = oldRaw.split(' | ').includes(next.raw);
+  if (existing.production_date_status === 'resolved' && next.status === 'resolved' && next.iso === existing.production_date) {
+    return { sets: [], binds: [] };
+  }
+  if (sameRaw) return { sets: [], binds: [] };
+  // A later certificate that states plainly one of the two days an earlier
+  // ambiguous value could be: the page has answered the question.
+  if (existing.production_date_status === 'ambiguous' && next.status === 'resolved' && next.iso
+    && ambiguousCouldBe(oldRaw, next.iso)) {
+    return {
+      sets: [
+        'production_date = ?',
+        'production_date_raw = ?',
+        'production_date_source = ?',
+        "production_date_status = 'resolved'",
+        'production_date_document_id = ?',
+      ],
+      binds: [next.iso, next.raw, next.source, next.documentId],
+    };
+  }
+  if (existing.production_date_status === 'resolved' && next.status === 'unparseable') {
+    return { sets: [], binds: [] };
+  }
+  if (existing.production_date_status === 'resolved' && next.status === 'ambiguous' && existing.production_date
+    && next.raw && ambiguousCouldBe(next.raw, existing.production_date)) {
+    return { sets: [], binds: [] };
+  }
+  return {
+    sets: ['production_date = NULL', "production_date_status = 'conflict'", 'production_date_raw = ?'],
+    binds: [oldRaw ? `${oldRaw} | ${next.raw}` : next.raw],
+  };
+}
+
+function ambiguousCouldBe(raw: string, iso: string): boolean {
+  const m = /^\s*(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})\s*$/.exec(raw);
+  if (!m) return false;
+  const y = m[3].length === 2 ? `20${m[3]}` : m[3];
+  const pad = (n: string) => n.padStart(2, '0');
+  return iso === `${y}-${pad(m[1])}-${pad(m[2])}` || iso === `${y}-${pad(m[2])}-${pad(m[1])}`;
 }
 
 interface LotRow {
@@ -242,4 +333,7 @@ interface LotRow {
   code_date: string | null;
   expiration_date: string | null;
   mfg_date: string | null;
+  production_date: string | null;
+  production_date_raw: string | null;
+  production_date_status: string | null;
 }

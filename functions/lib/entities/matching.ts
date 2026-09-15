@@ -36,6 +36,7 @@
 
 import type { D1Database } from '@cloudflare/workers-types';
 import { generateId } from '../db';
+import type { ProductionDateResolution } from '../../../shared/lotProductionDate';
 import {
   findOrCreateLot,
   normalizeLotNumber,
@@ -434,6 +435,12 @@ export async function attachLotToCoaDocument(
     codeDate?: string | null;
     expirationDate?: string | null;
     mfgDate?: string | null;
+    /**
+     * The row's production date with its provenance (migration 0106). Callers
+     * build it with `resolveProductionDate` from shared/lotProductionDate.ts;
+     * it is NEVER folded into `codeDate` (a code date is not a production date).
+     */
+    productionDate?: ProductionDateResolution | null;
     source?: string;
     /**
      * Supplier's lot numbering scheme (0075). Resolved by the caller from the
@@ -454,6 +461,7 @@ export async function attachLotToCoaDocument(
       codeDate: args.codeDate ?? null,
       expirationDate: args.expirationDate ?? null,
       mfgDate: args.mfgDate ?? null,
+      productionDate: args.productionDate ? { ...args.productionDate, documentId: args.documentId } : null,
       source: args.source ?? 'coa',
       lotScheme: args.lotScheme ?? null,
     });

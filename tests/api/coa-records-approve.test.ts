@@ -355,6 +355,92 @@ describe('produceCoaRecords', () => {
 
 // --- handleCoaRecordsApprove (partial approval) ----------------------------
 
+describe('produceCoaRecords — production date per lot row (migration 0106)', () => {
+  const BUNDLE =
+    'DARIGOLD CERTIFICATE OF ANALYSIS SWEET CREAM BUTTER PO K135797 '
+    + 'Lot 10426204 Sub Lot 13 Production Date 23-Jul-2026 Lot 10426203 Sub Lot 04 Production Date 22-Jul-2026 '
+    + 'Lot 10426203 Sub Lot 03 Production Date 22-Jul-2026 Lot 10426203 Sub Lot 02 Production Date 04-05-2026';
+
+  function payload(): CoaRecordsPayload {
+    const rec = (idx: number, lot: string, sub: string, prod: string) => ({
+      record_index: idx,
+      fields: { lot_code: lot, sub_lot_code: sub, production_date: prod, product_name: 'Sweet Cream Butter' },
+      source_pages: [1],
+    });
+    return {
+      record_cardinality: 'multi_lot',
+      record_key_basis: 'lot+sublot',
+      page_metadata: { manufacturer: 'Darigold', po_number: 'K135797' },
+      records: [
+        rec(0, '10426204', '13', '2026-07-23'),
+        rec(1, '10426203', '04', '2026-07-22'),
+        rec(2, '10426203', '03', '22-Jul-2026'),
+        // The ambiguous row: two readings, nothing on the record to choose.
+        rec(3, '10426203', '02', '04-05-2026'),
+      ],
+    };
+  }
+
+  async function lotRow(lotKey: string) {
+    return db
+      .prepare(
+        `SELECT code_date, production_date, production_date_raw, production_date_source,
+                production_date_status, production_date_document_id
+           FROM lots WHERE tenant_id = ? AND lot_key = ?`
+      )
+      .bind(seed.tenantId, lotKey)
+      .first<Record<string, string | null>>();
+  }
+
+  it('writes each row\'s production date with provenance, and no longer into code_date', async () => {
+    const item = await makeCoaQueueItem(payload());
+    item.extracted_text = BUNDLE;
+    const result = await produceCoaRecords(db, files, item, { payload: payload(), userId: seed.userId });
+    const docFor = (lotKey: string) => result.documents.find((d) => d.lotKey === lotKey)!.documentId;
+
+    expect(await lotRow('1042620413')).toMatchObject({
+      code_date: null,
+      production_date: '2026-07-23',
+      production_date_raw: '2026-07-23',
+      production_date_source: 'extracted',
+      production_date_status: 'resolved',
+      production_date_document_id: docFor('1042620413'),
+    });
+    expect(await lotRow('1042620303')).toMatchObject({ production_date: '2026-07-22', production_date_raw: '22-Jul-2026' });
+    expect(await lotRow('1042620302')).toMatchObject({
+      code_date: null,
+      production_date: null,
+      production_date_raw: '04-05-2026',
+      production_date_status: 'ambiguous',
+    });
+  });
+
+  it('stores the bundle as the displayed text and a row-scoped search_text that drops the other rows', async () => {
+    const item = await makeCoaQueueItem(payload());
+    item.extracted_text = BUNDLE;
+    const result = await produceCoaRecords(db, files, item, { payload: payload(), userId: seed.userId });
+    const doc13 = result.documents.find((d) => d.lotKey === '1042620413')!.documentId;
+    const v = await db
+      .prepare('SELECT extracted_text, search_text FROM document_versions WHERE document_id = ?')
+      .bind(doc13)
+      .first<{ extracted_text: string; search_text: string | null }>();
+    expect(v!.extracted_text).toBe(BUNDLE);
+    expect(v!.search_text).toBeTruthy();
+    expect(v!.search_text).not.toMatch(/22-Jul-2026|10426203/);
+    expect(v!.search_text).toMatch(/23-Jul-2026/);
+    expect(v!.search_text).toMatch(/K135797/);
+
+    // And the index reads it: a 22-Jul text search does not reach the 23-Jul row.
+    const hits = await db
+      .prepare(`SELECT doc_id FROM documents_fts WHERE documents_fts MATCH ? AND tenant_id = ?`)
+      .bind('extracted_text : "22-jul-2026"', seed.tenantId)
+      .all<{ doc_id: string }>();
+    const ids = (hits.results ?? []).map((r) => r.doc_id);
+    expect(ids).not.toContain(doc13);
+    expect(ids).toContain(result.documents.find((d) => d.lotKey === '1042620304')!.documentId);
+  });
+});
+
 describe('handleCoaRecordsApprove (via PUT /api/queue/:id)', () => {
   function makeContext(queueId: string, body: unknown): any {
     return {

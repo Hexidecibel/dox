@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 131 tables, 2 views, 210 indexes, 36 triggers.
+Objects: 131 tables, 2 views, 211 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -60,6 +60,7 @@ Triggers: `trg_bundles_ad_fts`, `trg_bundles_ai_fts`, `trg_bundles_au_fts`
   uploaded_by TEXT NOT NULL REFERENCES users(id)
   created_at TEXT DEFAULT (datetime('now'))
   extracted_text TEXT
+  search_text TEXT
   UNIQUE(document_id, version_number)
 ```
 
@@ -209,9 +210,14 @@ Triggers: `trg_document_products_ad_fts`, `trg_document_products_ai_fts`
   created_at TEXT DEFAULT (datetime('now'))
   updated_at TEXT DEFAULT (datetime('now'))
   sub_lot_code TEXT NOT NULL DEFAULT ''
+  production_date TEXT
+  production_date_raw TEXT
+  production_date_source TEXT CHECK (production_date_source IS NULL OR production_date_source IN ('extracted', 'extracted_code_date_legacy', 'reviewer'))
+  production_date_status TEXT CHECK (production_date_status IS NULL OR production_date_status IN ('resolved', 'ambiguous', 'unparseable', 'conflict'))
+  production_date_document_id TEXT
 ```
 
-Indexes: `idx_lots_identity`, `idx_lots_lotkey`, `idx_lots_supplier`
+Indexes: `idx_lots_identity`, `idx_lots_lotkey`, `idx_lots_production_date`, `idx_lots_supplier`
 
 Triggers: `trg_lots_au_fts`
 
@@ -1821,7 +1827,7 @@ SELECT
   COALESCE(d.description, '')       AS description,
   COALESCE(d.tags, '[]')            AS tags_text,
   COALESCE(dv.file_name, '')        AS file_name,
-  COALESCE(substr(dv.extracted_text, 1, 200000), '')
+  COALESCE(substr(COALESCE(dv.search_text, dv.extracted_text), 1, 200000), '')
                                     AS extracted_text,
   COALESCE(d.primary_metadata, '')  AS primary_metadata_text,
   COALESCE(d.extended_metadata, '') AS extended_metadata_text,

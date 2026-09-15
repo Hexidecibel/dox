@@ -11,6 +11,7 @@ import { buildR2Key, uploadFile, computeChecksum } from '../../lib/r2';
 import { sanitizeString } from '../../lib/validation';
 import { extractText } from '../../lib/extract';
 import { attachLotToCoaDocument, extractSubLotCode } from '../../lib/entities/matching';
+import { resolveProductionDate } from '../../../shared/lotProductionDate';
 import {
   parseStringArray,
   parseFacetLinks,
@@ -510,6 +511,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
               productId: pid,
               supplierId: supplierId || null,
               codeDate: (primaryMetadata.code_date as string | null) || codeDate || null,
+              productionDate: resolveProductionDate(primaryMetadata),
               expirationDate:
                 (primaryMetadata.expiration_date as string | null) || expirationDate || null,
               source: 'ingest',
@@ -701,6 +703,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
               productId: pid,
               supplierId: supplierId || null,
               codeDate: (primaryMetadata.code_date as string | null) || codeDate || null,
+              productionDate: resolveProductionDate(primaryMetadata),
               expirationDate:
                 (primaryMetadata.expiration_date as string | null) || expirationDate || null,
               source: 'ingest',
