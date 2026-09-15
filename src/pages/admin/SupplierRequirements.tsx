@@ -20,18 +20,30 @@
  * line that makes the remaining work finite.
  *
  * There is one editor component, not two implementations.
+ *
+ * REQUIREMENTS FROM REAL DATA (0112). Two more tabs sit beside the roster:
+ * "Needs review" — rows the initial bulk seed wrote that nobody confirmed, and
+ * derived rows the verified supplier list stopped supporting — and "Import
+ * verified supplier list", the spreadsheet door to the one derivation rule. The
+ * roster itself can select suppliers and apply a requirement packet to them,
+ * preview first.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  Badge,
   Box,
+  Button,
+  Checkbox,
   Chip,
   CircularProgress,
   Collapse,
   LinearProgress,
   Link,
   Paper,
+  Tab,
+  Tabs,
   TextField,
   Typography,
 } from '@mui/material';
@@ -49,6 +61,9 @@ import { EmptyState } from '../../components/EmptyState';
 import SupplierRequirementsEditor, {
   tierCounts,
 } from '../../components/SupplierRequirementsEditor';
+import ApplyPacketDialog from '../../components/ApplyPacketDialog';
+import RequirementsWorklist from '../../components/RequirementsWorklist';
+import SupplierListImport from '../../components/SupplierListImport';
 
 export function SupplierRequirements() {
   const [suppliers, setSuppliers] = useState<ApiSupplier[]>([]);
@@ -57,6 +72,10 @@ export function SupplierRequirements() {
   const [error, setError] = useState('');
   const [openId, setOpenId] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
+  const [tab, setTab] = useState(0);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [packetOpen, setPacketOpen] = useState(false);
+  const [notice, setNotice] = useState('');
 
   const navigate = useNavigate();
   const { user, isSuperAdmin } = useAuth();
@@ -110,6 +129,12 @@ export function SupplierRequirements() {
     });
   }, [suppliers, bySupplier, filter]);
 
+  const needsReview = useMemo(
+    () => rows.filter((r) => r.source === null || r.source === undefined || !!r.review_flag).length,
+    [rows],
+  );
+  const pickedSuppliers = suppliers.filter((s) => picked.has(s.id)).map((s) => ({ id: s.id, name: s.name }));
+
   const configured = suppliers.filter((s) => bySupplier.has(s.id)).length;
   const pct = suppliers.length ? Math.round((configured / suppliers.length) * 100) : 0;
 
@@ -141,7 +166,28 @@ export function SupplierRequirements() {
         </Alert>
       )}
 
-      {suppliers.length === 0 ? (
+      {notice && (
+        <Alert severity="success" sx={{ mb: 2 }} onClose={() => setNotice('')}>
+          {notice}
+        </Alert>
+      )}
+
+      <Tabs value={tab} onChange={(_e, v) => setTab(v)} sx={{ mb: 2 }} variant="scrollable" scrollButtons="auto">
+        <Tab label="Suppliers" />
+        <Tab
+          label={
+            <Badge color="warning" badgeContent={needsReview} max={999} sx={{ pr: needsReview ? 2 : 0 }}>
+              Needs review
+            </Badge>
+          }
+        />
+        <Tab label="Import verified supplier list" />
+      </Tabs>
+
+      {tab === 1 && <RequirementsWorklist tenantId={tenantId} onChanged={load} />}
+      {tab === 2 && <SupplierListImport tenantId={tenantId} onApplied={load} />}
+
+      {tab !== 0 ? null : suppliers.length === 0 ? (
         <EmptyState
           title="No suppliers yet"
           description="Requirements attach to a supplier, so add a supplier first."
@@ -168,13 +214,42 @@ export function SupplierRequirements() {
             )}
           </Paper>
 
-          <TextField
-            size="small"
-            fullWidth
-            placeholder="Filter suppliers"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            sx={{ mb: 2 }}
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap', mb: 2 }}>
+            <TextField
+              size="small"
+              placeholder="Filter suppliers"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              sx={{ flexGrow: 1, minWidth: 200 }}
+            />
+            <Button
+              size="small"
+              onClick={() => setPicked(picked.size === visible.length ? new Set() : new Set(visible.map((s) => s.id)))}
+            >
+              {picked.size === visible.length && visible.length > 0 ? 'Clear selection' : 'Select shown'}
+            </Button>
+            <Button
+              size="small"
+              variant="contained"
+              disabled={picked.size === 0}
+              onClick={() => setPacketOpen(true)}
+            >
+              Apply packet to {picked.size || ''} selected
+            </Button>
+          </Box>
+
+          <ApplyPacketDialog
+            open={packetOpen}
+            onClose={() => setPacketOpen(false)}
+            suppliers={pickedSuppliers}
+            tenantId={tenantId}
+            onApplied={(res) => {
+              setNotice(
+                `${res.packet_name} applied to ${res.suppliers.length} supplier${res.suppliers.length === 1 ? '' : 's'}: ${res.totals.add} added, ${res.totals.adopt_unconfirmed} unconfirmed confirmed, ${res.totals.remove_unconfirmed} removed.`,
+              );
+              setPicked(new Set());
+              void load();
+            }}
           />
 
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
@@ -182,6 +257,9 @@ export function SupplierRequirements() {
               const attached = bySupplier.get(supplier.id);
               const unconfigured = !attached;
               const counts = tierCounts(attached ?? []);
+              const unconfirmed = (attached ?? []).filter(
+                (r) => r.source === null || r.source === undefined || !!r.review_flag,
+              ).length;
               const open = openId === supplier.id;
               return (
                 <Paper
@@ -199,6 +277,20 @@ export function SupplierRequirements() {
                     }}
                     onClick={() => setOpenId(open ? null : supplier.id)}
                   >
+                    <Checkbox
+                      size="small"
+                      checked={picked.has(supplier.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) =>
+                        setPicked((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(supplier.id);
+                          else next.delete(supplier.id);
+                          return next;
+                        })
+                      }
+                      inputProps={{ 'aria-label': `Select ${supplier.name}` }}
+                    />
                     <Box sx={{ minWidth: 200 }}>
                       <Typography variant="body1" fontWeight={700}>
                         {supplier.name}
@@ -221,6 +313,14 @@ export function SupplierRequirements() {
                               size="small"
                               variant="outlined"
                               label={`${counts.recommended} recommended`}
+                            />
+                          )}
+                          {unconfirmed > 0 && (
+                            <Chip
+                              size="small"
+                              color="warning"
+                              variant="outlined"
+                              label={`${unconfirmed} need review`}
                             />
                           )}
                         </Box>

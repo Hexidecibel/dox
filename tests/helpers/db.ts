@@ -108,6 +108,7 @@ import m0108 from '../../migrations/0108_intake_duplicates.sql?raw';
 import m0109 from '../../migrations/0109_supplier_spec_watch.sql?raw';
 import m0110 from '../../migrations/0110_supplier_lot_schemes.sql?raw';
 import m0111 from '../../migrations/0111_renewal_alert_lead_time.sql?raw';
+import m0112 from '../../migrations/0112_supplier_list_derivation.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -121,7 +122,7 @@ const migrations: string[] = [
   m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
   m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094, m0095,
   m0096, m0097, m0098, m0099, m0100, m0101, m0102, m0103, m0104,
-  m0105, m0106, m0107, m0108, m0109, m0110, m0111,
+  m0105, m0106, m0107, m0108, m0109, m0110, m0111, m0112,
 ];
 
 /** The ordered migration SQL, for a test that stops the chain part-way (e.g. the 0110 lots rebuild). */
@@ -402,6 +403,9 @@ export async function cleanTables(db: D1Database): Promise<void> {
     'document_requirements', 'document_claims', 'claim_type_requirements',
     // 0087 applicability rows: before suppliers and requirements, after neither.
     'supplier_requirements',
+    // 0112 supplier-list import runs: FK tenants only; derived rows point at a
+    // run by bare id, so clearing after supplier_requirements is tidiness.
+    'supplier_list_imports',
     // 0100 type-level requirement DEFAULTS: FK both document_types and
     // requirements, so they clear ahead of both (and ahead of tenants).
     'document_type_requirements',

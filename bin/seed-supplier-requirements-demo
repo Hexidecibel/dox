@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# LOCAL ONLY. A tenant shaped like the live one before requirements came from
+# real data: the fsqa pack, a handful of suppliers, and the SAME invented
+# requirement set on every supplier with source IS NULL (the prod bulk seed was
+# 21 suppliers x 14 items). Use it to walk the Supplier Requirements screens:
+# Needs review, apply a packet (preview first), and import
+# tests/fixtures/supplier-list/medosweet-verified-suppliers.csv.
+#
+# Usage:
+#   bin/seed-supplier-requirements-demo          # tenant_reqdemo, login req@a.a / a
+#   bin/seed-supplier-requirements-demo --reset  # first delete the demo tenant's suppliers,
+#                                                # requirement rows and import runs (local only)
+#
+# Idempotent: tenant + pack are INSERT OR IGNORE (bin/create-tenant), suppliers
+# and rows use fixed ids with INSERT OR IGNORE. Never touches --remote.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+TID="tenant_reqdemo"
+SLUG="reqdemo"
+
+if [ "${1:-}" = "--reset" ]; then
+  npx wrangler d1 execute doc-upload-db --command "DELETE FROM supplier_requirements WHERE tenant_id='$TID'; DELETE FROM supplier_list_imports WHERE tenant_id='$TID'; DELETE FROM suppliers WHERE tenant_id='$TID';" >/dev/null
+  echo "reset $TID suppliers, requirement rows and import runs"
+fi
+
+./bin/create-tenant --name "Requirements Demo (local)" --slug "$SLUG" --id "$TID" >/dev/null
+echo "tenant $TID + fsqa pack seeded"
+
+HASH=$(node -e "
+  const c=require('crypto');const s=c.randomBytes(16);
+  const d=c.pbkdf2Sync('a',s,100000,32,'sha256');
+  console.log(s.toString('hex')+':'+d.toString('hex'));")
+
+SQL=$(mktemp); trap 'rm -f "$SQL"' EXIT
+{
+  echo "INSERT INTO users (id, email, password_hash, name, role, tenant_id, force_password_change)"
+  echo "  VALUES ('user_reqdemo_admin','req@a.a','$HASH','Req Demo Admin','org_admin','$TID',0)"
+  echo "  ON CONFLICT(email) DO UPDATE SET role='org_admin', tenant_id='$TID', password_hash=excluded.password_hash, force_password_change=0;"
+  for s in "darigold|Darigold" "country-morning|Country Morning Farms" "andersen|Andersen Dairy" \
+           "ecolab-like|Northwest Sanitation Chemical Co" "cascade-pack|Cascade Packaging" "sysco-like|Pacific Foodservice Distribution"; do
+    id="${s%%|*}"; name="${s#*|}"
+    echo "INSERT OR IGNORE INTO suppliers (id, tenant_id, name, slug) VALUES ('sup_reqdemo_$id', '$TID', '$name', '$id');"
+    # The uniform bulk seed: 6 required + 8 recommended, source NULL.
+    for r in spec-sheet allergen-matrix certificate-of-insurance coa-on-file letter-of-guarantee third-party-audit-certificate; do
+      echo "INSERT OR IGNORE INTO supplier_requirements (id, tenant_id, supplier_id, requirement_id, tier) VALUES ('sr_reqdemo_${id}_$r', '$TID', 'sup_reqdemo_$id', 'req_${SLUG}_$r', 'required');"
+    done
+    for r in food-safety-plan haccp-plan ingredient-statement recall-program sds-on-file shelf-life w9-on-file third-party-audit-report; do
+      echo "INSERT OR IGNORE INTO supplier_requirements (id, tenant_id, supplier_id, requirement_id, tier) VALUES ('sr_reqdemo_${id}_$r', '$TID', 'sup_reqdemo_$id', 'req_${SLUG}_$r', 'recommended');"
+    done
+  done
+} > "$SQL"
+npx wrangler d1 execute doc-upload-db --file="$SQL" >/dev/null
+echo "6 suppliers x 14 unconfirmed requirements seeded (source NULL)"
+echo "login: req@a.a / a   ->  Settings > Supplier Requirements"

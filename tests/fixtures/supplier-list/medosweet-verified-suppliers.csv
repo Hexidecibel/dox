@@ -1,0 +1,9 @@
+Supplier name,Supplier contact email,Supplier category,Approved (Y/N),Product SKU,Product name,Claims made
+"Darigold, Inc.",qa@darigold.com,ingredient,Y,0801,Unsalted Butter 25kg Bag,rBST-free
+"Darigold, Inc.",qa@darigold.com,ingredient,Y,10286,Unsalted Butter 300 gal Tote,rBST-free
+Country Morning Farms,quality@countrymorning.com,ingredient,Y,2235,Heavy Cream 40% 5 gal Bag,
+Andersen Dairy,,ingredient,Y,810004,Whole Milk Half Gallon,"kosher, halal"
+Andersen Dairy,,ingredient,Y,810010,2% Milk Half Gallon,kosher
+Northwest Sanitation Chemical Co,orders@nwsanchem.com,chemical-sanitation,Y,SAN-500,Quaternary Sanitizer 5 gal,
+Cascade Packaging,,packaging,Y,PK-HG,Half Gallon Carton,
+Old Creamery Supply,,ingredient,N,,,

@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 136 tables, 2 views, 226 indexes, 36 triggers.
+Objects: 137 tables, 2 views, 228 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -313,6 +313,23 @@ Triggers: `trg_products_ad_fts`, `trg_products_ai_fts`, `trg_products_au_fts`, `
 
 Indexes: `idx_sei_supplier_doctype`, `idx_sei_tenant`
 
+### `supplier_list_imports`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  file_name TEXT
+  input_format TEXT NOT NULL
+  pack TEXT
+  counts TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(counts))
+  row_outcomes TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(row_outcomes))
+  input_rows TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(input_rows))
+  created_by TEXT
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+```
+
+Indexes: `idx_supplier_list_imports_tenant`
+
 ### `supplier_lot_schemes`
 
 ```sql
@@ -383,10 +400,14 @@ Indexes: `idx_sra_tenant_supplier`
   updated_by TEXT
   source TEXT
   packet_slug TEXT
+  derivation_run_id TEXT
+  derivation_basis TEXT
+  review_flag TEXT
+  review_flagged_at TEXT
   UNIQUE(tenant_id, supplier_id, requirement_id)
 ```
 
-Indexes: `idx_supplier_requirements_packet`, `idx_supplier_requirements_requirement`, `idx_supplier_requirements_supplier`
+Indexes: `idx_supplier_requirements_packet`, `idx_supplier_requirements_requirement`, `idx_supplier_requirements_review_flag`, `idx_supplier_requirements_supplier`
 
 ### `suppliers`
 

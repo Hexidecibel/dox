@@ -50,6 +50,7 @@ import {
   Delete as DeleteIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
+import ApplyPacketDialog from './ApplyPacketDialog';
 import type {
   ApiRequirement,
   ApiSupplierRequirement,
@@ -91,6 +92,29 @@ export function orderAttached(rows: ApiSupplierRequirement[]): ApiSupplierRequir
     if (ac !== 0) return ac;
     return (a.requirement_name || '').localeCompare(b.requirement_name || '');
   });
+}
+
+/**
+ * Where a row came from, in words (0102 + 0112). `warn` marks the two states
+ * that need a person: the unconfirmed bulk seed, and a derived row the
+ * verified supplier list no longer supports.
+ */
+export function provenanceLabel(
+  row: Pick<ApiSupplierRequirement, 'source' | 'packet_slug' | 'review_flag'>,
+): { label: string; warn: boolean } {
+  if (row.review_flag === 'not_on_verified_list') {
+    return { label: 'No longer on the verified supplier list — review', warn: true };
+  }
+  switch (row.source) {
+    case 'human':
+      return { label: 'Set by a person', warn: false };
+    case 'packet':
+      return { label: row.packet_slug ? `From packet: ${row.packet_slug}` : 'From a packet', warn: false };
+    case 'derived':
+      return { label: 'From the verified supplier list', warn: false };
+    default:
+      return { label: 'Unconfirmed — initial bulk seed', warn: true };
+  }
 }
 
 /** Counts for the one-line summary sentence. */
@@ -169,6 +193,7 @@ export default function SupplierRequirementsEditor({
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [addTier, setAddTier] = useState<SupplierRequirementTier>('required');
   const [saving, setSaving] = useState(false);
+  const [packetOpen, setPacketOpen] = useState(false);
 
   const who = supplierName || 'this supplier';
 
@@ -316,16 +341,29 @@ export default function SupplierRequirementsEditor({
             )}
           </Typography>
         </Box>
-        <Button
-          size="small"
-          variant={attached.length === 0 ? 'contained' : 'outlined'}
-          startIcon={<AddIcon />}
-          onClick={openAdd}
-          disabled={vocab.length === 0}
-        >
-          Add requirements
-        </Button>
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          <Button size="small" variant="outlined" onClick={() => setPacketOpen(true)} disabled={vocab.length === 0}>
+            Apply a packet
+          </Button>
+          <Button
+            size="small"
+            variant={attached.length === 0 ? 'contained' : 'outlined'}
+            startIcon={<AddIcon />}
+            onClick={openAdd}
+            disabled={vocab.length === 0}
+          >
+            Add requirements
+          </Button>
+        </Box>
       </Box>
+
+      <ApplyPacketDialog
+        open={packetOpen}
+        onClose={() => setPacketOpen(false)}
+        suppliers={[{ id: supplierId, name: who }]}
+        tenantId={tenantId}
+        onApplied={() => void afterWrite()}
+      />
 
       {/* The false-clean guard, in the same words SupplierRequirementGaps uses. */}
       {attached.length === 0 ? (
@@ -374,6 +412,18 @@ export default function SupplierRequirementsEditor({
                     sx={{ mt: 0.5 }}
                   />
                 ) : null}
+                {(() => {
+                  const p = provenanceLabel(row);
+                  return (
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      color={p.warn ? 'warning' : 'default'}
+                      label={p.label}
+                      sx={{ mt: 0.5, ml: row.requirement_checklist ? 0.5 : 0 }}
+                    />
+                  );
+                })()}
                 {row.requirement_active === 0 ? (
                   <Tooltip title="This requirement is deactivated, so it will not be counted.">
                     <Chip

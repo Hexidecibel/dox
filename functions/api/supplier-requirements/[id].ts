@@ -91,6 +91,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }
       updates.push('tier = ?');
       params.push(body.tier);
+      // A tier is a decision. Whatever produced the row (the bulk seed, a
+      // packet, the verified list), a person has now chosen its tier, so it is
+      // theirs: an import will not re-tier it and the worklist drops it.
+      updates.push("source = 'human'", 'review_flag = NULL', 'review_flagged_at = NULL');
     }
 
     if (body.notes !== undefined) {

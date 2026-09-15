@@ -1,0 +1,3 @@
+Supplier name,Supplier contact email,Supplier category,Approved (Y/N),Product SKU,Product name,Claims made
+Example Dairy Co,qa@exampledairy.com,ingredient,Y,10042,Unsalted Butter 25kg,"kosher, rBST-free"
+Example Sanitation Supply,,chemical-sanitation,Y,,,
