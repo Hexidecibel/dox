@@ -88,7 +88,7 @@ const GROUPS = [
    [/^document_types$/, /^document_categories$/, /^naming_templates$/]],
   ["Suppliers, products & lots",
    "Supply-chain entities documents attach to. All links are optional per document.",
-   [/^suppliers$/, /^products/, /^tenant_products$/, /^product_suppliers$/, /^supplier_/, /^lots$/, /^document_lots$/, /^document_products$/]],
+   [/^suppliers$/, /^products/, /^tenant_products$/, /^product_suppliers$/, /^product_identifiers$/, /^supplier_/, /^lots$/, /^document_lots$/, /^document_products$/]],
   ["Intake, queue & sources",
    "Every ingest door funnels into processing_queue, then to the extraction worker, then to human review.",
    [/^processing_queue/, /^connectors?$/, /^connector_/, /^email_/, /^extraction_/, /^reviewer_/, /^teach_/, /^assignments$/]],

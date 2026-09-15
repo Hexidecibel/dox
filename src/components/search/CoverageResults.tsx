@@ -17,6 +17,7 @@ import { Link as RouterLink } from 'react-router-dom';
 import { ResultCardDocument } from './ResultCardDocument';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import type {
+  SearchConstraint,
   SearchConstraintCheck,
   SearchCoverageFields,
   SearchFieldProvenance,
@@ -41,6 +42,10 @@ import { formatIsoHuman } from '../../../shared/searchDates';
  *
  * Each result names the LOT ROW it was judged on ("Lot 10426203 · sublot 03 ·
  * produced Jul 22, 2026"), because one certificate can certify several.
+ *
+ * A product named the way a person knows it ("2235", "300 gal tote") says what
+ * it resolved to, and a phrase that fits several products is shown as that —
+ * "could mean" — with coverage counted for each product, never one picked.
  *
  * When nothing covers the search the page leads with that, in words, before
  * any candidate is shown — so a near miss can never be read as the answer.
@@ -115,6 +120,47 @@ function Evidence({ checks, kind }: { checks: SearchConstraintCheck[]; kind: 'co
   );
 }
 
+/** What a product phrase resolved to, and — when it could mean several — each reading's answer. */
+export function ProductResolutionNote({ constraint }: { constraint: SearchConstraint }) {
+  const res = constraint.product_resolution;
+  if (!res) return null;
+  if (!res.ambiguous) {
+    const k = res.candidates[0];
+    return (
+      <Alert severity={k.confirmed ? 'info' : 'warning'} sx={{ mb: 1.5 }} data-testid="product-resolution">
+        {k.explanation}
+        {k.conversion_note && (
+          <Typography variant="caption" component="div" sx={{ mt: 0.25 }}>
+            Unit conversion: {k.conversion_note}.
+          </Typography>
+        )}
+      </Alert>
+    );
+  }
+  return (
+    <Alert severity="warning" sx={{ mb: 1.5 }} data-testid="product-ambiguity">
+      <AlertTitle>“{res.phrase}” could mean {res.candidates.length} products</AlertTitle>
+      <Typography variant="body2" sx={{ mb: 0.5 }}>
+        Nothing is picked. Each document below says which of these it is, if any.
+      </Typography>
+      <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+        {res.candidates.map((k) => (
+          <li key={k.product_id}>
+            <Typography variant="body2">
+              <strong>{k.label}</strong>
+              {' — '}
+              {(k.covering_count ?? 0) > 0
+                ? `${k.covering_count} covering`
+                : (k.likely_count ?? 0) > 0 ? `${k.likely_count} likely — confirm` : 'no covering document on file'}
+              {!k.confirmed && ' (reached through an unconfirmed identifier)'}
+            </Typography>
+          </li>
+        ))}
+      </Box>
+    </Alert>
+  );
+}
+
 function UnreviewedCard({ u }: { u: SearchUnreviewedCandidate }) {
   return (
     <Card variant="outlined" sx={{ mb: 1, borderStyle: 'dashed' }}>
@@ -181,6 +227,10 @@ export function CoverageResults({
         </Stack>
       )}
 
+      {constraints.filter((c) => c.product_resolution).map((c) => (
+        <ProductResolutionNote key={`res-${c.id}`} constraint={c} />
+      ))}
+
       {dropped_constraints.length > 0 && (
         <Alert severity="info" sx={{ mb: 2 }}>
           <AlertTitle>Part of your search could not be applied</AlertTitle>
@@ -207,6 +257,12 @@ export function CoverageResults({
           <AlertTitle>No covering document on file</AlertTitle>
           {coverage_summary}
           {candidates.length > 0 && ' The documents below are nearby, but none of them matches — check the reason on each before using one.'}
+        </Alert>
+      )}
+
+      {coverage === 'ambiguous' && (
+        <Alert severity="info" sx={{ mb: 2 }} data-testid="ambiguous-coverage-banner">
+          {coverage_summary}
         </Alert>
       )}
 
@@ -244,7 +300,7 @@ export function CoverageResults({
             Likely covering — confirm ({likely.length})
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-            These match on a date an older extraction filed under another field. Open each one and check the certificate before using it.
+            Each of these would cover your search on evidence no person has confirmed — the reason is under each one. Open it and check before using it.
           </Typography>
           {likely.map((d) => (
             <ResultCardDocument

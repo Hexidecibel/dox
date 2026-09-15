@@ -52,6 +52,8 @@ import {
   type StoredDateReading,
 } from './searchDates';
 import { normalizeLotNumber, normalizeSubLotCode } from './lotNormalize';
+import { checkProductIdentity } from './productIdentity';
+import { checkOrder } from './orderCoverage';
 
 // ===========================================================================
 // Field vocabulary
@@ -170,16 +172,20 @@ export interface SubjectLot {
   production_date_raw?: string | null;
   production_date_source?: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | null;
   production_date_status?: 'resolved' | 'ambiguous' | 'unparseable' | 'conflict' | null;
+  /** The product record the lot row is linked to (product identity checks read it). */
+  product_name?: string | null;
 }
 
 export interface CoverageSubject {
   id: string;
+  supplier_id?: string | null;
   supplier_name: string | null;
   supplier_aliases: string[];
   document_type_slug: string | null;
   document_type_name: string | null;
   /** Linked product records. */
   product_names: string[];
+  product_ids?: string[];
   /** primary_metadata over extended_metadata (tables removed). */
   metadata: Record<string, unknown>;
   /** Linked lot records (document_lots → lots). Metadata lots are derived here. */
@@ -919,7 +925,10 @@ export function checkConstraint(c: SearchConstraint, s: CoverageSubject, order: 
     case 'lot': return checkLot(c, s);
     case 'date': return checkDate(c, s, order);
     case 'supplier': return checkSupplier(c, s);
-    case 'product': return c.fields[0] === 'product_code' ? checkMetadata(c, s) : checkProduct(c, s);
+    case 'product':
+      if (c.product_resolution) return checkProductIdentity(c, s);
+      return c.fields[0] === 'product_code' ? checkMetadata(c, s) : checkProduct(c, s);
+    case 'order': return checkOrder(c, s);
     case 'document_type': return checkDocumentType(c, s);
     case 'metadata': return checkMetadata(c, s);
     case 'text': return checkText(c, s);
@@ -952,8 +961,13 @@ const RELEVANT: ReadonlySet<SearchCheckOutcome> = new Set([
   'match', 'likely', 'near', 'role_mismatch', 'ambiguous', 'partial_lot', 'multiple_values',
 ]);
 
+/**
+ * A constraint that can make a document worth listing on its own when it holds:
+ * a lot, a date, an order, or a product resolved through the identifier graph
+ * ("10286 produced 9/2" lists the 10286 certificates from other days, labelled).
+ */
 export function isIdentifying(c: SearchConstraint): boolean {
-  return c.kind === 'lot' || c.kind === 'date';
+  return c.kind === 'lot' || c.kind === 'date' || c.kind === 'order' || (c.kind === 'product' && !!c.product_resolution);
 }
 
 const STATUS_RANK: Record<SubjectVerdict['status'], number> = {
@@ -1073,6 +1087,11 @@ export function matchedLotOf(v: SubjectVerdict, s: CoverageSubject): SearchMatch
   };
 }
 
+/** A product constraint whose phrase could mean several products. */
+export function ambiguousProduct(constraints: SearchConstraint[]): SearchConstraint | null {
+  return constraints.find((c) => c.kind === 'product' && c.product_resolution?.ambiguous) ?? null;
+}
+
 export function coverageFor(
   constraints: SearchConstraint[],
   dropped: SearchDroppedConstraint[],
@@ -1081,6 +1100,8 @@ export function coverageFor(
 ): SearchCoverage {
   if (constraints.length === 0 && dropped.length === 0) return 'unconstrained';
   if (dropped.length > 0) return 'none';
+  // Several products fit the phrase: coverage is per product, never one answer.
+  if (ambiguousProduct(constraints)) return 'ambiguous';
   if (coveringCount > 0) return 'covered';
   return likelyCount > 0 ? 'likely' : 'none';
 }
@@ -1104,8 +1125,22 @@ export function coverageSummary(
   if (dropped.length > 0) {
     return `No ${noun} on file can be confirmed to cover ${what}: ${dropped.map((d) => `"${d.label}"`).join(', ')} couldn't be applied.`;
   }
+  const amb = ambiguousProduct(constraints);
+  if (amb) {
+    const others = constraints.filter((c) => c !== amb && c.kind !== 'document_type').map((c) => c.label);
+    const rest = others.length ? others.join(', ') : 'it';
+    const per = amb.product_resolution!.candidates.map((k) => {
+      const cov = k.covering_count ?? 0;
+      const lik = k.likely_count ?? 0;
+      const answer = cov > 0
+        ? `${cov} ${noun}${cov === 1 ? '' : 's'} on file cover${cov === 1 ? 's' : ''} ${rest}`
+        : lik > 0 ? `none confirmed; ${lik} likely — confirm` : `no ${noun} on file covers ${rest}`;
+      return `As ${k.label}: ${answer}.`;
+    });
+    return `"${amb.product_resolution!.phrase}" could mean ${amb.product_resolution!.candidates.length} products, so nothing is picked. ${per.join(' ')}`;
+  }
   if (coveringCount === 0 && likelyCount > 0) {
-    return `No ${noun} on file is confirmed to cover ${what}. ${likelyCount} likely ${likelyCount === 1 ? 'does' : 'do'}, on a production date an older extraction filed as the code date — open ${likelyCount === 1 ? 'it' : 'each one'} to confirm.`;
+    return `No ${noun} on file is confirmed to cover ${what}. ${likelyCount} likely ${likelyCount === 1 ? 'does' : 'do'} — open ${likelyCount === 1 ? 'it' : 'each one'} and confirm the reason shown under ${likelyCount === 1 ? 'it' : 'each'}.`;
   }
   if (coveringCount === 0) return `No ${noun} on file covers ${what}.`;
   return `${coveringCount} ${noun}${coveringCount === 1 ? '' : 's'} on file cover${coveringCount === 1 ? 's' : ''} ${what}.`;

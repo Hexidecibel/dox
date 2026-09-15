@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 131 tables, 2 views, 211 indexes, 36 triggers.
+Objects: 132 tables, 2 views, 215 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -220,6 +220,30 @@ Triggers: `trg_document_products_ad_fts`, `trg_document_products_ai_fts`
 Indexes: `idx_lots_identity`, `idx_lots_lotkey`, `idx_lots_production_date`, `idx_lots_supplier`
 
 Triggers: `trg_lots_au_fts`
+
+### `product_identifiers`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id)
+  product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE
+  kind TEXT NOT NULL CHECK (kind IN ('our_sku', 'supplier_item', 'supplier_name', 'alias', 'gtin', 'pack'))
+  value TEXT NOT NULL
+  value_norm TEXT NOT NULL
+  supplier_id TEXT REFERENCES suppliers(id)
+  superseded INTEGER NOT NULL DEFAULT 0 CHECK (superseded IN (0, 1))
+  confirmed INTEGER NOT NULL DEFAULT 0 CHECK (confirmed IN (0, 1))
+  source TEXT NOT NULL CHECK (source IN ('seed', 'reviewer', 'extracted', 'import'))
+  note TEXT
+  created_by TEXT REFERENCES users(id)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  confirmed_by TEXT REFERENCES users(id)
+  confirmed_at TEXT
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  CHECK ( (kind IN ('supplier_item', 'supplier_name') AND supplier_id IS NOT NULL) OR (kind IN ('our_sku', 'alias', 'gtin', 'pack') AND supplier_id IS NULL) )
+```
+
+Indexes: `idx_product_identifiers_lookup`, `idx_product_identifiers_product`, `idx_product_identifiers_unique_plain`, `idx_product_identifiers_unique_supplier`
 
 ### `product_suppliers`
 

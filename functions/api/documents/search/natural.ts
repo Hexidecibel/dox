@@ -33,7 +33,7 @@ import {
 } from '../../../lib/permissions';
 import { parseNaturalQuery } from '../../../lib/llm';
 import { buildMatchExprWithLot, DOCUMENTS_FTS_COLS, documentsBm25Expr } from '../../../lib/search-fts';
-import { loadCoverageCorpus, runCoverageSearch, unreviewedTextCandidates } from '../../../lib/search-coverage';
+import { applyNaturalProductAndOrder, loadCoverageCorpus, runCoverageSearch, unreviewedTextCandidates } from '../../../lib/search-coverage';
 import { constraintsFromParsedQuery } from '../../../../shared/searchCoverage';
 import type { Env, User } from '../../../lib/types';
 import type { NaturalSearchResponse } from '../../../../shared/types';
@@ -122,10 +122,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (parsedQuery.content_search) ftsTerms.push(parsedQuery.content_search);
     const poolText = ftsTerms.join(' ').trim();
 
-    const { constraints, dropped } = constraintsFromParsedQuery(parsedQuery, body.query, {
+    const parsedConstraints = constraintsFromParsedQuery(parsedQuery, body.query, {
       documentTypes: docTypes,
       today: new Date().toISOString().slice(0, 10),
     });
+    const { dropped } = parsedConstraints;
+    // The product as the person named it ("bulk unsalted butter", "10286",
+    // "300 gal tote") resolves through the identifier graph, and a WMS order
+    // number follows its lines to their lots (Phase 3).
+    const constraints = await applyNaturalProductAndOrder(
+      context.env.DB, tenantId, parsedConstraints.constraints, parsedQuery, body.query,
+    );
 
     if (constraints.length > 0 || dropped.length > 0) {
       const corpus = await loadCoverageCorpus(context.env.DB, tenantId);

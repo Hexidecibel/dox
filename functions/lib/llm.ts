@@ -34,6 +34,7 @@ FIELD EXTRACTION RULES:
    - customer_name — company RECEIVING the product. Often labeled "Ship To", "Customer", "Sold To", or "Attention". If a company name appears prominently but is clearly the recipient (e.g., appears after "Ship To:"), it is the customer, NOT the supplier.
    - product_name — full product name (e.g., "Unsalted Sweet Cream Butter 68#")
    - product_code — supplier's internal product/item code or SKU
+   - customer_item_number — the CUSTOMER's own item number for this product, printed by the supplier and labelled as the customer's ("CUSTOMER ITEM #", "Customer Item", "Cust. Item No.", "Your Item #"). It is the buyer's SKU: NOT the supplier's item code (that is product_code), and NOT an order, invoice, sales order or PO number — never put it in order_number. Null when the page prints none.
    - lot_number — the lot or run number. Also the batch number, but ONLY when the document prints no separate lot; if it prints both, this is the lot.
    - batch_number — a batch identifier printed ALONGSIDE a separate lot ("Batch Number", "Batch", "Batch Code"). Null when the document prints only one of the two.
    - po_number — purchase order number
@@ -45,7 +46,7 @@ FIELD EXTRACTION RULES:
    - grade — quality grade (e.g., "Grade A", "Grade AA", "US Extra")
    - plant_number — facility ID or plant number
    - net_weight — net weight with units
-   - order_number — sales order or reference number
+   - order_number — sales order or reference number. A number labelled as the customer's item is NOT an order number; it is customer_item_number.
    - issuing_body — on a CERTIFICATE, the organisation that ISSUED it: the certifying agent, certification body, registrar, auditing firm, insurer or insurance broker whose name is on the letterhead. It is NOT the company being certified — that is supplier_name (rule 6). An ACCREDITATION body, which accredits the certifier rather than issuing this certificate (ANAB, IAF, a national accreditation service), is not the issuer.
    - certificate_number — the certificate's OWN number, as printed and labelled ("Certificate No.", "Cert #", "Certificate ID"). A policy number, a form number, an audit report number, a customer's item number and a document revision number are NOT certificate numbers. When the page prints none, this is null however many other numbers it prints.
    - scheme — the standard or programme a certification was granted against, as printed (e.g. "SQF Food Safety Code for Manufacturing Edition 9", "BRCGS Food Safety Issue 9", "FSSC 22000 v6", "USDA National Organic Program").
@@ -565,6 +566,10 @@ const FIELD_ALIASES: Record<string, string[]> = {
   po_number: ['po', 'purchase_order', 'purchase_order_number', 'po_no'],
   product_name: ['product', 'item', 'material', 'description', 'item_description'],
   product_code: ['item_code', 'sku', 'material_code', 'item_number', 'item_no'],
+  // The BUYER's item number, printed by the supplier (CMF "CUSTOMER ITEM #").
+  // Its own field so it is never filed as order_number (Phase 3). KEEP IN SYNC
+  // with functions/lib/llm.ts / bin/process-worker.
+  customer_item_number: ['customer_item', 'customer_item_no', 'customer_item_num', 'cust_item_number', 'cust_item_no', 'customer_sku', 'customer_part_number', 'your_item_number'],
   expiration_date: ['exp_date', 'best_by', 'use_by', 'best_before', 'sell_by', 'bb_date'],
   // Certificate-validity wordings ONLY. Deliberately no generic 'exp_date' /
   // 'expiry' here: those are the PRODUCT's shelf life and must stay on
@@ -896,6 +901,8 @@ export async function parseNaturalQuery(
     '{',
     '  "keywords": string[],           // general search terms not matched elsewhere',
     '  "document_type_slug": string|null, // exact slug from available types',
+    '  "product_text": string|null,    // the product EXACTLY as the person named it, pack and attributes included:',
+    '                                   // "bulk unsalted butter", "300 gal tote", "5 gallon bags", "2235", "810004"',
     '  "product_names": string[],      // matching product names — use fuzzy matching!',
     '                                   // "creams" → ["Sweet Cream Butter 68#", "Cream - Light 23%"]',
     '                                   // Include ALL products that relate to the query term',
@@ -923,6 +930,7 @@ export async function parseNaturalQuery(
     '4. "from last month" or "in March" → set date_from and date_to to that range. date_role says WHICH date: "produced in March" → "production"; "code date in March" → "code"; "uploaded / added / received last month" → "uploaded". A date printed on the document is never "uploaded".',
     '4a. A single production date ("produced 7/31/26", "production date 22-Jul-2026", "packed on 9/2") → metadata_filters with field=production_date, operator=equals, value YYYY-MM-DD. Use code_date ONLY when the query says "code date". Never put a production date in date_from/date_to with date_role "uploaded".',
     '5. Lot/PO numbers: "lot 776764" → metadata_filters with field=lot_number, operator=equals.',
+    '5a. PRODUCT TEXT: copy the words that name the product into product_text verbatim — the product words, its pack size ("5 gallon bag", "300 gal tote", "55.115#", "25kg", "half gallon") and its attributes ("unsalted", "U/S", "NS", "salted"). A pack size or an attribute is PART OF THE PRODUCT: never drop it, and never put it only in keywords. A bare product or item number ("2235", "810004", "10286") is product_text too, not a lot and not an order number. Do not include the supplier, the dates, or words like "COA".',
     '6. If query mentions test results, coliform, bacteria, etc. → use content_search.',
     '7. Always provide intent_summary — a clear one-line description of what was understood.',
     '8. Don\'t force matches — if nothing matches a field, leave it null/empty.',
@@ -992,6 +1000,7 @@ export async function parseNaturalQuery(
       document_type_slug: parsed.document_type_slug || null,
       product_names: Array.isArray(parsed.product_names) ? parsed.product_names :
         (parsed.product_name ? [parsed.product_name] : []),
+      product_text: typeof parsed.product_text === 'string' && parsed.product_text.trim() ? parsed.product_text.trim() : null,
       date_from: parsed.date_from || null,
       date_to: parsed.date_to || null,
       date_role: DATE_ROLES.includes(parsed.date_role) ? parsed.date_role : null,
@@ -1007,6 +1016,7 @@ export async function parseNaturalQuery(
       keywords: query.split(/\s+/).filter(Boolean),
       document_type_slug: null,
       product_names: [],
+      product_text: null,
       date_from: null,
       date_to: null,
       date_role: null,

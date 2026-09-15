@@ -20,14 +20,25 @@
  * linked to a row it finds is judged, whether or not the capped scan reached it.
  * Each document is judged row by row (shared/searchCoverage.evaluateSubject) and
  * the response names the row (`matched_lot`).
+ *
+ * PRODUCTS AND ORDERS (Phase 3, migration 0107). A product named the way a
+ * person knows it — our SKU, the supplier's item, a name, a pack — resolves
+ * through the identifier graph (shared/productIdentity.ts) into a product
+ * constraint that says what it resolved to; a phrase that fits several
+ * products stays ambiguous and coverage is reported per product. A WMS order
+ * number typed into search follows order_items -> lots -> documents (A7) and
+ * covers only through a person's accepted match or an exact lot row.
  */
 
 import type {
+  ParsedQuery,
   SearchConstraint,
   SearchConstraintCheck,
   SearchCoverage,
   SearchCoverageFields,
   SearchDroppedConstraint,
+  SearchOrderEvidence,
+  SearchProductResolution,
   SearchUnreviewedCandidate,
 } from '../../shared/types';
 import {
@@ -40,6 +51,7 @@ import {
   matchedLotOf,
   NEAR_DATE_DAYS,
   parseQueryText,
+  PRODUCT_VALUE_SEP,
   residualText,
   subjectLotIdentities,
   type CoverageSubject,
@@ -48,6 +60,10 @@ import {
   type SubjectVerdict,
 } from '../../shared/searchCoverage';
 import { buildMatchExprWithLot, DOCUMENTS_FTS_COLS, documentsBm25Expr, queryTokenVariants } from './search-fts';
+import { catalogCodes, makeProductIdentityConstraint, resolveProductPhrase, type PreparedCatalog } from '../../shared/productIdentity';
+import { makeOrderConstraint } from '../../shared/orderCoverage';
+import { loadProductCatalog } from './product-identifiers';
+import { normalizeLotNumber } from '../../shared/lotNormalize';
 
 export const DOC_SCAN_CAP = 5000;
 export const QUEUE_SCAN_CAP = 300;
@@ -101,6 +117,8 @@ const PART_SEP = '\u001e';
 
 interface DocScanRow {
   id: string;
+  supplier_id: string | null;
+  product_ids: string | null;
   created_at: string | null;
   updated_at: string | null;
   renewal_due_date: string | null;
@@ -130,20 +148,24 @@ function normAlnum(s: unknown): string {
 }
 
 /** The narrow per-document projection the judge reads. `WHERE` is appended by the caller. */
-const DOC_SUBJECT_SELECT = `SELECT d.id, d.created_at, d.updated_at, d.renewal_due_date, d.primary_metadata,
+const DOC_SUBJECT_SELECT = `SELECT d.id, d.supplier_id, d.created_at, d.updated_at, d.renewal_due_date, d.primary_metadata,
               CASE WHEN json_valid(d.extended_metadata) THEN json_remove(d.extended_metadata, '$.tables') END AS extended_lite,
               s.name AS supplier_name, s.aliases AS supplier_aliases,
               dt.slug AS document_type_slug, dt.name AS document_type_name,
               (SELECT GROUP_CONCAT(p.name, char(31))
                  FROM document_products dp JOIN products p ON p.id = dp.product_id
                 WHERE dp.document_id = d.id) AS product_names,
+              (SELECT GROUP_CONCAT(dp.product_id, char(31))
+                 FROM document_products dp WHERE dp.document_id = d.id) AS product_ids,
               (SELECT GROUP_CONCAT(
                         COALESCE(l.lot_number, '') || char(30) || COALESCE(l.sub_lot_code, '') || char(30) ||
                         COALESCE(l.lot_key, '') || char(30) || l.id || char(30) ||
                         COALESCE(l.production_date, '') || char(30) || COALESCE(l.production_date_raw, '') || char(30) ||
-                        COALESCE(l.production_date_source, '') || char(30) || COALESCE(l.production_date_status, ''),
+                        COALESCE(l.production_date_source, '') || char(30) || COALESCE(l.production_date_status, '') || char(30) ||
+                        COALESCE(lp.name, ''),
                         char(31))
                  FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
+                 LEFT JOIN products lp ON lp.id = l.product_id
                 WHERE dl.document_id = d.id) AS lot_rows
          FROM documents d
          LEFT JOIN suppliers s ON s.id = d.supplier_id
@@ -152,7 +174,7 @@ const DOC_SUBJECT_SELECT = `SELECT d.id, d.created_at, d.updated_at, d.renewal_d
 function parseLotRows(raw: string | null): SubjectLot[] {
   if (!raw) return [];
   return raw.split(FIELD_SEP).map((row) => {
-    const [lot_number = '', sub_lot_code = '', lot_key = '', lot_id = '', pd = '', pdRaw = '', pdSource = '', pdStatus = ''] = row.split(PART_SEP);
+    const [lot_number = '', sub_lot_code = '', lot_key = '', lot_id = '', pd = '', pdRaw = '', pdSource = '', pdStatus = '', productName = ''] = row.split(PART_SEP);
     return {
       lot_id: lot_id || null,
       lot_number,
@@ -163,18 +185,21 @@ function parseLotRows(raw: string | null): SubjectLot[] {
       production_date_raw: pdRaw || null,
       production_date_source: (pdSource || null) as SubjectLot['production_date_source'],
       production_date_status: (pdStatus || null) as SubjectLot['production_date_status'],
+      product_name: productName || null,
     };
   }).filter((l) => l.lot_number || l.lot_key);
 }
 
 function addDocRow(corpus: Pick<CoverageCorpus, 'docs' | 'updatedAt' | 'otherIdentifiers'>, r: DocScanRow): void {
   const metadata = { ...parseJsonObject(r.extended_lite), ...parseJsonObject(r.primary_metadata) };
-  for (const k of ['po_number', 'order_number', 'product_code', 'customer_po', 'shipment_number']) {
+  for (const k of ['po_number', 'order_number', 'product_code', 'customer_po', 'shipment_number', 'customer_item_number']) {
     const v = normAlnum(metadata[k]);
     if (v.length >= 4) corpus.otherIdentifiers.add(v);
   }
   corpus.docs.push({
     id: r.id,
+    supplier_id: r.supplier_id,
+    product_ids: r.product_ids ? r.product_ids.split(FIELD_SEP).filter(Boolean) : [],
     supplier_name: r.supplier_name,
     supplier_aliases: parseJsonArray(r.supplier_aliases),
     document_type_slug: r.document_type_slug,
@@ -290,6 +315,24 @@ export async function indexedLotDocumentIds(db: D1Database, tenantId: string, co
         from, to,
       );
     }
+    if (c.kind === 'order' && c.order) {
+      for (const line of c.order.lines) {
+        for (const id of [...line.accepted_document_ids, ...line.legacy_document_ids, ...line.rejected_document_ids, ...line.suggested.map((x) => x.document_id)]) {
+          out.add(id);
+        }
+        const shipped = line.lot_number ? normalizeLotNumber(line.lot_number) : '';
+        if (shipped.length < 5) continue;
+        // The shipped lot and its sibling sublots (the likeliest near miss).
+        const base = shipped.length > 8 ? shipped.slice(0, -2) : shipped;
+        await collect(
+          `SELECT DISTINCT dl.document_id
+             FROM lots l JOIN document_lots dl ON dl.lot_id = l.id
+            WHERE l.tenant_id = ? AND ((l.lot_key >= ? AND l.lot_key < ?) OR l.lot_key = ?)
+            LIMIT 500`,
+          base, `${base}~`, shipped,
+        );
+      }
+    }
     if (c.kind === 'lot') {
       const base = c.lot_parts?.base ?? (c.value.length > 8 ? c.value.slice(0, -2) : c.value);
       // A prefix range on the index: every key starting with the base. Keys are
@@ -338,8 +381,10 @@ export interface CoveragePlan {
   corpus: CoverageCorpus;
 }
 
-function lotTokenIsLot(t: LotToken, corpus: CoverageCorpus): boolean {
+function lotTokenIsLot(t: LotToken, corpus: CoverageCorpus, notLots: Set<string> = new Set()): boolean {
   if (t.explicit) return true;
+  // An item number or order number we hold is not a lot, however it looks.
+  if (notLots.has(t.norm)) return false;
   const n = t.norm;
   let exact = false;
   let partial = false;
@@ -381,11 +426,120 @@ function supplierWordIn(q: string, suppliers: Array<{ name: string; aliases: str
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Orders (A7)
+// ---------------------------------------------------------------------------
+
+export interface OrderHit {
+  token: string;
+  start: number;
+  end: number;
+  evidence: SearchOrderEvidence;
+}
+
+/**
+ * WMS orders whose number is typed in `q`. Staged orders (not yet confirmed
+ * from a connector run) are not orders yet and are skipped, as in the orders
+ * search block.
+ */
+export async function findOrdersInQuery(db: D1Database, tenantId: string, q: string, catalog: PreparedCatalog | null = null): Promise<OrderHit[]> {
+  const tokens: Array<{ raw: string; start: number; end: number }> = [];
+  const re = /[A-Za-z0-9][A-Za-z0-9-]*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(q)) !== null) {
+    if ((m[0].match(/\d/g) || []).length >= 4) tokens.push({ raw: m[0], start: m.index, end: m.index + m[0].length });
+  }
+  if (tokens.length === 0) return [];
+  const list = tokens.slice(0, 10);
+  const res = await db
+    .prepare(
+      `SELECT id, order_number, customer_name FROM orders
+        WHERE tenant_id = ? AND staged_at IS NULL AND order_number IN (${list.map(() => '?').join(',')})
+        LIMIT 5`,
+    )
+    .bind(tenantId, ...list.map((t) => t.raw))
+    .all<{ id: string; order_number: string; customer_name: string | null }>();
+  const hits: OrderHit[] = [];
+  for (const o of res.results ?? []) {
+    const tok = list.find((t) => t.raw === o.order_number)!;
+    hits.push({ token: tok.raw, start: tok.start, end: tok.end, evidence: await loadOrderEvidence(db, o, catalog) });
+  }
+  return hits;
+}
+
+async function loadOrderEvidence(
+  db: D1Database,
+  o: { id: string; order_number: string; customer_name: string | null },
+  catalog: PreparedCatalog | null,
+): Promise<SearchOrderEvidence> {
+  const items = await db
+    .prepare(
+      `SELECT id, product_code, product_name, lot_number, coa_document_id, coa_match_status
+         FROM order_items WHERE order_id = ? ORDER BY created_at, id`,
+    )
+    .bind(o.id)
+    .all<{ id: string; product_code: string | null; product_name: string | null; lot_number: string | null; coa_document_id: string | null; coa_match_status: string | null }>();
+  const sugg = await db
+    .prepare(
+      `SELECT lms.order_item_id, lms.document_id, lms.status, lms.match_basis, lms.match_confidence
+         FROM lot_match_suggestions lms JOIN order_items oi ON oi.id = lms.order_item_id
+        WHERE oi.order_id = ?`,
+    )
+    .bind(o.id)
+    .all<{ order_item_id: string; document_id: string; status: string | null; match_basis: string | null; match_confidence: number | null }>();
+  type SuggRow = { order_item_id: string; document_id: string; status: string | null; match_basis: string | null; match_confidence: number | null };
+  const byItem = new Map<string, SuggRow[]>();
+  for (const r of sugg.results ?? []) byItem.set(r.order_item_id, [...(byItem.get(r.order_item_id) ?? []), r]);
+  return {
+    order_id: o.id,
+    order_number: o.order_number,
+    customer_name: o.customer_name,
+    lines: (items.results ?? []).map((it) => {
+      const rows = byItem.get(it.id) ?? [];
+      const accepted = rows.filter((r) => r.status === 'accepted').map((r) => r.document_id);
+      const legacy = it.coa_document_id && it.coa_match_status === 'matched' && !accepted.includes(it.coa_document_id)
+        ? [it.coa_document_id] : [];
+      return {
+        order_item_id: it.id,
+        product_code: it.product_code,
+        product_name: it.product_name ? it.product_name.trim() : null,
+        lot_number: it.lot_number,
+        accepted_document_ids: accepted,
+        legacy_document_ids: legacy,
+        suggested: rows.filter((r) => !r.status || r.status === 'pending')
+          .map((r) => ({ document_id: r.document_id, basis: r.match_basis, confidence: r.match_confidence })),
+        rejected_document_ids: rows.filter((r) => r.status === 'rejected').map((r) => r.document_id),
+        product_resolution: lineProduct(it.product_code, catalog),
+      };
+    }),
+  };
+}
+
+/** A line's product code, resolved to exactly one product, or null. */
+function lineProduct(code: string | null, catalog: PreparedCatalog | null): SearchProductResolution | null {
+  if (!code || !catalog) return null;
+  const r = resolveProductPhrase(code, catalog);
+  return r && !r.resolution.ambiguous ? r.resolution : null;
+}
+
+async function activeSuppliers(db: D1Database, tenantId: string): Promise<Array<{ name: string; aliases: string[] }>> {
+  const supRes = await db
+    .prepare('SELECT name, aliases FROM suppliers WHERE tenant_id = ? AND active = 1')
+    .bind(tenantId)
+    .all<{ name: string; aliases: string | null }>();
+  return (supRes.results ?? []).map((s) => ({ name: s.name, aliases: parseJsonArray(s.aliases) }));
+}
+
 /**
  * Decide whether a typed query states constraints. Returns null for an
  * ordinary search ("butter", "K135797"), which keeps the plain FTS path and
- * pays for no scan. A supplier name counts only alongside a lot or a date —
+ * pays for no scan. A supplier name counts only alongside another constraint —
  * "darigold" alone is browsing, "darigold 7/22/2026" is asking for a document.
+ *
+ * A product resolved through the identifier graph (0107) is a constraint on its
+ * own only when it names a CODE or a PACK ("810004", "300 gal tote"); resolved
+ * from words alone ("butter") it applies only next to another constraint. A
+ * WMS order number is a constraint on its own (A7).
  */
 export async function planInstantSearch(
   db: D1Database,
@@ -397,9 +551,14 @@ export async function planInstantSearch(
   const structuredLot = structured.lot && structured.lot.trim()
     ? makeStructuredLotConstraint('c0', structured.lot, structured.sublot)
     : null;
-  if (parsed.dates.length === 0 && parsed.lotTokens.length === 0 && !structuredLot) return null;
+  const catalog = q.trim() ? await loadProductCatalog(db, tenantId) : null;
+  const orders = q.trim() ? await findOrdersInQuery(db, tenantId, q, catalog) : [];
+  if (parsed.dates.length === 0 && parsed.lotTokens.length === 0 && !structuredLot && orders.length === 0 && !catalog) return null;
+  const notLots = new Set<string>([
+    ...(catalog ? catalogCodes(catalog) : []),
+    ...orders.map((o) => normAlnum(o.token)),
+  ]);
 
-  const corpus = await loadCoverageCorpus(db, tenantId);
   const constraints: SearchConstraint[] = [];
   const spans: Array<[number, number]> = [];
   let n = 0;
@@ -410,21 +569,40 @@ export async function planInstantSearch(
     spans.push([d.start, d.end]);
     if (d.roleSpan) spans.push(d.roleSpan);
   }
-  for (const t of parsed.lotTokens) {
-    if (!lotTokenIsLot(t, corpus)) continue;
-    constraints.push(makeLotConstraint(`c${++n}`, t, 'query_text'));
-    spans.push([t.start, t.end]);
+  for (const o of orders) {
+    constraints.push(makeOrderConstraint(`c${++n}`, o.evidence, o.token));
+    spans.push([o.start, o.end]);
+  }
+  let corpus: CoverageCorpus | null = null;
+  const lotCandidates = parsed.lotTokens.filter((t) => !spans.some(([s, e]) => t.start < e && t.end > s));
+  if (lotCandidates.length > 0) {
+    corpus = await loadCoverageCorpus(db, tenantId);
+    for (const t of lotCandidates) {
+      if (!lotTokenIsLot(t, corpus, notLots)) continue;
+      constraints.push(makeLotConstraint(`c${++n}`, t, 'query_text'));
+      spans.push([t.start, t.end]);
+    }
+  }
+  if (constraints.length === 0 && !catalog) return null;
+
+  const suppliers = await activeSuppliers(db, tenantId);
+  const residualBeforeSupplier = residualText(q, spans);
+  const supHit = supplierWordIn(residualBeforeSupplier ? q : '', suppliers);
+  const sup = supHit && !spans.some(([s, e]) => supHit.start < e && supHit.end > s) ? supHit : null;
+
+  // The product, from what is left once dates, lots, orders and the supplier are cut out.
+  if (catalog) {
+    const productSpansTaken: Array<[number, number]> = sup ? [...spans, [sup.start, sup.end]] : [...spans];
+    const productWords = residualText(q, productSpansTaken);
+    const resolved = productWords ? resolveProductPhrase(productWords, catalog) : null;
+    if (resolved && (resolved.strong || constraints.length > 0)) {
+      constraints.push(makeProductIdentityConstraint(`c${++n}`, resolved.resolution, 'query_text'));
+      spans.push(...leftoverSpans(q, productSpansTaken));
+    }
   }
   if (constraints.length === 0) return null;
 
-  const supRes = await db
-    .prepare('SELECT name, aliases FROM suppliers WHERE tenant_id = ? AND active = 1')
-    .bind(tenantId)
-    .all<{ name: string; aliases: string | null }>();
-  const suppliers = (supRes.results ?? []).map((s) => ({ name: s.name, aliases: parseJsonArray(s.aliases) }));
-  const residualBeforeSupplier = residualText(q, spans);
-  const sup = supplierWordIn(residualBeforeSupplier ? q : '', suppliers);
-  if (sup && !spans.some(([s, e]) => sup.start < e && sup.end > s)) {
+  if (sup) {
     constraints.push({
       id: `c${++n}`, kind: 'supplier', label: `supplier ${sup.name}`, raw: q.slice(sup.start, sup.end),
       value: sup.name, fields: ['supplier'], source: 'query_text',
@@ -432,6 +610,7 @@ export async function planInstantSearch(
     spans.push([sup.start, sup.end]);
   }
 
+  corpus = corpus ?? await loadCoverageCorpus(db, tenantId);
   const residual = residualText(q, spans);
   if (residual) {
     constraints.push({
@@ -440,6 +619,79 @@ export async function planInstantSearch(
     });
   }
   return { constraints, dropped: [], residual, corpus };
+}
+
+/** Every stretch of `q` not covered by `taken` — the text a resolved product phrase was read from. */
+function leftoverSpans(q: string, taken: Array<[number, number]>): Array<[number, number]> {
+  const sorted = [...taken].sort((a, b) => a[0] - b[0]);
+  const out: Array<[number, number]> = [];
+  let pos = 0;
+  for (const [s, e] of sorted) {
+    if (s > pos) out.push([pos, s]);
+    pos = Math.max(pos, e);
+  }
+  if (pos < q.length) out.push([pos, q.length]);
+  return out;
+}
+
+/** Filler a question uses around a product ("show me the … documents"). */
+const NL_FILLER = /^(show|find|get|give|me|need|want|which|what|all|any|documents?|files?|produced|made|packed|manufactured|from|by)$/i;
+
+/**
+ * Natural language: resolve the product the question names through the
+ * identifier graph, and recognise a WMS order number, AFTER the model's parse
+ * has become constraints. The question's own words are tried when the model's
+ * `product_text` does not resolve — the rule dates already follow: the model's
+ * reading never outranks what the person typed.
+ */
+export async function applyNaturalProductAndOrder(
+  db: D1Database,
+  tenantId: string,
+  constraints: SearchConstraint[],
+  parsed: ParsedQuery,
+  rawQuery: string,
+): Promise<SearchConstraint[]> {
+  let out = [...constraints];
+  let n = 100;
+  const catalog = await loadProductCatalog(db, tenantId);
+  const orders = await findOrdersInQuery(db, tenantId, [rawQuery, ...out.filter((c) => c.kind === 'metadata').map((c) => c.value)].join(' '), catalog);
+  for (const o of orders) {
+    // A metadata filter the model put the order number in IS the order.
+    out = out.filter((c) => !(c.kind === 'metadata' && normAlnum(c.value) === normAlnum(o.evidence.order_number)));
+    if (!out.some((c) => c.kind === 'order' && c.value === o.evidence.order_number)) {
+      out.push(makeOrderConstraint(`c${++n}`, o.evidence, o.token));
+    }
+  }
+
+  if (!catalog) return out;
+  const phrases: string[] = [];
+  if (parsed.product_text && parsed.product_text.trim()) phrases.push(parsed.product_text.trim());
+  const typed = parseQueryText(rawQuery);
+  const spans: Array<[number, number]> = [
+    ...typed.dates.flatMap((d) => [[d.start, d.end] as [number, number], ...(d.roleSpan ? [d.roleSpan] : [])]),
+    ...typed.lotTokens.filter((t) => !catalog.codes.has(t.norm) && !orders.some((o) => normAlnum(o.token) === t.norm))
+      .map((t) => [t.start, t.end] as [number, number]),
+    ...orders.filter((o) => o.start < rawQuery.length).map((o) => [o.start, o.end] as [number, number]),
+  ];
+  const sup = supplierWordIn(rawQuery, await activeSuppliers(db, tenantId));
+  if (sup) spans.push([sup.start, sup.end]);
+  const rawWords = residualText(rawQuery, spans).split(/\s+/).filter((w) => w && !NL_FILLER.test(w)).join(' ');
+  if (rawWords) phrases.push(rawWords);
+  for (const c of out) {
+    if (c.kind === 'product' && !c.product_resolution) phrases.push(...c.value.split(PRODUCT_VALUE_SEP));
+  }
+
+  const others = out.filter((c) => c.kind !== 'product');
+  for (const phrase of phrases) {
+    const resolved = resolveProductPhrase(phrase, catalog);
+    if (!resolved || !(resolved.strong || others.length > 0)) continue;
+    const firstProduct = out.find((c) => c.kind === 'product');
+    // The identity check replaces the model's catalog-name guess and any
+    // product_code filter: both are what the resolved product now checks.
+    const replacement = makeProductIdentityConstraint(firstProduct?.id ?? `c${++n}`, resolved.resolution, firstProduct ? 'ai_parse' : 'query_text');
+    return [...others, replacement];
+  }
+  return out;
 }
 
 // ===========================================================================
@@ -579,12 +831,23 @@ export async function runCoverageSearch(
     }
   }
   const queueText = hasTextConstraint && input.poolText ? await queueTextHits(db, tenantId, input.poolText) : null;
+  // A certificate an order line is LINKED to — accepted, suggested, auto-linked
+  // or rejected — is always listed, so a link to the wrong product is seen and
+  // labelled rather than silently left out.
+  const orderLinked = new Set<string>();
+  for (const c of constraints) {
+    for (const line of c.order?.lines ?? []) {
+      for (const id of [...line.accepted_document_ids, ...line.legacy_document_ids, ...line.rejected_document_ids, ...line.suggested.map((x) => x.document_id)]) {
+        orderLinked.add(id);
+      }
+    }
+  }
 
   const judged: Array<{ id: string; verdict: SubjectVerdict; subject: CoverageSubject }> = [];
   for (const doc of corpus.docs) {
     const subject = hasTextConstraint ? { ...doc, text_match: pool.has(doc.id) } : doc;
     const verdict = evaluateSubject(subject, constraints, dropped, {
-      inPool: (!hasTextConstraint && pool.has(doc.id)) || mentions.has(doc.id),
+      inPool: (!hasTextConstraint && pool.has(doc.id)) || mentions.has(doc.id) || orderLinked.has(doc.id),
     });
     if (verdict.status !== 'covering' && mentions.has(doc.id)) {
       verdict.reason = `${verdict.reason ?? ''} Its text mentions "${mentions.get(doc.id)}".`.trim();
@@ -608,6 +871,19 @@ export async function runCoverageSearch(
     .filter((j) => j.verdict.status === 'candidate_not_matching')
     .sort((a, b) => b.verdict.score - a.verdict.score || byRank(a, b))
     .slice(0, CANDIDATE_CAP);
+
+  // Per product, when a product phrase resolved: how many documents cover (or
+  // likely cover) AS that product. An ambiguous phrase is answered this way.
+  for (const c of constraints) {
+    if (c.kind !== 'product' || !c.product_resolution) continue;
+    c.product_resolution = {
+      ...c.product_resolution,
+      candidates: c.product_resolution.candidates.map((k) => {
+        const as = (j: { verdict: SubjectVerdict }) => j.verdict.checks.some((ch) => ch.constraint_id === c.id && ch.candidate_product_id === k.product_id);
+        return { ...k, covering_count: covering.filter(as).length, likely_count: likely.filter(as).length };
+      }),
+    };
+  }
 
   const ordered = [...covering, ...likely, ...candidates];
   const page = ordered.slice(input.offset, input.offset + input.limit);

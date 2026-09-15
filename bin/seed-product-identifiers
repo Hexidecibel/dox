@@ -1,0 +1,172 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/seed-product-identifiers — seed the product identifier graph (migration
+ * 0107) with the identities we can show evidence for: Darigold 2235 <-> 810004,
+ * and Country Morning's CUSTOMER ITEM # <-> CMF ITEM # pairs (10286/30904,
+ * 10284/30906, 0801/50903, 0417/50900), each with its supplier product name and
+ * pack. Every row carries its evidence in `note`; the list and the reasons are
+ * in bin/lib/productIdentifierSeed.js.
+ *
+ * NOT SEEDED: 08012 = 0801 (open question to AJ), 30417 = 0417, and — unless
+ * --include-pending — 310348 (then only as an UNCONFIRMED former Darigold item).
+ *
+ * Per identity, the product it attaches to is: the product our WMS order lines
+ * already use for that SKU; else a product with exactly that name; else a new
+ * product. An identity whose supplier (or anchor) is ambiguous is skipped and
+ * reported. Re-running writes nothing new: existing rows are never updated, so a
+ * person's confirmation or removal-and-re-add is never overwritten by a seed.
+ *
+ * Usage:
+ *   bin/seed-product-identifiers                              # dry run, LOCAL, default tenants
+ *   bin/seed-product-identifiers --tenant <id> --apply        # LOCAL write
+ *   bin/seed-product-identifiers --remote                     # dry run, PRODUCTION
+ *   bin/seed-product-identifiers --remote --apply             # prompts: type the tenant id
+ *
+ * Flags:
+ *   --tenant ID          tenant to seed (repeatable). Default: Cush Co
+ *                        (1f03c3e73add44bfafb33bb16508b78b) and Q8 Darigold Review
+ *                        (a2bc46e6201903ff2f958458eeef24d0).
+ *   --apply              write. Without it this is a dry run.
+ *   --remote, -r         target PRODUCTION D1
+ *   --include-pending    also seed 310348 as an unconfirmed former item
+ *   --yes, -y            skip the production confirmation prompt
+ *   -h, --help           this help
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { execFileSync } = require('child_process');
+const { query, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+const { normalizeCode, normalizeName } = require('./lib/shared/productVocabulary');
+const { buildSeedPlan, planToSql, formatPlan } = require('./lib/productIdentifierSeed');
+
+const DEFAULT_TENANTS = ['1f03c3e73add44bfafb33bb16508b78b', 'a2bc46e6201903ff2f958458eeef24d0'];
+
+function parseArgs(argv) {
+  const opts = { tenants: [], apply: false, remote: false, yes: false, includePending: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenants.push(argv[++i]); break;
+      case '--apply': opts.apply = true; break;
+      case '--remote': case '-r': opts.remote = true; break;
+      case '--yes': case '-y': opts.yes = true; break;
+      case '--include-pending': opts.includePending = true; break;
+      case '-h': case '--help': {
+        const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+        console.log(lines.slice(3, lines.findIndex((l, j) => j > 2 && l.trim() === '*/')).join('\n').replace(/^ \* ?/gm, ''));
+        process.exit(0);
+      }
+      // eslint-disable-next-line no-fallthrough
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  if (opts.tenants.length === 0) opts.tenants = DEFAULT_TENANTS;
+  for (const t of opts.tenants) {
+    if (!/^[A-Za-z0-9_-]+$/.test(t || '')) {
+      console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+      process.exit(2);
+    }
+  }
+  return opts;
+}
+
+function execSql(statements, remote) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-seed-product-identifiers-'));
+  const file = path.join(dir, 'seed.sql');
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  try {
+    execFileSync('npx', ['wrangler', 'd1', 'execute', DEFAULT_DB, remote ? '--remote' : '--local', `--file=${file}`],
+      { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+  } catch (err) {
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${err.stderr ? err.stderr.toString() : err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function promptSync(question) {
+  process.stdout.write(question);
+  let fd;
+  try {
+    fd = fs.openSync('/dev/tty', 'rs');
+  } catch {
+    console.error('\nNo terminal to confirm on. Re-run interactively, or pass --yes.');
+    process.exit(1);
+  }
+  const buf = Buffer.alloc(256);
+  const n = fs.readSync(fd, buf, 0, buf.length, null);
+  fs.closeSync(fd);
+  return buf.toString('utf8', 0, n).split('\n')[0];
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const remote = opts.remote;
+  const target = remote ? 'PRODUCTION' : 'local';
+  const runAt = new Date().toISOString();
+
+  const hasTable = query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'product_identifiers'`, { remote });
+  const has0107 = Number(hasTable[0]?.n ?? 0) > 0;
+  if (!has0107) {
+    console.log('This database predates migration 0107 (no product_identifiers table). Dry run only; every identifier reads as new.\n');
+    if (opts.apply) {
+      console.error('--apply needs migrations/0107_product_identifiers.sql on the target first.');
+      process.exit(1);
+    }
+  }
+
+  for (const t of opts.tenants) {
+    const tenant = query(`SELECT id, name FROM tenants WHERE id = '${t}'`, { remote })[0];
+    if (!tenant) {
+      console.log(`Tenant ${t}: not in the ${target} database — skipped.\n`);
+      continue;
+    }
+    const suppliers = query(`SELECT id, name FROM suppliers WHERE tenant_id = '${t}' AND active = 1`, { remote });
+    const products = query(`SELECT id, name, slug FROM products WHERE tenant_id = '${t}'`, { remote });
+    const orderProducts = query(
+      `SELECT DISTINCT oi.product_code, oi.product_id FROM order_items oi JOIN orders o ON o.id = oi.order_id
+        WHERE o.tenant_id = '${t}' AND oi.product_id IS NOT NULL AND oi.product_code IS NOT NULL`,
+      { remote },
+    );
+    const existing = has0107
+      ? query(`SELECT product_id, kind, supplier_id, value_norm FROM product_identifiers WHERE tenant_id = '${t}'`, { remote })
+      : [];
+    const plan = buildSeedPlan(
+      { tenantId: t, suppliers, products, orderProducts, existing },
+      { includePending: opts.includePending, normalizeCode, normalizeName, newId: () => crypto.randomUUID().replace(/-/g, '') },
+    );
+    for (const line of formatPlan(plan, `${tenant.name} (${t}), ${target}`)) console.log(line);
+    const statements = planToSql(plan, runAt);
+    if (!opts.apply) {
+      console.log(statements.length === 0
+        ? 'DRY RUN — nothing to write.\n'
+        : `DRY RUN — ${plan.createProducts.length} product(s) and ${plan.inserts.length} identifier(s) not written. Re-run with --apply to write.\n`);
+      continue;
+    }
+    if (statements.length === 0) {
+      console.log('Nothing to write.\n');
+      continue;
+    }
+    if (remote && !opts.yes) {
+      const answer = promptSync(`About to WRITE to PRODUCTION D1 for ${tenant.name}: ${plan.createProducts.length} product(s), ${plan.inserts.length} identifier(s).\nType the tenant id to continue: `);
+      if (answer.trim() !== t) {
+        console.error('That did not match. Nothing was written for this tenant.\n');
+        continue;
+      }
+    }
+    execSql(statements, remote);
+    console.log(`Wrote ${plan.createProducts.length} product(s) and ${plan.inserts.length} identifier(s) to ${target} D1.\n`);
+  }
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+}

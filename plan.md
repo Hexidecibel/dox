@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### Any-field COA retrieval (AJ 2026-09-08) + Walkthrough 2 follow-ups
 
-**Status:** in-progress — Phase 1 and Phase 5 (part) shipped in v2.11.0; Phase 2 done locally (migration 0106, undeployed)
+**Status:** in-progress — Phase 1 and Phase 5 (part) shipped in v2.11.0; Phases 2 and 3 done locally (migrations 0106, 0107, undeployed)
 
 **Source:** AJ spec `20260908_IDP_Feature_Request__AnyField_COA_Retrieval_and_Identifier_Graph.docx`
 plus the Walkthrough 2 notes.
@@ -77,11 +77,13 @@ Lot rows carry their own production date with provenance (migration 0106), searc
 - Validator: `sublot_production_date_conflict`; row production date after the header expiry.
 - `bin/seed-lot-rows-demo` seeds AJ's fixture into a local tenant.
 
-#### Phase 3 — Product cross-reference + pack/attribute aliases — **planned**
-- Product identifier graph: 2235 ↔ 810004 / 310348, 10286 ↔ CMF 30904,
-  0801 ↔ CMF 50903.
-- Pack/attribute aliases: U/S = NS, 55.115# = 25 kg.
-- Extract CMF "CUSTOMER ITEM #" as its own field.
+#### Phase 3 — Product cross-reference + pack/attribute aliases — **DONE** (local, 2026-09-15; not deployed)
+A product named by our SKU, supplier item, name, alias or pack resolves through `product_identifiers` (migration 0107) into a product constraint that says what it resolved to; an ambiguous phrase is reported per product, never picked; a WMS order number follows its lots (A7).
+- Migration 0107 `product_identifiers` (provenance + confirmed + former); `shared/productVocabulary.ts`, `shared/productIdentity.ts`, `shared/orderCoverage.ts`.
+- `customer_item_number` extracted in all three prompt copies (no prod re-extract). NL parser returns `product_text`.
+- Admin: identifiers panel on the product page (add / confirm / remove, audited).
+- `bin/seed-product-identifiers` (dry run default). Prod dry run 2026-09-15: Cush Co 3 new products + 19 identifiers; Q8 1 product + 3.
+  310348 left out (pending AJ); 08012 = 0801 not asserted. **Waiting on:** 0107 on prod, then `--remote --apply`.
 
 #### Phase 4 — Declared per-supplier lot scheme — **planned**
 - Declared scheme: segments / widths / sublot / date encoding. Darigold

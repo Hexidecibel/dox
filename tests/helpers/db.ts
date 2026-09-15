@@ -103,6 +103,7 @@ import m0103 from '../../migrations/0103_spec_check_provenance.sql?raw';
 import m0104 from '../../migrations/0104_request_arrival_decisions.sql?raw';
 import m0105 from '../../migrations/0105_spec_check_result_identity.sql?raw';
 import m0106 from '../../migrations/0106_lot_production_date.sql?raw';
+import m0107 from '../../migrations/0107_product_identifiers.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -116,7 +117,7 @@ const migrations: string[] = [
   m0076, m0077, m0078, m0079, m0080, m0081, m0082, m0083, m0084, m0085,
   m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094, m0095,
   m0096, m0097, m0098, m0099, m0100, m0101, m0102, m0103, m0104,
-  m0105, m0106,
+  m0105, m0106, m0107,
 ];
 
 /**

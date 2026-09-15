@@ -24,6 +24,7 @@ import type { ApiProduct } from '../../lib/types';
 import { HelpWell } from '../../components/HelpWell';
 import { InfoTooltip } from '../../components/InfoTooltip';
 import { helpContent } from '../../lib/helpContent';
+import { ProductIdentifiersPanel } from '../../components/ProductIdentifiersPanel';
 
 /**
  * ProductDetail — minimal info page for a single product. Mirrors the
@@ -235,6 +236,8 @@ export function ProductDetail() {
           {product.description || 'No description.'}
         </Typography>
       </Paper>
+
+      <ProductIdentifiersPanel productId={product.id} tenantId={product.tenant_id} />
     </Box>
   );
 }

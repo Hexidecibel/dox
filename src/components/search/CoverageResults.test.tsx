@@ -120,4 +120,32 @@ describe('CoverageResults', () => {
     expect(section).toHaveTextContent('Likely covering — confirm (1)');
     expect(section).toHaveTextContent("Production date read from the document's code date field — older extraction. Confirm on the certificate");
   });
+
+  it('an ambiguous product phrase says "could mean", with each product\'s own answer, and picks nothing', () => {
+    const candidate = (product_id: string, label: string, covering: number) => ({
+      product_id, product_name: label, label, our_skus: [], supplier_items: [], supplier_names: [], pack: '300 gal tote',
+      matched_via: [], confirmed: true, conversion_note: null, explanation: label, covering_count: covering, likely_count: 0,
+    });
+    const productConstraint: SearchConstraint = {
+      id: 'c2', kind: 'product', label: 'product "300 gal tote" (could mean 2 products)', raw: '300 gal tote', value: 'a,b',
+      fields: ['product_code'], source: 'query_text',
+      product_resolution: {
+        phrase: '300 gal tote', ambiguous: true, message: '"300 gal tote" could mean 2 products',
+        candidates: [candidate('a', 'MS WHOLE 300GL (our SKU 10284)', 1), candidate('b', '40% CREAM 300GL (our SKU 10286)', 0)],
+      },
+    };
+    render(wrap(
+      <CoverageResults
+        coverage="ambiguous"
+        constraints={[constraint, productConstraint]}
+        coverage_summary='"300 gal tote" could mean 2 products, so nothing is picked.'
+        documents={[]}
+      />,
+    ));
+    const note = screen.getByTestId('product-ambiguity');
+    expect(note).toHaveTextContent('“300 gal tote” could mean 2 products');
+    expect(note).toHaveTextContent('MS WHOLE 300GL (our SKU 10284) — 1 covering');
+    expect(note).toHaveTextContent('40% CREAM 300GL (our SKU 10286) — no covering document on file');
+    expect(screen.getByTestId('ambiguous-coverage-banner')).toHaveTextContent('so nothing is picked');
+  });
 });
