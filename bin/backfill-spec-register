@@ -47,8 +47,10 @@
  *      and it does not import that module, or `email.ts`, or `alert-links.ts`,
  *      or `alert-routing.ts`. There is no code path from here to a send.
  *   2. The only statements it can emit are INSERTs into document_spec_checks
- *      plus one audit row (and, under --prune-artifacts, DELETEs of rows it has
- *      printed). See `planToSql` in bin/lib/specRegisterBackfill.js.
+ *      plus one audit row (and, under --prune-artifacts / --prune-duplicates,
+ *      DELETEs of rows it has printed; under --stamp-identity, UPDATEs of
+ *      result_key/result_location only). See `planToSql`, `duplicatesPruneToSql`
+ *      and `stampToSql` in bin/lib/specRegisterBackfill.js.
  *   3. Sending is a Worker-side action driven by an approval. Nothing in the
  *      codebase scans the register for unnotified failures — `notified_at` is
  *      written in exactly one place, immediately after a send, and read nowhere.
@@ -62,9 +64,28 @@
  *   - Write a verdict about a value that parses as a date or a clock time. That
  *     is an incubation log read as a results crosstab, and a verdict about it —
  *     pass, fail or refusal — asserts a measurement that never happened.
- *   - Delete anything, unless you pass --prune-artifacts, which prints every row
- *     it would remove first.
+ *   - Delete anything, unless you pass --prune-artifacts or --prune-duplicates,
+ *     each of which prints every row it would remove first.
  *   - Write anything at all without --apply.
+ *
+ * DUPLICATES, AND WHY "LOOKS THE SAME" IS NOT THE TEST (--prune-duplicates)
+ *
+ * Before migration 0105 a register row did not say WHERE on the certificate its
+ * result was printed. A multi-lot COA prints "Coliform <10" once per lot, so its
+ * rows agree on every column the page shows. On production (2026-09-14) that
+ * was 53 groups / 175 rows, and replaying the engine placed every one of them
+ * at a distinct row or table: not one was a duplicate. So this flag does not
+ * delete on appearance. It deletes a row only when the result's identity proves
+ * there are more rows than results — by `result_key` where rows carry one, or by
+ * re-running the engine over the document and counting where it finds that
+ * result. A document the replay cannot reproduce exactly is reported and left
+ * alone. When a group does hold surplus rows, the survivor is the acknowledged
+ * row if there is one, then the earliest. (Two DOCUMENTS carrying the same file
+ * are not register duplicates and this flag never touches them.)
+ *
+ * --stamp-identity gives rows written before 0105 their result_key and
+ * result_location from the same replay — bulk-pass rows only, and only on a
+ * document the replay reproduces. Requires 0105 on the target to --apply.
  *
  * SCOPE RESOLUTION MATCHES THE APPROVAL PATH, including its one conservatism:
  * `product_ids` is empty, exactly as functions/api/queue/[id].ts passes it, so a
@@ -77,6 +98,8 @@
  *   bin/backfill-spec-register --tenant <id> --remote           # dry run, PRODUCTION
  *   bin/backfill-spec-register --tenant <id> --remote --apply   # prompts first
  *   bin/backfill-spec-register --tenant <id> --prune-artifacts --apply
+ *   bin/backfill-spec-register --tenant <id> --remote --prune-duplicates   # dry run
+ *   bin/backfill-spec-register --tenant <id> --stamp-identity --apply
  *
  * Flags:
  *   --tenant ID        tenant to backfill (required)
@@ -86,6 +109,11 @@
  *   --prune-artifacts  ALSO delete existing register rows whose stored value is
  *                      a date or a clock time. Prints every row first. Never
  *                      happens as part of a plain backfill.
+ *   --prune-duplicates ALSO delete register rows that repeat a result already
+ *                      registered (identity proven, see above). Prints every
+ *                      row first; keeps the acknowledged, then the earliest.
+ *   --stamp-identity   ALSO write result_key/result_location (0105) onto
+ *                      bulk-pass rows that predate it, from the engine replay.
  *   --limit N          cap documents examined (prints that it was capped)
  *   --page-size N      D1 paging size (default 50)
  *   --json             emit the plan as JSON instead of prose
@@ -102,13 +130,19 @@ const { execFileSync } = require('child_process');
 
 const { query, queryPaged, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
 const { checkPrintedSpecs, checkConfiguredLimits } = require('./lib/shared/specCheck');
-const { buildLimitSnapshot } = require('./lib/shared/specSnapshot');
+const { buildLimitSnapshot, registerIdentity } = require('./lib/shared/specSnapshot');
 const {
   buildPlan,
   planToSql,
   auditSql,
   pruneToSql,
   pruneAuditSql,
+  findDuplicateRows,
+  duplicatesPruneToSql,
+  duplicatesAuditSql,
+  stampToSql,
+  stampAuditSql,
+  formatDuplicates,
   batchStatements,
   formatPlan,
   formatArtifacts,
@@ -122,6 +156,8 @@ function parseArgs(argv) {
     remote: false,
     yes: false,
     pruneArtifacts: false,
+    pruneDuplicates: false,
+    stampIdentity: false,
     limit: null,
     pageSize: 50,
     json: false,
@@ -136,6 +172,8 @@ function parseArgs(argv) {
       case '--yes':
       case '-y': opts.yes = true; break;
       case '--prune-artifacts': opts.pruneArtifacts = true; break;
+      case '--prune-duplicates': opts.pruneDuplicates = true; break;
+      case '--stamp-identity': opts.stampIdentity = true; break;
       case '--limit': opts.limit = Number(argv[++i]); break;
       case '--page-size': opts.pageSize = Number(argv[++i]); break;
       case '--json': opts.json = true; break;
@@ -160,8 +198,9 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  const src = fs.readFileSync(__filename, 'utf8');
-  console.log(src.split('\n').slice(3, 94).join('\n').replace(/^ \* ?/gm, ''));
+  const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+  const end = lines.findIndex((l, i) => i > 2 && l.trim() === '*/');
+  console.log(lines.slice(3, end).join('\n').replace(/^ \* ?/gm, ''));
 }
 
 /**
@@ -296,12 +335,31 @@ function loadUnitPolicy(tenant, remote) {
   }
 }
 
+/**
+ * Does this database have 0105's result identity? Probed, not assumed: the
+ * dry-run duplicate report has to work against a database that has not taken it
+ * (it recovers identity by replay), and the writes must not name a column that
+ * is not there.
+ */
+function hasResultIdentity(remote) {
+  // Asked of the schema rather than inferred from a failed SELECT: wrangler's
+  // --json mode reports the SQL error on stdout, so the thrown message does not
+  // reliably carry "no such column".
+  const rows = query(
+    `SELECT COUNT(*) AS n FROM pragma_table_info('document_spec_checks') WHERE name = 'result_key'`,
+    { remote }
+  );
+  return Number((rows || [])[0]?.n ?? 0) > 0;
+}
+
 /** Every register row this tenant already has. The idempotency input. */
-function loadExistingRows(tenant, remote, pageSize) {
+function loadExistingRows(tenant, remote, pageSize, withIdentity) {
   const { rows } = queryPaged(
     (limit, offset) =>
       `SELECT c.id, c.document_id, c.version_number, c.test_name_raw, c.value_raw,
+              c.unit_raw, c.limit_id, c.acknowledged_at,
               c.verdict, c.source, c.judgement_origin, c.bulk_run_at, c.created_at,
+              ${withIdentity ? 'c.result_key, c.result_location,' : ''}
               d.title AS document_title
          FROM document_spec_checks c
          LEFT JOIN documents d ON d.id = c.document_id
@@ -353,13 +411,15 @@ function execSql(statements, remote, label) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-function confirmProduction(tenant, plan, pruneCount) {
+function confirmProduction(tenant, plan, pruneCount, duplicateCount = 0, stampCount = 0) {
   const answer = promptSync(
     `\nAbout to WRITE to PRODUCTION D1 for tenant ${tenant}:\n` +
       `  ${plan.rows.length} register row(s) across ${plan.counts.documents_written} document(s)\n` +
       `  (${plan.counts.rows_out_of_spec} out of spec, ${plan.counts.rows_in_spec} in spec, ` +
       `${plan.counts.rows_not_checked} not checked)\n` +
       (pruneCount ? `  and DELETE ${pruneCount} artifact row(s) listed above\n` : '') +
+      (duplicateCount ? `  and DELETE ${duplicateCount} duplicate row(s) listed above\n` : '') +
+      (stampCount ? `  and stamp a result identity on ${stampCount} row(s)\n` : '') +
       'Nobody is emailed. Type the tenant id to continue: '
   );
   if (answer.trim() !== tenant) {
@@ -411,7 +471,18 @@ function main() {
     'This database has no document_spec_checks.judgement_origin — apply migration\n' +
       '0103_spec_check_provenance.sql first.'
   );
-  const existingRows = loadExistingRows(opts.tenant, remote, opts.pageSize);
+  const withIdentity = hasResultIdentity(remote);
+  if (!withIdentity && !opts.json) {
+    console.log(
+      'This database predates migration 0105 — rows are written without a result\n' +
+      'location, and duplicates are recognised by replaying the engine.\n'
+    );
+  }
+  if (opts.stampIdentity && opts.apply && !withIdentity) {
+    console.error('--stamp-identity --apply needs migration 0105_spec_check_result_identity.sql first.');
+    process.exit(1);
+  }
+  const existingRows = loadExistingRows(opts.tenant, remote, opts.pageSize, withIdentity);
 
   if (limits.length === 0) {
     // stderr under --json, so the JSON on stdout stays parseable.
@@ -456,13 +527,26 @@ function main() {
     existingRows,
     limits,
     buildLimitSnapshot,
+    registerIdentity,
     newId: () => crypto.randomUUID().replace(/-/g, ''),
   });
+
+  // The replay the duplicate check trusts: the engine's output per document,
+  // computed above by exactly the code that writes new rows.
+  const replay = new Map(
+    judged.map((j) => [j.document.id, { current_version: j.document.current_version, verdicts: j.verdicts }])
+  );
+  const duplicates =
+    opts.pruneDuplicates || opts.stampIdentity
+      ? findDuplicateRows({ existingRows, replay, registerIdentity })
+      : null;
+  const removals = opts.pruneDuplicates ? duplicates.removals : [];
+  const stamps = opts.stampIdentity ? duplicates.stamps : [];
 
   const artifacts = findArtifactRows(existingRows);
   const prunable = artifacts.filter((a) => a.confidence === 'confident');
 
-  const statements = planToSql(plan);
+  const statements = planToSql(plan, { withIdentity });
   const batches = batchStatements(statements);
 
   if (opts.json) {
@@ -484,6 +568,8 @@ function main() {
           artifacts,
           prunable: prunable.length,
           prune_requested: opts.pruneArtifacts,
+          result_identity_column: withIdentity,
+          duplicates,
           statements: statements.length,
           batches: batches.length,
         },
@@ -510,6 +596,18 @@ function main() {
       );
       console.log('');
     }
+    if (duplicates) {
+      for (const line of formatDuplicates(duplicates)) console.log(line);
+      if (opts.stampIdentity) {
+        console.log(
+          `Result identity to stamp (0105) ........ ${duplicates.counts.rows_to_stamp} row(s)` +
+            (duplicates.counts.stamp_skipped_approval_rows
+              ? ` (${duplicates.counts.stamp_skipped_approval_rows} approval row(s) left without one)`
+              : '')
+        );
+        console.log('');
+      }
+    }
   }
 
   const pruneStatements = opts.pruneArtifacts ? pruneToSql(artifacts) : [];
@@ -530,18 +628,31 @@ function main() {
                 'Re-run with --apply to remove them.'
         );
       }
+      if (opts.pruneDuplicates) {
+        console.log(
+          removals.length === 0
+            ? 'DRY RUN — no duplicate rows to remove.'
+            : `DRY RUN — ${removals.length} duplicate row(s) NOT deleted. Every one is listed above. ` +
+                'Re-run with --apply to remove them.'
+        );
+      }
+      if (opts.stampIdentity) {
+        console.log(`DRY RUN — ${stamps.length} row(s) NOT stamped with a result identity.`);
+      }
       console.log('Nothing was written and nobody was emailed.');
       console.log('');
     }
     return;
   }
 
-  if (statements.length === 0 && pruneStatements.length === 0) {
-    console.log('Nothing to do — no document needs a register row, and no artifact was found.');
+  if (statements.length === 0 && pruneStatements.length === 0 && removals.length === 0 && stamps.length === 0) {
+    console.log('Nothing to do — no document needs a register row, and no artifact or duplicate was found.');
     return;
   }
 
-  if (remote && !opts.yes) confirmProduction(opts.tenant, plan, prunable.length);
+  if (remote && !opts.yes) {
+    confirmProduction(opts.tenant, plan, prunable.length, removals.length, stamps.length);
+  }
 
   let written = 0;
   for (let i = 0; i < batches.length; i++) {
@@ -553,6 +664,22 @@ function main() {
   if (pruneStatements.length > 0) {
     execSql([...pruneStatements, pruneAuditSql(opts.tenant, runAt, artifacts)], remote, 'prune');
     console.log(`  pruned ${prunable.length} artifact row(s)`);
+  }
+
+  if (removals.length > 0) {
+    execSql(
+      [...duplicatesPruneToSql(removals), duplicatesAuditSql(opts.tenant, runAt, removals)],
+      remote,
+      'prune-duplicates'
+    );
+    console.log(`  pruned ${removals.length} duplicate row(s)`);
+  }
+
+  if (stamps.length > 0) {
+    const stampBatches = batchStatements(stampToSql(stamps));
+    stampBatches.forEach((b, i) => execSql(b, remote, `stamp-identity-${i + 1}`));
+    execSql([stampAuditSql(opts.tenant, runAt, stamps)], remote, 'stamp-identity-audit');
+    console.log(`  stamped a result identity on ${stamps.length} row(s)`);
   }
 
   // ONE audit row for the pass — never one per document. Written last, so it

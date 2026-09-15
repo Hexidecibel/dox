@@ -36,7 +36,74 @@
  */
 
 import type { SpecVerdict, ConfiguredLimit } from './specCheck';
+import { specResultKey } from './specCheck';
 import { parseSpecCriticality } from './specCriticality';
+
+/**
+ * WHICH RESULT a register row is about (migration 0105), in the two forms the
+ * register stores: the engine's own location key, and that location in words.
+ *
+ * Lives beside `buildLimitSnapshot` for the same reason that does: both
+ * producers of register rows write it, and a backfilled row has to name its
+ * result on exactly the same terms as an approval-written one.
+ *
+ * WHY IT EXISTS. A multi-lot COA prints one crosstab row per lot, and five lots
+ * that each read "Coliform <10" are five genuine results that agree in every
+ * column the register used to store. Measured on production they looked like
+ * 53 duplicate groups; replaying the engine placed every row at a distinct row
+ * or table. The location is the only thing that tells them apart, so it is
+ * frozen with the verdict rather than re-derived from metadata that can change.
+ */
+export interface RegisterIdentity {
+  /** `specResultKey(scope, target)` verbatim, e.g. "ai_fields::t0r2c9". */
+  result_key: string;
+  /** The same location for a reader, e.g. "Table 1, row 3 (38292)". */
+  result_location: string;
+}
+
+export function registerIdentity(v: Pick<SpecVerdict, 'scope' | 'target'>): RegisterIdentity {
+  const record = /^record\[(\d+)\]$/.exec(v.scope);
+  const prefix = record ? `Record ${Number(record[1]) + 1}, ` : '';
+  const t = v.target;
+  let where: string;
+  if (t.kind === 'table') {
+    const label = t.row_label ? ` (${t.row_label})` : '';
+    const place = `table ${t.table_index + 1}, row ${t.row_index + 1}${label}`;
+    where = prefix ? `${prefix}${place}` : `T${place.slice(1)}`;
+  } else {
+    where = `${prefix}${t.group} › ${t.cell}`;
+  }
+  return { result_key: specResultKey(v.scope, v.target), result_location: where };
+}
+
+/**
+ * One register row per (location, source) — the rule 0105's unique index makes
+ * structural, applied in code first so a repeat is dropped rather than failing
+ * the whole batch.
+ *
+ * Deduplicates on IDENTITY, never on value. Two lots that print the same number
+ * are two results and both are kept; only the same place on the page judged
+ * twice by the same source is one. The engine does not emit that today (it
+ * walks each table and row once), so `dropped` is expected to be empty; it is
+ * returned rather than swallowed so a producer can say so if that ever changes.
+ */
+export function uniqueByRegisterIdentity<T extends Pick<SpecVerdict, 'scope' | 'target' | 'source'>>(
+  verdicts: T[]
+): { kept: T[]; dropped: T[] } {
+  const seen = new Set<string>();
+  const kept: T[] = [];
+  const dropped: T[] = [];
+  for (const v of verdicts) {
+    const key = `${specResultKey(v.scope, v.target)}::${v.source}`;
+    if (seen.has(key)) {
+      dropped.push(v);
+      continue;
+    }
+    seen.add(key);
+    kept.push(v);
+  }
+  return { kept, dropped };
+}
 
 /**
  * Build the JSON that goes into `document_spec_checks.limit_snapshot`, or NULL

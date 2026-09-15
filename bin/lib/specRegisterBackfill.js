@@ -226,6 +226,7 @@ function buildPlan(input) {
     existingRows = [],
     limits = [],
     buildLimitSnapshot,
+    registerIdentity,
     newId,
   } = input;
 
@@ -244,6 +245,7 @@ function buildPlan(input) {
     skipped_already_backfilled: 0,
     skipped_no_verdicts: 0,
     refused_artifact_values: 0,
+    dropped_repeated_identity: 0,
   };
 
   for (const item of judged) {
@@ -285,7 +287,20 @@ function buildPlan(input) {
     }
 
     const docRows = [];
+    // One row per place on the page per source (0105), the same rule the
+    // approval writer applies. Identity, never value: two lots that print the
+    // same number are two results and both are written.
+    const seenIdentity = new Set();
     for (const v of verdicts) {
+      const identity = registerIdentity ? registerIdentity(v) : null;
+      if (identity) {
+        const key = `${identity.result_key}::${v.source}`;
+        if (seenIdentity.has(key)) {
+          counts.dropped_repeated_identity += 1;
+          continue;
+        }
+        seenIdentity.add(key);
+      }
       // RULE 3, on the way in. A value that is a clock time or a date was never
       // a measurement, so a verdict about it — pass, fail or refusal — asserts
       // something that did not happen. It is counted and reported, never
@@ -329,6 +344,8 @@ function buildPlan(input) {
         limit_snapshot: buildLimitSnapshot(v, limits),
         judgement_origin: 'bulk_recheck',
         bulk_run_at: runAt,
+        result_key: identity ? identity.result_key : null,
+        result_location: identity ? identity.result_location : null,
       });
       if (v.verdict === 'in_spec') counts.rows_in_spec += 1;
       else if (v.verdict === 'out_of_spec') counts.rows_out_of_spec += 1;
@@ -364,7 +381,10 @@ function buildPlan(input) {
  * are omitted entirely and therefore NULL: nobody approved this document with
  * this verdict in front of them, and nobody was told about it.
  */
-function planToSql(plan) {
+function planToSql(plan, opts = {}) {
+  // `withIdentity` is false only against a database that predates 0105; the
+  // rows are then written exactly as they were before it, without a location.
+  const withIdentity = opts.withIdentity !== false;
   const stmts = [];
   for (const r of plan.rows || []) {
     stmts.push(
@@ -372,14 +392,16 @@ function planToSql(plan) {
         `  (id, tenant_id, document_id, version_number, queue_item_id,\n` +
         `   spec_test_id, test_name_raw, value_raw, value_num, unit_raw,\n` +
         `   verdict, reason, source, limit_id, limit_snapshot,\n` +
-        `   judgement_origin, bulk_run_at)\n` +
+        `   judgement_origin, bulk_run_at${withIdentity ? ', result_key, result_location' : ''})\n` +
         `VALUES (${sqlText(r.id)}, ${sqlText(r.tenant_id)}, ${sqlText(r.document_id)}, ` +
         `${sqlNum(r.version_number)}, NULL,\n` +
         `  ${sqlText(r.spec_test_id)}, ${sqlText(r.test_name_raw)}, ${sqlText(r.value_raw)}, ` +
         `${sqlNum(r.value_num)}, ${sqlText(r.unit_raw)},\n` +
         `  ${sqlText(r.verdict)}, ${sqlText(r.reason)}, ${sqlText(r.source)}, ` +
         `${sqlText(r.limit_id)}, ${sqlText(r.limit_snapshot)},\n` +
-        `  ${sqlText(r.judgement_origin)}, ${sqlText(r.bulk_run_at)});`
+        `  ${sqlText(r.judgement_origin)}, ${sqlText(r.bulk_run_at)}` +
+        (withIdentity ? `, ${sqlText(r.result_key)}, ${sqlText(r.result_location)}` : '') +
+        `);`
     );
   }
   return stmts;
@@ -449,6 +471,361 @@ function pruneAuditSql(tenantId, runAt, artifacts) {
     `VALUES (NULL, ${sqlText(tenantId)}, 'spec_register.artifacts_pruned', 'document_spec_checks', ` +
     `${sqlText(runAt)}, ${sqlText(details)});`
   );
+}
+
+// ---------------------------------------------------------------------------
+// Rows that LOOK like duplicates — and the few that are
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything a reader of the register can see about a result: two rows that
+ * agree here are indistinguishable on the page. That makes them a duplicate
+ * CANDIDATE and nothing more — five lots that each print "Coliform <10" agree
+ * on every one of these columns and are five results.
+ */
+function visibleResultKey(r) {
+  return JSON.stringify([
+    r.test_name_raw == null ? null : String(r.test_name_raw),
+    r.value_raw == null || r.value_raw === '' ? null : String(r.value_raw),
+    r.unit_raw == null || r.unit_raw === '' ? null : String(r.unit_raw),
+    r.source || null,
+    r.limit_id || null,
+    r.verdict || null,
+  ]);
+}
+
+/**
+ * Which row survives when a group has more rows than results. An ACKNOWLEDGED
+ * row is kept ahead of an unacknowledged one whatever its age — deleting the
+ * copy that carries a person's sign-off would destroy the one thing a duplicate
+ * adds. Then the earliest, then the id, so the choice is deterministic.
+ */
+function keepOrder(a, b) {
+  const ackA = a.acknowledged_at ? 0 : 1;
+  const ackB = b.acknowledged_at ? 0 : 1;
+  if (ackA !== ackB) return ackA - ackB;
+  const ca = String(a.created_at || '');
+  const cb = String(b.created_at || '');
+  if (ca !== cb) return ca < cb ? -1 : 1;
+  return String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0;
+}
+
+function countBy(items, keyOf) {
+  const m = new Map();
+  for (const it of items) {
+    const k = keyOf(it);
+    const list = m.get(k) || [];
+    list.push(it);
+    m.set(k, list);
+  }
+  return m;
+}
+
+/**
+ * Decide which existing register rows are TRUE duplicates, and which rows can
+ * be given the result identity 0105 introduced.
+ *
+ * THE PROBLEM IT HAS TO SOLVE HONESTLY. Before 0105 a row did not store where
+ * on the page its result was printed, so "same test, value, unit, source,
+ * limit and verdict on one document" is all a query can see — and on
+ * production every one of the 53 groups that matched it was a multi-lot
+ * crosstab or a two-batch COA, i.e. distinct results. A prune keyed on those
+ * columns would have deleted 122 real lot results.
+ *
+ * So the identity is RECOVERED, never guessed:
+ *
+ *  - IDENTITY MODE. Every row of the document carries `result_key` (written
+ *    after 0105). One (version, result_key, source) is one result; any more
+ *    rows are surplus. No replay needed — the identity is the proof.
+ *  - REPLAY MODE. The engine is re-run over the document's metadata (the
+ *    caller does that and passes `replay`). A candidate group of N rows that
+ *    the replay places at M distinct locations holds N − M surplus rows. The
+ *    replay is trusted ONLY when it REPRODUCES the document: the same set of
+ *    visible results, with every row count at least the replay's. A document
+ *    whose metadata has been edited since, whose rows describe another
+ *    version, or whose rows came from two separate writes is reported as
+ *    unverifiable and nothing on it is touched.
+ *
+ * Stamping (the second output) assigns a replayed location to each row of a
+ * reproduced document that has none. Only rows the BULK pass wrote: the replay
+ * is literally the computation that produced them. An approval row was judged
+ * from the values a reviewer submitted and in records mode under a
+ * `record[N]` scope the document's own metadata does not carry, so a replayed
+ * location would be a near-guess there, and it is left without one.
+ *
+ * @param {object} input
+ * @param {Array}  input.existingRows  register rows (id, document_id, version_number,
+ *   test_name_raw, value_raw, unit_raw, source, limit_id, verdict, judgement_origin,
+ *   bulk_run_at, acknowledged_at, created_at, result_key?, document_title?)
+ * @param {Map}    input.replay  document_id -> { current_version, verdicts }
+ * @param {Function} input.registerIdentity  from the compiled shared/specSnapshot.ts
+ */
+function findDuplicateRows(input) {
+  const { existingRows = [], replay = new Map(), registerIdentity } = input;
+  const removals = [];
+  const explained = [];
+  const unverifiable = [];
+  const stamps = [];
+  const counts = {
+    documents_with_candidates: 0,
+    candidate_groups: 0,
+    candidate_rows: 0,
+    groups_distinct_results: 0,
+    groups_with_surplus: 0,
+    rows_to_remove: 0,
+    documents_unverifiable: 0,
+    rows_to_stamp: 0,
+    stamp_skipped_approval_rows: 0,
+  };
+
+  for (const [documentId, rows] of countBy(existingRows, (r) => r.document_id)) {
+    const title = rows[0].document_title || null;
+    const candidates = [...countBy(rows, (r) => `${r.version_number ?? ''}|${visibleResultKey(r)}`)]
+      .filter(([, g]) => g.length > 1);
+    if (candidates.length > 0) {
+      counts.documents_with_candidates += 1;
+      counts.candidate_groups += candidates.length;
+      counts.candidate_rows += candidates.reduce((n, [, g]) => n + g.length, 0);
+    }
+
+    // IDENTITY MODE.
+    if (rows.every((r) => r.result_key)) {
+      for (const [, g] of countBy(rows, (r) => `${r.version_number ?? ''}|${r.result_key}|${r.source}`)) {
+        if (g.length < 2) continue;
+        counts.groups_with_surplus += 1;
+        const sorted = [...g].sort(keepOrder);
+        for (const r of sorted.slice(1)) {
+          removals.push(removalOf(r, title, sorted[0], 'identity', 1, g.length));
+        }
+      }
+      for (const [, g] of candidates) {
+        if (new Set(g.map((r) => r.result_key)).size === g.length) {
+          counts.groups_distinct_results += 1;
+          explained.push(explainedOf(documentId, title, g, g.map((r) => r.result_location || r.result_key)));
+        }
+      }
+      continue;
+    }
+
+    // REPLAY MODE.
+    const entry = replay.get(documentId);
+    const notVerifiable = (reason) => {
+      if (candidates.length === 0) return;
+      counts.documents_unverifiable += 1;
+      unverifiable.push({
+        document_id: documentId,
+        title,
+        reason,
+        groups: candidates.map(([, g]) => ({ ...visibleOf(g[0]), rows: g.length })),
+      });
+    };
+    if (!entry) {
+      notVerifiable('no_metadata');
+      continue;
+    }
+    const writes = new Set(rows.map((r) => `${r.judgement_origin || ''}|${r.bulk_run_at || ''}`));
+    if (writes.size > 1) {
+      notVerifiable('mixed_writes');
+      continue;
+    }
+    const current = entry.current_version == null ? null : Number(entry.current_version);
+    if (rows.some((r) => r.version_number != null && current != null && Number(r.version_number) !== current)) {
+      notVerifiable('other_version');
+      continue;
+    }
+
+    const bulk = rows[0].judgement_origin === 'bulk_recheck';
+    // What the producer would have WRITTEN, not merely what the engine said:
+    // the bulk pass refuses date/clock values and drops a repeated identity, so
+    // the replay does the same before it is compared.
+    const seen = new Set();
+    const replayed = [];
+    for (const v of entry.verdicts || []) {
+      if (bulk) {
+        const artifact = classifyArtifact(v);
+        if (artifact && artifact.confidence === 'confident') continue;
+      }
+      const id = registerIdentity(v);
+      const k = `${id.result_key}::${v.source}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      replayed.push({ v, id });
+    }
+
+    const rowGroups = countBy(rows, (r) => visibleResultKey(r));
+    const replayGroups = countBy(replayed, (x) => visibleResultKey(x.v));
+    const sameKeys =
+      rowGroups.size === replayGroups.size && [...rowGroups.keys()].every((k) => replayGroups.has(k));
+    const reproduced =
+      sameKeys && [...rowGroups].every(([k, g]) => g.length >= replayGroups.get(k).length);
+    if (!reproduced) {
+      notVerifiable('replay_differs');
+      continue;
+    }
+
+    for (const [k, g] of rowGroups) {
+      const locations = replayGroups.get(k);
+      const sorted = [...g].sort(keepOrder);
+      const kept = sorted.slice(0, locations.length);
+      if (g.length > locations.length) {
+        counts.groups_with_surplus += 1;
+        for (const r of sorted.slice(locations.length)) {
+          removals.push(removalOf(r, title, kept[0], 'replay', locations.length, g.length));
+        }
+      } else if (g.length > 1) {
+        counts.groups_distinct_results += 1;
+        explained.push(explainedOf(documentId, title, g, locations.map((x) => x.id.result_location)));
+      }
+
+      const unstamped = kept.filter((r) => !r.result_key);
+      if (unstamped.length === 0) continue;
+      if (!bulk) {
+        counts.stamp_skipped_approval_rows += unstamped.length;
+        continue;
+      }
+      const byId = [...kept].sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1));
+      const byKey = [...locations].sort((a, b) => (a.id.result_key < b.id.result_key ? -1 : 1));
+      byId.forEach((r, i) => {
+        if (r.result_key) return;
+        stamps.push({
+          id: r.id,
+          document_id: documentId,
+          result_key: byKey[i].id.result_key,
+          result_location: byKey[i].id.result_location,
+        });
+      });
+    }
+  }
+
+  counts.rows_to_remove = removals.length;
+  counts.rows_to_stamp = stamps.length;
+  return { removals, explained, unverifiable, stamps, counts };
+}
+
+function visibleOf(r) {
+  return {
+    test_name_raw: r.test_name_raw,
+    value_raw: r.value_raw,
+    unit_raw: r.unit_raw || null,
+    source: r.source,
+    verdict: r.verdict,
+  };
+}
+
+function removalOf(r, title, keeper, basis, results, rows) {
+  return {
+    id: r.id,
+    document_id: r.document_id,
+    title,
+    ...visibleOf(r),
+    judgement_origin: r.judgement_origin || null,
+    created_at: r.created_at || null,
+    acknowledged: !!r.acknowledged_at,
+    kept_id: keeper.id,
+    basis,
+    results,
+    rows,
+  };
+}
+
+function explainedOf(documentId, title, g, locations) {
+  return { document_id: documentId, title, ...visibleOf(g[0]), rows: g.length, locations };
+}
+
+/** DELETEs for the surplus rows — only ever rendered under the explicit flag. */
+function duplicatesPruneToSql(removals) {
+  const ids = (removals || []).map((r) => r.id);
+  const stmts = [];
+  for (let i = 0; i < ids.length; i += 50) {
+    stmts.push(
+      `DELETE FROM document_spec_checks WHERE id IN (${ids.slice(i, i + 50).map(sqlText).join(', ')});`
+    );
+  }
+  return stmts;
+}
+
+function duplicatesAuditSql(tenantId, runAt, removals) {
+  const details = JSON.stringify({
+    run_at: runAt,
+    removed: removals.length,
+    kept_ids: [...new Set(removals.map((r) => r.kept_id))].slice(0, 50),
+    document_ids: [...new Set(removals.map((r) => r.document_id))].slice(0, 50),
+    reason: 'the same result registered more than once — identity recovered by result_key or engine replay',
+  });
+  return (
+    `INSERT INTO audit_log (user_id, tenant_id, action, resource_type, resource_id, details)\n` +
+    `VALUES (NULL, ${sqlText(tenantId)}, 'spec_register.duplicates_pruned', 'document_spec_checks', ` +
+    `${sqlText(runAt)}, ${sqlText(details)});`
+  );
+}
+
+/**
+ * UPDATEs that give a row its location. Guarded by `result_key IS NULL`, so a
+ * row that already names its result is never renamed, and a re-run is a no-op.
+ */
+function stampToSql(stamps) {
+  return (stamps || []).map(
+    (s) =>
+      `UPDATE document_spec_checks SET result_key = ${sqlText(s.result_key)}, ` +
+      `result_location = ${sqlText(s.result_location)} ` +
+      `WHERE id = ${sqlText(s.id)} AND result_key IS NULL;`
+  );
+}
+
+function stampAuditSql(tenantId, runAt, stamps) {
+  const details = JSON.stringify({
+    run_at: runAt,
+    stamped: stamps.length,
+    document_ids: [...new Set(stamps.map((s) => s.document_id))].slice(0, 50),
+    reason: 'result identity (0105) recovered by replaying the engine that wrote these rows',
+  });
+  return (
+    `INSERT INTO audit_log (user_id, tenant_id, action, resource_type, resource_id, details)\n` +
+    `VALUES (NULL, ${sqlText(tenantId)}, 'spec_register.identity_stamped', 'document_spec_checks', ` +
+    `${sqlText(runAt)}, ${sqlText(details)});`
+  );
+}
+
+function formatDuplicates(report, opts = {}) {
+  const c = report.counts;
+  const out = [];
+  const listLimit = opts.listLimit || 200;
+  out.push('Rows that look like duplicates ........ ' + c.candidate_rows +
+    ` in ${c.candidate_groups} group(s) on ${c.documents_with_candidates} document(s)`);
+  out.push('-'.repeat(72));
+  out.push('  Same document, test, value, unit, source, limit and verdict. That is all the');
+  out.push('  page shows, and it is NOT proof of a duplicate: a multi-lot certificate prints');
+  out.push('  the same "<10" once per lot. Each group was checked against where the engine');
+  out.push('  actually finds its results.');
+  out.push('');
+  out.push(`  Distinct results (kept, nothing to do) ... ${c.groups_distinct_results} group(s)`);
+  for (const e of report.explained.slice(0, opts.explainedLimit || 10)) {
+    out.push(`    ${e.title || e.document_id} · ${e.test_name_raw} = ${JSON.stringify(e.value_raw)} ` +
+      `[${e.verdict}] × ${e.rows}: ${e.locations.join('; ')}`);
+  }
+  if (report.explained.length > (opts.explainedLimit || 10)) {
+    out.push(`    … and ${report.explained.length - (opts.explainedLimit || 10)} more.`);
+  }
+  out.push(`  Could not be verified (never touched) ... ${c.documents_unverifiable} document(s)`);
+  const reasons = {
+    no_metadata: 'no extracted metadata to replay',
+    mixed_writes: 'rows from more than one write',
+    other_version: 'rows describe a different version than the metadata',
+    replay_differs: 'the engine no longer reproduces these rows (metadata or limits changed)',
+  };
+  for (const u of report.unverifiable.slice(0, 20)) {
+    out.push(`    ${u.title || u.document_id} — ${reasons[u.reason] || u.reason}`);
+  }
+  out.push(`  TRUE duplicates to remove ............... ${c.rows_to_remove} row(s)`);
+  for (const r of report.removals.slice(0, listLimit)) {
+    out.push(`    ${r.title || r.document_id} · ${r.test_name_raw} = ${JSON.stringify(r.value_raw)} [${r.verdict}]` +
+      ` — ${r.rows} rows for ${r.results} result(s), by ${r.basis}`);
+    out.push(`        delete row ${r.id} (${r.judgement_origin || 'origin unrecorded'}, ${r.created_at || '?'}` +
+      `${r.acknowledged ? ', acknowledged' : ''}); keep ${r.kept_id}`);
+  }
+  if (report.removals.length > listLimit) out.push(`    … and ${report.removals.length - listLimit} more.`);
+  out.push('');
+  return out;
 }
 
 /** Split statements into batches small enough for one `wrangler d1 execute`. */
@@ -589,6 +966,13 @@ module.exports = {
   auditSql,
   pruneToSql,
   pruneAuditSql,
+  visibleResultKey,
+  findDuplicateRows,
+  duplicatesPruneToSql,
+  duplicatesAuditSql,
+  stampToSql,
+  stampAuditSql,
+  formatDuplicates,
   batchStatements,
   formatPlan,
   formatArtifacts,

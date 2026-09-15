@@ -31,7 +31,11 @@ import { MODULES } from '../../shared/modules';
 import type { AlertRecipient } from './alert-routing';
 import type { SpecVerdict } from '../../shared/specCheck';
 import type { ConfiguredLimit } from '../../shared/specCheck';
-import { buildLimitSnapshot } from '../../shared/specSnapshot';
+import {
+  buildLimitSnapshot,
+  registerIdentity,
+  uniqueByRegisterIdentity,
+} from '../../shared/specSnapshot';
 import { compareSpecCriticality } from '../../shared/specCriticality';
 
 export interface RegisterContext {
@@ -66,6 +70,15 @@ export async function registerSpecChecks(
   verdicts: SpecVerdict[],
   limits: ConfiguredLimit[]
 ): Promise<{ written: number; failures: SpecVerdict[] }> {
+  // One row per place on the page per source (0105). Identity, never value: two
+  // lots printing the same number are two results and both are written.
+  const { kept, dropped } = uniqueByRegisterIdentity(verdicts);
+  if (dropped.length > 0) {
+    console.warn(
+      `[spec-register] ${dropped.length} verdict(s) repeated a result already judged on document ${ctx.documentId}; written once`
+    );
+  }
+  verdicts = kept;
   const failures = verdicts.filter((v) => v.verdict === 'out_of_spec');
   if (verdicts.length === 0) return { written: 0, failures };
 
@@ -86,47 +99,62 @@ export async function registerSpecChecks(
     // its own SQL and stamps 'bulk_recheck' + `bulk_run_at` itself, so an
     // origin parameter here would be a setting nobody could ever pass. Anything
     // that DID pass it would be claiming a human judgement it did not make.
-    const stmt = db.prepare(
-      `INSERT INTO document_spec_checks
-         (id, tenant_id, document_id, version_number, queue_item_id,
-          spec_test_id, test_name_raw, value_raw, value_num, unit_raw,
-          verdict, reason, source, limit_id, limit_snapshot,
-          acknowledged_by, acknowledged_at, acknowledgement_note,
-          judgement_origin, bulk_run_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approval', NULL)`
-    );
-
     // An approval that goes ahead over a failing result IS the acknowledgement.
     // Recording it here is what makes "a human saw this and accepted it"
     // answerable later, which is the difference between a warning and an audit
     // trail.
     const ackAt = ctx.acknowledgedBy ? new Date().toISOString() : null;
+    const rowValues = verdicts.map((v) => [
+      generateId(),
+      ctx.tenantId,
+      ctx.documentId,
+      ctx.versionNumber ?? null,
+      ctx.queueItemId ?? null,
+      v.spec_test_id ?? null,
+      v.test_name_raw,
+      v.value_raw ?? null,
+      v.value_num ?? null,
+      v.unit_raw ?? null,
+      v.verdict,
+      v.reason ?? null,
+      v.source,
+      v.limit_id ?? null,
+      buildLimitSnapshot(v, limits),
+      v.verdict === 'out_of_spec' ? ctx.acknowledgedBy ?? null : null,
+      v.verdict === 'out_of_spec' ? ackAt : null,
+      v.verdict === 'out_of_spec' ? ctx.acknowledgementNote ?? null : null,
+    ]);
 
-    const batch = verdicts.map((v) =>
-      stmt.bind(
-        generateId(),
-        ctx.tenantId,
-        ctx.documentId,
-        ctx.versionNumber ?? null,
-        ctx.queueItemId ?? null,
-        v.spec_test_id ?? null,
-        v.test_name_raw,
-        v.value_raw ?? null,
-        v.value_num ?? null,
-        v.unit_raw ?? null,
-        v.verdict,
-        v.reason ?? null,
-        v.source,
-        v.limit_id ?? null,
-        buildLimitSnapshot(v, limits),
-        v.verdict === 'out_of_spec' ? ctx.acknowledgedBy ?? null : null,
-        v.verdict === 'out_of_spec' ? ackAt : null,
-        v.verdict === 'out_of_spec' ? ctx.acknowledgementNote ?? null : null
-      )
-    );
+    const columns = `id, tenant_id, document_id, version_number, queue_item_id,
+          spec_test_id, test_name_raw, value_raw, value_num, unit_raw,
+          verdict, reason, source, limit_id, limit_snapshot,
+          acknowledged_by, acknowledged_at, acknowledgement_note,
+          judgement_origin, bulk_run_at`;
+    const placeholders = '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?';
 
-    await db.batch(batch);
-    return { written: batch.length, failures };
+    try {
+      const stmt = db.prepare(
+        `INSERT INTO document_spec_checks (${columns}, result_key, result_location)
+         VALUES (${placeholders}, 'approval', NULL, ?, ?)`
+      );
+      await db.batch(
+        verdicts.map((v, i) => {
+          const identity = registerIdentity(v);
+          return stmt.bind(...rowValues[i], identity.result_key, identity.result_location);
+        })
+      );
+    } catch (err) {
+      // A database that has not taken 0105 yet. Losing the register because a
+      // descriptive column is missing would be the worse failure, so the row is
+      // written without its location, exactly as it was before 0105.
+      if (!/no such column/i.test(err instanceof Error ? err.message : String(err))) throw err;
+      const legacy = db.prepare(
+        `INSERT INTO document_spec_checks (${columns})
+         VALUES (${placeholders}, 'approval', NULL)`
+      );
+      await db.batch(rowValues.map((values) => legacy.bind(...values)));
+    }
+    return { written: verdicts.length, failures };
   } catch (err) {
     console.error(
       '[spec-register] writing spec checks failed:',

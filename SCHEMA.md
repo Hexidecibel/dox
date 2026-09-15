@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 131 tables, 2 views, 209 indexes, 36 triggers.
+Objects: 131 tables, 2 views, 210 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -1457,9 +1457,11 @@ Indexes: `idx_document_requirements_document`, `idx_document_requirements_requir
   created_at TEXT DEFAULT (datetime('now'))
   judgement_origin TEXT
   bulk_run_at TEXT
+  result_key TEXT
+  result_location TEXT
 ```
 
-Indexes: `idx_dsc_bulk_run`, `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_tenant_verdict`
+Indexes: `idx_dsc_bulk_run`, `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_result_identity`, `idx_dsc_tenant_verdict`
 
 ### `document_type_extraction_instructions`
 

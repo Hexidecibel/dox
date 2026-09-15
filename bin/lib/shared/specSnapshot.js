@@ -20,7 +20,9 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // shared/specSnapshot.ts
 var specSnapshot_exports = {};
 __export(specSnapshot_exports, {
-  buildLimitSnapshot: () => buildLimitSnapshot
+  buildLimitSnapshot: () => buildLimitSnapshot,
+  registerIdentity: () => registerIdentity,
+  uniqueByRegisterIdentity: () => uniqueByRegisterIdentity
 });
 module.exports = __toCommonJS(specSnapshot_exports);
 
@@ -34,7 +36,53 @@ function parseSpecCriticality(value) {
   return isSpecCriticality(value) ? value : DEFAULT_SPEC_CRITICALITY;
 }
 
+// shared/specCheck.ts
+function specResultKey(scope, target) {
+  const where = target.kind === "table" ? `t${target.table_index}r${target.row_index}${target.col_index === void 0 ? "" : `c${target.col_index}`}` : `g${target.group}/${target.cell}`;
+  return `${scope}::${where}`;
+}
+var ABSENT_PHRASE_SRC = "absent|negative|neg|non[\\s-]*detect(?:able|ed)?|not\\s*detect(?:able|ed)?|none\\s*detect(?:able|ed)?|no\\s*growth|no\\s*detection|nd";
+var PRESENT_PHRASE_SRC = "present|positive|detectable|detected|pos";
+var ABSENT_PHRASE_RE = new RegExp(`^(?:${ABSENT_PHRASE_SRC})\\b`, "i");
+var QUAL_SCAN_RE = new RegExp(`\\b(?:${ABSENT_PHRASE_SRC})\\b|\\b(?:${PRESENT_PHRASE_SRC})\\b`, "gi");
+var PRESENT_ONLY_RE = new RegExp(`^(?:${PRESENT_PHRASE_SRC})$`, "i");
+var CLOCK_SRC = String.raw`\d{1,2}:\d{2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?`;
+var CALENDAR_SRC = String.raw`\d{1,4}[/.\-]\d{1,2}[/.\-]'?\d{2,4}`;
+var DATE_OR_TIME_RE = new RegExp(
+  `^(?:${CLOCK_SRC}|${CALENDAR_SRC}(?:\\s+${CLOCK_SRC})?)$`,
+  "i"
+);
+
 // shared/specSnapshot.ts
+function registerIdentity(v) {
+  const record = /^record\[(\d+)\]$/.exec(v.scope);
+  const prefix = record ? `Record ${Number(record[1]) + 1}, ` : "";
+  const t = v.target;
+  let where;
+  if (t.kind === "table") {
+    const label = t.row_label ? ` (${t.row_label})` : "";
+    const place = `table ${t.table_index + 1}, row ${t.row_index + 1}${label}`;
+    where = prefix ? `${prefix}${place}` : `T${place.slice(1)}`;
+  } else {
+    where = `${prefix}${t.group} \u203A ${t.cell}`;
+  }
+  return { result_key: specResultKey(v.scope, v.target), result_location: where };
+}
+function uniqueByRegisterIdentity(verdicts) {
+  const seen = /* @__PURE__ */ new Set();
+  const kept = [];
+  const dropped = [];
+  for (const v of verdicts) {
+    const key = `${specResultKey(v.scope, v.target)}::${v.source}`;
+    if (seen.has(key)) {
+      dropped.push(v);
+      continue;
+    }
+    seen.add(key);
+    kept.push(v);
+  }
+  return { kept, dropped };
+}
 function buildLimitSnapshot(verdict, limits) {
   const equated = verdict.unit_equivalence_applied ? { unit_equivalence: "volume_mass" } : {};
   if (verdict.source !== "limit" || !verdict.limit_id) {
@@ -57,5 +105,7 @@ function buildLimitSnapshot(verdict, limits) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  buildLimitSnapshot
+  buildLimitSnapshot,
+  registerIdentity,
+  uniqueByRegisterIdentity
 });
