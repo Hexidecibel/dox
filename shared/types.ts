@@ -772,7 +772,24 @@ export interface SupplierRequirementRow {
   created_by: string | null;
   updated_at: string;
   updated_by: string | null;
+  /**
+   * Where the row came from (0102, extended by 0111). NULL = the initial bulk
+   * seed, never confirmed; 'human' = a person attached, re-tiered or confirmed
+   * it; 'packet' = a person applied `packet_slug`; 'derived' = the verified
+   * supplier list implies it.
+   */
+  source?: SupplierRequirementSource | null;
+  packet_slug?: string | null;
+  /** 0111: the supplier-list import that last derived or re-supported this row. */
+  derivation_run_id?: string | null;
+  /** 0111: JSON list of `DerivationBasis` — why the list implies it. */
+  derivation_basis?: string | null;
+  /** 0111: 'not_on_verified_list' when a later import stopped implying a derived row. */
+  review_flag?: string | null;
+  review_flagged_at?: string | null;
 }
+
+export type SupplierRequirementSource = 'human' | 'packet' | 'derived';
 
 /** An applicability row as returned by the API, both ends joined in. */
 export interface ApiSupplierRequirement extends SupplierRequirementRow {
@@ -6032,6 +6049,219 @@ export interface ApplyRequirementPacketResponse {
    */
   unknown_requirements: string[];
   run: TenantSetupRun | null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Requirements from real data: packets on admin screens, the review worklist,
+// and the verified supplier list import (migration 0111).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** GET /api/supplier-requirements/packets — the packets an admin can apply. */
+export interface RequirementPacketCatalogResponse {
+  pack: string;
+  pack_label: string;
+  packets: Array<{
+    slug: string;
+    name: string;
+    description: string | null;
+    requirements: string[];
+    recommends: string[];
+  }>;
+}
+
+/** POST /api/supplier-requirements/apply-packet — one packet, named suppliers. */
+export interface BulkApplyPacketRequest {
+  packet: string;
+  /** Explicit supplier ids. There is no "all suppliers" shape. */
+  supplier_ids: string[];
+  dry_run?: boolean;
+  /** Also remove each supplier's unconfirmed (bulk-seed) rows the packet does not name. */
+  replace_unconfirmed?: boolean;
+  pack?: string;
+  tenant_id?: string;
+}
+
+export type PacketPreviewAction = 'add' | 'adopt_unconfirmed' | 'already_present' | 'remove_unconfirmed';
+
+export interface PacketPreviewLine {
+  requirement_id: string | null;
+  requirement_slug: string;
+  requirement_name: string;
+  action: PacketPreviewAction;
+  /** The tier after this call (for already_present, the row's own tier — unchanged). */
+  tier: SupplierRequirementTier;
+  /** The tier before, for adopt / already_present / remove. */
+  from_tier: SupplierRequirementTier | null;
+  /** What the packet asks for. */
+  packet_tier: SupplierRequirementTier | null;
+  /** The existing row's source, for already_present. */
+  existing_source: SupplierRequirementSource | null;
+}
+
+export interface PacketPreviewSupplier {
+  supplier_id: string;
+  supplier_name: string;
+  lines: PacketPreviewLine[];
+  counts: { add: number; adopt_unconfirmed: number; already_present: number; remove_unconfirmed: number; tier_kept_different: number };
+}
+
+export interface BulkApplyPacketResponse {
+  dry_run: boolean;
+  pack: string;
+  packet: string;
+  packet_name: string;
+  suppliers: PacketPreviewSupplier[];
+  totals: { add: number; adopt_unconfirmed: number; already_present: number; remove_unconfirmed: number };
+  unknown_requirements: string[];
+}
+
+/** POST /api/supplier-requirements/review — the worklist's bulk actions. */
+export interface SupplierRequirementReviewRequest {
+  action: 'confirm' | 'remove';
+  ids: string[];
+  tenant_id?: string;
+}
+
+export interface SupplierRequirementReviewResponse {
+  action: 'confirm' | 'remove';
+  /** Rows this call changed. */
+  applied: number;
+  /** Ids not found in the caller's tenant. */
+  not_found: string[];
+}
+
+export type SupplierListRowStatus = 'accepted' | 'rejected';
+
+export type SupplierMatchStatus = 'matched' | 'created' | 'will_create' | 'unresolved';
+
+export interface SupplierListUnmatched {
+  line: number;
+  kind: 'row' | 'supplier' | 'product' | 'claim' | 'email';
+  value: string;
+  reason: string;
+}
+
+export interface SupplierListRowOutcome {
+  line: number;
+  status: SupplierListRowStatus;
+  supplier_name: string;
+  supplier_id: string | null;
+  supplier_match: SupplierMatchStatus;
+  category: string | null;
+  approved: boolean | null;
+  product_label: string | null;
+  product_id: string | null;
+  product_name_matched: string | null;
+  claims_matched: string[];
+  claims_unmatched: string[];
+  problems: string[];
+  warnings: string[];
+}
+
+export type DerivedPreviewAction = 'add' | 'adopt_unconfirmed' | 'refresh_derived' | 'keep_person';
+
+export interface SupplierListDerivedLine {
+  requirement_slug: string;
+  requirement_name: string;
+  tier: SupplierRequirementTier;
+  action: DerivedPreviewAction;
+  from_tier: SupplierRequirementTier | null;
+  existing_source: SupplierRequirementSource | null;
+  /** Human-readable reasons, from `describeBasis`. */
+  because: string[];
+}
+
+export interface SupplierListPreviewSupplier {
+  supplier_key: string;
+  supplier_id: string | null;
+  supplier_name: string;
+  supplier_match: SupplierMatchStatus;
+  approved: boolean;
+  categories: string[];
+  products: string[];
+  contact_emails: string[];
+  lines: SupplierListDerivedLine[];
+}
+
+export interface SupplierListFlaggedLine {
+  row_id: string;
+  supplier_id: string;
+  supplier_name: string;
+  requirement_slug: string;
+  requirement_name: string;
+  tier: SupplierRequirementTier;
+  already_flagged: boolean;
+}
+
+export interface SupplierListImportCounts {
+  rows_total: number;
+  rows_accepted: number;
+  rows_rejected: number;
+  suppliers_listed: number;
+  suppliers_matched: number;
+  suppliers_created: number;
+  suppliers_not_approved: number;
+  products_matched: number;
+  products_unmatched: number;
+  claims_unmatched: number;
+  requirements_added: number;
+  requirements_adopted_unconfirmed: number;
+  requirements_refreshed: number;
+  requirements_tier_changed: number;
+  requirements_kept_person_set: number;
+  requirements_newly_flagged: number;
+  requirements_still_flagged: number;
+}
+
+/** POST /api/supplier-list/import */
+export interface SupplierListImportRequest {
+  dry_run?: boolean;
+  file_name?: string;
+  /** One of these three carries the list. */
+  csv?: string;
+  /** Base64 of an .xlsx workbook; the first sheet is read. */
+  xlsx_base64?: string;
+  rows?: Array<Partial<Record<'supplier_name' | 'supplier_contact_email' | 'supplier_category' | 'approved' | 'product_sku' | 'product_name' | 'claims', string>>>;
+  /** Re-run the stored input of an earlier applied import. */
+  rerun_of?: string;
+  pack?: string;
+  tenant_id?: string;
+}
+
+export interface SupplierListImportResponse {
+  dry_run: boolean;
+  run_id: string | null;
+  pack: string;
+  file_name: string | null;
+  counts: SupplierListImportCounts;
+  suppliers: SupplierListPreviewSupplier[];
+  flagged: SupplierListFlaggedLine[];
+  rows: SupplierListRowOutcome[];
+  unmatched: SupplierListUnmatched[];
+  /** Rule problems: a slug the tenant does not hold, a category with no packet. */
+  rule_problems: string[];
+  unrecognized_headers: string[];
+  rules: {
+    baseline: string[];
+    category_packets: Record<string, string | null>;
+    product_spec_sheet: string | null;
+  };
+}
+
+export interface SupplierListImportRun {
+  id: string;
+  tenant_id: string;
+  file_name: string | null;
+  input_format: 'csv' | 'xlsx' | 'rows';
+  pack: string | null;
+  counts: SupplierListImportCounts;
+  created_by: string | null;
+  created_by_name?: string | null;
+  created_at: string;
+}
+
+export interface SupplierListImportRunDetail extends SupplierListImportRun {
+  row_outcomes: SupplierListRowOutcome[];
 }
 
 /**

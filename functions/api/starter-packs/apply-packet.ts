@@ -36,6 +36,11 @@ import type {
  * button somebody adds six months from now, and the damage is not visible until
  * a customer reads their own gap report.
  *
+ * (2026-09-15: the admin screens gained POST /api/supplier-requirements/
+ * apply-packet, which takes SEVERAL suppliers — but each one named by id,
+ * capped, previewed by default, and unable to change any row a person or the
+ * verified supplier list set. It still has no shape that means "all of them".)
+ *
  * ═══════════════════════════════════════════════════════════════════════════
  * PROVENANCE IS WRITTEN, BECAUSE A WRONG DEFAULT HAS TO BE FINDABLE
  * ═══════════════════════════════════════════════════════════════════════════

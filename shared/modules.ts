@@ -105,6 +105,9 @@ export const MODULES: Record<ModuleKey, ModuleDefinition> = {
       '/api/request-templates',
       '/api/supplier-requests',
       '/api/supplier-gaps',
+      // The verified supplier list import creates suppliers and derives what
+      // they owe; with Supplier Documents off there are no suppliers to own it.
+      '/api/supplier-list',
     ],
   },
   compliance: {

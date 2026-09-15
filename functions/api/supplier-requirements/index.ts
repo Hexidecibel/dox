@@ -65,6 +65,10 @@ async function assertInTenant(
  * ?supplier_id=   list everything one supplier owes (the common call)
  * ?requirement_id= the inverse: which suppliers this line item applies to
  * ?tier=required|recommended  narrow to one tier
+ * ?review=unconfirmed  rows from the initial bulk seed (source IS NULL)
+ * ?review=flagged      derived rows no longer on the verified list (0111)
+ * ?review=any          either — the worklist
+ * ?source=human|packet|derived  narrow to one provenance
  * ?tenant_id=     super_admin only
  *
  * Rows carry the requirement's name/slug/checklist joined in, so the supplier
@@ -77,6 +81,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const supplierId = url.searchParams.get('supplier_id');
     const requirementId = url.searchParams.get('requirement_id');
     const tier = url.searchParams.get('tier');
+    const review = url.searchParams.get('review');
+    const source = url.searchParams.get('source');
     const tenantIdParam = url.searchParams.get('tenant_id');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '200', 10), 500);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
@@ -108,6 +114,20 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       }
       conditions.push('sr.tier = ?');
       params.push(tier);
+    }
+
+    if (review) {
+      if (review === 'unconfirmed') conditions.push('sr.source IS NULL');
+      else if (review === 'flagged') conditions.push('sr.review_flag IS NOT NULL');
+      else if (review === 'any') conditions.push('(sr.source IS NULL OR sr.review_flag IS NOT NULL)');
+      else return json({ error: 'review must be one of: unconfirmed, flagged, any' }, 400);
+    }
+    if (source) {
+      if (!['human', 'packet', 'derived'].includes(source)) {
+        return json({ error: 'source must be one of: human, packet, derived' }, 400);
+      }
+      conditions.push('sr.source = ?');
+      params.push(source);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -153,7 +173,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
  * tier?, notes?, tenant_id? (super_admin only).
  *
  * Re-attaching an existing pair is NOT a 409: it updates the tier in place and
- * returns 200. Attaching is an idempotent statement of applicability ("this
+ * returns 200. Either way the row is now a person's statement, so it is
+ * stamped `source = 'human'` (0102) and any review flag (0111) is cleared —
+ * without that, a row a person added through the editor would sit in the
+ * "unconfirmed bulk seed" worklist, and a derived row a person re-tiered would
+ * be re-tiered back by the next import. Attaching is an idempotent statement of applicability ("this
  * supplier owes this"), and a bulk apply-a-checklist call re-run must converge
  * rather than half-fail.
  */
@@ -193,7 +217,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (existing) {
       await context.env.DB.prepare(
         `UPDATE supplier_requirements
-            SET tier = ?, notes = COALESCE(?, notes),
+            SET tier = ?, notes = COALESCE(?, notes), source = 'human',
+                review_flag = NULL, review_flagged_at = NULL,
                 updated_at = datetime('now'), updated_by = ?
           WHERE id = ?`,
       )
@@ -223,8 +248,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const id = generateId();
     await context.env.DB.prepare(
       `INSERT INTO supplier_requirements
-         (id, tenant_id, supplier_id, requirement_id, tier, notes, created_by, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, tenant_id, supplier_id, requirement_id, tier, notes, source, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, 'human', ?, ?)`,
     )
       .bind(id, tenantId, body.supplier_id, body.requirement_id, tier, notes, user.id, user.id)
       .run();
