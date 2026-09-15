@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.12.0](releases/v2.12.0.md) — 2026-09-15 — Find a certificate by lot or production date, down to the exact row
 - [v2.11.0](releases/v2.11.0.md) — 2026-09-14 — Search tells you when nothing on file covers what you asked
 - [v2.10.0](releases/v2.10.0.md) — 2026-09-14 — Out of Spec says who judged a result, and where
 - [v2.9.0](releases/v2.9.0.md) — 2026-09-14 — Review what suppliers send back
