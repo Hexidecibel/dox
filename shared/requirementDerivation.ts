@@ -326,6 +326,15 @@ export type DerivedChange =
       was_flagged: boolean;
     }
   | {
+      kind: 'hold_unconfirmed';
+      row_id: string;
+      supplier_key: string;
+      slug: string;
+      tier: DerivationTier;
+      derived_tier: DerivationTier;
+      basis: DerivationBasis[];
+    }
+  | {
       kind: 'keep_person';
       row_id: string;
       supplier_key: string;
@@ -348,6 +357,9 @@ export type DerivedChange =
  *
  *   no row                -> add, source 'derived'
  *   NULL-source row       -> adopt: source 'derived', tier as derived (the guess now has a basis)
+ *                            -- UNLESS that would LOWER its tier: then it is held, left unconfirmed
+ *                            in the worklist with both tiers shown. An automatic producer never
+ *                            quietly takes an item out of the gap count; a person decides.
  *   'derived' row         -> refresh basis + tier, clear any review flag
  *   'human'/'packet' row  -> keep, untouched (reported, with the tier the list implied)
  *   'derived' row the list no longer implies -> flag 'not_on_verified_list'; NEVER deleted
@@ -374,6 +386,16 @@ export function planDerivedChanges(
       const row = byPair.get(pair);
       if (!row) {
         changes.push({ kind: 'add', supplier_key: supplierKey, slug: d.slug, tier: d.tier, basis: d.basis });
+      } else if ((row.source === null || row.source === undefined) && TIER_RANK[row.tier] > TIER_RANK[d.tier]) {
+        changes.push({
+          kind: 'hold_unconfirmed',
+          row_id: row.id,
+          supplier_key: supplierKey,
+          slug: d.slug,
+          tier: row.tier,
+          derived_tier: d.tier,
+          basis: d.basis,
+        });
       } else if (row.source === null || row.source === undefined) {
         changes.push({
           kind: 'adopt_unconfirmed',
@@ -431,6 +453,7 @@ export interface DerivedChangeCounts {
   refreshed: number;
   tier_changed: number;
   kept_person_set: number;
+  held_unconfirmed: number;
   newly_flagged: number;
   still_flagged: number;
 }
@@ -442,6 +465,7 @@ export function countDerivedChanges(changes: readonly DerivedChange[]): DerivedC
     refreshed: 0,
     tier_changed: 0,
     kept_person_set: 0,
+    held_unconfirmed: 0,
     newly_flagged: 0,
     still_flagged: 0,
   };
@@ -460,6 +484,9 @@ export function countDerivedChanges(changes: readonly DerivedChange[]): DerivedC
         break;
       case 'keep_person':
         c.kept_person_set++;
+        break;
+      case 'hold_unconfirmed':
+        c.held_unconfirmed++;
         break;
       case 'flag_unsupported':
         if (ch.already_flagged) c.still_flagged++;

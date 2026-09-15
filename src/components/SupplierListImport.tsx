@@ -57,6 +57,7 @@ const ACTION_LABEL: Record<SupplierListDerivedLine['action'], string> = {
   adopt_unconfirmed: 'Confirms unconfirmed',
   refresh_derived: 'Already derived',
   keep_person: 'Kept — set by a person',
+  hold_unconfirmed: 'Left unconfirmed — the list implies a lower tier; decide in Needs review',
 };
 
 function downloadTemplate() {
@@ -94,6 +95,7 @@ export function importSummary(r: SupplierListImportResponse): string {
   if (c.requirements_adopted_unconfirmed) parts.push(`${c.requirements_adopted_unconfirmed} unconfirmed confirmed by the list`);
   if (c.requirements_tier_changed) parts.push(`${c.requirements_tier_changed} tier change${c.requirements_tier_changed === 1 ? '' : 's'}`);
   if (c.requirements_kept_person_set) parts.push(`${c.requirements_kept_person_set} kept as a person set them`);
+  if (c.requirements_held_unconfirmed) parts.push(`${c.requirements_held_unconfirmed} left unconfirmed (the list implies a lower tier)`);
   if (c.requirements_newly_flagged) parts.push(`${c.requirements_newly_flagged} no longer on the list (flagged)`);
   return parts.join(' · ');
 }
@@ -314,7 +316,7 @@ export default function SupplierListImport({ tenantId, onApplied }: SupplierList
                             <TableCell>{l.tier}</TableCell>
                             <TableCell>
                               {ACTION_LABEL[l.action]}
-                              {l.from_tier && l.from_tier !== l.tier && l.action !== 'keep_person' ? ` (${l.from_tier} → ${l.tier})` : ''}
+                              {l.from_tier && l.from_tier !== l.tier && l.action === 'adopt_unconfirmed' || l.action === 'refresh_derived' ? ` (${l.from_tier} → ${l.tier})` : ''}
                             </TableCell>
                             <TableCell>{l.because.join('; ')}</TableCell>
                           </TableRow>

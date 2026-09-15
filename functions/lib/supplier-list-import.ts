@@ -167,6 +167,7 @@ function emptyCounts(): SupplierListImportCounts {
     requirements_refreshed: 0,
     requirements_tier_changed: 0,
     requirements_kept_person_set: 0,
+    requirements_held_unconfirmed: 0,
     requirements_newly_flagged: 0,
     requirements_still_flagged: 0,
   };
@@ -359,6 +360,7 @@ export async function runSupplierListImport(
   counts.requirements_refreshed = cc.refreshed;
   counts.requirements_tier_changed = cc.tier_changed;
   counts.requirements_kept_person_set = cc.kept_person_set;
+  counts.requirements_held_unconfirmed = cc.held_unconfirmed;
   counts.requirements_newly_flagged = cc.newly_flagged;
   counts.requirements_still_flagged = cc.still_flagged;
 
@@ -387,10 +389,10 @@ export async function runSupplierListImport(
         return {
           requirement_slug: d.slug,
           requirement_name: nameOfSlug(d.slug),
-          tier: ch?.kind === 'keep_person' ? ch.tier : d.tier,
+          tier: ch?.kind === 'keep_person' || ch?.kind === 'hold_unconfirmed' ? ch.tier : d.tier,
           action: action as SupplierListPreviewSupplier['lines'][number]['action'],
           from_tier:
-            ch && (ch.kind === 'adopt_unconfirmed' || ch.kind === 'refresh_derived') ? ch.from_tier : ch?.kind === 'keep_person' ? ch.tier : null,
+            ch && (ch.kind === 'adopt_unconfirmed' || ch.kind === 'refresh_derived') ? ch.from_tier : ch?.kind === 'keep_person' || ch?.kind === 'hold_unconfirmed' ? ch.tier : null,
           existing_source:
             ch?.kind === 'keep_person'
               ? (ch.source as SupplierRequirementSource)
@@ -516,6 +518,7 @@ export async function runSupplierListImport(
           }
           break;
         case 'keep_person':
+        case 'hold_unconfirmed':
           break;
       }
     }

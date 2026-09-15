@@ -296,9 +296,29 @@ describe('planDerivedChanges', () => {
       refreshed: 4,
       tier_changed: 0,
       kept_person_set: 0,
+      held_unconfirmed: 0,
       newly_flagged: 0,
       still_flagged: 0,
     });
+  });
+
+  it('never lowers an unconfirmed row\'s tier by adoption: it is held for a person instead', () => {
+    const changes = planDerivedChanges(
+      { sup_1: [{ slug: 'letter-of-guarantee', tier: 'recommended', basis: [{ rule: 'claim', claim: 'rbst-free', product: 'Butter' }] }] },
+      [existing({ id: 'seed_required', requirement_slug: 'letter-of-guarantee', tier: 'required', source: null })],
+    );
+    expect(changes).toEqual([
+      {
+        kind: 'hold_unconfirmed',
+        row_id: 'seed_required',
+        supplier_key: 'sup_1',
+        slug: 'letter-of-guarantee',
+        tier: 'required',
+        derived_tier: 'recommended',
+        basis: [{ rule: 'claim', claim: 'rbst-free', product: 'Butter' }],
+      },
+    ]);
+    expect(countDerivedChanges(changes)).toMatchObject({ adopted_unconfirmed: 0, held_unconfirmed: 1, tier_changed: 0 });
   });
 });
 

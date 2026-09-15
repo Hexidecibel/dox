@@ -232,9 +232,10 @@ describe('POST /api/supplier-list/import — apply', () => {
         `INSERT INTO supplier_requirements (id, tenant_id, supplier_id, requirement_id, tier, source)
          VALUES ('sr_human', ?, 'sup_dg', 'req_test-corp_spec-sheet', 'recommended', 'human'),
                 ('sr_seed', ?, 'sup_dg', 'req_test-corp_micro-limits', 'recommended', NULL),
-                ('sr_unrelated_seed', ?, 'sup_dg', 'req_test-corp_w9-on-file', 'required', NULL)`,
+                ('sr_unrelated_seed', ?, 'sup_dg', 'req_test-corp_w9-on-file', 'required', NULL),
+                ('sr_seed_higher', ?, 'sup_dg', 'req_test-corp_letter-of-guarantee', 'required', NULL)`,
       )
-      .bind(seed.tenantId, seed.tenantId, seed.tenantId)
+      .bind(seed.tenantId, seed.tenantId, seed.tenantId, seed.tenantId)
       .run();
 
     const preview = await post({ csv: medosweetCsv });
@@ -251,10 +252,20 @@ describe('POST /api/supplier-list/import — apply', () => {
       tier: 'required',
     });
 
+    // rBST-free recommends a letter of guarantee; the seed said required. Held.
+    expect(dg.lines.find((l) => l.requirement_slug === 'letter-of-guarantee')).toMatchObject({
+      action: 'hold_unconfirmed',
+      tier: 'required',
+    });
+    expect(preview.body.counts.requirements_held_unconfirmed).toBe(1);
+
     const { body } = await post({ csv: medosweetCsv, dry_run: false });
     const rows = Object.fromEntries((await rowsFor(seed.tenantId, 'Darigold')).map((r) => [r.slug, r]));
+    expect(rows['letter-of-guarantee']).toMatchObject({ id: 'sr_seed_higher', tier: 'required', source: null });
     expect(rows['spec-sheet']).toMatchObject({ id: 'sr_human', tier: 'recommended', source: 'human', derivation_run_id: null });
     expect(rows['micro-limits']).toMatchObject({ id: 'sr_seed', tier: 'required', source: 'derived', derivation_run_id: body.run_id });
+    // A seed row the list implies at a LOWER tier is held, not downgraded.
+    expect(dg.lines.find((l) => l.requirement_slug === 'w9-on-file')).toBeUndefined();
     // The list says nothing about the W-9: it stays unconfirmed, for the worklist.
     expect(rows['w9-on-file']).toMatchObject({ source: null, review_flag: null });
     // The name the list used became an alias rather than a second supplier.

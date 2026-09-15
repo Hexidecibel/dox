@@ -6158,7 +6158,7 @@ export interface SupplierListRowOutcome {
   warnings: string[];
 }
 
-export type DerivedPreviewAction = 'add' | 'adopt_unconfirmed' | 'refresh_derived' | 'keep_person';
+export type DerivedPreviewAction = 'add' | 'adopt_unconfirmed' | 'refresh_derived' | 'keep_person' | 'hold_unconfirmed';
 
 export interface SupplierListDerivedLine {
   requirement_slug: string;
@@ -6209,6 +6209,8 @@ export interface SupplierListImportCounts {
   requirements_refreshed: number;
   requirements_tier_changed: number;
   requirements_kept_person_set: number;
+  /** Unconfirmed rows NOT adopted because the list implies a lower tier — left for a person. */
+  requirements_held_unconfirmed: number;
   requirements_newly_flagged: number;
   requirements_still_flagged: number;
 }

@@ -25,7 +25,7 @@ import type { SupplierListImportResponse } from '../../shared/types';
 const counts = {
   rows_total: 3, rows_accepted: 2, rows_rejected: 1, suppliers_listed: 2, suppliers_matched: 1, suppliers_created: 1,
   suppliers_not_approved: 0, products_matched: 0, products_unmatched: 1, claims_unmatched: 1, requirements_added: 5,
-  requirements_adopted_unconfirmed: 2, requirements_refreshed: 0, requirements_tier_changed: 1, requirements_kept_person_set: 1,
+  requirements_adopted_unconfirmed: 2, requirements_refreshed: 0, requirements_tier_changed: 1, requirements_kept_person_set: 1, requirements_held_unconfirmed: 0,
   requirements_newly_flagged: 1, requirements_still_flagged: 0,
 };
 
