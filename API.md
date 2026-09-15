@@ -1465,6 +1465,33 @@ The schema defines: `Tenant`, `User`, `Document`, `DocumentVersion`, `AuditEntry
 
 Enums: `Role` (SUPER_ADMIN, ORG_ADMIN, USER, READER), `DocumentStatus` (ACTIVE, ARCHIVED, DELETED).
 
+### GraphQL Errors
+
+GraphQL answers the same condition the same way REST does. The five deliberate,
+caller-facing errors pass through with their own message plus a code and a
+matching HTTP status:
+
+| Thrown | `extensions.code` | Status |
+|---|---|---|
+| `UnauthorizedError` | `UNAUTHENTICATED` | 401 |
+| `ForbiddenError` | `FORBIDDEN` | 403 |
+| `NotFoundError` | `NOT_FOUND` | 404 |
+| `BadRequestError` | `BAD_REQUEST` | 400 |
+| `ConflictError` | `CONFLICT` | 409 |
+
+A module refusal keeps the `module_disabled` / `module_not_visible` code the
+REST gate uses.
+
+**Everything else is masked.** A D1 failure, a `TypeError`, a resolver bug all
+return `Unexpected error.` with code `INTERNAL_SERVER_ERROR` and nothing of the
+original message, stack or extensions. The allow-list is the point: it is
+exactly the list `errorToResponse` answers on the REST side
+(`functions/lib/graphql/errors.ts`).
+
+Before this, every one of the five came back as `Unexpected error.`, which
+reads as our fault and invites a retry that can never succeed — and erases the
+difference between "that does not exist" and "that is not yours".
+
 ---
 
 ## Document Versioning

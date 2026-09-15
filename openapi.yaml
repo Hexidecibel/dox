@@ -3557,6 +3557,15 @@ paths:
         Authentication is optional (login mutation works without a token).
         Authenticated requests use the same Bearer JWT as REST endpoints.
         **No auth required** (the /api/graphql path is public; individual resolvers enforce auth).
+
+        **Errors match the REST surface for the same condition.** A refusal
+        carries the same message the REST handler returns and an
+        `extensions.code` of `UNAUTHENTICATED` / `FORBIDDEN` / `NOT_FOUND` /
+        `BAD_REQUEST` / `CONFLICT`, and the response status is the matching
+        401 / 403 / 404 / 400 / 409. A module refusal keeps its own
+        `module_disabled` / `module_not_visible` code. **Everything else is
+        masked**: a genuine server error is always `Unexpected error.` with
+        code `INTERNAL_SERVER_ERROR` and nothing of the original attached.
       security: []
       requestBody:
         required: true
