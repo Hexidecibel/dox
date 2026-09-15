@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# Apply ONE (or a few named) migration(s) to a REMOTE D1 and stamp it in
+# `d1_migrations` — the tracking table prod actually uses.
+#
+# Usage:
+#   bin/migrate-prod-one --dry-run 0103_spec_check_provenance.sql
+#   bin/migrate-prod-one 0101_tenant_setup_runs.sql 0102_x.sql   # prompts
+#   bin/migrate-prod-one --yes 0103_spec_check_provenance.sql     # no prompt
+#   bin/migrate-prod-one --staging 0103_spec_check_provenance.sql # staging D1
+#
+# Flags:
+#   --dry-run     show tracking state + the statements, apply nothing
+#   --yes, -y     skip the confirmation prompt
+#   --staging     target doc-upload-db-staging (creds: env, then .env, then
+#                 .dev.vars). Stamps d1_migrations there only if that
+#                 table already exists; it is never created.
+#   --allow-destructive
+#                 permit a migration containing DROP / DELETE statements
+#
+# WHY THIS EXISTS (and why not bin/migrate --remote):
+#   - Prod tracks applied migrations in `d1_migrations` (wrangler's table), NOT
+#     `_migrations`. `bin/migrate --remote` would CREATE a competing
+#     `_migrations` table and then walk the whole chain.
+#   - Prod tracking is drifted (a stale legacy `_migrations` stops at 0085;
+#     d1_migrations has gaps, e.g. 0059-0067 applied-but-unstamped), so
+#     the chain must never be bulk-run. Each new migration is applied
+#     surgically, then stamped.
+#
+# Behaviour per file:
+#   1. Refuse if the target has no `d1_migrations` table (prod) — never create it.
+#   2. Skip if the filename is already stamped.
+#   3. Print every non-comment statement; refuse DROP/DELETE unless
+#      --allow-destructive.
+#   4. Apply with `wrangler d1 execute --remote --file`. On failure, abort
+#      WITHOUT stamping.
+#   5. INSERT the stamp row (name only; id + applied_at are defaulted, matching
+#      the rows wrangler itself writes).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DB="doc-upload-db"
+TARGET="PRODUCTION"
+DRY_RUN=0
+YES=0
+STAGING=0
+ALLOW_DESTRUCTIVE=0
+FILES=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --yes|-y) YES=1 ;;
+    --staging) STAGING=1; DB="doc-upload-db-staging"; TARGET="STAGING" ;;
+    --allow-destructive) ALLOW_DESTRUCTIVE=1 ;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+    -*) echo "Unknown flag: $1" >&2; exit 2 ;;
+    *) FILES+=("$1") ;;
+  esac
+  shift
+done
+
+[ "${#FILES[@]}" -gt 0 ] || { echo "Name at least one migration file. --help for usage." >&2; exit 2; }
+
+# Credentials: an exported CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID wins;
+# otherwise read from .env, then .dev.vars. (Not `source .dev.vars`, which would
+# clobber a fresher token already in the environment.)
+load_cred() {
+  local key="$1" f val
+  [ -n "${!key:-}" ] && return 0
+  for f in .env .dev.vars; do
+    [ -f "$f" ] || continue
+    val="$(grep "^${key}=" "$f" | head -1 | cut -d= -f2- | tr -d "\"'")"
+    if [ -n "$val" ]; then export "$key=$val"; return 0; fi
+  done
+}
+load_cred CLOUDFLARE_API_TOKEN
+load_cred CLOUDFLARE_ACCOUNT_ID
+
+# Run a read query and print the rows' values for one column, one per line.
+d1_col() {
+  local sql="$1" col="$2" raw
+  raw="$(npx wrangler d1 execute "$DB" --remote --json --command="$sql" 2>/dev/null)" || {
+    echo "ERROR: query failed against $DB: $sql" >&2
+    npx wrangler d1 execute "$DB" --remote --json --command="$sql" 2>&1 | tail -15 >&2
+    return 1
+  }
+  node -e '
+    const col = process.argv[2];
+    let data; try { data = JSON.parse(process.argv[1]); } catch { process.exit(3); }
+    if (data && data.error) { console.error(JSON.stringify(data.error)); process.exit(4); }
+    const rows = [];
+    for (const r of [].concat(data)) for (const row of (r && r.results) || []) rows.push(row[col]);
+    console.log(rows.filter((v) => v != null).join("\n"));
+  ' "$raw" "$col"
+}
+
+echo "Target: $TARGET D1 ($DB)"
+
+HAS_TRACKING="$(d1_col "SELECT name FROM sqlite_master WHERE type='table' AND name='d1_migrations'" name)"
+if [ "$HAS_TRACKING" != "d1_migrations" ]; then
+  if [ "$STAGING" = "1" ]; then
+    echo "  (no d1_migrations on staging — will apply without stamping)"
+  else
+    echo "ERROR: $DB has no d1_migrations table. Refusing to guess a tracking table." >&2
+    exit 1
+  fi
+fi
+
+STAMPED=""
+if [ "$HAS_TRACKING" = "d1_migrations" ]; then
+  STAMPED="$(d1_col "SELECT name FROM d1_migrations ORDER BY id" name)"
+  echo "  last stamped: $(printf '%s\n' "$STAMPED" | tail -1)"
+fi
+
+for arg in "${FILES[@]}"; do
+  name="$(basename "$arg")"
+  path="migrations/$name"
+  [ -f "$path" ] || { echo "ERROR: no such migration: $path" >&2; exit 1; }
+
+  echo
+  echo "=== $name ==="
+  if [ -n "$STAMPED" ] && printf '%s\n' "$STAMPED" | grep -Fxq "$name"; then
+    echo "  already stamped in d1_migrations — skipping"
+    continue
+  fi
+
+  # Statements without comments, collapsed to one line each for review.
+  stmts="$(sed -e 's/--.*$//' "$path" | tr '\n' ' ' | tr -s ' ' | tr ';' '\n' | sed -e 's/^ *//' -e '/^$/d')"
+  printf '%s\n' "$stmts" | sed 's/^/  > /' | cut -c1-160
+  if printf '%s\n' "$stmts" | grep -Eiq '^(DROP|DELETE)\b'; then
+    if [ "$ALLOW_DESTRUCTIVE" != "1" ]; then
+      echo "ERROR: $name contains DROP/DELETE. Re-run with --allow-destructive after reading it." >&2
+      exit 1
+    fi
+    echo "  WARNING: destructive statements present (--allow-destructive given)"
+  fi
+  if printf '%s\n' "$stmts" | grep -Eiq '^(UPDATE|INSERT)\b'; then
+    echo "  note: data statements present (UPDATE/INSERT) — read them above"
+  fi
+
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "  DRY RUN — not applied, not stamped"
+    continue
+  fi
+
+  if [ "$YES" != "1" ]; then
+    printf '  Apply %s to %s and stamp it? Type "apply": ' "$name" "$TARGET"
+    read -r answer </dev/tty
+    [ "$answer" = "apply" ] || { echo "  Not applied. Stopping."; exit 1; }
+  fi
+
+  if ! npx wrangler d1 execute "$DB" --remote --file="$path"; then
+    echo "ERROR: $name failed on $TARGET. NOT stamped. Stopping." >&2
+    exit 1
+  fi
+
+  if [ "$HAS_TRACKING" = "d1_migrations" ]; then
+    escaped="${name//\'/\'\'}"
+    npx wrangler d1 execute "$DB" --remote \
+      --command="INSERT INTO d1_migrations (name) VALUES ('$escaped');" >/dev/null || {
+        echo "ERROR: $name APPLIED but the stamp INSERT failed. Stamp it by hand." >&2
+        exit 1
+      }
+    echo "  applied + stamped"
+  else
+    echo "  applied (no tracking table to stamp)"
+  fi
+done
+
+echo
+echo "Done."

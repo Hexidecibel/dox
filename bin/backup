@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Take a restorable snapshot of a remote D1 database, OUTSIDE the repo.
+#
+# Usage:
+#   bin/backup                                   # prod: Time Travel bookmark
+#   bin/backup --table document_spec_checks      # + SQL export of that table
+#   bin/backup --staging [--table X ...]         # doc-upload-db-staging
+#   bin/backup --dir /some/dir                   # default ~/drops/dox-backups
+#
+# WHY A BOOKMARK AND NOT A FULL EXPORT: `wrangler d1 export` refuses any
+# database containing virtual tables ("cannot export databases with Virtual
+# Tables (fts5)") and dox has documents_fts / orders_fts. D1 Time Travel is the
+# whole-database backup instead: this records the current bookmark so a bad
+# migration or bulk write can be rolled back with
+#   npx wrangler d1 time-travel restore <db> --bookmark=<bookmark>
+# (restores the WHOLE database to that point — a deliberate manual act).
+# Time Travel retention is 30 days on paid plans.
+#
+# --table exports individual non-virtual tables as SQL as well, for a surgical
+# look/restore of just the rows a change touches.
+#
+# Credentials: wrangler reads CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID from
+# the environment. If they are unset, they are read from .env, then .dev.vars.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DB="doc-upload-db"
+DIR="$HOME/drops/dox-backups"
+TABLES=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --staging) DB="doc-upload-db-staging" ;;
+    --table) TABLES+=("$2"); shift ;;
+    --dir) DIR="$2"; shift ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+load_cred() {
+  local key="$1" f val
+  [ -n "${!key:-}" ] && return 0
+  for f in .env .dev.vars; do
+    [ -f "$f" ] || continue
+    val="$(grep "^${key}=" "$f" | head -1 | cut -d= -f2- | tr -d "\"'")"
+    if [ -n "$val" ]; then export "$key=$val"; return 0; fi
+  done
+}
+load_cred CLOUDFLARE_API_TOKEN
+load_cred CLOUDFLARE_ACCOUNT_ID
+
+mkdir -p "$DIR"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+info_file="$DIR/${DB}-${STAMP}.timetravel.json"
+echo "Recording Time Travel bookmark for $DB -> $info_file"
+npx wrangler d1 time-travel info "$DB" --json > "$info_file"
+if ! grep -q '"bookmark"' "$info_file"; then
+  echo "ERROR: no bookmark in time-travel output:" >&2
+  cat "$info_file" >&2
+  exit 1
+fi
+grep '"bookmark"' "$info_file" | head -1 | sed 's/^ */  /'
+
+for t in "${TABLES[@]}"; do
+  [[ "$t" =~ ^[A-Za-z0-9_]+$ ]] || { echo "ERROR: bad table name: $t" >&2; exit 2; }
+  out="$DIR/${DB}-${STAMP}.${t}.sql"
+  echo "Exporting table $t -> $out"
+  npx wrangler d1 export "$DB" --remote --table="$t" --output="$out" >/dev/null
+  size="$(stat -c %s "$out" 2>/dev/null || echo 0)"
+  [ "$size" -gt 0 ] || { echo "ERROR: export is empty: $out" >&2; exit 1; }
+  echo "  OK ($size bytes)"
+done
+
+echo "Done."
