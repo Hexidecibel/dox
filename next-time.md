@@ -4,6 +4,16 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-15 (overnight): v2.12.0 ON PROD — Phase 2 shipped.** Pages deploy `8302abd3` (136cdc0); gate:
+vitest 232 files / 3261 tests, Playwright 7 passed, 1 skipped; typecheck 56 (baseline). Migration **0106**
+applied to staging and prod (stamped `d1_migrations` id 89); prod view/trigger were checked first and matched
+the migration exactly except the intended `search_text` change; FTS unchanged (MATCH 'coa' 204, 600 rows).
+Backfill applied on prod (Cush Co): 397 examined, 168 lots written (81 extracted + 86 legacy resolved + 1
+legacy conflict, lot 10326076/10326051), 87 `search_text` written and all 87 reindexed; re-run dry run
+writes 0. Backup: `~/drops/dox-backups/doc-upload-db-20260915T082113Z.*` (Time Travel bookmark
+`000016e9-00000d43-000050e7-76cf2b33ae7904040db03d08b97eb210` + lots/document_versions SQL). New
+read-only `bin/d1-query` for verification queries.
+
 **2026-09-15 (later): Any-field COA retrieval Phase 2 DONE LOCALLY, not deployed.** Migration **0106**
 (lot production date + provenance, `document_versions.search_text`) applied to local only — needs a
 surgical apply + stamp on prod (`d1_migrations`), then `bin/backfill-lot-production-dates --tenant
