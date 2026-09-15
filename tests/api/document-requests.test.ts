@@ -571,6 +571,66 @@ describe('POST /api/document-requests/:id/amend — versioned, never overwritten
     expect(byReq[reqOrganic]).toBe('not_started');
   });
 
+  it('carries the document a line was accepted FROM, and only alongside accepted (0104)', async () => {
+    const id = await composeStandard();
+    await issue(id);
+    const before = await detail(id);
+    const allergenLine = before.body.request.lines.find(
+      (l: any) => l.requirement_id === reqAllergen,
+    );
+    const nutritionLine = before.body.request.lines.find(
+      (l: any) => l.requirement_id === reqNutrition,
+    );
+    const docId = await makeSatisfyingDocument(seed.tenantId, supplierA, reqAllergen, 'Allergen 2026');
+    // The decide endpoint is the only writer of this column; stand in for it.
+    await db
+      .prepare(`UPDATE request_lines SET status = 'accepted', accepted_document_id = ? WHERE id = ?`)
+      .bind(docId, allergenLine.id)
+      .run();
+    // A stale pointer on a line that is NOT accepted must not be resurrected.
+    await db
+      .prepare(`UPDATE request_lines SET status = 'received', accepted_document_id = ? WHERE id = ?`)
+      .bind(docId, nutritionLine.id)
+      .run();
+
+    const v2 = await amend(id, { amendment_reason: 'Deadline slipped', due_date: '2027-01-01' });
+    const v2Allergen = v2.body.request.lines.find((l: any) => l.requirement_id === reqAllergen);
+    const v2Nutrition = v2.body.request.lines.find((l: any) => l.requirement_id === reqNutrition);
+    expect(v2Allergen.id).not.toBe(allergenLine.id);
+    expect(v2Allergen.status).toBe('accepted');
+    expect(v2Allergen.accepted_document_id).toBe(docId);
+    expect(v2Nutrition.accepted_document_id).toBeNull();
+
+    // And again: the pointer survives a second amendment, not just the first.
+    const v3 = await amend(v2.body.request.id, { amendment_reason: 'Deadline slipped again' });
+    const v3Allergen = v3.body.request.lines.find((l: any) => l.requirement_id === reqAllergen);
+    expect(v3Allergen.accepted_document_id).toBe(docId);
+  });
+
+  it('refuses accepted_document_id on a line PUT, and clears it when status moves away', async () => {
+    const id = await composeStandard();
+    await issue(id);
+    const before = await detail(id);
+    const line = before.body.request.lines[0];
+    const docId = await makeSatisfyingDocument(seed.tenantId, supplierA, line.requirement_id, 'Cert');
+
+    const refused = await setLine(line.id, { accepted_document_id: docId });
+    expect(refused.status).toBe(400);
+
+    await db
+      .prepare(`UPDATE request_lines SET status = 'accepted', accepted_document_id = ? WHERE id = ?`)
+      .bind(docId, line.id)
+      .run();
+    // A note edit on an accepted line keeps the pointer...
+    const noted = await setLine(line.id, { status_note: 'Checked the signature' });
+    expect(noted.status).toBe(200);
+    expect(noted.body.line.accepted_document_id).toBe(docId);
+    // ...and moving it away drops it.
+    const moved = await setLine(line.id, { status: 'needs_attention' });
+    expect(moved.status).toBe(200);
+    expect(moved.body.line.accepted_document_id).toBeNull();
+  });
+
   it('keeps the previous composition verbatim when no lines are supplied', async () => {
     const id = await composeStandard();
     await issue(id);

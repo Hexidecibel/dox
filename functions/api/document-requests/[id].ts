@@ -23,24 +23,32 @@
  * precisely so the join already exists.
  *
  * It is READ-ONLY, and it deliberately does not move `request_lines.status`.
- * Two things are genuinely missing before a document can CLOSE a line, and
- * neither belongs in a schema-and-API task:
+ * A confirmed link for the right requirement from the right supplier is strong
+ * evidence and it is not the same statement as "this ask is satisfied" — a
+ * certificate uploaded for an unrelated reason would close a line nobody sent
+ * it for.
  *
- *   1. ATTRIBUTION. Nothing today records that an arriving document arrived
- *      AGAINST a particular ask. A confirmed link for the right requirement
- *      from the right supplier is strong evidence and it is not the same
- *      statement — a certificate uploaded for an unrelated reason would close
- *      a line nobody sent it for. Attribution needs a hook at the ingest /
- *      review-approval seam, which is the pipeline this task does not touch.
- *   2. THE TRANSITION ITSELF. `accepted` is the fourth of the client's five
- *      states and `received` and `under_review` sit in front of it. A machine
- *      that jumps a line straight to `accepted` erases the review those states
- *      exist to describe. The honest automatic move is `not_started` ->
- *      `received` at arrival, which requires (1).
+ * WHERE ATTRIBUTION NOW LIVES (migration 0104)
+ * -------------------------------------------
+ * This note used to list two missing pieces. Both exist now, and neither is on
+ * this route:
  *
- * So: the seam is built and queried, the write is not. A follow-up that adds
- * arrival attribution can drive the transition without a migration — the join
- * key (`request_lines.requirement_id`, indexed) is already here.
+ *   1. ATTRIBUTION. `request_upload_lines` records which file a supplier sent
+ *      against which line (0092), and `request_uploads.document_id` records
+ *      what that file became once a reviewer approved it (0094 + the approve
+ *      helper in functions/api/queue/[id].ts).
+ *   2. THE TRANSITION. POST /api/request-uploads/:id/decide is where a person
+ *      accepts a line FROM a named document (stamped on
+ *      `request_lines.accepted_document_id` and on the claim), or sends it back
+ *      with a reason the supplier reads. Accepting a typed line confirms the
+ *      registry link, so `closure` below fills in as a consequence of that
+ *      decision rather than as a guess made here. Logic:
+ *      functions/lib/request-arrivals.ts.
+ *
+ * So `closure` stays a read. The automatic `not_started` -> `received` move
+ * happens at arrival (the upload door), and `accepted` is only ever written by
+ * a person — through the decide endpoint, or by hand through
+ * PUT /api/request-lines/:id, which remains the escape hatch.
  */
 
 import { getClientIp } from '../../lib/db';

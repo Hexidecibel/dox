@@ -312,7 +312,7 @@ export function draftsFromLinks(
  * from outside that set would 400 the whole save, so an unrecognised
  * provenance is dropped and the endpoint's 'human' default applies.
  */
-const KNOWN_SOURCES = new Set(['human', 'extraction', 'rule', 'import']);
+const KNOWN_SOURCES = new Set(['human', 'extraction', 'rule', 'import', 'request_accept']);
 
 /** Flatten drafts (plus any passthrough rows) into the API's link payload. */
 export function linksFromDrafts(

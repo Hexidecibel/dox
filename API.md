@@ -1028,6 +1028,54 @@ Preview is accessed via the document detail page. The download endpoint (`GET /a
 
 ---
 
+## Supplier Request Arrivals
+
+A supplier answers a document request through a no-login link (`/r/:token`). Each file they send is an **arrival**: it is stored, put on the extraction queue, and claimed against one or more requirements on the request. A claim moves the requirement to `received`, never to `accepted`. These endpoints are the staff side: see what arrived, and decide what it satisfies (migration 0104).
+
+Two separate judgements, on two screens:
+
+1. **Review Queue approval** — "is the extraction faithful to this file?" Approving fills `request_uploads.document_id`.
+2. **Deciding the arrival** — "does this document satisfy what we asked this supplier for?" Only this moves a requirement to `accepted`, and it **requires step 1 first** (409 otherwise). Sending an item back (`needs_attention`) is allowed at any stage.
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/request-uploads?pending=1` | any tenant user | The inbox, oldest first. Also `request_id` (any version), `supplier_id`, `limit`, `offset`; `tenant_id` for super_admin. Response includes `pending_total`. |
+| `GET /api/request-uploads/:id` | any tenant user | One arrival. Another tenant's id is 404. |
+| `GET /api/request-uploads/:id/file` | any tenant user | The bytes. Falls back to the linked document's current version once approval has moved the upload object (`X-File-Source: upload \| document`); 410 if neither exists. |
+| `POST /api/request-uploads/:id/decide` | super_admin, org_admin, user | Accept or send back requirements. |
+| `POST /api/request-uploads/:id/enqueue` | super_admin, org_admin | Put an unread file (`queue_id` NULL) on the extraction queue. 409 if already queued. |
+
+Arrivals never include the uploader's IP or the storage key.
+
+`pipeline_state` is computed: `not_read` → `extracting` → `extraction_error` → `awaiting_approval` → `rejected_in_queue` → `document_linked`. Each claim is mapped onto the **current** version of the request (amendments re-mint line ids), so `claims[].line_id` is the id to decide with.
+
+### POST /api/request-uploads/:id/decide
+
+```json
+{
+  "decisions": [
+    { "line_id": "<current line id>", "decision": "accepted", "status_note": "Signature checked" },
+    { "line_id": "<current line id>", "decision": "needs_attention",
+      "attention_reason": "This is the 2023 statement; we need one signed this year." }
+  ]
+}
+```
+
+- `document_id` (accept only) defaults to the arrival's document; it may name any active document of the same supplier (a split COA produces several).
+- `status_note` is internal. `attention_reason` is what the supplier reads on their link; left blank, the portal composes a sentence from the requirement's criteria.
+- Deciding a requirement the supplier did not tick records a **staff claim**.
+- Accepting a typed requirement **confirms** its `document_requirements` link: none → inserted `confirmed` with `source: "request_accept"`; `suggested` → `confirmed`. If a person already marked the link `rejected`, the whole decision is refused with 409 and nothing is written.
+- The request must be `issued` (409 otherwise). No email is sent to the supplier.
+- Audit: `request_line_status_changed` per requirement (same action as `PUT /api/request-lines/:id`, with `via: "arrival"`), `request_upload.decided`, `request_upload.claim_added`, `document_requirement.confirmed_via_request`.
+
+Response: `{ "arrival": RequestArrival, "counts": DocumentRequestLineCounts }`.
+
+`request_lines.accepted_document_id` records which document a requirement stands accepted on. It is cleared when the line moves away from `accepted` (by `PUT /api/request-lines/:id`, which cannot set it) or when the supplier sends a newer file, and it is carried across amendments with the status.
+
+`GET /api/queue` also accepts `?source=request_link` to show only portal arrivals.
+
+---
+
 ## Agentic Integration
 
 The document portal supports an email-to-agent-to-portal pipeline for automated document ingestion. Here is the typical flow:

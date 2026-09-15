@@ -516,7 +516,19 @@ export type RegistryLinkStatus = 'suggested' | 'confirmed' | 'rejected';
  * CHECK constraint) so a new pipeline does not require a SQLite table rebuild;
  * the values below are the ones understood today.
  */
-export type RegistryLinkSource = 'human' | 'extraction' | 'rule' | 'import';
+export type RegistryLinkSource =
+  | 'human'
+  | 'extraction'
+  | 'rule'
+  | 'import'
+  /**
+   * A person accepted a supplier's file against a typed request line
+   * (POST /api/request-uploads/:id/decide, migration 0104). A human act, so the
+   * link is 'confirmed' — but a distinct provenance from 'human', because the
+   * judgement was "this satisfies what we asked THIS supplier for", made on the
+   * request screen, not a box ticked on the document page.
+   */
+  | 'request_accept';
 
 /**
  * What a claim is ABOUT. Open set for the same reason as RegistryLinkSource:
@@ -4418,6 +4430,14 @@ export interface RequestLineRow {
    * by them, and the only one of the two note columns that leaves the portal.
    */
   attention_reason: string | null;
+  /**
+   * The document this line currently stands accepted on (migration 0104).
+   * Set only by POST /api/request-uploads/:id/decide, and NULL whenever the
+   * line is not `accepted` — moving it away, or the supplier sending a newer
+   * file, clears it. Carried across an amendment with the status. Not
+   * writable through PUT /api/request-lines/:id.
+   */
+  accepted_document_id: string | null;
   status_changed_at: string | null;
   status_changed_by: string | null;
   sort_order: number;
@@ -4730,6 +4750,166 @@ export interface SupplierUploadResult {
   covered_items: string[];
   message: string;
   progress: SupplierRequestProgress;
+}
+
+// ---------------------------------------------------------------------------
+// Supplier-portal arrivals — the staff side (migration 0104)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where one arrival is in the pipeline BEFORE anyone decides what it
+ * satisfies. Computed, never stored, in this precedence order:
+ *
+ *   not_read           never enqueued (request_uploads.queue_id IS NULL) —
+ *                      the file is stored and nobody has read it
+ *   extracting         queued or being processed by the worker
+ *   extraction_error   the worker gave up; it needs a reprocess
+ *   awaiting_approval  extracted, waiting in the Review Queue
+ *   rejected_in_queue  a reviewer rejected the extraction (reason attached)
+ *   document_linked    approved; request_uploads.document_id is set
+ *
+ * Only `document_linked` allows a line to be ACCEPTED from this arrival.
+ * Needs-attention is allowed at every stage.
+ */
+export type RequestArrivalPipelineState =
+  | 'not_read'
+  | 'extracting'
+  | 'extraction_error'
+  | 'awaiting_approval'
+  | 'rejected_in_queue'
+  | 'document_linked';
+
+/**
+ * One claim — "this file covers that requirement" — mapped onto the CURRENT
+ * version of the request.
+ *
+ * `line_id` is the current version's line id, so it is the id a decision is
+ * posted with. `claimed_line_id` is the row the claim was actually made
+ * against, which differs after an amendment re-mints line ids. `line_id` is
+ * null when the line the supplier ticked was removed by a later amendment.
+ */
+export interface RequestArrivalClaim {
+  claim_id: string;
+  line_id: string | null;
+  claimed_line_id: string;
+  line_name: string;
+  line_kind: RequestLineKind;
+  requirement_id: string | null;
+  tier: SupplierRequirementTier;
+  /** The current line's status, or null when the line no longer exists. */
+  line_status: RequestLineStatus | null;
+  line_accepted_document_id: string | null;
+  claimed_by: 'supplier' | 'staff';
+  added_by_name: string | null;
+  decision: 'accepted' | 'needs_attention' | null;
+  decision_document_id: string | null;
+  decided_at: string | null;
+  decided_by_name: string | null;
+  /**
+   * True when this claim is undecided but its line was settled some other way
+   * — accepted or sent back from a different file, or by hand. It drops out of
+   * the inbox and stays in the request's own history.
+   */
+  decided_elsewhere: boolean;
+}
+
+/** A document the arrival became, offered as what an acceptance names. */
+export interface RequestArrivalDocument {
+  id: string;
+  title: string;
+}
+
+/**
+ * One file a supplier sent through a request link, as our own staff see it.
+ *
+ * Deliberately absent: `uploader_ip` (an audit fact, not a working one) and
+ * `r2_key` (the file is served by GET /api/request-uploads/:id/file, which
+ * knows what to do once approval has moved the bytes).
+ */
+export interface RequestArrival {
+  id: string;
+  tenant_id: string;
+  supplier_id: string;
+  supplier_name: string | null;
+  /** The version current when the file arrived. */
+  request_id: string;
+  root_request_id: string;
+  /** The version current NOW — the one decisions are made against. */
+  current_request_id: string;
+  current_request_status: DocumentRequestStatus;
+  request_title: string;
+  file_name: string;
+  file_size: number;
+  mime_type: string;
+  uploaded_at: string;
+  /** The supplier's own words ("Priya, QA"), if they typed any. */
+  uploader_label: string | null;
+  queue_id: string | null;
+  document_id: string | null;
+  document_title: string | null;
+  /**
+   * Every active document of this supplier the arrival's queue item produced
+   * (a records COA splits one file into several). An acceptance may name any
+   * of them; it defaults to `document_id`.
+   */
+  documents: RequestArrivalDocument[];
+  pipeline_state: RequestArrivalPipelineState;
+  rejection_reason: string | null;
+  rejection_note: string | null;
+  processing_error: string | null;
+  /**
+   * Spec results. Before approval they are computed from the queue row, the
+   * same way the Review Queue shows them; after approval `out_of_spec` is read
+   * from the frozen register (document_spec_checks). Null when there is
+   * nothing to judge from.
+   */
+  spec: { out_of_spec: number; not_checked: number; source: 'queue' | 'register' } | null;
+  claims: RequestArrivalClaim[];
+  /** Undecided claims whose current line is still received / under_review. */
+  pending_count: number;
+}
+
+export interface RequestArrivalListResponse {
+  arrivals: RequestArrival[];
+  total: number;
+  limit: number;
+  offset: number;
+  /** Tenant-wide pending arrival count, regardless of filters. Drives the tab badge. */
+  pending_total: number;
+}
+
+export interface RequestArrivalResponse {
+  arrival: RequestArrival;
+}
+
+export type RequestArrivalDecisionKind = 'accepted' | 'needs_attention';
+
+export interface DecideArrivalLine {
+  /** A line id on the CURRENT version of the request. */
+  line_id: string;
+  decision: RequestArrivalDecisionKind;
+  /**
+   * Accept only. Defaults to the arrival's own linked document. May be any
+   * active document of the same tenant and supplier.
+   */
+  document_id?: string | null;
+  /** INTERNAL. Never leaves the portal. */
+  status_note?: string | null;
+  /**
+   * Needs-attention only. The sentence the SUPPLIER reads. Blank falls back to
+   * one composed from the line's own criteria and formats.
+   */
+  attention_reason?: string | null;
+}
+
+export interface DecideArrivalRequest {
+  decisions: DecideArrivalLine[];
+}
+
+export interface DecideArrivalResponse {
+  arrival: RequestArrival;
+  /** The current version's counts after the decision. */
+  counts: DocumentRequestLineCounts;
 }
 
 /** A composable line, as posted by the composer. */

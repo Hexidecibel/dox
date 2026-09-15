@@ -138,7 +138,21 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       );
     }
 
+    // Which document a line was accepted FROM is decided on the arrival, where
+    // the file, its claim and its approved document are all in view
+    // (POST /api/request-uploads/:id/decide). A PUT that could name one would
+    // be an acceptance with no arrival behind it — the unexplained acceptance
+    // migration 0104 exists to end. The status dropdown stays as the escape
+    // hatch; it just cannot invent provenance.
+    if ('accepted_document_id' in (body as Record<string, unknown>)) {
+      throw new BadRequestError(
+        'accepted_document_id is set by deciding an arrival ' +
+          '(POST /api/request-uploads/:id/decide), not by editing the line.',
+      );
+    }
+
     const statusChanged = body.status !== undefined && body.status !== line.status;
+    const nextStatus = body.status === undefined ? line.status : body.status;
     const name = body.name === undefined ? line.name : sanitizeString(body.name);
     if (!name) return json({ error: 'name cannot be empty' }, 400);
 
@@ -146,6 +160,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       `UPDATE request_lines
           SET name = ?, explanation = ?, acceptable_formats = ?, criteria = ?,
               owner = ?, tier = ?, status = ?, status_note = ?, attention_reason = ?,
+              accepted_document_id = CASE WHEN ? THEN accepted_document_id ELSE NULL END,
               status_changed_at = CASE WHEN ? THEN datetime('now') ELSE status_changed_at END,
               status_changed_by = CASE WHEN ? THEN ? ELSE status_changed_by END,
               sort_order = ?, updated_at = datetime('now'), updated_by = ?
@@ -160,7 +175,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         body.criteria === undefined ? line.criteria : (body.criteria || null),
         body.owner === undefined ? line.owner : (body.owner || null),
         body.tier === undefined ? line.tier : body.tier,
-        body.status === undefined ? line.status : body.status,
+        nextStatus,
         body.status_note === undefined ? line.status_note : (body.status_note || null),
         // The supplier-facing half of the pair. Two columns, two audiences —
         // see migration 0092 for why reusing `status_note` for this would be
@@ -168,6 +183,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         body.attention_reason === undefined
           ? line.attention_reason
           : (body.attention_reason || null),
+        // A line that is no longer accepted is not accepted FROM anything.
+        // Keeping the pointer would leave the request screen naming a document
+        // as the basis of a verdict somebody has since withdrawn.
+        nextStatus === 'accepted' ? 1 : 0,
         statusChanged ? 1 : 0,
         statusChanged ? 1 : 0,
         user.id,

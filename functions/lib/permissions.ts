@@ -32,6 +32,20 @@ export class BadRequestError extends Error {
   }
 }
 
+/**
+ * The request is well-formed and the caller may make it, but the record is not
+ * in a state that allows it right now ("approve it first", "this ask was
+ * cancelled"). Distinct from 400 so a client can tell "fix your input" from
+ * "do something else first".
+ */
+export class ConflictError extends Error {
+  status = 409;
+  constructor(message = 'Conflict') {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
 export function requireRole(user: User, ...roles: string[]): void {
   if (!roles.includes(user.role)) {
     throw new ForbiddenError('Insufficient permissions');
@@ -76,7 +90,8 @@ export function errorToResponse(err: unknown): Response | null {
     err instanceof ForbiddenError ||
     err instanceof NotFoundError ||
     err instanceof UnauthorizedError ||
-    err instanceof BadRequestError
+    err instanceof BadRequestError ||
+    err instanceof ConflictError
   ) {
     return new Response(JSON.stringify({ error: err.message }), {
       status: err.status,

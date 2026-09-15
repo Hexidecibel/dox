@@ -23,6 +23,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const status = url.searchParams.get('status') || 'pending'; // pass 'all' to skip status filter
     const processingStatus = url.searchParams.get('processing_status');
     const documentTypeId = url.searchParams.get('document_type_id');
+    // Which door the item came through ('request_link', 'email', 'import', ...).
+    // Lets the supplier-arrivals screen link to "just the portal uploads"
+    // without the Review Queue learning anything about requests.
+    const source = url.searchParams.get('source');
     const mine = url.searchParams.get('mine') === '1' || url.searchParams.get('owned_by_me') === '1';
     let tenantId = url.searchParams.get('tenant_id');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
@@ -54,6 +58,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (documentTypeId) {
       conditions.push('pq.document_type_id = ?');
       params.push(documentTypeId);
+    }
+
+    if (source) {
+      conditions.push('pq.source = ?');
+      params.push(source);
     }
 
     // "Mine" filter: restrict to items whose (supplier_id, document_type_id)

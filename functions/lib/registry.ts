@@ -182,6 +182,10 @@ export const REGISTRY_LINK_SOURCES: readonly RegistryLinkSource[] = [
   'extraction',
   'rule',
   'import',
+  // A person accepting a supplier's file against a typed request line
+  // (functions/lib/request-arrivals.ts). Listed so a document-page save that
+  // round-trips the link does not 400 on its provenance.
+  'request_accept',
 ];
 
 export function isValidLinkSource(value: string): value is RegistryLinkSource {

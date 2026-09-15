@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 131 tables, 2 views, 208 indexes, 36 triggers.
+Objects: 131 tables, 2 views, 209 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -1590,6 +1590,7 @@ Indexes: `idx_renewal_alert_state_doc`
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   updated_by TEXT
   attention_reason TEXT
+  accepted_document_id TEXT REFERENCES documents(id) ON DELETE SET NULL
   CHECK ( (line_kind = 'requirement' AND requirement_id IS NOT NULL) OR (line_kind = 'free_text' AND requirement_id IS NULL) )
 ```
 
@@ -1681,10 +1682,16 @@ Indexes: `idx_request_templates_tenant`
   upload_id TEXT NOT NULL REFERENCES request_uploads(id) ON DELETE CASCADE
   line_id TEXT NOT NULL REFERENCES request_lines(id) ON DELETE CASCADE
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  claimed_by TEXT NOT NULL DEFAULT 'supplier' CHECK (claimed_by IN ('supplier', 'staff'))
+  added_by TEXT REFERENCES users(id)
+  decision TEXT CHECK (decision IN ('accepted', 'needs_attention'))
+  decision_document_id TEXT REFERENCES documents(id) ON DELETE SET NULL
+  decided_at TEXT
+  decided_by TEXT REFERENCES users(id)
   UNIQUE(upload_id, line_id)
 ```
 
-Indexes: `idx_request_upload_lines_line`
+Indexes: `idx_request_upload_lines_line`, `idx_request_upload_lines_undecided`
 
 ### `request_uploads`
 

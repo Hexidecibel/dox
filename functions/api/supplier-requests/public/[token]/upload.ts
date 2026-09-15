@@ -76,7 +76,7 @@
  */
 
 import { generateId, getClientIp, logAudit } from '../../../../lib/db';
-import { enqueueDocument } from '../../../../lib/intake/enqueue';
+import { enqueueSupplierUpload } from '../../../../lib/request-arrivals';
 import { computeChecksum } from '../../../../lib/r2';
 import { checkRateLimit, recordAttempt } from '../../../../lib/ratelimit';
 import { buildProgress } from '../../../../lib/document-requests';
@@ -332,11 +332,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       // deliberately unconditional on the current status: re-sending against an
       // already-accepted item reopens it for review, which is the correct
       // reading of "here is a newer certificate".
+      //
+      // `accepted_document_id` goes with it (migration 0104). A reopened line
+      // is not accepted FROM anything any more; leaving the pointer would have
+      // the request screen name last year's certificate as the basis of a
+      // verdict the newer file has just put back in question.
       ...claimedLines.map((l) =>
         db
           .prepare(
             `UPDATE request_lines
-                SET status = 'received', status_changed_at = ?, updated_at = ?
+                SET status = 'received', status_changed_at = ?, updated_at = ?,
+                    accepted_document_id = NULL
               WHERE id = ? AND tenant_id = ?`,
           )
           .bind(now, now, l.id, link.tenant_id),
@@ -414,108 +420,3 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   }
 };
 
-
-/**
- * Put one supplier arrival on the extraction queue and record the pairing.
- *
- * Best-effort by construction. The caller has already committed the upload, so
- * every failure mode here degrades to "the file is stored, the lines moved,
- * and nobody read it yet" — which is precisely the behaviour that existed
- * before 0094, and is therefore a safe floor rather than a broken state.
- *
- * The failure is made findable in two places rather than one:
- *   - `console.error`, for whoever is tailing the worker.
- *   - an audit-log row (`request_link.enqueue_failed`) against the upload,
- *     which is the surface an operator actually has. A `console.error` in a
- *     Worker is not a report; nobody is watching it a week from now.
- *
- * And the DATA records it too: `request_uploads.queue_id` stays NULL, so
- * "arrivals we never read" is one indexed query away and a re-enqueue sweep
- * has an exact worklist.
- */
-async function enqueueSupplierUpload(
-  db: D1Database,
-  args: {
-    tenantId: string;
-    supplierId: string;
-    requestId: string;
-    linkId: string;
-    uploadId: string;
-    r2Key: string;
-    fileName: string;
-    fileSize: number;
-    mimeType: string;
-    checksum: string;
-    ip: string;
-  },
-): Promise<string | null> {
-  try {
-    const { queueId } = await enqueueDocument(db, {
-      tenantId: args.tenantId,
-      // Unknown, and honestly so. A supplier request packet asks for an
-      // allergen statement, an insurance certificate and a spec sheet in the
-      // same breath; guessing a type here would only teach the worker a wrong
-      // one. NULL lets the doc-type resolution happen downstream where the
-      // extracted text is available to inform it.
-      documentTypeId: null,
-      fileR2Key: args.r2Key,
-      fileName: args.fileName,
-      fileSize: args.fileSize,
-      mimeType: args.mimeType,
-      checksum: args.checksum,
-      // A supplier is not a user. `created_by` is a nullable FK to users(id),
-      // so NULL is the only value that is both true and legal.
-      createdBy: null,
-      // The door, in the vocabulary the other doors use ('email', 's3', 'api',
-      // 'public_link', 'import'). Deliberately NOT 'public_link' — that value
-      // is already taken by the connector drop door, and collapsing the two
-      // would make "which door did this come from" unanswerable for exactly
-      // the two doors an operator most needs to tell apart. `request_link`
-      // matches this feature's own names throughout: the `request_links`
-      // table, the `request_link.upload` audit action, the rate-limit bucket.
-      source: 'request_link',
-      // Enough to walk back to the ask and to the individual arrival.
-      sourceDetail: `request:${args.requestId}:upload:${args.uploadId}`,
-      // NULL, treated as 'coa' downstream. Same reasoning as documentTypeId.
-      outputKind: null,
-      // Not a connector. A request link is its own kind of door.
-      sourceId: null,
-      // THE POINT. The link knows exactly which supplier this is, so the
-      // worker can load that supplier's extraction instructions instead of
-      // extracting blind.
-      supplierId: args.supplierId,
-    });
-
-    await db
-      .prepare(`UPDATE request_uploads SET queue_id = ? WHERE id = ? AND tenant_id = ?`)
-      .bind(queueId, args.uploadId, args.tenantId)
-      .run();
-
-    return queueId;
-  } catch (err) {
-    console.error('Supplier request upload: enqueue failed:', err);
-    try {
-      await logAudit(
-        db,
-        null,
-        args.tenantId,
-        'request_link.enqueue_failed',
-        'request_upload',
-        args.uploadId,
-        JSON.stringify({
-          request_id: args.requestId,
-          link_id: args.linkId,
-          supplier_id: args.supplierId,
-          file_name: args.fileName,
-          r2_key: args.r2Key,
-          error: err instanceof Error ? err.message : String(err),
-        }),
-        args.ip,
-      );
-    } catch {
-      // If even the audit write fails, the console line is what is left.
-      // Still not a reason to fail an upload that already succeeded.
-    }
-    return null;
-  }
-}

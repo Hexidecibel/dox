@@ -26,14 +26,24 @@ import { onRequestGet as portalGet } from '../../functions/api/supplier-requests
 import { onRequestPost as portalUpload } from '../../functions/api/supplier-requests/public/[token]/upload';
 import { onRequest as middleware } from '../../functions/api/_middleware';
 import { onRequestPut as lineUpdate } from '../../functions/api/request-lines/[id]';
-import { onRequestPut as queueUpdate } from '../../functions/api/queue/[id]';
 import {
   computeRequestLinkExpiry,
   generateRequestToken,
   itemRef,
-  mintRequestLink,
   REQUEST_LINK_MIN_TTL_DAYS,
 } from '../../functions/lib/request-links';
+import {
+  INTERNAL_NOTE,
+  LINE_OWNER,
+  RECIPIENT,
+  ROUTING_NOTE,
+  makeRequest as makeRequestFor,
+  orgAdminUser,
+  queuePut as queuePutAs,
+  refsFor,
+  upload,
+  type RequestFixture,
+} from '../helpers/requests';
 import { buildUploadMessage } from '../../functions/lib/request-links';
 import type { SupplierRequestView, SupplierUploadResult } from '../../shared/types';
 
@@ -48,10 +58,6 @@ let requirementIds: string[] = [];
  * must never appear in a byte of its output.
  */
 const OUR_LIMIT_TEXT = '<=10 CFU/g';
-const INTERNAL_NOTE = 'INTERNAL-they-always-send-the-2023-cert-escalate-to-Dan';
-const ROUTING_NOTE = 'INTERNAL-ROUTING-posted-via-Sarah-do-not-share';
-const RECIPIENT = 'internal-recipient@medosweet.example';
-const LINE_OWNER = 'INTERNAL-owner-Priya-in-QA';
 const OTHER_SUPPLIER_DOC = 'CONFIDENTIAL-OtherSupplier-Audit-Report';
 
 function ctx(token: string, init?: RequestInit, path = '') {
@@ -70,31 +76,6 @@ function ctx(token: string, init?: RequestInit, path = '') {
 
 async function get(token: string): Promise<{ status: number; body: unknown }> {
   const resp = await portalGet(ctx(token));
-  let body: unknown = null;
-  try {
-    body = await resp.json();
-  } catch {
-    body = null;
-  }
-  return { status: resp.status, body };
-}
-
-async function upload(
-  token: string,
-  refs: string[],
-  opts: { name?: string; type?: string; bytes?: number; label?: string } = {},
-): Promise<{ status: number; body: unknown }> {
-  const form = new FormData();
-  const blob = new Blob([new Uint8Array(opts.bytes ?? 64)], {
-    type: opts.type ?? 'application/pdf',
-  });
-  form.append('file', new File([blob], opts.name ?? 'cert.pdf', {
-    type: opts.type ?? 'application/pdf',
-  }));
-  form.append('item_refs', JSON.stringify(refs));
-  if (opts.label) form.append('uploader_label', opts.label);
-
-  const resp = await portalUpload(ctx(token, { method: 'POST', body: form }, '/upload'));
   let body: unknown = null;
   try {
     body = await resp.json();
@@ -141,43 +122,6 @@ async function linePut(
   return { status: resp.status, body: parsed };
 }
 
-/** Authenticated PUT against one queue item, as an org_admin reviewer. */
-async function queuePut(
-  queueId: string,
-  body: Record<string, unknown>,
-): Promise<{ status: number; body: unknown }> {
-  const c = {
-    request: new Request(`http://localhost/api/queue/${queueId}`, {
-      method: 'PUT',
-      body: JSON.stringify(body),
-      headers: { 'Content-Type': 'application/json' },
-    }),
-    env,
-    data: {
-      user: {
-        id: seed.orgAdminId,
-        email: 'orgadmin@test.com',
-        name: 'Org Admin',
-        role: 'org_admin',
-        tenant_id: seed.tenantId,
-      },
-    },
-    params: { id: queueId },
-    waitUntil: () => {},
-    passThroughOnException: () => {},
-    next: async () => new Response(null),
-    functionPath: `/api/queue/${queueId}`,
-  } as never;
-  const resp = await queueUpdate(c);
-  let parsed: unknown = null;
-  try {
-    parsed = await resp.json();
-  } catch {
-    parsed = null;
-  }
-  return { status: resp.status, body: parsed };
-}
-
 /** Every key that appears anywhere in the payload, at any depth. */
 function allKeys(value: unknown, into: Set<string> = new Set()): Set<string> {
   if (Array.isArray(value)) {
@@ -191,93 +135,23 @@ function allKeys(value: unknown, into: Set<string> = new Set()): Set<string> {
   return into;
 }
 
-/**
- * Build one issued ask with `names.length` typed lines, plus a link.
- * Every internal field that could leak is populated with a marked string.
- */
-async function makeRequest(
-  names: string[],
-  opts: {
-    dueDate?: string | null;
-    status?: string;
-    tiers?: ('required' | 'recommended')[];
-    supplier?: string;
-  } = {},
-): Promise<{ requestId: string; rootId: string; token: string; lineIds: string[] }> {
-  const requestId = generateTestId();
-  const supplier = opts.supplier ?? supplierId;
-
-  await db
-    .prepare(
-      `INSERT INTO document_requests
-         (id, tenant_id, supplier_id, root_request_id, version, title, intro,
-          due_date, assigned_to, origin, origin_ref, status, issued_at, created_by)
-       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, 'gap', 'INTERNAL-origin-ref-secret', ?, datetime('now'), ?)`,
-    )
-    .bind(
-      requestId,
-      seed.tenantId,
-      supplier,
-      requestId,
-      'Annual supplier documentation',
-      'Please send the items below.',
-      opts.dueDate === undefined ? '2026-12-01' : opts.dueDate,
-      seed.orgAdminId,
-      opts.status ?? 'issued',
-      seed.orgAdminId,
-    )
-    .run();
-
-  await db
-    .prepare(
-      `INSERT INTO request_routing
-         (id, tenant_id, request_id, issued_by, version, channel, recipient, internal_notes)
-       VALUES (?, ?, ?, ?, 1, 'portal', ?, ?)`,
-    )
-    .bind(generateTestId(), seed.tenantId, requestId, seed.orgAdminId, RECIPIENT, ROUTING_NOTE)
-    .run();
-
-  const lineIds: string[] = [];
-  for (let i = 0; i < names.length; i += 1) {
-    const lineId = generateTestId();
-    lineIds.push(lineId);
-    await db
-      .prepare(
-        `INSERT INTO request_lines
-           (id, tenant_id, request_id, line_kind, requirement_id, name, explanation,
-            acceptable_formats, criteria, owner, tier, status, status_note, sort_order)
-         VALUES (?, ?, ?, 'requirement', ?, ?, ?, ?, ?, ?, ?, 'not_started', ?, ?)`,
-      )
-      .bind(
-        lineId,
-        seed.tenantId,
-        requestId,
-        requirementIds[i % requirementIds.length],
-        names[i],
-        `Plain-language reason for ${names[i]}.`,
-        'PDF or a clear photo',
-        'Signed, dated within 12 months',
-        LINE_OWNER,
-        opts.tiers?.[i] ?? 'required',
-        INTERNAL_NOTE,
-        i,
-      )
-      .run();
-  }
-
-  const token = await mintRequestLink(db, {
-    tenantId: seed.tenantId,
-    rootRequestId: requestId,
-    supplierId: supplier,
-    dueDate: '2026-12-01',
-    createdBy: seed.orgAdminId,
-  });
-
-  return { requestId, rootId: requestId, token: token!, lineIds };
+/** The shared fixtures (tests/helpers/requests.ts), bound to this file's seed. */
+function fixture(): RequestFixture {
+  return { tenantId: seed.tenantId, orgAdminId: seed.orgAdminId, supplierId, requirementIds };
 }
 
-async function refsFor(token: string, lineIds: string[]): Promise<string[]> {
-  return Promise.all(lineIds.map((id) => itemRef(token, id)));
+function makeRequest(
+  names: string[],
+  opts: Parameters<typeof makeRequestFor>[2] = {},
+): ReturnType<typeof makeRequestFor> {
+  return makeRequestFor(fixture(), names, opts);
+}
+
+function queuePut(
+  queueId: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: unknown }> {
+  return queuePutAs(queueId, body, orgAdminUser(fixture()));
 }
 
 beforeAll(async () => {

@@ -49,6 +49,10 @@ tags:
     description: Audit log queries
   - name: API Keys
     description: API key management for programmatic access
+  - name: Supplier Arrivals
+    description: |
+      Files suppliers sent through a request link, as staff see them, and the
+      decision about which requirements each one satisfies (migration 0104).
   - name: GraphQL
     description: GraphQL API (alternative to REST)
 
@@ -371,6 +375,107 @@ components:
           nullable: true
           description: Joined from users table
       required: [id, name, key_prefix, user_id, permissions, revoked, created_at]
+
+    RequestArrivalClaim:
+      type: object
+      description: |
+        One "this file covers that requirement" claim, mapped onto the CURRENT
+        version of the request by line identity. `line_id` is the id to decide
+        with; `claimed_line_id` is the row the claim was made against.
+      properties:
+        claim_id: { type: string }
+        line_id: { type: string, nullable: true, description: Null when a later amendment removed the line. }
+        claimed_line_id: { type: string }
+        line_name: { type: string }
+        line_kind: { type: string, enum: [requirement, free_text] }
+        requirement_id: { type: string, nullable: true }
+        tier: { type: string, enum: [required, recommended] }
+        line_status: { type: string, nullable: true, enum: [not_started, received, under_review, accepted, needs_attention] }
+        line_accepted_document_id: { type: string, nullable: true }
+        claimed_by: { type: string, enum: [supplier, staff] }
+        added_by_name: { type: string, nullable: true }
+        decision: { type: string, nullable: true, enum: [accepted, needs_attention] }
+        decision_document_id: { type: string, nullable: true }
+        decided_at: { type: string, nullable: true }
+        decided_by_name: { type: string, nullable: true }
+        decided_elsewhere:
+          type: boolean
+          description: Undecided here, but the line was settled from another file or by hand.
+
+    RequestArrival:
+      type: object
+      description: |
+        One supplier upload. Never carries the uploader IP or the storage key;
+        the bytes are served by GET /api/request-uploads/{id}/file.
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        supplier_id: { type: string }
+        supplier_name: { type: string, nullable: true }
+        request_id: { type: string, description: The version current when the file arrived. }
+        root_request_id: { type: string }
+        current_request_id: { type: string, description: The version decisions are made against. }
+        current_request_status: { type: string, enum: [draft, issued, cancelled, closed] }
+        request_title: { type: string }
+        file_name: { type: string }
+        file_size: { type: integer }
+        mime_type: { type: string }
+        uploaded_at: { type: string }
+        uploader_label: { type: string, nullable: true }
+        queue_id: { type: string, nullable: true }
+        document_id: { type: string, nullable: true }
+        document_title: { type: string, nullable: true }
+        documents:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              title: { type: string }
+        pipeline_state:
+          type: string
+          enum: [not_read, extracting, extraction_error, awaiting_approval, rejected_in_queue, document_linked]
+          description: Only `document_linked` allows a requirement to be accepted from this file.
+        rejection_reason: { type: string, nullable: true }
+        rejection_note: { type: string, nullable: true }
+        processing_error: { type: string, nullable: true }
+        spec:
+          type: object
+          nullable: true
+          properties:
+            out_of_spec: { type: integer }
+            not_checked: { type: integer }
+            source: { type: string, enum: [queue, register] }
+        claims:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequestArrivalClaim'
+        pending_count:
+          type: integer
+          description: Undecided claims whose current line is still received or under review.
+
+    DecideArrivalRequest:
+      type: object
+      required: [decisions]
+      properties:
+        decisions:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [line_id, decision]
+            properties:
+              line_id: { type: string, description: A line on the CURRENT version. }
+              decision: { type: string, enum: [accepted, needs_attention] }
+              document_id:
+                type: string
+                nullable: true
+                description: Accept only. Defaults to the arrival's document; must be an active document of the same supplier.
+              status_note: { type: string, nullable: true, description: Internal. Never shown to the supplier. }
+              attention_reason:
+                type: string
+                nullable: true
+                description: Needs-attention only. The sentence the supplier reads; blank falls back to one composed from the line's criteria.
 
     PaginatedDocuments:
       type: object
@@ -2113,6 +2218,171 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /api/request-uploads:
+    get:
+      tags: [Supplier Arrivals]
+      summary: List supplier arrivals
+      description: |
+        Any tenant user. `pending=1` is the inbox (oldest first): arrivals with at
+        least one claimed requirement still waiting on a person, on a live ask.
+        `request_id` accepts any version of an ask and shows its whole history.
+        A super_admin must pass `tenant_id`.
+      parameters:
+        - { name: pending, in: query, schema: { type: string, enum: ['1'] } }
+        - { name: request_id, in: query, schema: { type: string } }
+        - { name: supplier_id, in: query, schema: { type: string } }
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only (required for one) }
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: Arrivals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  arrivals:
+                    type: array
+                    items: { $ref: '#/components/schemas/RequestArrival' }
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  pending_total: { type: integer, description: Tenant-wide inbox size, ignoring filters. }
+        '404':
+          description: request_id is not a request in this tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/request-uploads/{id}:
+    get:
+      tags: [Supplier Arrivals]
+      summary: Get one supplier arrival
+      description: Any tenant user. Another tenant's id is a 404.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The arrival
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  arrival: { $ref: '#/components/schemas/RequestArrival' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/request-uploads/{id}/file:
+    get:
+      tags: [Supplier Arrivals]
+      summary: Download the file a supplier sent
+      description: |
+        Any tenant user. Serves the upload's own object while it exists; once
+        approval has moved the bytes, serves the linked document's current
+        version instead. `X-File-Source` says which (`upload` | `document`).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: File bytes
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: The arrival is recorded but no bytes are held for it
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/request-uploads/{id}/decide:
+    post:
+      tags: [Supplier Arrivals]
+      summary: Decide which requirements a supplier's file satisfies
+      description: |
+        super_admin, org_admin or user (not reader). Writes, in one batch, the
+        claim decision, the current line's status and notes, and
+        `request_lines.accepted_document_id`. Accepting a typed line confirms its
+        `document_requirements` link (inserted with source `request_accept`, or a
+        `suggested` link promoted). Deciding a requirement the supplier did not
+        tick records a staff claim. No email is sent to the supplier.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DecideArrivalRequest' }
+      responses:
+        '200':
+          description: The refreshed arrival and the current version's line counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  arrival: { $ref: '#/components/schemas/RequestArrival' }
+                  counts: { type: object }
+        '400':
+          description: Malformed decisions, a line not on the current version, or an ineligible document
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Reader
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            Accepting before the file is approved in the Review Queue; the ask is
+            not issued; or a person already rejected the document for that
+            requirement. Nothing is written.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/request-uploads/{id}/enqueue:
+    post:
+      tags: [Supplier Arrivals]
+      summary: Put an unread supplier file on the extraction queue
+      description: super_admin or org_admin. Only for an arrival whose queue insert failed at upload time.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  arrival: { $ref: '#/components/schemas/RequestArrival' }
+        '409':
+          description: Already on the queue
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: The bytes are gone
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/graphql:
     post:

@@ -456,9 +456,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
  *     reviewer is looking at field values against a PDF. They have not seen
  *     the request, its line, its `criteria`, or its `acceptable_formats`.
  *   - Line accept asks "does this document satisfy what we asked this supplier
- *     for?" That is the assigned buyer's job. It already has a home —
- *     PUT /api/request-lines/:id — which gates on `requireLineWorker`, stamps
- *     `status_changed_by`, and audits `request_line_status_changed`.
+ *     for?" That is the assigned buyer's job. Its home is
+ *     POST /api/request-uploads/:id/decide (migration 0104), which gates on
+ *     `requireLineWorker`, REQUIRES the `document_id` this helper writes, names
+ *     the accepted document on the line, and audits
+ *     `request_line_status_changed` — the same action as the hand-edit escape
+ *     hatch, PUT /api/request-lines/:id.
  *
  * Writing `accepted` from here would stamp the extraction reviewer as the
  * person who made a judgement they were never shown the inputs for. Worse, one

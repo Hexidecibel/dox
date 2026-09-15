@@ -101,6 +101,7 @@ export const MODULES: Record<ModuleKey, ModuleDefinition> = {
       '/api/bundles',
       '/api/document-requests',
       '/api/request-lines',
+      '/api/request-uploads',
       '/api/request-templates',
       '/api/supplier-requests',
       '/api/supplier-gaps',

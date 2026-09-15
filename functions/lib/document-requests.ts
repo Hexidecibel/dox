@@ -292,8 +292,8 @@ function lineInsertStatements(
         `INSERT INTO request_lines
            (id, tenant_id, request_id, line_kind, requirement_id, name, explanation,
             acceptable_formats, criteria, owner, tier, status, status_note,
-            attention_reason, sort_order, created_by, updated_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            attention_reason, accepted_document_id, sort_order, created_by, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         generateId(),
@@ -310,6 +310,8 @@ function lineInsertStatements(
         carried?.status ?? 'not_started',
         carried?.note ?? null,
         carried?.attention_reason ?? null,
+        // Only ever set alongside 'accepted'; see CarriedLineState.
+        carried?.status === 'accepted' ? (carried.accepted_document_id ?? null) : null,
         l.sort_order,
         userId,
         userId,
@@ -324,7 +326,7 @@ function lineInsertStatements(
  * being typed. A free-text line has nothing better than its name, which is
  * another small, concrete cost of the escape hatch.
  */
-function lineKey(l: { line_kind: RequestLineKind; requirement_id: string | null; name: string }): string {
+export function lineKey(l: { line_kind: RequestLineKind; requirement_id: string | null; name: string }): string {
   return l.line_kind === 'requirement' && l.requirement_id
     ? `req:${l.requirement_id}`
     : `txt:${l.name.trim().toLowerCase()}`;
@@ -343,6 +345,13 @@ interface CarriedLineState {
    * telling them what to do — the exact state this page must never reach.
    */
   attention_reason: string | null;
+  /**
+   * The document the line stands accepted on (migration 0104). Carried with
+   * the status it belongs to: an amendment that fixes a due date must not turn
+   * "accepted, from this certificate" into "accepted, from nothing we can
+   * name" — that is the unexplained acceptance 0104 exists to end.
+   */
+  accepted_document_id: string | null;
 }
 
 /**
@@ -360,6 +369,7 @@ function carryStatuses(previous: RequestLineRow[]): Map<string, CarriedLineState
       status: p.status,
       note: p.status_note,
       attention_reason: p.attention_reason ?? null,
+      accepted_document_id: p.accepted_document_id ?? null,
     });
   }
   return m;
@@ -425,9 +435,10 @@ export async function loadLines(
  * that satisfies the requirement; it does not mean a person has accepted it
  * against THIS ask. Auto-advancing to `accepted` would erase the review the
  * five states exist to describe, and auto-advancing to `received` would need
- * an arrival event this read has no access to. See the module note in
- * functions/api/document-requests/[id].ts for the follow-up that closes this
- * properly.
+ * an arrival event this read has no access to. That move now lives on the
+ * arrival itself — POST /api/request-uploads/:id/decide
+ * (functions/lib/request-arrivals.ts) — which is where a person accepts a line
+ * from a named document and, for a typed line, confirms the link this reads.
  */
 export async function loadClosures(
   db: D1Database,
