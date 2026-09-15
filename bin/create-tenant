@@ -128,9 +128,9 @@ if [ -n "$ADMIN_EMAIL" ]; then
     const c=require('crypto');const s=c.randomBytes(16);
     const d=c.pbkdf2Sync(process.env.PW,s,100000,32,'sha256');
     console.log(s.toString('hex')+':'+d.toString('hex'));")
-  UID="user_$(printf '%s' "$ADMIN_EMAIL" | tr -c 'a-z0-9' '_')"
+  ADMIN_UID="user_$(printf '%s' "$ADMIN_EMAIL" | tr -c 'a-z0-9' '_')"
   d1 "INSERT INTO users (id, email, password_hash, name, role, tenant_id, force_password_change)
-      VALUES ('$UID','$(sql_escape "$ADMIN_EMAIL")','$HASH','$(sql_escape "$ADMIN_NAME")','$ADMIN_ROLE','$TID',1)
+      VALUES ('$ADMIN_UID','$(sql_escape "$ADMIN_EMAIL")','$HASH','$(sql_escape "$ADMIN_NAME")','$ADMIN_ROLE','$TID',1)
       ON CONFLICT(email) DO UPDATE SET role=excluded.role, tenant_id=excluded.tenant_id;" >/dev/null
   echo ""
   echo "  admin: $ADMIN_EMAIL ($ADMIN_ROLE)  TEMP PASSWORD: $TMP_PW"
