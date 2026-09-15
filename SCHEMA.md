@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 133 tables, 2 views, 221 indexes, 36 triggers.
+Objects: 134 tables, 2 views, 222 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -212,9 +212,10 @@ Triggers: `trg_document_products_ad_fts`, `trg_document_products_ai_fts`
   sub_lot_code TEXT NOT NULL DEFAULT ''
   production_date TEXT
   production_date_raw TEXT
-  production_date_source TEXT CHECK (production_date_source IS NULL OR production_date_source IN ('extracted', 'extracted_code_date_legacy', 'reviewer'))
+  production_date_source TEXT CHECK (production_date_source IS NULL OR production_date_source IN ('extracted', 'extracted_code_date_legacy', 'reviewer', 'lot_decode'))
   production_date_status TEXT CHECK (production_date_status IS NULL OR production_date_status IN ('resolved', 'ambiguous', 'unparseable', 'conflict'))
   production_date_document_id TEXT
+  production_date_scheme_id TEXT
 ```
 
 Indexes: `idx_lots_identity`, `idx_lots_lotkey`, `idx_lots_production_date`, `idx_lots_supplier`
@@ -308,6 +309,23 @@ Triggers: `trg_products_ad_fts`, `trg_products_ai_fts`, `trg_products_au_fts`, `
 ```
 
 Indexes: `idx_sei_supplier_doctype`, `idx_sei_tenant`
+
+### `supplier_lot_schemes`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id)
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id)
+  version INTEGER NOT NULL CHECK (version >= 1)
+  spec TEXT NOT NULL CHECK (json_valid(spec))
+  source TEXT NOT NULL CHECK (source IN ('admin', 'seed'))
+  note TEXT
+  created_by TEXT REFERENCES users(id)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  UNIQUE (supplier_id, version)
+```
+
+Indexes: `idx_supplier_lot_schemes_current`
 
 ### `supplier_product_map`
 

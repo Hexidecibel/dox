@@ -110,7 +110,8 @@ describe('productionDateSets (the lot writer)', () => {
 
   it('fills an empty lot', () => {
     const r = productionDateSets(none, next('2026-07-22', '2026-07-22', 'resolved'));
-    expect(r.binds).toEqual(['2026-07-22', '2026-07-22', 'extracted', 'resolved', 'doc-2']);
+    // The trailing null is production_date_scheme_id (0110): no lot format decoded this value.
+    expect(r.binds).toEqual(['2026-07-22', '2026-07-22', 'extracted', 'resolved', 'doc-2', null]);
   });
 
   it('leaves the same day alone and turns a different day into a conflict, never a winner', () => {
@@ -127,6 +128,6 @@ describe('productionDateSets (the lot writer)', () => {
 
   it('a later plain statement of one reading settles an ambiguous lot', () => {
     const amb = { production_date: null, production_date_raw: '04-05-2026', production_date_status: 'ambiguous' };
-    expect(productionDateSets(amb, next('2026-05-04', '2026-05-04', 'resolved')).binds).toEqual(['2026-05-04', '2026-05-04', 'extracted', 'doc-2']);
+    expect(productionDateSets(amb, next('2026-05-04', '2026-05-04', 'resolved')).binds).toEqual(['2026-05-04', '2026-05-04', 'extracted', 'doc-2', null]);
   });
 });
