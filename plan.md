@@ -46,6 +46,44 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Supplier-portal arrivals — staff review and accept
+
+**Status:** done — built locally 2026-09-14 (migration 0104; not deployed)
+
+**Summary:** `request_uploads` had no internal list and no accept action, so
+`received` → `accepted` only happened by hand through the status dropdown, with
+no record of which file or document it came from. Now: an inbox at
+`/requests/arrivals` (a third tab next to Requests and Templates, with a pending
+count), a "What came back" section on each request, and a decide dialog. It
+accepts requirements from the approved document or sends them back with a
+reason the supplier reads.
+
+**Decisions (user, final):**
+1. Accepting REQUIRES an approved document (`request_uploads.document_id`), and
+   the API returns 409 "Approve this file in the Review Queue first" without one.
+   Needs-attention is allowed at any stage. PUT /api/request-lines stays as the
+   escape hatch.
+2. Accepting a typed line confirms the `document_requirements` link: none →
+   insert `confirmed` with source `request_accept`; `suggested` → `confirmed`;
+   `rejected` → 409 and nothing is written.
+3. `requireLineWorker` may decide; a reader may not.
+4. No email to the supplier on needs-attention. They read `attention_reason`
+   on their link.
+
+**Shape:** the decision lives on the claim (`request_upload_lines`, 0104), not
+on the upload. `request_lines.accepted_document_id` names the document a line
+stands accepted on. It is carried through amendments and cleared when the line
+moves away from accepted or the supplier sends a newer file. Claims map onto the
+current version by line identity. `/file` falls back to the document's current
+version because COA approval deletes the upload object. Logic is in
+`functions/lib/request-arrivals.ts`; endpoints are under `/api/request-uploads`.
+The Review Queue honours `?item=<queue_id>`.
+
+**Also built (phase 2):** a read-only panel on a Review Queue item that came
+through a request link (`SupplierClaimPanel`, via `GET /api/request-uploads?queue_id=`)
+shows what the supplier said the file covers. It has no buttons, so queue
+approval does not turn back into accepting a requirement.
+
 ### Spec limits + out-of-parameter warnings
 
 **Status:** done — shipped to prod 2026-08-20 (migrations 0084/0085 applied surgically and stamped)
