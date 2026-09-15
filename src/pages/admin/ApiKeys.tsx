@@ -44,8 +44,57 @@ import { HelpWell } from '../../components/HelpWell';
 import { InfoTooltip } from '../../components/InfoTooltip';
 import { EmptyState } from '../../components/EmptyState';
 import { helpContent } from '../../lib/helpContent';
+import {
+  endOfLocalDayIso,
+  isApiKeyExpired,
+  localDateString,
+  parseApiKeyExpiry,
+} from '../../../shared/apiKeyExpiry';
 
-export function ApiKeys() {
+/**
+ * One line saying exactly when a key stops working. A legacy date-only expiry
+ * is shown as "the end of <date> (UTC)" because that is how the server reads
+ * it; a stored timestamp is shown in the viewer's own time zone, labelled.
+ */
+export function describeApiKeyExpiry(expiresAt: string | null | undefined, now: Date): string {
+  const expiry = parseApiKeyExpiry(expiresAt);
+  if (expiry.kind === 'never') return 'Never expires';
+  if (expiry.kind === 'invalid') return `Unreadable expiry "${expiry.raw}" (treated as expired)`;
+  const verb = isApiKeyExpired(expiresAt, now) ? 'Expired' : 'Expires';
+  if (expiry.kind === 'date') {
+    const day = expiry.lastValidAt.toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC',
+    });
+    return `${verb} at the end of ${day} (UTC)`;
+  }
+  const at = expiry.lastValidAt.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+  return `${verb} ${at}`;
+}
+
+function localTimeZoneName(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'your local time';
+  } catch {
+    return 'your local time';
+  }
+}
+
+export interface ApiKeysProps {
+  /** Clock seam for tests; defaults to the wall clock. */
+  now?: () => Date;
+}
+
+export function ApiKeys({ now = () => new Date() }: ApiKeysProps = {}) {
   const { user } = useAuth();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -108,7 +157,7 @@ export function ApiKeys() {
       const result = await api.apiKeys.create({
         name: formName.trim(),
         tenantId: formTenantId || undefined,
-        expiresAt: formExpiresAt || undefined,
+        expiresAt: formExpiresAt ? endOfLocalDayIso(formExpiresAt) ?? undefined : undefined,
       });
       setCreateOpen(false);
       setNewKey(result.key);
@@ -160,9 +209,28 @@ export function ApiKeys() {
 
   const getStatus = (key: ApiKey): { label: string; color: 'success' | 'error' | 'default' } => {
     if (key.revoked) return { label: 'Revoked', color: 'error' };
-    if (key.expires_at && new Date(key.expires_at) < new Date()) return { label: 'Expired', color: 'default' };
+    if (isApiKeyExpired(key.expires_at, now())) return { label: 'Expired', color: 'default' };
     return { label: 'Active', color: 'success' };
   };
+
+  // The create form picks a calendar date in the admin's OWN time zone and
+  // sends the last millisecond of that local day. Today is allowed (the key
+  // works through tonight); a past date is not.
+  const todayLocal = localDateString(now());
+  const expiryInPast = formExpiresAt !== '' && formExpiresAt < todayLocal;
+  const expiryInvalid = formExpiresAt !== '' && !expiryInPast && endOfLocalDayIso(formExpiresAt) === null;
+  const expiryHelper = (() => {
+    if (formExpiresAt === '') return 'Leave empty for a key that never expires.';
+    if (expiryInPast) return 'That date has already passed. Choose today or a later date.';
+    if (expiryInvalid) return 'Not a valid date.';
+    const [y, m, d] = formExpiresAt.split('-').map(Number);
+    const day = new Date(y, m - 1, d).toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+    return `Works through the end of ${day} (11:59 PM, ${localTimeZoneName()}), then stops.`;
+  })();
 
 
   if (loading) {
@@ -237,6 +305,11 @@ export function ApiKeys() {
                     <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
                       Created {formatDate(key.created_at)} | Last used {formatDate(key.last_used_at)}
                     </Typography>
+                    {key.expires_at && !key.revoked && (
+                      <Typography variant="caption" color="text.secondary" display="block">
+                        {describeApiKeyExpiry(key.expires_at, now())}
+                      </Typography>
+                    )}
                   </CardContent>
                 </Card>
               );
@@ -333,9 +406,14 @@ export function ApiKeys() {
                           color={status.color}
                           variant="outlined"
                         />
+                        {key.expires_at && !key.revoked && (
+                          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                            {describeApiKeyExpiry(key.expires_at, now())}
+                          </Typography>
+                        )}
                       </TableCell>
                       <TableCell align="right">
-                        {!key.revoked && !(key.expires_at && new Date(key.expires_at) < new Date()) && (
+                        {!key.revoked && !isApiKeyExpired(key.expires_at, now()) && (
                           <Tooltip title="Revoke">
                             <IconButton size="small" onClick={() => openRevoke(key)} color="error">
                               <DeleteIcon fontSize="small" />
@@ -404,7 +482,9 @@ export function ApiKeys() {
             onChange={(e) => setFormExpiresAt(e.target.value)}
             disabled={saving}
             InputLabelProps={{ shrink: true }}
-            helperText="Leave empty for no expiration"
+            inputProps={{ min: todayLocal, 'data-testid': 'api-key-expires-at' }}
+            error={expiryInPast || expiryInvalid}
+            helperText={expiryHelper}
           />
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
@@ -414,7 +494,7 @@ export function ApiKeys() {
           <Button
             variant="contained"
             onClick={handleCreate}
-            disabled={!formName.trim() || saving}
+            disabled={!formName.trim() || saving || expiryInPast || expiryInvalid}
           >
             {saving ? 'Creating...' : 'Create Key'}
           </Button>

@@ -873,7 +873,15 @@ Response (201):
 }
 ```
 
-Optional fields: `permissions` (array of strings, default `["*"]`), `expiresAt` (ISO date string), `tenantId` (super_admin only; org_admin auto-scoped).
+Optional fields: `permissions` (array of strings, default `["*"]`), `expiresAt`, `tenantId` (super_admin only; org_admin auto-scoped).
+
+`expiresAt` is the last moment the key works:
+
+- `"2026-12-31"` (a date) — the key works **through the end of that day, UTC** (until `2026-12-31T23:59:59.999Z`). A key given today's date works until midnight UTC tonight.
+- `"2026-12-31T23:59:59-08:00"` (a timestamp) — must carry a time zone (`Z` or an offset); a zone-less timestamp is rejected.
+- A value already in the past is rejected with `400` rather than creating a key that is expired on arrival. Omit the field for a key that never expires.
+
+The stored `expires_at` is normalised to a UTC timestamp. Settings › API Keys sends the end of the picked day in the admin's own time zone. Keys created before this rule may still hold a bare date; those are read the same way (through the end of that day, UTC).
 
 ### DELETE /api/api-keys/:id
 

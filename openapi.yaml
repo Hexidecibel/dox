@@ -361,8 +361,7 @@ components:
         expires_at:
           type: string
           nullable: true
-          format: date-time
-          description: Optional expiration date
+          description: Last moment the key works (UTC timestamp). Older keys may hold a bare date, which means through the end of that day UTC.
         revoked:
           type: integer
           enum: [0, 1]
@@ -2390,8 +2389,15 @@ paths:
                   example: ["*"]
                 expiresAt:
                   type: string
-                  format: date-time
-                  description: Optional expiration date
+                  description: |
+                    Optional. The last moment the key works. Either a date
+                    (`YYYY-MM-DD`), meaning the key works THROUGH the end of
+                    that day in UTC, or an ISO 8601 timestamp WITH a time zone
+                    (e.g. `2026-09-15T23:59:59-07:00`). A timestamp without a
+                    zone is rejected, as is a value already in the past. Stored
+                    normalised to a UTC timestamp. Omit for a key that never
+                    expires.
+                  example: "2026-12-31"
               required: [name]
       responses:
         '201':
@@ -2408,7 +2414,7 @@ paths:
                     description: The full API key (shown only once, starts with dox_sk_)
                     example: "dox_sk_abc123def456..."
         '400':
-          description: Missing name
+          description: Missing name, or an `expiresAt` that is malformed or already in the past
           content:
             application/json:
               schema:

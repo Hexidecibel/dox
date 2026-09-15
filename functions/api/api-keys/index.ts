@@ -1,4 +1,4 @@
-import { generateApiKey, hashApiKey, generateId } from '../../lib/auth';
+import { generateApiKey, hashApiKey, generateId, validateNewApiKeyExpiry } from '../../lib/auth';
 import { logAudit, getClientIp } from '../../lib/db';
 import { requireRole, errorToResponse } from '../../lib/permissions';
 import type { Env, User } from '../../lib/types';
@@ -51,12 +51,23 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       name?: string;
       tenantId?: string;
       permissions?: string[];
-      expiresAt?: string;
+      expiresAt?: unknown;
     };
 
     if (!body.name || !body.name.trim()) {
       return new Response(
         JSON.stringify({ error: 'name is required' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // A date-only expiry is valid THROUGH that day (UTC); a past one is refused
+    // rather than minting a key that is dead on creation. Stored normalised to
+    // the last valid instant as a full UTC timestamp. See shared/apiKeyExpiry.ts.
+    const expiry = validateNewApiKeyExpiry(body.expiresAt, new Date());
+    if (!expiry.ok) {
+      return new Response(
+        JSON.stringify({ error: expiry.error }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }
@@ -86,7 +97,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         currentUser.id,
         tenantId,
         permissions,
-        body.expiresAt || null
+        expiry.expiresAt
       )
       .run();
 
@@ -97,7 +108,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'api_key.created',
       'api_key',
       id,
-      JSON.stringify({ name: body.name, prefix }),
+      JSON.stringify({ name: body.name, prefix, expires_at: expiry.expiresAt }),
       getClientIp(context.request)
     );
 
