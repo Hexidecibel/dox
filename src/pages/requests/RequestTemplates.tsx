@@ -16,6 +16,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { arrivalsTabLabel, usePendingArrivals } from './RequestArrivals';
 import {
   Alert,
   Box,
@@ -47,6 +48,7 @@ export function RequestTemplates() {
   const { user, isSuperAdmin } = useAuth();
   const { selectedTenantId } = useTenant();
   const tenantId = isSuperAdmin ? selectedTenantId || undefined : user?.tenant_id || undefined;
+  const pendingArrivals = usePendingArrivals(tenantId, !isSuperAdmin || Boolean(tenantId));
   const canCompose = user?.role === 'super_admin' || user?.role === 'org_admin';
 
   const [templates, setTemplates] = useState<RequestTemplateDetail[]>([]);
@@ -138,6 +140,7 @@ export function RequestTemplates() {
       <Tabs value={1} sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}>
         <Tab label="Requests" onClick={() => navigate('/requests')} />
         <Tab label="Templates" />
+        <Tab label={arrivalsTabLabel(pendingArrivals)} onClick={() => navigate('/requests/arrivals')} />
       </Tabs>
 
       <HelpWell id="requests.templates" title="Packets you send more than once">

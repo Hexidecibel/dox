@@ -1039,7 +1039,7 @@ Two separate judgements, on two screens:
 
 | Endpoint | Who | Purpose |
 |----------|-----|---------|
-| `GET /api/request-uploads?pending=1` | any tenant user | The inbox, oldest first. Also `request_id` (any version), `supplier_id`, `limit`, `offset`; `tenant_id` for super_admin. Response includes `pending_total`. |
+| `GET /api/request-uploads?pending=1` | any tenant user | The inbox, oldest first. Also `request_id` (any version), `supplier_id`, `queue_id` (the arrival a Review Queue item came from), `limit`, `offset`; `tenant_id` for super_admin. Response includes `pending_total`. |
 | `GET /api/request-uploads/:id` | any tenant user | One arrival. Another tenant's id is 404. |
 | `GET /api/request-uploads/:id/file` | any tenant user | The bytes. Falls back to the linked document's current version once approval has moved the upload object (`X-File-Source: upload \| document`); 410 if neither exists. |
 | `POST /api/request-uploads/:id/decide` | super_admin, org_admin, user | Accept or send back requirements. |

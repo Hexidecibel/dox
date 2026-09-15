@@ -2232,6 +2232,7 @@ paths:
         - { name: pending, in: query, schema: { type: string, enum: ['1'] } }
         - { name: request_id, in: query, schema: { type: string } }
         - { name: supplier_id, in: query, schema: { type: string } }
+        - { name: queue_id, in: query, schema: { type: string }, description: The arrival a Review Queue item came from }
         - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only (required for one) }
         - $ref: '#/components/parameters/LimitParam'
         - $ref: '#/components/parameters/OffsetParam'

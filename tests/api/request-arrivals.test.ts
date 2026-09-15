@@ -201,6 +201,14 @@ describe('reading arrivals', () => {
     expect((await list(`request_id=${a.requestId}`, otherTenantAdmin)).status).toBe(404);
   });
 
+  it('finds the arrival a Review Queue item came from', async () => {
+    const a = await arrive(['Halal Certificate']);
+    const { status, body } = await list(`queue_id=${a.queueId}`, worker);
+    expect(status).toBe(200);
+    expect(body.arrivals.map((x) => x.id)).toEqual([a.uploadId]);
+    expect(body.arrivals[0].claims[0].line_name).toBe('Halal Certificate');
+  });
+
   it('filters the Review Queue by the door an item came through', async () => {
     const a = await arrive(['SQF Certificate']);
     const call = async (q: string) => {

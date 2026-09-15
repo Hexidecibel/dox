@@ -307,6 +307,8 @@ import type {
   AmendDocumentRequestRequest,
   CreateDocumentRequestRequest,
   CreateRequestTemplateRequest,
+  DecideArrivalRequest,
+  DecideArrivalResponse,
   DocumentRequestListResponse,
   DocumentRequestLineCounts,
   DocumentRequestResponse,
@@ -314,6 +316,8 @@ import type {
   InstantiateRequestTemplateRequest,
   IssueDocumentRequestRequest,
   ReissueDocumentRequestRequest,
+  RequestArrivalListResponse,
+  RequestArrivalResponse,
   RequestLineInput,
   RequestLineRow,
   RequestLineWithClosure,
@@ -2054,7 +2058,7 @@ export const api = {
   },
 
   queue: {
-    list: (params?: { status?: string; processing_status?: string; document_type_id?: string; tenant_id?: string; mine?: boolean | 1; limit?: number; offset?: number }) =>
+    list: (params?: { status?: string; processing_status?: string; document_type_id?: string; source?: string; tenant_id?: string; mine?: boolean | 1; limit?: number; offset?: number }) =>
       fetchApi<{ items: ProcessingQueueItem[]; total: number; limit: number; offset: number }>(
         `/queue?${new URLSearchParams(Object.entries(params || {}).filter(([, v]) => v != null).map(([k, v]) => [k, k === 'mine' ? (v ? '1' : '0') : String(v)])).toString()}`
       ),
@@ -3189,6 +3193,82 @@ export const api = {
     /** DELETE /api/request-lines/:id — draft only. */
     remove: (id: string) =>
       fetchApi<{ success: boolean }>(`/request-lines/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * Files suppliers sent through a request link, and the decision about what
+   * each one satisfies (migration 0104).
+   *
+   * Two judgements, two screens: the Review Queue approves the EXTRACTION, and
+   * `decide` accepts a requirement FROM the approved document. Accepting before
+   * approval is a 409 by design.
+   */
+  requestUploads: {
+    /** GET /api/request-uploads — `pending: true` is the inbox, `request_id` one ask's history. */
+    list: (params?: {
+      pending?: boolean;
+      request_id?: string;
+      supplier_id?: string;
+      queue_id?: string;
+      tenant_id?: string;
+      limit?: number;
+      offset?: number;
+    }) => {
+      const query = new URLSearchParams();
+      if (params?.pending) query.set('pending', '1');
+      if (params?.queue_id) query.set('queue_id', params.queue_id);
+      if (params?.request_id) query.set('request_id', params.request_id);
+      if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      const qs = query.toString();
+      return fetchApi<RequestArrivalListResponse>(`/request-uploads${qs ? `?${qs}` : ''}`);
+    },
+
+    /** GET /api/request-uploads/:id */
+    get: (id: string) => fetchApi<RequestArrivalResponse>(`/request-uploads/${id}`),
+
+    /** The file endpoint's path. Needs the auth header, so fetch it with `openFile`. */
+    fileUrl: (id: string) => `${API_BASE}/request-uploads/${id}/file`,
+
+    /**
+     * Fetch the file with the auth header and open it in a new tab. Falls back
+     * server-side to the approved document's copy once approval has moved it.
+     */
+    openFile: async (id: string) => {
+      // Open synchronously so a popup blocker sees a user gesture.
+      const win = window.open('', '_blank');
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const res = await fetch(`${API_BASE}/request-uploads/${id}/file`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        win?.close();
+        let message = res.statusText;
+        try {
+          message = ((await res.json()) as { error?: string }).error || message;
+        } catch {
+          // Non-JSON error body; the status text is what we have.
+        }
+        throw new Error(message);
+      }
+      const url = URL.createObjectURL(await res.blob());
+      if (win) win.location.href = url;
+      else window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    },
+
+    /** POST /api/request-uploads/:id/decide */
+    decide: (id: string, data: DecideArrivalRequest) =>
+      fetchApi<DecideArrivalResponse>(`/request-uploads/${id}/decide`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /** POST /api/request-uploads/:id/enqueue — only for a file nobody has read. */
+    enqueue: (id: string) =>
+      fetchApi<RequestArrivalResponse>(`/request-uploads/${id}/enqueue`, { method: 'POST' }),
   },
 
   /**

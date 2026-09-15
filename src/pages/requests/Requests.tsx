@@ -54,6 +54,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
 import { HelpWell } from '../../components/HelpWell';
 import { EmptyState } from '../../components/EmptyState';
+import { arrivalsTabLabel, usePendingArrivals } from './RequestArrivals';
 
 const STATUS_COLOR: Record<
   DocumentRequestStatus,
@@ -140,6 +141,7 @@ export function Requests() {
 
   const tenantId = isSuperAdmin ? selectedTenantId || undefined : user?.tenant_id || undefined;
   const canCompose = user?.role === 'super_admin' || user?.role === 'org_admin';
+  const pendingArrivals = usePendingArrivals(tenantId, !isSuperAdmin || Boolean(tenantId));
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -196,6 +198,7 @@ export function Requests() {
       <Tabs value={0} sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}>
         <Tab label="Requests" />
         <Tab label="Templates" onClick={() => navigate('/requests/templates')} />
+        <Tab label={arrivalsTabLabel(pendingArrivals)} onClick={() => navigate('/requests/arrivals')} />
       </Tabs>
 
       <HelpWell id="requests.list" title="Asking a supplier for documents">

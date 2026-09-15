@@ -11,6 +11,9 @@
  *                       accepted and resolved to its root, so a link from an
  *                       old version still shows everything.
  *
+ *   ?queue_id=<id>      the arrival a Review Queue item came from, so the
+ *                       queue can show what the supplier said the file covers.
+ *
  * Also: ?supplier_id=, ?limit=, ?offset=, and ?tenant_id= (super_admin only,
  * and required for one — same convention as the composer's own list).
  *
@@ -58,16 +61,18 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const limit = parseInt(url.searchParams.get('limit') || '50', 10);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
     const supplierId = url.searchParams.get('supplier_id');
+    const queueId = url.searchParams.get('queue_id');
 
     const { arrivals, total } = await loadArrivals(db, tenantId, {
       rootRequestId,
       supplierId,
+      queueId,
       pending,
       limit: Number.isFinite(limit) ? limit : 50,
       offset: Number.isFinite(offset) ? offset : 0,
     });
 
-    const filtered = Boolean(rootRequestId || supplierId);
+    const filtered = Boolean(rootRequestId || supplierId || queueId);
     const pendingTotal =
       pending && !filtered ? total : await countPendingArrivals(db, tenantId);
 

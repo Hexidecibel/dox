@@ -87,6 +87,7 @@ import { Requests } from '../pages/requests/Requests';
 import { RequestCompose } from '../pages/requests/RequestCompose';
 import { RequestDetail } from '../pages/requests/RequestDetail';
 import { RequestTemplates } from '../pages/requests/RequestTemplates';
+import { RequestArrivals } from '../pages/requests/RequestArrivals';
 import { Bundles } from '../pages/Bundles';
 import { BundleDetail } from '../pages/BundleDetail';
 import { IngestHistory } from '../pages/IngestHistory';
@@ -238,6 +239,11 @@ export const SURFACES: Surface[] = [
     nav: { label: 'Requests', icon: <RequestsIcon />, order: 50 },
   },
   { path: '/requests/templates', element: <RequestTemplates />, module: 'library' },
+  // What suppliers sent back through their links (migration 0104). Readable by
+  // every tenant user, like the list; the Decide action inside is gated to the
+  // roles the API lets decide. Declared before `/requests/:id` so "arrivals" is
+  // never read as a request id.
+  { path: '/requests/arrivals', element: <RequestArrivals />, module: 'library' },
   { path: '/requests/new', element: <RequestCompose />, module: 'library', roles: ADMIN },
   { path: '/requests/:id', element: <RequestDetail />, module: 'library' },
   { path: '/bundles', element: <Bundles />, module: 'library' },

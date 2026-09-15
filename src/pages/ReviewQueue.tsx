@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { SupplierClaimPanel } from '../components/SupplierClaimPanel';
 import {
   Box,
   Typography,
@@ -673,6 +675,41 @@ export default function ReviewQueue() {
   useEffect(() => {
     loadQueue();
   }, [loadQueue]);
+
+  // Deep link: /review?item=<queue_id> opens that item once the list has it.
+  // The supplier-arrivals screen links here so "approve this file" is one
+  // click, not a hunt through the queue. If the item is not in the current
+  // status filter (already approved, or rejected), switch the filter to where
+  // it actually is rather than silently showing nothing. One attempt per id.
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const deepLinkId = searchParams.get('item');
+  const deepLinkHandled = useRef<string | null>(null);
+  useEffect(() => {
+    if (!deepLinkId || loading || deepLinkHandled.current === deepLinkId) return;
+    if (items.some((i) => i.id === deepLinkId)) {
+      deepLinkHandled.current = deepLinkId;
+      setExpandedId(deepLinkId);
+      loadPreview(deepLinkId);
+      requestAnimationFrame(() => {
+        document.getElementById(`queue-item-${deepLinkId}`)?.scrollIntoView({ block: 'start' });
+      });
+      return;
+    }
+    deepLinkHandled.current = deepLinkId;
+    api.queue
+      .get(deepLinkId)
+      .then(({ item }) => {
+        if (item.status && item.status !== statusFilter) {
+          // Let the next load find it.
+          deepLinkHandled.current = null;
+          setStatusFilter(item.status);
+        }
+      })
+      .catch(() => {
+        // Unknown or foreign id: the queue renders as normal.
+      });
+  }, [deepLinkId, loading, items, statusFilter, loadPreview]);
 
   // Auto-refresh (polling) while any item is still in-flight (queued /
   // processing). Stops once everything settles so we don't hammer the API.
@@ -1543,7 +1580,7 @@ export default function ReviewQueue() {
             const isProcessing = item.processing_status !== 'ready';
 
             return (
-              <Card key={item.id} variant="outlined">
+              <Card key={item.id} id={`queue-item-${item.id}`} variant="outlined">
                 <CardContent
                   sx={{ cursor: 'pointer' }}
                   onClick={() => {
@@ -1713,6 +1750,14 @@ export default function ReviewQueue() {
 
                 {isExpanded && (
                   <Box sx={{ px: 2, pb: 2 }}>
+                    {item.source === 'request_link' && (
+                      <SupplierClaimPanel
+                        queueId={item.id}
+                        tenantId={item.tenant_id}
+                        asSuperAdmin={isSuperAdmin}
+                        onOpenRequest={(requestId) => navigate(`/requests/${requestId}`)}
+                      />
+                    )}
                     <Box sx={{ display: 'flex', gap: 2, flexDirection: { xs: 'column', md: 'row' }, mb: 2 }}>
                       {/* File preview */}
                       <Box sx={{ flex: 1, minWidth: 0 }}>

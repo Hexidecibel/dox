@@ -71,10 +71,13 @@ import type {
   DocumentRequestDetail,
   RequestLineStatus,
   RequestLineWithClosure,
+  RequestArrival,
   RequestLinkView,
   SupplierRequestView,
   User,
 } from '../../lib/types';
+import { ArrivalCard } from '../../components/ArrivalCard';
+import { DecideArrivalDialog } from '../../components/DecideArrivalDialog';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
 import {
@@ -156,6 +159,11 @@ export function RequestDetail() {
   const [copied, setCopied] = useState(false);
   const [rotateOpen, setRotateOpen] = useState(false);
 
+  // What the supplier sent back through the link, across every version.
+  const [arrivals, setArrivals] = useState<RequestArrival[]>([]);
+  const [arrivalsError, setArrivalsError] = useState('');
+  const [deciding, setDeciding] = useState<RequestArrival | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -198,6 +206,30 @@ export function RequestDetail() {
     }
     loadLink();
   }, [status, loadLink]);
+
+  // A draft has no link, so nothing can have come back through one.
+  const requestTenantId = request?.tenant_id;
+  const loadArrivals = useCallback(async () => {
+    if (!requestTenantId || status === 'draft' || !status) {
+      setArrivals([]);
+      return;
+    }
+    setArrivalsError('');
+    try {
+      const res = await api.requestUploads.list({
+        request_id: id,
+        tenant_id: isSuperAdmin ? requestTenantId : undefined,
+        limit: 200,
+      });
+      setArrivals(res.arrivals);
+    } catch (err) {
+      setArrivalsError(err instanceof Error ? err.message : 'Could not load what the supplier sent');
+    }
+  }, [id, requestTenantId, status, isSuperAdmin]);
+
+  useEffect(() => {
+    loadArrivals();
+  }, [loadArrivals]);
 
   useEffect(() => {
     if (!canCompose) return;
@@ -254,6 +286,20 @@ export function RequestDetail() {
   const isIssued = request.status === 'issued';
   const superseded = Boolean(request.superseded_at);
   const current = request.history.find((h) => h.is_current);
+
+  const pendingArrivalCount = arrivals.filter((a) => a.pending_count > 0).length;
+  /** Title for a document a line was accepted from, from whatever this page already holds. */
+  const documentTitle = (docId: string): string => {
+    for (const a of arrivals) {
+      const hit = a.documents.find((d) => d.id === docId);
+      if (hit) return hit.title;
+    }
+    for (const l of request.lines) {
+      const hit = l.closure.find((c) => c.document_id === docId);
+      if (hit) return hit.document_title;
+    }
+    return 'a document';
+  };
 
   const saveLines = async () => {
     setBusy(true);
@@ -573,6 +619,70 @@ export function RequestDetail() {
         </Paper>
       )}
 
+      {/* ------------------------------------------------------------------ */}
+      {/* What came back through the link.                                    */}
+      {/* ------------------------------------------------------------------ */}
+      {!isDraft && (
+        <Box sx={{ mb: 2 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', mb: 1, gap: 1 }}>
+            <Typography variant="h6" fontWeight={700} sx={{ flexGrow: 1 }}>
+              What came back
+            </Typography>
+            {pendingArrivalCount > 0 && (
+              <Chip size="small" color="warning" label={`${pendingArrivalCount} waiting on you`} />
+            )}
+          </Box>
+          {arrivalsError && (
+            <Alert severity="error" sx={{ mb: 1 }} onClose={() => setArrivalsError('')}>
+              {arrivalsError}
+            </Alert>
+          )}
+          {arrivals.length === 0 ? (
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="body2" color="text.secondary">
+                Nothing yet. Files the supplier sends through their link appear here, with the
+                requirements they said each one covers.
+              </Typography>
+            </Paper>
+          ) : (
+            <Stack spacing={1}>
+              {arrivals.map((a) => (
+                <ArrivalCard
+                  key={a.id}
+                  arrival={a}
+                  canDecide={canWorkLines && !superseded}
+                  canEnqueue={canCompose}
+                  busy={busy}
+                  onOpenFile={async (x) => {
+                    try {
+                      await api.requestUploads.openFile(x.id);
+                    } catch (err) {
+                      setArrivalsError(err instanceof Error ? err.message : 'Could not open the file');
+                    }
+                  }}
+                  onDecide={(x) => setDeciding(x)}
+                  onEnqueue={async (x) => {
+                    setBusy(true);
+                    try {
+                      await api.requestUploads.enqueue(x.id);
+                      await loadArrivals();
+                    } catch (err) {
+                      setArrivalsError(
+                        err instanceof Error ? err.message : 'Could not put the file in the Review Queue',
+                      );
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  onOpenQueueItem={(queueId) => navigate(`/review?item=${queueId}`)}
+                  onOpenDocument={(docId) => navigate(`/documents/${docId}`)}
+                />
+              ))}
+            </Stack>
+          )}
+        </Box>
+      )}
+
       {request.intro && (
         <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
           <Typography variant="caption" color="text.secondary" display="block">
@@ -655,6 +765,15 @@ export function RequestDetail() {
                         color={line.tier === 'required' ? 'primary' : 'default'}
                       />
                       {free && <Chip size="small" color="warning" label="Free text" />}
+                      {line.status === 'accepted' && line.accepted_document_id && (
+                        <Chip
+                          size="small"
+                          color="success"
+                          variant="outlined"
+                          label={`Accepted from ${documentTitle(line.accepted_document_id)}`}
+                          onClick={() => navigate(`/documents/${line.accepted_document_id}`)}
+                        />
+                      )}
                     </Stack>
 
                     {line.requirement_name && line.requirement_name !== line.name && (
@@ -845,6 +964,28 @@ export function RequestDetail() {
             const res = await api.documentRequests.reissue(request.id, body);
             setReissueOpen(false);
             navigate(`/requests/${res.request.id}`);
+          }}
+        />
+      )}
+
+      {deciding && (
+        <DecideArrivalDialog
+          open
+          arrival={deciding}
+          // Only this page's own lines can be offered when it IS the version
+          // decisions are made against; on an older version the dialog still
+          // decides what the supplier claimed.
+          lines={
+            deciding.current_request_id === request.id
+              ? request.lines.map((l) => ({ id: l.id, name: l.name, status: l.status }))
+              : undefined
+          }
+          onClose={() => setDeciding(null)}
+          onOpenQueueItem={(queueId) => navigate(`/review?item=${queueId}`)}
+          onSubmit={async (body) => {
+            await api.requestUploads.decide(deciding.id, body);
+            setDeciding(null);
+            await Promise.all([load(), loadArrivals()]);
           }}
         />
       )}

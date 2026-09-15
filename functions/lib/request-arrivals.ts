@@ -334,6 +334,8 @@ export interface LoadArrivalsOptions {
   /** Only arrivals with at least one claim still waiting on a person. */
   pending?: boolean;
   uploadId?: string | null;
+  /** The arrival a Review Queue item came from. */
+  queueId?: string | null;
   limit?: number;
   offset?: number;
 }
@@ -420,6 +422,10 @@ export async function loadArrivals(
   if (opts.uploadId) {
     where.push('u.id = ?');
     params.push(opts.uploadId);
+  }
+  if (opts.queueId) {
+    where.push('u.queue_id = ?');
+    params.push(opts.queueId);
   }
   if (opts.rootRequestId) {
     where.push('r.root_request_id = ?');

@@ -63,6 +63,8 @@ const ROUTE_SNAPSHOT: readonly string[] = [
   '/lots',
   '/requests',
   '/requests/templates',
+  // Added with migration 0104: what suppliers sent back through their links.
+  '/requests/arrivals',
   '/requests/new',
   '/requests/:id',
   '/reports',
@@ -147,7 +149,7 @@ describe('SURFACES — the path-set snapshot', () => {
   });
 
   it('accounts for every snapshot path exactly once', () => {
-    expect(ROUTE_SNAPSHOT.length).toBe(65);
+    expect(ROUTE_SNAPSHOT.length).toBe(66);
     expect(new Set(ROUTE_SNAPSHOT).size).toBe(ROUTE_SNAPSHOT.length);
     expect(SURFACES.length).toBe(ROUTE_SNAPSHOT.length - NON_SURFACE_PATHS.length);
   });
