@@ -1,0 +1,62 @@
+<!--
+  Arrivals demo: a SALES SHEET the supplier sent where a specification sheet
+  was asked for. The client's most common send-back (14 Sep 2026 walkthrough).
+  What makes it a sales sheet and not a spec sheet, deliberately:
+   * no specification number, no revision, no effective or review date;
+   * no approval signature, and "typical" values instead of acceptance limits;
+   * marketing language and a call to action.
+  A sales sheet is not a controlled document, so it cannot stand in for a spec
+  sheet however much product detail it carries.
+  Source of truth for tests/fixtures/arrivals-demo/pdf/sales-sheet.pdf; rebuild
+  with `bin/seed-arrivals-demo --render`. Fictional names and numbers.
+-->
+<style>@page{size:letter;margin:0.6in}body{font-family:Georgia,'Times New Roman',serif;color:#222;font-size:10.5pt;line-height:1.45}
+.hero{background:#f3e7c9;border-radius:10px;padding:22px 26px;margin-bottom:18px}
+.brand{font-family:Arial,Helvetica,sans-serif;font-size:9pt;letter-spacing:.14em;text-transform:uppercase;color:#7a5b1e}
+h1{font-size:26pt;margin:6px 0 4px;color:#3b2a0b}
+.tag{font-size:13pt;font-style:italic;color:#5a4214}
+.cols{display:flex;gap:24px}
+.col{flex:1}
+h2{font-family:Arial,Helvetica,sans-serif;font-size:11pt;color:#7a5b1e;margin:14px 0 6px;text-transform:uppercase;letter-spacing:.06em}
+ul{margin:0;padding-left:18px}
+table{border-collapse:collapse;width:100%;font-family:Arial,Helvetica,sans-serif;font-size:9.5pt}
+td{border-bottom:1px solid #e3d6b5;padding:4px 2px}
+.cta{margin-top:20px;background:#3b2a0b;color:#fff;padding:14px 18px;border-radius:8px;font-family:Arial,Helvetica,sans-serif}
+.small{font-size:8pt;color:#666;margin-top:14px;font-family:Arial,Helvetica,sans-serif}</style>
+<div class="hero">
+  <div class="brand">Northfield Creamery Ingredients</div>
+  <h1>Sour Cream Powder</h1>
+  <div class="tag">That fresh, tangy cultured-cream bite, in a shelf-stable powder.</div>
+</div>
+<div class="cols">
+  <div class="col">
+    <h2>Why chefs and formulators love it</h2>
+    <ul>
+      <li>Real cultured cream flavor with a clean, bright finish</li>
+      <li>Dissolves fast in dips, dressings, sauces and seasonings</li>
+      <li>Pairs beautifully with onion, chive, dill and ranch profiles</li>
+      <li>Made in small batches in the heart of Wisconsin dairy country</li>
+    </ul>
+    <h2>Great in</h2>
+    <ul>
+      <li>Snack seasonings and chip coatings</li>
+      <li>Dry dip and dressing mixes</li>
+      <li>Baked goods, mashed potato and soup bases</li>
+    </ul>
+  </div>
+  <div class="col">
+    <h2>At a glance</h2>
+    <table>
+      <tr><td>Item</td><td>NCI-3105</td></tr>
+      <tr><td>Typical fat</td><td>about 38%</td></tr>
+      <tr><td>Typical moisture</td><td>about 3%</td></tr>
+      <tr><td>Color</td><td>Creamy white</td></tr>
+      <tr><td>Packaging</td><td>50 lb bags, 2 lb pouches</td></tr>
+      <tr><td>Contains</td><td>Milk</td></tr>
+    </table>
+    <h2>Suggested use</h2>
+    <p>Start at 4–8% of a seasoning blend or 10–15% of a dry dip mix, and adjust to taste.</p>
+  </div>
+</div>
+<div class="cta">Ask your Northfield rep for samples and pricing: sales@northfieldcreamery.example · (262) 555-0190</div>
+<div class="small">Typical values are for information only and are not specifications. Contact Northfield Creamery Ingredients, Inc. for product documentation.</div>

@@ -1,0 +1,510 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/seed-arrivals-demo — put a supplier's portal arrivals in front of the
+ * client so they can walk arrivals -> Review Queue -> approve & decide, end to
+ * end, on real files.
+ *
+ * WHAT IT CREATES (idempotent: a re-run reuses everything it finds)
+ *
+ *   Supplier   Northfield Creamery Ingredients, Inc.  (find-or-create)
+ *   Requirements, by slug, created only if the tenant has none by that slug or
+ *   name: Certificate of Insurance, Specification Sheet, Allergen Statement,
+ *   Country of Origin Statement.
+ *   Request A  "Arrivals demo: annual supplier documentation" (issued)
+ *              lines: COI, Spec Sheet, Allergen Statement, Country of Origin
+ *   Request B  "Arrivals demo: new item, Sour Cream Powder (NCI-3105)" (issued)
+ *              lines: Spec Sheet
+ *   Arrivals, uploaded THROUGH EACH REQUEST'S PUBLIC SUPPLIER LINK (the exact
+ *   door a supplier uses: POST /api/supplier-requests/public/:token/upload),
+ *   which enqueues them via the shared intake path with source='request_link':
+ *     1. certificate-of-insurance.pdf  -> A, claims [COI]
+ *     2. specification-sheet.pdf       -> A, claims [Spec Sheet, Allergen, COO]
+ *     3. sales-sheet.pdf               -> B, claims [Spec Sheet]  (the send-back
+ *        demo: a sales sheet is not a controlled document)
+ *
+ *   Request B exists so the sales sheet claims a line NO other file claims.
+ *   Sending it back therefore cannot knock a spec sheet line someone else
+ *   accepted back to needs_attention, whatever order the demo is clicked in.
+ *
+ * WHY THROUGH THE HTTP API, NOT SQL
+ *   Every row is written by the same endpoints the app uses (compose, issue,
+ *   the public upload), so the demo exercises the real intake path and cannot
+ *   drift from it. The dev server (local) or the site (remote) must be up.
+ *
+ * EXTRACTION — say which, every time
+ *   Arrivals land at processing_status='queued'. The GPU worker extracts them.
+ *     --pre-extract     post a canned extraction for each still-queued item via
+ *                       PUT /api/queue/:id/results, the endpoint the worker
+ *                       itself posts to. extracted_text is the file's real text
+ *                       layer (pdftotext); the fields are hand-written to match
+ *                       what the file prints. DEFAULT for local (no worker).
+ *     --no-pre-extract  leave them queued for the worker. DEFAULT for --remote,
+ *                       where the real worker should read them. An item the
+ *                       worker already processed is never overwritten.
+ *
+ * FILES
+ *   The spec sheet is the committed setup-wizard sample
+ *   (public/setup-samples/fsqa/specification-sheet.pdf). The COI and sales
+ *   sheet are committed PDFs built from tests/fixtures/arrivals-demo/html/;
+ *   --render rebuilds them with the Playwright chromium the e2e suite ships.
+ *
+ * Usage:
+ *   bin/seed-arrivals-demo                       # local, http://localhost:8790
+ *   PORT=9788 bin/seed-arrivals-demo             # local dev server on another port
+ *   bin/seed-arrivals-demo --tenant <id>         # default tenant_aj_clean
+ *   bin/seed-arrivals-demo --remote              # https://supdox.com, confirms first
+ *   bin/seed-arrivals-demo --remote --yes        # no prompt
+ *   bin/seed-arrivals-demo --base-url <url>      # any other deployment
+ *   bin/seed-arrivals-demo --render              # rebuild the two PDFs, then exit
+ *
+ * Auth:
+ *   local   a@a.a / a (the dev convention; upserted as super_admin if missing)
+ *   remote  DOX_API_KEY (X-API-Key), or --email <e> with DOX_PASSWORD or a
+ *           prompt. The account must be super_admin or an org_admin of the
+ *           tenant, because issuing a request is an org commitment.
+ *
+ * Local only: if the tenant does not exist it is created ("AJ Clean (local
+ * demo)"). Remote never creates a tenant; a missing one is an error.
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const readline = require('node:readline');
+const { execFileSync } = require('node:child_process');
+
+const ROOT = path.resolve(__dirname, '..');
+const FIX = path.join(ROOT, 'tests/fixtures/arrivals-demo');
+
+const SUPPLIER_NAME = 'Northfield Creamery Ingredients, Inc.';
+const REQ_A_TITLE = 'Arrivals demo: annual supplier documentation';
+const REQ_B_TITLE = 'Arrivals demo: new item, Sour Cream Powder (NCI-3105)';
+
+const REQUIREMENTS = {
+  coi: { slug: 'certificate-of-insurance', name: 'Certificate of Insurance' },
+  spec: { slug: 'specification-sheet', name: 'Specification Sheet' },
+  allergen: { slug: 'allergen-statement', name: 'Allergen Statement' },
+  coo: { slug: 'country-of-origin-statement', name: 'Country of Origin Statement' },
+};
+
+const FILES = [
+  {
+    key: 'coi',
+    request: 'A',
+    claims: ['coi'],
+    fileName: 'certificate-of-insurance.pdf',
+    source: path.join(FIX, 'pdf/certificate-of-insurance.pdf'),
+    html: path.join(FIX, 'html/certificate-of-insurance.html'),
+    docTypeNames: ['certificate of insurance', 'certificate of liability insurance', 'coi'],
+    typeGuess: 'Certificate of Insurance',
+    fields: {
+      supplier_name: SUPPLIER_NAME,
+      document_title: 'Certificate of Liability Insurance',
+      certificate_number: 'COI-2026-11873',
+      insurer: 'Great Plains Mutual Casualty Company',
+      policy_number: 'GL-7730152',
+      effective_date: '2026-09-01',
+      document_expires_on: '2027-09-01',
+    },
+    summary: 'Certificate of liability insurance for Northfield Creamery Ingredients, policies 09/01/2026 to 09/01/2027.',
+  },
+  {
+    key: 'spec',
+    request: 'A',
+    claims: ['spec', 'allergen', 'coo'],
+    fileName: 'specification-sheet.pdf',
+    source: path.join(ROOT, 'public/setup-samples/fsqa/specification-sheet.pdf'),
+    html: null,
+    docTypeNames: ['specification sheet', 'spec sheet', 'product specification'],
+    typeGuess: 'Specification Sheet',
+    fields: {
+      supplier_name: SUPPLIER_NAME,
+      product_name: 'Cheddar Cheese Powder, Medium',
+      product_code: 'NCI-2280',
+      specification_number: 'SPEC-NCI-2280',
+      revision: '5',
+      effective_date: '2026-03-12',
+      country_of_origin: 'United States of America',
+      allergens: 'Milk',
+    },
+    summary: 'Product specification sheet, Cheddar Cheese Powder, Medium (NCI-2280), Rev. 5, effective 12 March 2026.',
+  },
+  {
+    key: 'sales',
+    request: 'B',
+    claims: ['spec'],
+    fileName: 'sales-sheet.pdf',
+    source: path.join(FIX, 'pdf/sales-sheet.pdf'),
+    html: path.join(FIX, 'html/sales-sheet.html'),
+    docTypeNames: [],
+    typeGuess: 'Sales sheet',
+    fields: {
+      supplier_name: SUPPLIER_NAME,
+      product_name: 'Sour Cream Powder',
+      product_code: 'NCI-3105',
+    },
+    summary: 'Marketing sales sheet for Sour Cream Powder (NCI-3105). No specification number, revision or dates.',
+  },
+];
+
+// ---------------------------------------------------------------------------
+// args
+// ---------------------------------------------------------------------------
+
+function parseArgs(argv) {
+  const o = {
+    tenant: 'tenant_aj_clean',
+    remote: false,
+    baseUrl: null,
+    yes: false,
+    preExtract: null,
+    render: false,
+    email: null,
+    help: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': o.tenant = argv[++i]; break;
+      case '--remote': case '-r': o.remote = true; break;
+      case '--base-url': o.baseUrl = argv[++i]; break;
+      case '--yes': case '-y': o.yes = true; break;
+      case '--pre-extract': o.preExtract = true; break;
+      case '--no-pre-extract': o.preExtract = false; break;
+      case '--render': o.render = true; break;
+      case '--email': o.email = argv[++i]; break;
+      case '-h': case '--help': o.help = true; break;
+      default: console.error(`unknown argument: ${a}`); process.exit(2);
+    }
+  }
+  if (!o.tenant) { console.error('--tenant needs a value'); process.exit(2); }
+  return o;
+}
+
+function ask(question, { hidden = false } = {}) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    if (hidden) {
+      rl._writeToOutput = (s) => { if (s.includes(question)) rl.output.write(s); };
+    }
+    rl.question(question, (answer) => { rl.close(); if (hidden) process.stdout.write('\n'); resolve(answer); });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// render
+// ---------------------------------------------------------------------------
+
+async function render() {
+  const { chromium } = require('@playwright/test');
+  const browser = await chromium.launch();
+  try {
+    for (const f of FILES.filter((x) => x.html)) {
+      const page = await browser.newPage();
+      await page.goto(`file://${f.html}`, { waitUntil: 'load' });
+      fs.mkdirSync(path.dirname(f.source), { recursive: true });
+      await page.pdf({ path: f.source, printBackground: true, format: 'Letter' });
+      await page.close();
+      console.log(`rendered ${path.relative(ROOT, f.source)}`);
+    }
+  } finally {
+    await browser.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// http
+// ---------------------------------------------------------------------------
+
+function makeClient(baseUrl) {
+  let headers = {};
+  const call = async (method, p, body, { raw = false, form = null } = {}) => {
+    const init = { method, headers: { ...headers } };
+    if (form) {
+      init.body = form;
+    } else if (body !== undefined) {
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(body);
+    }
+    const resp = await fetch(`${baseUrl}${p}`, init);
+    const text = await resp.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch { /* not json */ }
+    if (raw) return { status: resp.status, json, text };
+    if (!resp.ok) {
+      const msg = (json && json.error) || text.slice(0, 200) || resp.statusText;
+      throw new Error(`${method} ${p} -> ${resp.status}: ${msg}`);
+    }
+    return json;
+  };
+  return {
+    call,
+    setBearer: (t) => { headers = { Authorization: `Bearer ${t}` }; },
+    setApiKey: (k) => { headers = { 'X-API-Key': k }; },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// local-only SQL helpers (tenant + dev login)
+// ---------------------------------------------------------------------------
+
+function localSql(sql) {
+  const out = execFileSync(
+    'npx',
+    ['wrangler', 'd1', 'execute', 'doc-upload-db', '--local', '--json', '--command', sql],
+    { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] },
+  ).toString();
+  const start = out.search(/[[{]/);
+  try {
+    const j = JSON.parse(start >= 0 ? out.slice(start) : out);
+    const first = Array.isArray(j) ? j[0] : j.result?.[0];
+    return first?.results ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function q(s) {
+  return `'${String(s).replace(/'/g, "''")}'`;
+}
+
+function ensureLocalTenantAndLogin(tenantId) {
+  const t = localSql(`SELECT id FROM tenants WHERE id = ${q(tenantId)}`);
+  if (t.length === 0) {
+    localSql(
+      `INSERT INTO tenants (id, name, slug, description) VALUES (${q(tenantId)}, 'AJ Clean (local demo)', ${q(
+        tenantId.replace(/_/g, '-'),
+      )}, 'Local tenant created by bin/seed-arrivals-demo')`,
+    );
+    console.log(`  created local tenant ${tenantId}`);
+  }
+  const u = localSql(`SELECT id FROM users WHERE email = 'a@a.a' AND role = 'super_admin' AND active = 1`);
+  if (u.length === 0) {
+    const crypto = require('node:crypto');
+    const salt = crypto.randomBytes(16);
+    const derived = crypto.pbkdf2Sync('a', salt, 100000, 32, 'sha256');
+    const hash = `${salt.toString('hex')}:${derived.toString('hex')}`;
+    localSql(
+      `INSERT INTO users (id, email, password_hash, name, role, tenant_id) VALUES ('arrivals_demo_admin', 'a@a.a', ${q(
+        hash,
+      )}, 'Dev Admin', 'super_admin', NULL) ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash, role = 'super_admin', active = 1`,
+    );
+    console.log('  upserted local login a@a.a / a (super_admin)');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// steps
+// ---------------------------------------------------------------------------
+
+const norm = (s) => String(s || '').trim().toLowerCase();
+
+async function ensureRequirement(api, tenantId, existing, def) {
+  const hit = existing.find((r) => r.slug === def.slug || norm(r.name) === norm(def.name));
+  if (hit) return { id: hit.id, name: hit.name, created: false };
+  const res = await api.call('POST', '/api/requirements', { tenant_id: tenantId, name: def.name, slug: def.slug });
+  return { id: res.requirement.id, name: res.requirement.name, created: true };
+}
+
+async function ensureRequest(api, tenantId, supplierId, title, lines) {
+  const list = await api.call(
+    'GET',
+    `/api/document-requests?tenant_id=${encodeURIComponent(tenantId)}&supplier_id=${encodeURIComponent(supplierId)}&limit=200`,
+  );
+  let found = (list.requests || []).find((r) => r.title === title && ['issued', 'draft'].includes(r.status));
+  let created = false;
+  if (!found) {
+    const res = await api.call('POST', '/api/document-requests', {
+      tenant_id: tenantId,
+      supplier_id: supplierId,
+      title,
+      intro: 'Demo request created by bin/seed-arrivals-demo. Please send the items below.',
+      origin: 'manual',
+      lines: lines.map((l) => ({ line_kind: 'requirement', requirement_id: l.id, name: l.name })),
+    });
+    found = res.request;
+    created = true;
+  }
+  if (found.status === 'draft') {
+    await api.call('POST', `/api/document-requests/${found.id}/issue`, { channel: 'portal' });
+  }
+  const detail = (await api.call('GET', `/api/document-requests/${found.id}`)).request;
+  let link = (await api.call('GET', `/api/document-requests/${found.id}/link`)).link;
+  if (!link || !link.url) {
+    link = (await api.call('POST', `/api/document-requests/${found.id}/link`, {})).link;
+  }
+  const token = String(link.url).split('/r/')[1];
+  if (!token) throw new Error(`could not read the supplier link token for request ${found.id}`);
+  return { request: detail, token, created };
+}
+
+function pdfText(file) {
+  try {
+    return execFileSync('pdftotext', [file, '-'], { encoding: 'utf8' });
+  } catch {
+    return null;
+  }
+}
+
+async function main() {
+  const o = parseArgs(process.argv.slice(2));
+  if (o.help) {
+    const src = fs.readFileSync(__filename, 'utf8');
+    console.log(src.slice(src.indexOf('/**') + 3, src.indexOf('*/')).replace(/^ \* ?/gm, ''));
+    return;
+  }
+  if (o.render) {
+    await render();
+    return;
+  }
+
+  const baseUrl = (o.baseUrl || (o.remote ? 'https://supdox.com' : `http://localhost:${process.env.PORT || 8790}`)).replace(/\/$/, '');
+  const local = !o.remote && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(baseUrl);
+  const preExtract = o.preExtract ?? local;
+
+  for (const f of FILES) {
+    if (!fs.existsSync(f.source)) {
+      throw new Error(`missing ${path.relative(ROOT, f.source)} (run bin/seed-arrivals-demo --render)`);
+    }
+  }
+
+  console.log('seed-arrivals-demo');
+  console.log(`  target      : ${baseUrl}${local ? ' (local)' : ' (REMOTE)'}`);
+  console.log(`  tenant      : ${o.tenant}`);
+  console.log(`  extraction  : ${preExtract ? 'pre-extract still-queued items via /api/queue/:id/results' : 'leave queued for the worker'}`);
+  console.log('');
+
+  if (!local && !o.yes) {
+    const answer = await ask(`This writes a supplier, requirements, two issued requests and three portal uploads to ${baseUrl} tenant ${o.tenant}. Type 'seed' to continue: `);
+    if (answer.trim() !== 'seed') { console.log('Aborted.'); process.exit(1); }
+  }
+
+  const api = makeClient(baseUrl);
+
+  // --- auth ---------------------------------------------------------------
+  if (local) {
+    ensureLocalTenantAndLogin(o.tenant);
+  }
+  if (process.env.DOX_API_KEY && !local) {
+    api.setApiKey(process.env.DOX_API_KEY);
+  } else {
+    const email = o.email || (local ? 'a@a.a' : null);
+    if (!email) throw new Error('remote needs DOX_API_KEY, or --email with DOX_PASSWORD (or a prompt)');
+    const password = local && !o.email ? 'a' : process.env.DOX_PASSWORD || (await ask(`Password for ${email}: `, { hidden: true }));
+    const login = await api.call('POST', '/api/auth/login', { email, password });
+    api.setBearer(login.token);
+  }
+
+  // --- tenant ---------------------------------------------------------------
+  const tenantResp = await api.call('GET', `/api/tenants/${encodeURIComponent(o.tenant)}`, undefined, { raw: true });
+  if (tenantResp.status !== 200) {
+    throw new Error(`tenant ${o.tenant} is not visible to this account (HTTP ${tenantResp.status}); nothing was written`);
+  }
+
+  // --- supplier + requirements ---------------------------------------------
+  const sup = await api.call('POST', '/api/suppliers/lookup-or-create', { tenant_id: o.tenant, name: SUPPLIER_NAME });
+  const supplierId = sup.supplier.id;
+  console.log(`supplier     ${sup.created ? 'created' : 'reused '}  ${sup.supplier.name} (${supplierId})`);
+
+  const existingReqs = (await api.call('GET', `/api/requirements?tenant_id=${encodeURIComponent(o.tenant)}&active=1&limit=500`)).requirements || [];
+  const reqs = {};
+  for (const [k, def] of Object.entries(REQUIREMENTS)) {
+    reqs[k] = await ensureRequirement(api, o.tenant, existingReqs, def);
+    console.log(`requirement  ${reqs[k].created ? 'created' : 'reused '}  ${reqs[k].name}`);
+  }
+
+  // --- requests ---------------------------------------------------------------
+  const A = await ensureRequest(api, o.tenant, supplierId, REQ_A_TITLE, [reqs.coi, reqs.spec, reqs.allergen, reqs.coo]);
+  const B = await ensureRequest(api, o.tenant, supplierId, REQ_B_TITLE, [reqs.spec]);
+  console.log(`request A    ${A.created ? 'created' : 'reused '}  ${A.request.title} (${A.request.id})`);
+  console.log(`request B    ${B.created ? 'created' : 'reused '}  ${B.request.title} (${B.request.id})`);
+  const byKey = { A, B };
+
+  // --- document types, for the pre-extraction ---------------------------------
+  let docTypes = [];
+  try {
+    docTypes = (await api.call('GET', `/api/document-types?tenant_id=${encodeURIComponent(o.tenant)}&active=1&limit=500`)).documentTypes || [];
+  } catch { /* the guess alone is fine */ }
+
+  // --- uploads through the public supplier link --------------------------------
+  const queueIds = [];
+  for (const f of FILES) {
+    const target = byKey[f.request];
+    const history = await api.call(
+      'GET',
+      `/api/request-uploads?tenant_id=${encodeURIComponent(o.tenant)}&request_id=${encodeURIComponent(target.request.id)}&limit=200`,
+    );
+    let arrival = (history.arrivals || []).find((a) => a.file_name === f.fileName);
+    if (arrival) {
+      console.log(`arrival      reused   ${f.fileName} -> request ${f.request}`);
+    } else {
+      const view = await api.call('GET', `/api/supplier-requests/public/${target.token}`);
+      const wanted = f.claims.map((c) => reqs[c].name);
+      const refs = wanted.map((name) => {
+        const item = (view.items || []).find((it) => norm(it.name) === norm(name));
+        if (!item) throw new Error(`request ${f.request} has no line "${name}" on its supplier page`);
+        return item.ref;
+      });
+      const form = new FormData();
+      form.append('file', new Blob([fs.readFileSync(f.source)], { type: 'application/pdf' }), f.fileName);
+      form.append('item_refs', JSON.stringify(refs));
+      form.append('uploader_label', 'Dana Whitcomb, QA (demo)');
+      await api.call('POST', `/api/supplier-requests/public/${target.token}/upload`, undefined, { form });
+      const after = await api.call(
+        'GET',
+        `/api/request-uploads?tenant_id=${encodeURIComponent(o.tenant)}&request_id=${encodeURIComponent(target.request.id)}&limit=200`,
+      );
+      arrival = (after.arrivals || []).find((a) => a.file_name === f.fileName);
+      console.log(`arrival      uploaded ${f.fileName} -> request ${f.request}, claims ${wanted.join(', ')}`);
+    }
+    if (!arrival || !arrival.queue_id) {
+      console.log(`             WARNING: ${f.fileName} has no queue item (enqueue failed?); use Re-enqueue on Requests > Arrivals`);
+      continue;
+    }
+    queueIds.push({ f, queueId: arrival.queue_id });
+  }
+
+  // --- extraction ----------------------------------------------------------------
+  const states = [];
+  for (const { f, queueId } of queueIds) {
+    const { item } = await api.call('GET', `/api/queue/${queueId}`);
+    if (preExtract && item.processing_status === 'queued') {
+      const typeHit = docTypes.find((dt) => f.docTypeNames.includes(norm(dt.name)));
+      const text = pdfText(f.source);
+      await api.call('PUT', `/api/queue/${queueId}/results`, {
+        processing_status: 'ready',
+        extracted_text: text ?? `${f.summary}\n(pdftotext unavailable when this demo was seeded)`,
+        ai_fields: JSON.stringify(f.fields),
+        ai_confidence: 'high',
+        confidence_score: 0.9,
+        confidence: 0.9,
+        summary: f.summary,
+        supplier: SUPPLIER_NAME,
+        document_type_id: typeHit ? typeHit.id : null,
+        document_type_guess: typeHit ? typeHit.name : f.typeGuess,
+        text_model: 'seed-arrivals-demo (canned, not a model)',
+      });
+      states.push(`${f.fileName}: pre-extracted (canned fields${typeHit ? `, type ${typeHit.name}` : `, type guess "${f.typeGuess}"`})`);
+    } else {
+      states.push(`${f.fileName}: ${item.processing_status}${item.processing_status === 'queued' ? ' (waiting for the worker)' : ''}, queue status ${item.status}`);
+    }
+  }
+
+  console.log('');
+  console.log('Queue items:');
+  for (const s of states) console.log(`  ${s}`);
+  console.log('');
+  console.log('Try it:');
+  console.log(`  ${baseUrl}/requests/arrivals     the three arrivals, waiting on a person`);
+  console.log(`  ${baseUrl}/review                 filter Source = supplier link; each card shows what the supplier claimed`);
+  console.log('    - certificate-of-insurance.pdf  -> choose Accept, then "Approve & accept 1"');
+  console.log('    - specification-sheet.pdf       -> choose Accept, then "Approve & accept 3"');
+  console.log('    - sales-sheet.pdf               -> Reject, reason "Sales sheet, not a spec sheet" (sends it back)');
+  console.log(`  Supplier's view:  ${baseUrl}/r/${A.token}`);
+  console.log(`                    ${baseUrl}/r/${B.token}`);
+}
+
+main().catch((err) => {
+  console.error(`seed-arrivals-demo failed: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+});
