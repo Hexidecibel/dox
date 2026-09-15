@@ -1,6 +1,11 @@
 {
-  "current": "2.15.0",
+  "current": "2.16.0",
   "versions": [
+    {
+      "version": "2.16.0",
+      "date": "2026-09-15",
+      "title": "Each supplier's lot format, declared"
+    },
     {
       "version": "2.15.0",
       "date": "2026-09-15",

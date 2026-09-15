@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.16.0](releases/v2.16.0.md) — 2026-09-15 — Each supplier's lot format, declared
 - [v2.15.0](releases/v2.15.0.md) — 2026-09-15 — Suppliers on watch, and nothing unjudged looks checked
 - [v2.14.0](releases/v2.14.0.md) — 2026-09-15 — The portal recognises a file it has already seen
 - [v2.13.0](releases/v2.13.0.md) — 2026-09-15 — Search understands products the way people name them
