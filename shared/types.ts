@@ -3907,6 +3907,7 @@ export interface LotSuggestion {
   order_item_id: string;
   order_number: string | null;
   document_id: string;
+  document_title?: string | null;
   match_confidence: number | null;
   match_basis: string | null;
   status: string;
@@ -3945,7 +3946,7 @@ export type CoaGapStatus = 'ok' | 'missing_lot' | 'missing_coa' | 'expired';
 /**
  * For a `missing_coa` line: is the product even known to us?
  *   have_other_lot — a COA exists for this distributor code (different lot) →
- *                    collect THIS lot's COA and it auto-links.
+ *                    collect THIS lot's COA; its match is then suggested.
  *   none_on_file   — no COA on file for this product code at all.
  */
 export type CoaAvailability = 'have_other_lot' | 'none_on_file' | null;
@@ -3968,6 +3969,12 @@ export interface CoaFulfillmentRow {
   coa_document_id: string | null;
   coa_file_name: string | null;
   coa_match_status: string | null;
+  /**
+   * Pending lot-match suggestions for this line. A suggestion is NOT a match
+   * (the engine never asserts one), so such a line is still `missing_coa`
+   * until someone accepts it on the order.
+   */
+  coa_suggestions_pending: number;
   gap: CoaGapStatus;
   coa_availability: CoaAvailability;
 }

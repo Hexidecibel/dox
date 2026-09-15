@@ -169,7 +169,7 @@ be added to `tests/helpers/db.ts`.
 | 0063 | processing_queue_attempts | Track resets from `processing` back to queued |
 | 0064 | product_suppliers | product_suppliers M2M provenance + backfill |
 | 0065 | lots | `lots` table (tenant/supplier/product, lot_number, lot_key, dates) |
-| 0066 | order_item_lot_linking | order_items.lot_id + coa_match_status/coa_matched_at + lot_match_suggestions |
+| 0066 | order_item_lot_linking | order_items.lot_id + coa_match_status/coa_matched_at + lot_match_suggestions. **Since 14 Sep 2026 every lot match is a suggestion** (`functions/lib/entities/matching.ts`): the engine never writes `coa_document_id`/`matched`, however strong the basis; only accepting a suggestion (POST /api/lot-matches/:id, one click on OrderDetail / lot panel / shipment tile) links. Pre-change auto-links are left as history; `bin/audit-asserted-lot-matches` reports them (opt-in `--apply` re-offers them) |
 | 0067 | queue_source_routing | Unified intake routing: output_kind, source_id, intake_mode (additive) |
 | 0068 | extraction_profiles_and_internal_suppliers | Unify extraction profiles into supplier_extraction_instructions (+ field_mappings) |
 | 0069 | document_types_supplier_scope | Reparent document types under suppliers (hybrid: NULL supplier_id = global) |

@@ -51,8 +51,25 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(orderId)
       .all();
 
+    // Pending lot-match suggestions for this order's lines. The matcher never
+    // links a COA to a line on its own (functions/lib/entities/matching.ts), so
+    // this is where a person sees the evidence and makes the call, one click
+    // each via POST /api/lot-matches/:id. Highest confidence first.
+    const suggestionsResult = await context.env.DB.prepare(
+      `SELECT lms.id, lms.order_item_id, lms.document_id, d.title AS document_title,
+              lms.lot_id, l.lot_number, lms.match_basis, lms.match_confidence, lms.status
+         FROM lot_match_suggestions lms
+         JOIN order_items oi ON oi.id = lms.order_item_id
+         LEFT JOIN documents d ON d.id = lms.document_id
+         LEFT JOIN lots l ON l.id = lms.lot_id
+        WHERE oi.order_id = ? AND lms.status = 'pending'
+        ORDER BY lms.match_confidence DESC, lms.created_at DESC`
+    )
+      .bind(orderId)
+      .all();
+
     return new Response(
-      JSON.stringify({ order, items: itemsResult.results }),
+      JSON.stringify({ order, items: itemsResult.results, suggestions: suggestionsResult.results ?? [] }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (err) {

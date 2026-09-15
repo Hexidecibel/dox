@@ -93,14 +93,16 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          lms.order_item_id AS order_item_id,
          o.order_number    AS order_number,
          lms.document_id   AS document_id,
+         d.title           AS document_title,
          lms.match_confidence AS match_confidence,
          lms.match_basis   AS match_basis,
          lms.status        AS status
        FROM lot_match_suggestions lms
        JOIN order_items oi ON oi.id = lms.order_item_id
        JOIN orders o ON o.id = oi.order_id
+       LEFT JOIN documents d ON d.id = lms.document_id
        WHERE lms.lot_id = ? AND lms.status = 'pending'
-       ORDER BY lms.created_at DESC`
+       ORDER BY lms.match_confidence DESC, lms.created_at DESC`
     )
       .bind(lotId)
       .all();

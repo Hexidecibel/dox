@@ -2,19 +2,19 @@
  * POST /api/admin/rematch-lots
  *
  * Re-runs the order↔COA lot matcher for every lot-bound order_item in the
- * tenant. Use this to retroactively light up links after a matcher change —
- * notably the distributor-code (product_code + COA title prefix) auto-confirm,
- * which upgrades many previously-weak `lot_only` suggestions to STRONG links
- * even when product names (and thus product_ids) differ across the two sides.
+ * tenant. Use this to retroactively surface matches after a matcher change —
+ * e.g. the distributor-code (product_code + COA title prefix) rule, which
+ * raises many `lot_only` suggestions to high confidence even when product
+ * names (and thus product_ids) differ across the two sides.
  *
- * For each order_item with a `lot_id`, we call `linkOrderToCoas`, which:
- *   - finds COA documents sharing the lot_key,
- *   - auto-links (writes coa_document_id) on product OR distributor-code
- *     agreement, or
- *   - records a pending suggestion otherwise.
+ * For each order_item with a `lot_id`, we call `linkOrderToCoas`, which finds
+ * COA documents sharing the lot_key and records each as a PENDING suggestion
+ * with its basis and confidence. It never links: a person accepts a match
+ * (POST /api/lot-matches/:id).
  *
- * Idempotent: `applyStrongLink` only writes on a strictly higher confidence,
- * and suggestions use INSERT OR IGNORE on (order_item_id, document_id).
+ * Idempotent: suggestions are unique on (order_item_id, document_id); a pending
+ * one is only ever raised to higher confidence, and an accepted or rejected one
+ * is never touched.
  *
  * Auth: super_admin (any tenant) or org_admin (own tenant only).
  *
@@ -24,14 +24,15 @@
  *     doesn't match is rejected).
  *
  * Returns JSON counts:
- *   { order_items_processed, strong_links_made, suggestions_created }
- * where strong_links_made counts order_items that gained a coa_document_id
- * during this run, and suggestions_created counts net-new pending suggestions.
+ *   { order_items_processed, suggestions_created, high_confidence_suggestions }
+ * where suggestions_created counts net-new suggestions and
+ * high_confidence_suggestions counts pending suggestions for the processed
+ * lines at product/code-agreement confidence (>= 0.85) after the run.
  */
 
 import { requireRole, requireTenantAccess, errorToResponse } from '../../lib/permissions';
 import { logAudit, getClientIp } from '../../lib/db';
-import { linkOrderToCoas } from '../../lib/entities/matching';
+import { linkOrderToCoas, CONFIDENCE_LOT_PRODUCT } from '../../lib/entities/matching';
 import type { Env, User } from '../../lib/types';
 
 interface OrderItemRow {
@@ -43,8 +44,8 @@ interface OrderItemRow {
 
 interface RematchResult {
   order_items_processed: number;
-  strong_links_made: number;
   suggestions_created: number;
+  high_confidence_suggestions: number;
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -90,8 +91,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const result: RematchResult = {
       order_items_processed: 0,
-      strong_links_made: 0,
       suggestions_created: 0,
+      high_confidence_suggestions: 0,
     };
 
     for (const oi of rows.results ?? []) {
@@ -105,11 +106,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
         const after = await snapshot(db, oi.id);
 
-        // A newly-set coa_document_id (was null, now set) is a strong link.
-        if (!before.linked && after.linked) {
-          result.strong_links_made++;
-        }
         result.suggestions_created += Math.max(0, after.suggestions - before.suggestions);
+        result.high_confidence_suggestions += after.highConfidencePending;
       } catch (err) {
         console.warn(
           'rematch-lots: order_item failed:',
@@ -154,19 +152,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 async function snapshot(
   db: D1Database,
   orderItemId: string
-): Promise<{ linked: boolean; suggestions: number }> {
-  const oi = await db
-    .prepare('SELECT coa_document_id FROM order_items WHERE id = ?')
-    .bind(orderItemId)
-    .first<{ coa_document_id: string | null }>();
+): Promise<{ suggestions: number; highConfidencePending: number }> {
   const sugg = await db
     .prepare(
-      `SELECT COUNT(*) AS c FROM lot_match_suggestions WHERE order_item_id = ?`
+      `SELECT COUNT(*) AS c,
+              SUM(CASE WHEN status = 'pending' AND match_confidence >= ? THEN 1 ELSE 0 END) AS hi
+         FROM lot_match_suggestions WHERE order_item_id = ?`
     )
-    .bind(orderItemId)
-    .first<{ c: number }>();
+    .bind(CONFIDENCE_LOT_PRODUCT, orderItemId)
+    .first<{ c: number; hi: number | null }>();
   return {
-    linked: !!oi?.coa_document_id,
     suggestions: Number(sugg?.c) || 0,
+    highConfidencePending: Number(sugg?.hi) || 0,
   };
 }

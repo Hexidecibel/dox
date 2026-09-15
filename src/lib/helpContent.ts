@@ -370,11 +370,11 @@ const orders: ModuleHelpExpanded = {
       status:
         "Where this order is in the COA workflow. pending = just ingested, no enrichment yet. enriched = customer / products resolved. matched = COAs found for the lots on the order. fulfilled = all required docs attached. delivered = COA package sent to the customer. error = ingest or enrichment failed.",
       items: 'Total line items on the order.',
-      matched: 'Line items that have a matched lot + COA. Counts against `items` for the matched / total ratio.',
+      matched: 'Line items with a COA a person confirmed for their lot (suggestions do not count). Counts against `items` for the matched / total ratio.',
       source: 'Which connector this order came from. Click the chip to filter the list to one connector.',
       created: 'When the order was first ingested or created.',
-      lot: 'Lot / batch number for this line. Drives COA matching: ingested COAs that carry the same lot number get auto-attached to lines.',
-      coa: 'The matched COA for this line. Click through for the file, version history, and metadata. Empty means no COA matched yet.',
+      lot: 'Lot / batch number for this line. Drives COA matching: ingested COAs that carry the same lot number are suggested for the line, for someone to confirm.',
+      coa: 'The matched COA for this line. Click through for the file, version history, and metadata. Empty means nobody has confirmed a COA yet; a suggested match shows here with Confirm and Reject, because a match is never linked until a person confirms it.',
     },
   },
   detail: {

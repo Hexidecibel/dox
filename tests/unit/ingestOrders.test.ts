@@ -128,7 +128,7 @@ describe('ingestOrders — header-only orders with null connector refs (prod rep
 });
 
 describe('ingestOrders — accumulative lot linkage (store now, link when lot arrives)', () => {
-  it('binds order_items.lot_id + coa_document_id when an order line matches an existing COA-linked lot', async () => {
+  it('binds order_items.lot_id and suggests the existing COA when an order line matches its lot', async () => {
     const tenantId = seed.tenantId;
 
     // 1. A COA document already on file, linked to a lot (the COA side).
@@ -173,7 +173,8 @@ describe('ingestOrders — accumulative lot linkage (store now, link when lot ar
     expect(result.ordersCreated).toBe(1);
     expect(result.errors).toBe(0);
 
-    // The order line must be bound to the lot AND to the existing COA document.
+    // The order line is bound to the lot, and the existing COA is SUGGESTED for
+    // it. The engine never links a COA to a shipment on its own.
     const item = await db.prepare(
       `SELECT oi.lot_id, oi.coa_document_id, oi.coa_match_status
        FROM order_items oi JOIN orders o ON o.id = oi.order_id
@@ -182,11 +183,18 @@ describe('ingestOrders — accumulative lot linkage (store now, link when lot ar
 
     expect(item).not.toBeNull();
     expect(item!.lot_id).toBe(coaLot!.id);
-    expect(item!.coa_document_id).toBe(coaDocId);
-    expect(item!.coa_match_status).toBe('matched');
+    expect(item!.coa_document_id).toBeNull();
+    expect(item!.coa_match_status).toBe('unmatched');
+    const sugg = await db.prepare(
+      `SELECT lms.document_id, lms.status FROM lot_match_suggestions lms
+       JOIN order_items oi ON oi.id = lms.order_item_id
+       JOIN orders o ON o.id = oi.order_id
+       WHERE o.tenant_id = ? AND o.order_number = 'ORD-1'`
+    ).bind(tenantId).first<{ document_id: string; status: string }>();
+    expect(sugg).toEqual({ document_id: coaDocId, status: 'pending' });
   });
 
-  it('header-only order persists now and links later when the lot arrives via a re-run', async () => {
+  it('header-only order persists now and gets its match suggested when the lot arrives via a re-run', async () => {
     const tenantId = seed.tenantId;
     const productId = generateTestId();
     await db.prepare('INSERT INTO products (id, tenant_id, name, slug, active) VALUES (?, ?, ?, ?, 1)')
@@ -238,6 +246,13 @@ describe('ingestOrders — accumulative lot linkage (store now, link when lot ar
        WHERE o.tenant_id = ? AND o.order_number = 'ORD-9'`
     ).bind(tenantId).first<{ lot_id: string | null; coa_document_id: string | null }>();
     expect(item!.lot_id).toBe(coaLot!.id);
-    expect(item!.coa_document_id).toBe(coaDocId);
+    expect(item!.coa_document_id).toBeNull();
+    const sugg = await db.prepare(
+      `SELECT lms.document_id FROM lot_match_suggestions lms
+       JOIN order_items oi ON oi.id = lms.order_item_id
+       JOIN orders o ON o.id = oi.order_id
+       WHERE o.tenant_id = ? AND o.order_number = 'ORD-9' AND lms.status = 'pending'`
+    ).bind(tenantId).first<{ document_id: string }>();
+    expect(sugg?.document_id).toBe(coaDocId);
   });
 });

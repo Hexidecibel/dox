@@ -97,7 +97,7 @@ function SummaryHeader({ summary }: { summary: CoaFulfillmentSummary }) {
           label={`Collectible ${summary.collectible}`}
           color="warning"
           sx={{ fontWeight: 700 }}
-          title="Shipped lots with no COA, but we hold COAs for that product — collect this lot's COA and it auto-links."
+          title="Shipped lots with no COA, but we hold COAs for that product. Collect this lot's COA and its match is suggested for you to confirm."
         />
       )}
       {summary.no_product_coa > 0 && (
@@ -352,12 +352,22 @@ export function Reports() {
                                   </Link>
                                 ) : row.gap === 'missing_lot' ? (
                                   '-'
+                                ) : row.coa_suggestions_pending > 0 ? (
+                                  <Chip
+                                    size="small"
+                                    label="Match suggested"
+                                    color="info"
+                                    component={RouterLink}
+                                    to={`/orders/${row.order_id}`}
+                                    clickable
+                                    title="A COA looks like this lot's. Nobody has confirmed it yet, so the line still counts as missing a COA. Open the order to confirm or reject it."
+                                  />
                                 ) : row.coa_availability === 'have_other_lot' ? (
                                   <Chip
                                     size="small"
                                     label="Collect lot COA"
                                     color="warning"
-                                    title="We hold COAs for this product — collect this lot's COA and it auto-links."
+                                    title="We hold COAs for this product. Collect this lot's COA and its match is suggested for you to confirm."
                                   />
                                 ) : (
                                   <Chip

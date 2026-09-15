@@ -7,14 +7,15 @@ import type { Env, User } from '../../lib/types';
 /**
  * GET /api/lot-matches
  *
- * List weak lot-match suggestions for human review (Review Queue v2). Each row
+ * List lot-match suggestions for human review (every engine match is one) (Review Queue v2). Each row
  * carries enough to render a review line: the COA document title, the matched
  * order line's product, the lot, and the match basis/confidence. Resolve a
  * suggestion via POST /api/lot-matches/:id { action: 'accept' | 'reject' }.
  *
  * Query params (all optional except tenant scoping):
  *   status        — suggestion status filter; default 'pending'. Pass 'all' to skip.
- *   order_number  — restrict to suggestions whose order_item belongs to this order.
+ *   order_number  — restrict to suggestions whose order_item belongs to this
+ *                   order. May be repeated (a shipment touches several).
  *   limit         — default 50, cap 200.
  *   offset        — default 0.
  *
@@ -28,7 +29,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     const url = new URL(context.request.url);
     const status = url.searchParams.get('status') || 'pending';
-    const orderNumber = url.searchParams.get('order_number');
+    // getAll: the client appends one per order a shipment touched. Reading only
+    // the first silently hid every other order's suggestions.
+    const orderNumbers = url.searchParams.getAll('order_number').filter(Boolean).slice(0, 50);
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
@@ -52,9 +55,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       params.push(status);
     }
 
-    if (orderNumber) {
-      conditions.push('o.order_number = ?');
-      params.push(orderNumber);
+    if (orderNumbers.length > 0) {
+      conditions.push(`o.order_number IN (${orderNumbers.map(() => '?').join(', ')})`);
+      params.push(...orderNumbers);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -79,7 +82,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
        LEFT JOIN orders      o  ON o.id  = oi.order_id
        LEFT JOIN lots        l  ON l.id  = lms.lot_id
        ${whereClause}
-       ORDER BY lms.created_at DESC, lms.id DESC
+       ORDER BY lms.match_confidence DESC, lms.created_at DESC, lms.id DESC
        LIMIT ? OFFSET ?`
     )
       .bind(...params, limit, offset)

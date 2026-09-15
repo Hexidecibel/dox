@@ -32,7 +32,7 @@ interface BackfillResult {
   documents_scanned: number;
   lots_created: number;
   links_created: number;
-  orders_linked: number;
+  orders_suggested: number;
   skipped: number;
   errors: Array<{ document_id: string; error: string }>;
 }
@@ -148,7 +148,7 @@ describe('POST /api/admin/backfill-lots — auth gate', () => {
 });
 
 describe('POST /api/admin/backfill-lots — extraction + linkage', () => {
-  it('promotes a lot and binds a matching order line', async () => {
+  it('promotes a lot and suggests (never links) a matching order line', async () => {
     const product = await findOrCreateProduct(db, seed.tenantId, 'Backfill Product');
 
     // Pre-existing order line shipped as lot 6141 for this product.
@@ -180,7 +180,7 @@ describe('POST /api/admin/backfill-lots — extraction + linkage', () => {
 
     expect(body.lots_created).toBe(1);
     expect(body.links_created).toBe(1);
-    expect(body.orders_linked).toBe(1);
+    expect(body.orders_suggested).toBe(1);
     expect(body.errors).toHaveLength(0);
 
     // document_lots row exists for the doc.
@@ -198,15 +198,20 @@ describe('POST /api/admin/backfill-lots — extraction + linkage', () => {
     expect(lot!.code_date).toBe('2026-01-15');
     expect(lot!.expiration_date).toBe('2027-01-15');
 
-    // The order line got bound to the COA.
+    // The order line is NOT linked: the match waits for a person.
     const item = await db
       .prepare(
         'SELECT coa_document_id, coa_match_status FROM order_items WHERE id = ?'
       )
       .bind(itemId)
       .first<{ coa_document_id: string | null; coa_match_status: string }>();
-    expect(item!.coa_document_id).toBe(docId);
-    expect(item!.coa_match_status).toBe('matched');
+    expect(item!.coa_document_id).toBeNull();
+    expect(item!.coa_match_status).toBe('unmatched');
+    const sugg = await db
+      .prepare('SELECT document_id, status FROM lot_match_suggestions WHERE order_item_id = ?')
+      .bind(itemId)
+      .all<{ document_id: string; status: string }>();
+    expect(sugg.results).toEqual([{ document_id: docId, status: 'pending' }]);
   });
 
   it('promotes a lot with no matching order (link created, no bind)', async () => {
@@ -220,7 +225,7 @@ describe('POST /api/admin/backfill-lots — extraction + linkage', () => {
 
     expect(body.lots_created).toBe(1);
     expect(body.links_created).toBe(1);
-    expect(body.orders_linked).toBe(0);
+    expect(body.orders_suggested).toBe(0);
 
     const link = await db
       .prepare('SELECT id FROM document_lots WHERE document_id = ?')

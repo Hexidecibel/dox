@@ -154,16 +154,17 @@ export async function produceShipment(
       }
 
       // 3. Write the WMS binding onto the order line. Idempotent: re-running
-      //    sets the same lot_id. We do NOT clobber a coa_document_id here —
-      //    the matcher in step 4 owns strong-link writes.
+      //    sets the same lot_id. We do NOT touch coa_document_id here — only
+      //    a person accepting a suggestion writes it.
       await db
         .prepare(`UPDATE order_items SET lot_id = ? WHERE id = ?`)
         .bind(lot.id, orderItem.id)
         .run();
 
       // 4. Run the lot-keyed linkage rules. With orderItemId set, this
-      //    dispatches order_item→COA matching: a strong match writes
-      //    coa_document_id onto the line; a weak match records a suggestion.
+      //    dispatches order_item→COA matching. Every candidate COA becomes a
+      //    pending suggestion (with its basis and confidence); nothing is
+      //    linked until a person accepts one.
       await runLinkageForLot(db, tenantId, {
         lotId: lot.id,
         orderItemId: orderItem.id,
@@ -181,8 +182,10 @@ export async function produceShipment(
       if (after?.coa_document_id) {
         bound++;
       } else {
-        // No strong link. If a pending suggestion now exists for this line,
-        // count it as suggested; otherwise the lot bound but no COA is on file.
+        // Not linked (no one has accepted a match for this line). If a pending
+        // suggestion exists, count it as suggested; otherwise the lot bound
+        // but no COA is on file. `bound` only counts lines a person already
+        // accepted a COA for.
         const sugg = await db
           .prepare(
             `SELECT 1 FROM lot_match_suggestions

@@ -4,6 +4,9 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**Lot matching is suggest-only (AJ §7, user confirmed 14 Sep).** Existing prod `matched` rows (9) untouched;
+`bin/audit-asserted-lot-matches --remote` lists them (dry-run) — decide whether to `--apply`.
+
 ## 2026-09-14 v2.8.0 ON PROD — migrations through 0103, backfill waiting on a yes
 
 **2026-09-14 latest: v2.10.0 ON PROD (Out of Spec origin filter + result location,

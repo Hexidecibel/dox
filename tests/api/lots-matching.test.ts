@@ -22,6 +22,8 @@ import {
   classifyMatch,
 } from '../../functions/lib/entities/matching';
 import { onRequestPost as resolveLotMatch } from '../../functions/api/lot-matches/[id]';
+import { onRequestGet as listLotMatches } from '../../functions/api/lot-matches/index';
+import { onRequestGet as getOrder } from '../../functions/api/orders/[id]';
 
 const db = env.DB;
 let seed: Awaited<ReturnType<typeof seedTestData>>;
@@ -110,6 +112,30 @@ async function getOrderItem(id: string) {
       match_confidence: number | null;
       coa_match_status: string;
     }>();
+}
+
+/**
+ * The engine never asserts a lot-to-shipment match (client rule, 14 Sep 2026):
+ * however strong the evidence, the pair is a PENDING suggestion and the order
+ * line stays unlinked until a person accepts it.
+ */
+async function expectSuggestedOnly(
+  orderItemId: string,
+  docId: string,
+  opts: { confidence?: number; minConfidence?: number } = {}
+) {
+  const oi = await getOrderItem(orderItemId);
+  expect(oi!.coa_document_id).toBeNull();
+  expect(oi!.coa_match_status).toBe('unmatched');
+  expect(oi!.lot_matched).toBeFalsy();
+  const sugg = (await getSuggestions(orderItemId)).filter((x) => x.document_id === docId);
+  expect(sugg).toHaveLength(1);
+  expect(sugg[0].status).toBe('pending');
+  if (opts.confidence !== undefined) expect(sugg[0].match_confidence).toBe(opts.confidence);
+  if (opts.minConfidence !== undefined) {
+    expect(sugg[0].match_confidence).toBeGreaterThanOrEqual(opts.minConfidence);
+  }
+  return sugg[0];
 }
 
 async function getSuggestions(orderItemId: string) {
@@ -326,7 +352,7 @@ describe('findOrCreateLot', () => {
 // --- matching engine -------------------------------------------------------
 
 describe('matching: COA → orders', () => {
-  it('auto-links (strong) when product agrees', async () => {
+  it('suggests at high confidence, and does not link, when product agrees', async () => {
     const productId = await makeProduct(seed.tenantId, 'Butter');
     const supplierId = await makeSupplier(seed.tenantId, 'Dairy Co');
 
@@ -356,15 +382,10 @@ describe('matching: COA → orders', () => {
       supplierId,
     });
 
-    const oi = await getOrderItem(orderItemId);
-    expect(oi!.coa_document_id).toBe(docId);
-    expect(oi!.coa_match_status).toBe('matched');
-    expect(oi!.lot_matched).toBe(1);
-    expect(oi!.match_confidence).toBeGreaterThanOrEqual(0.85);
-    expect(await getSuggestions(orderItemId)).toHaveLength(0);
+    await expectSuggestedOnly(orderItemId, docId, { minConfidence: 0.85 });
   });
 
-  it('matches an order line that has a raw lot_number but no lot_id yet', async () => {
+  it('suggests a match for an order line that has a raw lot_number but no lot_id yet', async () => {
     const productId = await makeProduct(seed.tenantId, 'Cream');
     const { orderItemId } = await makeOrderWithItem(seed.tenantId, {
       productId,
@@ -385,9 +406,7 @@ describe('matching: COA → orders', () => {
       supplierId: null,
     });
 
-    const oi = await getOrderItem(orderItemId);
-    expect(oi!.coa_document_id).toBe(docId);
-    expect(oi!.coa_match_status).toBe('matched');
+    await expectSuggestedOnly(orderItemId, docId);
   });
 
   it('suggests (weak) when only the lot matches and product is unknown — no auto-link', async () => {
@@ -457,7 +476,7 @@ describe('matching: COA → orders', () => {
 });
 
 describe('matching: order → COAs', () => {
-  it('auto-links (strong) when product agrees', async () => {
+  it('suggests at high confidence, and does not link, when product agrees', async () => {
     const productId = await makeProduct(seed.tenantId, 'Whey');
     const supplierId = await makeSupplier(seed.tenantId, 'Whey Co');
 
@@ -486,14 +505,12 @@ describe('matching: order → COAs', () => {
       productId,
     });
 
-    const oi = await getOrderItem(orderItemId);
-    expect(oi!.coa_document_id).toBe(docId);
-    expect(oi!.coa_match_status).toBe('matched');
+    await expectSuggestedOnly(orderItemId, docId);
   });
 });
 
-describe('matching: distributor-code auto-confirm', () => {
-  it('order → COA: codes agree (different products) → STRONG auto-link, no suggestion', async () => {
+describe('matching: distributor-code agreement', () => {
+  it('order → COA: codes agree (different products) → high-confidence suggestion, no link', async () => {
     const orderProduct = await makeProduct(seed.tenantId, 'WILL CAGE FREE WHOLE LIQ');
     const coaProduct = await makeProduct(seed.tenantId, 'Willamette Cage-Free Liquid Whole Egg');
 
@@ -529,11 +546,7 @@ describe('matching: distributor-code auto-confirm', () => {
       productId: orderProduct,
     });
 
-    const oi = await getOrderItem(orderItemId);
-    expect(oi!.coa_document_id).toBe(docId);
-    expect(oi!.coa_match_status).toBe('matched');
-    expect(oi!.match_confidence).toBe(0.9);
-    expect(await getSuggestions(orderItemId)).toHaveLength(0);
+    await expectSuggestedOnly(orderItemId, docId, { confidence: 0.9 });
   });
 
   it('order → COA: codes differ → stays a weak suggestion', async () => {
@@ -577,7 +590,7 @@ describe('matching: distributor-code auto-confirm', () => {
     expect(sugg[0].match_basis).toBe('lot_only');
   });
 
-  it('COA → orders: codes agree (different products) → STRONG auto-link', async () => {
+  it('COA → orders: codes agree (different products) → high-confidence suggestion, no link', async () => {
     const orderProduct = await makeProduct(seed.tenantId, 'Order Name');
     const coaProduct = await makeProduct(seed.tenantId, 'Coa Name');
 
@@ -612,10 +625,7 @@ describe('matching: distributor-code auto-confirm', () => {
       supplierId: null,
     });
 
-    const oi = await getOrderItem(orderItemId);
-    expect(oi!.coa_document_id).toBe(docId);
-    expect(oi!.coa_match_status).toBe('matched');
-    expect(await getSuggestions(orderItemId)).toHaveLength(0);
+    await expectSuggestedOnly(orderItemId, docId);
   });
 });
 
@@ -675,7 +685,7 @@ async function makeProductMap(
 }
 
 describe('supplier_product_map bridge (0075)', () => {
-  it('COA→orders: a map row upgrades a name-divergent pair from lot_only to strong lot+product', async () => {
+  it('COA→orders: a map row upgrades a name-divergent pair from lot_only to a lot+product suggestion', async () => {
     const supplierId = await makeSupplier(seed.tenantId, 'Country Morning Farms');
     // Two DIFFERENT product rows: the COA-side ("Milk - Whole") and the
     // order-side distributor SKU product. classifyMatch would see different
@@ -721,11 +731,7 @@ describe('supplier_product_map bridge (0075)', () => {
       coaProductName: 'Milk - Whole',
     });
 
-    const oi = await getOrderItem(orderItemId);
-    expect(oi!.coa_document_id).toBe(docId);
-    expect(oi!.coa_match_status).toBe('matched');
-    expect(oi!.match_confidence).toBe(0.85);
-    expect(await getSuggestions(orderItemId)).toHaveLength(0);
+    await expectSuggestedOnly(orderItemId, docId, { confidence: 0.85 });
   });
 
   it('order→COAs: a map row upgrades the same pair via the rematch path', async () => {
@@ -767,11 +773,7 @@ describe('supplier_product_map bridge (0075)', () => {
       productId: orderProductId,
     });
 
-    const oi = await getOrderItem(orderItemId);
-    expect(oi!.coa_document_id).toBe(docId);
-    expect(oi!.coa_match_status).toBe('matched');
-    expect(oi!.match_confidence).toBe(0.85);
-    expect(await getSuggestions(orderItemId)).toHaveLength(0);
+    await expectSuggestedOnly(orderItemId, docId, { confidence: 0.85 });
   });
 
   it('no map row → behavior identical to today (name-divergent pair stays lot_only)', async () => {
@@ -863,7 +865,7 @@ describe('POST /api/lot-matches/:id', () => {
     return { suggestionId: sugg[0].id, orderItemId, docId };
   }
 
-  it('accept promotes the suggestion to a strong link', async () => {
+  it('accept links the COA to the order line', async () => {
     const { suggestionId, orderItemId, docId } = await seedSuggestion();
     const orgAdmin = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
 
@@ -905,5 +907,137 @@ describe('POST /api/lot-matches/:id', () => {
     const otherAdmin = { id: seed.orgAdmin2Id, role: 'org_admin', tenant_id: seed.tenantId2 };
     const res = await resolveLotMatch(makeContext(suggestionId, { action: 'accept' }, otherAdmin));
     expect(res.status).toBe(403);
+  });
+});
+
+describe('every match is a suggestion (never asserted)', () => {
+  /** A COA and an order line agreeing on lot + product: the strongest evidence short of supplier. */
+  async function strongPair(lotNumber: string) {
+    const productId = await makeProduct(seed.tenantId, `Strong ${lotNumber}`);
+    const orderLot = await findOrCreateLot(db, seed.tenantId, { lotNumber, productId });
+    const { orderItemId } = await makeOrderWithItem(seed.tenantId, { productId, lotId: orderLot!.id });
+    const docId = await makeDocument(seed.tenantId, null);
+    const coaLot = await findOrCreateLot(db, seed.tenantId, { lotNumber, productId });
+    await db
+      .prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)')
+      .bind(generateTestId(), docId, coaLot!.id)
+      .run();
+    const run = () =>
+      linkCoaToOrders(db, seed.tenantId, { documentId: docId, lotId: coaLot!.id, productId, supplierId: null });
+    return { productId, orderItemId, docId, coaLotId: coaLot!.id, run };
+  }
+
+  it('a high-confidence suggestion is one click from a link', async () => {
+    const pair = await strongPair('HC-1');
+    await pair.run();
+    const sugg = await expectSuggestedOnly(pair.orderItemId, pair.docId, { confidence: 0.85 });
+    expect(sugg.match_basis).toBe('lot+product');
+
+    const orgAdmin = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
+    const res = await resolveLotMatch(makeContext(sugg.id, { action: 'accept' }, orgAdmin));
+    expect(res.status).toBe(200);
+    const oi = await getOrderItem(pair.orderItemId);
+    expect(oi!.coa_document_id).toBe(pair.docId);
+    expect(oi!.coa_match_status).toBe('matched');
+    expect(oi!.match_confidence).toBe(0.85);
+  });
+
+  it('raises a pending suggestion to stronger evidence, and never re-ranks a decided one', async () => {
+    const pair = await strongPair('HC-2');
+    // Pretend an earlier run only had the lot to go on.
+    await db
+      .prepare(
+        `INSERT INTO lot_match_suggestions (id, tenant_id, order_item_id, document_id, lot_id, match_confidence, match_basis, status)
+         VALUES (?, ?, ?, ?, ?, 0.5, 'lot_only', 'pending')`
+      )
+      .bind(generateTestId(), seed.tenantId, pair.orderItemId, pair.docId, pair.coaLotId)
+      .run();
+    await pair.run();
+    const raised = await expectSuggestedOnly(pair.orderItemId, pair.docId, { confidence: 0.85 });
+    expect(raised.match_basis).toBe('lot+product');
+
+    // A person rejects it; re-running the matcher must not reopen or re-rank it.
+    await db.prepare(`UPDATE lot_match_suggestions SET status = 'rejected', match_confidence = 0.5 WHERE id = ?`).bind(raised.id).run();
+    await pair.run();
+    const after = await getSuggestions(pair.orderItemId);
+    expect(after).toHaveLength(1);
+    expect(after[0].status).toBe('rejected');
+    expect(after[0].match_confidence).toBe(0.5);
+    expect((await getOrderItem(pair.orderItemId))!.coa_document_id).toBeNull();
+  });
+
+  it('leaves a line the old policy already linked alone, and does not re-suggest that pair', async () => {
+    const pair = await strongPair('HC-3');
+    await db
+      .prepare(
+        `UPDATE order_items SET coa_document_id = ?, lot_matched = 1, match_confidence = 0.85,
+                coa_match_status = 'matched', coa_matched_at = '2026-06-01 00:00:00' WHERE id = ?`
+      )
+      .bind(pair.docId, pair.orderItemId)
+      .run();
+    await pair.run();
+    const oi = await getOrderItem(pair.orderItemId);
+    expect(oi!.coa_document_id).toBe(pair.docId);
+    expect(oi!.coa_match_status).toBe('matched');
+    expect(await getSuggestions(pair.orderItemId)).toHaveLength(0);
+  });
+});
+
+describe('where a person sees a suggestion', () => {
+  function getCtx(url: string, params: Record<string, string> = {}): any {
+    return {
+      request: new Request(`http://localhost${url}`),
+      env,
+      data: { user: { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId } },
+      params,
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+      next: async () => new Response(null),
+      functionPath: url,
+    };
+  }
+
+  async function suggestedOrder(lotNumber: string) {
+    const productId = await makeProduct(seed.tenantId, `Seen ${lotNumber}`);
+    const orderLot = await findOrCreateLot(db, seed.tenantId, { lotNumber, productId });
+    const { orderId, orderItemId } = await makeOrderWithItem(seed.tenantId, { productId, lotId: orderLot!.id });
+    const docId = await makeDocument(seed.tenantId, null, `COA ${lotNumber}`);
+    const coaLot = await findOrCreateLot(db, seed.tenantId, { lotNumber, productId });
+    await db
+      .prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)')
+      .bind(generateTestId(), docId, coaLot!.id)
+      .run();
+    await linkCoaToOrders(db, seed.tenantId, { documentId: docId, lotId: coaLot!.id, productId, supplierId: null });
+    const order = await db
+      .prepare('SELECT order_number FROM orders WHERE id = ?')
+      .bind(orderId)
+      .first<{ order_number: string }>();
+    return { orderId, orderItemId, docId, orderNumber: order!.order_number };
+  }
+
+  it('GET /api/orders/:id carries the pending suggestions for its lines', async () => {
+    const a = await suggestedOrder('SEEN-1');
+    const res = await getOrder(getCtx(`/api/orders/${a.orderId}`, { id: a.orderId }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { suggestions: Array<Record<string, unknown>> };
+    expect(body.suggestions).toHaveLength(1);
+    expect(body.suggestions[0]).toMatchObject({
+      order_item_id: a.orderItemId,
+      document_id: a.docId,
+      document_title: 'COA SEEN-1',
+      match_basis: 'lot+product',
+      match_confidence: 0.85,
+      status: 'pending',
+    });
+  });
+
+  it('GET /api/lot-matches honours every order_number it is given', async () => {
+    const a = await suggestedOrder('SEEN-2');
+    const b = await suggestedOrder('SEEN-3');
+    const res = await listLotMatches(
+      getCtx(`/api/lot-matches?status=pending&order_number=${a.orderNumber}&order_number=${b.orderNumber}`)
+    );
+    const body = (await res.json()) as { suggestions: Array<{ document_id: string }> };
+    expect(body.suggestions.map((x) => x.document_id).sort()).toEqual([a.docId, b.docId].sort());
   });
 });

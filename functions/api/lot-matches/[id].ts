@@ -11,10 +11,12 @@ import type { Env, User } from '../../lib/types';
 /**
  * POST /api/lot-matches/:id
  *
- * Resolve a weak lot_match_suggestions row produced by the matching engine.
+ * Resolve a lot_match_suggestions row produced by the matching engine. Every
+ * match is a suggestion, high-confidence ones included, and this is the ONLY
+ * path that links a COA to an order line (see functions/lib/entities/matching.ts).
  * Body: { action: 'accept' | 'reject' }
  *
- *   accept → promote to a STRONG link: stamp the COA reference onto the
+ *   accept → link: stamp the COA reference onto the
  *            order_item (coa_document_id, lot_id, lot_matched=1,
  *            coa_match_status='matched', coa_matched_at) and set the
  *            suggestion's status to 'accepted'.
@@ -71,7 +73,7 @@ async function handle(context: Parameters<PagesFunction<Env>>[0]): Promise<Respo
     }
 
     if (action === 'accept') {
-      // Promote to a strong link on the order_item.
+      // A person made the call: link the COA to the order line.
       await context.env.DB.prepare(
         `UPDATE order_items
          SET coa_document_id = ?,

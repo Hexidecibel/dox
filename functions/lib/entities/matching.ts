@@ -5,12 +5,25 @@
  * links order lines (order_items, written by connectors) to COA documents
  * (written by smart-upload / ingest) by their normalized lot key.
  *
- * Policy (decided in the Phase 2 design):
- *   - STRONG match (basis includes product) → AUTO-LINK: write the COA ref
- *     onto the order_item row.
- *   - WEAK match (lot number only, ambiguous because product/supplier disagree
- *     or are unknown) → SUGGEST: write a lot_match_suggestions row for human
- *     review; do NOT auto-link.
+ * Policy — EVERY MATCH IS A SUGGESTION (changed 14 Sep 2026):
+ *   The engine never writes a COA onto an order line. Every candidate pairing,
+ *   however strong the evidence, becomes a `lot_match_suggestions` row carrying
+ *   its `match_basis` and `match_confidence`, and a person accepts it in one
+ *   click (POST /api/lot-matches/:id). Only that accept writes
+ *   `order_items.coa_document_id` / `coa_match_status = 'matched'`.
+ *
+ *   Why: the client's rule (AJ, IDP request §7) is "It does not assert a
+ *   lot-to-shipment match as established fact. It presents the evidence and I
+ *   make the call." A lot-to-shipment link is what a customer COA report is
+ *   built on, so it is a claim the business makes to its customer; a number in
+ *   a matcher is not the business making it. The Phase 2 design auto-linked
+ *   STRONG matches (product or distributor code agrees). That tier still
+ *   exists, as `classifyMatch(...).strong`, but it now means "high-confidence
+ *   suggestion" and changes only how the suggestion is ranked and shown.
+ *
+ *   Rows that the old policy already wrote as `matched` are history and are
+ *   left alone here; see bin/audit-asserted-lot-matches for the read-only
+ *   report (and its opt-in conversion).
  *
  * Supplier is often unknown on the order side — that's acceptable. The COA side
  * supplies it. Supplier therefore only ever UPGRADES confidence; it never
@@ -99,12 +112,13 @@ function codesAgree(
 /**
  * Classify a candidate pairing into a match basis + confidence.
  *
- * A match is STRONG when the two sides agree on EITHER the product (resolved
- * product_id) OR the distributor code (order product_code vs the COA title's
- * leading parenthesized SKU). Product names diverge across the two halves of
- * the system, so the distributor SKU is the reliable join; code agreement
- * alone is enough to auto-link. Supplier agreement (when both are known) bumps
- * confidence but is never required.
+ * A match is STRONG (a high-confidence suggestion) when the two sides agree on
+ * EITHER the product (resolved product_id) OR the distributor code (order
+ * product_code vs the COA title's leading parenthesized SKU). Product names
+ * diverge across the two halves of the system, so the distributor SKU is the
+ * reliable join. Supplier agreement (when both are known) bumps confidence but
+ * is never required. Strong or weak, the result is a suggestion a person
+ * accepts; see the module header.
  *
  * `coaSupplierId`/`orderSupplierId` may be null (unknown). An unknown supplier
  * does not contradict; it simply can't reach the supplier-confirmed tier.
@@ -151,43 +165,18 @@ export function classifyMatch(args: {
 }
 
 /**
- * Apply a STRONG match to an order_item: write the COA reference and mark it
- * matched. We only write when the item is not already matched OR the new
- * confidence is strictly higher than what's recorded (an upgrade — e.g. a
- * lot+product+supplier match supersedes a prior lot+product one).
- */
-async function applyStrongLink(
-  db: D1Database,
-  args: {
-    orderItemId: string;
-    documentId: string;
-    lotId: string;
-    confidence: number;
-  }
-): Promise<void> {
-  const { orderItemId, documentId, lotId, confidence } = args;
-  await db
-    .prepare(
-      `UPDATE order_items
-       SET coa_document_id = ?,
-           lot_id = ?,
-           lot_matched = 1,
-           match_confidence = ?,
-           coa_match_status = 'matched',
-           coa_matched_at = datetime('now')
-       WHERE id = ?
-         AND (coa_match_status IS NULL
-              OR coa_match_status != 'matched'
-              OR match_confidence IS NULL
-              OR match_confidence < ?)`
-    )
-    .bind(documentId, lotId, confidence, orderItemId, confidence)
-    .run();
-}
-
-/**
- * Record a WEAK match as a pending suggestion. Idempotent via the
- * (order_item_id, document_id) unique index.
+ * Record a candidate match as a pending suggestion, for a person to accept.
+ *
+ *   - New pair → INSERT at 'pending' with its basis and confidence.
+ *   - Existing PENDING pair with lower confidence → raised to the new evidence
+ *     (e.g. a product map taught since the last run upgrades lot_only to
+ *     lot+product). The reviewer should see the best case for the pair.
+ *   - Existing ACCEPTED or REJECTED pair → untouched. A human decision is never
+ *     reopened or re-ranked by the matcher; a rejection stays rejected.
+ *   - Order line already linked to THIS document (an accepted suggestion, or a
+ *     row the pre-14-Sep policy auto-linked) → nothing to suggest.
+ *
+ * Idempotent via UNIQUE(order_item_id, document_id).
  */
 async function recordSuggestion(
   db: D1Database,
@@ -201,11 +190,24 @@ async function recordSuggestion(
   }
 ): Promise<void> {
   const { tenantId, orderItemId, documentId, lotId, confidence, basis } = args;
+  const linked = await db
+    .prepare('SELECT coa_document_id FROM order_items WHERE id = ?')
+    .bind(orderItemId)
+    .first<{ coa_document_id: string | null }>();
+  if (linked?.coa_document_id === documentId) return;
+
   await db
     .prepare(
-      `INSERT OR IGNORE INTO lot_match_suggestions
+      `INSERT INTO lot_match_suggestions
          (id, tenant_id, order_item_id, document_id, lot_id, match_confidence, match_basis, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+       ON CONFLICT(order_item_id, document_id) DO UPDATE SET
+         match_confidence = excluded.match_confidence,
+         match_basis = excluded.match_basis,
+         lot_id = COALESCE(lot_match_suggestions.lot_id, excluded.lot_id)
+       WHERE lot_match_suggestions.status = 'pending'
+         AND (lot_match_suggestions.match_confidence IS NULL
+              OR lot_match_suggestions.match_confidence < excluded.match_confidence)`
     )
     .bind(generateId(), tenantId, orderItemId, documentId, lotId, confidence, basis)
     .run();
@@ -254,7 +256,7 @@ interface OrderItemCandidate {
 
 /**
  * Called after a COA is approved/ingested with a lot. Finds order_items whose
- * lot matches (by lot_key) and applies the strong/weak policy.
+ * lot matches (by lot_key) and records each pairing as a suggestion.
  *
  * Candidates are gathered two ways:
  *   1. order_items already resolved to a lot whose lot_key matches.
@@ -273,8 +275,8 @@ export async function linkCoaToOrders(
      * The COA's product name (for the supplier_product_map bridge, 0075). When
      * a map row exists for (tenant, supplier, normalized name), the mapped
      * order_product_id / distributor_sku are substituted into classifyMatch so
-     * a name-divergent supplier (e.g. Country Morning) strong-links on
-     * lot+product. Omitted/unmapped → identical to pre-0075 behavior.
+     * a name-divergent supplier (e.g. Country Morning) is suggested at
+     * lot+product confidence instead of lot_only. Omitted/unmapped → identical to pre-0075 behavior.
      */
     coaProductName?: string | null;
   }
@@ -335,23 +337,14 @@ export async function linkCoaToOrders(
       orderProductCode: oi.product_code,
     });
 
-    if (cls.strong) {
-      await applyStrongLink(db, {
-        orderItemId: oi.id,
-        documentId,
-        lotId,
-        confidence: cls.confidence,
-      });
-    } else {
-      await recordSuggestion(db, {
-        tenantId,
-        orderItemId: oi.id,
-        documentId,
-        lotId,
-        confidence: cls.confidence,
-        basis: cls.basis,
-      });
-    }
+    await recordSuggestion(db, {
+      tenantId,
+      orderItemId: oi.id,
+      documentId,
+      lotId,
+      confidence: cls.confidence,
+      basis: cls.basis,
+    });
   }
 }
 
@@ -504,8 +497,8 @@ interface CoaCandidate {
 
 /**
  * Called after a connector creates an order line with a lot. Finds COA
- * documents (via document_lots → lots on matching lot_key) and applies the
- * strong/weak policy, writing onto the SAME order_item row / suggestions table.
+ * documents (via document_lots → lots on matching lot_key) and records each
+ * pairing as a suggestion for the order line.
  */
 export async function linkOrderToCoas(
   db: D1Database,
@@ -571,23 +564,14 @@ export async function linkOrderToCoas(
       orderProductCode,
     });
 
-    if (cls.strong) {
-      await applyStrongLink(db, {
-        orderItemId,
-        documentId: coa.document_id,
-        // Prefer the order's own lot row for the FK; both resolve to the same key.
-        lotId,
-        confidence: cls.confidence,
-      });
-    } else {
-      await recordSuggestion(db, {
-        tenantId,
-        orderItemId,
-        documentId: coa.document_id,
-        lotId,
-        confidence: cls.confidence,
-        basis: cls.basis,
-      });
-    }
+    await recordSuggestion(db, {
+      tenantId,
+      orderItemId,
+      documentId: coa.document_id,
+      // Prefer the order's own lot row for the FK; both resolve to the same key.
+      lotId,
+      confidence: cls.confidence,
+      basis: cls.basis,
+    });
   }
 }
