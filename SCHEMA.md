@@ -799,8 +799,8 @@ Triggers: `trg_customers_ad_fts`, `trg_customers_ai_fts`, `trg_customers_au_fts`
   match_basis TEXT
   status TEXT DEFAULT 'pending'
   created_at TEXT DEFAULT (datetime('now'))
-  UNIQUE(order_item_id, document_id)
   match_note TEXT
+  UNIQUE(order_item_id, document_id)
 ```
 
 Indexes: `idx_lms_order_item`, `idx_lms_tenant_status`
