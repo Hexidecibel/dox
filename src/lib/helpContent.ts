@@ -817,6 +817,12 @@ const search: ModuleHelpExpanded = {
           "When nothing covers your search you see \"No covering document on file\" first, before any nearby documents, so a near miss is never mistaken for an answer.",
       },
       {
+        heading: 'Lots, sublots and production dates',
+        body:
+          "A certificate that lists several lots is checked one lot row at a time, and each result names the row it was judged on: \"Lot 10426203 · sublot 03 · produced Jul 22, 2026\". A lot can be typed as one number (1042620303), with a dash (10426203-03), with a space (10426203 03), or as two inputs with the Lot / sublot button under the search box. " +
+          "The production date comes from the lot row, with where it came from. A date an older extraction stored as the code date, which the certificate prints under its production date label, shows under Likely covering — confirm: open it and check before sending it. A date that reads two ways (04-05-2026) is never counted as a match.",
+      },
+      {
         heading: 'Keyword vs. AI mode',
         body:
           "Keyword search is fast and matches the words you type. Plurals and common unit spellings (gal / gallon) match each other. " +

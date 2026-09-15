@@ -1944,8 +1944,13 @@ export interface SearchMatchContext {
 // is never counted as covering, however well it matches. Logic lives in
 // `shared/searchCoverage.ts`; retrieval in `functions/lib/search-coverage.ts`.
 
-/** `unconstrained` = the query stated nothing to verify, so nothing was judged. */
-export type SearchCoverage = 'covered' | 'none' | 'unconstrained';
+/**
+ * `unconstrained` = the query stated nothing to verify, so nothing was judged.
+ * `likely` = nothing on file is VERIFIED to cover it, but at least one document
+ * would, on a value an older extraction filed under another field (a production
+ * date read from the code date). A person confirms those; the page says so.
+ */
+export type SearchCoverage = 'covered' | 'likely' | 'none' | 'unconstrained';
 
 /**
  * The role of a date. `production` covers production / manufacture / pack date;
@@ -1982,8 +1987,13 @@ export interface SearchConstraint {
   month_day?: { month: number; day: number } | null;
   /** For metadata constraints: exact (normalized) or substring comparison. */
   match?: 'equals' | 'contains';
+  /**
+   * A lot typed as TWO inputs (base + sublot, AJ A3). Matched part against part,
+   * never by concatenating them — base-lot width is supplier-specific (R2).
+   */
+  lot_parts?: { base: string; sub: string } | null;
   /** Where the constraint came from. */
-  source: 'query_text' | 'ai_parse';
+  source: 'query_text' | 'ai_parse' | 'structured';
   /** Anything the reader should know about how it was read. */
   note?: string | null;
 }
@@ -1996,7 +2006,7 @@ export interface SearchDroppedConstraint {
   reason: string;
 }
 
-export type SearchMatchStatus = 'covering' | 'candidate_not_matching' | 'unreviewed_candidate';
+export type SearchMatchStatus = 'covering' | 'likely_covering' | 'candidate_not_matching' | 'unreviewed_candidate';
 
 export type SearchCheckOutcome =
   | 'match'
@@ -2011,12 +2021,23 @@ export type SearchCheckOutcome =
   /** The field holds several values, one of which matches. */
   | 'multiple_values'
   | 'mismatch'
+  /**
+   * Would match, on a value whose role an older extraction did not record (a
+   * production date read from the document's code date field). Never covering
+   * on its own: the document is `likely_covering`, to be confirmed by a person.
+   */
+  | 'likely'
   /** The document has no value for this field at all. */
   | 'missing'
   /** The constraint could not be checked against this document. */
   | 'unverified';
 
-export type SearchFieldProvenance = 'extracted' | 'linked_record' | 'system';
+/**
+ * `extracted_code_date_legacy` = an older extraction filed this value as the
+ * code date, and the page prints it under a production date label
+ * (bin/backfill-lot-production-dates). `reviewer` = typed by a person.
+ */
+export type SearchFieldProvenance = 'extracted' | 'linked_record' | 'system' | 'extracted_code_date_legacy' | 'reviewer';
 
 export interface SearchConstraintCheck {
   constraint_id: string;
@@ -2038,9 +2059,29 @@ export interface SearchConstraintCheck {
   distance_days?: number | null;
 }
 
+/**
+ * The lot ROW a result was judged on (AJ R1 / A1 "row highlighted"). A
+ * certificate can certify several lots; this names the one that matched, or the
+ * closest one for a candidate.
+ */
+export interface SearchMatchedLot {
+  lot_id: string | null;
+  lot_number: string;
+  sub_lot_code: string;
+  lot_key: string;
+  production_date: string | null;
+  production_date_raw: string | null;
+  production_date_source: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | null;
+  production_date_status: 'resolved' | 'ambiguous' | 'unparseable' | 'conflict' | null;
+  /** As printed on this row's document, when the document is this row alone. */
+  quantity: string | null;
+  net_weight: string | null;
+}
+
 /** Per-result annotation, added to document rows on constrained searches. */
 export interface SearchResultCoverage {
   match_status?: SearchMatchStatus;
+  matched_lot?: SearchMatchedLot | null;
   match_checks?: SearchConstraintCheck[];
   /** The failing checks' messages joined — null when covering. */
   match_reason?: string | null;
@@ -2070,6 +2111,8 @@ export interface SearchCoverageFields {
   /** One line from the reader's side: "No document on file covers production date Jul 31, 2026." */
   coverage_summary?: string | null;
   covering_count?: number;
+  /** Documents that would cover on a legacy-labelled value; confirm each. */
+  likely_count?: number;
   candidate_count?: number;
   unreviewed_candidates?: SearchUnreviewedCandidate[];
   /** The structured scan hit its row cap; a covering document could be past it. */
@@ -3817,6 +3860,10 @@ export interface UniversalSearchResponse extends SearchCoverageFields {
 export interface UniversalSearchParams {
   q: string;
   tenant_id?: string;
+  /** A lot given as two inputs (AJ A3): the base lot, matched part against part. */
+  lot?: string;
+  /** Its sublot. Requires `lot`. */
+  sublot?: string;
   /** Top-N for the `documents` block (default 20, max 200). */
   limit?: number;
   /** Page offset for the `documents` block (default 0). */
@@ -4014,6 +4061,11 @@ export interface LotListItem {
   code_date: string | null;
   expiration_date: string | null;
   mfg_date: string | null;
+  /** Migration 0106: the production date its certificate states (ISO), with provenance. */
+  production_date?: string | null;
+  production_date_raw?: string | null;
+  production_date_source?: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | null;
+  production_date_status?: 'resolved' | 'ambiguous' | 'unparseable' | 'conflict' | null;
   created_at: string;
   /** COUNT(document_lots) for this lot — COA docs linked to it. */
   coa_document_count: number;

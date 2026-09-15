@@ -37,6 +37,7 @@ import type {
   SearchDateRole,
   SearchDroppedConstraint,
   SearchFieldProvenance,
+  SearchMatchedLot,
   SearchMatchStatus,
 } from './types';
 import {
@@ -159,10 +160,16 @@ export const NEAR_DATE_DAYS = 14;
 // ===========================================================================
 
 export interface SubjectLot {
+  lot_id?: string | null;
   lot_number: string;
   sub_lot_code: string;
   lot_key: string;
   provenance: SearchFieldProvenance;
+  /** Migration 0106 — the row's own production date and where it came from. */
+  production_date?: string | null;
+  production_date_raw?: string | null;
+  production_date_source?: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | null;
+  production_date_status?: 'resolved' | 'ambiguous' | 'unparseable' | 'conflict' | null;
 }
 
 export interface CoverageSubject {
@@ -181,6 +188,12 @@ export interface CoverageSubject {
   renewal_due_date: string | null;
   /** Did the free-text part of the query hit this document? null = not asked. */
   text_match: boolean | null;
+  /**
+   * Judged as ONE lot row: `lots` holds exactly that row, a row production date
+   * outranks the document's metadata, and metadata lots count only when they
+   * refine that row. Set by `evaluateSubject`, never by retrieval.
+   */
+  row_scoped?: boolean;
 }
 
 // ===========================================================================
@@ -209,6 +222,8 @@ export interface LotToken {
   explicit: boolean;
   start: number;
   end: number;
+  /** Base and sublot typed apart ("10426203 03", "lot 10426203 sublot 03"). */
+  parts?: { base: string; sub: string };
 }
 
 export interface QueryTextParse {
@@ -282,20 +297,29 @@ export function parseQueryText(q: string): QueryTextParse {
     let raw = t.raw;
     let end = t.end;
     let composed = norm;
+    let parts: { base: string; sub: string } | undefined;
     const next = all[i + 1];
     const next2 = all[i + 2];
+    // "10426203 03" with no "lot" in front: a long all-digit lot followed by
+    // exactly two digits is AJ's own spaced shape (R2), and a two-digit number
+    // that close to a lot number is its sublot — nothing else in a COA search
+    // is typed that way.
+    const spacedSublot = /^\d{8,}$/.test(norm) && !!next && /^\d{2}$/.test(next.raw)
+      && /^\s+$/.test(text.slice(t.end, next.start));
     if (explicit && next && /^(sublot|sub-lot|sub)$/i.test(next.raw) && next2 && /^[A-Za-z0-9]{1,3}$/.test(next2.raw)) {
-      composed = norm + normalizeSubLotCode(next2.raw);
+      parts = { base: norm, sub: normalizeSubLotCode(next2.raw) };
+      composed = norm + parts.sub;
       raw = `${t.raw} sublot ${next2.raw}`;
       end = next2.end;
       i += 2;
-    } else if (explicit && next && /^\d{2}$/.test(next.raw)) {
+    } else if ((explicit || spacedSublot) && next && /^\d{2}$/.test(next.raw)) {
+      parts = { base: norm, sub: next.raw };
       composed = norm + next.raw;
       raw = `${t.raw} ${next.raw}`;
       end = next.end;
       i += 1;
     }
-    lotTokens.push({ raw, norm: composed, explicit, start: t.start, end });
+    lotTokens.push({ raw, norm: composed, explicit, start: t.start, end, ...(parts ? { parts } : {}) });
   }
 
   return { dates, lotTokens };
@@ -406,16 +430,39 @@ export function formatLot(norm: string, sub?: string): string {
   return sub ? `${norm}-${sub}` : norm;
 }
 
-export function makeLotConstraint(id: string, token: { raw: string; norm: string }, source: SearchConstraint['source']): SearchConstraint {
+export function makeLotConstraint(
+  id: string,
+  token: { raw: string; norm: string; parts?: { base: string; sub: string } },
+  source: SearchConstraint['source'],
+): SearchConstraint {
+  const parts = token.parts && token.parts.base && token.parts.sub ? token.parts : null;
   return {
     id,
     kind: 'lot',
-    label: `lot ${token.raw.replace(/^lot\s*#?\s*/i, '')}`,
+    label: parts ? `lot ${parts.base} · sublot ${parts.sub}` : `lot ${token.raw.replace(/^lot\s*#?\s*/i, '')}`,
     raw: token.raw,
     value: token.norm,
     fields: ['lot'],
+    lot_parts: parts,
     source,
     note: null,
+  };
+}
+
+/**
+ * A lot given as two separate inputs (AJ A3). The base and the sublot are
+ * matched as parts; `value` carries their concatenation only so the prefix and
+ * near-sublot rules keep working. Returns null when the base normalizes to
+ * nothing.
+ */
+export function makeStructuredLotConstraint(id: string, base: string, sub: string | null | undefined): SearchConstraint | null {
+  const b = normalizeLotNumber(base);
+  if (!b) return null;
+  const s = normalizeSubLotCode(sub ?? '');
+  const raw = s ? `${base.trim()} sublot ${String(sub).trim()}` : base.trim();
+  return {
+    ...makeLotConstraint(id, { raw, norm: b + s, parts: s ? { base: b, sub: s } : undefined }, 'structured'),
+    label: s ? `lot ${b} · sublot ${s}` : `lot ${b}`,
   };
 }
 
@@ -425,6 +472,7 @@ export function makeLotConstraint(id: string, token: { raw: string; norm: string
 
 const OUTCOME_RANK: Record<SearchCheckOutcome, number> = {
   match: 9,
+  likely: 8,
   multiple_values: 7,
   ambiguous: 6,
   near: 5,
@@ -474,12 +522,17 @@ export function subjectLotIdentities(s: CoverageSubject): Array<{ base: string; 
     out.push({ base, sub, key: normAlnum(key || base + sub), display: formatLot(base, sub), provenance });
   };
   for (const l of s.lots) push(l.lot_number, l.sub_lot_code, l.lot_key, l.provenance);
+  const rowBases = s.row_scoped ? new Set(s.lots.map((l) => normalizeLotNumber(l.lot_number))) : null;
   const md = s.metadata;
   const metaLot = metaString(md.lot_number) ?? metaString(md.lot_code) ?? metaString(md.lot);
   if (metaLot) {
     const sub = metaString(md.sub_lot_number) ?? metaString(md.sub_lot_code) ?? metaString(md.sublot) ?? '';
     const parts = metaLot.split(/[,;]|\s{2,}/).map((p) => p.trim()).filter(Boolean);
-    for (const p of parts) push(p, parts.length === 1 ? sub : '', '', 'extracted');
+    for (const p of parts) {
+      // Judging one lot row: the document's other lots are not this row's.
+      if (rowBases && !rowBases.has(normalizeLotNumber(p))) continue;
+      push(p, parts.length === 1 ? sub : '', '', 'extracted');
+    }
   }
   // A linked lot record that stored only the base while the extraction recorded
   // the sublot is the same lot, told less precisely — keep the precise one.
@@ -495,9 +548,45 @@ export function checkLot(c: SearchConstraint, s: CoverageSubject): SearchConstra
   const n = c.value;
   const many = ids.length > 1 ? ` (one of ${ids.length} lots on this document)` : '';
   let best: SearchConstraintCheck | null = null;
+  const parts = c.lot_parts ?? null;
   for (const id of ids) {
     const composite = id.base + id.sub;
     const common = { ...base, value: id.display, provenance: id.provenance };
+    if (parts) {
+      // Two inputs: base against base, sublot against sublot (R2). A record that
+      // stored only the composite ("1042620303", no sublot) is the same lot
+      // written the WMS way, and says so.
+      if (id.sub && id.base === parts.base && id.sub === parts.sub) {
+        best = better(best, { ...common, outcome: 'match', message: `Lot ${id.base} sublot ${id.sub} is on this document${many}.` });
+        continue;
+      }
+      if (!id.sub && id.base === parts.base + parts.sub) {
+        best = better(best, {
+          ...common,
+          outcome: 'match',
+          message: `Lot ${id.base} is on this document${many} — recorded as one number, which is lot ${parts.base} sublot ${parts.sub} written together.`,
+        });
+        continue;
+      }
+      if (id.sub && id.base === parts.base) {
+        best = better(best, {
+          ...common,
+          outcome: 'near',
+          message: `This document is lot ${id.base} sublot ${id.sub} — the same lot, a different sublot than ${parts.sub}.`,
+        });
+        continue;
+      }
+      if (!id.sub && id.base === parts.base) {
+        best = better(best, {
+          ...common,
+          outcome: 'partial_lot',
+          message: `This document records lot ${id.base} with no sublot, so sublot ${parts.sub} can't be verified.`,
+        });
+        continue;
+      }
+      best = better(best, { ...common, outcome: 'mismatch', message: `Lot on this document is ${id.display}, not lot ${parts.base} sublot ${parts.sub}.` });
+      continue;
+    }
     if (n === composite || n === id.key) {
       best = better(best, { ...common, outcome: 'match', message: `Lot ${id.display} is on this document${many}.` });
     } else if (n === id.base && id.sub) {
@@ -535,11 +624,46 @@ interface DateHitEval {
   raw: string;
   reading: StoredDateReading;
   provenance: SearchFieldProvenance;
+  lot_row?: boolean;
+  row_status?: SubjectLot['production_date_status'];
 }
 
-function subjectDateValues(s: CoverageSubject, fields: string[]): Array<{ field: string; value: string; provenance: SearchFieldProvenance }> {
-  const out: Array<{ field: string; value: string; provenance: SearchFieldProvenance }> = [];
+interface DateValue {
+  field: string;
+  value: string;
+  provenance: SearchFieldProvenance;
+  /** Read from the lot row (0106) rather than the document's metadata. */
+  lot_row?: boolean;
+  row_status?: SubjectLot['production_date_status'];
+}
+
+/** The one lot row a row-scoped subject is judged on, when it states a production date. */
+function rowProduction(s: CoverageSubject): SubjectLot | null {
+  if (!s.row_scoped || s.lots.length !== 1) return null;
+  const l = s.lots[0];
+  return l.production_date_status ? l : null;
+}
+
+function subjectDateValues(s: CoverageSubject, fields: string[]): DateValue[] {
+  const out: DateValue[] = [];
+  const row = rowProduction(s);
   for (const f of fields) {
+    // A lot row that states its production date answers for every production
+    // spelling in the metadata: it is the same statement, for this row alone.
+    if (row && DATE_ROLE_FIELDS.production.includes(f)) {
+      if (f !== 'production_date') continue;
+      const value = row.production_date ?? row.production_date_raw;
+      if (!value) continue;
+      const source = row.production_date_source ?? 'extracted';
+      out.push({
+        field: f,
+        value,
+        provenance: source === 'extracted' ? 'extracted' : source,
+        lot_row: true,
+        row_status: row.production_date_status,
+      });
+      continue;
+    }
     if (f === 'created_at') {
       if (s.created_at) out.push({ field: f, value: s.created_at.slice(0, 10), provenance: 'system' });
       continue;
@@ -585,11 +709,13 @@ export function checkDate(c: SearchConstraint, s: CoverageSubject, order: DateOr
   const base = { constraint_id: c.id } as const;
   const evaluate = (fields: string[]) => {
     const hits: DateHitEval[] = [];
-    const unparsed: Array<{ field: string; value: string; provenance: SearchFieldProvenance }> = [];
+    const unparsed: DateValue[] = [];
     for (const v of subjectDateValues(s, fields)) {
       const readings = readStoredDates(v.value, v.field === 'created_at' ? null : order);
       if (readings.length === 0) unparsed.push(v);
-      for (const r of readings) hits.push({ field: v.field, raw: v.value, reading: r, provenance: v.provenance });
+      for (const r of readings) {
+        hits.push({ field: v.field, raw: v.value, reading: r, provenance: v.provenance, lot_row: v.lot_row, row_status: v.row_status });
+      }
     }
     return { hits, unparsed };
   };
@@ -606,6 +732,7 @@ export function checkDate(c: SearchConstraint, s: CoverageSubject, order: DateOr
     const provenance = hits[0].provenance;
     const rawValue = hits[0].raw;
     const common = { ...base, field, field_label: label, value: rawValue, provenance };
+    const onThis = hits[0].lot_row ? 'this lot row' : 'this document';
     const matching = hits.filter((h) => h.reading.kind === 'exact' && inConstraint(c, h.reading.iso));
     const ambiguousMatching = hits.filter((h) => h.reading.kind === 'ambiguous' && h.reading.readings.some((iso) => inConstraint(c, iso)));
     const distinctDays = new Set(hits.map((h) => (h.reading.kind === 'exact' ? h.reading.iso : h.reading.raw)));
@@ -615,9 +742,25 @@ export function checkDate(c: SearchConstraint, s: CoverageSubject, order: DateOr
       const how = r.order && r.raw !== r.iso
         ? ` (read as ${r.order === 'mdy' ? 'month/day' : 'day/month'} because this document writes its other dates that way)`
         : '';
-      best = better(best, { ...common, outcome: 'match', message: `The ${label} on this document is ${formatIsoHuman(r.iso)}${how}.` });
+      if (provenance === 'extracted_code_date_legacy') {
+        // Not verified: the value is right, its ROLE was inferred from the page
+        // by the backfill. Shown as likely, for a person to confirm.
+        best = better(best, {
+          ...common,
+          outcome: 'likely',
+          message: `The ${label} on ${onThis} is ${formatIsoHuman(r.iso)} — read from the document's code date field (older extraction), which the page prints under its production date label. Open the certificate to confirm before using it.`,
+        });
+      } else {
+        best = better(best, { ...common, outcome: 'match', message: `The ${label} on ${onThis} is ${formatIsoHuman(r.iso)}${how}.` });
+      }
     } else if (matching.length > 0 || ambiguousMatching.length > 0) {
-      if (distinctDays.size > 1) {
+      if (hits[0].row_status === 'conflict') {
+        best = better(best, {
+          ...common,
+          outcome: 'multiple_values',
+          message: `Certificates on file state different production dates for this lot (${rawValue}); one of them is the date asked for — confirm which is right.`,
+        });
+      } else if (distinctDays.size > 1) {
         best = better(best, {
           ...common,
           outcome: 'multiple_values',
@@ -642,7 +785,7 @@ export function checkDate(c: SearchConstraint, s: CoverageSubject, order: DateOr
         }
       }
       const shown = hits.length === 1 ? describeReading(hits[0].reading) : rawValue;
-      const msg = `The ${label} on this document is ${shown}; you asked for ${asked}.`;
+      const msg = `The ${label} on ${onThis} is ${shown}; you asked for ${asked}.`;
       best = better(best, {
         ...common,
         outcome: nearest !== null && nearest <= NEAR_DATE_DAYS ? 'near' : 'mismatch',
@@ -653,6 +796,9 @@ export function checkDate(c: SearchConstraint, s: CoverageSubject, order: DateOr
   }
 
   if (best && best.outcome !== 'mismatch') return best;
+  // A near or mismatched row date still answers the question for this row:
+  // the document's code date is not consulted as a production date then.
+  if (best && own.hits.some((h) => h.lot_row)) return best;
 
   if (!best && own.unparsed.length > 0) {
     const u = own.unparsed[0];
@@ -792,6 +938,8 @@ export function subjectDateOrder(s: CoverageSubject): DateOrder | null {
 
 export interface SubjectVerdict {
   status: Exclude<SearchMatchStatus, 'unreviewed_candidate'>;
+  /** The lot row this verdict was reached on, when the subject has lot rows. */
+  lot: SubjectLot | null;
   checks: SearchConstraintCheck[];
   reason: string | null;
   /** Does this subject belong in the result list at all? */
@@ -801,18 +949,65 @@ export interface SubjectVerdict {
 }
 
 const RELEVANT: ReadonlySet<SearchCheckOutcome> = new Set([
-  'match', 'near', 'role_mismatch', 'ambiguous', 'partial_lot', 'multiple_values',
+  'match', 'likely', 'near', 'role_mismatch', 'ambiguous', 'partial_lot', 'multiple_values',
 ]);
 
 export function isIdentifying(c: SearchConstraint): boolean {
   return c.kind === 'lot' || c.kind === 'date';
 }
 
+const STATUS_RANK: Record<SubjectVerdict['status'], number> = {
+  covering: 2,
+  likely_covering: 1,
+  candidate_not_matching: 0,
+};
+
+/**
+ * Judge a subject. A document with lot rows is judged ROW BY ROW (AJ R1): each
+ * row with the document's shared fields, the best row wins, and the verdict
+ * names it — so a four-lot certificate covers "lot 10426203 sublot 03, produced
+ * Jul 22" only when ONE row is both, never by pairing one row's lot with
+ * another row's date.
+ */
 export function evaluateSubject(
   s: CoverageSubject,
   constraints: SearchConstraint[],
   dropped: SearchDroppedConstraint[],
   opts: { inPool?: boolean } = {},
+): SubjectVerdict {
+  if (s.lots.length === 0 || s.row_scoped) return evaluateOne(s, constraints, dropped, opts);
+  let best: SubjectVerdict | null = null;
+  for (const lot of s.lots) {
+    const v = evaluateOne({ ...s, lots: [lot], row_scoped: true }, constraints, dropped, opts);
+    if (!best || STATUS_RANK[v.status] > STATUS_RANK[best.status]
+      || (STATUS_RANK[v.status] === STATUS_RANK[best.status] && v.score > best.score)) {
+      best = v;
+    }
+  }
+  const verdict = best!;
+  // No row matched a lot constraint on a several-lot document: name every lot
+  // on it, not just the one the ranking happened to keep.
+  if (s.lots.length > 1 && verdict.status === 'candidate_not_matching') {
+    let changed = false;
+    const checks = verdict.checks.map((ch) => {
+      const c = constraints.find((x) => x.id === ch.constraint_id);
+      if (!c || c.kind !== 'lot' || ch.outcome !== 'mismatch') return ch;
+      changed = true;
+      return checkLot(c, s);
+    });
+    if (changed) {
+      const failing = checks.filter((c) => c.outcome !== 'match');
+      return { ...verdict, checks, reason: failing.length ? failing.map((c) => c.message).join(' ') : null };
+    }
+  }
+  return verdict;
+}
+
+function evaluateOne(
+  s: CoverageSubject,
+  constraints: SearchConstraint[],
+  dropped: SearchDroppedConstraint[],
+  opts: { inPool?: boolean },
 ): SubjectVerdict {
   const order = subjectDateOrder(s);
   const checks = constraints.map((c) => checkConstraint(c, s, order));
@@ -836,9 +1031,11 @@ export function evaluateSubject(
   const eligible = opts.inPool === true
     || textMatched
     || (identifying.length > 0 ? identifyingRelevant : checks.some((ch) => ch.outcome === 'match'));
+  const likely = !allMatch && checks.length > 0 && checks.every((c) => c.outcome === 'match' || c.outcome === 'likely');
   let score = 0;
   for (const ch of checks) {
     score += ch.outcome === 'match' ? 100
+      : ch.outcome === 'likely' ? 90
       : ch.outcome === 'multiple_values' || ch.outcome === 'ambiguous' ? 80
         : ch.outcome === 'near' ? 50 + Math.max(0, NEAR_DATE_DAYS - (ch.distance_days ?? NEAR_DATE_DAYS))
           : ch.outcome === 'partial_lot' ? 40
@@ -846,11 +1043,33 @@ export function evaluateSubject(
   }
   const failing = checks.filter((c) => c.outcome !== 'match');
   return {
-    status: allMatch ? 'covering' : 'candidate_not_matching',
+    status: allMatch ? 'covering' : likely ? 'likely_covering' : 'candidate_not_matching',
+    lot: s.row_scoped && s.lots.length === 1 ? s.lots[0] : null,
     checks,
     reason: failing.length ? failing.map((c) => c.message).join(' ') : null,
-    eligible: allMatch || eligible,
+    eligible: allMatch || likely || eligible,
     score,
+  };
+}
+
+/** The response shape of a verdict's lot row, with the row document's own quantity and weight. */
+export function matchedLotOf(v: SubjectVerdict, s: CoverageSubject): SearchMatchedLot | null {
+  const l = v.lot;
+  if (!l) return null;
+  const single = s.lots.length === 1;
+  return {
+    lot_id: l.lot_id ?? null,
+    lot_number: l.lot_number,
+    sub_lot_code: l.sub_lot_code,
+    lot_key: l.lot_key,
+    production_date: l.production_date ?? null,
+    production_date_raw: l.production_date_raw ?? null,
+    production_date_source: l.production_date_source ?? null,
+    production_date_status: l.production_date_status ?? null,
+    // Quantity and weight are printed per row: they belong to the row only when
+    // this document IS that row (a split certificate), never borrowed otherwise.
+    quantity: single ? metaString(s.metadata.quantity) : null,
+    net_weight: single ? metaString(s.metadata.net_weight) : null,
   };
 }
 
@@ -858,10 +1077,12 @@ export function coverageFor(
   constraints: SearchConstraint[],
   dropped: SearchDroppedConstraint[],
   coveringCount: number,
+  likelyCount = 0,
 ): SearchCoverage {
   if (constraints.length === 0 && dropped.length === 0) return 'unconstrained';
   if (dropped.length > 0) return 'none';
-  return coveringCount > 0 ? 'covered' : 'none';
+  if (coveringCount > 0) return 'covered';
+  return likelyCount > 0 ? 'likely' : 'none';
 }
 
 /**
@@ -873,6 +1094,7 @@ export function coverageSummary(
   constraints: SearchConstraint[],
   dropped: SearchDroppedConstraint[],
   coveringCount: number,
+  likelyCount = 0,
 ): string | null {
   if (constraints.length === 0 && dropped.length === 0) return null;
   const docType = constraints.find((c) => c.kind === 'document_type');
@@ -881,6 +1103,9 @@ export function coverageSummary(
   const what = asked.length ? asked.join(', ') : (docType ? `document type ${docType.raw}` : 'this search');
   if (dropped.length > 0) {
     return `No ${noun} on file can be confirmed to cover ${what}: ${dropped.map((d) => `"${d.label}"`).join(', ')} couldn't be applied.`;
+  }
+  if (coveringCount === 0 && likelyCount > 0) {
+    return `No ${noun} on file is confirmed to cover ${what}. ${likelyCount} likely ${likelyCount === 1 ? 'does' : 'do'}, on a production date an older extraction filed as the code date — open ${likelyCount === 1 ? 'it' : 'each one'} to confirm.`;
   }
   if (coveringCount === 0) return `No ${noun} on file covers ${what}.`;
   return `${coveringCount} ${noun}${coveringCount === 1 ? '' : 's'} on file cover${coveringCount === 1 ? 's' : ''} ${what}.`;

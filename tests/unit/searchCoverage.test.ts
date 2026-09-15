@@ -22,6 +22,7 @@ import {
   evaluateSubject,
   makeDateConstraint,
   makeLotConstraint,
+  makeStructuredLotConstraint,
   parseQueryText,
   residualText,
   type CoverageSubject,
@@ -279,5 +280,55 @@ describe('forgiving FTS terms', () => {
 
   it('ORs spellings for the words that need it', () => {
     expect(buildMatchExpr('300 gal tote')).toBe('"300" AND ("gal" OR "gals" OR "gallon" OR "gallons") AND "tote"*');
+  });
+});
+
+describe('lot rows and lot parts (Phase 2)', () => {
+  const row = (lot: string, sub: string, pd: string | null, extra: Record<string, unknown> = {}) => ({
+    lot_number: lot, sub_lot_code: sub, lot_key: lot + sub, provenance: 'linked_record' as const,
+    production_date: pd, production_date_raw: pd, production_date_source: 'extracted' as const,
+    production_date_status: (pd ? 'resolved' : null) as 'resolved' | null, ...extra,
+  });
+
+  it('reads "10426203 03" as base + sublot, but a short number followed by two digits stays text', () => {
+    expect(parseQueryText('10426203 03').lotTokens[0]).toMatchObject({ norm: '1042620303', parts: { base: '10426203', sub: '03' } });
+    expect(parseQueryText('K1357 03').lotTokens.every((t) => !t.parts)).toBe(true);
+  });
+
+  it('matches two inputs part against part, and a composite-only record as the same lot written together', () => {
+    const c = makeStructuredLotConstraint('c1', '10426203', '3')!;
+    expect(c.lot_parts).toEqual({ base: '10426203', sub: '03' });
+    expect(checkLot(c, subject({ lots: [row('10426203', '03', null)] })).outcome).toBe('match');
+    expect(checkLot(c, subject({ lots: [row('1042620303', '', null)] }))).toMatchObject({ outcome: 'match', message: expect.stringMatching(/written together/) });
+    expect(checkLot(c, subject({ lots: [row('10426203', '04', null)] })).outcome).toBe('near');
+    // 1042620 + 303 concatenates to the same string and is NOT the same lot.
+    expect(checkLot(c, subject({ lots: [row('1042620', '303', null)] })).outcome).toBe('mismatch');
+  });
+
+  it('judges a several-lot document row by row and names the row', () => {
+    const s = subject({ lots: [row('10426300', '01', '2026-08-01'), row('10426300', '02', '2026-08-02')] });
+    const lot = makeLotConstraint('c1', { raw: '10426300 02', norm: '1042630002', parts: { base: '10426300', sub: '02' } }, 'query_text');
+    const day = makeDateConstraint('c2', 'production', { kind: 'day', iso: '2026-08-02', raw: '8/2/2026', note: null }, 'query_text');
+    const v = evaluateSubject(s, [lot, day], []);
+    expect(v.status).toBe('covering');
+    expect(v.lot?.sub_lot_code).toBe('02');
+    const wrongRow = makeLotConstraint('c1', { raw: '10426300 01', norm: '1042630001', parts: { base: '10426300', sub: '01' } }, 'query_text');
+    expect(evaluateSubject(s, [wrongRow, day], []).status).toBe('candidate_not_matching');
+  });
+
+  it('a legacy-sourced row date is likely, not covering; coverage says so', () => {
+    const s = subject({ lots: [row('10426150', '01', '2026-05-30', { production_date_source: 'extracted_code_date_legacy' })], metadata: { code_date: '2026-05-30' } });
+    const day = makeDateConstraint('c1', 'production', { kind: 'day', iso: '2026-05-30', raw: '5/30/2026', note: null }, 'query_text');
+    const v = evaluateSubject(s, [day], []);
+    expect(v.status).toBe('likely_covering');
+    expect(v.checks[0]).toMatchObject({ outcome: 'likely', provenance: 'extracted_code_date_legacy' });
+    expect(coverageFor([day], [], 0, 1)).toBe('likely');
+    expect(coverageFor([day], [], 1, 1)).toBe('covered');
+  });
+
+  it('a row date outranks a collapsed document field', () => {
+    const s = subject({ lots: [row('10426203', '03', '2026-07-22')], metadata: { production_date: '2026-07-22, 2026-07-23' } });
+    const day = makeDateConstraint('c1', 'production', { kind: 'day', iso: '2026-07-22', raw: '7/22/2026', note: null }, 'query_text');
+    expect(evaluateSubject(s, [day], []).status).toBe('covering');
   });
 });

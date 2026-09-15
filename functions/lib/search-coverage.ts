@@ -12,9 +12,14 @@
  * pending Review Queue, and hands every row to the pure judge.
  *
  * Bounded by `DOC_SCAN_CAP`; a tenant past it is told (`coverage_scan_truncated`)
- * rather than silently answered from a partial corpus. Phase 2 (row-level lot
- * records with their own production date column) replaces the scan with an
- * index; the judge and the response shape do not change.
+ * rather than silently answered from a partial corpus.
+ *
+ * LOT ROWS ARE READ BY INDEX (Phase 2, migration 0106). A production-date or lot
+ * constraint also asks `lots` directly — `idx_lots_production_date` for the day
+ * (± the nearby window) and `idx_lots_lotkey` for the lot — and every document
+ * linked to a row it finds is judged, whether or not the capped scan reached it.
+ * Each document is judged row by row (shared/searchCoverage.evaluateSubject) and
+ * the response names the row (`matched_lot`).
  */
 
 import type {
@@ -31,11 +36,15 @@ import {
   evaluateSubject,
   makeDateConstraint,
   makeLotConstraint,
+  makeStructuredLotConstraint,
+  matchedLotOf,
+  NEAR_DATE_DAYS,
   parseQueryText,
   residualText,
   subjectLotIdentities,
   type CoverageSubject,
   type LotToken,
+  type SubjectLot,
   type SubjectVerdict,
 } from '../../shared/searchCoverage';
 import { buildMatchExprWithLot, DOCUMENTS_FTS_COLS, documentsBm25Expr, queryTokenVariants } from './search-fts';
@@ -120,22 +129,70 @@ function normAlnum(s: unknown): string {
   return String(s ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
-export async function loadCoverageCorpus(db: D1Database, tenantId: string): Promise<CoverageCorpus> {
-  const docRes = await db
-    .prepare(
-      `SELECT d.id, d.created_at, d.updated_at, d.renewal_due_date, d.primary_metadata,
+/** The narrow per-document projection the judge reads. `WHERE` is appended by the caller. */
+const DOC_SUBJECT_SELECT = `SELECT d.id, d.created_at, d.updated_at, d.renewal_due_date, d.primary_metadata,
               CASE WHEN json_valid(d.extended_metadata) THEN json_remove(d.extended_metadata, '$.tables') END AS extended_lite,
               s.name AS supplier_name, s.aliases AS supplier_aliases,
               dt.slug AS document_type_slug, dt.name AS document_type_name,
               (SELECT GROUP_CONCAT(p.name, char(31))
                  FROM document_products dp JOIN products p ON p.id = dp.product_id
                 WHERE dp.document_id = d.id) AS product_names,
-              (SELECT GROUP_CONCAT(COALESCE(l.lot_number, '') || char(30) || COALESCE(l.sub_lot_code, '') || char(30) || COALESCE(l.lot_key, ''), char(31))
+              (SELECT GROUP_CONCAT(
+                        COALESCE(l.lot_number, '') || char(30) || COALESCE(l.sub_lot_code, '') || char(30) ||
+                        COALESCE(l.lot_key, '') || char(30) || l.id || char(30) ||
+                        COALESCE(l.production_date, '') || char(30) || COALESCE(l.production_date_raw, '') || char(30) ||
+                        COALESCE(l.production_date_source, '') || char(30) || COALESCE(l.production_date_status, ''),
+                        char(31))
                  FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
                 WHERE dl.document_id = d.id) AS lot_rows
          FROM documents d
          LEFT JOIN suppliers s ON s.id = d.supplier_id
-         LEFT JOIN document_types dt ON dt.id = d.document_type_id
+         LEFT JOIN document_types dt ON dt.id = d.document_type_id`;
+
+function parseLotRows(raw: string | null): SubjectLot[] {
+  if (!raw) return [];
+  return raw.split(FIELD_SEP).map((row) => {
+    const [lot_number = '', sub_lot_code = '', lot_key = '', lot_id = '', pd = '', pdRaw = '', pdSource = '', pdStatus = ''] = row.split(PART_SEP);
+    return {
+      lot_id: lot_id || null,
+      lot_number,
+      sub_lot_code,
+      lot_key,
+      provenance: 'linked_record' as const,
+      production_date: pd || null,
+      production_date_raw: pdRaw || null,
+      production_date_source: (pdSource || null) as SubjectLot['production_date_source'],
+      production_date_status: (pdStatus || null) as SubjectLot['production_date_status'],
+    };
+  }).filter((l) => l.lot_number || l.lot_key);
+}
+
+function addDocRow(corpus: Pick<CoverageCorpus, 'docs' | 'updatedAt' | 'otherIdentifiers'>, r: DocScanRow): void {
+  const metadata = { ...parseJsonObject(r.extended_lite), ...parseJsonObject(r.primary_metadata) };
+  for (const k of ['po_number', 'order_number', 'product_code', 'customer_po', 'shipment_number']) {
+    const v = normAlnum(metadata[k]);
+    if (v.length >= 4) corpus.otherIdentifiers.add(v);
+  }
+  corpus.docs.push({
+    id: r.id,
+    supplier_name: r.supplier_name,
+    supplier_aliases: parseJsonArray(r.supplier_aliases),
+    document_type_slug: r.document_type_slug,
+    document_type_name: r.document_type_name,
+    product_names: r.product_names ? r.product_names.split(FIELD_SEP).filter(Boolean) : [],
+    metadata,
+    lots: parseLotRows(r.lot_rows),
+    created_at: r.created_at,
+    renewal_due_date: r.renewal_due_date,
+    text_match: null,
+  });
+  if (r.updated_at) corpus.updatedAt.set(r.id, r.updated_at);
+}
+
+export async function loadCoverageCorpus(db: D1Database, tenantId: string): Promise<CoverageCorpus> {
+  const docRes = await db
+    .prepare(
+      `${DOC_SUBJECT_SELECT}
         WHERE d.tenant_id = ? AND d.status = 'active'
         ORDER BY d.updated_at DESC
         LIMIT ?`,
@@ -148,32 +205,7 @@ export async function loadCoverageCorpus(db: D1Database, tenantId: string): Prom
   const updatedAt = new Map<string, string>();
   const otherIdentifiers = new Set<string>();
 
-  for (const r of rows.slice(0, DOC_SCAN_CAP)) {
-    const metadata = { ...parseJsonObject(r.extended_lite), ...parseJsonObject(r.primary_metadata) };
-    for (const k of ['po_number', 'order_number', 'product_code', 'customer_po', 'shipment_number']) {
-      const v = normAlnum(metadata[k]);
-      if (v.length >= 4) otherIdentifiers.add(v);
-    }
-    docs.push({
-      id: r.id,
-      supplier_name: r.supplier_name,
-      supplier_aliases: parseJsonArray(r.supplier_aliases),
-      document_type_slug: r.document_type_slug,
-      document_type_name: r.document_type_name,
-      product_names: r.product_names ? r.product_names.split(FIELD_SEP).filter(Boolean) : [],
-      metadata,
-      lots: r.lot_rows
-        ? r.lot_rows.split(FIELD_SEP).map((row) => {
-          const [lot_number = '', sub_lot_code = '', lot_key = ''] = row.split(PART_SEP);
-          return { lot_number, sub_lot_code, lot_key, provenance: 'linked_record' as const };
-        }).filter((l) => l.lot_number || l.lot_key)
-        : [],
-      created_at: r.created_at,
-      renewal_due_date: r.renewal_due_date,
-      text_match: null,
-    });
-    if (r.updated_at) updatedAt.set(r.id, r.updated_at);
-  }
+  for (const r of rows.slice(0, DOC_SCAN_CAP)) addDocRow({ docs, updatedAt, otherIdentifiers }, r);
 
   const queueRes = await db
     .prepare(
@@ -224,6 +256,74 @@ export async function loadCoverageCorpus(db: D1Database, tenantId: string): Prom
   });
 
   return { docs, updatedAt, queue, truncated, otherIdentifiers };
+}
+
+function addDaysIso(iso: string, n: number): string {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Documents linked to a lot row an indexed lookup finds for these constraints:
+ *   - a production (or any-role) date with a day range -> `lots.production_date`
+ *     over that range, widened by the nearby window for a single day, so the
+ *     23-Jul row is judged (and labelled nearby) for a 22-Jul question;
+ *   - a lot -> `lots.lot_key` equal to it, or sharing its base (sibling sublots
+ *     are the likeliest near miss).
+ * A year-less date ("produced 9/2") has no range to seek and is left to the scan.
+ */
+export async function indexedLotDocumentIds(db: D1Database, tenantId: string, constraints: SearchConstraint[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  const collect = async (sql: string, ...binds: unknown[]) => {
+    const res = await db.prepare(sql).bind(tenantId, ...binds).all<{ document_id: string }>();
+    for (const r of res.results ?? []) out.add(r.document_id);
+  };
+  for (const c of constraints) {
+    if (c.kind === 'date' && (c.role === 'production' || c.role === 'any') && (c.date_from || c.date_to)) {
+      const single = !!c.date_from && c.date_from === c.date_to;
+      const from = c.date_from ? (single ? addDaysIso(c.date_from, -NEAR_DATE_DAYS) : c.date_from) : '0000-01-01';
+      const to = c.date_to ? (single ? addDaysIso(c.date_to, NEAR_DATE_DAYS) : c.date_to) : '9999-12-31';
+      await collect(
+        `SELECT DISTINCT dl.document_id
+           FROM lots l JOIN document_lots dl ON dl.lot_id = l.id
+          WHERE l.tenant_id = ? AND l.production_date BETWEEN ? AND ?
+          LIMIT 2000`,
+        from, to,
+      );
+    }
+    if (c.kind === 'lot') {
+      const base = c.lot_parts?.base ?? (c.value.length > 8 ? c.value.slice(0, -2) : c.value);
+      // A prefix range on the index: every key starting with the base. Keys are
+      // upper-case alphanumerics, and '~' sorts after all of them.
+      await collect(
+        `SELECT DISTINCT dl.document_id
+           FROM lots l JOIN document_lots dl ON dl.lot_id = l.id
+          WHERE l.tenant_id = ? AND ((l.lot_key >= ? AND l.lot_key < ?) OR l.lot_key = ?)
+          LIMIT 2000`,
+        base, `${base}~`, c.value,
+      );
+    }
+  }
+  return out;
+}
+
+/** Bring every document an indexed lot-row lookup found into the corpus. */
+export async function extendCorpusWithLotRows(
+  db: D1Database,
+  tenantId: string,
+  corpus: CoverageCorpus,
+  constraints: SearchConstraint[],
+): Promise<void> {
+  const ids = await indexedLotDocumentIds(db, tenantId, constraints);
+  const have = new Set(corpus.docs.map((d) => d.id));
+  const missing = [...ids].filter((id) => !have.has(id));
+  for (let i = 0; i < missing.length; i += 80) {
+    const chunk = missing.slice(i, i + 80);
+    const res = await db
+      .prepare(`${DOC_SUBJECT_SELECT} WHERE d.tenant_id = ? AND d.status = 'active' AND d.id IN (${chunk.map(() => '?').join(',')})`)
+      .bind(tenantId, ...chunk)
+      .all<DocScanRow>();
+    for (const r of res.results ?? []) addDocRow(corpus, r);
+  }
 }
 
 // ===========================================================================
@@ -287,14 +387,23 @@ function supplierWordIn(q: string, suppliers: Array<{ name: string; aliases: str
  * pays for no scan. A supplier name counts only alongside a lot or a date —
  * "darigold" alone is browsing, "darigold 7/22/2026" is asking for a document.
  */
-export async function planInstantSearch(db: D1Database, tenantId: string, q: string): Promise<CoveragePlan | null> {
+export async function planInstantSearch(
+  db: D1Database,
+  tenantId: string,
+  q: string,
+  structured: { lot?: string | null; sublot?: string | null } = {},
+): Promise<CoveragePlan | null> {
   const parsed = parseQueryText(q);
-  if (parsed.dates.length === 0 && parsed.lotTokens.length === 0) return null;
+  const structuredLot = structured.lot && structured.lot.trim()
+    ? makeStructuredLotConstraint('c0', structured.lot, structured.sublot)
+    : null;
+  if (parsed.dates.length === 0 && parsed.lotTokens.length === 0 && !structuredLot) return null;
 
   const corpus = await loadCoverageCorpus(db, tenantId);
   const constraints: SearchConstraint[] = [];
   const spans: Array<[number, number]> = [];
   let n = 0;
+  if (structuredLot) constraints.push({ ...structuredLot, id: `c${++n}` });
 
   for (const d of parsed.dates) {
     constraints.push(makeDateConstraint(`c${++n}`, d.role, d.date, 'query_text'));
@@ -426,7 +535,7 @@ export async function fetchDocumentRows(db: D1Database, ids: string[]): Promise<
 }
 
 export interface CoverageRunResult extends Required<Pick<SearchCoverageFields,
-  'coverage' | 'constraints' | 'dropped_constraints' | 'coverage_summary' | 'covering_count' | 'candidate_count' | 'unreviewed_candidates' | 'coverage_scan_truncated'>> {
+  'coverage' | 'constraints' | 'dropped_constraints' | 'coverage_summary' | 'covering_count' | 'likely_count' | 'candidate_count' | 'unreviewed_candidates' | 'coverage_scan_truncated'>> {
   /** Covering documents first, then candidates — each annotated. Paged. */
   rows: Array<Record<string, unknown>>;
   total: number;
@@ -456,6 +565,7 @@ export async function runCoverageSearch(
   },
 ): Promise<CoverageRunResult> {
   const { constraints, dropped, corpus } = input;
+  await extendCorpusWithLotRows(db, tenantId, corpus, constraints);
   const hasTextConstraint = constraints.some((c) => c.kind === 'text');
   const pool = input.poolText ? await ftsPool(db, tenantId, input.poolText) : new Map<string, PoolHit>();
   // A lot typed into search that a document only MENTIONS (in its text or its
@@ -470,7 +580,7 @@ export async function runCoverageSearch(
   }
   const queueText = hasTextConstraint && input.poolText ? await queueTextHits(db, tenantId, input.poolText) : null;
 
-  const judged: Array<{ id: string; verdict: SubjectVerdict }> = [];
+  const judged: Array<{ id: string; verdict: SubjectVerdict; subject: CoverageSubject }> = [];
   for (const doc of corpus.docs) {
     const subject = hasTextConstraint ? { ...doc, text_match: pool.has(doc.id) } : doc;
     const verdict = evaluateSubject(subject, constraints, dropped, {
@@ -479,7 +589,7 @@ export async function runCoverageSearch(
     if (verdict.status !== 'covering' && mentions.has(doc.id)) {
       verdict.reason = `${verdict.reason ?? ''} Its text mentions "${mentions.get(doc.id)}".`.trim();
     }
-    if (verdict.eligible) judged.push({ id: doc.id, verdict });
+    if (verdict.eligible) judged.push({ id: doc.id, verdict, subject: doc });
   }
 
   const byRank = (a: { id: string }, b: { id: string }) => {
@@ -491,12 +601,15 @@ export async function runCoverageSearch(
     return (corpus.updatedAt.get(b.id) ?? '').localeCompare(corpus.updatedAt.get(a.id) ?? '');
   };
   const covering = judged.filter((j) => j.verdict.status === 'covering').sort(byRank);
+  const likely = judged
+    .filter((j) => j.verdict.status === 'likely_covering')
+    .sort((a, b) => b.verdict.score - a.verdict.score || byRank(a, b));
   const candidates = judged
-    .filter((j) => j.verdict.status !== 'covering')
+    .filter((j) => j.verdict.status === 'candidate_not_matching')
     .sort((a, b) => b.verdict.score - a.verdict.score || byRank(a, b))
     .slice(0, CANDIDATE_CAP);
 
-  const ordered = [...covering, ...candidates];
+  const ordered = [...covering, ...likely, ...candidates];
   const page = ordered.slice(input.offset, input.offset + input.limit);
   const rowsById = await fetchDocumentRows(db, page.map((p) => p.id));
   const rows: Array<Record<string, unknown>> = [];
@@ -508,6 +621,7 @@ export async function runCoverageSearch(
       ...row,
       ...(hit ? { rank: hit.rank, snippet: hit.snippet, snippet_extracted: hit.snippet_extracted, snippet_supplier: hit.snippet_supplier } : {}),
       match_status: p.verdict.status,
+      matched_lot: matchedLotOf(p.verdict, p.subject),
       match_checks: p.verdict.checks,
       match_reason: p.verdict.reason,
     });
@@ -524,7 +638,7 @@ export async function runCoverageSearch(
       if (!best || verdict.score > best.verdict.score) best = { label: r.label, verdict };
     }
     if (!best) continue;
-    const all = best.verdict.status === 'covering';
+    const all = best.verdict.status === 'covering' || best.verdict.status === 'likely_covering';
     unreviewed.push({
       queue_id: g.queue_id,
       file_name: g.file_name,
@@ -543,15 +657,16 @@ export async function runCoverageSearch(
   }
   unreviewed.sort((a, b) => b.score - a.score);
 
-  const coverage: SearchCoverage = coverageFor(constraints, dropped, covering.length);
+  const coverage: SearchCoverage = coverageFor(constraints, dropped, covering.length, likely.length);
   return {
     rows,
     total: ordered.length,
     coverage,
     constraints,
     dropped_constraints: dropped,
-    coverage_summary: coverageSummary(constraints, dropped, covering.length),
+    coverage_summary: coverageSummary(constraints, dropped, covering.length, likely.length),
     covering_count: covering.length,
+    likely_count: likely.length,
     candidate_count: candidates.length,
     unreviewed_candidates: unreviewed.slice(0, UNREVIEWED_CAP).map(({ score: _s, ...u }) => u),
     coverage_scan_truncated: corpus.truncated,

@@ -2899,6 +2899,8 @@ export const api = {
       const query = new URLSearchParams();
       query.set('q', params.q);
       if (params.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params.lot) query.set('lot', params.lot);
+      if (params.lot && params.sublot) query.set('sublot', params.sublot);
       if (params.limit !== undefined) query.set('limit', String(params.limit));
       if (params.offset !== undefined) query.set('offset', String(params.offset));
       if (params.limit_per_type !== undefined) query.set('limit_per_type', String(params.limit_per_type));

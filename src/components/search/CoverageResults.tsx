@@ -15,23 +15,32 @@ import ReportProblemIcon from '@mui/icons-material/ReportProblem';
 import HourglassTopIcon from '@mui/icons-material/HourglassTop';
 import { Link as RouterLink } from 'react-router-dom';
 import { ResultCardDocument } from './ResultCardDocument';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import type {
   SearchConstraintCheck,
   SearchCoverageFields,
   SearchFieldProvenance,
+  SearchMatchedLot,
   SearchUnreviewedCandidate,
   UniversalSearchDocument,
 } from '../../../shared/types';
+import { formatIsoHuman } from '../../../shared/searchDates';
 
 /**
  * Coverage-aware result view (Any-Field COA Retrieval, D6 / R9).
  *
- * Three sections, never blended, in this order:
+ * Four sections, never blended, in this order:
  *   1. documents that COVER what was asked (every stated constraint verified
  *      on the document's own fields), with the evidence under each;
- *   2. nearby documents that do NOT — under a heading that says so, each with
+ *   2. documents that LIKELY cover it, on a value an older extraction filed
+ *      under another field (a production date read from the code date) — to be
+ *      confirmed by opening them, never counted as covering;
+ *   3. nearby documents that do NOT — under a heading that says so, each with
  *      the reason it does not match;
- *   3. Review Queue files that look relevant but are not on file yet.
+ *   4. Review Queue files that look relevant but are not on file yet.
+ *
+ * Each result names the LOT ROW it was judged on ("Lot 10426203 · sublot 03 ·
+ * produced Jul 22, 2026"), because one certificate can certify several.
  *
  * When nothing covers the search the page leads with that, in words, before
  * any candidate is shown — so a near miss can never be read as the answer.
@@ -44,7 +53,43 @@ const PROVENANCE_LABEL: Record<SearchFieldProvenance, string> = {
   extracted: 'read from the document',
   linked_record: 'linked record',
   system: 'recorded by the portal',
+  extracted_code_date_legacy: "read from the document's code date field — older extraction",
+  reviewer: 'entered by a reviewer',
 };
+
+/** "Lot 10426203 · sublot 03 · produced Jul 22, 2026 · 50 EA · 2755.75 LB" */
+export function lotRowLine(l: SearchMatchedLot): string {
+  const parts = [`Lot ${l.lot_number}`];
+  if (l.sub_lot_code) parts.push(`sublot ${l.sub_lot_code}`);
+  if (l.production_date) parts.push(`produced ${formatIsoHuman(l.production_date)}`);
+  else if (l.production_date_status === 'ambiguous') parts.push(`production date "${l.production_date_raw}" (reads two ways)`);
+  else if (l.production_date_status === 'conflict') parts.push(`production dates disagree (${l.production_date_raw})`);
+  else if (l.production_date_status === 'unparseable') parts.push(`production date "${l.production_date_raw}" (unreadable)`);
+  if (l.quantity) parts.push(l.quantity);
+  if (l.net_weight) parts.push(l.net_weight);
+  return parts.join(' · ');
+}
+
+function LotRow({ lot }: { lot: SearchMatchedLot | null | undefined }) {
+  if (!lot) return null;
+  const legacy = lot.production_date_source === 'extracted_code_date_legacy';
+  return (
+    <Box sx={{ mt: 0.75 }} data-testid="matched-lot">
+      <Chip
+        size="small"
+        variant="outlined"
+        label={lotRowLine(lot)}
+        sx={{ fontWeight: 600, maxWidth: '100%', height: 'auto', '& .MuiChip-label': { whiteSpace: 'normal', py: 0.25 } }}
+      />
+      {lot.production_date_source && lot.production_date_status && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.25 }}>
+          Production date {PROVENANCE_LABEL[lot.production_date_source === 'extracted' ? 'extracted' : lot.production_date_source]}
+          {legacy ? '. Confirm on the certificate before sending it.' : ''}
+        </Typography>
+      )}
+    </Box>
+  );
+}
 
 function Evidence({ checks, kind }: { checks: SearchConstraintCheck[]; kind: 'covering' | 'candidate' }) {
   const shown = kind === 'covering' ? checks : checks.filter((c) => c.outcome !== 'match');
@@ -57,7 +102,7 @@ function Evidence({ checks, kind }: { checks: SearchConstraintCheck[]; kind: 'co
           variant="caption"
           sx={{ display: 'block', color: kind === 'covering' ? 'success.dark' : 'warning.dark' }}
         >
-          {kind === 'covering' ? '✓ ' : '✕ '}
+          {kind === 'covering' ? '✓ ' : c.outcome === 'likely' ? '? ' : '✕ '}
           {c.message}
           {c.provenance && (
             <Box component="span" sx={{ color: 'text.secondary' }}>
@@ -103,6 +148,7 @@ export function CoverageResults({
   coverage_scan_truncated,
 }: CoverageResultsProps) {
   const covering = documents.filter((d) => d.match_status === 'covering');
+  const likely = documents.filter((d) => d.match_status === 'likely_covering');
   const candidates = documents.filter((d) => d.match_status === 'candidate_not_matching');
 
   if (!coverage || coverage === 'unconstrained') {
@@ -149,6 +195,13 @@ export function CoverageResults({
         </Alert>
       )}
 
+      {coverage === 'likely' && (
+        <Alert severity="warning" icon={<HelpOutlineIcon />} sx={{ mb: 2 }} data-testid="likely-coverage-banner">
+          <AlertTitle>No confirmed covering document — {likely.length} likely</AlertTitle>
+          {coverage_summary}
+        </Alert>
+      )}
+
       {coverage === 'none' && (
         <Alert severity="warning" icon={<ReportProblemIcon />} sx={{ mb: 2 }} data-testid="no-coverage-banner">
           <AlertTitle>No covering document on file</AlertTitle>
@@ -179,7 +232,26 @@ export function CoverageResults({
               key={d.id}
               doc={d}
               tone="covering"
-              footer={<Evidence checks={d.match_checks ?? []} kind="covering" />}
+              footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="covering" /></>}
+            />
+          ))}
+        </Box>
+      )}
+
+      {likely.length > 0 && (
+        <Box sx={{ mb: 3 }} data-testid="likely-section">
+          <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+            Likely covering — confirm ({likely.length})
+          </Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+            These match on a date an older extraction filed under another field. Open each one and check the certificate before using it.
+          </Typography>
+          {likely.map((d) => (
+            <ResultCardDocument
+              key={d.id}
+              doc={d}
+              tone="candidate"
+              footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="candidate" /></>}
             />
           ))}
         </Box>
@@ -198,7 +270,7 @@ export function CoverageResults({
               key={d.id}
               doc={d}
               tone="candidate"
-              footer={<Evidence checks={d.match_checks ?? []} kind="candidate" />}
+              footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="candidate" /></>}
             />
           ))}
         </Box>

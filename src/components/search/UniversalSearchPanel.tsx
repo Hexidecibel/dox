@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Box,
+  Button,
   CircularProgress,
   Stack,
   Tab,
   Tabs,
+  TextField,
   Typography,
 } from '@mui/material';
 import { SearchBar } from './SearchBar';
@@ -81,6 +83,14 @@ export function UniversalSearchPanel({
   );
 
   const debouncedQ = useDebouncedValue(state.q, 300);
+
+  // "Lot / sublot" (AJ A3): a lot given as two inputs, matched part against
+  // part. An advanced input beside the one box, which stays the main path.
+  const [lotOpen, setLotOpen] = useState(false);
+  const [lotBase, setLotBase] = useState('');
+  const [lotSub, setLotSub] = useState('');
+  const debouncedLot = useDebouncedValue(lotOpen ? lotBase.trim() : '', 300);
+  const debouncedSub = useDebouncedValue(lotOpen ? lotSub.trim() : '', 300);
   const recent = useRecentSearches();
 
   const [data, setData] = useState<UniversalSearchResponse>(EMPTY_RESPONSE);
@@ -114,7 +124,7 @@ export function UniversalSearchPanel({
     let cancelled = false;
     const trimmed = debouncedQ.trim();
     if (aiMode) return;
-    if (!trimmed) {
+    if (!trimmed && !debouncedLot) {
       setData(EMPTY_RESPONSE);
       setError(null);
       setLoading(false);
@@ -123,7 +133,7 @@ export function UniversalSearchPanel({
     setLoading(true);
     setError(null);
     api.search
-      .universal({ q: trimmed, tenant_id: tenantId })
+      .universal({ q: trimmed, tenant_id: tenantId, lot: debouncedLot || undefined, sublot: debouncedSub || undefined })
       .then((res) => {
         if (cancelled) return;
         setData(res);
@@ -139,7 +149,7 @@ export function UniversalSearchPanel({
     return () => {
       cancelled = true;
     };
-  }, [debouncedQ, tenantId, aiMode]);
+  }, [debouncedQ, debouncedLot, debouncedSub, tenantId, aiMode]);
 
   const handleSubmit = (q: string) => {
     const trimmed = q.trim();
@@ -148,7 +158,8 @@ export function UniversalSearchPanel({
     if (aiMode && trimmed) runAi(trimmed);
   };
 
-  const constrained = data.coverage === 'covered' || data.coverage === 'none';
+  const constrained = data.coverage === 'covered' || data.coverage === 'likely' || data.coverage === 'none';
+  const hasQuery = state.q.trim() !== '' || (lotOpen && lotBase.trim() !== '');
   const coverageProps = {
     documents: data.documents.results,
     coverage: data.coverage,
@@ -194,6 +205,44 @@ export function UniversalSearchPanel({
             : 'Search documents, orders, customers, bundles…'
         }
       />
+      {!aiMode && (
+        <Box sx={{ mt: 1 }} data-testid="lot-sublot-search">
+          <Button
+            size="small"
+            variant={lotOpen ? 'outlined' : 'text'}
+            onClick={() => setLotOpen((v) => !v)}
+            sx={{ textTransform: 'none' }}
+            aria-expanded={lotOpen}
+          >
+            Lot / sublot
+          </Button>
+          {lotOpen && (
+            <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap' }} useFlexGap>
+              <TextField
+                size="small"
+                label="Lot"
+                placeholder="10426203"
+                value={lotBase}
+                onChange={(e) => setLotBase(e.target.value)}
+                inputProps={{ 'data-testid': 'lot-base-input' }}
+                sx={{ flex: '1 1 180px', maxWidth: 260 }}
+              />
+              <TextField
+                size="small"
+                label="Sublot"
+                placeholder="03"
+                value={lotSub}
+                onChange={(e) => setLotSub(e.target.value)}
+                inputProps={{ 'data-testid': 'lot-sub-input' }}
+                sx={{ flex: '0 1 110px' }}
+              />
+              <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center', flex: '1 1 220px' }}>
+                Base lot and sublot as the certificate prints them — matched separately, never by gluing them together.
+              </Typography>
+            </Stack>
+          )}
+        </Box>
+      )}
       {aiMode && (
         <Box sx={{ mt: 1 }} data-testid="ai-search">
           {aiError && <Alert severity="error" sx={{ mb: 2 }}>{aiError}</Alert>}
@@ -282,13 +331,13 @@ export function UniversalSearchPanel({
         </Box>
       )}
 
-      {!loading && state.q.trim() === '' && (
+      {!loading && !hasQuery && (
         <Typography variant="body2" color="text.secondary">
           Type to search across documents, orders, customers, and bundles.
         </Typography>
       )}
 
-      {!loading && state.q.trim() !== '' && tab === 'all' && (
+      {!loading && hasQuery && tab === 'all' && (
         <Stack spacing={3}>
           {constrained && (
             <Section title="Documents" total={data.documents.total} onSeeAll={() => setStatePatch({ type: 'documents' })}>

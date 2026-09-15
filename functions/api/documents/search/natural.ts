@@ -146,6 +146,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         dropped_constraints: run.dropped_constraints,
         coverage_summary: run.coverage_summary,
         covering_count: run.covering_count,
+        likely_count: run.likely_count,
         candidate_count: run.candidate_count,
         unreviewed_candidates: run.unreviewed_candidates,
         coverage_scan_truncated: run.coverage_scan_truncated,

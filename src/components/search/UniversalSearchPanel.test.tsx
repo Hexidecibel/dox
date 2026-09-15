@@ -110,4 +110,17 @@ describe('UniversalSearchPanel', () => {
     render(wrap(<UniversalSearchPanel />, '/?q=foo'));
     expect(await screen.findByText('500')).toBeInTheDocument();
   });
+  it('A3: the Lot / sublot inputs search a lot as two parts', async () => {
+    mocks.universal.mockResolvedValue({ ...RESPONSE, coverage: 'covered', constraints: [], documents: { total: 0, results: [] } });
+    const user = userEvent.setup();
+    render(wrap(<UniversalSearchPanel />));
+    await user.click(screen.getByRole('button', { name: 'Lot / sublot' }));
+    await user.type(screen.getByTestId('lot-base-input'), '10426203');
+    await user.type(screen.getByTestId('lot-sub-input'), '03');
+    await waitFor(() => {
+      const calls = mocks.universal.mock.calls;
+      const last = calls[calls.length - 1]?.[0];
+      expect(last).toMatchObject({ q: '', lot: '10426203', sublot: '03' });
+    });
+  });
 });

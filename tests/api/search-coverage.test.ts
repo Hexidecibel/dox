@@ -4,9 +4,16 @@
  * real case (AJ Conner, Any-Field COA Retrieval, §2 and §8).
  *
  *   Darigold multi-lot COA, split one document per sublot the way approval
- *   splits it, every sibling carrying the WHOLE bundle's text:
+ *   splits it, every sibling carrying the WHOLE bundle's text as its
+ *   extracted_text and the row-scoped text (0106) as its search_text; each lot
+ *   row carries its own production date:
  *     10426203-02 / -03 / -04  production 2026-07-22
  *     10426204-13              production 2026-07-23
+ *   Legacy Darigold            production date only in code_date (2026-05-30),
+ *                              printed under "Production Date"; lot row source
+ *                              'extracted_code_date_legacy'
+ *   Ambiguous row              10426199-02, "04-05-2026" (status ambiguous)
+ *   Two-lot certificate        ONE document, lots 10426300-01 (Aug 1) and -02 (Aug 2)
  *   West Point butter          code date 2026-07-31 (no production date)
  *   Review Queue (pending)     Darigold lot 10426212, production 2026-07-31
  *   Country Morning            Whole Milk 300 Gallon Tote, production 2026-09-02
@@ -22,6 +29,9 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { onRequestGet as universalSearch } from '../../functions/api/search/index';
 import { onRequestPost as naturalSearch } from '../../functions/api/documents/search/natural';
+import { indexedLotDocumentIds } from '../../functions/lib/search-coverage';
+import { makeDateConstraint } from '../../shared/searchCoverage';
+import { rowScopedSearchText } from '../../shared/rowScopedText';
 
 const db = env.DB;
 const T = 'cov-tenant';
@@ -41,6 +51,9 @@ const DOC = {
   wholeMilkTote: 'cov-doc-cmf-whole-tote',
   heavyCreamTote: 'cov-doc-cmf-cream-tote',
   bag: 'cov-doc-cmf-bag',
+  legacy: 'cov-doc-dg-legacy',
+  ambiguous: 'cov-doc-dg-ambiguous',
+  twoLot: 'cov-doc-dg-two-lot',
 };
 const QUEUE_ID = 'cov-queue-10426212';
 
@@ -55,24 +68,36 @@ async function insertDoc(opts: {
   supplierId: string;
   metadata: Record<string, unknown>;
   text: string;
+  searchText?: string | null;
 }) {
   await db.prepare(
     `INSERT INTO documents (id, tenant_id, title, tags, current_version, status, created_by, supplier_id, document_type_id, primary_metadata, created_at, updated_at)
      VALUES (?, ?, ?, '[]', 1, 'active', ?, ?, ?, ?, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')`,
   ).bind(opts.id, T, opts.title, USER.id, opts.supplierId, DT_COA, JSON.stringify(opts.metadata)).run();
   await db.prepare(
-    `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, extracted_text, uploaded_by)
-     VALUES (?, ?, 1, ?, 1024, 'application/pdf', ?, 'x', ?, ?)`,
-  ).bind(`${opts.id}-v1`, opts.id, `${opts.id}.pdf`, `r2/${opts.id}.pdf`, opts.text, USER.id).run();
+    `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, extracted_text, search_text, uploaded_by)
+     VALUES (?, ?, 1, ?, 1024, 'application/pdf', ?, 'x', ?, ?, ?)`,
+  ).bind(`${opts.id}-v1`, opts.id, `${opts.id}.pdf`, `r2/${opts.id}.pdf`, opts.text, opts.searchText ?? null, USER.id).run();
 }
 
-async function linkLot(docId: string, lotNumber: string, sub: string) {
-  const lotId = `${docId}-lot`;
+async function linkLot(
+  docId: string,
+  lotNumber: string,
+  sub: string,
+  production?: { iso: string | null; raw: string; source: string; status: string },
+) {
+  const lotId = `${docId}-lot-${lotNumber}${sub}`;
   await db.prepare(
-    `INSERT INTO lots (id, tenant_id, supplier_id, lot_number, sub_lot_code, lot_key) VALUES (?, ?, ?, ?, ?, ?)`,
-  ).bind(lotId, T, SUP_DG, lotNumber, sub, `${lotNumber}${sub}`).run();
+    `INSERT INTO lots (id, tenant_id, supplier_id, lot_number, sub_lot_code, lot_key,
+                       production_date, production_date_raw, production_date_source, production_date_status, production_date_document_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    lotId, T, SUP_DG, lotNumber, sub, `${lotNumber}${sub}`,
+    production?.iso ?? null, production?.raw ?? null, production?.source ?? null, production?.status ?? null,
+    production ? docId : null,
+  ).run();
   await db.prepare(`INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)`)
-    .bind(`${docId}-dl`, docId, lotId).run();
+    .bind(`${lotId}-dl`, docId, lotId).run();
 }
 
 beforeAll(async () => {
@@ -92,7 +117,8 @@ beforeAll(async () => {
     [DOC.dg04, '10426203', '04', '2026-07-22'],
     [DOC.dg13, '10426204', '13', '2026-07-23'],
   ] as const;
-  for (const [id, lot, sub, prod] of darigold) {
+  const rowFields = darigold.map(([, lot, sub, prod]) => ({ lot_number: lot, sub_lot_code: sub, production_date: prod }));
+  for (const [i, [id, lot, sub, prod]] of darigold.entries()) {
     await insertDoc({
       id,
       title: 'SWEET CREAM BUTTER - Btr NS Gr AA 25kg',
@@ -100,11 +126,43 @@ beforeAll(async () => {
       metadata: {
         supplier_name: 'Darigold, Inc.', lot_number: lot, sub_lot_code: sub, production_date: prod,
         po_number: 'K135797', order_number: 'EDI187653', product_code: '810004',
+        quantity: sub === '13' ? '100 EA' : '50 EA', net_weight: sub === '13' ? '5511.5 LB' : '2755.75 LB',
       },
       text: BUNDLE_TEXT,
+      // Exactly what approval writes (produceCoaRecords): the bundle with the
+      // other rows' lots and dates blanked.
+      searchText: rowScopedSearchText(BUNDLE_TEXT, rowFields[i], rowFields.filter((_, j) => j !== i))?.text ?? null,
     });
-    await linkLot(id, lot, sub);
+    await linkLot(id, lot, sub, { iso: prod, raw: prod, source: 'extracted', status: 'resolved' });
   }
+
+  await insertDoc({
+    id: DOC.legacy,
+    title: 'Darigold Butter (older extraction)',
+    supplierId: SUP_DG,
+    metadata: { supplier_name: 'Darigold, Inc.', lot_number: '10426150', sub_lot_code: '01', code_date: '2026-05-30' },
+    text: 'DARIGOLD CERTIFICATE OF ANALYSIS Lot Number 10426150 Sub Lot Number 01 Production Date 30-May-2026',
+  });
+  await linkLot(DOC.legacy, '10426150', '01', { iso: '2026-05-30', raw: '2026-05-30', source: 'extracted_code_date_legacy', status: 'resolved' });
+
+  await insertDoc({
+    id: DOC.ambiguous,
+    title: 'Darigold Butter (ambiguous date)',
+    supplierId: SUP_DG,
+    metadata: { supplier_name: 'Darigold, Inc.', lot_number: '10426199', sub_lot_code: '02', production_date: '04-05-2026' },
+    text: 'DARIGOLD Lot 10426199 Sub Lot 02 Production Date 04-05-2026',
+  });
+  await linkLot(DOC.ambiguous, '10426199', '02', { iso: null, raw: '04-05-2026', source: 'extracted', status: 'ambiguous' });
+
+  await insertDoc({
+    id: DOC.twoLot,
+    title: 'Darigold two-lot certificate (not split)',
+    supplierId: SUP_DG,
+    metadata: { supplier_name: 'Darigold, Inc.', lot_number: '10426300' },
+    text: 'DARIGOLD Lot 10426300 Sub Lot 01 Production Date 01-Aug-2026 Lot 10426300 Sub Lot 02 Production Date 02-Aug-2026',
+  });
+  await linkLot(DOC.twoLot, '10426300', '01', { iso: '2026-08-01', raw: '01-Aug-2026', source: 'extracted', status: 'resolved' });
+  await linkLot(DOC.twoLot, '10426300', '02', { iso: '2026-08-02', raw: '02-Aug-2026', source: 'extracted', status: 'resolved' });
 
   await insertDoc({
     id: DOC.westPoint,
@@ -283,6 +341,136 @@ describe('GET /api/search — coverage (instant search)', () => {
   it('a pending queue file is visible to an ordinary search as unreviewed', async () => {
     const body = await search('EDI190001');
     expect(body.unreviewed_candidates.map((u: any) => u.queue_id)).toContain(QUEUE_ID);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2 — lot rows (migration 0106)
+// ---------------------------------------------------------------------------
+
+async function searchLot(lot: string, sublot?: string, q = '') {
+  const qs = new URLSearchParams({ q, lot, limit: '50' });
+  if (sublot !== undefined) qs.set('sublot', sublot);
+  const res = await universalSearch(ctxGet(qs.toString()));
+  expect(res.status).toBe(200);
+  return (await res.json()) as any;
+}
+
+describe('GET /api/search — lot rows (Phase 2)', () => {
+  it('A1: the covering result names the lot row it matched, with its production date and pack', async () => {
+    const body = await search('1042620303');
+    const dg03 = body.documents.results.find((r: any) => r.id === DOC.dg03);
+    expect(dg03.matched_lot).toMatchObject({
+      lot_number: '10426203', sub_lot_code: '03', production_date: '2026-07-22',
+      production_date_source: 'extracted', production_date_status: 'resolved',
+      quantity: '50 EA', net_weight: '2755.75 LB',
+    });
+  });
+
+  it('A2 in its spaced shape: "10426203 03" covers the -03 row only', async () => {
+    const body = await search('10426203 03');
+    expect(body.constraints).toHaveLength(1);
+    expect(body.constraints[0]).toMatchObject({ kind: 'lot', lot_parts: { base: '10426203', sub: '03' } });
+    expect(idsWith(body, 'covering')).toEqual([DOC.dg03]);
+  });
+
+  it('A3: base 10426203 + sublot 03 as two separate inputs covers the -03 row, part against part', async () => {
+    const body = await searchLot('10426203', '03');
+    expect(body.coverage).toBe('covered');
+    expect(body.constraints[0]).toMatchObject({ kind: 'lot', source: 'structured', lot_parts: { base: '10426203', sub: '03' }, label: 'lot 10426203 · sublot 03' });
+    expect(idsWith(body, 'covering')).toEqual([DOC.dg03]);
+    expect(body.documents.results[0].matched_lot).toMatchObject({ sub_lot_code: '03', production_date: '2026-07-22' });
+    const dg04 = body.documents.results.find((r: any) => r.id === DOC.dg04);
+    expect(dg04.match_status).toBe('candidate_not_matching');
+    expect(dg04.match_checks[0].outcome).toBe('near');
+  });
+
+  it('A3: a base with no sublot input covers every sublot of that base', async () => {
+    const body = await searchLot('10426203');
+    expect(idsWith(body, 'covering')).toEqual([DOC.dg02, DOC.dg03, DOC.dg04].sort());
+  });
+
+  it('a sublot without a lot is refused', async () => {
+    const res = await universalSearch(ctxGet('q=&sublot=03'));
+    expect(res.status).toBe(400);
+  });
+
+  it('A4: production date 22-Jul-2026 — exactly the three 22-Jul rows cover, read from the lot rows; 23-Jul is nearby with the reason', async () => {
+    const body = await search('production date 22-Jul-2026');
+    expect(idsWith(body, 'covering')).toEqual([DOC.dg02, DOC.dg03, DOC.dg04].sort());
+    for (const r of body.documents.results.filter((x: any) => x.match_status === 'covering')) {
+      expect(r.matched_lot.production_date).toBe('2026-07-22');
+      expect(r.match_checks[0].message).toMatch(/on this lot row is Jul 22, 2026/);
+    }
+    const dg13 = body.documents.results.find((r: any) => r.id === DOC.dg13);
+    expect(dg13.match_status).toBe('candidate_not_matching');
+    expect(dg13.match_checks[0]).toMatchObject({ outcome: 'near', distance_days: 1 });
+    expect(dg13.matched_lot).toMatchObject({ sub_lot_code: '13', production_date: '2026-07-23' });
+  });
+
+  it('the production-date lookup is an index read over lot rows (covering and nearby rows)', async () => {
+    const ids = await indexedLotDocumentIds(db, T, [
+      makeDateConstraint('c1', 'production', { kind: 'day', iso: '2026-07-22', raw: '2026-07-22', note: null }, 'query_text'),
+    ]);
+    expect([...ids]).toEqual(expect.arrayContaining([DOC.dg02, DOC.dg03, DOC.dg04, DOC.dg13, DOC.twoLot]));
+    expect(ids.has(DOC.legacy)).toBe(false);
+  });
+
+  it("sibling text no longer covers: lot 10426204 with \"22-Jul\" does not cover the 23-Jul row", async () => {
+    const body = await search('lot 10426204 22-Jul');
+    expect(body.constraints.map((c: any) => c.kind).sort()).toEqual(['lot', 'text']);
+    expect(idsWith(body, 'covering')).toEqual([]);
+    const dg13 = body.documents.results.find((r: any) => r.id === DOC.dg13);
+    expect(dg13.match_status).toBe('candidate_not_matching');
+    expect(dg13.match_reason).toMatch(/doesn't mention "22-Jul"/);
+  });
+
+  it('a sibling that only shares the page is no longer listed as "mentioning" another row\'s lot', async () => {
+    const body = await search('10426204');
+    expect(idsWith(body, 'covering')).toEqual([DOC.dg13]);
+    const listed = body.documents.results.map((r: any) => r.id);
+    for (const id of [DOC.dg02, DOC.dg03, DOC.dg04]) expect(listed).not.toContain(id);
+  });
+
+  it('a legacy production date (read from the code date field) is "likely", never covering — and says where it came from', async () => {
+    const body = await search('production date 5/30/2026');
+    expect(body.coverage).toBe('likely');
+    expect(body.covering_count).toBe(0);
+    expect(body.likely_count).toBe(1);
+    expect(body.coverage_summary).toMatch(/No document on file is confirmed to cover production date May 30, 2026\. 1 likely does/);
+    const legacy = body.documents.results.find((r: any) => r.id === DOC.legacy);
+    expect(legacy.match_status).toBe('likely_covering');
+    expect(legacy.match_checks[0]).toMatchObject({ outcome: 'likely', provenance: 'extracted_code_date_legacy' });
+    expect(legacy.match_checks[0].message).toMatch(/code date field \(older extraction\)/);
+    expect(legacy.matched_lot.production_date_source).toBe('extracted_code_date_legacy');
+  });
+
+  it('an ambiguous row date is never a match, either way it could be read', async () => {
+    for (const q of ['production date 4/5/2026', 'production date 5/4/2026']) {
+      const body = await search(q);
+      expect(idsWith(body, 'covering')).not.toContain(DOC.ambiguous);
+      const row = body.documents.results.find((r: any) => r.id === DOC.ambiguous);
+      expect(row.match_checks[0].outcome).toBe('ambiguous');
+    }
+  });
+
+  it('row by row: one row\'s lot and another row\'s date never combine into a covering answer', async () => {
+    const mixed = await search('lot 10426300 01 production date 8/2/2026');
+    expect(idsWith(mixed, 'covering')).toEqual([]);
+    const same = await search('lot 10426300 02 production date 8/2/2026');
+    expect(idsWith(same, 'covering')).toEqual([DOC.twoLot]);
+    const row = same.documents.results.find((r: any) => r.id === DOC.twoLot);
+    // Not a split document, so the row's pack is not borrowed from the document.
+    expect(row.matched_lot).toMatchObject({ sub_lot_code: '02', production_date: '2026-08-02', quantity: null });
+  });
+
+  it('A11 still holds with lot rows: production date 7/31/2026 has no covering document', async () => {
+    const body = await search('production date 7/31/2026');
+    expect(body.coverage).toBe('none');
+    expect(idsWith(body, 'covering')).toEqual([]);
+    expect(idsWith(body, 'likely_covering')).toEqual([]);
+    const wp = body.documents.results.find((r: any) => r.id === DOC.westPoint);
+    expect(wp.match_checks[0].outcome).toBe('role_mismatch');
   });
 });
 

@@ -57,7 +57,13 @@ function LotRow({ lot }: { lot: LotListItem }) {
         </TableCell>
         <TableCell>
           <Typography variant="body2" color="text.secondary">
-            {lot.code_date ? formatDate(lot.code_date) : '—'}
+            {lot.production_date
+              ? `prod ${formatDate(lot.production_date)}`
+              : lot.production_date_status && lot.production_date_raw
+                ? `prod "${lot.production_date_raw}" (${lot.production_date_status})`
+                : ''}
+            {lot.code_date ? `${lot.production_date || lot.production_date_raw ? ' / ' : ''}code ${formatDate(lot.code_date)}` : ''}
+            {!lot.production_date && !lot.production_date_raw && !lot.code_date ? '—' : ''}
             {lot.expiration_date ? ` / exp ${formatDate(lot.expiration_date)}` : ''}
           </Typography>
         </TableCell>
@@ -204,7 +210,7 @@ export function Lots() {
                   <TableCell>Sublot</TableCell>
                   <TableCell>Product</TableCell>
                   <TableCell>Supplier</TableCell>
-                  <TableCell>Code / Exp Date</TableCell>
+                  <TableCell>Production / Code / Exp</TableCell>
                   <TableCell>Activity</TableCell>
                 </TableRow>
               </TableHead>

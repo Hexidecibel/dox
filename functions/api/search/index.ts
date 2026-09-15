@@ -24,6 +24,10 @@
  *     UNINDEXED so fan-out without scoping would mix tenants).
  *   - everyone else: tenant_id is taken from the user.
  *
+ * Structured lot (AJ A3): `lot` and optional `sublot` search for a lot given
+ * as two separate inputs, matched part against part. They may be sent with or
+ * without `q`; without it, only the coverage answer is computed.
+ *
  * Paging:
  *   - documents block accepts `limit` (default 20, max 200) + `offset`.
  *   - other entities are top-N only (`limit_per_type`, default 5,
@@ -71,6 +75,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const url = new URL(context.request.url);
 
     const q = url.searchParams.get('q') ?? '';
+    const structuredLot = (url.searchParams.get('lot') ?? '').trim();
+    const structuredSublot = (url.searchParams.get('sublot') ?? '').trim();
+    if (structuredSublot && !structuredLot) {
+      throw new BadRequestError('sublot needs a lot');
+    }
     let tenantId = url.searchParams.get('tenant_id');
     const docLimit = Math.min(
       parseInt(url.searchParams.get('limit') || `${DEFAULT_DOC_LIMIT}`, 10),
@@ -104,7 +113,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // swap in "recent items" lists in Phase 5 (per the plan's
     // open-implementation-detail). For v1 this is a 200 with zeros.
     // ----------------------------------------------------------------
-    if (!matchExpr) {
+    if (!matchExpr && !structuredLot) {
       const responseBody: UniversalResponse = {
         documents: { ...empty },
         suppliers: { ...empty },
@@ -300,7 +309,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       ).bind(tenantId, docMatchExpr, docLimit, docOffset),
     ];
 
-    const batchResults = await context.env.DB.batch<RowWithCount>(stmts);
+    // A structured-lot search with no typed text has nothing to FTS-match.
+    const batchResults = matchExpr ? await context.env.DB.batch<RowWithCount>(stmts) : [];
 
     function blockFromPair<T>(countIdx: number, pageIdx: number, shape: (r: RowWithCount) => T): PerEntityBlock<T> {
       const totalRow = batchResults[countIdx]?.results?.[0] as { total?: number } | undefined;
@@ -331,7 +341,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // and pending Review Queue files ride along as unreviewed candidates.
     // An ordinary search keeps the FTS block above untouched.
     // ----------------------------------------------------------------
-    const plan = await planInstantSearch(context.env.DB, tenantId, q);
+    const plan = await planInstantSearch(context.env.DB, tenantId, q, { lot: structuredLot, sublot: structuredSublot });
     if (plan) {
       const run = await runCoverageSearch(context.env.DB, tenantId, {
         constraints: plan.constraints,
@@ -348,6 +358,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         dropped_constraints: run.dropped_constraints,
         coverage_summary: run.coverage_summary,
         covering_count: run.covering_count,
+        likely_count: run.likely_count,
         candidate_count: run.candidate_count,
         unreviewed_candidates: run.unreviewed_candidates,
         coverage_scan_truncated: run.coverage_scan_truncated,

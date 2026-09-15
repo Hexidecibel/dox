@@ -87,6 +87,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          lots.code_date       AS code_date,
          lots.expiration_date AS expiration_date,
          lots.mfg_date        AS mfg_date,
+         lots.production_date        AS production_date,
+         lots.production_date_raw    AS production_date_raw,
+         lots.production_date_source AS production_date_source,
+         lots.production_date_status AS production_date_status,
          lots.created_at      AS created_at,
          (SELECT COUNT(*) FROM document_lots dl WHERE dl.lot_id = lots.id)
            AS coa_document_count,
