@@ -1,4 +1,5 @@
 import type { ExpirationRow, ExpirationStatus } from './expirations';
+import { renewalAlertLeadSourceLabel } from '../../shared/renewalLeadTime';
 
 interface SendEmailOptions {
   /** A single address or a list — a list sends one email to all recipients. */
@@ -446,13 +447,20 @@ export function buildRenewalAlertEmail(
     if (d === 0) return 'today';
     return `in ${d} day${d === 1 ? '' : 's'}`;
   };
+  // Why this record is in the mail today: its own lead time and where that
+  // number came from (migration 0111). Absent on rows built by older callers.
+  const leadText = (d: ExpirationRow): string =>
+    typeof d.alert_lead_days === 'number' && d.alert_lead_source
+      ? `warned ${d.alert_lead_days} days ahead (${renewalAlertLeadSourceLabel(d.alert_lead_source)})`
+      : '';
 
   const rows = docs.map((d) => {
+    const lead = leadText(d);
     return `<tr>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${escapeHtml(d.title)}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#666;font-size:13px;">${escapeHtml(d.primary_category_name || '—')}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#666;font-size:13px;">${escapeHtml(d.owner || '—')}</td>
-              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${escapeHtml(d.renewal_due_date || '—')}<br><span style="color:#999;font-size:12px;">${escapeHtml(daysText(d.days_until))}</span></td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${escapeHtml(d.renewal_due_date || '—')}<br><span style="color:#999;font-size:12px;">${escapeHtml(daysText(d.days_until))}</span>${lead ? `<br><span style="color:#999;font-size:11px;">${escapeHtml(lead)}</span>` : ''}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;font-weight:600;color:${statusColor(d.status)};">${statusLabel(d.status)}</td>
             </tr>`;
   }).join('\n');
@@ -508,6 +516,7 @@ export function buildRenewalAlertEmail(
       d.primary_category_name ? `[${d.primary_category_name}]` : '',
       d.owner ? `owner: ${d.owner}` : '',
       `due ${d.renewal_due_date || '—'} (${daysText(d.days_until)})`,
+      leadText(d),
       statusLabel(d.status).toUpperCase(),
     ].filter(Boolean);
     return `- ${parts.join(' · ')}`;

@@ -151,6 +151,9 @@ Triggers: `trg_document_categories_ad_fts`, `trg_document_categories_ai_fts`
   renewal_interval_months INTEGER
   renewal_policy TEXT NOT NULL DEFAULT 'inherit' CHECK (renewal_policy IN ('inherit', 'period', 'none'))
   default_owner TEXT
+  renewal_alert_lead_days INTEGER CHECK (renewal_alert_lead_days IS NULL OR renewal_alert_lead_days BETWEEN 7 AND 365)
+  renewal_alert_lead_updated_at TEXT
+  renewal_alert_lead_updated_by TEXT
   UNIQUE(tenant_id, slug)
 ```
 
@@ -1231,6 +1234,9 @@ Indexes: `idx_sessions_user`
   spec_volume_mass_equivalent INTEGER NOT NULL DEFAULT 0
   spec_unit_policy_updated_at TEXT
   spec_unit_policy_updated_by TEXT
+  renewal_alert_lead_days INTEGER CHECK (renewal_alert_lead_days IS NULL OR renewal_alert_lead_days BETWEEN 7 AND 365)
+  renewal_alert_lead_updated_at TEXT
+  renewal_alert_lead_updated_by TEXT
 ```
 
 ### `users`

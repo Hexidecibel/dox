@@ -55,6 +55,8 @@ import { InfoTooltip } from '../../components/InfoTooltip';
 import { EmptyState } from '../../components/EmptyState';
 import { DocumentTypeInstructionsDialog } from '../../components/DocumentTypeInstructionsDialog';
 import { helpContent } from '../../lib/helpContent';
+import { LeadDaysField, LeadTimePreviewNote, useLeadTimePreview } from '../../components/RenewalLeadTime';
+import { DEFAULT_RENEWAL_ALERT_LEAD_DAYS } from '../../../shared/renewalLeadTime';
 
 export function DocumentTypes() {
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
@@ -93,6 +95,14 @@ export function DocumentTypes() {
    * so the value they see before saving is the value that will be stored.
    */
   const [formRenewalTouched, setFormRenewalTouched] = useState(false);
+  /**
+   * Renewal alert lead time override (migration 0111). null = use the
+   * organization's number, which is fetched when the dialog opens so the
+   * inherit option can say what it inherits.
+   */
+  const [formLeadDays, setFormLeadDays] = useState<number | null>(null);
+  const [formLeadValid, setFormLeadValid] = useState(true);
+  const [orgLeadDays, setOrgLeadDays] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
 
   /**
@@ -186,6 +196,8 @@ export function DocumentTypes() {
     setFormExtractTables(true);
     setFormRenewalMonths('');
     setFormRenewalTouched(false);
+    setFormLeadDays(null);
+    setFormLeadValid(true);
     setFormTenantId(
       isSuperAdmin
         ? (tenantFilter || selectedTenantId || '')
@@ -209,9 +221,40 @@ export function DocumentTypes() {
     );
     // An existing type keeps what it has; never re-guess from the name here.
     setFormRenewalTouched(true);
+    setFormLeadDays(dt.renewal_alert_lead_days ?? null);
+    setFormLeadValid(true);
     setFormTenantId(dt.tenant_id);
     setDialogOpen(true);
   };
+
+  // The organization's lead time, for the "Use organization default (N days)"
+  // label. Best-effort: a tenant with Compliance off (or a failed read) falls
+  // back to naming the system default rather than blocking the dialog.
+  const dialogTenantId = editingType?.tenant_id || formTenantId || undefined;
+  useEffect(() => {
+    if (!dialogOpen) return;
+    let cancelled = false;
+    setOrgLeadDays(null);
+    api.expirations.leadTime
+      .get({ tenantId: isSuperAdmin ? dialogTenantId : undefined })
+      .then((r) => {
+        if (!cancelled) setOrgLeadDays(r.effective.days);
+      })
+      .catch(() => {
+        /* label falls back to the system default */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dialogOpen, dialogTenantId, isSuperAdmin]);
+
+  const leadDirty = !!editingType && formLeadDays !== (editingType.renewal_alert_lead_days ?? null);
+  const leadPreview = useLeadTimePreview({
+    enabled: dialogOpen && leadDirty && formLeadValid && formRenewalMonths !== 'none',
+    leadDays: formLeadDays,
+    documentTypeId: editingType?.id,
+    tenantId: isSuperAdmin ? editingType?.tenant_id : undefined,
+  });
 
   // Mirror of the server-side proposal in POST /api/document-types: a new type
   // whose name reads as a specification sheet starts at three years, because
@@ -254,6 +297,7 @@ export function DocumentTypes() {
           auto_ingest: formAutoIngest ? 1 : 0,
           extract_tables: formExtractTables ? 1 : 0,
           ...renewalPayload(),
+          renewal_alert_lead_days: formLeadDays,
         });
       } else {
         const tenantId = isSuperAdmin ? formTenantId : user?.tenant_id;
@@ -269,6 +313,7 @@ export function DocumentTypes() {
           auto_ingest: formAutoIngest ? 1 : 0,
           extract_tables: formExtractTables ? 1 : 0,
           ...renewalPayload(),
+          renewal_alert_lead_days: formLeadDays,
         });
       }
       setDialogOpen(false);
@@ -401,6 +446,9 @@ export function DocumentTypes() {
                       size="small"
                       variant="outlined"
                     />
+                    {dt.renewal_alert_lead_days != null && dt.renewal_policy !== 'none' && (
+                      <Chip label={`Warns ${dt.renewal_alert_lead_days} days before`} size="small" variant="outlined" />
+                    )}
                     {instructionsByType[dt.id]?.authored && (
                       <Chip label="Extraction guidance" size="small" color="primary" variant="outlined" />
                     )}
@@ -505,6 +553,11 @@ export function DocumentTypes() {
                       <Typography variant="body2" color="text.secondary">
                         {renewalPeriodLabel(dt.renewal_interval_months, dt.renewal_policy)}
                       </Typography>
+                      {dt.renewal_alert_lead_days != null && dt.renewal_policy !== 'none' && (
+                        <Typography variant="caption" color="text.secondary" component="div">
+                          Warns {dt.renewal_alert_lead_days} days before
+                        </Typography>
+                      )}
                     </TableCell>
                     <TableCell>{formatDate(dt.created_at)}</TableCell>
                     <TableCell align="right">
@@ -623,6 +676,35 @@ export function DocumentTypes() {
             dashboard and never trigger a renewal alert.
           </Typography>
 
+          {/* Renewal alert lead time override (migration 0111) */}
+          <Box sx={{ mb: 2 }}>
+            <LeadDaysField
+              key={`${editingType?.id ?? 'new'}:${dialogOpen}`}
+              label="Warn owners"
+              inheritLabel={`Use organization default (${orgLeadDays ?? DEFAULT_RENEWAL_ALERT_LEAD_DAYS} days before)`}
+              value={formLeadDays}
+              disabled={saving || formRenewalMonths === 'none'}
+              onChange={(v, ok) => {
+                setFormLeadDays(v);
+                setFormLeadValid(ok);
+              }}
+            />
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+              {formRenewalMonths === 'none'
+                ? 'This type does not renew, so its owners are never warned about it.'
+                : 'How many days before a document of this type is due its owner is emailed. Leave it on the organization default unless this type needs a different run-up — an audit certificate that needs an audit booked, say.'}
+            </Typography>
+            {leadDirty && (
+              <Box sx={{ mt: 1 }}>
+                <LeadTimePreviewNote
+                  preview={leadPreview.preview}
+                  loading={leadPreview.loading}
+                  error={leadPreview.error}
+                />
+              </Box>
+            )}
+          </Box>
+
           {/* Feature Toggles */}
           <Box>
             <Typography variant="subtitle2" sx={{ mb: 1 }}>Features</Typography>
@@ -657,7 +739,7 @@ export function DocumentTypes() {
           <Button
             variant="contained"
             onClick={handleSave}
-            disabled={!formName.trim() || saving || (!editingType && isSuperAdmin && !formTenantId)}
+            disabled={!formName.trim() || saving || !formLeadValid || (!editingType && isSuperAdmin && !formTenantId)}
           >
             {saving ? 'Saving...' : editingType ? 'Save Changes' : 'Add Document Type'}
           </Button>

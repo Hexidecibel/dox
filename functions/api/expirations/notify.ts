@@ -1,5 +1,4 @@
 import { requireRole, requireTenantAccess, BadRequestError, errorToResponse } from '../../lib/permissions';
-import { DEFAULT_WINDOW_DAYS } from '../../lib/expirations';
 import { runRenewalAlerts } from '../../lib/renewal-alerts';
 import type { Env, User } from '../../lib/types';
 
@@ -39,8 +38,15 @@ import type { Env, User } from '../../lib/types';
  * Degrades cleanly when RESEND_API_KEY is unset - returns
  * { sent:false, reason:'email_not_configured' } rather than 500'ing.
  *
- * Body/query params: tenant_id (super_admin only), window_days (default 60),
- * as_of (default today).
+ * LEAD TIME (migration 0111): which documents are alerting is decided per
+ * document by its resolved lead time (type override -> tenant -> 60-day
+ * default), exactly as the scheduled run decides it. `window_days` is NOT a
+ * parameter any more: it used to be passed straight from the Renewals
+ * dashboard's look-ahead selector, which let a view filter decide who was
+ * mailed. A caller that still sends it gets `window_days_ignored: true` back
+ * rather than a silent difference.
+ *
+ * Body/query params: tenant_id (super_admin only), as_of (default today).
  */
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -69,14 +75,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
     requireTenantAccess(user, tenantId);
 
-    const windowRaw = parseInt(param('window_days') || String(DEFAULT_WINDOW_DAYS), 10);
-    const windowDays = Number.isFinite(windowRaw) && windowRaw >= 0 ? windowRaw : DEFAULT_WINDOW_DAYS;
+    const windowDaysIgnored = param('window_days') !== null;
     const asOf = param('as_of') || new Date().toISOString().slice(0, 10);
 
     const result = await runRenewalAlerts(context.env.DB, context.env.RESEND_API_KEY, {
       tenantId,
       asOf,
-      windowDays,
       appUrl: url.origin,
       respectCooldown: false,
       actorUserId: user.id,
@@ -90,6 +94,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       suppressed_count: result.suppressed_count,
       groups: result.groups,
       unrouted: result.unrouted,
+      tenant_lead: result.tenant_lead,
+      ...(windowDaysIgnored ? { window_days_ignored: true } : {}),
       ...(result.reason ? { reason: result.reason } : {}),
     });
   } catch (err) {

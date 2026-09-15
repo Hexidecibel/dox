@@ -33,7 +33,7 @@
  */
 
 import { generateId } from './db';
-import { computeExpirations, DEFAULT_WINDOW_DAYS, isAlertStatus } from './expirations';
+import { computeExpirations, LEAD_TIME_WINDOW, isAlertStatus } from './expirations';
 import type { AlertLandingView, AlertLandingSpecFailure, AlertLinkKind } from '../../shared/types';
 
 /**
@@ -292,7 +292,8 @@ export async function buildAlertLandingView(
   // page is to show the CURRENT state of the thing needing action. Filtered to
   // the exact set the email named, so an old link never widens.
   const asOf = new Date().toISOString().slice(0, 10);
-  const { rows } = await computeExpirations(db, link.tenant_id, asOf, DEFAULT_WINDOW_DAYS);
+  // Judged the way the email was: each record against its own lead time (0111).
+  const { rows } = await computeExpirations(db, link.tenant_id, asOf, LEAD_TIME_WINDOW);
   const renewals = rows
     .filter((r) => subjectIds.has(r.id) && isAlertStatus(r.status))
     .map((r) => ({

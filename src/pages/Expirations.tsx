@@ -29,6 +29,8 @@ import type {
   ExpirationStatus,
   RenewalType,
 } from '../lib/types';
+import type { ResolvedRenewalAlertLead } from '../../shared/types';
+import { renewalAlertLeadSourceLabel } from '../../shared/renewalLeadTime';
 
 const STATUS_CHIP: Record<ExpirationStatus, { label: string; color: 'success' | 'error' | 'warning' | 'default' }> = {
   current: { label: 'Current', color: 'success' },
@@ -79,44 +81,76 @@ function daysText(d: number | null): string {
 
 const WINDOW_OPTIONS = [30, 60, 90, 180];
 
+/** "the organization setting" / "the system default", for the look-ahead helper text. */
+function tenantLeadPhrase(lead: ResolvedRenewalAlertLead): string {
+  return lead.source === 'tenant' ? 'the organization setting' : 'the system default';
+}
+
 export function Expirations() {
   const { selectedTenantId } = useTenant();
   const [rows, setRows] = useState<ExpirationRow[]>([]);
   const [summary, setSummary] = useState<ExpirationSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [windowDays, setWindowDays] = useState(60);
+  /**
+   * The look-ahead. null until the first load, which asks the server for its
+   * default: the organization's renewal alert lead time (migration 0111). It is
+   * a VIEW filter only: the alert engine judges each document against its own
+   * lead time and never reads this.
+   */
+  const [windowDays, setWindowDays] = useState<number | null>(null);
+  const [tenantLead, setTenantLead] = useState<ResolvedRenewalAlertLead | null>(null);
   const [onlyAttention, setOnlyAttention] = useState(true);
   const [sending, setSending] = useState(false);
   const [toast, setToast] = useState<{ msg: string; severity: 'success' | 'error' | 'info' | 'warning' } | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const result = await api.expirations.list({
-        tenantId: selectedTenantId || undefined,
-        windowDays,
-      });
-      setRows(result.rows);
-      setSummary(result.summary);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load renewals');
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedTenantId, windowDays]);
+  /**
+   * `days === null`: ask without a window and take the server's (the tenant's
+   * lead time) as the selector value. Done on first load and on a tenant
+   * switch, because a different tenant has a different lead time.
+   */
+  const load = useCallback(
+    async (days: number | null) => {
+      setLoading(true);
+      setError('');
+      try {
+        const result = await api.expirations.list({
+          tenantId: selectedTenantId || undefined,
+          windowDays: days ?? undefined,
+        });
+        setRows(result.rows);
+        setSummary(result.summary);
+        setTenantLead(result.tenant_lead ?? null);
+        if (days === null) setWindowDays(result.window_days);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load renewals');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [selectedTenantId],
+  );
 
+  // Tenant switch (and first mount): back to that tenant's default look-ahead.
   useEffect(() => {
-    load();
-  }, [selectedTenantId, windowDays]); // eslint-disable-line react-hooks/exhaustive-deps
+    void load(null);
+  }, [load]);
+
+  const changeWindow = (days: number) => {
+    setWindowDays(days);
+    void load(days);
+  };
+
+  const windowOptions = [...new Set([...WINDOW_OPTIONS, ...(tenantLead ? [tenantLead.days] : []), ...(windowDays ? [windowDays] : [])])].sort(
+    (a, b) => a - b,
+  );
 
   const sendAlert = useCallback(async () => {
     setSending(true);
     try {
+      // No window: who is emailed is decided by each document's lead time.
       const res = await api.expirations.notify({
         tenantId: selectedTenantId || undefined,
-        windowDays,
       });
       // The unrouted count is reported WHETHER OR NOT anything sent. A run
       // that mailed three owners and silently skipped two records is not a
@@ -155,7 +189,13 @@ export function Expirations() {
     } finally {
       setSending(false);
     }
-  }, [selectedTenantId, windowDays]);
+  }, [selectedTenantId]);
+
+  // What "Send alert now" would consider: judged on each row's OWN lead time,
+  // not the look-ahead, so a narrow view cannot disable a real send.
+  const mailAlertingCount = rows.filter(
+    (r) => r.alert_status === 'expiring' || r.alert_status === 'expired' || r.alert_status === 'overdue',
+  ).length;
 
   const visibleRows = onlyAttention
     ? rows.filter((r) => r.status === 'expiring' || r.status === 'expired' || r.status === 'overdue')
@@ -175,14 +215,17 @@ export function Expirations() {
       <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center', mb: 3 }}>
         <TextField
           select
-          label="Look-ahead"
+          label="Look-ahead (this view)"
           size="small"
-          value={windowDays}
-          onChange={(e) => setWindowDays(Number(e.target.value))}
-          sx={{ minWidth: 140 }}
+          value={windowDays ?? ''}
+          onChange={(e) => changeWindow(Number(e.target.value))}
+          sx={{ minWidth: 170 }}
+          disabled={windowDays === null}
         >
-          {WINDOW_OPTIONS.map((d) => (
-            <MenuItem key={d} value={d}>{d} days</MenuItem>
+          {windowOptions.map((d) => (
+            <MenuItem key={d} value={d}>
+              {d} days{tenantLead && d === tenantLead.days ? ' (alert lead time)' : ''}
+            </MenuItem>
           ))}
         </TextField>
         <Box sx={{ flexGrow: 1 }} />
@@ -205,11 +248,23 @@ export function Expirations() {
           variant="contained"
           size="small"
           onClick={sendAlert}
-          disabled={sending || loading || !summary || summary.alerting === 0}
+          disabled={sending || loading || !summary || mailAlertingCount === 0}
         >
           {sending ? 'Sending…' : 'Send alert now'}
         </Button>
       </Box>
+
+      {tenantLead && (
+        <Typography variant="body2" color="text.secondary" sx={{ mt: -2, mb: 3 }} data-testid="lead-time-note">
+          The look-ahead only changes this view. Owners are emailed {tenantLead.days} days before a
+          document is due ({tenantLeadPhrase(tenantLead)}), or at their document type's own lead
+          time where one is set — the look-ahead never changes who is emailed, including by{' '}
+          <em>Send alert now</em>.{' '}
+          <Link component={RouterLink} to="/settings/owner-routes" underline="hover">
+            Change when owners are warned
+          </Link>
+        </Typography>
+      )}
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
@@ -262,9 +317,34 @@ export function Expirations() {
                         <Typography component="span" variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                           {daysText(row.days_until)}
                         </Typography>
+                        {row.alert_lead_days != null && row.alert_lead_source && (
+                          <Typography
+                            component="span"
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ display: 'block' }}
+                            title={`Owner is warned ${row.alert_lead_days} days before due (${renewalAlertLeadSourceLabel(row.alert_lead_source)})`}
+                          >
+                            warned {row.alert_lead_days}d ahead
+                            {row.alert_lead_source === 'document_type' ? ' (type)' : ''}
+                          </Typography>
+                        )}
                       </TableCell>
                       <TableCell align="right">
                         <StatusChip status={row.status} />
+                        {/* The view and the mail path can disagree: a type that
+                            warns 120 days ahead is being mailed about while a
+                            60-day look-ahead still calls it Current. Say so. */}
+                        {row.alert_status === 'expiring' && row.status === 'current' && (
+                          <Typography
+                            variant="caption"
+                            color="warning.main"
+                            sx={{ display: 'block', mt: 0.5 }}
+                            data-testid="in-warning-window"
+                          >
+                            owner being warned
+                          </Typography>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}

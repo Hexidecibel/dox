@@ -113,6 +113,10 @@ import type {
 } from './types';
 import type { ParsedCustomer, ParsedOrder, ParsedShipment } from '../../shared/connectorOutput';
 import type {
+  RenewalAlertLeadTimeResponse,
+  RenewalLeadTimePreview,
+} from '../../shared/types';
+import type {
   TypeRenewalPolicy,
   RenewalDecisionPayload,
   QueueArrivalDecisionInput,
@@ -1150,7 +1154,7 @@ export const api = {
      * POST /api/document-types
      * Returns: { documentType: ApiDocumentType }
      */
-    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy }) =>
+    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_alert_lead_days?: number | null }) =>
       fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -1160,7 +1164,7 @@ export const api = {
      * PUT /api/document-types/:id
      * Returns: { documentType: ApiDocumentType }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_alert_lead_days?: number | null }) =>
       fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1757,17 +1761,50 @@ export const api = {
      */
     notify: (params?: {
       tenantId?: string;
-      windowDays?: number;
       asOf?: string;
     }): Promise<ExpirationNotifyResponse> => {
+      // No window: which documents are alerting is each document's own lead
+      // time (migration 0111), never the dashboard's look-ahead selector.
       return fetchApi<ExpirationNotifyResponse>(`/expirations/notify`, {
         method: 'POST',
         body: JSON.stringify({
           tenant_id: params?.tenantId,
-          window_days: params?.windowDays,
           as_of: params?.asOf,
         }),
       });
+    },
+
+    /**
+     * The organization's renewal alert lead time (migration 0111): how many
+     * days before a due date owners are warned. Per-type overrides are set on
+     * the document type (`renewal_alert_lead_days`).
+     */
+    leadTime: {
+      get: (params?: { tenantId?: string }): Promise<RenewalAlertLeadTimeResponse> => {
+        const qs = new URLSearchParams();
+        if (params?.tenantId) qs.set('tenant_id', params.tenantId);
+        const suffix = qs.toString() ? `?${qs.toString()}` : '';
+        return fetchApi<RenewalAlertLeadTimeResponse>(`/expirations/lead-time${suffix}`);
+      },
+      put: (body: { lead_days: number | null; tenantId?: string }): Promise<RenewalAlertLeadTimeResponse> =>
+        fetchApi<RenewalAlertLeadTimeResponse>(`/expirations/lead-time`, {
+          method: 'PUT',
+          body: JSON.stringify({ lead_days: body.lead_days, tenant_id: body.tenantId }),
+        }),
+      /** Read-only: what a proposed value would change at the next run. */
+      preview: (params: {
+        leadDays: number | null;
+        documentTypeId?: string;
+        tenantId?: string;
+        asOf?: string;
+      }): Promise<RenewalLeadTimePreview> => {
+        const qs = new URLSearchParams();
+        qs.set('lead_days', params.leadDays === null ? 'inherit' : String(params.leadDays));
+        if (params.documentTypeId) qs.set('document_type_id', params.documentTypeId);
+        if (params.tenantId) qs.set('tenant_id', params.tenantId);
+        if (params.asOf) qs.set('as_of', params.asOf);
+        return fetchApi<RenewalLeadTimePreview>(`/expirations/lead-time/preview?${qs.toString()}`);
+      },
     },
   },
 

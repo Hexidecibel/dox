@@ -62,6 +62,10 @@ tags:
     description: |
       The out-of-spec register — every judged COA test result, which limit it
       was judged against, who judged it, and who acknowledged it.
+  - name: Renewals
+    description: |
+      The renewal dashboard, renewal alerts, and how far ahead owners are
+      warned (renewal alert lead time, migration 0111).
   - name: GraphQL
     description: GraphQL API (alternative to REST)
 
@@ -86,6 +90,88 @@ components:
         and optionally have an expiration date.
 
   schemas:
+    ResolvedRenewalAlertLead:
+      type: object
+      description: A resolved renewal alert lead time and which rung answered.
+      properties:
+        days: { type: integer }
+        source: { type: string, enum: [document_type, tenant, default] }
+    ExpirationRow:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        primary_category_name: { type: string, nullable: true }
+        owner: { type: string, nullable: true }
+        renewal_type: { type: string }
+        renewal_due_date: { type: string, format: date, nullable: true }
+        status: { type: string, enum: [current, expiring, expired, overdue, stale], description: Judged against the dashboard look-ahead }
+        days_until: { type: integer, nullable: true }
+        renewal_rule: { type: string }
+        renewal_period_months: { type: integer, nullable: true }
+        alert_lead_days: { type: integer, description: "Days before due this document's owner is warned" }
+        alert_lead_source: { type: string, enum: [document_type, tenant, default] }
+        alert_status: { type: string, enum: [current, expiring, expired, overdue, stale], description: "Judged against alert_lead_days; what alerts mail on" }
+    RenewalAlertedDocument:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        status: { type: string }
+        renewal_due_date: { type: string, format: date, nullable: true }
+        days_until: { type: integer, nullable: true }
+        alert_lead_days: { type: integer }
+        alert_lead_source: { type: string, enum: [document_type, tenant, default] }
+    RenewalAlertLeadTime:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        lead_days: { type: integer, nullable: true, description: "The stored setting; null = the default applies" }
+        effective: { $ref: '#/components/schemas/ResolvedRenewalAlertLead' }
+        default_lead_days: { type: integer, example: 60 }
+        min_lead_days: { type: integer, example: 7 }
+        max_lead_days: { type: integer, example: 365 }
+        presets: { type: array, items: { type: integer }, example: [30, 60, 90] }
+        updated_at: { type: string, nullable: true }
+        updated_by: { type: string, nullable: true }
+        updated_by_name: { type: string, nullable: true }
+        document_type_overrides:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              lead_days: { type: integer }
+              updated_at: { type: string, nullable: true }
+    RenewalLeadTimePreview:
+      type: object
+      properties:
+        as_of: { type: string, format: date }
+        scope: { type: string, enum: [tenant, document_type] }
+        document_type_id: { type: string, nullable: true }
+        proposed_lead_days: { type: integer, nullable: true }
+        current_tenant_lead: { $ref: '#/components/schemas/ResolvedRenewalAlertLead' }
+        proposed_tenant_lead: { $ref: '#/components/schemas/ResolvedRenewalAlertLead' }
+        current_alerting_count: { type: integer }
+        proposed_alerting_count: { type: integer }
+        newly_entering_count: { type: integer, description: "Alerting under the proposal and not today" }
+        newly_entering_would_send_count: { type: integer, description: "Of those, the ones the next scheduled run would mail (cooldown applied)" }
+        leaving_count: { type: integer }
+        lead_changed_count: { type: integer }
+        newly_entering:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              title: { type: string }
+              days_until: { type: integer, nullable: true }
+              alert_lead_days: { type: integer }
+              alert_lead_source: { type: string }
+              current_alert_lead_days: { type: integer }
+              next_run_decision: { type: string, enum: [first, escalated, cooldown_elapsed, suppressed], nullable: true }
+        leaving: { type: array, items: { type: object } }
     User:
       type: object
       properties:
@@ -2830,6 +2916,174 @@ paths:
                   acknowledged: { type: integer }
         '400':
           description: ids is required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/expirations:
+    get:
+      tags: [Renewals]
+      summary: Renewal dashboard feed
+      description: |
+        Any tenant user (Compliance module). Every active document with a
+        resolvable due date. `status` is judged against `window_days`, the
+        dashboard look-ahead, which is a VIEW filter only. `alert_status` is
+        judged against the document's own `alert_lead_days` (type override,
+        else the organization setting, else 60) and is what renewal alerts
+        mail on.
+      parameters:
+        - { name: window_days, in: query, schema: { type: integer }, description: Look-ahead for `status`. Defaults to the organization's lead time. }
+        - { name: as_of, in: query, schema: { type: string, format: date } }
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+      responses:
+        '200':
+          description: Classified rows and summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rows:
+                    type: array
+                    items: { $ref: '#/components/schemas/ExpirationRow' }
+                  summary: { type: object }
+                  window_days: { type: integer }
+                  as_of: { type: string, format: date }
+                  tenant_lead: { $ref: '#/components/schemas/ResolvedRenewalAlertLead' }
+
+  /api/expirations/notify:
+    post:
+      tags: [Renewals]
+      summary: Send the renewal digest now
+      description: |
+        super_admin or org_admin. Same engine as the daily scheduled run, with
+        the re-alert cooldown skipped (the ledger is still written). Each
+        document is alerting when `days_until <= alert_lead_days`. There is no
+        window parameter: a `window_days` in the body or query is ignored and
+        reported as `window_days_ignored: true`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenant_id: { type: string, description: super_admin only }
+                as_of: { type: string, format: date }
+      responses:
+        '200':
+          description: What was sent, to whom, and what reached nobody
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent: { type: boolean }
+                  recipients: { type: array, items: { type: string } }
+                  document_count: { type: integer }
+                  alerting_count: { type: integer }
+                  suppressed_count: { type: integer }
+                  groups:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        owner_label: { type: string, nullable: true }
+                        via: { type: string }
+                        recipients: { type: array, items: { type: string } }
+                        document_count: { type: integer }
+                        document_ids: { type: array, items: { type: string } }
+                        documents:
+                          type: array
+                          items: { $ref: '#/components/schemas/RenewalAlertedDocument' }
+                        sent: { type: boolean }
+                  unrouted: { type: object }
+                  tenant_lead: { $ref: '#/components/schemas/ResolvedRenewalAlertLead' }
+                  window_days_ignored: { type: boolean }
+                  reason: { type: string, enum: [no_documents, all_suppressed, email_not_configured, all_unrouted, no_recipients] }
+
+  /api/expirations/lead-time:
+    get:
+      tags: [Renewals]
+      summary: Read the organization's renewal alert lead time
+      description: super_admin (with `tenant_id`) or org_admin (own tenant). Compliance module.
+      parameters:
+        - { name: tenant_id, in: query, schema: { type: string }, description: required for super_admin }
+      responses:
+        '200':
+          description: The setting, its effective value, and the document types that override it
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RenewalAlertLeadTime' }
+        '403':
+          description: Not an admin
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [Renewals]
+      summary: Set how many days before a due date owners are warned
+      description: |
+        super_admin (with `tenant_id`) or org_admin (always its own tenant).
+        `lead_days` is required: a whole number from 7 to 365, or null for the
+        60-day default. A change stamps `renewal_alert_lead_updated_at/_by` and
+        writes a `renewal_alert_lead_time_updated` audit row with the previous
+        value; saving the same value writes nothing. Changing it never re-sends
+        a record already alerted within the 7-day cooldown.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lead_days]
+              properties:
+                lead_days: { type: integer, minimum: 7, maximum: 365, nullable: true }
+                tenant_id: { type: string, description: super_admin only }
+      responses:
+        '200':
+          description: The saved setting
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RenewalAlertLeadTime' }
+        '400':
+          description: Missing, fractional, non-numeric or out-of-range `lead_days`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Not an admin
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/expirations/lead-time/preview:
+    get:
+      tags: [Renewals]
+      summary: Preview what a lead time change would do at the next run
+      description: |
+        super_admin or org_admin. Read-only: classifies the tenant's documents
+        under the stored and the proposed configuration and applies the
+        scheduled run's re-alert rules. Writes nothing and sends nothing. With
+        `document_type_id` it previews that type's override; without, the
+        organization setting.
+      parameters:
+        - { name: lead_days, in: query, required: true, schema: { type: string }, description: '7-365, or `inherit` / empty for null' }
+        - { name: document_type_id, in: query, schema: { type: string } }
+        - { name: as_of, in: query, schema: { type: string, format: date } }
+        - { name: tenant_id, in: query, schema: { type: string }, description: required for super_admin }
+      responses:
+        '200':
+          description: Counts, and up to 25 documents entering and leaving the warning window
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RenewalLeadTimePreview' }
+        '400':
+          description: Bad `lead_days` or `as_of`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Document type not in this tenant
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

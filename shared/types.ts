@@ -466,6 +466,15 @@ export interface DocumentTypeRow {
    * when the document has none, and never overwrites one a human set.
    */
   default_owner: string | null;
+  /**
+   * Renewal alert lead time override for documents of this type, in days
+   * (migration 0111). NULL = inherit the organization's
+   * `tenants.renewal_alert_lead_days`, which itself falls back to 60. See
+   * shared/renewalLeadTime.ts. Optional so pre-0111 fixtures still compile.
+   */
+  renewal_alert_lead_days?: number | null;
+  renewal_alert_lead_updated_at?: string | null;
+  renewal_alert_lead_updated_by?: string | null;
   active: number;
   created_at: string;
   updated_at: string;
@@ -4567,6 +4576,8 @@ import type {
   TypeRenewalPolicy,
   RenewalDecision,
 } from './renewalPeriod';
+export type { RenewalAlertLeadSource, ResolvedRenewalAlertLead } from './renewalLeadTime';
+import type { RenewalAlertLeadSource, ResolvedRenewalAlertLead } from './renewalLeadTime';
 
 /**
  * The frozen record of an approval-time renewal decision, stored as JSON in
@@ -4626,6 +4637,17 @@ export interface ExpirationRow {
   renewal_rule?: RenewalRule;
   /** The renewal period that applied, in months; null when a stated date answered. */
   renewal_period_months?: number | null;
+  /**
+   * Days before its due date THIS document's owner is warned (migration 0111):
+   * the type override, else the organization's setting, else 60.
+   */
+  alert_lead_days: number;
+  alert_lead_source: RenewalAlertLeadSource;
+  /**
+   * Status judged against `alert_lead_days` — what the alert engine mails on.
+   * `status` is judged against the dashboard's look-ahead, a view filter.
+   */
+  alert_status: ExpirationStatus;
 }
 
 export interface ExpirationSummary {
@@ -4639,8 +4661,73 @@ export interface ExpirationSummary {
 export interface ExpirationListResponse {
   rows: ExpirationRow[];
   summary: ExpirationSummary;
+  /** The look-ahead the rows' `status` used. Defaults to `tenant_lead.days`. */
   window_days: number;
   as_of: string;
+  /** The organization's renewal alert lead time (setting or default). */
+  tenant_lead: ResolvedRenewalAlertLead;
+}
+
+/** One document in a renewal digest or the gap bucket, with the lead time that put it there. */
+export interface RenewalAlertedDocument {
+  id: string;
+  title: string;
+  status: string;
+  renewal_due_date: string | null;
+  days_until: number | null;
+  alert_lead_days: number;
+  alert_lead_source: RenewalAlertLeadSource;
+}
+
+/** GET / PUT /api/expirations/lead-time */
+export interface RenewalAlertLeadTimeResponse {
+  tenant_id: string;
+  /** The stored organization setting; null = the default applies. */
+  lead_days: number | null;
+  effective: ResolvedRenewalAlertLead;
+  default_lead_days: number;
+  min_lead_days: number;
+  max_lead_days: number;
+  presets: number[];
+  updated_at: string | null;
+  updated_by: string | null;
+  updated_by_name: string | null;
+  /** Active document types that override the organization's number. */
+  document_type_overrides: Array<{ id: string; name: string; lead_days: number; updated_at: string | null }>;
+}
+
+/** One document listed by the lead-time preview. */
+export interface RenewalLeadTimePreviewDocument {
+  id: string;
+  title: string;
+  owner: string | null;
+  primary_category_name: string | null;
+  renewal_due_date: string | null;
+  days_until: number | null;
+  status: string;
+  alert_lead_days: number;
+  alert_lead_source: RenewalAlertLeadSource;
+  current_alert_lead_days: number;
+  /** The scheduled run's decision under the proposal; null when not alerting. */
+  next_run_decision: 'first' | 'escalated' | 'cooldown_elapsed' | 'suppressed' | null;
+}
+
+/** GET /api/expirations/lead-time/preview — read-only. */
+export interface RenewalLeadTimePreview {
+  as_of: string;
+  scope: 'tenant' | 'document_type';
+  document_type_id: string | null;
+  proposed_lead_days: number | null;
+  current_tenant_lead: ResolvedRenewalAlertLead;
+  proposed_tenant_lead: ResolvedRenewalAlertLead;
+  current_alerting_count: number;
+  proposed_alerting_count: number;
+  newly_entering_count: number;
+  newly_entering_would_send_count: number;
+  leaving_count: number;
+  lead_changed_count: number;
+  newly_entering: RenewalLeadTimePreviewDocument[];
+  leaving: RenewalLeadTimePreviewDocument[];
 }
 
 /** Which rung of the alert-routing ladder produced a group's recipients. */
@@ -4654,6 +4741,8 @@ export interface RenewalAlertGroup {
   recipients: string[];
   document_count: number;
   document_ids: string[];
+  /** The same documents, with status and the lead time that made each alerting. */
+  documents: RenewalAlertedDocument[];
   sent: boolean;
 }
 
@@ -4669,7 +4758,13 @@ export interface RenewalUnroutedReport {
   count: number;
   /** Distinct owner labels with no route; null means the record named no owner. */
   owner_labels: Array<string | null>;
-  documents: Array<{ id: string; title: string; owner: string | null }>;
+  documents: Array<{
+    id: string;
+    title: string;
+    owner: string | null;
+    alert_lead_days: number;
+    alert_lead_source: RenewalAlertLeadSource;
+  }>;
   /** Admins sent the routing-GAP notice - which is not the renewal alert. */
   notified: string[];
   notice_sent: boolean;
@@ -4695,6 +4790,10 @@ export interface ExpirationNotifyResponse {
   /** One entry per owner label that resolved to somebody. */
   groups: RenewalAlertGroup[];
   unrouted: RenewalUnroutedReport;
+  /** The organization-level lead time in force; per-type overrides show per document. */
+  tenant_lead: ResolvedRenewalAlertLead;
+  /** Present when the caller sent `window_days`, which no longer affects who is mailed. */
+  window_days_ignored?: boolean;
   reason?: RenewalNoSendReason;
 }
 
