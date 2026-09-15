@@ -33,7 +33,8 @@ import type { Role } from './types';
  * order. 65 paths: 53 surfaces inside the authenticated shell, 10 public
  * no-shell routes, and the two redirects.
  *
- * The two added since: `/setup` and `/setup/:step`, the first-run wizard.
+ * Added since: `/setup` and `/setup/:step` (the first-run wizard) and
+ * `/export/:token` (documents sent out of search, migration 0114).
  */
 const ROUTE_SNAPSHOT: readonly string[] = [
   '/login',
@@ -43,6 +44,10 @@ const ROUTE_SNAPSHOT: readonly string[] = [
   '/u/:token',
   '/a/:token',
   '/alert/:token',
+  // Documents sent out of search (migration 0114): the recipient is a customer
+  // or a salesperson with no account, so this is a no-shell landing like the
+  // alert page above, not a surface.
+  '/export/:token',
   '/r/:token',
   '/drop/:slug/:token',
   '/docs/connectors',
@@ -122,6 +127,7 @@ const NON_SURFACE_PATHS: readonly string[] = [
   '/u/:token',
   '/a/:token',
   '/alert/:token',
+  '/export/:token',
   '/r/:token',
   '/drop/:slug/:token',
   '/docs/connectors',
@@ -149,7 +155,7 @@ describe('SURFACES — the path-set snapshot', () => {
   });
 
   it('accounts for every snapshot path exactly once', () => {
-    expect(ROUTE_SNAPSHOT.length).toBe(66);
+    expect(ROUTE_SNAPSHOT.length).toBe(67);
     expect(new Set(ROUTE_SNAPSHOT).size).toBe(ROUTE_SNAPSHOT.length);
     expect(SURFACES.length).toBe(ROUTE_SNAPSHOT.length - NON_SURFACE_PATHS.length);
   });
