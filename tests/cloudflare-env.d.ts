@@ -3,6 +3,8 @@
 
 interface CloudflareEnv {
   DB: D1Database;
+  /** Empty D1 for migration rehearsals (vitest.config.mts); never auto-migrated. */
+  MIGRATION_DB: D1Database;
   FILES: R2Bucket;
   JWT_SECRET: string;
   RESEND_API_KEY?: string;

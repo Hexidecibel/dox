@@ -123,11 +123,14 @@ const migrations: string[] = [
   m0105, m0106, m0107, m0108, m0109, m0110,
 ];
 
+/** The ordered migration SQL, for a test that stops the chain part-way (e.g. the 0110 lots rebuild). */
+export const MIGRATIONS: readonly string[] = migrations;
+
 /**
  * Split a SQL file into individual statements.
  * Strips comment lines and inline comments, then splits on semicolons.
  */
-function splitStatements(sql: string): string[] {
+export function splitStatements(sql: string): string[] {
   const lines = sql.split('\n');
   const cleanedLines: string[] = [];
   for (const line of lines) {
@@ -211,7 +214,10 @@ function splitStatements(sql: string): string[] {
  * DB can desynchronize the schema, especially once views (added in
  * migration 0054) reference tables that those migrations recreate.
  */
-export async function runMigrations(db: D1Database): Promise<void> {
+export async function runMigrations(
+  db: D1Database,
+  opts: { before?: number } = {},
+): Promise<void> {
   // Ensure the tracking table exists. Use an integer index (matches the
   // migrations[] array position) since these are anonymous SQL strings.
   await db
@@ -228,7 +234,8 @@ export async function runMigrations(db: D1Database): Promise<void> {
     .all<{ idx: number }>();
   const applied = new Set((appliedRows.results ?? []).map((r) => r.idx));
 
-  for (let i = 0; i < migrations.length; i++) {
+  const stop = opts.before ?? migrations.length;
+  for (let i = 0; i < stop; i++) {
     if (applied.has(i)) continue;
 
     const statements = splitStatements(migrations[i]);

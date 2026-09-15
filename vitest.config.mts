@@ -38,6 +38,11 @@ export default defineConfig({
           cloudflareTest({
             wrangler: { configPath: './wrangler.toml' },
             miniflare: {
+              // A second, EMPTY D1 that tests/setup.ts never migrates: for a
+              // test that has to stop the migration chain part-way and apply
+              // one migration to a populated pre-migration schema (the 0110
+              // lots rebuild). env.DB is always fully migrated before a file runs.
+              d1Databases: { MIGRATION_DB: 'migration-rehearsal-db' },
               bindings: {
                 JWT_SECRET: 'test-jwt-secret-for-testing-only',
                 RESEND_API_KEY: 'test-resend-key',
