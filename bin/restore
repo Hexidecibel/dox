@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Roll a remote D1 database back to a Time Travel bookmark taken by bin/backup.
+#
+# Usage:
+#   bin/restore --bookmark <bookmark>                 # prod (asks you to type "restore")
+#   bin/restore --staging --bookmark <bookmark> --yes # staging, no prompt
+#   bin/restore --from ~/drops/dox-backups/doc-upload-db-<stamp>.timetravel.json
+#
+# This restores the WHOLE database to that point in time: every write made
+# after the bookmark — by anyone, to any table — is undone. It is the
+# counterpart of bin/backup and the documented rollback for a bad migration.
+#
+# Before restoring, the CURRENT bookmark is recorded next to the backups (as
+# <db>-<stamp>.pre-restore.timetravel.json) so the restore itself can be undone.
+#
+# Credentials: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID from the
+# environment, else .env, else .dev.vars.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DB="doc-upload-db"
+TARGET="PRODUCTION"
+BOOKMARK=""
+YES=0
+DIR="$HOME/drops/dox-backups"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --staging) DB="doc-upload-db-staging"; TARGET="STAGING" ;;
+    --bookmark) BOOKMARK="$2"; shift ;;
+    --from)
+      [ -f "$2" ] || { echo "ERROR: no such file: $2" >&2; exit 2; }
+      BOOKMARK="$(grep '"bookmark"' "$2" | head -1 | sed -E 's/.*"bookmark"[^"]*"([^"]+)".*/\1/')"
+      shift ;;
+    --yes|-y) YES=1 ;;
+    --dir) DIR="$2"; shift ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -n "$BOOKMARK" ] || { echo "Give --bookmark <bookmark> or --from <timetravel.json>. --help for usage." >&2; exit 2; }
+[[ "$BOOKMARK" =~ ^[0-9a-f-]+$ ]] || { echo "ERROR: that does not look like a bookmark: $BOOKMARK" >&2; exit 2; }
+
+load_cred() {
+  local key="$1" f val
+  [ -n "${!key:-}" ] && return 0
+  for f in .env .dev.vars; do
+    [ -f "$f" ] || continue
+    val="$(grep "^${key}=" "$f" | head -1 | cut -d= -f2- | tr -d "\"'")"
+    if [ -n "$val" ]; then export "$key=$val"; return 0; fi
+  done
+}
+load_cred CLOUDFLARE_API_TOKEN
+load_cred CLOUDFLARE_ACCOUNT_ID
+
+mkdir -p "$DIR"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+pre="$DIR/${DB}-${STAMP}.pre-restore.timetravel.json"
+echo "Target: $TARGET D1 ($DB)"
+echo "Recording the current bookmark first -> $pre"
+npx wrangler d1 time-travel info "$DB" --json > "$pre"
+grep -q '"bookmark"' "$pre" || { echo "ERROR: could not record the current bookmark; refusing to restore." >&2; cat "$pre" >&2; exit 1; }
+grep '"bookmark"' "$pre" | head -1 | sed 's/^ */  current: /'
+echo "  restoring to: $BOOKMARK"
+
+if [ "$YES" != "1" ]; then
+  printf '  Restore the WHOLE %s database to that bookmark? Type "restore": ' "$TARGET"
+  read -r answer </dev/tty
+  [ "$answer" = "restore" ] || { echo "  Not restored."; exit 1; }
+fi
+
+npx wrangler d1 time-travel restore "$DB" --bookmark="$BOOKMARK" --json
+echo "Done. Verify the data you expected to come back before doing anything else."

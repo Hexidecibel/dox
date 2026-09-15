@@ -35,6 +35,20 @@
 #      WITHOUT stamping.
 #   5. INSERT the stamp row (name only; id + applied_at are defaulted, matching
 #      the rows wrangler itself writes).
+#
+# WHAT IS SENT IS THE FILE WITH ITS FULL-LINE COMMENTS REMOVED (2026-09-15).
+#   `wrangler d1 execute --remote --file` goes through D1's import API. On
+#   staging, 0110 (a `lots` rebuild that needs `PRAGMA defer_foreign_keys`)
+#   failed deterministically with "D1 DB was reset and rolled back ... FOREIGN
+#   KEY constraint failed" when its comment header held non-ASCII characters
+#   (em dash, box drawing, §, ›), and succeeded every time with the same
+#   statements under no header, a plain-ASCII header, or the header with those
+#   characters replaced. The import evidently mis-assigns statement boundaries
+#   after multi-byte text, and the deferral is lost. Comments are documentation
+#   for the repo, not for the database, so they are stripped from the uploaded
+#   copy (a line whose first non-blank characters are `--`; the scan refuses a
+#   file where such a line would sit inside a string literal). Non-ASCII left in
+#   the STATEMENTS of a file that defers foreign keys is refused outright.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -52,7 +66,7 @@ while [ "$#" -gt 0 ]; do
     --yes|-y) YES=1 ;;
     --staging) STAGING=1; DB="doc-upload-db-staging"; TARGET="STAGING" ;;
     --allow-destructive) ALLOW_DESTRUCTIVE=1 ;;
-    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,52p' "$0"; exit 0 ;;
     -*) echo "Unknown flag: $1" >&2; exit 2 ;;
     *) FILES+=("$1") ;;
   esac
@@ -138,7 +152,46 @@ for arg in "${FILES[@]}"; do
     echo "  note: data statements present (UPDATE/INSERT) — read them above"
   fi
 
+  # The copy that is actually uploaded: full-line comments stripped (see header).
+  upload="$(mktemp -t "migrate-${name%.sql}.XXXXXX.sql")"
+  if ! node -e '
+    const fs = require("fs");
+    const [src, dst] = process.argv.slice(1);
+    const text = fs.readFileSync(src, "utf8");
+    // Walk the ORIGINAL text tracking single quotes (outside comments) so a
+    // comment-looking line inside a string literal is caught, not stripped.
+    let inStr = false, lineStart = true, out = [], bad = null, lineNo = 1;
+    const lines = text.split("\n");
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      if (!inStr && /^\s*--/.test(line)) continue;
+      if (inStr && /^\s*--/.test(line)) { bad = li + 1; break; }
+      let i = 0;
+      while (i < line.length) {
+        const c = line[i];
+        if (inStr) { if (c === "\x27") { if (line[i + 1] === "\x27") i++; else inStr = false; } }
+        else if (c === "\x27") inStr = true;
+        else if (c === "-" && line[i + 1] === "-") break;
+        i++;
+      }
+      out.push(line);
+    }
+    if (bad) { console.error("refusing: line " + bad + " looks like a comment but is inside a string literal"); process.exit(3); }
+    const body = out.join("\n");
+    if (/defer_foreign_keys/i.test(body) && /[^\x00-\x7f]/.test(body)) {
+      console.error("refusing: this migration defers foreign keys and its statements contain non-ASCII characters (see bin/migrate-prod-one header)");
+      process.exit(4);
+    }
+    fs.writeFileSync(dst, body);
+    console.log("  upload copy: " + text.split("\n").length + " lines -> " + out.length + " (full-line comments stripped)");
+  ' "$path" "$upload"; then
+    rm -f "$upload"
+    echo "ERROR: $name could not be prepared for upload. Nothing applied." >&2
+    exit 1
+  fi
+
   if [ "$DRY_RUN" = "1" ]; then
+    rm -f "$upload"
     echo "  DRY RUN — not applied, not stamped"
     continue
   fi
@@ -149,10 +202,12 @@ for arg in "${FILES[@]}"; do
     [ "$answer" = "apply" ] || { echo "  Not applied. Stopping."; exit 1; }
   fi
 
-  if ! npx wrangler d1 execute "$DB" --remote --file="$path"; then
+  if ! npx wrangler d1 execute "$DB" --remote --file="$upload"; then
+    rm -f "$upload"
     echo "ERROR: $name failed on $TARGET. NOT stamped. Stopping." >&2
     exit 1
   fi
+  rm -f "$upload"
 
   if [ "$HAS_TRACKING" = "d1_migrations" ]; then
     escaped="${name//\'/\'\'}"
