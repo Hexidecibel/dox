@@ -55,7 +55,9 @@ __export(specCheck_exports, {
   unitRefusalNote: () => unitRefusalNote,
   validateLimitShape: () => validateLimitShape,
   watchEndedLabel: () => watchEndedLabel,
-  watchStatus: () => watchStatus
+  watchStatus: () => watchStatus,
+  yeastMoldMismatch: () => yeastMoldMismatch,
+  yeastMoldPart: () => yeastMoldPart
 });
 module.exports = __toCommonJS(specCheck_exports);
 
@@ -81,32 +83,29 @@ var UNKNOWN_UNIT = { family: "unknown", perBasis: 1, canonical: "" };
 function norm(s) {
   return String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
+function exact(x) {
+  return Number(x.toPrecision(12));
+}
 function normalizeUnit(raw) {
   const s = String(raw ?? "").trim();
   if (!s) return UNKNOWN_UNIT;
   const n = norm(s);
   if (n === "percent" || n === "pct" || s.includes("%")) {
     const basis = percentBasis(s);
-    return basis ? { family: `percent:${basis}`, perBasis: 1, canonical: `% ${basis}` } : { family: "percent", perBasis: 1, canonical: "%" };
+    return basis ? { family: `percent:${basis}`, perBasis: 1e-4, canonical: `% ${basis}` } : { family: "percent", perBasis: 1e-4, canonical: "%" };
   }
   if (isEmptyCell(s)) return UNKNOWN_UNIT;
   if (!n) return UNKNOWN_UNIT;
-  if (n === "ph") return { family: "ph", perBasis: 1, canonical: "pH" };
+  if (n === "ph" || n === "phunit" || n === "phunits") return { family: "ph", perBasis: 1, canonical: "pH" };
   if (n === "c" || n === "degc" || n === "f" || n === "degf") {
     return { family: "temp", perBasis: 1, canonical: s };
   }
+  const log = parseLogCount(s);
+  if (log) return log;
+  const conc = parseConcentration(s);
+  if (conc) return conc;
   const m = parseEnumerationUnit(s);
-  if (m) {
-    const method = m.method === "cfu" || m.method === "mpn" ? m.method : "cfu";
-    const amount = m.amount;
-    const basisRaw = m.basis;
-    const basis = basisRaw.startsWith("g") ? "mass" : basisRaw ? "volume" : "";
-    if (!basis) return { family: `${method}:unspecified`, perBasis: amount, canonical: s };
-    let perBasis = amount;
-    if (basisRaw === "l" || basisRaw.startsWith("liter")) perBasis = amount * 1e3;
-    if (basisRaw === "oz") perBasis = amount * 28.3495;
-    return { family: `${method}:${basis}`, perBasis, canonical: s };
-  }
+  if (m) return { family: `${m.method}:${m.basis}`, perBasis: m.perBasis, canonical: s };
   return { family: `other:${n}`, perBasis: 1, canonical: s };
 }
 function percentBasis(raw) {
@@ -116,40 +115,128 @@ function percentBasis(raw) {
   if (/v\/v|vol\/vol/.test(t)) return "v/v";
   return null;
 }
-var ENUMERATION_METHOD_RE = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?$/;
-var ENUMERATION_BASIS_RE = /^(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/;
+function compactUnit(s) {
+  return s.toLowerCase().replace(/[µμ]/g, "u").replace(/\s+/g, "").replace(/\.+$/, "").replace(/mcg/g, "ug").replace(/([a-z0-9])per([a-z0-9])/g, "$1/$2");
+}
+var MASS_IN_GRAMS = { ng: 1e-9, ug: 1e-6, mg: 1e-3, g: 1, kg: 1e3 };
+var VOLUME_IN_LITRES = { ml: 1e-3, dl: 0.1, l: 1 };
+function parseConcentration(raw) {
+  const c = compactUnit(raw);
+  const canonical = raw.trim();
+  if (c === "ppm") return { family: "massfrac", perBasis: 1, canonical };
+  if (c === "ppb") return { family: "massfrac", perBasis: 1e3, canonical };
+  const m = /^(ng|ug|mg|g|kg)\/(\d*\.?\d+)?(ng|ug|mg|g|kg|ml|dl|l)$/.exec(c);
+  if (!m) return null;
+  const amount = m[2] ? Number(m[2]) : 1;
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const numerator = MASS_IN_GRAMS[m[1]];
+  if (m[3] in MASS_IN_GRAMS) {
+    const ppmPerUnit = numerator / (MASS_IN_GRAMS[m[3]] * amount) * 1e6;
+    return { family: "massfrac", perBasis: exact(1 / ppmPerUnit), canonical };
+  }
+  const mgPerLitrePerUnit = numerator * 1e3 / (VOLUME_IN_LITRES[m[3]] * amount);
+  return { family: "massvol", perBasis: exact(1 / mgPerLitrePerUnit), canonical };
+}
+function parseLogCount(raw) {
+  const m = /^log\s*(?:10|₁₀)?(?![a-z])\s*(.*)$/i.exec(raw.trim());
+  if (!m) return null;
+  const rest = m[1].trim().replace(/^[(\[]\s*(.*?)\s*[)\]]$/, "$1");
+  if (!rest) return { family: "log:unspecified", perBasis: 1, canonical: raw.trim() };
+  const e = parseEnumerationUnit(rest);
+  if (!e || e.method === "any") return { family: `log:other:${norm(rest)}`, perBasis: 1, canonical: raw.trim() };
+  const amount = e.amount === 1 ? "" : `:${e.amount}`;
+  return { family: `log:${e.method}:${e.basis}${amount}`, perBasis: 1, canonical: raw.trim() };
+}
+var ENUMERATION_METHOD_SRC = "cfu|mpn|apc|spc|tpc|count|ct|somaticcells|somaticcell|cells|cell|scc";
+var ENUMERATION_BASIS_SRC = "grams|gram|g|milliliters|milliliter|ml|liters|liter|l|fluidounces|fluidounce|fluidoz|floz|ozwt|wtoz|ozavdp|avdpoz|ounces|ounce|ozs|oz";
+var ENUMERATION_METHOD_RE = new RegExp(`^(${ENUMERATION_METHOD_SRC})?(per)?$`);
+var ENUMERATION_BASIS_RE = new RegExp(`^(${ENUMERATION_BASIS_SRC})?$`);
+var ENUMERATION_WHOLE_RE = new RegExp(`^(${ENUMERATION_METHOD_SRC})?(per)?(${ENUMERATION_BASIS_SRC})?$`);
+var OUNCE_WEIGHT_GRAMS = 28.3495;
+var FLUID_OUNCE_ML = 29.5735;
+function countMethod(word) {
+  if (!word) return "any";
+  if (word === "mpn") return "mpn";
+  if (/^(cells?|somaticcells?|scc)$/.test(word)) return "cells";
+  return "cfu";
+}
+function countBasis(word) {
+  if (!word) return { basis: "unspecified", scale: 1 };
+  if (/^(g|gram|grams)$/.test(word)) return { basis: "mass", scale: 1 };
+  if (/^(ml|milliliters?)$/.test(word)) return { basis: "volume", scale: 1 };
+  if (/^(l|liters?)$/.test(word)) return { basis: "volume", scale: 1e3 };
+  if (/^(floz|fluidoz|fluidounces?)$/.test(word)) return { basis: "volume", scale: FLUID_OUNCE_ML };
+  if (/^(ozwt|wtoz|ozavdp|avdpoz)$/.test(word)) return { basis: "mass", scale: OUNCE_WEIGHT_GRAMS };
+  return { basis: "oz", scale: 1 };
+}
 function parseEnumerationUnit(raw) {
-  const lower = raw.toLowerCase();
+  const lower = raw.toLowerCase().trim();
+  const introduced = (text) => /\//.test(text) || /(^|[^a-z])per([^a-z]|$)/.test(text);
+  const build = (methodWord, amount2, basisWord) => {
+    const { basis, scale } = countBasis(basisWord);
+    return { method: countMethod(methodWord), amount: amount2, basis, perBasis: exact(amount2 * scale) };
+  };
   const num = /(\d*\.\d+|\d+)/.exec(lower);
   if (!num) {
-    const m = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/.exec(
-      norm(lower)
-    );
-    return m ? { method: m[1], amount: 1, basis: m[3] ?? "" } : null;
+    const m = ENUMERATION_WHOLE_RE.exec(norm(lower));
+    if (!m) return null;
+    if (!m[1] && !(m[3] && introduced(lower))) return null;
+    return build(m[1], 1, m[3]);
   }
-  const head = ENUMERATION_METHOD_RE.exec(norm(lower.slice(0, num.index)));
+  const headRaw = lower.slice(0, num.index);
+  const head = ENUMERATION_METHOD_RE.exec(norm(headRaw));
   const tail = ENUMERATION_BASIS_RE.exec(norm(lower.slice(num.index + num[0].length)));
   if (!head || !tail) return null;
+  if (!head[1] && !(tail[1] && introduced(headRaw))) return null;
   const amount = Number(num[1]);
   if (!Number.isFinite(amount) || amount <= 0) return null;
-  return { method: head[1], amount, basis: tail[1] ?? "" };
+  return build(head[1], amount, tail[1]);
 }
 var STRICT_UNIT_POLICY = {};
+function unitKind(family) {
+  return family.split(":")[0];
+}
+var COUNT_METHODS = /* @__PURE__ */ new Set(["cfu", "mpn", "cells", "any"]);
+function concentrationClass(family) {
+  if (family === "percent" || family === "percent:w/w" || family === "massfrac") return "fraction";
+  if (family === "percent:w/v" || family === "massvol") return "massvol";
+  if (family === "percent:v/v") return "volfrac";
+  return null;
+}
 function resolveUnits(from, to, policy = STRICT_UNIT_POLICY) {
   if (from.family === "unknown" || to.family === "unknown") return { factor: 1, equated: false };
-  if (from.family === to.family) return { factor: to.perBasis / from.perBasis, equated: false };
-  if (from.family.startsWith("percent") && to.family.startsWith("percent")) {
-    return from.family === "percent" || to.family === "percent" ? { factor: 1, equated: false } : null;
+  const ratio = exact(to.perBasis / from.perBasis);
+  if (from.family === to.family) {
+    const concentration = from.family === "massfrac" || from.family === "massvol";
+    return concentration && compactUnit(from.canonical) !== compactUnit(to.canonical) ? { factor: ratio, equated: false, arithmetic: true } : { factor: ratio, equated: false };
+  }
+  if (unitKind(from.family) === "log" || unitKind(to.family) === "log") {
+    if (unitKind(from.family) !== unitKind(to.family)) return null;
+    return from.family === "log:unspecified" || to.family === "log:unspecified" ? { factor: 1, equated: false } : null;
+  }
+  const fClass = concentrationClass(from.family);
+  const tClass = concentrationClass(to.family);
+  if (fClass || tClass) {
+    if (from.family.startsWith("percent") && to.family.startsWith("percent")) {
+      return from.family === "percent" || to.family === "percent" ? { factor: 1, equated: false } : null;
+    }
+    if (fClass && fClass === tClass) return { factor: ratio, equated: false, arithmetic: true };
+    return null;
   }
   const [fMethod, fBasis] = from.family.split(":");
   const [tMethod, tBasis] = to.family.split(":");
+  if (!COUNT_METHODS.has(fMethod) || !COUNT_METHODS.has(tMethod)) return null;
   if (fMethod !== tMethod) return null;
-  if (fBasis === "unspecified" || tBasis === "unspecified") {
-    return { factor: to.perBasis / from.perBasis, equated: false };
+  if (fBasis === "oz" || tBasis === "oz") {
+    return fBasis === tBasis ? { factor: ratio, equated: false } : null;
+  }
+  if (fBasis === "unspecified" || tBasis === "unspecified" || fBasis === tBasis) {
+    return { factor: ratio, equated: false };
   }
   const volumeVsMass = fBasis === "volume" && tBasis === "mass" || fBasis === "mass" && tBasis === "volume";
-  if (volumeVsMass && policy.volume_mass_equivalent) {
-    return { factor: to.perBasis / from.perBasis, equated: true };
+  const cells = fMethod === "cells" || tMethod === "cells";
+  if (volumeVsMass && !cells && policy.volume_mass_equivalent) {
+    return { factor: ratio, equated: true };
   }
   return null;
 }
@@ -167,12 +254,12 @@ function roundFactor(x) {
 }
 function describeUnitConversion(from, to, match) {
   const scaled = Math.abs(match.factor - 1) > 1e-9;
-  if (!match.equated && !scaled) return null;
+  if (!match.equated && !scaled && !match.arithmetic) return null;
   const operation = !scaled ? "1:1" : match.factor < 1 ? `\xF7 ${roundFactor(1 / match.factor)}` : `\xD7 ${roundFactor(match.factor)}`;
   return {
     from: from.canonical || "the printed unit",
     to: to.canonical || "the limit unit",
-    rule: match.equated ? "tenant_volume_mass" : "sample_basis",
+    rule: match.equated ? "tenant_volume_mass" : match.arithmetic ? "unit_arithmetic" : "sample_basis",
     factor: roundFactor(match.factor),
     operation
   };
@@ -193,11 +280,31 @@ function unitRefusalNote(from, to) {
   if (fm === "percent" && tm === "percent") {
     return " (a % w/w, % v/v or % w/v comparison depends on the product, so it is left for a person to verify)";
   }
-  if (fm === tm && (fb === "volume" && tb === "mass" || fb === "mass" && tb === "volume")) {
-    return " (per-volume against per-mass depends on the product, so it is left for a person to verify \u2014 a tenant whose products make them the same number can say so in Settings \u203A Spec Limits)";
+  if (fm === "log" !== (tm === "log")) {
+    return " (a log count and a linear count are on different scales, and one is never converted into the other \u2014 verify by hand)";
   }
-  if (fm !== tm && (fm === "cfu" || fm === "mpn") && (tm === "cfu" || tm === "mpn")) {
-    return " (different counting methods)";
+  if (fm === "log") return " (log counts on different bases are not converted \u2014 verify by hand)";
+  const fClass = concentrationClass(from.family);
+  const tClass = concentrationClass(to.family);
+  if (fClass && tClass) {
+    return fClass === "volfrac" || tClass === "volfrac" ? " (a % v/v against a weight-based concentration depends on the product, so it is left for a person to verify)" : " (a mass-per-volume concentration against a mass fraction depends on the product's density, so it is left for a person to verify)";
+  }
+  if (COUNT_METHODS.has(fm) && COUNT_METHODS.has(tm)) {
+    if (fm === "any" || tm === "any") {
+      const bare = fm === "any" ? from : to;
+      return ` (the unit "${bare.canonical}" states a basis but no counting method, so it cannot be confirmed as the count the limit is written in \u2014 verify by hand)`;
+    }
+    if (fm === "cells" !== (tm === "cells")) return " (a cell count is not a colony count)";
+    if (fm !== tm) return " (different counting methods)";
+    if (fb === "oz" || tb === "oz") {
+      return " (ounce could be weight or fluid ounce, so it is not converted \u2014 verify by hand)";
+    }
+    if (fb === "volume" && tb === "mass" || fb === "mass" && tb === "volume") {
+      return fm === "cells" || tm === "cells" ? " (per-volume against per-mass depends on the product, so it is left for a person to verify)" : " (per-volume against per-mass depends on the product, so it is left for a person to verify \u2014 a tenant whose products make them the same number can say so in Settings \u203A Spec Limits)";
+    }
+  }
+  if (fClass && COUNT_METHODS.has(tm) || tClass && COUNT_METHODS.has(fm)) {
+    return " (a count and a concentration measure different things)";
   }
   return "";
 }
@@ -208,7 +315,7 @@ function isKnownUnit(raw) {
 function unitFromHeader(header) {
   const s = String(header ?? "").trim();
   if (!s) return null;
-  const m = /[([{]([^)\]}]+)[)\]}]\s*$/.exec(s) || /,\s*([^,]+)$/.exec(s) || /\bin\s+([A-Za-z%][A-Za-z0-9/%.\s]*)$/i.exec(s);
+  const m = /[([{]([^)\]}]+)[)\]}]\s*$/.exec(s) || /,\s*([^,]+)$/.exec(s) || /\bin\s+([A-Za-z%µμ][A-Za-z0-9/%.\sµμ]*)$/i.exec(s);
   if (!m) return null;
   const candidate = m[1].trim().replace(/^in\s+/i, "");
   return isKnownUnit(candidate) ? candidate : null;
@@ -279,7 +386,7 @@ function isEmptyCell(raw) {
   return EMPTY_TOKENS.has(norm(s)) && !/\d/.test(s);
 }
 function trailingUnit(s) {
-  const m = /([a-zA-Z%][a-zA-Z0-9/%.\s]*)$/.exec(s.trim());
+  const m = /(\/?\s*[a-zA-Z%µμ][a-zA-Z0-9/%.\sµμ]*)$/.exec(s.trim());
   if (!m) return null;
   const u = m[1].trim();
   if (!u || /^(est|estimated|approx|max|min)$/i.test(u)) return null;
@@ -472,7 +579,7 @@ function compareToLimit(value, limit, policy = STRICT_UNIT_POLICY) {
       value_num: null
     };
   }
-  const v = value.value * match.factor;
+  const v = exact(value.value * match.factor);
   const conversion = describeUnitConversion(vu, lu, match);
   const say = (c) => {
     if (!conversion) return c;
@@ -561,14 +668,14 @@ function detectTableShape(headers) {
   const normed = headers.map(norm);
   const find = (key) => {
     const syns = HEADER_SYNONYMS[key];
-    let exact = -1;
+    let exact2 = -1;
     let partial = -1;
     normed.forEach((h, i) => {
       if (!h) return;
-      if (syns.includes(h) && exact === -1) exact = i;
+      if (syns.includes(h) && exact2 === -1) exact2 = i;
       if (partial === -1 && syns.some((s) => h.includes(s) && s.length > 3)) partial = i;
     });
-    return exact !== -1 ? exact : partial;
+    return exact2 !== -1 ? exact2 : partial;
   };
   const result = find("result");
   let spec = find("spec");
@@ -818,7 +925,58 @@ function matchSpecTest(testName, tests) {
   for (const t of tests) {
     if ((t.aliases || []).some((a) => norm(a) === key)) return t;
   }
+  const part = pureYeastMoldPart(testName);
+  if (part) {
+    const candidates = tests.filter((t) => pureYeastMoldPart(t.name) === part);
+    if (candidates.length === 1) return candidates[0];
+  }
   return null;
+}
+function yeastMoldPart(name) {
+  const lower = String(name ?? "").toLowerCase().replace(/\([^)]*\)/g, " ");
+  const compact = lower.replace(/[^a-z]/g, "");
+  if (!compact) return null;
+  if (compact === "ym" || compact === "yandm") return "combined";
+  const yeast = /yeast/.test(compact);
+  const mold = /mou?ld/.test(compact);
+  if (yeast && mold) return "combined";
+  if (yeast) return "yeast";
+  if (mold) return "mold";
+  return null;
+}
+var YEAST_MOLD_WORDS = /* @__PURE__ */ new Set([
+  "yeast",
+  "yeasts",
+  "mold",
+  "molds",
+  "mould",
+  "moulds",
+  "and",
+  "y",
+  "m",
+  "ym",
+  "count",
+  "counts",
+  "total",
+  "combined",
+  "plate"
+]);
+function pureYeastMoldPart(name) {
+  const words = String(name ?? "").toLowerCase().replace(/\([^)]*\)/g, " ").split(/[^a-z]+/).filter(Boolean);
+  if (words.length === 0 || !words.every((w) => YEAST_MOLD_WORDS.has(w))) return null;
+  return yeastMoldPart(name);
+}
+function yeastMoldMismatch(printedName, test) {
+  const printed = yeastMoldPart(printedName);
+  const analyte = yeastMoldPart(test.name);
+  if (!printed || !analyte || printed === analyte) return null;
+  if (printed === "combined") {
+    return `a combined yeast & mold result can't be split to check the ${analyte} limit`;
+  }
+  if (analyte === "combined") {
+    return `a ${printed} result on its own can't be judged against the combined yeast & mold limit \u2014 separate yeast and mold results are not added together`;
+  }
+  return `a ${printed} result can't be judged against the ${analyte} limit`;
 }
 function toSpecLimit(l, test) {
   return {
@@ -921,19 +1079,51 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
   };
   const judge = (scope, target, testName, valueRaw, unitRaw, specRaw = "", unitHint = null, verdictRaw = "") => {
     if (!testName) return;
+    const refuseYeastMold = (t, l, reason2) => {
+      const limitTextOnly = formatLimit(toSpecLimit(l, t));
+      const watch2 = watchStatus(l.review_by, opts.asOf);
+      verdicts.push({
+        scope,
+        target,
+        test_name_raw: testName,
+        value_raw: valueRaw,
+        unit_raw: unitRaw || null,
+        source: "limit",
+        limit_text: limitTextOnly,
+        spec_test_id: t.id,
+        limit_id: l.id,
+        criticality: parseSpecCriticality(l.criticality),
+        value_num: null,
+        ...watch2 ? { watch: watch2 } : {},
+        verdict: "not_checked",
+        reason: reason2,
+        message: `${t.name} could not be judged against our limit of ${limitTextOnly} \u2014 ${reason2}.`
+      });
+    };
     const test = matchSpecTest(testName, tests);
-    if (!test) {
-      unmatched.add(testName);
-      noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, null);
-      return;
-    }
-    const configured = resolved.get(test.id);
-    if (!configured) {
+    const configured = test ? resolved.get(test.id) : void 0;
+    if (!test || !configured) {
+      const part = pureYeastMoldPart(testName);
+      if (part && part !== "combined" && !isBlankResult(valueRaw)) {
+        const combined = tests.filter((t) => yeastMoldPart(t.name) === "combined" && resolved.has(t.id));
+        if (combined.length === 1) {
+          const reason2 = yeastMoldMismatch(testName, combined[0]);
+          if (reason2) {
+            refuseYeastMold(combined[0], resolved.get(combined[0].id), reason2);
+            return;
+          }
+        }
+      }
       unmatched.add(testName);
       noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, test);
       return;
     }
     if (isBlankResult(valueRaw)) return;
+    const yeastMold = yeastMoldMismatch(testName, test);
+    if (yeastMold) {
+      refuseYeastMold(test, configured, yeastMold);
+      return;
+    }
     const limit = toSpecLimit(configured, test);
     const watch = watchStatus(configured.review_by, opts.asOf);
     const watched = watch ? { watch } : {};
@@ -1149,6 +1339,7 @@ function reportedAnalytes(sources, tests) {
   const note = (name, value) => {
     const t = matchSpecTest(name, tests);
     if (!t) return;
+    if (yeastMoldMismatch(name, t)) return;
     const has = !isBlankResult(value) && !isDateOrTimeCell(value);
     const prev = out.get(t.id);
     if (!prev || !prev.withResult && has) out.set(t.id, { withResult: has, printedAs: name });
@@ -1419,5 +1610,7 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   unitRefusalNote,
   validateLimitShape,
   watchEndedLabel,
-  watchStatus
+  watchStatus,
+  yeastMoldMismatch,
+  yeastMoldPart
 });

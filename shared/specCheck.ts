@@ -219,17 +219,44 @@ export function specVerdictKey(v: SpecVerdict): string {
 // ---------------------------------------------------------------------------
 
 /**
- * A unit resolved into a comparable form. `family` must match for two values to
- * be compared at all — CFU and MPN are different enumeration methods and CFU/g
- * and CFU/mL are different bases, so neither pair is convertible. Getting this
- * wrong is precisely the false-negative failure mode this module exists to avoid.
+ * A unit resolved into a comparable form. `family` must line up (see
+ * `resolveUnits`) for two values to be compared at all — CFU and MPN are
+ * different enumeration methods and CFU/g and CFU/mL are different bases, so
+ * neither pair is convertible. Getting this wrong is precisely the
+ * false-negative failure mode this module exists to avoid.
+ *
+ * The families, and what each one may be compared with:
+ *
+ *   `cfu:<basis>` `mpn:<basis>`  colony / most-probable-number counts. `<basis>`
+ *                                is `mass`, `volume`, `unspecified` or `oz`.
+ *   `any:<basis>`                a count whose method is not printed ("per ml.",
+ *                                "/g"). Recognised so the refusal can say what
+ *                                is missing, and so it compares with another
+ *                                method-less count — but NOT assumed to be CFU.
+ *   `cells:<basis>`              a count of CELLS ("cells/mL" — somatic cell
+ *                                count). Not a colony count; never compared with
+ *                                CFU or MPN.
+ *   `log:<method>:<basis>`       a log-scale count ("log cfu/g"). Only ever
+ *                                compared with the same log family: a log count
+ *                                is not a linear one and is never converted.
+ *   `massfrac`                   mass per mass on a ppm footing — ppm, mg/kg,
+ *                                µg/g, ppb, µg/kg, mg/100g, g/100g. Exact
+ *                                arithmetic, compared with `percent` / `% w/w`.
+ *   `massvol`                    mass per volume on a mg/L footing — mg/L,
+ *                                µg/mL, g/100mL. Compared with `% w/v` only;
+ *                                against a mass fraction it depends on density.
+ *   `percent` `percent:<basis>`  a percentage; see `percentBasis`.
+ *   `ph` `temp`                  what they say.
+ *   `other:<text>`               anything unrecognised — refused against every
+ *                                recognised unit.
  */
 export interface UnitInfo {
-  /** 'cfu:mass', 'cfu:volume', 'mpn:mass', 'percent', 'ph', 'temp', 'plain'. */
   family: string;
   /**
-   * Divisor that converts the printed magnitude to a per-one-basis quantity.
-   * "CFU/100g" → 100, so 500 CFU/100g normalizes to 5 per gram.
+   * Divisor that converts the printed magnitude to the family's base footing.
+   * "CFU/100g" → 100, so 500 CFU/100g normalizes to 5 per gram; "ppb" → 1000,
+   * so 500 ppb normalizes to 0.5 ppm; "%" → 0.0001, so 2% normalizes to
+   * 20,000 ppm.
    */
   perBasis: number;
   canonical: string;
@@ -245,8 +272,17 @@ function norm(s: unknown): string {
 }
 
 /**
- * Parse a unit string into a comparable family. Returns `unknown` for anything
- * unrecognised, which the comparator treats as "assume it matches" rather than
+ * Twelve significant figures: enough for any real unit factor, and it stops a
+ * float wobble (1e-3 / 1e3 * 1e6 = 0.9999999999999999) from turning a result
+ * that sits exactly ON a limit into one a hair either side of it.
+ */
+function exact(x: number): number {
+  return Number(x.toPrecision(12));
+}
+
+/**
+ * Parse a unit string into a comparable family. Returns `unknown` for a blank or
+ * a placeholder, which the comparator treats as "assume it matches" rather than
  * as a mismatch — COAs routinely print the unit once in a header column, and
  * refusing to compare whenever a cell omits it would make the feature useless.
  *
@@ -256,6 +292,12 @@ function norm(s: unknown): string {
  * every real unit, so a placeholder was judged HARDER than a blank and 45 of the
  * 74 unjudgeable rows in the prod sample were nothing but this. The placeholder
  * vocabulary lives in one place, `isEmptyCell`; do not restate it here.
+ *
+ * Anything that IS a unit but is not recognised comes back `other:<text>`, and
+ * that is refused against every recognised unit. The spellings recognised here
+ * were taken from the production corpus (Andersen's "per ml.", Cheese
+ * Merchants' "/g", "g/100g", "mg/kg", "pH Units") plus the arithmetic classes
+ * the SME ruled exact (2026-09-14).
  */
 export function normalizeUnit(raw: unknown): UnitInfo {
   const s = String(raw ?? '').trim();
@@ -277,35 +319,38 @@ export function normalizeUnit(raw: unknown): UnitInfo {
     // density is not 1, so the basis is kept when the lab states one. A bare
     // "%" states none and stays `percent`, agreeing with any of them — the same
     // rule an unspecified CFU basis already follows.
+    //
+    // perBasis puts a percent on the ppm footing (1% = 10,000 ppm), which is
+    // what lets `% w/w` be judged against a `mg/kg` limit. Percent against
+    // percent is still factor 1.
     const basis = percentBasis(s);
     return basis
-      ? { family: `percent:${basis}`, perBasis: 1, canonical: `% ${basis}` }
-      : { family: 'percent', perBasis: 1, canonical: '%' };
+      ? { family: `percent:${basis}`, perBasis: 1e-4, canonical: `% ${basis}` }
+      : { family: 'percent', perBasis: 1e-4, canonical: '%' };
   }
 
   if (isEmptyCell(s)) return UNKNOWN_UNIT;
   // Anything else with no alphanumerics left says nothing either.
   if (!n) return UNKNOWN_UNIT;
 
-  if (n === 'ph') return { family: 'ph', perBasis: 1, canonical: 'pH' };
+  if (n === 'ph' || n === 'phunit' || n === 'phunits') return { family: 'ph', perBasis: 1, canonical: 'pH' };
   if (n === 'c' || n === 'degc' || n === 'f' || n === 'degf') {
     return { family: 'temp', perBasis: 1, canonical: s };
   }
 
-  // Enumeration units: <method>/<amount><basis>, e.g. CFU/g, cfu/100 g, MPN/mL.
+  // Log counts BEFORE enumeration units: "log cfu/g" contains a perfectly good
+  // CFU/g, and reading it as one would compare 2.3 (a logarithm) with a linear
+  // limit of 10 and call it a pass.
+  const log = parseLogCount(s);
+  if (log) return log;
+
+  const conc = parseConcentration(s);
+  if (conc) return conc;
+
+  // Enumeration units: <method>/<amount><basis>, e.g. CFU/g, cfu/100 g, MPN/mL,
+  // cells/mL, per ml.
   const m = parseEnumerationUnit(s);
-  if (m) {
-    const method = m.method === 'cfu' || m.method === 'mpn' ? m.method : 'cfu';
-    const amount = m.amount;
-    const basisRaw = m.basis;
-    const basis = basisRaw.startsWith('g') ? 'mass' : basisRaw ? 'volume' : '';
-    if (!basis) return { family: `${method}:unspecified`, perBasis: amount, canonical: s };
-    // Normalise larger volume/mass units onto the base one.
-    let perBasis = amount;
-    if (basisRaw === 'l' || basisRaw.startsWith('liter')) perBasis = amount * 1000;
-    if (basisRaw === 'oz') perBasis = amount * 28.3495;
-    return { family: `${method}:${basis}`, perBasis, canonical: s };
-  }
+  if (m) return { family: `${m.method}:${m.basis}`, perBasis: m.perBasis, canonical: s };
 
   return { family: `other:${n}`, perBasis: 1, canonical: s };
 }
@@ -319,8 +364,111 @@ function percentBasis(raw: string): 'w/w' | 'v/v' | 'w/v' | null {
   return null;
 }
 
-const ENUMERATION_METHOD_RE =/^(cfu|mpn|apc|spc|tpc|count|ct)(per)?$/;
-const ENUMERATION_BASIS_RE = /^(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/;
+/**
+ * A unit reduced for concentration matching: lower case, the micro sign and the
+ * Greek mu both read as "u" (so µg, μg and ug agree), "mcg" read as "ug",
+ * whitespace dropped, trailing full stops dropped ("mg/kg."), and a "per"
+ * between two unit words read as a slash ("mg per kg").
+ */
+function compactUnit(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[µμ]/g, 'u')
+    .replace(/\s+/g, '')
+    .replace(/\.+$/, '')
+    .replace(/mcg/g, 'ug')
+    .replace(/([a-z0-9])per([a-z0-9])/g, '$1/$2');
+}
+
+const MASS_IN_GRAMS: Record<string, number> = { ng: 1e-9, ug: 1e-6, mg: 1e-3, g: 1, kg: 1e3 };
+const VOLUME_IN_LITRES: Record<string, number> = { ml: 1e-3, dl: 0.1, l: 1 };
+
+/**
+ * Mass-fraction and mass-per-volume concentrations — the exact-arithmetic
+ * classes (SME ruling, 2026-09-14): ppm = mg/kg = µg/g, ppb = µg/kg,
+ * mg/100g = 10 ppm, g/100g = 1% = 10,000 ppm. mg/L is its own class, because
+ * mg/L against ppm depends on the product's density.
+ *
+ * "ppt" is deliberately NOT here: it is printed for both parts per thousand and
+ * parts per trillion, nine orders of magnitude apart, and guessing is how a
+ * false pass is made.
+ */
+function parseConcentration(raw: string): UnitInfo | null {
+  const c = compactUnit(raw);
+  const canonical = raw.trim();
+  if (c === 'ppm') return { family: 'massfrac', perBasis: 1, canonical };
+  if (c === 'ppb') return { family: 'massfrac', perBasis: 1000, canonical };
+  const m = /^(ng|ug|mg|g|kg)\/(\d*\.?\d+)?(ng|ug|mg|g|kg|ml|dl|l)$/.exec(c);
+  if (!m) return null;
+  const amount = m[2] ? Number(m[2]) : 1;
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const numerator = MASS_IN_GRAMS[m[1]];
+  if (m[3] in MASS_IN_GRAMS) {
+    const ppmPerUnit = (numerator / (MASS_IN_GRAMS[m[3]] * amount)) * 1e6;
+    return { family: 'massfrac', perBasis: exact(1 / ppmPerUnit), canonical };
+  }
+  const mgPerLitrePerUnit = (numerator * 1e3) / (VOLUME_IN_LITRES[m[3]] * amount);
+  return { family: 'massvol', perBasis: exact(1 / mgPerLitrePerUnit), canonical };
+}
+
+/**
+ * "log cfu/g", "log10 CFU/mL", "Log CFU", "log10". Its own family, compared only
+ * with the same log family. A sample amount other than one ("log cfu/100g") is
+ * kept IN the family, so it matches only itself: shifting a logarithm to a new
+ * basis is a subtraction, not the multiplication every other factor here is,
+ * and one conversion rule that is secretly two is not worth the risk.
+ */
+function parseLogCount(raw: string): UnitInfo | null {
+  const m = /^log\s*(?:10|₁₀)?(?![a-z])\s*(.*)$/i.exec(raw.trim());
+  if (!m) return null;
+  const rest = m[1].trim().replace(/^[(\[]\s*(.*?)\s*[)\]]$/, '$1');
+  if (!rest) return { family: 'log:unspecified', perBasis: 1, canonical: raw.trim() };
+  const e = parseEnumerationUnit(rest);
+  if (!e || e.method === 'any') return { family: `log:other:${norm(rest)}`, perBasis: 1, canonical: raw.trim() };
+  const amount = e.amount === 1 ? '' : `:${e.amount}`;
+  return { family: `log:${e.method}:${e.basis}${amount}`, perBasis: 1, canonical: raw.trim() };
+}
+
+const ENUMERATION_METHOD_SRC = 'cfu|mpn|apc|spc|tpc|count|ct|somaticcells|somaticcell|cells|cell|scc';
+const ENUMERATION_BASIS_SRC =
+  'grams|gram|g|milliliters|milliliter|ml|liters|liter|l|fluidounces|fluidounce|fluidoz|floz|ozwt|wtoz|ozavdp|avdpoz|ounces|ounce|ozs|oz';
+const ENUMERATION_METHOD_RE = new RegExp(`^(${ENUMERATION_METHOD_SRC})?(per)?$`);
+const ENUMERATION_BASIS_RE = new RegExp(`^(${ENUMERATION_BASIS_SRC})?$`);
+const ENUMERATION_WHOLE_RE = new RegExp(`^(${ENUMERATION_METHOD_SRC})?(per)?(${ENUMERATION_BASIS_SRC})?$`);
+
+/** Grams in an avoirdupois ounce, and millilitres in a US fluid ounce. */
+const OUNCE_WEIGHT_GRAMS = 28.3495;
+const FLUID_OUNCE_ML = 29.5735;
+
+type CountMethod = 'cfu' | 'mpn' | 'cells' | 'any';
+type CountBasis = 'mass' | 'volume' | 'oz' | 'unspecified';
+
+function countMethod(word: string | undefined): CountMethod {
+  if (!word) return 'any';
+  if (word === 'mpn') return 'mpn';
+  if (/^(cells?|somaticcells?|scc)$/.test(word)) return 'cells';
+  return 'cfu';
+}
+
+/**
+ * Which basis a printed basis word states, and how many of the base unit (g or
+ * mL) one of it is.
+ *
+ * OUNCES ARE THE TRAP. "oz" alone is either an avoirdupois ounce (28.35 g) or a
+ * fluid ounce (29.57 mL), and the page rarely says which. It used to be filed as
+ * a VOLUME and converted with the MASS factor — wrong on both counts at once. A
+ * bare ounce is now its own basis, comparable only with another ounce; "fl oz"
+ * is a volume and "oz wt" / "avdp oz" a mass, because there the lab said so.
+ */
+function countBasis(word: string | undefined): { basis: CountBasis; scale: number } {
+  if (!word) return { basis: 'unspecified', scale: 1 };
+  if (/^(g|gram|grams)$/.test(word)) return { basis: 'mass', scale: 1 };
+  if (/^(ml|milliliters?)$/.test(word)) return { basis: 'volume', scale: 1 };
+  if (/^(l|liters?)$/.test(word)) return { basis: 'volume', scale: 1000 };
+  if (/^(floz|fluidoz|fluidounces?)$/.test(word)) return { basis: 'volume', scale: FLUID_OUNCE_ML };
+  if (/^(ozwt|wtoz|ozavdp|avdpoz)$/.test(word)) return { basis: 'mass', scale: OUNCE_WEIGHT_GRAMS };
+  return { basis: 'oz', scale: 1 };
+}
 
 /**
  * Split an enumeration unit into method, sample amount and basis.
@@ -335,24 +483,39 @@ const ENUMERATION_BASIS_RE = /^(g|gram|grams|ml|milliliter|milliliters|l|liter|l
  * The number must sit AFTER the method ("cfu/0.1g", "CFU per 0.1 g"); a number
  * in front of it ("10 cfu/g") is a value that leaked into the unit cell, not a
  * sample basis, and is not claimed as one. An amount of zero cannot be a basis
- * (it would divide by zero) and is refused. Returns null for anything that is
- * not an enumeration unit.
+ * (it would divide by zero) and is refused.
+ *
+ * A MISSING METHOD ("per ml.", "/g", "per 25 g") is accepted only when a "per"
+ * or a slash actually introduces the basis and a basis is actually named: that
+ * is the lab stating "a count, per millilitre". A bare "g" or "25g" is a mass,
+ * or a pathogen test's sample size, and is never read as a count basis. Returns
+ * null for anything that is not an enumeration unit.
  */
-function parseEnumerationUnit(raw: string): { method: string; amount: number; basis: string } | null {
-  const lower = raw.toLowerCase();
+function parseEnumerationUnit(
+  raw: string
+): { method: CountMethod; amount: number; basis: CountBasis; perBasis: number } | null {
+  const lower = raw.toLowerCase().trim();
+  const introduced = (text: string) => /\//.test(text) || /(^|[^a-z])per([^a-z]|$)/.test(text);
+  const build = (methodWord: string | undefined, amount: number, basisWord: string | undefined) => {
+    const { basis, scale } = countBasis(basisWord);
+    return { method: countMethod(methodWord), amount, basis, perBasis: exact(amount * scale) };
+  };
+
   const num = /(\d*\.\d+|\d+)/.exec(lower);
   if (!num) {
-    const m = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/.exec(
-      norm(lower)
-    );
-    return m ? { method: m[1], amount: 1, basis: m[3] ?? '' } : null;
+    const m = ENUMERATION_WHOLE_RE.exec(norm(lower));
+    if (!m) return null;
+    if (!m[1] && !(m[3] && introduced(lower))) return null;
+    return build(m[1], 1, m[3]);
   }
-  const head = ENUMERATION_METHOD_RE.exec(norm(lower.slice(0, num.index)));
+  const headRaw = lower.slice(0, num.index);
+  const head = ENUMERATION_METHOD_RE.exec(norm(headRaw));
   const tail = ENUMERATION_BASIS_RE.exec(norm(lower.slice(num.index + num[0].length)));
   if (!head || !tail) return null;
+  if (!head[1] && !(tail[1] && introduced(headRaw))) return null;
   const amount = Number(num[1]);
   if (!Number.isFinite(amount) || amount <= 0) return null;
-  return { method: head[1], amount, basis: tail[1] ?? '' };
+  return build(head[1], amount, tail[1]);
 }
 
 /**
@@ -402,6 +565,36 @@ export interface UnitMatch {
    * carrying this must say so in its reason.
    */
   equated: boolean;
+  /**
+   * Set when the two units are different spellings of one quantity related by
+   * exact arithmetic (µg/g → ppm, % → mg/kg). A conversion even at 1:1, and
+   * always shown as one: "ppm" beside a limit written in "mg/kg" is a
+   * relabelling the reviewer should be able to see was made.
+   */
+  arithmetic?: boolean;
+}
+
+/** The part of a family before its first colon: 'cfu', 'log', 'massfrac', … */
+function unitKind(family: string): string {
+  return family.split(':')[0];
+}
+
+const COUNT_METHODS = new Set(['cfu', 'mpn', 'cells', 'any']);
+
+/**
+ * Which concentration CLASS a family belongs to, or null for a non-concentration.
+ * Only members of one class convert into each other:
+ *   'fraction'  dimensionless mass fractions — %, % w/w, ppm, mg/kg, µg/g, ppb
+ *   'massvol'   mass per volume — mg/L, µg/mL, g/100mL, % w/v
+ *   'volfrac'   % v/v, which converts into nothing but itself
+ * A bare "%" is a fraction here, and against another percentage it keeps the
+ * older, looser rule in `resolveUnits`.
+ */
+function concentrationClass(family: string): 'fraction' | 'massvol' | 'volfrac' | null {
+  if (family === 'percent' || family === 'percent:w/w' || family === 'massfrac') return 'fraction';
+  if (family === 'percent:w/v' || family === 'massvol') return 'massvol';
+  if (family === 'percent:v/v') return 'volfrac';
+  return null;
 }
 
 /**
@@ -409,6 +602,15 @@ export interface UnitMatch {
  * `from` to the same footing as `to`? `null` means "do not compare".
  *
  * An unknown unit on either side is treated as agreement — see `normalizeUnit`.
+ *
+ * THE RULE SET, in the SME's terms (2026-09-14). Pure arithmetic is automated
+ * and visibly flagged: a sample amount (CFU/100g → CFU/g), a fixed unit factor
+ * (ppb → ppm, 1% = 10,000 ppm, µg/g = mg/kg). Anything product-dependent is
+ * refused unless the tenant enabled that equivalence: per-mL against per-g
+ * (0093, the one setting there is), % w/w against % v/v, a mass fraction
+ * against a mass-per-volume. And some pairs are never compared, setting or
+ * not: CFU against MPN, a cell count against a colony count, a log count against
+ * a linear one, and a bare ounce against grams or millilitres.
  */
 export function resolveUnits(
   from: UnitInfo,
@@ -416,29 +618,71 @@ export function resolveUnits(
   policy: UnitPolicy = STRICT_UNIT_POLICY
 ): UnitMatch | null {
   if (from.family === 'unknown' || to.family === 'unknown') return { factor: 1, equated: false };
-  if (from.family === to.family) return { factor: to.perBasis / from.perBasis, equated: false };
-
-  // Percentages: a stated w/w against a stated v/v is product-dependent and is
-  // refused outright. No tenant setting reaches this — 0093 is volume-vs-mass
-  // for COUNTS only. A bare "%" states no basis and agrees with either.
-  if (from.family.startsWith('percent') && to.family.startsWith('percent')) {
-    return from.family === 'percent' || to.family === 'percent' ? { factor: 1, equated: false } : null;
+  const ratio = exact(to.perBasis / from.perBasis);
+  if (from.family === to.family) {
+    // "µg/g" beside a "ppm" limit is one family and still a relabelling worth
+    // showing; "mg/kg" beside "MG/KG" is the same spelling and is not.
+    const concentration = from.family === 'massfrac' || from.family === 'massvol';
+    return concentration && compactUnit(from.canonical) !== compactUnit(to.canonical)
+      ? { factor: ratio, equated: false, arithmetic: true }
+      : { factor: ratio, equated: false };
   }
 
-  // An unspecified basis still tells us the method; allow it against either basis.
+  // Log counts compare only with the same log family. "log:unspecified" (a bare
+  // "log10") states the scale and nothing else, so it agrees with any log count.
+  if (unitKind(from.family) === 'log' || unitKind(to.family) === 'log') {
+    if (unitKind(from.family) !== unitKind(to.family)) return null;
+    return from.family === 'log:unspecified' || to.family === 'log:unspecified'
+      ? { factor: 1, equated: false }
+      : null;
+  }
+
+  const fClass = concentrationClass(from.family);
+  const tClass = concentrationClass(to.family);
+  if (fClass || tClass) {
+    // Percentages: a stated w/w against a stated v/v is product-dependent and is
+    // refused outright. No tenant setting reaches this — 0093 is volume-vs-mass
+    // for COUNTS only. A bare "%" states no basis and agrees with either.
+    if (from.family.startsWith('percent') && to.family.startsWith('percent')) {
+      return from.family === 'percent' || to.family === 'percent' ? { factor: 1, equated: false } : null;
+    }
+    // Within one class the factor is exact arithmetic. Across classes it would
+    // need a density, which is the product's, not ours.
+    if (fClass && fClass === tClass) return { factor: ratio, equated: false, arithmetic: true };
+    return null;
+  }
+
   const [fMethod, fBasis] = from.family.split(':');
   const [tMethod, tBasis] = to.family.split(':');
+  if (!COUNT_METHODS.has(fMethod) || !COUNT_METHODS.has(tMethod)) return null;
+  // The methods must be the same one. A count whose method is NOT printed
+  // ("per ml.") is not assumed to be CFU: on production every such row is
+  // Andersen's certification paragraph (the 100,000 / 400,000 per mL regulatory
+  // thresholds) lifted into the results table, so "assume CFU" would have
+  // turned two honest refusals into two false out-of-spec alerts. It compares
+  // with another method-less count, and is refused — with its own reason —
+  // against a limit that names a method.
   if (fMethod !== tMethod) return null;
-  if (fBasis === 'unspecified' || tBasis === 'unspecified') {
-    return { factor: to.perBasis / from.perBasis, equated: false };
+
+  // A bare ounce is weight or volume and the page did not say which: it lines
+  // up with another bare ounce and with nothing else, whatever the setting.
+  if (fBasis === 'oz' || tBasis === 'oz') {
+    return fBasis === tBasis ? { factor: ratio, equated: false } : null;
+  }
+  // An unspecified basis still tells us the method; allow it against either basis.
+  if (fBasis === 'unspecified' || tBasis === 'unspecified' || fBasis === tBasis) {
+    return { factor: ratio, equated: false };
   }
 
-  // The ONE case the tenant setting reaches. Note the method has already had to
-  // match, so CFU-against-MPN and percent-against-CFU never arrive here.
+  // The ONE case the tenant setting reaches: volume against mass, for colony
+  // and MPN counts. The method has already had to agree, so CFU-against-MPN and
+  // percent-against-CFU never arrive here; a cell count is not what 0093 was
+  // written about, so it does not reach cells either.
   const volumeVsMass =
     (fBasis === 'volume' && tBasis === 'mass') || (fBasis === 'mass' && tBasis === 'volume');
-  if (volumeVsMass && policy.volume_mass_equivalent) {
-    return { factor: to.perBasis / from.perBasis, equated: true };
+  const cells = fMethod === 'cells' || tMethod === 'cells';
+  if (volumeVsMass && !cells && policy.volume_mass_equivalent) {
+    return { factor: ratio, equated: true };
   }
   return null;
 }
@@ -481,8 +725,12 @@ export function unitEquivalenceNote(value: UnitInfo, limit: UnitInfo): string {
  * `tenant_volume_mass`  a per-mL result judged as per-g (or the reverse) because
  *                       THIS tenant said so (migration 0093). Product-dependent,
  *                       which is why it is a setting at all.
+ * `unit_arithmetic`     a fixed factor between two spellings of one quantity —
+ *                       ppm = mg/kg = µg/g, ppb = µg/kg, 1% = 10,000 ppm,
+ *                       mg/100g = 10 ppm, % w/v against mg/L. True for every
+ *                       product; shown even when the factor is 1.
  */
-export type UnitConversionRule = 'sample_basis' | 'tenant_volume_mass';
+export type UnitConversionRule = 'sample_basis' | 'tenant_volume_mass' | 'unit_arithmetic';
 
 /**
  * A conversion applied to ONE compared value (SME ruling, 2026-09-14: "any unit
@@ -517,7 +765,7 @@ export function describeUnitConversion(
   match: UnitMatch
 ): UnitConversion | null {
   const scaled = Math.abs(match.factor - 1) > 1e-9;
-  if (!match.equated && !scaled) return null;
+  if (!match.equated && !scaled && !match.arithmetic) return null;
   const operation = !scaled
     ? '1:1'
     : match.factor < 1
@@ -526,7 +774,7 @@ export function describeUnitConversion(
   return {
     from: from.canonical || 'the printed unit',
     to: to.canonical || 'the limit unit',
-    rule: match.equated ? 'tenant_volume_mass' : 'sample_basis',
+    rule: match.equated ? 'tenant_volume_mass' : match.arithmetic ? 'unit_arithmetic' : 'sample_basis',
     factor: roundFactor(match.factor),
     operation,
   };
@@ -570,14 +818,39 @@ export function unitRefusalNote(from: UnitInfo, to: UnitInfo): string {
   if (fm === 'percent' && tm === 'percent') {
     return ' (a % w/w, % v/v or % w/v comparison depends on the product, so it is left for a person to verify)';
   }
-  if (fm === tm && ((fb === 'volume' && tb === 'mass') || (fb === 'mass' && tb === 'volume'))) {
-    return (
-      ' (per-volume against per-mass depends on the product, so it is left for a person to verify — ' +
-      'a tenant whose products make them the same number can say so in Settings › Spec Limits)'
-    );
+  if ((fm === 'log') !== (tm === 'log')) {
+    return ' (a log count and a linear count are on different scales, and one is never converted into the other — verify by hand)';
   }
-  if (fm !== tm && (fm === 'cfu' || fm === 'mpn') && (tm === 'cfu' || tm === 'mpn')) {
-    return ' (different counting methods)';
+  if (fm === 'log') return ' (log counts on different bases are not converted — verify by hand)';
+  const fClass = concentrationClass(from.family);
+  const tClass = concentrationClass(to.family);
+  if (fClass && tClass) {
+    return fClass === 'volfrac' || tClass === 'volfrac'
+      ? ' (a % v/v against a weight-based concentration depends on the product, so it is left for a person to verify)'
+      : " (a mass-per-volume concentration against a mass fraction depends on the product's density, so it is left for a person to verify)";
+  }
+  if (COUNT_METHODS.has(fm) && COUNT_METHODS.has(tm)) {
+    if (fm === 'any' || tm === 'any') {
+      const bare = fm === 'any' ? from : to;
+      return (
+        ` (the unit "${bare.canonical}" states a basis but no counting method, so it cannot be ` +
+        'confirmed as the count the limit is written in — verify by hand)'
+      );
+    }
+    if ((fm === 'cells') !== (tm === 'cells')) return ' (a cell count is not a colony count)';
+    if (fm !== tm) return ' (different counting methods)';
+    if (fb === 'oz' || tb === 'oz') {
+      return ' (ounce could be weight or fluid ounce, so it is not converted — verify by hand)';
+    }
+    if ((fb === 'volume' && tb === 'mass') || (fb === 'mass' && tb === 'volume')) {
+      return fm === 'cells' || tm === 'cells'
+        ? ' (per-volume against per-mass depends on the product, so it is left for a person to verify)'
+        : ' (per-volume against per-mass depends on the product, so it is left for a person to verify — ' +
+            'a tenant whose products make them the same number can say so in Settings › Spec Limits)';
+    }
+  }
+  if ((fClass && COUNT_METHODS.has(tm)) || (tClass && COUNT_METHODS.has(fm))) {
+    return ' (a count and a concentration measure different things)';
   }
   return '';
 }
@@ -635,7 +908,7 @@ function unitFromHeader(header: unknown): string | null {
   const m =
     /[([{]([^)\]}]+)[)\]}]\s*$/.exec(s) ||
     /,\s*([^,]+)$/.exec(s) ||
-    /\bin\s+([A-Za-z%][A-Za-z0-9/%.\s]*)$/i.exec(s);
+    /\bin\s+([A-Za-z%µμ][A-Za-z0-9/%.\sµμ]*)$/i.exec(s);
   if (!m) return null;
   // "Result (in CFU/g)" — the preposition is part of the annotation, not of the
   // unit, and leaving it on makes `normalizeUnit` fail to recognise a unit it
@@ -768,7 +1041,11 @@ function isEmptyCell(raw: unknown): boolean {
 
 /** Pull a trailing unit off a value string ("40 CFU/g" → "CFU/g"). */
 function trailingUnit(s: string): string | null {
-  const m = /([a-zA-Z%][a-zA-Z0-9/%.\s]*)$/.exec(s.trim());
+  // A slash directly in front of the unit is part of it: "< 10 /g" is per gram,
+  // and clipping it to "g" turned a count basis into a mass.
+  // µ and μ (micro sign, Greek mu) start a unit too: without them "0.8 µg/g"
+  // read its unit as "g/g" and was judged a million times too small.
+  const m = /(\/?\s*[a-zA-Z%µμ][a-zA-Z0-9/%.\sµμ]*)$/.exec(s.trim());
   if (!m) return null;
   const u = m[1].trim();
   if (!u || /^(est|estimated|approx|max|min)$/i.test(u)) return null;
@@ -1089,7 +1366,9 @@ export function compareToLimit(
       value_num: null,
     };
   }
-  const v = (value.value as number) * match.factor;
+  // Rounded like the factor, so a result that converts to exactly the limit
+  // (295.735 CFU/fl oz = 10 CFU/mL) is not a float hair past it.
+  const v = exact((value.value as number) * match.factor);
   const conversion = describeUnitConversion(vu, lu, match);
 
   /**
@@ -1802,7 +2081,90 @@ export function matchSpecTest(testName: string, tests: SpecTestDef[]): SpecTestD
   for (const t of tests) {
     if ((t.aliases || []).some((a) => norm(a) === key)) return t;
   }
+  // ONE narrow exception to "exact only": the yeast & mold spellings. Their
+  // vocabulary is closed (yeast/yeasts, mold/molds/mould/moulds, "and", "&",
+  // "/", "count", "total", "combined"), so "Yeasts & Moulds" can be matched to
+  // a test whose NAME is the same combination without the substring risk the
+  // rule above exists for — a name carrying any other word ("Osmophilic
+  // Yeast") is not pure and falls through to unmatched. And it only ever pairs
+  // like with like: combined with combined, yeast with yeast, mold with mold.
+  const part = pureYeastMoldPart(testName);
+  if (part) {
+    const candidates = tests.filter((t) => pureYeastMoldPart(t.name) === part);
+    if (candidates.length === 1) return candidates[0];
+  }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Yeast & mold — a combined result is not two results
+// ---------------------------------------------------------------------------
+
+/** Which yeast/mold quantity a name describes, or null when it names neither. */
+export type YeastMoldPart = 'yeast' | 'mold' | 'combined';
+
+/**
+ * Read a test name as yeast, mold, or the two COMBINED ("Yeast & Mold", "Y&M",
+ * "Yeast/Mold", "Yeasts and Molds", "Yeast & Mould", "YM"). A parenthetical is
+ * ignored ("Yeast & Mold (combined)", "Mold (cfu/g)").
+ */
+export function yeastMoldPart(name: unknown): YeastMoldPart | null {
+  const lower = String(name ?? '').toLowerCase().replace(/\([^)]*\)/g, ' ');
+  const compact = lower.replace(/[^a-z]/g, '');
+  if (!compact) return null;
+  if (compact === 'ym' || compact === 'yandm') return 'combined';
+  const yeast = /yeast/.test(compact);
+  const mold = /mou?ld/.test(compact);
+  if (yeast && mold) return 'combined';
+  if (yeast) return 'yeast';
+  if (mold) return 'mold';
+  return null;
+}
+
+const YEAST_MOLD_WORDS = new Set([
+  'yeast', 'yeasts', 'mold', 'molds', 'mould', 'moulds', 'and', 'y', 'm', 'ym',
+  'count', 'counts', 'total', 'combined', 'plate',
+]);
+
+/** `yeastMoldPart`, but only for a name made of nothing except that vocabulary. */
+function pureYeastMoldPart(name: unknown): YeastMoldPart | null {
+  const words = String(name ?? '')
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, ' ')
+    .split(/[^a-z]+/)
+    .filter(Boolean);
+  if (words.length === 0 || !words.every((w) => YEAST_MOLD_WORDS.has(w))) return null;
+  return yeastMoldPart(name);
+}
+
+/**
+ * Why a printed yeast/mold result cannot be judged against this analyte's limit,
+ * or null when it can.
+ *
+ * SME ruling (2026-09-14): a combined "Yeast & Mold" figure cannot be split, so
+ * it is never judged against a separate Mold or Yeast limit — it could be all
+ * yeast. It MAY be judged against a combined limit. The reverse — separate yeast
+ * and mold results against a combined limit — would need the two ADDED, and the
+ * SME has not ruled that summing is acceptable, so that is refused too.
+ *
+ * Checked on the analyte's canonical NAME, whatever alias matched, so a
+ * "Yeast & Mold" alias configured onto a Mold analyte by mistake cannot make
+ * the combination judgeable.
+ */
+export function yeastMoldMismatch(printedName: string, test: SpecTestDef): string | null {
+  const printed = yeastMoldPart(printedName);
+  const analyte = yeastMoldPart(test.name);
+  if (!printed || !analyte || printed === analyte) return null;
+  if (printed === 'combined') {
+    return `a combined yeast & mold result can't be split to check the ${analyte} limit`;
+  }
+  if (analyte === 'combined') {
+    return (
+      `a ${printed} result on its own can't be judged against the combined yeast & mold limit — ` +
+      'separate yeast and mold results are not added together'
+    );
+  }
+  return `a ${printed} result can't be judged against the ${analyte} limit`;
 }
 
 /** Turn a stored limit row into the comparator's shape. */
@@ -2150,19 +2512,63 @@ export function checkConfiguredLimits(
     verdictRaw = ''
   ) => {
     if (!testName) return;
+
+    /** A yeast & mold refusal (see `yeastMoldMismatch`): a limit applies, and this result cannot be put against it. */
+    const refuseYeastMold = (t: SpecTestDef, l: ConfiguredLimit, reason: string) => {
+      const limitTextOnly = formatLimit(toSpecLimit(l, t));
+      const watch = watchStatus(l.review_by, opts.asOf);
+      verdicts.push({
+        scope,
+        target,
+        test_name_raw: testName,
+        value_raw: valueRaw,
+        unit_raw: unitRaw || null,
+        source: 'limit',
+        limit_text: limitTextOnly,
+        spec_test_id: t.id,
+        limit_id: l.id,
+        criticality: parseSpecCriticality(l.criticality),
+        value_num: null,
+        ...(watch ? { watch } : {}),
+        verdict: 'not_checked',
+        reason,
+        message: `${t.name} could not be judged against our limit of ${limitTextOnly} — ${reason}.`,
+      });
+    };
+
     const test = matchSpecTest(testName, tests);
-    if (!test) {
-      unmatched.add(testName);
-      noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, null);
-      return;
-    }
-    const configured = resolved.get(test.id);
-    if (!configured) {
+    const configured = test ? resolved.get(test.id) : undefined;
+    if (!test || !configured) {
+      // A SEPARATE yeast or mold result with no limit of its own, on a document
+      // a COMBINED yeast & mold limit applies to. Judging it would mean adding
+      // yeast and mold together, which nobody has ruled acceptable; staying
+      // silent would leave a limit we hold looking as if it had nothing to
+      // check. So it is refused, against the combined limit, and says why.
+      const part = pureYeastMoldPart(testName);
+      if (part && part !== 'combined' && !isBlankResult(valueRaw)) {
+        const combined = tests.filter((t) => yeastMoldPart(t.name) === 'combined' && resolved.has(t.id));
+        if (combined.length === 1) {
+          const reason = yeastMoldMismatch(testName, combined[0]);
+          if (reason) {
+            refuseYeastMold(combined[0], resolved.get(combined[0].id) as ConfiguredLimit, reason);
+            return;
+          }
+        }
+      }
       unmatched.add(testName);
       noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, test);
       return;
     }
     if (isBlankResult(valueRaw)) return;
+
+    // A combined yeast & mold figure against a separate Yeast or Mold limit —
+    // however the name came to match (an alias configured onto the wrong
+    // analyte, most likely). It cannot be split, so it is not judged.
+    const yeastMold = yeastMoldMismatch(testName, test);
+    if (yeastMold) {
+      refuseYeastMold(test, configured, yeastMold);
+      return;
+    }
 
     const limit = toSpecLimit(configured, test);
     // A supplier watch rides along on EVERY verdict its limit produces —
@@ -2541,6 +2947,9 @@ function reportedAnalytes(
   const note = (name: string, value: string) => {
     const t = matchSpecTest(name, tests);
     if (!t) return;
+    // A combined yeast & mold figure does not report the Mold analyte (or the
+    // Yeast one), and separate results do not report the combined one.
+    if (yeastMoldMismatch(name, t)) return;
     const has = !isBlankResult(value) && !isDateOrTimeCell(value);
     const prev = out.get(t.id);
     if (!prev || (!prev.withResult && has)) out.set(t.id, { withResult: has, printedAs: name });

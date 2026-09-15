@@ -165,7 +165,9 @@ export function ConversionChip({ conversion }: { conversion: UnitConversion | nu
   const title =
     conversion.rule === 'tenant_volume_mass'
       ? "Judged across per-volume and per-mass because this tenant's Spec Limits setting says they are the same number for its products."
-      : 'The printed sample basis was converted to the basis the limit is written in before comparing.';
+      : conversion.rule === 'unit_arithmetic'
+        ? 'The printed unit was converted to the unit the limit is written in by exact arithmetic (ppm = mg/kg = µg/g, 1% = 10,000 ppm) before comparing.'
+        : 'The printed sample basis was converted to the basis the limit is written in before comparing.';
   return (
     <Tooltip arrow title={title}>
       <Chip
