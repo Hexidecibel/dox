@@ -4,7 +4,29 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-15 (latest): v2.16.1 ON PROD — spec unit classes + yeast & mold combined/separate refusals.**
+**2026-09-15 (latest): v2.17.0 ON PROD — renewal alert lead time + supplier list import / packets / Needs review.**
+Merges of `worktree-agent-abec86af04085b09e` (lead time, 0111; no conflicts) and
+`worktree-agent-ad009e3bac9b67d80` (supplier list derivation; conflicts CLAUDE.md + tests/helpers/db.ts; its
+migration also said 0111 → **renumbered 0112**, every reference updated). 0112 is ADDITIVE (new
+`supplier_list_imports` + 4 ALTER ADD COLUMN on `supplier_requirements` + 2 indexes), not a rebuild. Follow-up
+5786ed3: GFSI claim rule now requires `third-party-audit-certificate`, recommends `third-party-audit-report`
+(AJ 2026-09-14; new pack applications only, existing tenants untouched); setup wizard screen 3 states the
+tenant's resolved lead time. Release 0659a4e, Pages deploy `72b572b5`, staging `f2fb2ab3`; gate: vitest 268
+files / 3675 tests, Playwright 7 passed; typecheck 56 (baseline, none in changed files). Prod backup:
+bookmark `000016eb-000001b0-000050e7-356f76b40df2bcc96e78be9f8b077d1d` + SQL of supplier_requirements /
+tenants / document_types in `~/drops/dox-backups/doc-upload-db-20260915T211944Z.*`. **Prod verified after
+0111+0112 (both stamped in d1_migrations):** tenants 6, document_types 107, supplier_requirements 294
+(source NULL=294) — all unchanged; all `renewal_alert_lead_days` NULL; supplier_list_imports 0; no row has
+derivation_run_id/review_flag. Staging: tenants 2, document_types 23, supplier_requirements 0, unchanged.
+Local D1 note: the shared local DB also carries the other agent's 0113, so SCHEMA.md was kept as merged
+(identical to a regeneration minus 0113's two lines) — regenerate when 0113 merges.
+No import or packet was run on prod; no renewal alerts triggered.
+**Open for AJ (from the import work):** (1) is `third-party-audit-certificate` his "third-party food safety
+certificate"? (2) should co-packers get the Ingredient packet? (3) what do packaging and distributor suppliers
+owe? (4) is each import the COMPLETE verified list (drop-off flags assume it is)? (5) spec sheet per supplier
+or per product?
+
+**2026-09-15: v2.16.1 ON PROD — spec unit classes + yeast & mold combined/separate refusals.**
 Merge of `worktree-agent-a6c6a322e03bb1bff` (no conflicts, no migration; compiled mirror
 `bin/lib/shared/specCheck.js` confirmed current). Release 453dd2b, Pages deploy `ea2e4a2f`, staging `76faffd6`;
 gate: vitest 257 files / 3589 tests, Playwright 7 passed; typecheck 56 (baseline). Read-only prod
