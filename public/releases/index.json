@@ -1,6 +1,11 @@
 {
-  "current": "2.10.0",
+  "current": "2.11.0",
   "versions": [
+    {
+      "version": "2.11.0",
+      "date": "2026-09-14",
+      "title": "Search tells you when nothing on file covers what you asked"
+    },
     {
       "version": "2.10.0",
       "date": "2026-09-14",
