@@ -4,7 +4,19 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-15 (overnight, latest): v2.16.0 ON PROD — Phase 4 declared lot formats + API key expiry fix.**
+**2026-09-15 (latest): v2.16.1 ON PROD — spec unit classes + yeast & mold combined/separate refusals.**
+Merge of `worktree-agent-a6c6a322e03bb1bff` (no conflicts, no migration; compiled mirror
+`bin/lib/shared/specCheck.js` confirmed current). Release 453dd2b, Pages deploy `ea2e4a2f`, staging `76faffd6`;
+gate: vitest 257 files / 3589 tests, Playwright 7 passed; typecheck 56 (baseline). Read-only prod
+`bin/recheck-spec-limits --remote` (Medosweet tenant 1f03c3e7…): 522 docs, 1184 of 1309 judged — IN SPEC 1143,
+OUT OF SPEC 41, COULD NOT BE JUDGED 125 (was 122; +3 Cheese Merchants combined Y&M refused), CATCHES 12 —
+exactly the implementer's simulation. Stored register rows were NOT rewritten (no backfill run).
+**Open for AJ:** (1) may separate yeast and mold results be SUMMED against a combined Y&M limit — and should a
+yeast count alone that is already over the combined ceiling be judged out? (today: refused, never summed);
+(2) should Andersen's "per ml." plate count (no method printed) be read as CFU/mL by a declared rule? (today:
+recognised as a count, not assumed CFU → could not be checked).
+
+**2026-09-15 (overnight): v2.16.0 ON PROD — Phase 4 declared lot formats + API key expiry fix.**
 Merges of `worktree-agent-a2d8dd9678f829c7c` (conflicts: CLAUDE.md, tests/helpers/db.ts — 0110 after 0109,
 SupplierDetail tabs — Lot format index 8, Spec watch stays last at 9, SCHEMA.md regenerated) and
 `worktree-agent-a072e795a09da8f61` (conflict: todo.md). Release 47ee178, Pages deploy `e7facc37`, staging
