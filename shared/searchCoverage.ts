@@ -793,7 +793,7 @@ export function checkDate(c: SearchConstraint, s: CoverageSubject, order: DateOr
         best = better(best, {
           ...common,
           outcome: 'likely',
-          message: `Lot code implies production ${formatIsoHuman(r.iso)}: lot ${matching[0].decoded_lot ?? ''} ${how}. No production date is stated for ${onThis} — open the certificate to confirm before using it.`.replace('lot  ', 'lot '),
+          message: `Lot code implies production ${formatIsoHuman(r.iso)} (${matching[0].decoded_lot ? `lot ${matching[0].decoded_lot}, ` : ''}${how}). No production date is stated for ${onThis} — open the certificate to confirm before using it.`,
         });
       } else if (provenance === 'extracted_code_date_legacy') {
         // Not verified: the value is right, its ROLE was inferred from the page
