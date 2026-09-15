@@ -1,0 +1,73 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/d1-query — run ONE read-only statement against a D1 database and print
+ * the rows as JSON. For verification before/after a migration or backfill.
+ *
+ * Read-only by construction: it goes through bin/lib/d1.js `query()`, which
+ * refuses anything that is not SELECT/WITH. Use `pragma_table_info('t')` rather
+ * than `PRAGMA table_info(t)`.
+ *
+ * Usage:
+ *   bin/d1-query --remote "SELECT name, sql FROM sqlite_master WHERE name = 'x'"
+ *   bin/d1-query --staging "SELECT count(*) AS n FROM lots"
+ *   bin/d1-query "SELECT ..."                     # local D1
+ *
+ * Flags:
+ *   --remote, -r   production D1 (doc-upload-db)
+ *   --staging      staging D1 (doc-upload-db-staging), remote
+ *   --raw          print each row's single column value verbatim (for SQL text)
+ *
+ * Credentials: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID from the
+ * environment, else .env, else .dev.vars.
+ */
+const fs = require('fs');
+const path = require('path');
+const { query } = require('./lib/d1.js');
+
+const args = process.argv.slice(2);
+let remote = false;
+let db = 'doc-upload-db';
+let raw = false;
+const sqlParts = [];
+for (const a of args) {
+  if (a === '--remote' || a === '-r') remote = true;
+  else if (a === '--staging') {
+    remote = true;
+    db = 'doc-upload-db-staging';
+  } else if (a === '--raw') raw = true;
+  else if (a === '-h' || a === '--help') {
+    console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(2, 23).join('\n'));
+    process.exit(0);
+  } else sqlParts.push(a);
+}
+if (sqlParts.length === 0) {
+  console.error('Give one SQL statement. --help for usage.');
+  process.exit(2);
+}
+
+const root = path.resolve(__dirname, '..');
+for (const key of ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID']) {
+  if (process.env[key]) continue;
+  for (const f of ['.env', '.dev.vars']) {
+    const p = path.join(root, f);
+    if (!fs.existsSync(p)) continue;
+    const line = fs.readFileSync(p, 'utf8').split('\n').find((l) => l.startsWith(`${key}=`));
+    if (line) {
+      process.env[key] = line.slice(key.length + 1).replace(/["']/g, '').trim();
+      break;
+    }
+  }
+}
+
+try {
+  const rows = query(sqlParts.join(' '), { remote, db });
+  if (raw) {
+    for (const r of rows) for (const v of Object.values(r)) console.log(v);
+  } else {
+    console.log(JSON.stringify(rows, null, 2));
+  }
+} catch (err) {
+  console.error(String(err.message || err));
+  process.exit(1);
+}

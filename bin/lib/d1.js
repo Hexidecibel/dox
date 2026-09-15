@@ -92,7 +92,9 @@ function query(sql, opts = {}) {
     }).toString();
   } catch (err) {
     const stderr = err.stderr ? err.stderr.toString() : '';
-    throw new Error(`d1 query failed: ${stderr || err.message}`);
+    // wrangler --json reports a SQL error on stdout, not stderr.
+    const stdout = err.stdout ? err.stdout.toString() : '';
+    throw new Error(`d1 query failed: ${stderr || err.message}${stdout ? `\n${stdout}` : ''}`);
   }
   return flattenRows(out);
 }
