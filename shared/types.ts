@@ -884,6 +884,36 @@ export type ClassificationStatus =
  */
 export type LotScheme = 'auto' | 'date_code' | 'lims_combined' | 'plain';
 
+/** One DECLARED lot format version (migration 0109, supplier_lot_schemes). */
+export interface SupplierLotSchemeVersion {
+  id: string;
+  supplier_id: string;
+  version: number;
+  spec: import('./lotScheme').LotSchemeSpec;
+  source: 'admin' | 'seed';
+  note: string | null;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+/** GET / PUT /api/suppliers/:id/lot-scheme */
+export interface SupplierLotSchemeResponse {
+  supplier: { id: string; name: string; lot_scheme: LotScheme | null };
+  /** The latest declaration, or null when nothing is declared (the legacy enum applies). */
+  current: SupplierLotSchemeVersion | null;
+  /** What is in force: the declaration, or the legacy enum as an equivalent spec. */
+  effective: { source: 'declared' | 'legacy'; spec: import('./lotScheme').LotSchemeSpec; version: number | null };
+  versions: SupplierLotSchemeVersion[];
+  /** This supplier's lots on file (read-only), for the live fit preview. */
+  lots: import('./lotScheme').LotFitRow[];
+  lots_truncated: boolean;
+  /** How the lots on file read against the effective format. */
+  preview: import('./lotScheme').LotFitPreview;
+  /** PUT only: true when the submitted format equals the one in force (nothing written). */
+  unchanged?: boolean;
+}
+
 export interface SupplierRow {
   id: string;
   tenant_id: string;

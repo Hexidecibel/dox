@@ -54,6 +54,7 @@ import { helpContent } from '../../lib/helpContent';
 import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
 import LotSchemeSelect from '../../components/LotSchemeSelect';
 import SupplierProductMapPanel from '../../components/SupplierProductMapPanel';
+import SupplierLotFormatPanel from '../../components/SupplierLotFormatPanel';
 import SupplierRequirementGaps from '../../components/SupplierRequirementGaps';
 import SupplierRequirementsEditor from '../../components/SupplierRequirementsEditor';
 import EntityNotes from '../../components/EntityNotes';
@@ -438,8 +439,11 @@ export function SupplierDetail() {
     if (tab === 0) loadProducts();
     else if (tab === 1) loadTemplates();
     else if (tab === 2) loadDocuments();
-    else if (tab === 3) loadInstructions();
-    else if (tab === 4) loadDocTypes();
+    // Tab 3 (Requirements) loads itself. These indices were left one behind
+    // when that tab was inserted, so Extraction Instructions, Document Types,
+    // Product Mapping and Notes each opened empty.
+    else if (tab === 4) loadInstructions();
+    else if (tab === 5) loadDocTypes();
   }, [tab, loadProducts, loadTemplates, loadDocuments, loadInstructions, loadDocTypes]);
 
   const openCreateDocType = () => {
@@ -796,6 +800,7 @@ export function SupplierDetail() {
           <Tab label="Document Types" />
           <Tab label="Product Mapping" />
           <Tab label="Notes" />
+          <Tab label="Lot format" />
         </Tabs>
       </Box>
 
@@ -1522,7 +1527,7 @@ export function SupplierDetail() {
       {/* an admin author maps for single-product suppliers too. Self-loads the */}
       {/* supplier's COA products and persists each pick via PUT /product-map.  */}
       <TabPanel value={tab} index={6}>
-        {tab === 5 && (
+        {tab === 6 && (
           <SupplierProductMapPanel
             tenantId={supplier.tenant_id}
             supplierId={supplier.id}
@@ -1541,7 +1546,7 @@ export function SupplierDetail() {
       {/* Mounted lazily like Product Mapping so the fetch only fires when the  */}
       {/* tab is actually opened.                                               */}
       <TabPanel value={tab} index={7}>
-        {tab === 6 && (
+        {tab === 7 && (
           <EntityNotes
             entityType="supplier"
             entityId={supplier.id}
@@ -1549,6 +1554,15 @@ export function SupplierDetail() {
             title={`Notes on ${supplier.name}`}
             description="No notes on this supplier yet. Notes are timestamped, attributed and permanent — use them for what happened, not for what the supplier is."
           />
+        )}
+      </TabPanel>
+
+      {/* Lot format Tab — the supplier's DECLARED lot format (migration 0109): */}
+      {/* template or segments, a live tester, and a read-only fit preview      */}
+      {/* against every lot on file. Mounted lazily like Notes.                 */}
+      <TabPanel value={tab} index={8}>
+        {tab === 8 && (
+          <SupplierLotFormatPanel supplierId={supplier.id} supplierName={supplier.name} canEdit={isAdmin} />
         )}
       </TabPanel>
     </Box>
