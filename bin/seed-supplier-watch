@@ -31,6 +31,13 @@
  *   --reason TEXT        why, stored on the required analytes
  *   --apply              actually write. Without it this is a dry run.
  *   --remote, -r         target PRODUCTION D1 (with --apply, asks you to type the tenant id)
+ *   --demo-certificate   LOCAL ONLY, with --apply: also put one pending COA from
+ *                        this supplier in the Review Queue whose results show
+ *                        every state (out of spec on the watch limit, could not
+ *                        check, a converted value, no limit configured, and a
+ *                        required analyte missing), plus a placeholder PDF in
+ *                        local R2 so it can be approved. Re-running replaces it.
+ *                        Approve it on `R2_BUCKET=doc-upload-files bin/dev-demo`.
  *   --json               print the plan as JSON
  *   -h, --help           this help
  *
@@ -49,7 +56,76 @@ const { buildWatchPlan, watchPlanToSql, formatWatchPlan } = require('./lib/suppl
 
 function printHelp() {
   const src = fs.readFileSync(__filename, 'utf8');
-  console.log(src.split('\n').slice(3, 38).join('\n').replace(/^ \* ?/gm, ''));
+  const end = src.split('\n').findIndex((l) => l.trim() === '*/');
+  console.log(src.split('\n').slice(2, end).join('\n').replace(/^ \* ?/gm, ''));
+}
+
+/**
+ * One pending COA whose results exercise every state the review queue can show
+ * for a supplier on watch. Records mode, so the per-row "No limit configured"
+ * chips render in the records tile. The analyte names are the ones most
+ * tenants configure; a name the tenant has not configured simply lands in
+ * "No limit configured", which is itself a state worth seeing.
+ */
+function demoCertificateSql({ tenantId, supplier, documentType }) {
+  const id = `watchdemo_${supplier.id}`.replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64);
+  const key = `pending/watch-demo/${id}/andersen-watch-demo.pdf`;
+  const payload = {
+    record_cardinality: 'single',
+    record_key_basis: 'lot',
+    page_metadata: { supplier_name: supplier.name },
+    records: [
+      {
+        record_index: 0,
+        fields: { product_name: 'Whole Milk (watch demo)', lot_number: 'WD-2026-0915' },
+        tables: [
+          {
+            name: 'Microbiology',
+            headers: ['Test', 'Result', 'Units'],
+            rows: [
+              ['Coliform', '5', 'CFU/g'],
+              ['Standard Plate Count', '<25000', 'CFU/g'],
+              ['Mold', '30000', 'CFU/100g'],
+              ['Somatic Cell Count', '180000', 'per ml'],
+              ['Butterfat', '3.5', '%'],
+            ],
+          },
+        ],
+        source_pages: [1],
+        _confidence: 0.95,
+      },
+    ],
+  };
+  const t = (v) => `'${String(v).replace(/'/g, "''")}'`;
+  return {
+    id,
+    key,
+    sql: [
+      `DELETE FROM processing_queue WHERE id = ${t(id)};`,
+      `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, ` +
+        `status, processing_status, output_kind, supplier, supplier_id, product_names, ai_records) VALUES (` +
+        `${t(id)}, ${t(tenantId)}, ${t(documentType.id)}, ${t(key)}, 'andersen-watch-demo.pdf', 1024, 'application/pdf', ` +
+        `'pending', 'ready', 'coa', ${t(supplier.name)}, ${t(supplier.id)}, 'Whole Milk (watch demo)', ${t(JSON.stringify(payload))});`,
+    ],
+  };
+}
+
+function putPlaceholderPdf(key) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-watch-demo-'));
+  const file = path.join(dir, 'placeholder.pdf');
+  fs.writeFileSync(
+    file,
+    '%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n' +
+      '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\nxref\n0 4\n0000000000 65535 f \n' +
+      'trailer<</Root 1 0 R/Size 4>>\nstartxref\n0\n%%EOF\n'
+  );
+  // Local bucket doc-upload-files, the one bin/stage-queue-files uses. bin/dev-demo
+  // binds a bucket literally named FILES unless run with R2_BUCKET=doc-upload-files.
+  execFileSync('npx', ['wrangler', 'r2', 'object', 'put', `doc-upload-files/${key}`, `--file=${file}`, '--content-type=application/pdf', '--local'], {
+    cwd: PROJECT_ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 function parseArgs(argv) {
@@ -65,6 +141,7 @@ function parseArgs(argv) {
     apply: false,
     remote: false,
     json: false,
+    demoCertificate: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -83,6 +160,7 @@ function parseArgs(argv) {
       case '--remote':
       case '-r': opts.remote = true; break;
       case '--json': opts.json = true; break;
+      case '--demo-certificate': opts.demoCertificate = true; break;
       case '-h':
       case '--help': printHelp(); process.exit(0); break;
       default:
@@ -96,6 +174,10 @@ function parseArgs(argv) {
   }
   if (!/^[A-Za-z0-9_-]+$/.test(opts.tenant)) {
     console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+    process.exit(2);
+  }
+  if (opts.demoCertificate && opts.remote) {
+    console.error('--demo-certificate is local only: it puts a fabricated certificate in the Review Queue.');
     process.exit(2);
   }
   return opts;
@@ -237,13 +319,20 @@ function main() {
   }
 
   const statements = watchPlanToSql(plan);
+  const demo = opts.demoCertificate ? demoCertificateSql({ tenantId: tenant.id, supplier, documentType }) : null;
   if (!opts.apply) {
     console.log(
       statements.length === 0
         ? 'DRY RUN — nothing to do; the database already has this watch.'
         : `DRY RUN — ${statements.length} statement(s) not executed. Re-run with --apply to write.`
     );
+    if (demo) console.log(`DRY RUN — would also queue demo certificate ${demo.id} (local).`);
     return;
+  }
+  if (demo) {
+    execSql(demo.sql, false);
+    putPlaceholderPdf(demo.key);
+    console.log(`Queued demo certificate ${demo.id} in the local Review Queue.`);
   }
   if (statements.length === 0) {
     console.log('Nothing to do — the database already has this watch.');

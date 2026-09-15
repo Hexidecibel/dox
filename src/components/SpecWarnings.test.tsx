@@ -153,7 +153,7 @@ describe('a missing required analyte is its own finding', () => {
       />
     );
     expect(screen.getByText('Watch period ended 2026-09-01 — review')).toBeTruthy();
-    expect(screen.getByTestId('spec-watch-overdue').textContent).toContain('still applies');
+    expect(screen.getByTestId('spec-watch-overdue').textContent).toContain('Still applies — supplier limit: Coliform');
   });
 
   it('puts an "incomplete" chip on the collapsed row', () => {

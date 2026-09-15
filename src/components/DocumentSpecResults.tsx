@@ -43,7 +43,13 @@ import {
 import { api } from '../lib/api';
 import type { ApiSpecCheck, ApiSpecGap } from '../lib/types';
 import { NO_LIMIT_CONFIGURED_LABEL, watchEndedLabel } from '../../shared/specCheck';
-import { COULD_NOT_CHECK_LABEL, ConversionChip, conversionFromSnapshot } from './SpecWarnings';
+import {
+  COULD_NOT_CHECK_LABEL,
+  ConversionChip,
+  MISSING_REQUIRED_COLOR,
+  conversionFromSnapshot,
+  missingRequiredChipSx,
+} from './SpecWarnings';
 
 /** Every state a printed result can be in, and how each one looks. */
 export type ResultState = 'in_spec' | 'out_of_spec' | 'not_checked' | 'unjudged' | 'missing_required';
@@ -67,7 +73,15 @@ export function ResultStateChip({ state }: { state: ResultState }) {
     case 'not_checked':
       return <Chip size="small" color="info" variant="outlined" icon={<NotCheckedIcon />} label={label} />;
     case 'missing_required':
-      return <Chip size="small" color="secondary" variant="outlined" icon={<MissingIcon />} label={label} />;
+      return (
+        <Chip
+          size="small"
+          variant="outlined"
+          icon={<MissingIcon sx={{ color: `${MISSING_REQUIRED_COLOR} !important` }} />}
+          label={label}
+          sx={missingRequiredChipSx}
+        />
+      );
     case 'in_spec':
       return <Chip size="small" color="success" variant="outlined" icon={<InSpecIcon />} label={label} />;
     default:

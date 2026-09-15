@@ -11,6 +11,12 @@
 # Port 8788 is often taken by an unrelated local service, so this defaults to
 # 8790. Override with:  PORT=9788 ./bin/dev-demo
 #
+# R2: by default the FILES binding gets a local bucket literally named "FILES"
+# (unchanged, so files uploaded through an earlier demo stay visible). Seed and
+# staging scripts (bin/stage-queue-files, bin/seed-supplier-watch
+# --demo-certificate) write to the wrangler.toml bucket instead; to approve what
+# they queued, run:  R2_BUCKET=doc-upload-files ./bin/dev-demo
+#
 # LOCAL ONLY — never touches remote/prod.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -18,7 +24,8 @@ cd "$(dirname "$0")/.."
 PORT="${PORT:-8790}"
 # database_id for binding "DB" (doc-upload-db) — see wrangler.toml.
 DB_ID="a89907f9-5f15-4cdb-9a7a-bd273feaf159"
+R2_ARG="FILES${R2_BUCKET:+=${R2_BUCKET}}"
 
-echo "Starting dox dev server on http://localhost:${PORT} (local D1 + R2)…"
+echo "Starting dox dev server on http://localhost:${PORT} (local D1 + R2 ${R2_ARG})…"
 echo "Login: a@a.a / a   Tenant: Medosweet Farms (medosweet_demo)"
-exec npx wrangler pages dev dist --d1 "DB=${DB_ID}" --r2 FILES --port "${PORT}"
+exec npx wrangler pages dev dist --d1 "DB=${DB_ID}" --r2 "${R2_ARG}" --port "${PORT}"

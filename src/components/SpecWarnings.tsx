@@ -171,7 +171,7 @@ export function ConversionChip({ conversion }: { conversion: UnitConversion | nu
       <Chip
         size="small"
         variant="outlined"
-        color={conversion.rule === 'tenant_volume_mass' ? 'secondary' : 'default'}
+        color="default"
         label={label}
         data-testid="spec-conversion-chip"
         sx={{ height: 20, fontSize: 11, ml: 0.5, verticalAlign: 'middle' }}
@@ -265,6 +265,14 @@ export function SpecRowMarker({
     </Box>
   );
 }
+
+/**
+ * Incomplete gets its own hue. The theme's `secondary` is a blue next to
+ * `info` (could not check), and the two findings must not be read as one — one
+ * says "verify this value", the other "a value you require is not there".
+ */
+export const MISSING_REQUIRED_COLOR = '#6b46c1';
+export const missingRequiredChipSx = { color: MISSING_REQUIRED_COLOR, borderColor: MISSING_REQUIRED_COLOR } as const;
 
 /** The one label for a result we held a limit for and could not apply. */
 export const COULD_NOT_CHECK_LABEL = 'Could not check — verify';
@@ -464,7 +472,7 @@ export function SpecWarningBanner({
       )}
       {missingByAnalyte.length > 0 && (
         <Box sx={{ mt: failures.length ? 1 : 0.5 }} data-testid="spec-missing-required">
-          <Typography variant="caption" sx={{ fontWeight: 700, color: 'secondary.main', display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <Typography variant="caption" sx={{ fontWeight: 700, color: MISSING_REQUIRED_COLOR, display: 'flex', alignItems: 'center', gap: 0.5 }}>
             <MissingIcon sx={{ fontSize: 14 }} />
             Incomplete — required for this supplier, not reported
           </Typography>
@@ -503,15 +511,22 @@ export function SpecWarningBanner({
       )}
       {watches.length > 0 && (
         <Box sx={{ mt: 1 }} data-testid="spec-watch-overdue">
-          {watches.map((w) => (
-            <Typography key={`${w.kind}:${w.id}`} variant="caption" sx={{ display: 'block' }}>
-              <WatchEndedChip reviewBy={w.review_by} />{' '}
-              {w.kind === 'limit'
-                ? `The supplier-specific ${w.analyte_name} limit still applies.`
-                : `${w.analyte_name} is still required from this supplier.`}{' '}
-              Extend or remove it in Settings › Spec Limits.
-            </Typography>
-          ))}
+          {/* One line per review-by date, not per rule: a watch is usually
+              written as one decision (a tighter limit plus a few required
+              analytes, all to be reviewed together). */}
+          {[...groupWatches(watches)].map(([reviewBy, group]) => {
+            const limitsHere = group.filter((w) => w.kind === 'limit').map((w) => w.analyte_name);
+            const requiredHere = group.filter((w) => w.kind === 'required_analyte').map((w) => w.analyte_name);
+            return (
+              <Typography key={reviewBy} variant="caption" sx={{ display: 'block' }}>
+                <WatchEndedChip reviewBy={reviewBy} /> Still applies —{' '}
+                {limitsHere.length > 0 && `supplier limit${limitsHere.length === 1 ? '' : 's'}: ${limitsHere.join(', ')}`}
+                {limitsHere.length > 0 && requiredHere.length > 0 && '; '}
+                {requiredHere.length > 0 && `required: ${requiredHere.join(', ')}`}. Extend or remove in
+                Settings › Spec Limits.
+              </Typography>
+            );
+          })}
         </Box>
       )}
       {noLimit.length > 0 && (
@@ -535,6 +550,17 @@ export function SpecWarningBanner({
       </Typography>
     </Alert>
   );
+}
+
+/** Overdue watches keyed by review-by date, earliest first. */
+function groupWatches(watches: OverdueWatchSummary[]): Map<string, OverdueWatchSummary[]> {
+  const out = new Map<string, OverdueWatchSummary[]>();
+  for (const w of [...watches].sort((a, b) => a.review_by.localeCompare(b.review_by))) {
+    const list = out.get(w.review_by) ?? [];
+    list.push(w);
+    out.set(w.review_by, list);
+  }
+  return out;
 }
 
 /** One line per missing analyte, however many records of the COA miss it. */
@@ -635,11 +661,10 @@ export function SpecAlertChip({
       <Tooltip key="missing" arrow title={missing.map((m) => m.message).join('\n')}>
         <Chip
           size="small"
-          color="secondary"
           variant="outlined"
-          icon={<MissingIcon sx={{ fontSize: 14 }} />}
+          icon={<MissingIcon sx={{ fontSize: 14, color: `${MISSING_REQUIRED_COLOR} !important` }} />}
           label={`incomplete: ${missing.length} required`}
-          sx={{ whiteSpace: 'pre-line', ml: 0.5 }}
+          sx={{ whiteSpace: 'pre-line', ml: 0.5, ...missingRequiredChipSx }}
         />
       </Tooltip>
     );

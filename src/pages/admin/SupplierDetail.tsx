@@ -790,7 +790,7 @@ export function SupplierDetail() {
 
       {/* Tabs */}
       <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-        <Tabs value={tab} onChange={(_, v) => setTab(v)}>
+        <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons="auto">
           <Tab label="Products" />
           <Tab label="Templates" />
           <Tab label={`Documents${documentsTotal ? ` (${documentsTotal})` : ''}`} />
