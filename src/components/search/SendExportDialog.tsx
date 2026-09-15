@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert,
   Box,
@@ -51,6 +51,16 @@ export function SendExportDialog({
   const [recipients, setRecipients] = useState('');
   const [onBehalfOf, setOnBehalfOf] = useState('');
   const [message, setMessage] = useState('');
+
+  // Cleared when the dialog closes: the next send is usually to somebody
+  // else, and a stale covering note carried into it would go out unread.
+  useEffect(() => {
+    if (!open) {
+      setRecipients('');
+      setOnBehalfOf('');
+      setMessage('');
+    }
+  }, [open]);
 
   const count = documents.length;
 
