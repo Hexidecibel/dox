@@ -1,5 +1,5 @@
 /**
- * Exact-duplicate detection at intake (migration 0107).
+ * Exact-duplicate detection at intake (migration 0108).
  *
  * The contract, per case, across the doors:
  *   1. identical to an APPROVED file -> no new review card; a ledger row links

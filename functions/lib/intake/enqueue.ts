@@ -15,7 +15,7 @@ import type { IntakeDuplicateNotice, IntakeRejectedMatch } from '../../../shared
  * connector-only columns `supplier_id` and `connector_run_id` (NULL when not
  * provided).
  *
- * EXACT DUPLICATES (migration 0107). Before inserting, the checksum is
+ * EXACT DUPLICATES (migration 0108). Before inserting, the checksum is
  * compared with what the tenant already holds (functions/lib/intake/duplicates.ts).
  * An arrival identical to an approved file, or to one still waiting in the
  * queue, does NOT become a row here: it is recorded in `intake_duplicates` and

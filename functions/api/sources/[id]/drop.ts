@@ -423,7 +423,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       // Still a 200 and still `queued: true` for an exact duplicate: the file
       // was received and stored, which is what a partner's integration needs
       // to know. It was not put in front of a reviewer a second time
-      // (migration 0107), so `queue_id` is null and `duplicate` says why. No
+      // (migration 0108), so `queue_id` is null and `duplicate` says why. No
       // document title crosses this boundary.
       queued: true,
       queue_id: enqueued.queueId,

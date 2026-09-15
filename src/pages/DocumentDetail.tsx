@@ -1385,7 +1385,7 @@ export function DocumentDetail() {
         </>
       )}
 
-      {/* Received again (migration 0107): this exact file arriving after it  */}
+      {/* Received again (migration 0108): this exact file arriving after it  */}
       {/* was first received. Renders nothing for a file that never has.      */}
       <ReceivedAgainPanel documentId={doc.id} />
 

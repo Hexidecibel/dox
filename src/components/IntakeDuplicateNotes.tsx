@@ -1,6 +1,6 @@
 /**
  * What intake knows about a file being byte-identical to something already
- * here (migration 0107), in the words a reviewer reads.
+ * here (migration 0108), in the words a reviewer reads.
  *
  *   IntakeHistoryChips   one-glance chips for the collapsed Review Queue row
  *   IntakeHistoryAlerts  the sentences on the opened card

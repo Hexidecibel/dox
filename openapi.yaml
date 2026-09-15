@@ -57,7 +57,7 @@ tags:
     description: |
       Files that arrived byte-identical to one already approved or already
       waiting in the Review Queue, recorded instead of queued a second time,
-      and "Review anyway" (migration 0107).
+      and "Review anyway" (migration 0108).
   - name: Spec Register
     description: |
       The out-of-spec register — every judged COA test result, which limit it
@@ -2663,7 +2663,7 @@ paths:
                     nullable: true
                     description: |
                       Set when the file is identical to one already approved or
-                      already waiting (0107); the arrival was linked to that
+                      already waiting (0108); the arrival was linked to that
                       instead of queued.
         '409':
           description: Already on the queue, or already linked to a document

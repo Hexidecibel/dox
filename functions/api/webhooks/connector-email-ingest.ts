@@ -131,7 +131,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const sourceDetail = `email:${payload.sender}`;
     // `queue_id` is null for an attachment that was an exact duplicate of a
-    // file already approved or already waiting (migration 0107); it is
+    // file already approved or already waiting (migration 0108); it is
     // recorded as received again instead, and `intake_duplicate_id` names the
     // record a reviewer can "Review anyway" from.
     const items: { queue_id: string | null; file_name: string; intake_duplicate_id?: string }[] = [];

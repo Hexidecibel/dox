@@ -1,5 +1,5 @@
 /**
- * Exact-duplicate detection at intake (migration 0107).
+ * Exact-duplicate detection at intake (migration 0108).
  *
  * THE RULE, IN ONE PLACE
  * ----------------------
@@ -449,7 +449,7 @@ function emptyHistory(): QueueIntakeHistory {
  * Batch-load `intake_history` for a page of queue items. A fixed handful of
  * queries per page regardless of page size; best-effort (a failure returns
  * empty histories rather than failing the queue read, and an environment
- * without 0107 behaves as if nothing was ever suppressed).
+ * without 0108 behaves as if nothing was ever suppressed).
  */
 export async function loadQueueIntakeHistory(
   db: D1Database,

@@ -170,7 +170,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         queued: true,
         queue_id: enqueued.queueId,
         // An exact duplicate of a file already approved or already waiting is
-        // recorded as received again rather than queued twice (migration 0107).
+        // recorded as received again rather than queued twice (migration 0108).
         intake_duplicate: enqueued.outcome === 'duplicate' ? enqueued.duplicate : null,
         run_id: connectorRunId,
       }),

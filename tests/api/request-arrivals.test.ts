@@ -551,7 +551,7 @@ describe('amendments, re-uploads and files', () => {
     const a = await arrive(['Allergen Statement']);
     // Simulate the enqueue failure the upload door tolerates: no queue item
     // was ever made. (Leaving the original item in place would make this file
-    // an exact duplicate of one already waiting, which since 0107 links the
+    // an exact duplicate of one already waiting, which since 0108 links the
     // arrival to that item instead of queueing it again.)
     await db.prepare('UPDATE request_uploads SET queue_id = NULL WHERE id = ?').bind(a.uploadId).run();
     await db.prepare('DELETE FROM processing_queue WHERE id = ?').bind(a.queueId).run();

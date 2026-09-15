@@ -1,4 +1,4 @@
--- Migration 0107: a file we have already seen does not become a second review.
+-- Migration 0108: a file we have already seen does not become a second review.
 --
 -- WHY
 -- ---

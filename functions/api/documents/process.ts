@@ -217,7 +217,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       await uploadFile(context.env.FILES, r2Key, fileData, mimeType);
 
       // Create queue entry — unless this exact file is already approved or
-      // already waiting (migration 0107), in which case the shared helper
+      // already waiting (migration 0108), in which case the shared helper
       // records it as received again and no second card is made.
       const enqueued = await enqueueDocument(context.env.DB, {
         id: queueId,
@@ -236,7 +236,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         clientIp: context.request.headers.get('cf-connecting-ip'),
       });
 
-      // `duplicate` keeps its pre-0107 shape (the uploader is staff in this
+      // `duplicate` keeps its pre-0108 shape (the uploader is staff in this
       // tenant, so naming the document is fine here).
       let duplicate: { document_id: string; document_title: string; file_name: string } | null = null;
       if (enqueued.outcome === 'duplicate' && enqueued.duplicate.matched_document_id) {

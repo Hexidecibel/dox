@@ -147,7 +147,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       })
     );
 
-    // Exact-duplicate facts (migration 0107): what else arrived identical to
+    // Exact-duplicate facts (migration 0108): what else arrived identical to
     // each card, and whether this exact file was rejected or approved before.
     // One batch for the page, not a query per row.
     const history = await loadQueueIntakeHistory(

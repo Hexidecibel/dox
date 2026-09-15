@@ -64,7 +64,7 @@ export interface PollConnectorSummary {
   /**
    * Of `dispatched`, how many were byte-identical to a file already approved
    * or already waiting, and so were recorded as received again instead of
-   * queued (migration 0107). Still dispatched: the key is marked processed.
+   * queued (migration 0108). Still dispatched: the key is marked processed.
    */
   received_again?: number;
   errors: string[];

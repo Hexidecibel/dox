@@ -1,5 +1,5 @@
 /**
- * The staff side of exact-duplicate intake (migration 0107): reading the
+ * The staff side of exact-duplicate intake (migration 0108): reading the
  * ledger, and "Review anyway".
  *
  * The rule itself lives in ./duplicates.ts. This module never suppresses

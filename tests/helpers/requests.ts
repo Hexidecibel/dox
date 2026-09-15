@@ -175,7 +175,7 @@ export async function upload(
   opts: { name?: string; type?: string; bytes?: number; label?: string; content?: Uint8Array } = {},
 ): Promise<{ status: number; body: unknown }> {
   const form = new FormData();
-  // Unique bytes by default: since migration 0107 an upload byte-identical to
+  // Unique bytes by default: since migration 0108 an upload byte-identical to
   // one already waiting or approved is linked to it instead of queued, so a
   // fixed buffer would couple every test in a file. Pass `content` to send the
   // same file twice on purpose.

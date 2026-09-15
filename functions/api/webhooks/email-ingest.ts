@@ -42,7 +42,7 @@ const EMAIL_LLM_TEXT_CHAR_LIMIT = 6000;
 interface EmailIngestResult {
   fileName: string;
   status: 'ingested' | 'queued' | 'duplicate' | 'skipped' | 'error';
-  /** Set when status is 'duplicate' (migration 0107). */
+  /** Set when status is 'duplicate' (migration 0108). */
   intakeDuplicateId?: string;
   documentId?: string;
   queueId?: string;
@@ -183,7 +183,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const fileData = await file.arrayBuffer();
         const checksum = await computeChecksum(fileData);
 
-        // EXACT DUPLICATE CHECK (migration 0107), before any model is called.
+        // EXACT DUPLICATE CHECK (migration 0108), before any model is called.
         // This door inserts its own queue row (it extracts inline), so it asks
         // the shared admission helper directly rather than through
         // enqueueDocument — same rule, same ledger, same audit rows. A

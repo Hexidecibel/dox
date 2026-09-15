@@ -24,7 +24,7 @@ const db = env.DB;
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 
 function makePdfBlob(): Blob {
-  // Unique per call: since migration 0107 an attachment byte-identical to one
+  // Unique per call: since migration 0108 an attachment byte-identical to one
   // already queued is recorded as received again, not queued a second time.
   const bytes = new TextEncoder().encode(`%PDF-1.4\n%fake payload ${crypto.randomUUID()}\n`);
   return new Blob([bytes], { type: 'application/pdf' });

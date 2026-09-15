@@ -537,7 +537,7 @@ async function linkApprovedDocumentToRequestUpload(
   combined = false
 ): Promise<void> {
   try {
-    // Usually one arrival per queue item. Since 0107 there can be several: a
+    // Usually one arrival per queue item. Since 0108 there can be several: a
     // byte-identical upload that arrived while this item was still waiting is
     // pointed at this item instead of getting a second card, so every arrival
     // on it is linked here.

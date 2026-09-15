@@ -239,14 +239,14 @@ export interface EnqueueSupplierUploadResult {
   queueId: string | null;
   /**
    * Set when the file was byte-identical to one already approved or already
-   * waiting (migration 0107). The arrival was linked to that instead. Both
+   * waiting (migration 0108). The arrival was linked to that instead. Both
    * NULL means the enqueue failed (audited as `request_link.enqueue_failed`).
    */
   duplicate: IntakeDuplicateNotice | null;
 }
 
 /**
- * An exact duplicate still has to exist for staff as an arrival (0107). The
+ * An exact duplicate still has to exist for staff as an arrival (0108). The
  * supplier's upload already succeeded and their lines already moved to
  * `received`; what changes is only which existing thing the arrival points at,
  * so nobody reviews the same bytes twice:

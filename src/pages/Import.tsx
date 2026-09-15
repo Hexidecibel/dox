@@ -81,7 +81,7 @@ interface QueuedItem {
   processingStatus: string;
   result?: ProcessingQueueItem;
   duplicate?: { document_id: string; document_title: string; file_name: string } | null;
-  /** Not queued: this exact file is already approved or already waiting (0107). */
+  /** Not queued: this exact file is already approved or already waiting (0108). */
   intakeDuplicate?: IntakeDuplicateNotice | null;
   /** Set once "Review anyway" put it in the queue after all. */
   sentAnyway?: boolean;

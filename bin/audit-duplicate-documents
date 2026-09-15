@@ -5,7 +5,7 @@
  * approved more than once. REPORT ONLY.
  *
  * WHY
- *   Until migration 0107 nothing at intake compared checksums, so the same
+ *   Until migration 0108 nothing at intake compared checksums, so the same
  *   email forwarded twice became two queue items and, on prod, two approved
  *   documents — each with its own spec register rows, which then read as
  *   duplicate results. Intake now records a repeat arrival instead of queueing

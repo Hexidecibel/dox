@@ -215,7 +215,7 @@ export default function ReviewQueue() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('pending');
-  // "Received again" (migration 0107): files byte-identical to one already
+  // "Received again" (migration 0108): files byte-identical to one already
   // approved or already waiting, recorded instead of queued. A view beside the
   // status filters rather than a status, because those rows are not queue
   // items. ?view=received-again opens it directly.

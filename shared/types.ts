@@ -1807,13 +1807,13 @@ export interface ProcessingQueueItem {
   renewal_proposal?: ResolvedRenewal;
   /**
    * What intake knows about this exact file (byte-identical, by checksum) —
-   * migration 0107. Computed when the queue is read; never blocks an approval.
+   * migration 0108. Computed when the queue is read; never blocks an approval.
    */
   intake_history?: QueueIntakeHistory;
 }
 
 // ---------------------------------------------------------------------------
-// Exact-duplicate intake (migration 0107)
+// Exact-duplicate intake (migration 0108)
 // ---------------------------------------------------------------------------
 
 /**
@@ -1989,7 +1989,7 @@ export interface QueuedResponse {
     } | null;
     /**
      * Set when this exact file was already approved or is already waiting, so
-     * no new review card was made (migration 0107). "Review anyway" is
+     * no new review card was made (migration 0108). "Review anyway" is
      * POST /api/intake-duplicates/:intake_duplicate_id/review.
      */
     intake_duplicate?: IntakeDuplicateNotice | null;

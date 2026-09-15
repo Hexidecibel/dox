@@ -1,6 +1,6 @@
 /**
  * IntakeDuplicateNotes — what a reviewer is told about a file that arrived
- * byte-identical to one already here (migration 0107).
+ * byte-identical to one already here (migration 0108).
  *
  *   1. A card whose exact file was rejected before says when and why, so a
  *      resend is judged knowingly rather than approved blind.

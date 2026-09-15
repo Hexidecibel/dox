@@ -320,7 +320,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         queued: true,
         queue_id: enqueued.queueId,
         // A retry of a file that has since been approved (or is already
-        // waiting) is recorded as received again, not queued twice (0107).
+        // waiting) is recorded as received again, not queued twice (0108).
         intake_duplicate: enqueued.outcome === 'duplicate' ? enqueued.duplicate : null,
         run_id: connectorRunId,
         retry_of_run_id: run.id,

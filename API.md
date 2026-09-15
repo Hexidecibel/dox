@@ -1078,7 +1078,7 @@ Response: `{ "arrival": RequestArrival, "counts": DocumentRequestLineCounts }`.
 
 ## Files Received Again (exact duplicates)
 
-Every intake door computes a SHA-256 of the bytes. Before a file becomes a Review Queue card it is compared with what **the same tenant** already holds (migration 0107, `functions/lib/intake/duplicates.ts`, called from `enqueueDocument` so every door shares it):
+Every intake door computes a SHA-256 of the bytes. Before a file becomes a Review Queue card it is compared with what **the same tenant** already holds (migration 0108, `functions/lib/intake/duplicates.ts`, called from `enqueueDocument` so every door shares it):
 
 | The identical file is… | What happens |
 |---|---|

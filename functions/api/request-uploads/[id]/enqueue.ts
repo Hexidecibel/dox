@@ -98,7 +98,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       actorId: user.id,
     });
     if (duplicate) {
-      // The exact file is already approved or already waiting (0107). The
+      // The exact file is already approved or already waiting (0108). The
       // arrival now points at that, and the ledger row can still be sent for
       // review anyway from the Review Queue.
       return json({ arrival: await loadArrival(db, tenantId, upload.id), intake_duplicate: duplicate });
