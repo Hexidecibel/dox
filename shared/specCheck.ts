@@ -185,6 +185,12 @@ export interface SpecVerdict {
    * absent as `DEFAULT_SPEC_CRITICALITY`.
    */
   criticality?: SpecCriticality;
+  /**
+   * Set when the governing limit is a supplier WATCH with a review-by date
+   * (migration 0107). The limit applied either way; `review_overdue` says the
+   * period ended and a person should extend or remove it.
+   */
+  watch?: WatchStatus;
 }
 
 /**
@@ -1681,6 +1687,47 @@ export interface ConfiguredLimit {
   product_id: string | null;
   /** Tie-breaker when two limits are equally specific. */
   updated_at?: string | null;
+  /**
+   * When a supplier-scoped limit's WATCH PERIOD is due for review (migration
+   * 0107), as YYYY-MM-DD. Passing it never loosens anything — the limit keeps
+   * applying and the verdict is flagged instead. See `watchStatus`.
+   */
+  review_by?: string | null;
+}
+
+/**
+ * A watch period's state at the moment of judgement.
+ *
+ * SME ruling (2026-09-14): a supplier under watch gets tighter limits and extra
+ * required analytes for a period, then returns to company defaults — and
+ * "nobody remembers to loosen by hand". The date is the reminder. It is NOT an
+ * expiry: after it passes the tighter rule STILL APPLIES, because the unsafe
+ * failure is a watch that quietly lapsed and let a supplier back onto looser
+ * limits nobody chose. What changes is that every surface says the period
+ * ended and asks a person to extend it or remove it.
+ */
+export interface WatchStatus {
+  review_by: string;
+  /** True once `as_of` is AFTER `review_by` (the review-by day itself is still inside the period). */
+  review_overdue: boolean;
+}
+
+/** Normalize a stored date to YYYY-MM-DD, or null when it is not one. */
+export function isoDay(raw: unknown): string | null {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(raw ?? '').trim());
+  return m ? m[1] : null;
+}
+
+/**
+ * The watch state for a review-by date as of a day. Null when there is no date.
+ * Without an `asOf` nothing can be overdue: this module holds no clock, and
+ * guessing "today" here would make a pure function time-dependent.
+ */
+export function watchStatus(reviewBy: unknown, asOf?: string | null): WatchStatus | null {
+  const day = isoDay(reviewBy);
+  if (!day) return null;
+  const today = isoDay(asOf);
+  return { review_by: day, review_overdue: !!today && today > day };
 }
 
 /** What the document being reviewed is, for scope resolution. */
@@ -1800,7 +1847,41 @@ export interface ConfiguredCheckResult {
    * judge. An unlabelled row appears as `row N` rather than being omitted.
    */
   non_measurement_rows: string[];
+  /**
+   * Printed results NOBODY judged: no configured limit applies to the analyte,
+   * and the certificate prints no specification for it either (SME ruling,
+   * 2026-09-14). A superset of `unmatched`'s names with the evidence attached,
+   * because the portal must render "No limit configured" on the value itself
+   * rather than imply an assurance it did not give. Distinct from `not_checked`,
+   * which means we HELD a limit and could not apply it.
+   */
+  unjudged: UnjudgedResult[];
 }
+
+/**
+ * One printed result that was not judged because nothing to judge it against
+ * exists. `why` is the rule that left it unjudged:
+ *   'no_analyte'         the printed name matches no configured analyte
+ *   'no_limit_in_scope'  it matches one, but no limit applies to this supplier /
+ *                        document type
+ */
+export interface UnjudgedResult {
+  scope: string;
+  target: SpecTarget;
+  test_name_raw: string;
+  value_raw: string;
+  unit_raw: string | null;
+  state: 'unjudged';
+  why: 'no_analyte' | 'no_limit_in_scope';
+  spec_test_id: string | null;
+  /** The lab's own "Pass"/"Fail" where a number belongs, when it printed one. Not a verdict. */
+  lab_verdict?: 'pass' | 'fail';
+  reason: string;
+  message: string;
+}
+
+/** The one label every surface uses for an unjudged result. */
+export const NO_LIMIT_CONFIGURED_LABEL = 'No limit configured';
 
 /**
  * CROSSTAB TABLES — a shape `detectTableShape` cannot describe.
@@ -1994,7 +2075,7 @@ export function checkConfiguredLimits(
   tests: SpecTestDef[],
   limits: ConfiguredLimit[],
   ctx: LimitContext,
-  opts: { includePasses?: boolean; unitPolicy?: UnitPolicy } = {}
+  opts: { includePasses?: boolean; unitPolicy?: UnitPolicy; asOf?: string | null } = {}
 ): ConfiguredCheckResult {
   const policy = opts.unitPolicy ?? STRICT_UNIT_POLICY;
   const resolved = resolveSpecLimits(limits, ctx);
@@ -2002,9 +2083,50 @@ export function checkConfiguredLimits(
   const unmatched = new Set<string>();
   const controlRows = new Set<string>();
   const nonMeasurementRows = new Set<string>();
-  if (tests.length === 0) {
-    return { verdicts, unmatched: [], control_rows: [], non_measurement_rows: [] };
-  }
+  const unjudged: UnjudgedResult[] = [];
+  // No early return for a tenant with no analytes: every printed result is
+  // then UNJUDGED, and saying so is the point (SME ruling, 2026-09-14). The
+  // crosstab detector needs analytes to recognise a crosstab, so it simply
+  // finds none; ordinary tables are still walked.
+
+  /**
+   * A printed result with nothing to judge it against. Recorded with the rule
+   * that left it unjudged — but only when the certificate prints no
+   * specification of its own for the row and does not call it a failure: a row
+   * the printed-spec pass judged is not unjudged, whatever we hold.
+   */
+  const noteUnjudged = (
+    scope: string,
+    target: SpecTarget,
+    testName: string,
+    valueRaw: string,
+    unitRaw: string,
+    specRaw: string,
+    verdictRaw: string,
+    matched: SpecTestDef | null
+  ) => {
+    if (isBlankResult(valueRaw)) return;
+    if (parseLimitExpression(specRaw)) return;
+    const labWord = readVerdictWord(verdictRaw || valueRaw);
+    if (labWord === 'fail') return;
+    const printed = `${valueRaw}${unitRaw && !isEmptyCell(unitRaw) && !trailingUnit(valueRaw) ? ` ${unitRaw}` : ''}`;
+    const reason = matched
+      ? `${matched.name} is a configured analyte, but no limit applies to this supplier and document type, and the certificate prints no specification for it`
+      : 'no configured analyte matches this name, and the certificate prints no specification for it';
+    unjudged.push({
+      scope,
+      target,
+      test_name_raw: testName,
+      value_raw: valueRaw,
+      unit_raw: unitRaw || null,
+      state: 'unjudged',
+      why: matched ? 'no_limit_in_scope' : 'no_analyte',
+      spec_test_id: matched ? matched.id : null,
+      ...(labWord ? { lab_verdict: labWord } : {}),
+      reason,
+      message: `${testName}: ${NO_LIMIT_CONFIGURED_LABEL.toLowerCase()} — ${printed} was printed and not judged.`,
+    });
+  };
 
   const judge = (
     scope: string,
@@ -2022,22 +2144,32 @@ export function checkConfiguredLimits(
      * comparable to the very thing it is being judged against, which is the
      * failure the refusal exists to prevent.
      */
-    unitHint: { unit: string; from: UnitOrigin } | null = null
+    unitHint: { unit: string; from: UnitOrigin } | null = null,
+    /** The row's pass/fail column, when the table has one. Only read to keep a
+     *  printed failure out of the unjudged list — it was judged, by the COA. */
+    verdictRaw = ''
   ) => {
     if (!testName) return;
     const test = matchSpecTest(testName, tests);
     if (!test) {
       unmatched.add(testName);
+      noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, null);
       return;
     }
     const configured = resolved.get(test.id);
     if (!configured) {
       unmatched.add(testName);
+      noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, test);
       return;
     }
     if (isBlankResult(valueRaw)) return;
 
     const limit = toSpecLimit(configured, test);
+    // A supplier watch rides along on EVERY verdict its limit produces —
+    // passes, failures and refusals alike — so a lapsed watch is visible
+    // wherever the result is, not only when something failed.
+    const watch = watchStatus(configured.review_by, opts.asOf);
+    const watched = watch ? { watch } : {};
 
     // Our limit is usually TIGHTER than what the supplier certifies against, so
     // this path is precisely where a spec restated in the result column would
@@ -2056,6 +2188,7 @@ export function checkConfiguredLimits(
         limit_id: configured.id,
         criticality: parseSpecCriticality(configured.criticality),
         value_num: null,
+        ...watched,
         reason: RESTATED_SPEC_REASON,
         verdict: 'not_checked',
         message: `${test.name} could not be judged against our limit of ${limitTextOnly} — ${RESTATED_SPEC_REASON}.`,
@@ -2102,6 +2235,7 @@ export function checkConfiguredLimits(
         limit_id: configured.id,
         criticality: parseSpecCriticality(configured.criticality),
         value_num: null,
+        ...watched,
         lab_verdict: labVerdict,
         verdict: 'not_checked',
         reason,
@@ -2163,6 +2297,7 @@ export function checkConfiguredLimits(
       ...(cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {}),
       ...(cmp.conversion ? { conversion: cmp.conversion } : {}),
       ...(inferred ? { unit_inferred_from: inferred.from } : {}),
+      ...watched,
     };
 
     if (cmp.verdict === 'out_of_spec') {
@@ -2280,7 +2415,8 @@ export function checkConfiguredLimits(
           cell(shape.result),
           cell(shape.unit),
           cell(shape.spec),
-          headerHint
+          headerHint,
+          cell(shape.verdict)
         );
       });
     });
@@ -2306,6 +2442,7 @@ export function checkConfiguredLimits(
     unmatched: [...unmatched],
     control_rows: [...controlRows],
     non_measurement_rows: [...nonMeasurementRows],
+    unjudged,
   };
 }
 
@@ -2322,6 +2459,232 @@ function unitHintFor(header: unknown, unitsRowCell: string): { unit: string; fro
   const cell = unitsRowCell.trim();
   if (cell && isKnownUnit(cell)) return { unit: cell, from: 'units_row' };
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Completeness — required analytes per supplier (migration 0107)
+// ---------------------------------------------------------------------------
+
+/**
+ * A `supplier_required_analytes` row: an analyte this supplier's certificates of
+ * this document type MUST report.
+ *
+ * SME ruling (2026-09-14): whatever the supplier's COA reports counts as
+ * complete BY DEFAULT. Only this configuration can make a COA incomplete — so a
+ * tenant that has written no rows gets no completeness findings at all, and a
+ * supplier "on watch" gets extra analytes it must report for the watch period.
+ */
+export interface RequiredAnalyte {
+  id: string;
+  spec_test_id: string;
+  supplier_id: string;
+  document_type_id: string;
+  /** YYYY-MM-DD; before this day the requirement does not apply yet. */
+  effective_from?: string | null;
+  /** YYYY-MM-DD; after this day the requirement STILL applies and is flagged. */
+  review_by?: string | null;
+  reason?: string | null;
+}
+
+/**
+ * A required analyte the certificate did not report. Its own state — never a
+ * pass, never folded into `not_checked` (which means a result WAS printed and
+ * could not be compared).
+ *
+ * `why` is the rule that fired:
+ *   'not_on_certificate'  no printed name matched the analyte or any alias
+ *   'no_result'           it is printed, but the result cell is blank or a
+ *                         placeholder ("Pending", "Not tested")
+ */
+export interface MissingRequiredAnalyte {
+  /** Which bundle it is missing from: 'ai_fields' or 'record[N]'. */
+  scope: string;
+  state: 'missing_required';
+  requirement_id: string;
+  spec_test_id: string;
+  analyte_name: string;
+  why: 'not_on_certificate' | 'no_result';
+  /** The printed name, when `why` is 'no_result'. */
+  printed_as: string | null;
+  watch: WatchStatus | null;
+  requirement_reason: string | null;
+  reason: string;
+  message: string;
+}
+
+/** Does this requirement apply to this document on this day? */
+export function requiredAnalyteApplies(
+  r: RequiredAnalyte,
+  ctx: LimitContext,
+  asOf?: string | null
+): boolean {
+  if (!ctx.supplier_id || r.supplier_id !== ctx.supplier_id) return false;
+  if (!ctx.document_type_id || r.document_type_id !== ctx.document_type_id) return false;
+  const from = isoDay(r.effective_from);
+  const today = isoDay(asOf);
+  // Not yet effective only when both days are known; an unknown "today" never
+  // silently disables a requirement somebody wrote.
+  if (from && today && today < from) return false;
+  return true;
+}
+
+/**
+ * Which configured analytes a set of sources REPORTS, matched by name and
+ * alias exactly as limits are (`matchSpecTest`). `withResult` is false when the
+ * analyte is printed only beside a blank or placeholder result.
+ */
+function reportedAnalytes(
+  sources: SpecSource[],
+  tests: SpecTestDef[]
+): Map<string, { withResult: boolean; printedAs: string }> {
+  const out = new Map<string, { withResult: boolean; printedAs: string }>();
+  const note = (name: string, value: string) => {
+    const t = matchSpecTest(name, tests);
+    if (!t) return;
+    const has = !isBlankResult(value) && !isDateOrTimeCell(value);
+    const prev = out.get(t.id);
+    if (!prev || (!prev.withResult && has)) out.set(t.id, { withResult: has, printedAs: name });
+  };
+  for (const src of sources) {
+    for (const table of src.tables ?? []) {
+      const headers = table.headers || [];
+      const rows = table.rows || [];
+      const shape = detectTableShape(headers);
+      if (shape.result === -1 && shape.spec === -1) {
+        const cross = detectCrosstab(headers, tests);
+        if (cross) {
+          for (const ci of cross.resultIndexes) {
+            const header = headers[ci] ?? '';
+            const product = rows.filter(
+              (r) => !isControlRowLabel(cross.labelIndex >= 0 ? r[cross.labelIndex] : '')
+            );
+            if (product.length === 0) note(header, '');
+            for (const r of product) note(header, String(r[ci] ?? '').trim());
+          }
+          continue;
+        }
+      }
+      // A result column, or failing that the lab's own pass/fail column: "Pass"
+      // with no number is still the lab reporting the analyte. Whether it can
+      // be judged is the limit check's question, answered there.
+      const valueCol = shape.result !== -1 ? shape.result : shape.verdict;
+      if (valueCol === -1 || shape.test === -1) continue;
+      for (const r of rows) {
+        note(String(r[shape.test] ?? '').trim(), String(r[valueCol] ?? '').trim());
+      }
+    }
+    for (const cells of Object.values(src.groups ?? {})) {
+      if (!cells || typeof cells !== 'object') continue;
+      for (const [cellName, cell] of Object.entries(cells)) {
+        if (!cell || typeof cell !== 'object') continue;
+        note(cellName.replace(/_/g, ' '), String(cell.value ?? '').trim());
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Report every required analyte this document's certificate did not report.
+ *
+ * PER RECORD. A records-mode COA becomes one document per record, and a lot
+ * whose own table omits coliform is incomplete even when the lot beside it
+ * printed one — so each `record[N]` is judged on its own sources plus any
+ * page-level ones (a header table applies to every record). A flat extraction
+ * is judged once, under 'ai_fields'. No sources at all is still judged: a
+ * certificate that yielded no results table reported nothing, and the message
+ * says so rather than calling it complete.
+ */
+export function checkRequiredAnalytes(
+  sources: SpecSource[],
+  tests: SpecTestDef[],
+  required: RequiredAnalyte[],
+  ctx: LimitContext,
+  opts: { asOf?: string | null } = {}
+): MissingRequiredAnalyte[] {
+  const applicable = required.filter((r) => requiredAnalyteApplies(r, ctx, opts.asOf));
+  if (applicable.length === 0) return [];
+
+  const isRecord = (s: SpecSource) => /^record\[\d+\]$/.test(s.scope);
+  const shared = sources.filter((s) => !isRecord(s));
+  const recordScopes = [...new Set(sources.filter(isRecord).map((s) => s.scope))];
+  const units =
+    recordScopes.length > 0
+      ? recordScopes.map((scope) => ({ scope, sources: [...sources.filter((s) => s.scope === scope), ...shared] }))
+      : [{ scope: shared[0]?.scope ?? 'ai_fields', sources: shared }];
+  const noResults = sources.every((s) => (s.tables ?? []).length === 0 && Object.keys(s.groups ?? {}).length === 0);
+
+  const byId = new Map(tests.map((t) => [t.id, t]));
+  const out: MissingRequiredAnalyte[] = [];
+  for (const unit of units) {
+    const reported = reportedAnalytes(unit.sources, tests);
+    for (const r of applicable) {
+      const seen = reported.get(r.spec_test_id);
+      if (seen?.withResult) continue;
+      const name = byId.get(r.spec_test_id)?.name ?? 'A required analyte';
+      const watch = watchStatus(r.review_by, opts.asOf);
+      const why = seen ? 'no_result' : 'not_on_certificate';
+      const reason =
+        why === 'no_result'
+          ? `required for this supplier, printed as "${seen!.printedAs}" with no result`
+          : noResults
+            ? 'required for this supplier, and no test results were read from this certificate at all'
+            : 'required for this supplier, and not reported on this certificate under its name or any alias';
+      out.push({
+        scope: unit.scope,
+        state: 'missing_required',
+        requirement_id: r.id,
+        spec_test_id: r.spec_test_id,
+        analyte_name: name,
+        why,
+        printed_as: seen ? seen.printedAs : null,
+        watch,
+        requirement_reason: r.reason ?? null,
+        reason,
+        message:
+          why === 'no_result'
+            ? `${name} is required for this supplier and was printed with no result — the certificate is incomplete.`
+            : `${name} is required for this supplier and is not on this certificate — the certificate is incomplete.`,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Every watch in force for this document whose review-by day has passed: the
+ * resolved supplier-scoped limits and the applicable required analytes. Read by
+ * the review queue to say "watch period ended — review" whether or not any
+ * result on this certificate happened to fail.
+ */
+export function overdueWatches(
+  tests: SpecTestDef[],
+  limits: ConfiguredLimit[],
+  required: RequiredAnalyte[],
+  ctx: LimitContext,
+  asOf: string | null | undefined
+): Array<{ kind: 'limit' | 'required_analyte'; id: string; spec_test_id: string; analyte_name: string; review_by: string }> {
+  const name = (id: string) => tests.find((t) => t.id === id)?.name ?? 'an analyte';
+  const out: Array<{ kind: 'limit' | 'required_analyte'; id: string; spec_test_id: string; analyte_name: string; review_by: string }> = [];
+  for (const l of resolveSpecLimits(limits, ctx).values()) {
+    const w = watchStatus(l.review_by, asOf);
+    if (w?.review_overdue) {
+      out.push({ kind: 'limit', id: l.id, spec_test_id: l.spec_test_id, analyte_name: name(l.spec_test_id), review_by: w.review_by });
+    }
+  }
+  for (const r of required) {
+    if (!requiredAnalyteApplies(r, ctx, asOf)) continue;
+    const w = watchStatus(r.review_by, asOf);
+    if (w?.review_overdue) {
+      out.push({ kind: 'required_analyte', id: r.id, spec_test_id: r.spec_test_id, analyte_name: name(r.spec_test_id), review_by: w.review_by });
+    }
+  }
+  return out;
+}
+
+/** "Watch period ended 2026-10-01 — review", the one phrasing every surface uses. */
+export function watchEndedLabel(reviewBy: string): string {
+  return `Watch period ended ${reviewBy} — review`;
 }
 
 /**

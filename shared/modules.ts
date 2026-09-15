@@ -114,7 +114,15 @@ export const MODULES: Record<ModuleKey, ModuleDefinition> = {
       'For the person who answers to the auditor — what expires soon, what came back out of spec, and evidence that somebody was told.',
     defaultEnabled: true,
     uiPrefixes: ['/expirations', '/spec-alerts'],
-    apiPrefixes: ['/api/expirations', '/api/spec-checks', '/api/spec-limits', '/api/spec-tests', '/api/spec-unit-policy'],
+    apiPrefixes: [
+      '/api/expirations',
+      '/api/spec-checks',
+      '/api/spec-gaps',
+      '/api/spec-limits',
+      '/api/spec-required-analytes',
+      '/api/spec-tests',
+      '/api/spec-unit-policy',
+    ],
   },
   fulfillment: {
     key: 'fulfillment',

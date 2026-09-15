@@ -583,13 +583,15 @@ describe('checkConfiguredLimits — our limit, not theirs', () => {
     expect(r.verdicts[0].message).toMatch(/could not be judged against our limit/);
   });
 
-  it('does nothing at all when the tenant has configured no analytes', () => {
-    expect(checkConfiguredLimits(src([['Coliform', '', '40', 'CFU/g']]), [], [], {})).toEqual({
-      verdicts: [],
-      unmatched: [],
-      control_rows: [],
-      non_measurement_rows: [],
-    });
+  it('judges nothing when the tenant has configured no analytes — and says every result was unjudged', () => {
+    // SME ruling 2026-09-14: a printed analyte with no limit renders "No limit
+    // configured" rather than silence, so a tenant with nothing configured sees
+    // that nothing was judged instead of a clean-looking certificate.
+    const r = checkConfiguredLimits(src([['Coliform', '', '40', 'CFU/g']]), [], [], {});
+    expect(r.verdicts).toEqual([]);
+    expect(r.unmatched).toEqual(['Coliform']);
+    expect(r.unjudged).toHaveLength(1);
+    expect(r.unjudged[0]).toMatchObject({ state: 'unjudged', why: 'no_analyte', test_name_raw: 'Coliform' });
   });
 });
 

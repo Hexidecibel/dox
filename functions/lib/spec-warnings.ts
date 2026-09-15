@@ -20,7 +20,14 @@
  * SAME CONTRACT AS THE INVARIANTS: never throws, never blocks, advisory only.
  */
 
-import { checkPrintedSpecs, checkConfiguredLimits, STRICT_UNIT_POLICY } from '../../shared/specCheck';
+import {
+  checkPrintedSpecs,
+  checkConfiguredLimits,
+  checkRequiredAnalytes,
+  overdueWatches,
+  isoDay,
+  STRICT_UNIT_POLICY,
+} from '../../shared/specCheck';
 import { parseSpecCriticality } from '../../shared/specCriticality';
 import type {
   SpecSource,
@@ -29,7 +36,18 @@ import type {
   ConfiguredLimit,
   LimitContext,
   UnitPolicy,
+  RequiredAnalyte,
+  UnjudgedResult,
+  MissingRequiredAnalyte,
 } from '../../shared/specCheck';
+
+/** An overdue supplier watch in force for a document (see `overdueWatches`). */
+export type OverdueWatch = ReturnType<typeof overdueWatches>[number];
+
+/** Today as YYYY-MM-DD — the one clock read on the review path. */
+export function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 /**
  * Above this, skip rather than burn worker CPU on a pathological payload. A
@@ -132,13 +150,52 @@ export interface SpecConfig {
    * precisely what this feature must not be.
    */
   unitPolicy: UnitPolicy;
+  /**
+   * Required analytes per (supplier, document type) — migration 0107. Optional
+   * so a config built by hand (tests, the arrivals path) keeps compiling; absent
+   * means none, which is the SME's "complete by default".
+   */
+  required?: RequiredAnalyte[];
 }
 
 export const EMPTY_SPEC_CONFIG: SpecConfig = {
   tests: [],
   limits: [],
   unitPolicy: STRICT_UNIT_POLICY,
+  required: [],
 };
+
+/**
+ * Read the tenant's required analytes. Its own try/catch for the same reason
+ * as the unit policy: an environment without migration 0107 must lose the
+ * completeness check, never the limits.
+ */
+async function loadRequiredAnalytes(db: D1Database, tenantId: string): Promise<RequiredAnalyte[]> {
+  try {
+    const res = await db
+      .prepare(
+        `SELECT id, spec_test_id, supplier_id, document_type_id, effective_from, review_by, reason
+           FROM supplier_required_analytes WHERE tenant_id = ?`
+      )
+      .bind(tenantId)
+      .all();
+    return ((res.results ?? []) as Record<string, unknown>[]).map((r) => ({
+      id: String(r.id),
+      spec_test_id: String(r.spec_test_id),
+      supplier_id: String(r.supplier_id),
+      document_type_id: String(r.document_type_id),
+      effective_from: isoDay(r.effective_from),
+      review_by: isoDay(r.review_by),
+      reason: r.reason == null ? null : String(r.reason),
+    }));
+  } catch (err) {
+    console.error(
+      '[spec-warnings] loading required analytes failed (migration 0107 not applied?):',
+      err instanceof Error ? err.message : String(err)
+    );
+    return [];
+  }
+}
 
 /**
  * Read the tenant's unit policy. Its OWN try/catch, deliberately not folded
@@ -193,16 +250,28 @@ async function loadLimitRows(
       .all();
     return (res.results ?? []) as Record<string, unknown>[];
   };
-  try {
-    return await read(`${LIMIT_COLUMNS}, criticality`);
-  } catch (err) {
-    console.error(
-      '[spec-warnings] reading spec_limits.criticality failed (migration 0095 not applied?), ' +
-        'falling back to unranked limits:',
-      err instanceof Error ? err.message : String(err)
-    );
-    return read(LIMIT_COLUMNS);
+  // Newest column first, each fallback dropping one migration's worth: a
+  // missing review_by (0107) costs the watch flag, a missing criticality (0095)
+  // the ranking — never the limits themselves.
+  const attempts = [
+    `${LIMIT_COLUMNS}, criticality, review_by`,
+    `${LIMIT_COLUMNS}, criticality`,
+    LIMIT_COLUMNS,
+  ];
+  let lastErr: unknown = null;
+  for (const columns of attempts) {
+    try {
+      return await read(columns);
+    } catch (err) {
+      lastErr = err;
+      console.error(
+        `[spec-warnings] reading spec_limits (${columns.split(',').slice(-1)[0].trim()}) failed, ` +
+          'falling back to fewer columns:',
+        err instanceof Error ? err.message : String(err)
+      );
+    }
   }
+  throw lastErr;
 }
 
 /**
@@ -216,6 +285,7 @@ async function loadLimitRows(
  */
 export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<SpecConfig> {
   const unitPolicy = await loadUnitPolicy(db, tenantId);
+  const required = await loadRequiredAnalytes(db, tenantId);
   try {
     const [testRows, limitRows] = await Promise.all([
       db
@@ -259,10 +329,11 @@ export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<
         document_type_id: row.document_type_id == null ? null : String(row.document_type_id),
         product_id: row.product_id == null ? null : String(row.product_id),
         updated_at: row.updated_at == null ? null : String(row.updated_at),
+        review_by: isoDay(row.review_by),
       };
     });
 
-    return { tests, limits, unitPolicy };
+    return { tests, limits, unitPolicy, required };
   } catch (err) {
     console.error(
       '[spec-warnings] loading spec config failed:',
@@ -291,7 +362,29 @@ export interface SpecSummary {
   not_checked: number;
   /** Tests printed on the COA that we hold no limit for. Not a warning. */
   unmatched: number;
+  /** Printed results with no limit and no printed spec — "No limit configured". */
+  unjudged: number;
+  /** Required analytes (0107) this certificate did not report. */
+  missing_required: number;
+  /** Supplier watches in force for this document whose review-by has passed. */
+  watch_overdue: number;
 }
+
+/** Everything the spec pass says about one row, beyond the verdicts. */
+export interface SpecCoverage {
+  unjudged: UnjudgedResult[];
+  missing_required: MissingRequiredAnalyte[];
+  watch_overdue: OverdueWatch[];
+}
+
+const EMPTY_SUMMARY: SpecSummary = {
+  out_of_spec: 0,
+  not_checked: 0,
+  unmatched: 0,
+  unjudged: 0,
+  missing_required: 0,
+  watch_overdue: 0,
+};
 
 /**
  * Run BOTH passes over one row: the COA's own printed limits, then ours.
@@ -308,23 +401,34 @@ export function specResultsWithConfig(
   row: SpecWarnableRow,
   config: SpecConfig,
   ctx: LimitContext,
-  opts: { includePasses?: boolean } = {}
-): { results: SpecVerdict[]; summary: SpecSummary } {
+  opts: { includePasses?: boolean; asOf?: string } = {}
+): { results: SpecVerdict[]; summary: SpecSummary } & SpecCoverage {
+  const asOf = opts.asOf ?? todayIso();
   try {
     const sources = specSourcesFor(row);
     const unitPolicy = config.unitPolicy ?? STRICT_UNIT_POLICY;
+    const required = config.required ?? [];
     const printed = checkPrintedSpecs(sources, { unitPolicy });
     const configured = checkConfiguredLimits(sources, config.tests, config.limits, ctx, {
-      ...opts,
+      includePasses: opts.includePasses,
       unitPolicy,
+      asOf,
     });
+    const missing = checkRequiredAnalytes(sources, config.tests, required, ctx, { asOf });
+    const watchOverdue = overdueWatches(config.tests, config.limits, required, ctx, asOf);
     const results = [...printed, ...configured.verdicts];
     return {
       results,
+      unjudged: configured.unjudged,
+      missing_required: missing,
+      watch_overdue: watchOverdue,
       summary: {
         out_of_spec: results.filter((v) => v.verdict === 'out_of_spec').length,
         not_checked: results.filter((v) => v.verdict === 'not_checked').length,
         unmatched: configured.unmatched.length,
+        unjudged: configured.unjudged.length,
+        missing_required: missing.length,
+        watch_overdue: watchOverdue.length,
       },
     };
   } catch (err) {
@@ -332,16 +436,33 @@ export function specResultsWithConfig(
       '[spec-warnings] spec check failed:',
       err instanceof Error ? err.message : String(err)
     );
-    return { results: [], summary: { out_of_spec: 0, not_checked: 0, unmatched: 0 } };
+    return { results: [], summary: { ...EMPTY_SUMMARY }, unjudged: [], missing_required: [], watch_overdue: [] };
   }
 }
 
-/** Attach `spec_results` + `spec_summary` to a row. Does not mutate the input. */
+/**
+ * Attach `spec_results` + `spec_summary` — and the coverage lists the review
+ * queue renders beside them (`spec_unjudged`, `spec_missing_required`,
+ * `spec_watch_overdue`) — to a row. Does not mutate the input.
+ */
 export function withSpecConfig<T extends SpecWarnableRow>(
   row: T,
   config: SpecConfig,
   ctx: LimitContext
-): T & { spec_results: SpecVerdict[]; spec_summary: SpecSummary } {
-  const { results, summary } = specResultsWithConfig(row, config, ctx);
-  return { ...row, spec_results: results, spec_summary: summary };
+): T & {
+  spec_results: SpecVerdict[];
+  spec_summary: SpecSummary;
+  spec_unjudged: UnjudgedResult[];
+  spec_missing_required: MissingRequiredAnalyte[];
+  spec_watch_overdue: OverdueWatch[];
+} {
+  const out = specResultsWithConfig(row, config, ctx);
+  return {
+    ...row,
+    spec_results: out.results,
+    spec_summary: out.summary,
+    spec_unjudged: out.unjudged,
+    spec_missing_required: out.missing_required,
+    spec_watch_overdue: out.watch_overdue,
+  };
 }

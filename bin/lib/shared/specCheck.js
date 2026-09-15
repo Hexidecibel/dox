@@ -20,9 +20,11 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // shared/specCheck.ts
 var specCheck_exports = {};
 __export(specCheck_exports, {
+  NO_LIMIT_CONFIGURED_LABEL: () => NO_LIMIT_CONFIGURED_LABEL,
   STRICT_UNIT_POLICY: () => STRICT_UNIT_POLICY,
   checkConfiguredLimits: () => checkConfiguredLimits,
   checkPrintedSpecs: () => checkPrintedSpecs,
+  checkRequiredAnalytes: () => checkRequiredAnalytes,
   classifySpecDisagreement: () => classifySpecDisagreement,
   collectPrintedAssertions: () => collectPrintedAssertions,
   compareToLimit: () => compareToLimit,
@@ -32,11 +34,14 @@ __export(specCheck_exports, {
   formatLimit: () => formatLimit,
   formatUnitConversion: () => formatUnitConversion,
   isControlRowLabel: () => isControlRowLabel,
+  isoDay: () => isoDay,
   matchSpecTest: () => matchSpecTest,
   normalizeUnit: () => normalizeUnit,
+  overdueWatches: () => overdueWatches,
   parseLimitExpression: () => parseLimitExpression,
   parseMeasuredValue: () => parseMeasuredValue,
   readVerdictWord: () => readVerdictWord,
+  requiredAnalyteApplies: () => requiredAnalyteApplies,
   resolveSpecLimits: () => resolveSpecLimits,
   resolveUnits: () => resolveUnits,
   resultRestatesSpec: () => resultRestatesSpec,
@@ -48,7 +53,9 @@ __export(specCheck_exports, {
   unitFactor: () => unitFactor,
   unitInferenceNote: () => unitInferenceNote,
   unitRefusalNote: () => unitRefusalNote,
-  validateLimitShape: () => validateLimitShape
+  validateLimitShape: () => validateLimitShape,
+  watchEndedLabel: () => watchEndedLabel,
+  watchStatus: () => watchStatus
 });
 module.exports = __toCommonJS(specCheck_exports);
 
@@ -766,6 +773,16 @@ function resultRestatesSpec(resultRaw, specRaw, unitRaw = "") {
   if (value.kind !== "numeric") return false;
   return (result.match(/\d/g) || []).length >= 4;
 }
+function isoDay(raw) {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(raw ?? "").trim());
+  return m ? m[1] : null;
+}
+function watchStatus(reviewBy, asOf) {
+  const day = isoDay(reviewBy);
+  if (!day) return null;
+  const today = isoDay(asOf);
+  return { review_by: day, review_overdue: !!today && today > day };
+}
 function specificity(l) {
   return (l.product_id ? 4 : 0) + (l.supplier_id ? 2 : 0) + (l.document_type_id ? 1 : 0);
 }
@@ -815,6 +832,7 @@ function toSpecLimit(l, test) {
     basis_grams: null
   };
 }
+var NO_LIMIT_CONFIGURED_LABEL = "No limit configured";
 function detectCrosstab(headers, tests) {
   if (headers.length < 2) return null;
   const matched = headers.map((h) => matchSpecTest(h, tests));
@@ -879,23 +897,46 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
   const unmatched = /* @__PURE__ */ new Set();
   const controlRows = /* @__PURE__ */ new Set();
   const nonMeasurementRows = /* @__PURE__ */ new Set();
-  if (tests.length === 0) {
-    return { verdicts, unmatched: [], control_rows: [], non_measurement_rows: [] };
-  }
-  const judge = (scope, target, testName, valueRaw, unitRaw, specRaw = "", unitHint = null) => {
+  const unjudged = [];
+  const noteUnjudged = (scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, matched) => {
+    if (isBlankResult(valueRaw)) return;
+    if (parseLimitExpression(specRaw)) return;
+    const labWord = readVerdictWord(verdictRaw || valueRaw);
+    if (labWord === "fail") return;
+    const printed = `${valueRaw}${unitRaw && !isEmptyCell(unitRaw) && !trailingUnit(valueRaw) ? ` ${unitRaw}` : ""}`;
+    const reason = matched ? `${matched.name} is a configured analyte, but no limit applies to this supplier and document type, and the certificate prints no specification for it` : "no configured analyte matches this name, and the certificate prints no specification for it";
+    unjudged.push({
+      scope,
+      target,
+      test_name_raw: testName,
+      value_raw: valueRaw,
+      unit_raw: unitRaw || null,
+      state: "unjudged",
+      why: matched ? "no_limit_in_scope" : "no_analyte",
+      spec_test_id: matched ? matched.id : null,
+      ...labWord ? { lab_verdict: labWord } : {},
+      reason,
+      message: `${testName}: ${NO_LIMIT_CONFIGURED_LABEL.toLowerCase()} \u2014 ${printed} was printed and not judged.`
+    });
+  };
+  const judge = (scope, target, testName, valueRaw, unitRaw, specRaw = "", unitHint = null, verdictRaw = "") => {
     if (!testName) return;
     const test = matchSpecTest(testName, tests);
     if (!test) {
       unmatched.add(testName);
+      noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, null);
       return;
     }
     const configured = resolved.get(test.id);
     if (!configured) {
       unmatched.add(testName);
+      noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, test);
       return;
     }
     if (isBlankResult(valueRaw)) return;
     const limit = toSpecLimit(configured, test);
+    const watch = watchStatus(configured.review_by, opts.asOf);
+    const watched = watch ? { watch } : {};
     if (resultRestatesSpec(valueRaw, specRaw, unitRaw)) {
       const limitTextOnly = formatLimit(limit);
       verdicts.push({
@@ -910,6 +951,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
         limit_id: configured.id,
         criticality: parseSpecCriticality(configured.criticality),
         value_num: null,
+        ...watched,
         reason: RESTATED_SPEC_REASON,
         verdict: "not_checked",
         message: `${test.name} could not be judged against our limit of ${limitTextOnly} \u2014 ${RESTATED_SPEC_REASON}.`
@@ -932,6 +974,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
         limit_id: configured.id,
         criticality: parseSpecCriticality(configured.criticality),
         value_num: null,
+        ...watched,
         lab_verdict: labVerdict,
         verdict: "not_checked",
         reason: reason2,
@@ -970,7 +1013,8 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       reason,
       ...cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {},
       ...cmp.conversion ? { conversion: cmp.conversion } : {},
-      ...inferred ? { unit_inferred_from: inferred.from } : {}
+      ...inferred ? { unit_inferred_from: inferred.from } : {},
+      ...watched
     };
     if (cmp.verdict === "out_of_spec") {
       verdicts.push({
@@ -1057,7 +1101,8 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
           cell(shape.result),
           cell(shape.unit),
           cell(shape.spec),
-          headerHint
+          headerHint,
+          cell(shape.verdict)
         );
       });
     });
@@ -1080,7 +1125,8 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
     verdicts,
     unmatched: [...unmatched],
     control_rows: [...controlRows],
-    non_measurement_rows: [...nonMeasurementRows]
+    non_measurement_rows: [...nonMeasurementRows],
+    unjudged
   };
 }
 function unitHintFor(header, unitsRowCell) {
@@ -1089,6 +1135,115 @@ function unitHintFor(header, unitsRowCell) {
   const cell = unitsRowCell.trim();
   if (cell && isKnownUnit(cell)) return { unit: cell, from: "units_row" };
   return null;
+}
+function requiredAnalyteApplies(r, ctx, asOf) {
+  if (!ctx.supplier_id || r.supplier_id !== ctx.supplier_id) return false;
+  if (!ctx.document_type_id || r.document_type_id !== ctx.document_type_id) return false;
+  const from = isoDay(r.effective_from);
+  const today = isoDay(asOf);
+  if (from && today && today < from) return false;
+  return true;
+}
+function reportedAnalytes(sources, tests) {
+  const out = /* @__PURE__ */ new Map();
+  const note = (name, value) => {
+    const t = matchSpecTest(name, tests);
+    if (!t) return;
+    const has = !isBlankResult(value) && !isDateOrTimeCell(value);
+    const prev = out.get(t.id);
+    if (!prev || !prev.withResult && has) out.set(t.id, { withResult: has, printedAs: name });
+  };
+  for (const src of sources) {
+    for (const table of src.tables ?? []) {
+      const headers = table.headers || [];
+      const rows = table.rows || [];
+      const shape = detectTableShape(headers);
+      if (shape.result === -1 && shape.spec === -1) {
+        const cross = detectCrosstab(headers, tests);
+        if (cross) {
+          for (const ci of cross.resultIndexes) {
+            const header = headers[ci] ?? "";
+            const product = rows.filter(
+              (r) => !isControlRowLabel(cross.labelIndex >= 0 ? r[cross.labelIndex] : "")
+            );
+            if (product.length === 0) note(header, "");
+            for (const r of product) note(header, String(r[ci] ?? "").trim());
+          }
+          continue;
+        }
+      }
+      const valueCol = shape.result !== -1 ? shape.result : shape.verdict;
+      if (valueCol === -1 || shape.test === -1) continue;
+      for (const r of rows) {
+        note(String(r[shape.test] ?? "").trim(), String(r[valueCol] ?? "").trim());
+      }
+    }
+    for (const cells of Object.values(src.groups ?? {})) {
+      if (!cells || typeof cells !== "object") continue;
+      for (const [cellName, cell] of Object.entries(cells)) {
+        if (!cell || typeof cell !== "object") continue;
+        note(cellName.replace(/_/g, " "), String(cell.value ?? "").trim());
+      }
+    }
+  }
+  return out;
+}
+function checkRequiredAnalytes(sources, tests, required, ctx, opts = {}) {
+  const applicable = required.filter((r) => requiredAnalyteApplies(r, ctx, opts.asOf));
+  if (applicable.length === 0) return [];
+  const isRecord = (s) => /^record\[\d+\]$/.test(s.scope);
+  const shared = sources.filter((s) => !isRecord(s));
+  const recordScopes = [...new Set(sources.filter(isRecord).map((s) => s.scope))];
+  const units = recordScopes.length > 0 ? recordScopes.map((scope) => ({ scope, sources: [...sources.filter((s) => s.scope === scope), ...shared] })) : [{ scope: shared[0]?.scope ?? "ai_fields", sources: shared }];
+  const noResults = sources.every((s) => (s.tables ?? []).length === 0 && Object.keys(s.groups ?? {}).length === 0);
+  const byId = new Map(tests.map((t) => [t.id, t]));
+  const out = [];
+  for (const unit of units) {
+    const reported = reportedAnalytes(unit.sources, tests);
+    for (const r of applicable) {
+      const seen = reported.get(r.spec_test_id);
+      if (seen?.withResult) continue;
+      const name = byId.get(r.spec_test_id)?.name ?? "A required analyte";
+      const watch = watchStatus(r.review_by, opts.asOf);
+      const why = seen ? "no_result" : "not_on_certificate";
+      const reason = why === "no_result" ? `required for this supplier, printed as "${seen.printedAs}" with no result` : noResults ? "required for this supplier, and no test results were read from this certificate at all" : "required for this supplier, and not reported on this certificate under its name or any alias";
+      out.push({
+        scope: unit.scope,
+        state: "missing_required",
+        requirement_id: r.id,
+        spec_test_id: r.spec_test_id,
+        analyte_name: name,
+        why,
+        printed_as: seen ? seen.printedAs : null,
+        watch,
+        requirement_reason: r.reason ?? null,
+        reason,
+        message: why === "no_result" ? `${name} is required for this supplier and was printed with no result \u2014 the certificate is incomplete.` : `${name} is required for this supplier and is not on this certificate \u2014 the certificate is incomplete.`
+      });
+    }
+  }
+  return out;
+}
+function overdueWatches(tests, limits, required, ctx, asOf) {
+  const name = (id) => tests.find((t) => t.id === id)?.name ?? "an analyte";
+  const out = [];
+  for (const l of resolveSpecLimits(limits, ctx).values()) {
+    const w = watchStatus(l.review_by, asOf);
+    if (w?.review_overdue) {
+      out.push({ kind: "limit", id: l.id, spec_test_id: l.spec_test_id, analyte_name: name(l.spec_test_id), review_by: w.review_by });
+    }
+  }
+  for (const r of required) {
+    if (!requiredAnalyteApplies(r, ctx, asOf)) continue;
+    const w = watchStatus(r.review_by, asOf);
+    if (w?.review_overdue) {
+      out.push({ kind: "required_analyte", id: r.id, spec_test_id: r.spec_test_id, analyte_name: name(r.spec_test_id), review_by: w.review_by });
+    }
+  }
+  return out;
+}
+function watchEndedLabel(reviewBy) {
+  return `Watch period ended ${reviewBy} \u2014 review`;
 }
 function validateLimitShape(input) {
   const { operator } = input;
@@ -1229,9 +1384,11 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  NO_LIMIT_CONFIGURED_LABEL,
   STRICT_UNIT_POLICY,
   checkConfiguredLimits,
   checkPrintedSpecs,
+  checkRequiredAnalytes,
   classifySpecDisagreement,
   collectPrintedAssertions,
   compareToLimit,
@@ -1241,11 +1398,14 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   formatLimit,
   formatUnitConversion,
   isControlRowLabel,
+  isoDay,
   matchSpecTest,
   normalizeUnit,
+  overdueWatches,
   parseLimitExpression,
   parseMeasuredValue,
   readVerdictWord,
+  requiredAnalyteApplies,
   resolveSpecLimits,
   resolveUnits,
   resultRestatesSpec,
@@ -1257,5 +1417,7 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   unitFactor,
   unitInferenceNote,
   unitRefusalNote,
-  validateLimitShape
+  validateLimitShape,
+  watchEndedLabel,
+  watchStatus
 });

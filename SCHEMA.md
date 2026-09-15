@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 131 tables, 2 views, 211 indexes, 36 triggers.
+Objects: 133 tables, 2 views, 215 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -302,6 +302,26 @@ Indexes: `idx_sei_supplier_doctype`, `idx_sei_tenant`
 ```
 
 Indexes: `idx_supplier_product_map_lookup`
+
+### `supplier_required_analytes`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE
+  document_type_id TEXT NOT NULL REFERENCES document_types(id) ON DELETE CASCADE
+  spec_test_id TEXT NOT NULL REFERENCES spec_tests(id) ON DELETE CASCADE
+  effective_from TEXT
+  review_by TEXT
+  reason TEXT
+  created_by TEXT REFERENCES users(id)
+  created_at TEXT DEFAULT (datetime('now'))
+  updated_at TEXT DEFAULT (datetime('now'))
+  updated_by TEXT REFERENCES users(id)
+  UNIQUE (tenant_id, supplier_id, document_type_id, spec_test_id)
+```
+
+Indexes: `idx_sra_tenant_supplier`
 
 ### `supplier_requirements`
 
@@ -1469,6 +1489,33 @@ Indexes: `idx_document_requirements_document`, `idx_document_requirements_requir
 
 Indexes: `idx_dsc_bulk_run`, `idx_dsc_document`, `idx_dsc_limit`, `idx_dsc_result_identity`, `idx_dsc_tenant_verdict`
 
+### `document_spec_gaps`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE
+  version_number INTEGER
+  queue_item_id TEXT
+  kind TEXT NOT NULL CHECK (kind IN ('missing_required', 'unjudged'))
+  spec_test_id TEXT
+  required_analyte_id TEXT
+  test_name_raw TEXT NOT NULL
+  value_raw TEXT
+  unit_raw TEXT
+  result_key TEXT
+  result_location TEXT
+  reason TEXT NOT NULL
+  snapshot TEXT
+  judgement_origin TEXT
+  notified_at TEXT
+  created_at TEXT DEFAULT (datetime('now'))
+  CHECK (kind <> 'missing_required' OR (spec_test_id IS NOT NULL AND result_key IS NULL))
+  CHECK (kind <> 'unjudged' OR result_key IS NOT NULL)
+```
+
+Indexes: `idx_dsg_document`, `idx_dsg_identity`, `idx_dsg_tenant_kind`
+
 ### `document_type_extraction_instructions`
 
 ```sql
@@ -1763,6 +1810,7 @@ Indexes: `idx_requirements_checklist`, `idx_requirements_tenant`
   updated_at TEXT DEFAULT (datetime('now'))
   updated_by TEXT REFERENCES users(id)
   criticality TEXT NOT NULL DEFAULT 'medium' CHECK (criticality IN ('high', 'medium', 'low'))
+  review_by TEXT
 ```
 
 Indexes: `idx_spec_limits_product`, `idx_spec_limits_scope`, `idx_spec_limits_supplier`, `idx_spec_limits_tenant_test`
