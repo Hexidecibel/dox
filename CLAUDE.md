@@ -244,7 +244,15 @@ Roll back with `bin/restore` (Time Travel bookmark from `bin/backup`).
 ## Commands
 
 - Install: `npm install`
-- Build: `npm run build` (TypeScript + Vite)
+- Build: `npm run build` (TypeScript + Vite) — builds `tsconfig.app.json` ONLY
+- Typecheck the Functions project: `npm run typecheck:functions` (ratchet, see below)
+  - ⚠️ `npx tsc --noEmit` at the root is a **no-op** (`files: []` + project references).
+    `npm run build` never typechecks `functions/`. `bin/typecheck-ratchet` runs
+    `tsc -p tsconfig.functions.json --noEmit` and compares against
+    `tests/typecheck-baseline.json` (**27** pre-existing errors): it fails when the
+    count rises or a previously clean file gains one, never on the backlog. Bank a
+    fix with `bin/typecheck-ratchet --update`. Wired into `.github/workflows/test.yml`
+    and `bin/e2e` (so `bin/deploy` gates on it).
 - Dev server: `npm run dev` (wrangler pages dev on port 8788 with local D1 + R2)
 - Frontend dev: `npm run dev:frontend` (Vite HMR only)
 - Migrations: `npm run migrate` or `./bin/migrate`

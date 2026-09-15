@@ -1,4 +1,4 @@
-import { NotFoundError, errorToResponse, requireTenantAccess } from '../../../lib/permissions';
+import { NotFoundError, errorToResponse } from '../../../lib/permissions';
 import type { Env, User } from '../../../lib/types';
 
 /**

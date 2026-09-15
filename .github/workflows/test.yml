@@ -23,6 +23,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The Functions half of the codebase is not typechecked by `npm run
+      # build` (which builds tsconfig.app.json only) and `npx tsc --noEmit`
+      # against the root config is a no-op, so until now nothing checked it at
+      # all. This is a RATCHET over a recorded baseline of pre-existing errors:
+      # it fails when the count rises or when a previously clean file gains an
+      # error, never on the backlog itself. See bin/typecheck-ratchet.
+      - name: Typecheck functions (ratchet)
+        run: npm run typecheck:functions
+
       - name: Run tests
         run: npm test
 

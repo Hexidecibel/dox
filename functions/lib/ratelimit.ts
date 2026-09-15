@@ -10,17 +10,6 @@ export async function checkRateLimit(
   windowSeconds: number
 ): Promise<{ allowed: boolean; remaining: number; resetAt: string }> {
   const now = new Date();
-  // SQLite stores `datetime('now')` as `YYYY-MM-DD HH:MM:SS` (no T, no Z).
-  // JS's `.toISOString()` returns `YYYY-MM-DDTHH:MM:SS.sssZ` and the
-  // string compare against the SQLite format always lexically deems the
-  // SQLite value "less than" the JS one (' ' < 'T'), which would cause
-  // every call to spuriously declare the window expired. Match the
-  // SQLite shape so the comparison is meaningful.
-  const windowStart = new Date(now.getTime() - windowSeconds * 1000)
-    .toISOString()
-    .replace('T', ' ')
-    .replace(/\..*Z$/, '');
-
   const record = await db
     .prepare('SELECT attempts, window_start FROM rate_limits WHERE key = ?')
     .bind(key)

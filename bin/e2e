@@ -10,6 +10,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Cheapest tier first, and the only one that covers the Functions project at
+# all: `npm run build` builds tsconfig.app.json only, and `npx tsc --noEmit`
+# against the root config compiles an empty program. A ratchet over a recorded
+# baseline, so it fails on a NEW type error and never on the backlog.
+echo "==> Typechecking functions (ratchet)"
+npm run typecheck:functions
+
+echo
 echo "==> Running API + unit tests (vitest)"
 npm test
 

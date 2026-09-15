@@ -1,4 +1,13 @@
-import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+// `R2Bucket` is taken from the AMBIENT global (tsconfig.functions.json's
+// `types: ["@cloudflare/workers-types"]`), NOT imported from the package.
+// The package ships two declarations of the same API — index.d.ts (globals)
+// and index.ts (a module) — and TypeScript does not consider them identical,
+// because the module copy's Headers has `getAll` and the global one does not.
+// Importing R2Bucket here made every hand-off to functions/lib/r2.ts (which
+// uses the global) a type error: 11 of them across this file and
+// functions/api/queue/[id].ts. D1Database is imported because it is not
+// otherwise in scope here and its two copies DO match structurally.
+import type { D1Database } from '@cloudflare/workers-types';
 import { generateId, logAudit } from '../db';
 import { buildR2Key, uploadFile, downloadFile, deleteFile, computeChecksum } from '../r2';
 import { findOrCreateSupplier } from '../suppliers';
@@ -1038,7 +1047,8 @@ export interface CoaRecordsApproveOptions {
    */
   decisions?: Record<number, CoaRecordDecision>;
   userId: string;
-  clientIp?: string;
+  /** `string | null` to match `getClientIp`, like the other approve paths. */
+  clientIp?: string | null;
   selectedSource?: 'text' | 'vlm';
   supplierId?: string;
   supplierName?: string;

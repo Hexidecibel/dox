@@ -14,7 +14,6 @@ import {
   generateToken,
   generateId,
 } from '../../auth';
-import { validatePassword } from '../../validation';
 import { logAudit, getClientIp } from '../../db';
 import { sendEmail, buildAdminResetEmail } from '../../email';
 import type { User as DBUser, Document } from '../../types';

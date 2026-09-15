@@ -1,6 +1,6 @@
 import type { GraphQLContext } from '../context';
 import { roleToGql, statusToGql, statusToDB } from '../roles';
-import type { User as DBUser, Tenant, Document, AuditEntry } from '../../types';
+import type { User as DBUser } from '../../types';
 import type { ModuleKey } from '../../../../shared/modules';
 import {
   UnauthorizedError,

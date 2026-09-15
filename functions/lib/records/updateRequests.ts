@@ -12,12 +12,10 @@
  *     can't be probed for existence.
  */
 
-import { generateId } from '../db';
 import {
   parseRowData,
   rebuildRowRefs,
   computeDisplayTitle,
-  logRecordsActivity,
   refTypeForColumn,
 } from './helpers';
 import { BadRequestError, NotFoundError } from '../permissions';

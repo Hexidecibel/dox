@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Pre-existing `tsc -p tsconfig.functions.json --noEmit` errors, per file.",
+    "Enforced by bin/typecheck-ratchet: the total may not rise, and a file",
+    "absent from this list may not gain errors. Lower it deliberately with",
+    "bin/typecheck-ratchet --update; never raise it to make CI pass."
+  ],
+  "project": "tsconfig.functions.json",
+  "total": 27,
+  "files": {
+    "functions/api/admin/processing-status.ts": 2,
+    "functions/api/bundles/[id]/download.ts": 1,
+    "functions/api/documents/[id].ts": 4,
+    "functions/api/documents/ingest-url.ts": 4,
+    "functions/api/documents/ingest.ts": 4,
+    "functions/api/records/sheets/[sheetId]/forms/[formId].ts": 1,
+    "functions/api/teach/sessions/[id]/confirm.ts": 1,
+    "functions/api/teach/sessions/[id]/messages.ts": 1,
+    "functions/api/teach/sessions/[id]/synthesize.ts": 1,
+    "functions/api/teach/sessions/index.ts": 1,
+    "functions/api/webhooks/connector-email-ingest.ts": 1,
+    "functions/api/webhooks/connectors/[connectorId].ts": 1,
+    "functions/lib/auth.ts": 2,
+    "functions/lib/connectors/schemaDiscovery.ts": 1,
+    "functions/lib/extract.ts": 1,
+    "functions/lib/learnedPreferences.ts": 1
+  }
+}

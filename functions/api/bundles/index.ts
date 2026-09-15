@@ -1,7 +1,6 @@
 import { generateId, logAudit, getClientIp } from '../../lib/db';
 import {
   requireRole,
-  requireTenantAccess,
   errorToResponse,
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';

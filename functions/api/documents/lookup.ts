@@ -5,7 +5,7 @@ import {
   BadRequestError,
   errorToResponse,
 } from '../../lib/permissions';
-import type { Env, User, Document } from '../../lib/types';
+import type { Env, User } from '../../lib/types';
 
 /**
  * GET /api/documents/lookup?external_ref=X&tenant_id=Y
