@@ -3321,7 +3321,7 @@ FIELD EXTRACTION RULES:
    - revision_date — the date THIS VERSION of the document was issued or revised ("Revision Date", "Revised", "Version date"), on documents that carry versions — a safety data sheet, a specification. A print date, a page-footer date and a supersedes date are not revision dates.
    - signatory — the PRINTED NAME of the person who signed or authorised the document ("Jane Ruiz, QA Manager" gives "Jane Ruiz"). Rule 3 still bars the signature MARK: take a name that is typed or printed on the page, never one read out of a handwritten squiggle, and return null when no name is printed.
 
-2. For dates: normalize to YYYY-MM-DD. Two-digit years mean 2000s (e.g., '26 = 2026, 03/08/26 = 2026-03-08). Julian dates (e.g., "6094") mean day 094 of 2026 — convert when identifiable. If ambiguous, keep as-is.
+2. For dates: normalize to YYYY-MM-DD. Two-digit years mean 2000s (e.g., '26 = 2026, 03/08/26 = 2026-03-08). If ambiguous, keep as-is. A date printed only as a CODE — a Julian date or a lot code (e.g. "6094", "10426212") — is NOT a calendar date: never decode or convert it. Copy the code exactly as printed into the field it is labelled as, and leave every date field empty unless the page prints that date. Decoding a lot code is done later, from the supplier's declared lot format, where it is labelled and checked.
 
 3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signature marks, titles, disclaimers, individual test values (those go in tables). The one carve-out is the signer's PRINTED NAME, which goes in signatory (rule 1): a name typed under a signature line is data a reviewer needs to chase a document, while the handwritten mark above it is not, and reading a name out of a squiggle is invention.
 
@@ -3411,7 +3411,7 @@ INDUSTRY CONTEXT — Dairy & Food:
 - Common COA tests: Standard Plate Count (SPC), coliform, E. coli, yeast & mold, somatic cell count, butterfat %, moisture %, pH, acidity, temperature
 - Grade designations: Grade A, Grade AA, US Extra, USDA grades
 - Plant/facility numbers: USDA plant numbers (e.g., "Plant 42-1234")
-- Code dates may use Julian format (YDDD where Y=last digit of year, DDD=day)
+- Code dates may be printed in Julian format (YDDD where Y=last digit of year, DDD=day) — copy them exactly as printed; never convert one to a calendar date
 - Net weights: common units are lbs, gallons, kg
 
 DAIRY COA DOMAIN RULES (hard rules — follow exactly):
@@ -3681,7 +3681,7 @@ FIELD EXTRACTION RULES:
    - revision_date — the date THIS VERSION of the document was issued or revised ("Revision Date", "Revised", "Version date"), on documents that carry versions — a safety data sheet, a specification. A print date, a page-footer date and a supersedes date are not revision dates.
    - signatory — the PRINTED NAME of the person who signed or authorised the document ("Jane Ruiz, QA Manager" gives "Jane Ruiz"). Rule 3 still bars the signature MARK: take a name that is typed or printed on the page, never one read out of a handwritten squiggle, and return null when no name is printed.
 
-2. For dates: normalize to YYYY-MM-DD. Two-digit years mean 2000s (e.g., '26 = 2026, 03/08/26 = 2026-03-08). Julian dates (e.g., "6094") mean day 094 of 2026 — convert when identifiable. If ambiguous, keep as-is.
+2. For dates: normalize to YYYY-MM-DD. Two-digit years mean 2000s (e.g., '26 = 2026, 03/08/26 = 2026-03-08). If ambiguous, keep as-is. A date printed only as a CODE — a Julian date or a lot code (e.g. "6094", "10426212") — is NOT a calendar date: never decode or convert it. Copy the code exactly as printed into the field it is labelled as, and leave every date field empty unless the page prints that date. Decoding a lot code is done later, from the supplier's declared lot format, where it is labelled and checked.
 
 3. DO NOT include: addresses, phone/fax/email, page numbers, print dates, header/footer boilerplate, signature marks, titles, disclaimers, individual test values (those go in tables). The one carve-out is the signer's PRINTED NAME, which goes in signatory (rule 1): a name typed under a signature line is data a reviewer needs to chase a document, while the handwritten mark above it is not, and reading a name out of a squiggle is invention.
 
