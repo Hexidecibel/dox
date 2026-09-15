@@ -252,7 +252,7 @@ export function AmendRequestDialog({
                 vocab={vocab}
                 value={drafts}
                 onChange={setDrafts}
-                emptyMessage="This tenant has no checklist items configured yet."
+                emptyMessage="This tenant has no requirements configured yet."
               />
             </>
           ) : (

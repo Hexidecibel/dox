@@ -88,7 +88,7 @@ export function Requirements() {
       const result = await api.requirements.list({ tenant_id: activeTenantId });
       setRequirements(result.requirements);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load checklist items');
+      setError(err instanceof Error ? err.message : 'Failed to load requirements');
     } finally {
       setLoading(false);
     }
@@ -155,7 +155,7 @@ export function Requirements() {
       setDialogOpen(false);
       load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save checklist item');
+      setError(err instanceof Error ? err.message : 'Failed to save requirement');
     } finally {
       setSaving(false);
     }
@@ -166,7 +166,7 @@ export function Requirements() {
       await api.requirements.update(req.id, { active: req.active ? 0 : 1 });
       load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update checklist item');
+      setError(err instanceof Error ? err.message : 'Failed to update requirement');
     }
   };
 
@@ -191,17 +191,17 @@ export function Requirements() {
         }}
       >
         <Typography variant="h4" fontWeight={700}>
-          Checklist
+          Requirements
         </Typography>
         <Button variant="contained" startIcon={<AddIcon />} onClick={openCreate}>
-          Add Checklist Item
+          Add Requirement
         </Button>
       </Box>
 
       <HelpWell id="registry.requirements" title="What documents have to prove">
         Each row here is one line item you need on file — the thing a document{' '}
         <strong>satisfies</strong>. One document can satisfy several at once (a spec sheet often
-        closes half a dozen). Group related items with a checklist name so the list matches the
+        closes half a dozen). Give related items the same group name so the list matches the
         paperwork you already work from. Claims point at these items to say what becomes required.
       </HelpWell>
 
@@ -231,13 +231,13 @@ export function Requirements() {
         )}
         {checklists.length > 0 && (
           <FormControl size="small" sx={{ minWidth: 200 }}>
-            <InputLabel>Checklist</InputLabel>
+            <InputLabel>Group</InputLabel>
             <Select
               value={checklistFilter}
               onChange={(e) => setChecklistFilter(e.target.value)}
-              label="Checklist"
+              label="Group"
             >
-              <MenuItem value="">All checklists</MenuItem>
+              <MenuItem value="">All groups</MenuItem>
               {checklists.map((c) => (
                 <MenuItem key={c} value={c}>
                   {c}
@@ -250,9 +250,9 @@ export function Requirements() {
 
       {visible.length === 0 ? (
         <EmptyState
-          title="No checklist items yet"
+          title="No requirements yet"
           description="Add the line items you need on file, or seed a starter pack with bin/create-tenant."
-          actionLabel="Add checklist item"
+          actionLabel="Add requirement"
           onAction={openCreate}
         />
       ) : isMobile ? (
@@ -303,8 +303,8 @@ export function Requirements() {
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell>Checklist Item</TableCell>
-                <TableCell>Checklist</TableCell>
+                <TableCell>Requirement</TableCell>
+                <TableCell>Group</TableCell>
                 <TableCell>Slug</TableCell>
                 <TableCell align="right">
                   <Tooltip title="Documents whose confirmed links satisfy this item">
@@ -382,7 +382,7 @@ export function Requirements() {
         fullScreen={isMobile}
       >
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          {editing ? 'Edit Checklist Item' : 'Add Checklist Item'}
+          {editing ? 'Edit Requirement' : 'Add Requirement'}
           <IconButton onClick={() => setDialogOpen(false)} size="small">
             <CloseIcon />
           </IconButton>
@@ -418,13 +418,13 @@ export function Requirements() {
             sx={{ mt: 1, mb: 2 }}
           />
           <TextField
-            label="Checklist (optional grouping)"
+            label="Group (optional)"
             placeholder="e.g. SOP 102.2"
             fullWidth
             value={formChecklist}
             onChange={(e) => setFormChecklist(e.target.value)}
             disabled={saving}
-            helperText="Items with the same checklist name are grouped together."
+            helperText="Requirements with the same group name are listed together."
             sx={{ mb: 2 }}
           />
           <TextField
@@ -452,7 +452,7 @@ export function Requirements() {
             onClick={handleSave}
             disabled={!formName.trim() || saving || (!editing && isSuperAdmin && !formTenantId)}
           >
-            {saving ? 'Saving…' : editing ? 'Save Changes' : 'Add Checklist Item'}
+            {saving ? 'Saving…' : editing ? 'Save Changes' : 'Add Requirement'}
           </Button>
         </DialogActions>
       </Dialog>

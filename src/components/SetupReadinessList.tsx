@@ -183,11 +183,11 @@ export function buildReadinessItems(snap: SetupReadinessSnapshot): ReadinessItem
     },
     {
       key: 'requirements',
-      label: 'Checklist items',
+      label: 'Requirements',
       ready: snap.requirements.count > 0,
       count: snap.requirements.count,
       examples: snap.requirements.examples,
-      missing: 'No checklist items yet — an approved document has nothing it can close.',
+      missing: 'No requirements yet — an approved document has nothing it can close.',
       href: '/settings/requirements',
     },
     {

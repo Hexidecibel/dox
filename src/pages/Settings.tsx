@@ -96,7 +96,7 @@ const SECTIONS: SettingsSection[] = [
       // The three registry facets, in the order a tenant configures them:
       // what a document IS (document types), what it SATISFIES (checklist),
       // what it TRIGGERS (claims) and what each claim opens (claim rules).
-      { key: 'requirements', label: 'Checklist', icon: <ChecklistIcon />, roles: ALL_ADMIN, module: 'library', component: Requirements },
+      { key: 'requirements', label: 'Requirements', icon: <ChecklistIcon />, roles: ALL_ADMIN, module: 'library', component: Requirements },
       { key: 'claim-types', label: 'Claims', icon: <ClaimsIcon />, roles: ALL_ADMIN, module: 'library', component: ClaimTypes },
       { key: 'claim-rules', label: 'Claim Rules', icon: <RuleIcon />, roles: ALL_ADMIN, module: 'library', component: ClaimRules },
       // Applicability: the checklist above is a vocabulary; this says who owes

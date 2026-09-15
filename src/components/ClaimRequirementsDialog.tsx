@@ -211,15 +211,15 @@ export function ClaimRequirementsDialog({
           </Box>
         ) : requirements.length === 0 ? (
           <Alert severity="info">
-            This tenant has no checklist items yet. Add them under Settings → Checklist first —
-            a claim can only point at something already on the checklist.
+            This tenant has no requirements yet. Add them under Settings → Requirements first —
+            a claim can only point at an existing requirement.
           </Alert>
         ) : (
           <>
             <TextField
               fullWidth
               size="small"
-              placeholder="Search the checklist…"
+              placeholder="Search requirements…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               sx={{ mb: 2 }}
@@ -299,7 +299,7 @@ export function ClaimRequirementsDialog({
 
             {groups.size === 0 && (
               <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
-                Nothing on the checklist matches “{search}”.
+                No requirement matches “{search}”.
               </Typography>
             )}
           </>

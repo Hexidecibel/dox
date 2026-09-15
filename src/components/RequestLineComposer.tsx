@@ -370,7 +370,7 @@ export function RequestLineComposer({
         What are you asking for?
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-        Pick from your own checklist. Anything picked here can be closed by a document when
+        Pick from your own requirements. Anything picked here can be closed by a document when
         it arrives, can be chased when it expires, and is counted when it is missing.
       </Typography>
 
@@ -385,7 +385,7 @@ export function RequestLineComposer({
             <TextField
               size="small"
               fullWidth
-              placeholder="Search your checklist…"
+              placeholder="Search your requirements…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               disabled={disabled}
@@ -402,7 +402,7 @@ export function RequestLineComposer({
 
           {groups.length === 0 ? (
             <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>
-              Nothing in your checklist matches “{search}”.
+              None of your requirements match “{search}”.
             </Typography>
           ) : (
             groups.map((group) => (
@@ -465,7 +465,7 @@ export function RequestLineComposer({
           onClick={() => setEscapeOpen(true)}
           sx={{ textTransform: 'none', color: 'text.secondary', mb: 2 }}
         >
-          Need something that isn’t in the checklist?
+          Need something that isn’t one of your requirements?
         </Button>
       ) : (
         <Paper
@@ -478,7 +478,7 @@ export function RequestLineComposer({
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
             A free-text line still reaches the supplier, but nothing that arrives can close
             it, it cannot be chased when it expires, and it is never counted as missing. If
-            this is something you will ask for again, add it to your checklist under{' '}
+            this is something you will ask for again, add it to your requirements under{' '}
             <strong>Settings → Requirements</strong> and pick it above instead.
           </Typography>
           <Stack direction="row" spacing={1} alignItems="flex-start">
@@ -533,7 +533,7 @@ export function RequestLineComposer({
         <>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
             {counts.total} line{counts.total === 1 ? '' : 's'} — {counts.typed} from your
-            checklist
+            requirements
             {counts.freeText > 0 && (
               <>
                 ,{' '}
@@ -571,8 +571,8 @@ export function RequestLineComposer({
                       ) : (
                         <Typography variant="caption" color="text.secondary">
                           {draft.seeded
-                            ? 'From your checklist — already outstanding for this supplier.'
-                            : 'From your checklist.'}
+                            ? 'From your requirements — already outstanding for this supplier.'
+                            : 'From your requirements.'}
                         </Typography>
                       )}
                     </Box>
@@ -634,7 +634,7 @@ export function RequestLineComposer({
                         helperText={
                           free
                             ? 'The supplier sees exactly this.'
-                            : 'Your checklist calls it this. Reword it if the supplier knows it by another name — the line still resolves to the same requirement.'
+                            : 'Your requirements call it this. Reword it if the supplier knows it by another name — the line still resolves to the same requirement.'
                         }
                       />
                       <TextField

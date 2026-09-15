@@ -165,7 +165,7 @@ describe('SupplierRequirementsEditor', () => {
   it('says so plainly when the tenant has no checklist to draw from at all', async () => {
     listRequirements.mockResolvedValue({ requirements: [] });
     render(<SupplierRequirementsEditor supplierId="sup_1" supplierName="Acme Dairy" />);
-    expect(await screen.findByText('No checklist to draw from')).toBeInTheDocument();
+    expect(await screen.findByText('No requirements to draw from')).toBeInTheDocument();
     // A different problem from "nobody configured this supplier", so a
     // different message — the fix is in Settings, not on this supplier.
     expect(screen.queryByText('Nothing set up yet')).not.toBeInTheDocument();
@@ -238,7 +238,7 @@ describe('SupplierRequirementsEditor', () => {
     render(<SupplierRequirementsEditor supplierId="sup_1" supplierName="Acme Dairy" />);
     await screen.findByText('Letter of Guarantee');
 
-    await user.click(screen.getByRole('button', { name: /Add checklist items/i }));
+    await user.click(screen.getByRole('button', { name: /Add requirements/i }));
 
     expect(await screen.findByRole('checkbox', { name: 'Allergen Matrix' })).toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: 'Letter of Guarantee' })).not.toBeInTheDocument();
@@ -251,7 +251,7 @@ describe('SupplierRequirementsEditor', () => {
     render(<SupplierRequirementsEditor supplierId="sup_1" supplierName="Acme Dairy" />);
     await screen.findByText('Nothing set up yet');
 
-    await user.click(screen.getByRole('button', { name: /Add checklist items/i }));
+    await user.click(screen.getByRole('button', { name: /Add requirements/i }));
     await user.click(await screen.findByRole('checkbox', { name: 'Allergen Matrix' }));
     // The tier is chosen in the dialog too, so a batch of advisory items does
     // not have to be added as required and then downgraded one by one.

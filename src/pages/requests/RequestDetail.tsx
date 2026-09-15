@@ -778,7 +778,7 @@ export function RequestDetail() {
 
                     {line.requirement_name && line.requirement_name !== line.name && (
                       <Typography variant="caption" color="text.secondary" display="block">
-                        Your checklist calls this “{line.requirement_name}”
+                        Your requirements call this “{line.requirement_name}”
                         {line.requirement_checklist ? ` (${line.requirement_checklist})` : ''}
                       </Typography>
                     )}

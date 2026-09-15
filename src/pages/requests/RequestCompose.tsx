@@ -263,7 +263,7 @@ export function RequestCompose() {
 
       <HelpWell id="requests.compose" title="What you are writing">
         Pick the supplier first and the portal fills in what they already owe. Everything you
-        tick is an item from your own checklist, so when the document lands it can be matched
+        tick is one of your own requirements, so when the document lands it can be matched
         to the ask. Saving gives you a draft; issuing is a separate, deliberate click, and
         after it the request can only be amended.
       </HelpWell>
@@ -276,7 +276,7 @@ export function RequestCompose() {
 
       {requirements.length === 0 && (
         <Alert severity="warning" sx={{ mb: 2 }}>
-          <AlertTitle>Your checklist is empty</AlertTitle>
+          <AlertTitle>You have no requirements yet</AlertTitle>
           There are no requirements configured for this tenant, so there is nothing to ask for
           that the portal can track. Add them under <strong>Settings → Requirements</strong>{' '}
           first — a request made entirely of free text cannot be satisfied, chased or counted.
@@ -358,7 +358,7 @@ export function RequestCompose() {
         <>
           {!gap.configured && (
             <Alert severity="warning" sx={{ mb: 2 }}>
-              <AlertTitle>No checklist is set up for this supplier</AlertTitle>
+              <AlertTitle>No requirements are set up for this supplier</AlertTitle>
               Nothing is <em>known</em> to be outstanding for {gap.supplier_name} — which is
               not the same as them owing nothing. Pick what you need below, and set up what
               they owe on the supplier record so it is reported from then on.
@@ -367,7 +367,7 @@ export function RequestCompose() {
           {gap.configured && gap.open.length === 0 && (
             <Alert severity="success" sx={{ mb: 2 }}>
               <AlertTitle>Nothing is outstanding for {gap.supplier_name}</AlertTitle>
-              Every item on their checklist is closed by a confirmed document. Anything you
+              Every requirement they owe is closed by a confirmed document. Anything you
               add here is a new ask.
             </Alert>
           )}
@@ -385,7 +385,7 @@ export function RequestCompose() {
                 {gap.open.length} item{gap.open.length === 1 ? '' : 's'} already outstanding —
                 added for you
               </AlertTitle>
-              These are the checklist items {gap.supplier_name} owes and has not sent. Untick
+              These are the requirements {gap.supplier_name} owes and has not sent. Untick
               anything you are not asking for this time.
             </Alert>
           )}
@@ -412,7 +412,7 @@ export function RequestCompose() {
           emptyMessage={
             <>
               No requirements are configured for this tenant yet. Add them under{' '}
-              <strong>Settings → Requirements</strong> — the checklist is what makes an
+              <strong>Settings → Requirements</strong> — requirements are what make an
               arriving document able to close an ask.
             </>
           }

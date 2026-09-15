@@ -284,7 +284,7 @@ export function ClaimTypes() {
                 <TableCell>About</TableCell>
                 <TableCell>Slug</TableCell>
                 <TableCell>
-                  <Tooltip title="How many checklist items this claim makes applicable">
+                  <Tooltip title="How many requirements this claim makes applicable">
                     <span>Opens</span>
                   </Tooltip>
                 </TableCell>

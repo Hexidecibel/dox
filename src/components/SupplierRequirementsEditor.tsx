@@ -301,7 +301,7 @@ export default function SupplierRequirementsEditor({
           </Typography>
           <Typography variant="body2" color="text.secondary">
             {attached.length === 0 ? (
-              'No checklist items attached yet.'
+              'No requirements attached yet.'
             ) : (
               <>
                 <strong>{counts.required}</strong> required
@@ -323,7 +323,7 @@ export default function SupplierRequirementsEditor({
           onClick={openAdd}
           disabled={vocab.length === 0}
         >
-          Add checklist items
+          Add requirements
         </Button>
       </Box>
 
@@ -331,16 +331,16 @@ export default function SupplierRequirementsEditor({
       {attached.length === 0 ? (
         vocab.length === 0 ? (
           <Alert severity="info">
-            <AlertTitle>No checklist to draw from</AlertTitle>
-            This tenant has no checklist line items yet. Add them under{' '}
-            <strong>Settings → Checklist</strong> first — they are the vocabulary a supplier
+            <AlertTitle>No requirements to draw from</AlertTitle>
+            This tenant has no requirements yet. Add them under{' '}
+            <strong>Settings → Requirements</strong> first — they are the vocabulary a supplier
             can be held to.
           </Alert>
         ) : (
           <Alert severity="warning">
             <AlertTitle>Nothing set up yet</AlertTitle>
             Nothing has been attached to {who}, so nothing is being checked. This is{' '}
-            <strong>not</strong> the same as compliant — attach the checklist line items{' '}
+            <strong>not</strong> the same as compliant — attach the requirements{' '}
             {who} owes before reading anything as clean.
           </Alert>
         )
@@ -375,7 +375,7 @@ export default function SupplierRequirementsEditor({
                   />
                 ) : null}
                 {row.requirement_active === 0 ? (
-                  <Tooltip title="This checklist item is deactivated, so it will not be counted.">
+                  <Tooltip title="This requirement is deactivated, so it will not be counted.">
                     <Chip
                       size="small"
                       color="warning"
@@ -412,11 +412,11 @@ export default function SupplierRequirementsEditor({
       )}
 
       <Dialog open={addOpen} onClose={() => setAddOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Add checklist items for {who}</DialogTitle>
+        <DialogTitle>Add requirements for {who}</DialogTitle>
         <DialogContent dividers>
           {available.length === 0 ? (
             <Typography variant="body2" color="text.secondary">
-              Every checklist item is already attached to {who}.
+              Every requirement is already attached to {who}.
             </Typography>
           ) : (
             <>

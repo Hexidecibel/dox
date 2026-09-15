@@ -203,7 +203,7 @@ export function Requests() {
 
       <HelpWell id="requests.list" title="Asking a supplier for documents">
         A request is what you send a supplier when something is missing. Each line points at
-        an item on your own checklist, so when the document arrives the portal already knows
+        one of your own requirements, so when the document arrives the portal already knows
         what it was for — it can be closed, chased when it expires, and counted while it is
         outstanding. Issued requests are never edited: correcting one is an{' '}
         <strong>amendment</strong>, which keeps the version the supplier is holding.
@@ -291,7 +291,7 @@ export function Requests() {
             title="No requests yet"
             description={
               canCompose
-                ? 'Compose one to ask a supplier for what they owe. Start from a supplier and the portal offers the items already outstanding for them, so you are not re-picking a checklist you already configured.'
+                ? 'Compose one to ask a supplier for what they owe. Start from a supplier and the portal offers the items already outstanding for them, so you are not re-picking requirements you already configured.'
                 : 'Nobody has sent a supplier a document request yet. An org admin composes and issues these.'
             }
             actionLabel={canCompose ? 'Compose a request' : undefined}

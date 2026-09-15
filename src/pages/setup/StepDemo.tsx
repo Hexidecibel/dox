@@ -668,7 +668,7 @@ export function StepDemo({ run, tenantId, pack, patchState, finish }: SetupStepP
         <Alert severity="success" sx={{ mt: 2 }}>
           <AlertTitle>It is in the review queue</AlertTitle>
           Nothing has been approved and no document row exists yet. A person confirms what the
-          extraction found, and the checklist items above are proposed at that moment.
+          extraction found, and the requirements above are proposed at that moment.
         </Alert>
       )}
 
@@ -676,19 +676,19 @@ export function StepDemo({ run, tenantId, pack, patchState, finish }: SetupStepP
       <Divider sx={{ my: 3 }} />
 
       <Typography variant="h6" fontWeight={700} gutterBottom>
-        Give one supplier a checklist
+        Give one supplier its requirements
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         A packet is a starting point for <strong>one</strong> supplier — never a rule applied to all
-        of them. Seeding every supplier the same items is how a checklist ends up uniform and wrong,
+        of them. Seeding every supplier the same items is how a supplier's requirements end up uniform and wrong,
         so there is no button here that does it. You will apply one to each supplier as they arrive,
         and edit it afterwards.
       </Typography>
 
       {packets.length === 0 ? (
         <Alert severity="info">
-          This pack defines no packets, so there is nothing to apply. Supplier checklists are built
-          on the Supplier Requirements screen.
+          This pack defines no packets, so there is nothing to apply. Supplier requirements are set
+          up on the Supplier Requirements screen.
         </Alert>
       ) : applied ? (
         <Alert severity="success">
@@ -712,7 +712,7 @@ export function StepDemo({ run, tenantId, pack, patchState, finish }: SetupStepP
           {applied.unknown.length > 0 && (
             <Typography variant="body2" sx={{ mt: 1 }}>
               {applied.unknown.length} item{applied.unknown.length === 1 ? '' : 's'} in the packet
-              have no checklist row in this tenant and were skipped:{' '}
+              are not requirements in this tenant and were skipped:{' '}
               {applied.unknown.join(', ')}. Re-run the starter pack on the first screen to add them.
             </Typography>
           )}
@@ -748,7 +748,7 @@ export function StepDemo({ run, tenantId, pack, patchState, finish }: SetupStepP
               helperText={
                 item?.supplier
                   ? 'Read off the document you just dropped. Change it if it read the name wrong.'
-                  : 'Name the supplier this checklist belongs to.'
+                  : 'Name the supplier these requirements belong to.'
               }
               sx={{ minWidth: 260 }}
             />
