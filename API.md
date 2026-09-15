@@ -1076,6 +1076,26 @@ Response: `{ "arrival": RequestArrival, "counts": DocumentRequestLineCounts }`.
 
 ---
 
+## Out-of-Spec Register
+
+`document_spec_checks` holds every judged COA test result: the verdict (`in_spec` / `out_of_spec` / `not_checked`), the limit it was judged against (frozen in `limit_snapshot`), and who acknowledged it. The Out of Spec page (`/spec-alerts`) reads it.
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/spec-checks` | any tenant user | List rows. `verdict` (default `out_of_spec`; `all` for everything), `acknowledged` (`0`/`1`), `origin` (see below), `document_id`, `supplier_id`, `spec_test_id`, `since`, `limit` (max 200), `offset`; `tenant_id` for super_admin. |
+| `POST /api/spec-checks` | any tenant user | `{ "ids": [...], "note": "..." }`. Acknowledge results. It never changes a verdict. |
+
+**Who judged it.** Rows have two producers, and each row says which one wrote it:
+
+- `judgement_origin: "approval"`: a reviewer approved the document with this result showing (migration 0103).
+- `judgement_origin: "bulk_recheck"`: `bin/backfill-spec-register` computed it over approved history. `bulk_run_at` is that pass's timestamp. Nobody reviewed the result at approval, and nobody was emailed.
+
+`?origin=approval` or `?origin=bulk_recheck` narrows the list. The default, `all`, returns both. Any other value returns 400. Acknowledgement works the same on both kinds, and it never changes the origin.
+
+**Which result.** `result_location` (migration 0105) says where on the certificate the result was printed, for example `"Table 1, row 3 (26141R)"`. `result_key` is the same location as a machine key. A certificate that covers several lots lists the same test once per lot, so two rows with equal test, value and verdict are separate results when their locations differ. Rows written before 0105 have NULL here until `bin/backfill-spec-register --stamp-identity` fills them.
+
+---
+
 ## Agentic Integration
 
 The document portal supports an email-to-agent-to-portal pipeline for automated document ingestion. Here is the typical flow:

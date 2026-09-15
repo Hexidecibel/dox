@@ -17,11 +17,19 @@ import type { Env, User } from '../../lib/types';
 /**
  * GET /api/spec-checks
  *
- * Query: verdict (default 'out_of_spec'), acknowledged ('0' | '1'), document_id,
+ * Query: verdict (default 'out_of_spec'), acknowledged ('0' | '1'), origin
+ * ('all' | 'approval' | 'bulk_recheck', default 'all'), document_id,
  * supplier_id, spec_test_id, since (ISO date), limit, offset.
  *
  * Defaults to the view that matters — unacknowledged failures, newest first.
+ *
+ * `origin` filters on WHO judged a result (migration 0103): a reviewer at
+ * approval, or `bin/backfill-spec-register` over history with nobody looking
+ * and nobody emailed. Every row carries `judgement_origin` and `bulk_run_at`
+ * whatever the filter, so a reader can never mistake one for the other.
  */
+const ORIGINS = new Set(['all', 'approval', 'bulk_recheck']);
+
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
     const user = context.data.user as User;
@@ -54,6 +62,21 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const acknowledged = url.searchParams.get('acknowledged');
     if (acknowledged === '0') conditions.push('c.acknowledged_at IS NULL');
     if (acknowledged === '1') conditions.push('c.acknowledged_at IS NOT NULL');
+
+    // A typo here must not read as "no filter": a request for reviewer-judged
+    // rows that silently returned bulk ones too would be the exact confusion
+    // the origin column exists to prevent.
+    const origin = url.searchParams.get('origin') ?? 'all';
+    if (!ORIGINS.has(origin)) {
+      return new Response(
+        JSON.stringify({ error: "origin must be 'all', 'approval' or 'bulk_recheck'" }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (origin !== 'all') {
+      conditions.push('c.judgement_origin = ?');
+      params.push(origin);
+    }
 
     for (const [param, column] of [
       ['document_id', 'c.document_id'],

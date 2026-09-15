@@ -813,6 +813,14 @@ export interface ApiSpecCheck {
   judgement_origin: 'approval' | 'bulk_recheck' | null;
   /** The bulk pass's timestamp, shared by every row it wrote. NULL at approval. */
   bulk_run_at: string | null;
+  /**
+   * WHICH result on the certificate this row is (migration 0105): the engine's
+   * location key, and the same place in words ("Table 1, row 3 (26141R)"). Five
+   * lots that each print "Coliform <10" are five rows that differ only here.
+   * NULL on rows written before 0105 that have not been stamped.
+   */
+  result_key?: string | null;
+  result_location?: string | null;
   created_at: string;
   /** Joined for display. */
   document_title?: string | null;

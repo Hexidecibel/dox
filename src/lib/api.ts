@@ -1140,6 +1140,8 @@ export const api = {
     list: (params?: {
       verdict?: 'out_of_spec' | 'not_checked' | 'in_spec' | 'all';
       acknowledged?: '0' | '1';
+      /** Who judged it (0103): a reviewer at approval, or the bulk re-check. */
+      origin?: 'all' | 'approval' | 'bulk_recheck';
       document_id?: string;
       supplier_id?: string;
       spec_test_id?: string;
