@@ -273,13 +273,11 @@ export function normalizeUnit(raw: unknown): UnitInfo {
   }
 
   // Enumeration units: <method>/<amount><basis>, e.g. CFU/g, cfu/100 g, MPN/mL.
-  const m = /^(cfu|mpn|apc|spc|tpc|count|ct)(per|\/)?(\d+)?(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/.exec(
-    n
-  );
+  const m = parseEnumerationUnit(s);
   if (m) {
-    const method = m[1] === 'cfu' || m[1] === 'mpn' ? m[1] : 'cfu';
-    const amount = m[3] ? Number(m[3]) : 1;
-    const basisRaw = m[4] ?? '';
+    const method = m.method === 'cfu' || m.method === 'mpn' ? m.method : 'cfu';
+    const amount = m.amount;
+    const basisRaw = m.basis;
     const basis = basisRaw.startsWith('g') ? 'mass' : basisRaw ? 'volume' : '';
     if (!basis) return { family: `${method}:unspecified`, perBasis: amount, canonical: s };
     // Normalise larger volume/mass units onto the base one.
@@ -290,6 +288,42 @@ export function normalizeUnit(raw: unknown): UnitInfo {
   }
 
   return { family: `other:${n}`, perBasis: 1, canonical: s };
+}
+
+const ENUMERATION_METHOD_RE = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?$/;
+const ENUMERATION_BASIS_RE = /^(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/;
+
+/**
+ * Split an enumeration unit into method, sample amount and basis.
+ *
+ * THE AMOUNT IS READ BEFORE ANYTHING IS NORMALIZED, and that ordering is the
+ * fix for a 10x misread. `norm` keeps only alphanumerics, so "cfu/0.1g" used to
+ * become "cfu01g", whose amount parsed as `01` = 1: a result of 5 CFU per 0.1 g
+ * (50 per gram) was judged as 5 per gram and passed a ≤10 limit it fails five
+ * times over. The number is therefore located on the RAW string, decimal point
+ * intact, and only the text either side of it is normalized.
+ *
+ * The number must sit AFTER the method ("cfu/0.1g", "CFU per 0.1 g"); a number
+ * in front of it ("10 cfu/g") is a value that leaked into the unit cell, not a
+ * sample basis, and is not claimed as one. An amount of zero cannot be a basis
+ * (it would divide by zero) and is refused. Returns null for anything that is
+ * not an enumeration unit.
+ */
+function parseEnumerationUnit(raw: string): { method: string; amount: number; basis: string } | null {
+  const lower = raw.toLowerCase();
+  const num = /(\d*\.\d+|\d+)/.exec(lower);
+  if (!num) {
+    const m = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/.exec(
+      norm(lower)
+    );
+    return m ? { method: m[1], amount: 1, basis: m[3] ?? '' } : null;
+  }
+  const head = ENUMERATION_METHOD_RE.exec(norm(lower.slice(0, num.index)));
+  const tail = ENUMERATION_BASIS_RE.exec(norm(lower.slice(num.index + num[0].length)));
+  if (!head || !tail) return null;
+  const amount = Number(num[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return { method: head[1], amount, basis: tail[1] ?? '' };
 }
 
 /**

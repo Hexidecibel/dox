@@ -151,6 +151,68 @@ describe('units', () => {
   });
 });
 
+describe('a decimal sample basis is read as a decimal, not 10x off', () => {
+  // norm() strips the decimal point, so "cfu/0.1g" used to read as per ONE
+  // gram: 5 CFU per 0.1 g (50 per gram) passed a ≤10 CFU/g limit.
+  it('cfu/0.1g is per 0.1 g', () => {
+    const u = normalizeUnit('cfu/0.1g');
+    expect(u.family).toBe('cfu:mass');
+    expect(u.perBasis).toBeCloseTo(0.1);
+    expect(unitFactor(u, normalizeUnit('CFU/g'))).toBeCloseTo(10);
+  });
+
+  it('cfu/10g is per 10 g', () => {
+    const u = normalizeUnit('cfu/10g');
+    expect(u.family).toBe('cfu:mass');
+    expect(u.perBasis).toBe(10);
+    expect(unitFactor(u, normalizeUnit('CFU/g'))).toBeCloseTo(0.1);
+  });
+
+  it('cfu/0.01mL is per 0.01 mL', () => {
+    const u = normalizeUnit('cfu/0.01mL');
+    expect(u.family).toBe('cfu:volume');
+    expect(u.perBasis).toBeCloseTo(0.01);
+    expect(unitFactor(u, normalizeUnit('CFU/mL'))).toBeCloseTo(100);
+  });
+
+  it('"CFU per 0.1 g" is per 0.1 g, spaces and the word "per" included', () => {
+    const u = normalizeUnit('CFU per 0.1 g');
+    expect(u.family).toBe('cfu:mass');
+    expect(u.perBasis).toBeCloseTo(0.1);
+    expect(normalizeUnit('cfu / .1 g').perBasis).toBeCloseTo(0.1);
+  });
+
+  it('a bare "per 0.1 g" names no method, so it is not claimed as a CFU basis', () => {
+    const u = normalizeUnit('per 0.1 g');
+    expect(u.family.startsWith('cfu')).toBe(false);
+    expect(u.perBasis).toBe(1);
+  });
+
+  it('whole-number bases are unchanged', () => {
+    expect(normalizeUnit('CFU/100g').perBasis).toBe(100);
+    expect(normalizeUnit('MPN/100 mL').perBasis).toBe(100);
+    expect(normalizeUnit('CFU/g').perBasis).toBe(1);
+    expect(normalizeUnit('cfu/L').perBasis).toBe(1000);
+  });
+
+  it('a zero basis or a number in front of the method is not a basis', () => {
+    expect(normalizeUnit('cfu/0g').family.startsWith('cfu')).toBe(false);
+    expect(normalizeUnit('10 cfu/g').family.startsWith('cfu')).toBe(false);
+  });
+
+  it('5 CFU per 0.1 g is out of spec against ≤10 CFU/g (it is 50 per gram)', () => {
+    const cmp = compareToLimit(parseMeasuredValue('5 cfu/0.1g'), {
+      operator: '<=',
+      min: null,
+      max: 10,
+      unit: 'CFU/g',
+      raw: '',
+    });
+    expect(cmp.verdict).toBe('out_of_spec');
+    expect(cmp.value_num).toBeCloseTo(50);
+  });
+});
+
 describe('compareToLimit — the cases that must be right', () => {
   const coliform = lim({ operator: '<=', max: 10, unit: 'CFU/g' });
 

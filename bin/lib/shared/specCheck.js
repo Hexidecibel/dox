@@ -83,13 +83,11 @@ function normalizeUnit(raw) {
   if (n === "c" || n === "degc" || n === "f" || n === "degf") {
     return { family: "temp", perBasis: 1, canonical: s };
   }
-  const m = /^(cfu|mpn|apc|spc|tpc|count|ct)(per|\/)?(\d+)?(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/.exec(
-    n
-  );
+  const m = parseEnumerationUnit(s);
   if (m) {
-    const method = m[1] === "cfu" || m[1] === "mpn" ? m[1] : "cfu";
-    const amount = m[3] ? Number(m[3]) : 1;
-    const basisRaw = m[4] ?? "";
+    const method = m.method === "cfu" || m.method === "mpn" ? m.method : "cfu";
+    const amount = m.amount;
+    const basisRaw = m.basis;
     const basis = basisRaw.startsWith("g") ? "mass" : basisRaw ? "volume" : "";
     if (!basis) return { family: `${method}:unspecified`, perBasis: amount, canonical: s };
     let perBasis = amount;
@@ -98,6 +96,24 @@ function normalizeUnit(raw) {
     return { family: `${method}:${basis}`, perBasis, canonical: s };
   }
   return { family: `other:${n}`, perBasis: 1, canonical: s };
+}
+var ENUMERATION_METHOD_RE = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?$/;
+var ENUMERATION_BASIS_RE = /^(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/;
+function parseEnumerationUnit(raw) {
+  const lower = raw.toLowerCase();
+  const num = /(\d*\.\d+|\d+)/.exec(lower);
+  if (!num) {
+    const m = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/.exec(
+      norm(lower)
+    );
+    return m ? { method: m[1], amount: 1, basis: m[3] ?? "" } : null;
+  }
+  const head = ENUMERATION_METHOD_RE.exec(norm(lower.slice(0, num.index)));
+  const tail = ENUMERATION_BASIS_RE.exec(norm(lower.slice(num.index + num[0].length)));
+  if (!head || !tail) return null;
+  const amount = Number(num[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return { method: head[1], amount, basis: tail[1] ?? "" };
 }
 var STRICT_UNIT_POLICY = {};
 function resolveUnits(from, to, policy = STRICT_UNIT_POLICY) {
