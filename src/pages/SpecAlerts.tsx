@@ -15,6 +15,12 @@
  * a limit for that test and could not honestly apply it. A reader who assumes
  * "not listed as failing" means "passed" is exactly who this feature has to
  * protect, so the count of unjudgeable results is always one click away.
+ *
+ * WHO JUDGED IT (migration 0103) is shown on every row and filterable. A result
+ * a reviewer had in front of them at approval and one `bin/backfill-spec-register`
+ * computed over history are different events: nobody reviewed the second at
+ * approval and nobody was emailed about it. Rendering the two identically would
+ * let a script's arithmetic pass for a person's judgement.
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -40,6 +46,8 @@ import {
   TableRow,
   Tabs,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -69,6 +77,14 @@ const TABS: Array<{ key: TabKey; label: string; hint: string }> = [
     label: 'Could not check',
     hint: 'We held a limit and could not honestly apply it — NOT a pass',
   },
+];
+
+type OriginKey = 'all' | 'approval' | 'bulk_recheck';
+
+const ORIGINS: Array<{ key: OriginKey; label: string }> = [
+  { key: 'all', label: 'All' },
+  { key: 'approval', label: 'Reviewed at approval' },
+  { key: 'bulk_recheck', label: 'Bulk re-check' },
 ];
 
 function fmtDate(iso: string | null | undefined): string {
@@ -116,6 +132,7 @@ function snapshotCriticality(check: ApiSpecCheck): SpecCriticality | null {
 
 export function SpecAlerts() {
   const [tab, setTab] = useState<TabKey>('open');
+  const [origin, setOrigin] = useState<OriginKey>('all');
   const [checks, setChecks] = useState<ApiSpecCheck[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -134,7 +151,7 @@ export function SpecAlerts() {
         tab === 'not_checked'
           ? ({ verdict: 'not_checked' } as const)
           : ({ verdict: 'out_of_spec', acknowledged: tab === 'open' ? '0' : '1' } as const);
-      const res = await api.specChecks.list({ ...params, limit: 200 });
+      const res = await api.specChecks.list({ ...params, origin, limit: 200 });
       setChecks(res.specChecks);
       setTotal(res.total);
       setSelected(new Set());
@@ -143,7 +160,7 @@ export function SpecAlerts() {
     } finally {
       setLoading(false);
     }
-  }, [tab]);
+  }, [tab, origin]);
 
   useEffect(() => {
     load();
@@ -207,15 +224,39 @@ export function SpecAlerts() {
         </Alert>
       )}
 
-      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }}>
-        {TABS.map((t) => (
-          <Tab
-            key={t.key}
-            value={t.key}
-            label={<Tooltip title={t.hint} arrow><span>{t.label}</span></Tooltip>}
-          />
-        ))}
-      </Tabs>
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 1,
+          mb: 2,
+        }}
+      >
+        <Tabs value={tab} onChange={(_, v) => setTab(v)}>
+          {TABS.map((t) => (
+            <Tab
+              key={t.key}
+              value={t.key}
+              label={<Tooltip title={t.hint} arrow><span>{t.label}</span></Tooltip>}
+            />
+          ))}
+        </Tabs>
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={origin}
+          onChange={(_, v: OriginKey | null) => v && setOrigin(v)}
+          aria-label="Who judged the result"
+        >
+          {ORIGINS.map((o) => (
+            <ToggleButton key={o.key} value={o.key} sx={{ textTransform: 'none' }}>
+              {o.label}
+            </ToggleButton>
+          ))}
+        </ToggleButtonGroup>
+      </Box>
 
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
@@ -225,11 +266,13 @@ export function SpecAlerts() {
         <EmptyState
           title={tab === 'open' ? 'Nothing out of spec' : 'Nothing here'}
           description={
-            tab === 'open'
-              ? 'No unacknowledged out-of-spec results. This only covers tests you hold a limit for — configure more in Settings › Spec Limits.'
-              : tab === 'not_checked'
-                ? 'No results were skipped. When one is, it appears here rather than passing silently.'
-                : 'Nothing has been acknowledged yet.'
+            origin !== 'all'
+              ? `Nothing here among results judged by ${origin === 'approval' ? 'a reviewer at approval' : 'the bulk re-check'}. Switch the filter to All to see everything.`
+              : tab === 'open'
+                ? 'No unacknowledged out-of-spec results. This only covers tests you hold a limit for — configure more in Settings › Spec Limits.'
+                : tab === 'not_checked'
+                  ? 'No results were skipped. When one is, it appears here rather than passing silently.'
+                  : 'Nothing has been acknowledged yet.'
           }
         />
       ) : (
@@ -265,6 +308,14 @@ export function SpecAlerts() {
                           <NotCheckedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
                         )}
                         <span>{c.spec_test_name || c.test_name_raw}</span>
+                        {c.judgement_origin === 'bulk_recheck' && (
+                          <Tooltip
+                            arrow
+                            title={`Judged over history on ${fmtDate(c.bulk_run_at)}. Nobody reviewed this result at approval and nobody was emailed.`}
+                          >
+                            <Chip size="small" variant="outlined" label="Bulk re-check" />
+                          </Tooltip>
+                        )}
                         {(() => {
                           const tier = snapshotCriticality(c);
                           if (!tier) return null;
@@ -304,6 +355,16 @@ export function SpecAlerts() {
                       >
                         {c.document_title || c.document_id}
                       </Button>
+                      {c.result_location && (
+                        <Tooltip
+                          arrow
+                          title="Where on the certificate this result was printed. A certificate covering several lots lists the same test once per lot."
+                        >
+                          <Typography variant="caption" color="text.secondary" display="block">
+                            {c.result_location}
+                          </Typography>
+                        </Tooltip>
+                      )}
                     </TableCell>
                     <TableCell>{c.supplier_name || '—'}</TableCell>
                     <TableCell>{fmtDate(c.created_at)}</TableCell>

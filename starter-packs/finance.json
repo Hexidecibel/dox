@@ -352,7 +352,7 @@
     {
       "name": "Counterparty Onboarding",
       "slug": "counterparty-onboarding",
-      "description": "What a new vendor or contractor owes before they are paid. Applied one counterparty at a time — the same discipline as the food-safety pack, for the same reason: applied in bulk it becomes a checklist that is uniform and wrong.",
+      "description": "What a new vendor or contractor owes before they are paid. Applied one counterparty at a time — the same discipline as the food-safety pack, for the same reason: applied in bulk it becomes a list of requirements that is uniform and wrong.",
       "requirements": [
         "counterparty-w9-on-file",
         "executed-contract-on-file"
@@ -368,7 +368,7 @@
       "bank-reconciliations-on-file"
     ],
     "decoy": "general-ledger-on-file",
-    "decoy_reason": "A reconciliation QUOTES the ledger balance it is reconciling to. It is not the ledger, and filing it against the General Ledger line item leaves that line item looking closed by a document that contains none of the detail. A document TYPE is not a checklist REQUIREMENT — that is the one idea this screen exists to teach.",
+    "decoy_reason": "A reconciliation QUOTES the ledger balance it is reconciling to. It is not the ledger, and filing it against the General Ledger line item leaves that line item looking closed by a document that contains none of the detail. A document TYPE is not a REQUIREMENT — that is the one idea this screen exists to teach.",
     "also_closed_by": {
       "requirement": "general-ledger-on-file",
       "document_type": "general-ledger-export"

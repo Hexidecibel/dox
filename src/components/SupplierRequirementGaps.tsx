@@ -254,8 +254,8 @@ export default function SupplierRequirementGaps({
         <Alert severity="warning" sx={{ mb: 2 }}>
           <AlertTitle>No requirements configured</AlertTitle>
           Nothing has been attached to this supplier, so nothing is being checked.
-          This is <strong>not</strong> the same as compliant — attach the checklist
-          line items this supplier owes before reading anything below as clean.
+          This is <strong>not</strong> the same as compliant — attach the requirements
+          this supplier owes before reading anything below as clean.
           {onConfigure ? (
             <Box sx={{ mt: 1 }}>
               <Button size="small" variant="contained" color="warning" onClick={onConfigure}>
@@ -358,7 +358,7 @@ export default function SupplierRequirementGaps({
                 <TableHead>
                   <TableRow>
                     <TableCell>Requirement</TableCell>
-                    <TableCell>Checklist</TableCell>
+                    <TableCell>Group</TableCell>
                     <TableCell>Tier</TableCell>
                     <TableCell>Applies because</TableCell>
                     <TableCell>Status</TableCell>

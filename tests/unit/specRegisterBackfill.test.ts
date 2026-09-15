@@ -39,6 +39,10 @@ const {
   auditSql,
   pruneToSql,
   indexExistingRows,
+  findDuplicateRows,
+  duplicatesPruneToSql,
+  duplicatesAuditSql,
+  stampToSql,
 } = mod;
 
 const RUN_AT = '2026-09-04T12:00:00.000Z';
@@ -344,5 +348,171 @@ describe('the row it writes', () => {
     expect(p.rows).toHaveLength(0);
     expect(p.skipped[0].reason).toBe('all_values_refused');
     expect(p.counts.documents_written).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Duplicates: what looks the same, and what is (0105)
+// ---------------------------------------------------------------------------
+
+/** One lot's coliform result in a crosstab — `row` is the lot's row on the page. */
+function lotVerdict(row: number, over: Partial<SpecVerdict> = {}): SpecVerdict {
+  return verdict({
+    target: { kind: 'table', table_index: 0, row_index: row, table_name: 'micro', col_index: 4, row_label: `L${row}` },
+    value_raw: '<10',
+    value_num: 10,
+    verdict: 'in_spec',
+    ...over,
+  });
+}
+
+let rowSeq = 0;
+function registerRow(over: Record<string, unknown> = {}) {
+  rowSeq += 1;
+  return {
+    id: `chk_${String(rowSeq).padStart(3, '0')}`,
+    document_id: 'doc_1',
+    document_title: 'TUB WHIP CREAM CH SPRD',
+    version_number: 1,
+    test_name_raw: 'Coliform',
+    value_raw: '<10',
+    unit_raw: 'CFU/g',
+    source: 'limit',
+    limit_id: LIMIT.id,
+    verdict: 'in_spec',
+    judgement_origin: 'bulk_recheck',
+    bulk_run_at: RUN_AT,
+    acknowledged_at: null,
+    created_at: '2026-09-15 01:36:27',
+    ...over,
+  };
+}
+
+function dupes(existingRows: unknown[], verdicts: SpecVerdict[] | null) {
+  const replay = new Map();
+  if (verdicts) replay.set('doc_1', { current_version: 1, verdicts });
+  return findDuplicateRows({ existingRows, replay, registerIdentity: compiledSnapshot.registerIdentity });
+}
+
+describe('duplicates are proven by identity, never by appearance', () => {
+  it('a multi-lot certificate is NOT a duplicate, however equal the rows look', () => {
+    // The production shape: six lots, each "<10", written as six rows that agree
+    // on every column the page shows. A prune keyed on those columns would have
+    // deleted five real lot results.
+    const rows = [1, 2, 3, 4, 5, 6].map(() => registerRow());
+    const r = dupes(rows, [1, 2, 3, 4, 5, 6].map((i) => lotVerdict(i)));
+    expect(r.counts.candidate_groups).toBe(1);
+    expect(r.counts.candidate_rows).toBe(6);
+    expect(r.removals).toEqual([]);
+    expect(r.counts.groups_distinct_results).toBe(1);
+    expect(r.explained[0].locations).toHaveLength(6);
+  });
+
+  it('removes only the rows beyond the results the replay finds', () => {
+    // Three rows, two lots: one surplus row.
+    const rows = [registerRow(), registerRow(), registerRow()];
+    const r = dupes(rows, [lotVerdict(1), lotVerdict(2)]);
+    expect(r.removals).toHaveLength(1);
+    expect(r.removals[0]).toMatchObject({ basis: 'replay', results: 2, rows: 3 });
+    // Earliest (then lowest id) survives.
+    expect(r.removals[0].id).toBe(rows[2].id);
+  });
+
+  it('never deletes an acknowledged row in favour of an unacknowledged one', () => {
+    const older = registerRow({ created_at: '2026-01-01 00:00:00', verdict: 'out_of_spec', value_raw: '40' });
+    const acked = registerRow({
+      created_at: '2026-09-01 00:00:00',
+      verdict: 'out_of_spec',
+      value_raw: '40',
+      acknowledged_at: '2026-09-02 00:00:00',
+    });
+    const r = dupes([older, acked], [verdict()]);
+    expect(r.removals.map((x: { id: string }) => x.id)).toEqual([older.id]);
+    expect(r.removals[0].kept_id).toBe(acked.id);
+  });
+
+  it('touches nothing on a document the replay does not reproduce', () => {
+    // Metadata edited since, or limits changed: the rows no longer line up with
+    // what the engine finds, so the replay cannot vouch for any of them.
+    const rows = [registerRow(), registerRow(), registerRow({ test_name_raw: 'Yeast' })];
+    const r = dupes(rows, [lotVerdict(1)]);
+    expect(r.removals).toEqual([]);
+    expect(r.stamps).toEqual([]);
+    expect(r.unverifiable[0]).toMatchObject({ document_id: 'doc_1', reason: 'replay_differs' });
+  });
+
+  it('touches nothing without metadata, across writes, or on another version', () => {
+    const pair = () => [registerRow(), registerRow()];
+    expect(dupes(pair(), null).unverifiable[0].reason).toBe('no_metadata');
+    expect(
+      dupes([registerRow(), registerRow({ bulk_run_at: '2026-09-20T00:00:00.000Z' })], [lotVerdict(1)])
+        .unverifiable[0].reason
+    ).toBe('mixed_writes');
+    expect(
+      dupes([registerRow({ version_number: 2 }), registerRow({ version_number: 2 })], [lotVerdict(1)])
+        .unverifiable[0].reason
+    ).toBe('other_version');
+  });
+
+  it('with result_key on every row, identity alone decides', () => {
+    const key = 'ai_fields::t0r1c4';
+    const rows = [
+      registerRow({ result_key: key }),
+      registerRow({ result_key: key }),
+      registerRow({ result_key: 'ai_fields::t0r2c4' }),
+    ];
+    const r = dupes(rows, null);
+    expect(r.removals).toHaveLength(1);
+    expect(r.removals[0]).toMatchObject({ basis: 'identity', id: rows[1].id });
+  });
+
+  it('stamps bulk rows with the replayed location, and leaves approval rows alone', () => {
+    const bulk = dupes([registerRow(), registerRow()], [lotVerdict(1), lotVerdict(2)]);
+    expect(bulk.stamps.map((s: { result_key: string }) => s.result_key).sort()).toEqual([
+      'ai_fields::t0r1c4',
+      'ai_fields::t0r2c4',
+    ]);
+    expect(bulk.stamps[0].result_location).toBe('Table 1, row 2 (L1)');
+
+    const approval = dupes(
+      [registerRow({ judgement_origin: 'approval', bulk_run_at: null })],
+      [lotVerdict(1)]
+    );
+    expect(approval.stamps).toEqual([]);
+    expect(approval.counts.stamp_skipped_approval_rows).toBe(1);
+  });
+
+  it('renders DELETEs by id, one audit row with no actor, and guarded UPDATEs', () => {
+    const r = dupes([registerRow(), registerRow()], [lotVerdict(1)]);
+    const del = duplicatesPruneToSql(r.removals);
+    expect(del).toHaveLength(1);
+    expect(del[0]).toMatch(/^DELETE FROM document_spec_checks WHERE id IN \('chk_\d+'\);$/);
+    const audit = duplicatesAuditSql('tenant_x', RUN_AT, r.removals);
+    expect(audit).toMatch(/VALUES \(NULL, 'tenant_x', 'spec_register.duplicates_pruned'/);
+
+    const [update] = stampToSql([{ id: 'chk_1', result_key: 'k', result_location: "Table 1, row 2 (O'Brien)" }]);
+    expect(update).toBe(
+      "UPDATE document_spec_checks SET result_key = 'k', result_location = 'Table 1, row 2 (O''Brien)' WHERE id = 'chk_1' AND result_key IS NULL;"
+    );
+    expect(update).not.toMatch(/verdict|acknowledged|notified_at/);
+  });
+});
+
+describe('the backfill writes result identity too', () => {
+  it('stores the location, keeps every lot, and drops only a repeated place', () => {
+    const p = plan({
+      registerIdentity: compiledSnapshot.registerIdentity,
+      judged: [{ document: DOC, verdicts: [lotVerdict(1), lotVerdict(2), lotVerdict(2)] }],
+    });
+    expect(p.rows.map((r: { result_key: string }) => r.result_key)).toEqual([
+      'ai_fields::t0r1c4',
+      'ai_fields::t0r2c4',
+    ]);
+    expect(p.counts.dropped_repeated_identity).toBe(1);
+    const [sql] = planToSql(p);
+    expect(sql).toContain('result_key, result_location');
+    expect(sql).toContain("'Table 1, row 2 (L1)'");
+    // Against a database without 0105 the row is written as it was before.
+    expect(planToSql(p, { withIdentity: false })[0]).not.toContain('result_key');
   });
 });

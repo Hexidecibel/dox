@@ -1,7 +1,7 @@
 {
   "pack": "fsqa",
   "label": "Food Safety & Quality Assurance",
-  "description": "Starter vocabulary for a food-safety supplier document registry: what a document IS, which checklist line items it CLOSES, and which claims OPEN new requirements.",
+  "description": "Starter vocabulary for a food-safety supplier document registry: what a document IS, which requirements it CLOSES, and which claims OPEN new ones.",
   "_editing": [
     "This file is DATA. Edit it with a text editor — no code changes needed.",
     "document_types = what a document IS. One per document. (Layer 1)",
@@ -66,7 +66,7 @@
     {
       "name": "Specification Sheet",
       "slug": "specification-sheet",
-      "description": "Supplier product spec. Typically closes many checklist items at once (micro limits, pack size, nutritionals, allergens, origin, GTIN).",
+      "description": "Supplier product spec. Typically closes many requirements at once (micro limits, pack size, nutritionals, allergens, origin, GTIN).",
       "owner": "QA",
       "closes": [
         "spec-sheet",
@@ -757,7 +757,7 @@
     {
       "name": "Ingredient Supplier",
       "slug": "ingredient-supplier",
-      "description": "A supplier of a food ingredient we put into product. The heaviest packet, and the one that makes a supplier's checklist look like the SOP.",
+      "description": "A supplier of a food ingredient we put into product. The heaviest packet, and the one that makes a supplier's requirements look like the SOP.",
       "requirements": [
         "spec-sheet",
         "micro-limits",
@@ -1028,7 +1028,7 @@
       "ingredient-statement"
     ],
     "decoy": "coa-on-file",
-    "decoy_reason": "A specification sheet is the document a COA is judged AGAINST, and the two arrive together, so filing this one against the Certificate of Analysis line item is the tempting mistake. It is wrong for a reason worth internalising: a specification measures nothing. Every figure on it is an acceptance limit for the PRODUCT, unchanged from lot to lot; a COA reports what one lot actually measured. Tick this box and the line item reads as closed by a document that contains no result at all. A document TYPE is not a checklist REQUIREMENT, and the mapping between them is what you are configuring.",
+    "decoy_reason": "A specification sheet is the document a COA is judged AGAINST, and the two arrive together, so filing this one against the Certificate of Analysis line item is the tempting mistake. It is wrong for a reason worth internalising: a specification measures nothing. Every figure on it is an acceptance limit for the PRODUCT, unchanged from lot to lot; a COA reports what one lot actually measured. Tick this box and the line item reads as closed by a document that contains no result at all. A document TYPE is not a REQUIREMENT, and the mapping between them is what you are configuring.",
     "also_closed_by": {
       "requirement": "coa-on-file",
       "document_type": "certificate-of-analysis"

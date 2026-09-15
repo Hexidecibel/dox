@@ -1138,7 +1138,7 @@ export function DocumentDetail() {
       <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, mb: 3 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1.5 }}>
           <Typography variant="h6" fontWeight={600}>Requirements &amp; Claims</Typography>
-          <InfoTooltip text="What this document closes on the checklist, and what it asserts. Only CONFIRMED links count — a suggestion from the extraction pipeline leaves the requirement open until a person confirms it." />
+          <InfoTooltip text="Which requirements this document closes, and what it asserts. Only CONFIRMED links count — a suggestion from the extraction pipeline leaves the requirement open until a person confirms it." />
           {!isReader && !facetsEditing && (
             <IconButton size="small" onClick={openFacetsEdit} aria-label="Edit requirements and claims">
               <EditIcon fontSize="small" />
@@ -1242,7 +1242,7 @@ export function DocumentDetail() {
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                   <Box>
                     <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                      Satisfies (checklist items this document closes)
+                      Satisfies (requirements this document closes)
                     </Typography>
                     <DocumentFacetPicker
                       vocab={requirementVocab.map((r) => ({
@@ -1255,11 +1255,11 @@ export function DocumentDetail() {
                       onChange={setReqLinks}
                       showStatus
                       disabled={facetsSaving}
-                      searchPlaceholder="Search the checklist…"
+                      searchPlaceholder="Search requirements…"
                       emptyMessage={
                         <>
-                          This tenant has no checklist items yet. Add them under Settings &rarr;
-                          Checklist before a document can say what it closes.
+                          This tenant has no requirements yet. Add them under Settings &rarr;
+                          Requirements before a document can say what it closes.
                         </>
                       }
                     />
@@ -1298,10 +1298,10 @@ export function DocumentDetail() {
                 <>
                   {facetView(
                     'Satisfies',
-                    'Checklist items this document closes.',
+                    'Requirements this document closes.',
                     reqs,
                     requirementVocab.length === 0
-                      ? 'No checklist items are configured for this tenant yet.'
+                      ? 'No requirements are configured for this tenant yet.'
                       : 'Nothing linked.',
                   )}
                   {facetView(

@@ -317,14 +317,14 @@ export function buildTrace({
       lines.push({
         key: 'requirements',
         tone: 'ok',
-        text: `${typeRequirements.length} checklist item${typeRequirements.length === 1 ? '' : 's'} will be proposed when you approve it`,
+        text: `${typeRequirements.length} requirement${typeRequirements.length === 1 ? '' : 's'} will be proposed when you approve it`,
         detail: firstThree(typeRequirements.map((r) => r.requirement_name)),
       });
     } else {
       lines.push({
         key: 'requirements',
         tone: 'info',
-        text: `${typeName} is not mapped to any checklist item, so approving it closes nothing`,
+        text: `${typeName} is not mapped to any requirement, so approving it closes nothing`,
         detail: 'One document can satisfy several line items — that mapping is what makes it count.',
       });
     }

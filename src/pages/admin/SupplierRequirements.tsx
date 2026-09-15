@@ -128,7 +128,7 @@ export function SupplierRequirements() {
       </Typography>
 
       <HelpWell id="registry.supplier_requirements" title="What does each supplier owe us?">
-        Attach checklist items to a supplier and the gap report can tell you what is missing.{' '}
+        Attach requirements to a supplier and the gap report can tell you what is missing.{' '}
         <strong>Required</strong> items are counted as gaps; <strong>recommended</strong> ones are
         advisory and left out by default — that default exists so the report stays worth reading.
         A supplier with nothing attached is <strong>not set up</strong>, which is not the same as
@@ -153,7 +153,7 @@ export function SupplierRequirements() {
           <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
               <Typography variant="body2" fontWeight={600}>
-                {configured} of {suppliers.length} suppliers have a checklist
+                {configured} of {suppliers.length} suppliers have requirements attached
               </Typography>
               <Typography variant="body2" color="text.secondary">
                 {pct}%

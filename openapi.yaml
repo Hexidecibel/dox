@@ -53,6 +53,10 @@ tags:
     description: |
       Files suppliers sent through a request link, as staff see them, and the
       decision about which requirements each one satisfies (migration 0104).
+  - name: Spec Register
+    description: |
+      The out-of-spec register — every judged COA test result, which limit it
+      was judged against, who judged it, and who acknowledged it.
   - name: GraphQL
     description: GraphQL API (alternative to REST)
 
@@ -401,6 +405,50 @@ components:
         decided_elsewhere:
           type: boolean
           description: Undecided here, but the line was settled from another file or by hand.
+
+    SpecCheck:
+      type: object
+      description: |
+        One judged test result in the out-of-spec register. Verdicts are never
+        edited; only acknowledgement is written from outside.
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        document_id: { type: string }
+        version_number: { type: integer, nullable: true }
+        queue_item_id: { type: string, nullable: true }
+        spec_test_id: { type: string, nullable: true }
+        test_name_raw: { type: string }
+        value_raw: { type: string, nullable: true }
+        value_num: { type: number, nullable: true }
+        unit_raw: { type: string, nullable: true }
+        verdict: { type: string, enum: [in_spec, out_of_spec, not_checked] }
+        reason: { type: string, nullable: true }
+        source: { type: string, enum: [printed, limit], description: "printed = the COA's own spec; limit = our configured limit" }
+        limit_id: { type: string, nullable: true }
+        limit_snapshot: { type: string, nullable: true, description: JSON of the limit as it stood when judged }
+        acknowledged_by: { type: string, nullable: true }
+        acknowledged_at: { type: string, nullable: true }
+        acknowledgement_note: { type: string, nullable: true }
+        notified_at: { type: string, nullable: true }
+        judgement_origin:
+          type: string
+          nullable: true
+          enum: [approval, bulk_recheck]
+          description: |
+            Who judged it (migration 0103). `approval` = a reviewer had the
+            document open with this result showing. `bulk_recheck` =
+            bin/backfill-spec-register computed it over history; nobody reviewed
+            it at approval and nobody was emailed.
+        bulk_run_at: { type: string, nullable: true, description: The bulk pass's timestamp; NULL at approval }
+        result_key: { type: string, nullable: true, description: 'Where on the certificate the result was printed (migration 0105), e.g. "ai_fields::t0r2c9"' }
+        result_location: { type: string, nullable: true, description: 'The same place in words, e.g. "Table 1, row 3 (26141R)"' }
+        created_at: { type: string }
+        document_title: { type: string, nullable: true }
+        supplier_id: { type: string, nullable: true }
+        supplier_name: { type: string, nullable: true }
+        spec_test_name: { type: string, nullable: true }
+        acknowledged_by_name: { type: string, nullable: true }
 
     RequestArrival:
       type: object
@@ -2381,6 +2429,80 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '410':
           description: The bytes are gone
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/spec-checks:
+    get:
+      tags: [Spec Register]
+      summary: List register rows
+      description: |
+        Any tenant user. Defaults to out-of-spec results, newest first. A
+        super_admin may pass `tenant_id`. Every row carries `judgement_origin`
+        and `bulk_run_at` whatever the `origin` filter.
+      parameters:
+        - { name: verdict, in: query, schema: { type: string, enum: [out_of_spec, not_checked, in_spec, all], default: out_of_spec } }
+        - { name: acknowledged, in: query, schema: { type: string, enum: ['0', '1'] } }
+        - name: origin
+          in: query
+          description: Who judged the result. Any other value is a 400.
+          schema: { type: string, enum: [all, approval, bulk_recheck], default: all }
+        - { name: document_id, in: query, schema: { type: string } }
+        - { name: supplier_id, in: query, schema: { type: string } }
+        - { name: spec_test_id, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { type: string }, description: ISO date; rows created on or after }
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: Register rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  specChecks:
+                    type: array
+                    items: { $ref: '#/components/schemas/SpecCheck' }
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        '400':
+          description: Unknown `origin`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    post:
+      tags: [Spec Register]
+      summary: Acknowledge results
+      description: |
+        Any tenant user. Records that a person has seen these results and accepted
+        them. Never changes a verdict or its origin, and works the same on
+        approval and bulk re-check rows. Ids from another tenant are ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, items: { type: string } }
+                note: { type: string }
+      responses:
+        '200':
+          description: Acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  acknowledged: { type: integer }
+        '400':
+          description: ids is required
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

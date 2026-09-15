@@ -512,7 +512,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Counterparty Onboarding",
         "slug": "counterparty-onboarding",
-        "description": "What a new vendor or contractor owes before they are paid. Applied one counterparty at a time — the same discipline as the food-safety pack, for the same reason: applied in bulk it becomes a checklist that is uniform and wrong.",
+        "description": "What a new vendor or contractor owes before they are paid. Applied one counterparty at a time — the same discipline as the food-safety pack, for the same reason: applied in bulk it becomes a list of requirements that is uniform and wrong.",
         "default": false,
         "requirements": [
           "counterparty-w9-on-file",
@@ -530,7 +530,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "bank-reconciliations-on-file"
       ],
       "decoy": "general-ledger-on-file",
-      "decoy_reason": "A reconciliation QUOTES the ledger balance it is reconciling to. It is not the ledger, and filing it against the General Ledger line item leaves that line item looking closed by a document that contains none of the detail. A document TYPE is not a checklist REQUIREMENT — that is the one idea this screen exists to teach.",
+      "decoy_reason": "A reconciliation QUOTES the ledger balance it is reconciling to. It is not the ledger, and filing it against the General Ledger line item leaves that line item looking closed by a document that contains none of the detail. A document TYPE is not a REQUIREMENT — that is the one idea this screen exists to teach.",
       "also_closed_by": {
         "requirement": "general-ledger-on-file",
         "document_type": "general-ledger-export"
@@ -551,12 +551,12 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
   "fsqa": {
     "pack": "fsqa",
     "label": "Food Safety & Quality Assurance",
-    "description": "Starter vocabulary for a food-safety supplier document registry: what a document IS, which checklist line items it CLOSES, and which claims OPEN new requirements.",
+    "description": "Starter vocabulary for a food-safety supplier document registry: what a document IS, which requirements it CLOSES, and which claims OPEN new ones.",
     "document_types": [
       {
         "name": "Specification Sheet",
         "slug": "specification-sheet",
-        "description": "Supplier product spec. Typically closes many checklist items at once (micro limits, pack size, nutritionals, allergens, origin, GTIN).",
+        "description": "Supplier product spec. Typically closes many requirements at once (micro limits, pack size, nutritionals, allergens, origin, GTIN).",
         "sort_order": 10,
         "owner": "QA",
         "closes": [
@@ -1320,7 +1320,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Ingredient Supplier",
         "slug": "ingredient-supplier",
-        "description": "A supplier of a food ingredient we put into product. The heaviest packet, and the one that makes a supplier's checklist look like the SOP.",
+        "description": "A supplier of a food ingredient we put into product. The heaviest packet, and the one that makes a supplier's requirements look like the SOP.",
         "default": false,
         "requirements": [
           "spec-sheet",
@@ -1629,7 +1629,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "ingredient-statement"
       ],
       "decoy": "coa-on-file",
-      "decoy_reason": "A specification sheet is the document a COA is judged AGAINST, and the two arrive together, so filing this one against the Certificate of Analysis line item is the tempting mistake. It is wrong for a reason worth internalising: a specification measures nothing. Every figure on it is an acceptance limit for the PRODUCT, unchanged from lot to lot; a COA reports what one lot actually measured. Tick this box and the line item reads as closed by a document that contains no result at all. A document TYPE is not a checklist REQUIREMENT, and the mapping between them is what you are configuring.",
+      "decoy_reason": "A specification sheet is the document a COA is judged AGAINST, and the two arrive together, so filing this one against the Certificate of Analysis line item is the tempting mistake. It is wrong for a reason worth internalising: a specification measures nothing. Every figure on it is an acceptance limit for the PRODUCT, unchanged from lot to lot; a COA reports what one lot actually measured. Tick this box and the line item reads as closed by a document that contains no result at all. A document TYPE is not a REQUIREMENT, and the mapping between them is what you are configuring.",
       "also_closed_by": {
         "requirement": "coa-on-file",
         "document_type": "certificate-of-analysis"

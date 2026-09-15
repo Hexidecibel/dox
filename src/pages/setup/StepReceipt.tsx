@@ -66,10 +66,10 @@ function sectionsFrom(snap: SetupReadinessSnapshot, packetsDefined: number): Led
       key: 'requirements',
       title: 'What a document SATISFIES',
       count: snap.requirements.count,
-      unit: 'checklist items',
+      unit: 'requirements',
       examples: snap.requirements.examples,
       href: '/settings/requirements',
-      linkLabel: 'Checklist',
+      linkLabel: 'Requirements',
     },
     {
       key: 'claim_types',
@@ -121,7 +121,7 @@ function sectionsFrom(snap: SetupReadinessSnapshot, packetsDefined: number): Led
       // uniform-and-wrong because six items were bulk-written across 21
       // suppliers; a receipt that read "3 packets ready" would invite exactly
       // that again.
-      unit: 'suppliers have a checklist',
+      unit: 'suppliers have requirements attached',
       examples: [],
       href: '/settings/supplier-requirements',
       linkLabel: 'Supplier requirements',

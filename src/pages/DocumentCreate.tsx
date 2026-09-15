@@ -379,7 +379,7 @@ export function DocumentCreate() {
       <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
         <Typography variant="subtitle1" fontWeight={600} gutterBottom>What this document satisfies</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-          Tick every checklist item this document closes. This is what a gap report
+          Tick every requirement this document closes. This is what a gap report
           subtracts against: anything left unticked stays outstanding for the supplier.
         </Typography>
         <DocumentFacetPicker
@@ -392,10 +392,10 @@ export function DocumentCreate() {
           value={requirementLinks}
           onChange={setRequirementLinks}
           disabled={saving}
-          searchPlaceholder="Search the checklist…"
+          searchPlaceholder="Search requirements…"
           emptyMessage={
             <>
-              This tenant has no checklist items yet. Add them under Settings &rarr; Checklist,
+              This tenant has no requirements yet. Add them under Settings &rarr; Requirements,
               then a document can say what it closes.
             </>
           }

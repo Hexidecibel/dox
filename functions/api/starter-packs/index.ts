@@ -68,14 +68,14 @@ function sectionsFor(pack: StarterPack): StarterPackSection[] {
     },
     {
       key: 'requirements',
-      label: 'checklist items',
+      label: 'requirements',
       count: pack.requirements.length,
       examples: examples(pack.requirements.map((r) => r.name)),
       seeded: true,
     },
     {
       key: 'document_type_requirements',
-      label: 'type → checklist defaults',
+      label: 'type → requirement defaults',
       count: typeRequirementLinks,
       examples: examples(
         pack.document_types

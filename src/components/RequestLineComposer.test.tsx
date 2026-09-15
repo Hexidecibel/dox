@@ -86,7 +86,7 @@ describe('RequestLineComposer — the picker', () => {
     // No input to type an ask into...
     expect(screen.queryByLabelText('What to ask for')).not.toBeInTheDocument();
     // ...until the escape hatch is opened by name.
-    await user.click(screen.getByRole('button', { name: /isn’t in the checklist/i }));
+    await user.click(screen.getByRole('button', { name: /isn’t one of your requirements/i }));
     expect(screen.getByLabelText('What to ask for')).toBeInTheDocument();
     // And it states the cost before it takes anything.
     expect(screen.getByText(/nothing that arrives can close it/i)).toBeInTheDocument();
@@ -95,7 +95,7 @@ describe('RequestLineComposer — the picker', () => {
   it('refuses to add an empty free-text line, and adds a named one as free_text', async () => {
     const user = userEvent.setup();
     const onChange = renderComposer([]);
-    await user.click(screen.getByRole('button', { name: /isn’t in the checklist/i }));
+    await user.click(screen.getByRole('button', { name: /isn’t one of your requirements/i }));
 
     const addButton = screen.getByRole('button', { name: 'Add anyway' });
     expect(addButton).toBeDisabled();

@@ -195,7 +195,7 @@ export function StepPack({
           ) : (
             <>
               The vocabulary is already in place — {preSeeded?.types} document types and{' '}
-              {preSeeded?.requirements} checklist items — which is what{' '}
+              {preSeeded?.requirements} requirements — which is what{' '}
               <code>bin/create-tenant --pack</code> leaves behind. Nothing to do here.
             </>
           )}{' '}

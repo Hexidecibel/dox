@@ -226,7 +226,7 @@ export function StepTeach({ run, tenantId, pack, patchState, setNextIntercept }:
         setTypes(dts.documentTypes);
       } catch (err) {
         if (cancelled) return;
-        setLoadError(err instanceof Error ? err.message : 'Could not read this tenant’s checklist');
+        setLoadError(err instanceof Error ? err.message : 'Could not read this tenant’s requirements');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -569,7 +569,7 @@ export function StepTeach({ run, tenantId, pack, patchState, setNextIntercept }:
       <Alert severity="info">
         <AlertTitle>This starter pack ships no teaching example</AlertTitle>
         The idea this screen exists to show — that one document closes several
-        checklist line items at once — is configured under{' '}
+        requirements at once — is configured under{' '}
         <strong>Settings ▸ Document Types</strong> for each type. Nothing here blocks the next
         screen.
       </Alert>
@@ -591,8 +591,8 @@ export function StepTeach({ run, tenantId, pack, patchState, setNextIntercept }:
   return (
     <Box>
       <Typography variant="body1" sx={{ mb: 0.5 }}>
-        This is a <strong>{teachType.name}</strong>. It is <strong>one document</strong>. Your
-        checklist has {total} line items.{' '}
+        This is a <strong>{teachType.name}</strong>. It is <strong>one document</strong>. You have
+        {total} requirements.{' '}
         <strong>Which ones does this one file close?</strong>
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
@@ -621,7 +621,7 @@ export function StepTeach({ run, tenantId, pack, patchState, setNextIntercept }:
           ) : (
             <Alert severity="info" sx={{ height: '100%' }}>
               <AlertTitle>No sample document ships with this pack</AlertTitle>
-              The checklist on the right is still this tenant's own, and ticking it still
+              The requirements on the right are still this tenant's own, and ticking them still
               configures what a {teachType.name} closes.
             </Alert>
           )}
@@ -700,10 +700,10 @@ export function StepTeach({ run, tenantId, pack, patchState, setNextIntercept }:
               value={pickerValue}
               onChange={handlePickerChange}
               newLinkStatus="confirmed"
-              searchPlaceholder="Search your checklist…"
+              searchPlaceholder="Search your requirements…"
               emptyMessage={
                 <>
-                  This tenant has no checklist line items yet. Apply a starter pack on the first
+                  This tenant has no requirements yet. Apply a starter pack on the first
                   screen, or add them under <strong>Settings ▸ Requirements</strong>.
                 </>
               }
@@ -717,7 +717,7 @@ export function StepTeach({ run, tenantId, pack, patchState, setNextIntercept }:
         <Paper variant="outlined" sx={{ p: 2, mt: 2 }} data-testid="teach-checklist">
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap', mb: 1 }}>
             <Typography variant="subtitle2" fontWeight={700}>
-              A supplier's checklist, with this one document filed
+              A supplier's requirements, with this one document filed
             </Typography>
             <Chip
               size="small"

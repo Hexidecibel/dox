@@ -61,6 +61,11 @@ function verdict(over: Partial<SpecVerdict> = {}): SpecVerdict {
   };
 }
 
+/** A different row of the same results table — a different result. */
+function atRow(row_index: number, over: Record<string, unknown> = {}): SpecVerdict['target'] {
+  return { kind: 'table', table_index: 0, row_index, table_name: 'micro', ...over };
+}
+
 async function makeDocument(title: string): Promise<string> {
   const id = generateTestId();
   await db
@@ -145,7 +150,7 @@ describe('registerSpecChecks', () => {
       { tenantId: seed.tenantId, documentId },
       [
         verdict({ verdict: 'not_checked', reason: 'reported as <50, which straddles the 10 limit' }),
-        verdict({ verdict: 'in_spec', test_name_raw: 'SPC' }),
+        verdict({ verdict: 'in_spec', test_name_raw: 'SPC', target: atRow(1) }),
       ],
       [LIMIT]
     );
@@ -164,7 +169,7 @@ describe('registerSpecChecks', () => {
     await registerSpecChecks(
       db,
       { tenantId: seed.tenantId, documentId, acknowledgedBy: seed.orgAdminId, acknowledgementNote: 'ok' },
-      [verdict(), verdict({ verdict: 'in_spec', test_name_raw: 'SPC' })],
+      [verdict(), verdict({ verdict: 'in_spec', test_name_raw: 'SPC', target: atRow(1) })],
       [LIMIT]
     );
 
@@ -192,6 +197,65 @@ describe('registerSpecChecks', () => {
       .bind(documentId)
       .first<{ n: number }>();
     expect(n!.n).toBe(1);
+  });
+
+  it('names the place on the certificate each result came from (0105)', async () => {
+    // A multi-lot crosstab: three lots, all "<10". Three results that agree on
+    // every visible column, so without a location they read as one result
+    // written three times. All three are kept, and each says which row it is.
+    const documentId = await makeDocument('Three lots COA');
+    const lots = [1, 2, 3].map((row) =>
+      verdict({
+        verdict: 'in_spec',
+        value_raw: '<10',
+        target: atRow(row, { col_index: 4, row_label: `2614${row}R` }),
+      })
+    );
+    await registerSpecChecks(db, { tenantId: seed.tenantId, documentId, versionNumber: 1 }, lots, [LIMIT]);
+
+    const rows = (
+      await db
+        .prepare(
+          'SELECT result_key, result_location FROM document_spec_checks WHERE document_id = ? ORDER BY result_key'
+        )
+        .bind(documentId)
+        .all<{ result_key: string; result_location: string }>()
+    ).results;
+    expect(rows).toEqual([
+      { result_key: 'ai_fields::t0r1c4', result_location: 'Table 1, row 2 (26141R)' },
+      { result_key: 'ai_fields::t0r2c4', result_location: 'Table 1, row 3 (26142R)' },
+      { result_key: 'ai_fields::t0r3c4', result_location: 'Table 1, row 4 (26143R)' },
+    ]);
+  });
+
+  it('writes the same result once, and the index refuses a second copy', async () => {
+    const documentId = await makeDocument('Repeated result COA');
+    const { written } = await registerSpecChecks(
+      db,
+      { tenantId: seed.tenantId, documentId, versionNumber: 1 },
+      [verdict(), verdict()],
+      [LIMIT]
+    );
+    expect(written).toBe(1);
+
+    const n = await db
+      .prepare('SELECT COUNT(*) AS n FROM document_spec_checks WHERE document_id = ?')
+      .bind(documentId)
+      .first<{ n: number }>();
+    expect(n!.n).toBe(1);
+
+    // Structural, not only in code: a producer that bypassed the guard cannot
+    // write a second row for the same place, source and version.
+    await expect(
+      db
+        .prepare(
+          `INSERT INTO document_spec_checks
+             (id, tenant_id, document_id, version_number, test_name_raw, verdict, source, result_key)
+           VALUES (?, ?, ?, 1, 'Coliform', 'out_of_spec', 'limit', 'ai_fields::t0r0')`
+        )
+        .bind(generateTestId(), seed.tenantId, documentId)
+        .run()
+    ).rejects.toThrow(/UNIQUE/i);
   });
 });
 
@@ -319,8 +383,8 @@ describe('registerAndNotifyForApproval', () => {
         },
         [
           verdict({ test_name_raw: 'Coliform' }),
-          verdict({ test_name_raw: 'SPC', value_raw: '99999' }),
-          verdict({ test_name_raw: 'Yeast & Mold', value_raw: '5000' }),
+          verdict({ test_name_raw: 'SPC', value_raw: '99999', target: atRow(1) }),
+          verdict({ test_name_raw: 'Yeast & Mold', value_raw: '5000', target: atRow(2) }),
         ],
         [LIMIT],
         [{ documentId: doc, title: 'Three failures COA', recordIndex: null }]

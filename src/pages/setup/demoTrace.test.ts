@@ -275,7 +275,7 @@ describe('buildTrace — a stage with no evidence produces no line', () => {
       renewalOwner: null,
     });
     const line = lines.find((l) => l.key === 'requirements');
-    expect(line?.text).toBe('2 checklist items will be proposed when you approve it');
+    expect(line?.text).toBe('2 requirements will be proposed when you approve it');
     expect(line?.detail).toBe('Allergen matrix, Micro limits');
   });
 
