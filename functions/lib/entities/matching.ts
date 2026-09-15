@@ -41,7 +41,7 @@ import {
   findOrCreateLot,
   normalizeLotNumber,
   normalizeProductNameKey,
-  type LotScheme,
+  type LotSchemeInput,
 } from './lots';
 
 // Confidence thresholds. "Strong" requires the product OR the distributor code
@@ -443,11 +443,13 @@ export async function attachLotToCoaDocument(
     productionDate?: ProductionDateResolution | null;
     source?: string;
     /**
-     * Supplier's lot numbering scheme (0075). Resolved by the caller from the
-     * supplier row. Threaded into findOrCreateLot so the stored lot_key matches
-     * the order side. Omitted/null → 'auto' (today's behavior).
+     * Supplier's lot scheme — the legacy 0075 enum or the resolved (possibly
+     * declared, 0109) format, from `loadResolvedLotScheme`. Threaded into
+     * findOrCreateLot so the stored lot_key matches the order side, and so a
+     * declared production-role format can supply a labelled fallback production
+     * date. Omitted/null → 'auto' (today's behavior).
      */
-    lotScheme?: LotScheme | null;
+    lotScheme?: LotSchemeInput;
     /** COA product name → supplier_product_map bridge (0075). */
     coaProductName?: string | null;
   }
@@ -464,6 +466,7 @@ export async function attachLotToCoaDocument(
       productionDate: args.productionDate ? { ...args.productionDate, documentId: args.documentId } : null,
       source: args.source ?? 'coa',
       lotScheme: args.lotScheme ?? null,
+      documentId: args.documentId,
     });
     if (!lot) return null;
 

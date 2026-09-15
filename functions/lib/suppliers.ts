@@ -469,6 +469,24 @@ export async function mergeSuppliers(
       foldedAliases.push(c);
     }
 
+    // Declared lot formats (0109) belong to the loser and cannot move: the
+    // winner's format governs the merged lots, and version numbers are per
+    // supplier. They are removed (their FK would block the delete) and their
+    // content goes into the audit row below, so nothing is lost silently.
+    let droppedLotSchemes: Array<{ version: number; spec: string; source: string; created_at: string }> = [];
+    try {
+      const rows = await db
+        .prepare('SELECT version, spec, source, created_at FROM supplier_lot_schemes WHERE supplier_id = ? AND tenant_id = ? ORDER BY version')
+        .bind(loserId, tenantId)
+        .all<{ version: number; spec: string; source: string; created_at: string }>();
+      droppedLotSchemes = rows.results ?? [];
+      if (droppedLotSchemes.length > 0) {
+        await db.prepare('DELETE FROM supplier_lot_schemes WHERE supplier_id = ? AND tenant_id = ?').bind(loserId, tenantId).run();
+      }
+    } catch {
+      // Pre-0109 database: no declarations table.
+    }
+
     // Delete the loser row (FTS cleanup is trigger-driven).
     await db.prepare('DELETE FROM suppliers WHERE id = ?').bind(loserId).run();
 
@@ -480,7 +498,12 @@ export async function mergeSuppliers(
         'supplier.merged',
         'supplier',
         winnerId,
-        JSON.stringify({ loser_id: loserId, loser_name: loser.name, winner_id: winnerId }),
+        JSON.stringify({
+          loser_id: loserId,
+          loser_name: loser.name,
+          winner_id: winnerId,
+          ...(droppedLotSchemes.length > 0 ? { dropped_lot_schemes: droppedLotSchemes } : {}),
+        }),
         actor.ip
       );
     } catch {

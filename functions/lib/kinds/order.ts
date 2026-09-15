@@ -2,6 +2,7 @@ import { generateId } from '../db';
 import type { ConnectorOutput, ParsedContact, ParsedCustomer } from '../connectors/types';
 import { findOrCreateProduct } from '../entities/products';
 import { findOrCreateLot } from '../entities/lots';
+import { orderSideSchemeResolver } from '../lot-schemes';
 import { linkOrderToCoas } from '../entities/matching';
 
 /**
@@ -178,6 +179,7 @@ export async function ingestOrders(
   // Upsert orders
   let ordersCreated = 0;
   let ordersStaged = 0;
+  const orderSideScheme = orderSideSchemeResolver(db, tenantId);
   for (const order of output.orders) {
     try {
       // order_number is NOT NULL and is the upsert key. A row without one
@@ -294,14 +296,17 @@ export async function ingestOrders(
           }
           if (item.lot_number) {
             try {
-              // TODO (0075, deferred): thread the supplier's lot_scheme here for
-              // suppliers whose ORDER side also carries the item code. CMF's WMS
-              // is already bare-date (date_code is a no-op on this side), so
-              // order-side scheme plumbing is intentionally skipped for now.
+              // The line's supplier, reached through its product, may have a
+              // DECLARED lot format (0109): the WMS composite '1042620303' is then
+              // lot 10426203 + sublot 03, the same identity the certificate side
+              // stores. No declared format (or no single supplier) → the
+              // historical concat, unchanged; the legacy 0075 enum is still NOT
+              // applied on this side, exactly as before.
               const lot = await findOrCreateLot(db, tenantId, {
                 lotNumber: item.lot_number,
                 productId: lineProductId,
                 source: 'order',
+                lotScheme: await orderSideScheme(lineProductId),
               });
               lineLotId = lot?.id ?? null;
             } catch { /* non-fatal */ }
