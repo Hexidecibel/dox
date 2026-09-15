@@ -6,6 +6,21 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ## 2026-09-14 v2.8.0 ON PROD — migrations through 0103, backfill waiting on a yes
 
+**2026-09-14 latest: v2.10.0 ON PROD (Out of Spec origin filter + result location,
+Checklist → Requirements).** Pages deploy `511576b2`; gate: vitest 225 files / 3140
+tests, Playwright 7 passed, 1 skipped. **0105** (`result_key`/`result_location` +
+PARTIAL unique index `idx_dsc_result_identity`) applied to staging (unstamped) and
+prod (stamped; Time Travel bookmark + `document_spec_checks` export in
+`~/drops/dox-backups/doc-upload-db-20260915T030742Z.*` first). Register cleanup
+(`bin/backfill-spec-register --remote --prune-duplicates --stamp-identity --apply`):
+**0 rows deleted, 0 written, 1218 bulk_recheck rows stamped**; 88 approval rows have
+no identity (not replayable); total still 1306. **The "duplicates" were two different
+things, neither a register bug:** (a) the SAME EMAIL FORWARDED TWICE → two approved
+documents with identical checksums — **54 same-file same-title groups / 60 surplus
+documents on prod**; intake has no seen-this-file check. **Open decision: block vs
+warn on a repeat file** (in todo.md). (b) Multi-lot COAs printing the same test once
+per lot — 53 groups / 175 rows, all distinct results, now shown with their location.
+
 **2026-09-14 later: v2.9.0 ON PROD (supplier arrivals review — `/requests/arrivals`).**
 0104 applied to staging (unstamped) and prod (stamped, `d1_migrations` id 87; Time
 Travel bookmark + request_lines/request_upload_lines exports in `~/drops/dox-backups/`
