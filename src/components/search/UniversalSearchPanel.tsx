@@ -13,12 +13,15 @@ import { ResultCardDocument } from './ResultCardDocument';
 import { ResultCardOrder } from './ResultCardOrder';
 import { ResultCardCustomer } from './ResultCardCustomer';
 import { ResultCardBundle } from './ResultCardBundle';
+import { CoverageResults, UnreviewedCandidatesSection } from './CoverageResults';
 import { useSearchParamsState } from '../../hooks/useSearchParamsState';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { useRecentSearches } from '../../hooks/useRecentSearches';
 import { api } from '../../lib/api';
 import type {
+  NaturalSearchResponse,
   SearchState,
+  UniversalSearchDocument,
   UniversalSearchResponse,
   UniversalSearchType,
 } from '../../../shared/types';
@@ -84,9 +87,33 @@ export function UniversalSearchPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // AI mode: the question is parsed by the model on Enter (not per
+  // keystroke — it is a model call) and answered with coverage.
+  const [aiMode, setAiMode] = useState(false);
+  const [aiData, setAiData] = useState<NaturalSearchResponse | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+
+  const runAi = useCallback(
+    (q: string) => {
+      setAiLoading(true);
+      setAiError(null);
+      api.search
+        .natural(q, tenantId)
+        .then((res) => setAiData(res))
+        .catch((e: unknown) => {
+          setAiData(null);
+          setAiError(e instanceof Error ? e.message : 'AI search failed');
+        })
+        .finally(() => setAiLoading(false));
+    },
+    [tenantId],
+  );
+
   useEffect(() => {
     let cancelled = false;
     const trimmed = debouncedQ.trim();
+    if (aiMode) return;
     if (!trimmed) {
       setData(EMPTY_RESPONSE);
       setError(null);
@@ -112,13 +139,26 @@ export function UniversalSearchPanel({
     return () => {
       cancelled = true;
     };
-  }, [debouncedQ, tenantId]);
+  }, [debouncedQ, tenantId, aiMode]);
 
   const handleSubmit = (q: string) => {
     const trimmed = q.trim();
     if (trimmed) recent.push(trimmed);
     setStatePatch({ q: trimmed });
+    if (aiMode && trimmed) runAi(trimmed);
   };
+
+  const constrained = data.coverage === 'covered' || data.coverage === 'none';
+  const coverageProps = {
+    documents: data.documents.results,
+    coverage: data.coverage,
+    constraints: data.constraints,
+    dropped_constraints: data.dropped_constraints,
+    coverage_summary: data.coverage_summary,
+    unreviewed_candidates: data.unreviewed_candidates,
+    coverage_scan_truncated: data.coverage_scan_truncated,
+  };
+  const unreviewed = data.unreviewed_candidates ?? [];
 
   const totals: Record<UniversalSearchType, number> = {
     all:
@@ -142,8 +182,50 @@ export function UniversalSearchPanel({
         onRecentPick={(q) => setStatePatch({ q })}
         onRecentRemove={recent.remove}
         onRecentClear={recent.clear}
-        placeholder="Search documents, orders, customers, bundles…"
+        aiMode={aiMode}
+        onAiToggle={(next) => {
+          setAiMode(next);
+          setAiData(null);
+          setAiError(null);
+        }}
+        placeholder={
+          aiMode
+            ? 'Ask a question, then press Enter — e.g. Darigold butter produced 7/31/26'
+            : 'Search documents, orders, customers, bundles…'
+        }
       />
+      {aiMode && (
+        <Box sx={{ mt: 1 }} data-testid="ai-search">
+          {aiError && <Alert severity="error" sx={{ mb: 2 }}>{aiError}</Alert>}
+          {aiLoading && (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
+              <CircularProgress size={24} />
+            </Box>
+          )}
+          {!aiLoading && !aiData && !aiError && (
+            <Typography variant="body2" color="text.secondary">
+              AI search reads your question, then checks each document against what you asked for. Press Enter to search.
+            </Typography>
+          )}
+          {!aiLoading && aiData && (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Understood as: {aiData.parsed_query.intent_summary}
+              </Typography>
+              <CoverageResults
+                documents={aiData.results as unknown as UniversalSearchDocument[]}
+                coverage={aiData.coverage}
+                constraints={aiData.constraints}
+                dropped_constraints={aiData.dropped_constraints}
+                coverage_summary={aiData.coverage_summary}
+                unreviewed_candidates={aiData.unreviewed_candidates}
+                coverage_scan_truncated={aiData.coverage_scan_truncated}
+              />
+            </>
+          )}
+        </Box>
+      )}
+      {!aiMode && (<>
       <Tabs
         value={tab}
         onChange={(_, next: UniversalSearchType) => setStatePatch({ type: next })}
@@ -208,7 +290,12 @@ export function UniversalSearchPanel({
 
       {!loading && state.q.trim() !== '' && tab === 'all' && (
         <Stack spacing={3}>
-          {data.documents.total > 0 && (
+          {constrained && (
+            <Section title="Documents" total={data.documents.total} onSeeAll={() => setStatePatch({ type: 'documents' })}>
+              <CoverageResults {...coverageProps} />
+            </Section>
+          )}
+          {!constrained && data.documents.total > 0 && (
             <Section
               title="Documents"
               total={data.documents.total}
@@ -252,7 +339,8 @@ export function UniversalSearchPanel({
               ))}
             </Section>
           )}
-          {totals.all === 0 && (
+          {!constrained && <UnreviewedCandidatesSection items={unreviewed} />}
+          {!constrained && totals.all === 0 && unreviewed.length === 0 && (
             <Typography variant="body2" color="text.secondary">
               No results across any entity type.
             </Typography>
@@ -260,14 +348,21 @@ export function UniversalSearchPanel({
         </Stack>
       )}
 
-      {!loading && tab === 'documents' &&
+      {!loading && tab === 'documents' && constrained && <CoverageResults {...coverageProps} />}
+      {!loading && tab === 'documents' && !constrained &&
         data.documents.results.map((d) => <ResultCardDocument key={d.id} doc={d} />)}
+      {!loading && tab === 'documents' && !constrained && (
+        <Box sx={{ mt: 2 }}>
+          <UnreviewedCandidatesSection items={unreviewed} />
+        </Box>
+      )}
       {!loading && tab === 'orders' &&
         data.orders.results.map((o) => <ResultCardOrder key={o.id} order={o} />)}
       {!loading && tab === 'customers' &&
         data.customers.results.map((c) => <ResultCardCustomer key={c.id} customer={c} />)}
       {!loading && tab === 'bundles' &&
         data.bundles.results.map((b) => <ResultCardBundle key={b.id} bundle={b} />)}
+      </>)}
     </Box>
   );
 }
