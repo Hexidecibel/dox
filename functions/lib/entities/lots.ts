@@ -20,6 +20,13 @@ import {
   normalizeProductNameKey,
 } from '../../../shared/lotNormalize';
 import type { ProductionDateResolution } from '../../../shared/lotProductionDate';
+import {
+  legacyLotSchemeSpec,
+  legacyResolvedScheme,
+  lotIdentity,
+  productionDateFromLot,
+  type ResolvedLotScheme,
+} from '../../../shared/lotScheme';
 
 /**
  * The pure normalization rules now live in `shared/lotNormalize.ts` so the
@@ -31,45 +38,35 @@ import type { ProductionDateResolution } from '../../../shared/lotProductionDate
 export { normalizeLotNumber, normalizeSubLotCode, normalizeProductNameKey };
 
 /**
- * Per-supplier lot numbering scheme (migration 0075). Decides how a raw lot
- * key + sublot code combine into the stored `lot_key`:
- *   - 'auto'  : no transform (default; today's behavior). Sublot concat if present.
- *   - 'plain' : identity (+ sublot concat if extracted). Same as 'auto' at storage.
- *   - 'lims_combined' : baseLotKey + normalizeSubLotCode(subLotCode) (Darigold-style).
- *   - 'date_code'     : strip to the leading MMDDYY (6-digit) date; drop any
- *                       trailing alpha item-code, and force subLotCode='' (the
- *                       suffix is the item, NOT a 2-digit sublot). e.g. CMF
- *                       '061626WHO' → '061626'. Non-conforming keys (no leading
- *                       6 digits) keep the full key — defensive, never drop.
+ * Per-supplier lot numbering scheme (migration 0075), the legacy enum:
+ *   - 'auto' / 'plain' / 'lims_combined' : lot as written + sublot (one behaviour)
+ *   - 'date_code' : the leading MMDDYY (6-digit) run, sublot forced '' (CMF
+ *                   '061626WHO' -> '061626'); a key with no leading 6 digits is kept.
+ *
+ * Since 0110 a supplier may DECLARE its lot format instead (supplier_lot_schemes,
+ * shared/lotScheme.ts); the enum values are expressed as equivalent specs so
+ * there is one engine and their keys are byte-identical.
  */
 export type LotScheme = 'auto' | 'date_code' | 'lims_combined' | 'plain';
 
 /**
- * Combine a normalized base lot key + sublot code into the stored `lot_key`,
- * per the supplier's scheme. Pure; runs AFTER normalizeLotNumber /
- * normalizeSubLotCode. Returns the final { lotKey, subLotCode } — date_code may
- * rewrite both (it forces subLotCode='').
+ * Combine a normalized base lot key + sublot code into the stored `lot_key`
+ * under a LEGACY enum value. Pure; runs the spec engine on
+ * `legacyLotSchemeSpec(scheme)`. Kept for its existing callers and tests.
  */
 export function applyLotScheme(
   scheme: LotScheme | null | undefined,
   baseLotKey: string,
   subLotCode: string
 ): { lotKey: string; subLotCode: string } {
-  switch (scheme) {
-    case 'date_code': {
-      // Strip to the leading 6-digit date; trailing alpha code is the item, not
-      // a sublot. Non-conforming (no leading 6 digits) → keep full key.
-      const m = /^(\d{6})/.exec(baseLotKey);
-      return { lotKey: m ? m[1] : baseLotKey, subLotCode: '' };
-    }
-    case 'lims_combined':
-      return { lotKey: baseLotKey + subLotCode, subLotCode };
-    case 'plain':
-    case 'auto':
-    default:
-      // Identity, plus the sublot concat when a sublot was extracted.
-      return { lotKey: baseLotKey + subLotCode, subLotCode };
-  }
+  return lotIdentity(legacyLotSchemeSpec(scheme), baseLotKey, subLotCode);
+}
+
+/** A legacy enum value or a resolved (possibly declared) scheme, as callers hold them. */
+export type LotSchemeInput = LotScheme | ResolvedLotScheme | null | undefined;
+
+export function toResolvedScheme(scheme: LotSchemeInput): ResolvedLotScheme {
+  return scheme && typeof scheme === 'object' ? scheme : legacyResolvedScheme(scheme ?? 'auto');
 }
 
 /**
@@ -112,11 +109,15 @@ export interface FindOrCreateLotOpts {
   metadata?: string | null;
   source?: string | null;
   /**
-   * Per-supplier lot numbering scheme (migration 0075). Decides how baseLotKey
-   * + subLotCode combine into the stored lot_key. Omitted/null → 'auto'
-   * (today's behavior). See applyLotScheme.
+   * The supplier's lot scheme: a legacy 0075 enum value, or the resolved scheme
+   * (`loadResolvedLotScheme`, 0110) which may be a DECLARED format. Decides how
+   * the lot and sublot combine into the stored lot_key; a declared
+   * production-role format also supplies a labelled fallback production date
+   * (never over a stated one). Omitted/null → 'auto' (today's behavior).
    */
-  lotScheme?: LotScheme | null;
+  lotScheme?: LotSchemeInput;
+  /** The document the lot is being attached from, for a decoded date's provenance. */
+  documentId?: string | null;
 }
 
 export interface FindOrCreateLotResult {
@@ -144,16 +145,31 @@ export async function findOrCreateLot(
   const baseLotKey = normalizeLotNumber(opts.lotNumber);
   if (!baseLotKey) return null;
 
-  // Option B: sublot is verbatim-concatenated onto the normalized lot number.
-  // sub_lot_code is the 2-digit code ('' when none); lot_key embeds it so the
-  // matcher anchor (product_code + lot_key) lines up with the WMS combined lot.
-  // The supplier's lot_scheme (0075) decides the combine — 'auto'/'plain' keep
-  // the historical concat; 'date_code' strips to the bare MMDDYY date and
-  // forces sub_lot_code=''.
-  const rawSubLotCode = normalizeSubLotCode(opts.subLotCode);
-  const scheme = applyLotScheme(opts.lotScheme, baseLotKey, rawSubLotCode);
-  const lotKey = scheme.lotKey;
-  const subLotCode = scheme.subLotCode;
+  // Option B: sub_lot_code is the 2-digit code ('' when none); lot_key embeds it
+  // so the matcher anchor (product_code + lot_key) lines up with the WMS
+  // combined lot. The supplier's scheme decides the combine: the legacy enum
+  // keeps the historical concat ('date_code' strips to the bare MMDDYY), and a
+  // DECLARED format (0110) splits a composite by its declared widths — so
+  // '10426203-03' with no sublot field is lot 10426203, sublot 03 — and falls
+  // back to the historical concat for a lot that does not fit.
+  const resolvedScheme = toResolvedScheme(opts.lotScheme);
+  const identity = lotIdentity(resolvedScheme.spec, opts.lotNumber, opts.subLotCode);
+  const lotKey = identity.lotKey;
+  const subLotCode = identity.subLotCode;
+  if (!lotKey) return null;
+
+  // R3: the stated production date is authoritative; a declared production-role
+  // format fills in only when nothing is stated, and a disagreement becomes
+  // 'conflict' carrying both values (shared/lotScheme.ts productionDateFromLot).
+  const statedPd = opts.productionDate ?? null;
+  const decision = productionDateFromLot(resolvedScheme, opts.lotNumber, opts.subLotCode, statedPd);
+  const productionDate: ProductionDateWrite | null = decision.resolution
+    ? {
+        ...decision.resolution,
+        documentId: statedPd?.documentId ?? opts.documentId ?? null,
+        schemeId: decision.scheme_id,
+      }
+    : null;
 
   const rawLot = String(opts.lotNumber).trim();
   const supplierId = opts.supplierId ?? null;
@@ -169,13 +185,13 @@ export async function findOrCreateLot(
   const existing = productId
     ? await db
         .prepare(
-          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date, production_date, production_date_raw, production_date_status FROM lots WHERE tenant_id = ? AND lot_key = ? AND sub_lot_code = ? AND product_id = ?'
+          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date, production_date, production_date_raw, production_date_source, production_date_status FROM lots WHERE tenant_id = ? AND lot_key = ? AND sub_lot_code = ? AND product_id = ?'
         )
         .bind(tenantId, lotKey, subLotCode, productId)
         .first<LotRow>()
     : await db
         .prepare(
-          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date, production_date, production_date_raw, production_date_status FROM lots WHERE tenant_id = ? AND lot_key = ? AND sub_lot_code = ? AND product_id IS NULL'
+          'SELECT id, supplier_id, product_id, code_date, expiration_date, mfg_date, production_date, production_date_raw, production_date_source, production_date_status FROM lots WHERE tenant_id = ? AND lot_key = ? AND sub_lot_code = ? AND product_id IS NULL'
         )
         .bind(tenantId, lotKey, subLotCode)
         .first<LotRow>();
@@ -204,7 +220,7 @@ export async function findOrCreateLot(
       sets.push('mfg_date = ?');
       binds.push(mfgDate);
     }
-    const production = productionDateSets(existing, opts.productionDate ?? null);
+    const production = productionDateSets(existing, productionDate);
     sets.push(...production.sets);
     binds.push(...production.binds);
     if (sets.length > 0) {
@@ -220,15 +236,15 @@ export async function findOrCreateLot(
 
   // 2. Create.
   const id = generateId();
-  const pd = opts.productionDate ?? null;
+  const pd = productionDate;
   await db
     .prepare(
       `INSERT INTO lots
          (id, tenant_id, supplier_id, product_id, lot_number, sub_lot_code, lot_key,
           code_date, expiration_date, mfg_date, primary_metadata, first_seen_source,
           production_date, production_date_raw, production_date_source, production_date_status,
-          production_date_document_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          production_date_document_id, production_date_scheme_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -247,17 +263,23 @@ export async function findOrCreateLot(
       pd ? pd.raw : null,
       pd ? pd.source : null,
       pd ? pd.status : null,
-      pd ? pd.documentId : null
+      pd ? pd.documentId : null,
+      pd ? (pd.schemeId ?? null) : null
     )
     .run();
 
   return { id };
 }
 
+/** What findOrCreateLot hands the production-date writer: the value, its document, its declaration. */
+export type ProductionDateWrite = ProductionDateResolution & { documentId: string | null; schemeId?: string | null };
+
+const NO_SETS: { sets: string[]; binds: (string | null)[] } = { sets: [], binds: [] };
+
 /**
- * The production-date columns to set on an EXISTING lot (migration 0106).
+ * The production-date columns to set on an EXISTING lot (migrations 0106, 0110).
  *
- *   - nothing stored yet            -> store the new value as stated
+ *   - nothing stored yet            -> store the new value as given
  *   - same day already resolved     -> leave it (the first certificate stays
  *                                      the named source)
  *   - a different stated value      -> 'conflict': the day is cleared, raw names
@@ -266,30 +288,65 @@ export async function findOrCreateLot(
  *
  * An unresolved new value never displaces a resolved one, but one that cannot
  * be the stored day (an ambiguous reading that excludes it) is a conflict too.
+ *
+ * A LOT-CODE DECODE ('lot_decode', 0110) is a fallback and a validator, never an
+ * authority:
+ *   - it never displaces anything a certificate stated; if it disagrees with a
+ *     stated resolved day the row becomes 'conflict' with both in raw
+ *   - a stated value arriving on a decoded row replaces the decode when it is
+ *     the same day (extraction confirms it) or does not read as one day (what
+ *     the page printed outranks an inference); a different stated day is a
+ *     conflict
  */
 export function productionDateSets(
-  existing: Pick<LotRow, 'production_date' | 'production_date_raw' | 'production_date_status'>,
-  next: (ProductionDateResolution & { documentId: string | null }) | null
+  existing: Pick<LotRow, 'production_date' | 'production_date_raw' | 'production_date_status'> & { production_date_source?: string | null },
+  next: ProductionDateWrite | null
 ): { sets: string[]; binds: (string | null)[] } {
-  if (!next) return { sets: [], binds: [] };
-  if (!existing.production_date_status) {
-    return {
-      sets: [
-        'production_date = ?',
-        'production_date_raw = ?',
-        'production_date_source = ?',
-        'production_date_status = ?',
-        'production_date_document_id = ?',
-      ],
-      binds: [next.iso, next.raw, next.source, next.status, next.documentId],
-    };
-  }
+  if (!next) return NO_SETS;
+  const schemeId = next.schemeId ?? null;
+  const storeAll = {
+    sets: [
+      'production_date = ?',
+      'production_date_raw = ?',
+      'production_date_source = ?',
+      'production_date_status = ?',
+      'production_date_document_id = ?',
+      'production_date_scheme_id = ?',
+    ],
+    binds: [next.iso, next.raw, next.source, next.status, next.documentId, schemeId],
+  };
+  if (!existing.production_date_status) return storeAll;
   const oldRaw = existing.production_date_raw ?? '';
+  const conflict = () => ({
+    sets: ['production_date = NULL', "production_date_status = 'conflict'", 'production_date_raw = ?'],
+    binds: [oldRaw ? `${oldRaw} | ${next.raw}` : next.raw],
+  });
+  const existingIsDecode = existing.production_date_source === 'lot_decode';
+
+  if (next.source === 'lot_decode') {
+    if (existingIsDecode) {
+      // Decode against decode: a re-declared format reads the lot differently.
+      // No document disagrees with anything — the newer reading replaces the older.
+      return existing.production_date === next.iso ? NO_SETS : storeAll;
+    }
+    if (existing.production_date_status === 'resolved') {
+      return existing.production_date === next.iso ? NO_SETS : conflict();
+    }
+    if (existing.production_date_status === 'conflict' && !oldRaw.split(' | ').includes(next.raw)) return conflict();
+    // A stated but unreadable value: a decode does not settle what a page printed.
+    return NO_SETS;
+  }
+
+  if (existingIsDecode && existing.production_date_status === 'resolved') {
+    if (next.status === 'resolved' && next.iso !== existing.production_date) return conflict();
+    return storeAll;
+  }
+
   const sameRaw = oldRaw.split(' | ').includes(next.raw);
   if (existing.production_date_status === 'resolved' && next.status === 'resolved' && next.iso === existing.production_date) {
-    return { sets: [], binds: [] };
+    return NO_SETS;
   }
-  if (sameRaw) return { sets: [], binds: [] };
+  if (sameRaw) return NO_SETS;
   // A later certificate that states plainly one of the two days an earlier
   // ambiguous value could be: the page has answered the question.
   if (existing.production_date_status === 'ambiguous' && next.status === 'resolved' && next.iso
@@ -301,21 +358,19 @@ export function productionDateSets(
         'production_date_source = ?',
         "production_date_status = 'resolved'",
         'production_date_document_id = ?',
+        'production_date_scheme_id = ?',
       ],
-      binds: [next.iso, next.raw, next.source, next.documentId],
+      binds: [next.iso, next.raw, next.source, next.documentId, schemeId],
     };
   }
   if (existing.production_date_status === 'resolved' && next.status === 'unparseable') {
-    return { sets: [], binds: [] };
+    return NO_SETS;
   }
   if (existing.production_date_status === 'resolved' && next.status === 'ambiguous' && existing.production_date
     && next.raw && ambiguousCouldBe(next.raw, existing.production_date)) {
-    return { sets: [], binds: [] };
+    return NO_SETS;
   }
-  return {
-    sets: ['production_date = NULL', "production_date_status = 'conflict'", 'production_date_raw = ?'],
-    binds: [oldRaw ? `${oldRaw} | ${next.raw}` : next.raw],
-  };
+  return conflict();
 }
 
 function ambiguousCouldBe(raw: string, iso: string): boolean {
@@ -335,5 +390,6 @@ interface LotRow {
   mfg_date: string | null;
   production_date: string | null;
   production_date_raw: string | null;
+  production_date_source: string | null;
   production_date_status: string | null;
 }

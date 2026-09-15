@@ -75,6 +75,8 @@ export type {
   SupplierMergeResponse,
   SupplierRow,
   LotScheme,
+  SupplierLotSchemeResponse,
+  SupplierLotSchemeVersion,
   ProductMapEntry,
   OrderProductOption,
   ProductMapGetResponse,

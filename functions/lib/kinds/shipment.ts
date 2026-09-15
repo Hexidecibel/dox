@@ -29,6 +29,7 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import type { ParsedShipment } from '../../../shared/connectorOutput';
 import { findOrCreateLot } from '../entities/lots';
+import { orderSideSchemeResolver } from '../lot-schemes';
 import { runLinkageForLot } from '../entities/linkage';
 
 export interface ProduceShipmentContext {
@@ -118,6 +119,9 @@ export async function produceShipment(
   const { tenantId } = ctx;
   let bound = 0;
   let suggested = 0;
+  // Same rule as the order side: a declared lot format (0110) of the line's
+  // product's single supplier splits the WMS composite; otherwise unchanged.
+  const shipmentScheme = orderSideSchemeResolver(db, tenantId);
   let unmatched = 0;
   let errors = 0;
 
@@ -146,6 +150,7 @@ export async function produceShipment(
         lotNumber: ship.lot_number,
         productId: orderItem.product_id,
         source: 'shipment',
+        lotScheme: await shipmentScheme(orderItem.product_id),
       });
       if (!lot) {
         // lot_number normalized to empty — nothing to bind.

@@ -4,7 +4,7 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import type { Env, User } from '../../lib/types';
-import { withInvariantWarnings } from '../../lib/queue-warnings';
+import { LOT_SCHEME_SELECT, withInvariantWarnings } from '../../lib/queue-warnings';
 import { specConfigLoader, withSpecConfig } from '../../lib/spec-warnings';
 import { withRenewalProposal } from '../../lib/renewal-proposal';
 import { loadQueueIntakeHistory } from '../../lib/intake/duplicates';
@@ -100,7 +100,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
               dt.renewal_interval_months as type_renewal_interval_months,
               t.name as tenant_name, t.slug as tenant_slug,
               u.name as created_by_name, r.name as reviewed_by_name,
-              CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists
+              CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists,
+              ${LOT_SCHEME_SELECT}
        FROM processing_queue pq
        ${mineJoin}
        LEFT JOIN document_types dt ON pq.document_type_id = dt.id

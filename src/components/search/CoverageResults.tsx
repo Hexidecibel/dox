@@ -60,13 +60,20 @@ const PROVENANCE_LABEL: Record<SearchFieldProvenance, string> = {
   system: 'recorded by the portal',
   extracted_code_date_legacy: "read from the document's code date field — older extraction",
   reviewer: 'entered by a reviewer',
+  lot_decode: "decoded from the lot code using the supplier's declared lot format — not stated on the certificate",
 };
 
 /** "Lot 10426203 · sublot 03 · produced Jul 22, 2026 · 50 EA · 2755.75 LB" */
 export function lotRowLine(l: SearchMatchedLot): string {
   const parts = [`Lot ${l.lot_number}`];
   if (l.sub_lot_code) parts.push(`sublot ${l.sub_lot_code}`);
-  if (l.production_date) parts.push(`produced ${formatIsoHuman(l.production_date)}`);
+  // A date decoded from the lot code (0110) is never written as if the
+  // certificate stated it.
+  if (l.production_date && l.production_date_source === 'lot_decode') parts.push(`lot code implies production ${formatIsoHuman(l.production_date)}`);
+  else if (l.production_date) parts.push(`produced ${formatIsoHuman(l.production_date)}`);
+  else if (!l.production_date_status && l.lot_code_implies) {
+    parts.push(`lot code implies ${l.lot_code_implies.role === 'production' ? 'production' : 'best-by'} ${formatIsoHuman(l.lot_code_implies.date)}`);
+  }
   else if (l.production_date_status === 'ambiguous') parts.push(`production date "${l.production_date_raw}" (reads two ways)`);
   else if (l.production_date_status === 'conflict') parts.push(`production dates disagree (${l.production_date_raw})`);
   else if (l.production_date_status === 'unparseable') parts.push(`production date "${l.production_date_raw}" (unreadable)`);
@@ -77,7 +84,7 @@ export function lotRowLine(l: SearchMatchedLot): string {
 
 function LotRow({ lot }: { lot: SearchMatchedLot | null | undefined }) {
   if (!lot) return null;
-  const legacy = lot.production_date_source === 'extracted_code_date_legacy';
+  const legacy = lot.production_date_source === 'extracted_code_date_legacy' || lot.production_date_source === 'lot_decode';
   return (
     <Box sx={{ mt: 0.75 }} data-testid="matched-lot">
       <Chip
@@ -90,6 +97,11 @@ function LotRow({ lot }: { lot: SearchMatchedLot | null | undefined }) {
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.25 }}>
           Production date {PROVENANCE_LABEL[lot.production_date_source === 'extracted' ? 'extracted' : lot.production_date_source]}
           {legacy ? '. Confirm on the certificate before sending it.' : ''}
+        </Typography>
+      )}
+      {!lot.production_date_status && lot.lot_code_implies && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.25 }}>
+          The certificate states no {lot.lot_code_implies.role === 'production' ? 'production' : 'best-by'} date; the date shown is {lot.lot_code_implies.provenance}. Confirm on the certificate before sending it.
         </Typography>
       )}
     </Box>

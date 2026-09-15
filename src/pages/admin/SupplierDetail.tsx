@@ -54,6 +54,7 @@ import { helpContent } from '../../lib/helpContent';
 import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
 import LotSchemeSelect from '../../components/LotSchemeSelect';
 import SupplierProductMapPanel from '../../components/SupplierProductMapPanel';
+import SupplierLotFormatPanel from '../../components/SupplierLotFormatPanel';
 import SupplierRequirementGaps from '../../components/SupplierRequirementGaps';
 import SupplierRequirementsEditor from '../../components/SupplierRequirementsEditor';
 import EntityNotes from '../../components/EntityNotes';
@@ -441,8 +442,11 @@ export function SupplierDetail() {
     if (tab === 0) loadProducts();
     else if (tab === 1) loadTemplates();
     else if (tab === 2) loadDocuments();
-    else if (tab === 3) loadInstructions();
-    else if (tab === 4) loadDocTypes();
+    // Tab 3 (Requirements) loads itself. These indices were left one behind
+    // when that tab was inserted, so Extraction Instructions, Document Types,
+    // Product Mapping and Notes each opened empty.
+    else if (tab === 4) loadInstructions();
+    else if (tab === 5) loadDocTypes();
   }, [tab, loadProducts, loadTemplates, loadDocuments, loadInstructions, loadDocTypes]);
 
   const openCreateDocType = () => {
@@ -799,6 +803,7 @@ export function SupplierDetail() {
           <Tab label="Document Types" />
           <Tab label="Product Mapping" />
           <Tab label="Notes" />
+          <Tab label="Lot format" />
           {/* Last, so hiding it for a tenant without Compliance shifts no index. */}
           {complianceVisible && <Tab label="Spec watch" />}
         </Tabs>
@@ -1527,7 +1532,7 @@ export function SupplierDetail() {
       {/* an admin author maps for single-product suppliers too. Self-loads the */}
       {/* supplier's COA products and persists each pick via PUT /product-map.  */}
       <TabPanel value={tab} index={6}>
-        {tab === 5 && (
+        {tab === 6 && (
           <SupplierProductMapPanel
             tenantId={supplier.tenant_id}
             supplierId={supplier.id}
@@ -1557,12 +1562,21 @@ export function SupplierDetail() {
         )}
       </TabPanel>
 
+      {/* Lot format Tab — the supplier's DECLARED lot format (migration 0110): */}
+      {/* template or segments, a live tester, and a read-only fit preview      */}
+      {/* against every lot on file. Mounted lazily like Notes.                 */}
+      <TabPanel value={tab} index={8}>
+        {tab === 8 && (
+          <SupplierLotFormatPanel supplierId={supplier.id} supplierName={supplier.name} canEdit={isAdmin} />
+        )}
+      </TabPanel>
+
       {/* Spec watch (migration 0109): this supplier's limits over the company
           defaults and the analytes its certificates must report, with their
           review-by dates. The same panel as Settings › Spec Limits, scoped. */}
       {complianceVisible && (
-        <TabPanel value={tab} index={8}>
-          {tab === 8 && (
+        <TabPanel value={tab} index={9}>
+          {tab === 9 && (
             <SupplierWatchPanel supplierId={supplier.id} tenantId={supplier.tenant_id} canEdit={isAdmin} />
           )}
         </TabPanel>

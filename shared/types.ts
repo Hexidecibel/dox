@@ -955,6 +955,36 @@ export type ClassificationStatus =
  */
 export type LotScheme = 'auto' | 'date_code' | 'lims_combined' | 'plain';
 
+/** One DECLARED lot format version (migration 0110, supplier_lot_schemes). */
+export interface SupplierLotSchemeVersion {
+  id: string;
+  supplier_id: string;
+  version: number;
+  spec: import('./lotScheme').LotSchemeSpec;
+  source: 'admin' | 'seed';
+  note: string | null;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+/** GET / PUT /api/suppliers/:id/lot-scheme */
+export interface SupplierLotSchemeResponse {
+  supplier: { id: string; name: string; lot_scheme: LotScheme | null };
+  /** The latest declaration, or null when nothing is declared (the legacy enum applies). */
+  current: SupplierLotSchemeVersion | null;
+  /** What is in force: the declaration, or the legacy enum as an equivalent spec. */
+  effective: { source: 'declared' | 'legacy'; spec: import('./lotScheme').LotSchemeSpec; version: number | null };
+  versions: SupplierLotSchemeVersion[];
+  /** This supplier's lots on file (read-only), for the live fit preview. */
+  lots: import('./lotScheme').LotFitRow[];
+  lots_truncated: boolean;
+  /** How the lots on file read against the effective format. */
+  preview: import('./lotScheme').LotFitPreview;
+  /** PUT only: true when the submitted format equals the one in force (nothing written). */
+  unchanged?: boolean;
+}
+
 export interface SupplierRow {
   id: string;
   tenant_id: string;
@@ -2346,7 +2376,11 @@ export type SearchCheckOutcome =
  * code date, and the page prints it under a production date label
  * (bin/backfill-lot-production-dates). `reviewer` = typed by a person.
  */
-export type SearchFieldProvenance = 'extracted' | 'linked_record' | 'system' | 'extracted_code_date_legacy' | 'reviewer';
+/**
+ * 'lot_decode' (migration 0110): a date the supplier's DECLARED lot format
+ * decodes from the lot code. Never covering — at best `likely`, confirm.
+ */
+export type SearchFieldProvenance = 'extracted' | 'linked_record' | 'system' | 'extracted_code_date_legacy' | 'reviewer' | 'lot_decode';
 
 export interface SearchConstraintCheck {
   constraint_id: string;
@@ -2382,8 +2416,14 @@ export interface SearchMatchedLot {
   lot_key: string;
   production_date: string | null;
   production_date_raw: string | null;
-  production_date_source: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | null;
+  production_date_source: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | 'lot_decode' | null;
   production_date_status: 'resolved' | 'ambiguous' | 'unparseable' | 'conflict' | null;
+  /**
+   * What the lot code itself implies under the supplier's DECLARED format (0110),
+   * with the provenance in words. Present only when the format decodes a date for
+   * this lot; shown as "lot code implies …", never as a stated date.
+   */
+  lot_code_implies?: { date: string; role: 'production' | 'best_by'; provenance: string } | null;
   /** As printed on this row's document, when the document is this row alone. */
   quantity: string | null;
   net_weight: string | null;
@@ -4375,7 +4415,7 @@ export interface LotListItem {
   /** Migration 0106: the production date its certificate states (ISO), with provenance. */
   production_date?: string | null;
   production_date_raw?: string | null;
-  production_date_source?: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | null;
+  production_date_source?: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | 'lot_decode' | null;
   production_date_status?: 'resolved' | 'ambiguous' | 'unparseable' | 'conflict' | null;
   created_at: string;
   /** COUNT(document_lots) for this lot — COA docs linked to it. */

@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### Any-field COA retrieval (AJ 2026-09-08) + Walkthrough 2 follow-ups
 
-**Status:** in-progress — Phase 1 and Phase 5 (part) shipped in v2.11.0; Phases 2 and 3 done locally (migrations 0106, 0107, undeployed)
+**Status:** in-progress — Phase 1 and Phase 5 (part) shipped in v2.11.0; Phases 2 and 3 on prod (v2.12.0 / v2.13.0); Phase 4 done locally (migration 0110, undeployed)
 
 **Source:** AJ spec `20260908_IDP_Feature_Request__AnyField_COA_Retrieval_and_Identifier_Graph.docx`
 plus the Walkthrough 2 notes.
@@ -85,12 +85,14 @@ A product named by our SKU, supplier item, name, alias or pack resolves through 
 - `bin/seed-product-identifiers` (dry run default). Prod dry run 2026-09-15: Cush Co 3 new products + 19 identifiers; Q8 1 product + 3.
   310348 left out (pending AJ); 08012 = 0801 not asserted. **Waiting on:** 0107 on prod, then `--remote --apply`.
 
-#### Phase 4 — Declared per-supplier lot scheme — **planned**
-- Declared scheme: segments / widths / sublot / date encoding. Darigold
-  plant(3) | YY | DDD verified on 45 lots, plant prefixes 103 / 104 / 121 / 220.
-- Review-time validator: decoded lot vs extracted production date.
-- Remove "convert Julian dates" from the extraction prompts (`functions/lib/llm.ts`
-  + `bin/process-worker`) — decoding belongs to the declared scheme, not the model.
+#### Phase 4 — Declared per-supplier lot scheme — **DONE** (local, 2026-09-15; not deployed)
+Each supplier's lot format is declared data (migration 0110, append-only `supplier_lot_schemes`), used to validate lots in review, split composites, and supply a labelled `lot_decode` production date only where none is stated — never covering, never over a stated date.
+- `shared/lotScheme.ts` (validator + decoder + legacy-enum parity); lots rebuilt for `'lot_decode'` + `production_date_scheme_id`.
+- Review Queue invariants `lot_fits_declared_format` / `lot_code_production_date` / `lot_code_best_by_date`; search `likely` "lot code implies production …".
+- Supplier › Lot format tab (`/api/suppliers/:id/lot-scheme`, audited); Julian conversion removed from all prompt copies (worker needs a restart).
+- `bin/seed-supplier-lot-schemes` prod dry run 2026-09-15, Cush Co: Darigold 29/32 lots fit (3 known extraction errors), 0 decoded-date disagreements; CMF 93/93; Andersen none (47 lots).
+  `bin/report-lot-key-scheme --remote`: 1 composite kept whole (1032603623), 1 base-in-sublot (1032610210326102, repair would merge into lot 10326102), 2 not fitting.
+  **Waiting on:** 0110 on prod (surgical, it rebuilds `lots`), then the seed `--remote --apply`; Cush Co / Q8 stored `extraction_context` still carries the old Julian hint line.
 
 #### Phase 5 — Walkthrough 2 follow-ups
 - **Done (v2.11.0):** combined approve + arrival decision in the Review Queue;

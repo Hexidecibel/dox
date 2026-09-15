@@ -43,6 +43,206 @@ function normalizeSubLotCode(raw) {
   return /^[0-9]$/.test(s) ? `0${s}` : s;
 }
 
+// shared/lotScheme.ts
+var IMPLIED_WIDTH = {
+  yy: 2,
+  julian_day: 3,
+  mmddyy: 6,
+  yymmdd: 6
+};
+function legacyLotSchemeSpec(value) {
+  if (value === "date_code") {
+    return {
+      format: 1,
+      kind: "structured",
+      label: "legacy date code (leading six digits)",
+      segments: [
+        { name: "date", kind: "digits", width: 6 },
+        // Any length: the legacy regex looked only at the first six characters.
+        { name: "rest", kind: "alnum", min_width: 0, max_width: Number.MAX_SAFE_INTEGER }
+      ],
+      sublot: null,
+      key: "segments",
+      key_segments: ["date"],
+      date_role: null
+    };
+  }
+  return { format: 1, kind: "none", label: "legacy: lot as written" };
+}
+var MAX_WIDTH = 32;
+function kindAccepts(kind, s) {
+  switch (kind) {
+    case "letters":
+      return /^[A-Z]*$/.test(s);
+    case "alnum":
+      return /^[A-Z0-9]*$/.test(s);
+    default:
+      return /^[0-9]*$/.test(s);
+  }
+}
+var KIND_WORDS = {
+  digits: "digits",
+  letters: "letters",
+  alnum: "letters or digits",
+  yy: "a two-digit year",
+  julian_day: "a three-digit day of the year",
+  mmddyy: "a MMDDYY date",
+  yymmdd: "a YYMMDD date"
+};
+function lotSchemeLabel(spec) {
+  if (spec.label) return spec.label;
+  if (spec.kind === "none") return "no declared lot format";
+  const parts = (spec.segments ?? []).map((s) => s.name);
+  if (spec.sublot) parts.push("sublot");
+  return parts.join(" \xB7 ");
+}
+function isLeap(y) {
+  return y % 4 === 0 && y % 100 !== 0 || y % 400 === 0;
+}
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function isoFromYmd(y, m, d) {
+  if (m < 1 || m > 12 || d < 1) return null;
+  const dim = [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1];
+  if (d > dim) return null;
+  return `${y}-${pad2(m)}-${pad2(d)}`;
+}
+function isoFromJulian(y, day) {
+  const days = isLeap(y) ? 366 : 365;
+  if (day < 1 || day > days) return null;
+  const t = Date.UTC(y, 0, 1) + (day - 1) * 864e5;
+  return new Date(t).toISOString().slice(0, 10);
+}
+var SEPARATED_SUBLOT = /^(.*[A-Za-z0-9])[\s\-/._]+([A-Za-z0-9]{1,6})\s*$/;
+function decodeLot(spec, lotRaw, sublotRaw) {
+  const input = String(lotRaw ?? "").trim();
+  const n = normalizeLotNumber(input);
+  const subGiven = normalizeSubLotCode(sublotRaw ?? null);
+  const s = spec ?? legacyLotSchemeSpec("auto");
+  const label2 = lotSchemeLabel(s);
+  const plain = (reason, fits = false) => {
+    const keepsSublot = s.kind === "none" || !!s.sublot;
+    const sub = keepsSublot ? subGiven : "";
+    return {
+      input,
+      fits,
+      reason,
+      base: n,
+      sublot: sub,
+      composite: n + sub,
+      key: n + sub,
+      key_sublot: sub,
+      segments: [],
+      decoded_date: null,
+      date_role: null,
+      label: label2
+    };
+  };
+  try {
+    if (!n) return plain("There is no lot number.");
+    if (s.kind === "none") return plain("No lot format is declared for this supplier, so the lot is stored as written.");
+    const segs = (s.segments ?? []).map((g) => g.width == null && IMPLIED_WIDTH[g.kind] ? { ...g, width: IMPLIED_WIDTH[g.kind] } : g);
+    if (segs.length === 0) return plain("The declared lot format has no segments.");
+    const fixedBase = segs.every((g) => g.width != null) ? segs.reduce((a, g) => a + g.width, 0) : null;
+    let base = n;
+    let sub = "";
+    if (s.sublot) {
+      const w = s.sublot.width;
+      const sepMatch = SEPARATED_SUBLOT.exec(input);
+      const sepBase = sepMatch ? normalizeLotNumber(sepMatch[1]) : "";
+      if (subGiven) {
+        if (fixedBase != null && n.length === fixedBase + w) {
+          if (n.slice(fixedBase) !== subGiven) {
+            return plain(`The lot number ends in sublot ${n.slice(fixedBase)}, but the sublot given is ${subGiven}.`);
+          }
+          base = n.slice(0, fixedBase);
+        }
+        sub = subGiven;
+      } else if (sepMatch && fixedBase != null && sepBase.length === fixedBase && normalizeLotNumber(sepMatch[2]).length <= w) {
+        base = sepBase;
+        sub = normalizeSubLotCode(sepMatch[2]);
+      } else if (fixedBase != null && n.length === fixedBase + w) {
+        base = n.slice(0, fixedBase);
+        sub = n.slice(fixedBase);
+      }
+      if (sub && (sub.length !== w || !kindAccepts(s.sublot.kind, sub))) {
+        return plain(`Sublot "${sub}" is not ${w} ${s.sublot.kind === "digits" ? "digits" : "letters or digits"}.`);
+      }
+    }
+    if (fixedBase != null && base.length !== fixedBase) {
+      const withSub = s.sublot ? ` (${fixedBase + s.sublot.width} with the sublot)` : "";
+      return plain(`"${input}" is ${n.length} characters; ${label2} is ${fixedBase}${withSub}.`);
+    }
+    const parts = [];
+    let at = 0;
+    for (let i = 0; i < segs.length; i++) {
+      const g = segs[i];
+      let value;
+      if (g.width != null) {
+        value = base.slice(at, at + g.width);
+        if (value.length !== g.width) return plain(`"${input}" is too short for ${label2}: ${g.name} is missing.`);
+      } else {
+        value = base.slice(at);
+        const min = g.min_width ?? 1;
+        const max = g.max_width ?? MAX_WIDTH;
+        if (value.length < min || value.length > max) {
+          return plain(`${g.name} "${value}" should be ${min === max ? min : `${min} to ${max}`} characters.`);
+        }
+      }
+      at += value.length;
+      if (!kindAccepts(g.kind, value)) return plain(`${g.name} "${value}" is not ${KIND_WORDS[g.kind]}.`);
+      if (g.values && value && !g.values.includes(value)) {
+        return plain(`${g.name} "${value}" is not one of the declared values (${g.values.join(", ")}).`);
+      }
+      parts.push({ name: g.name, kind: g.kind, value });
+    }
+    if (at !== base.length) return plain(`"${input}" is longer than ${label2}.`);
+    let decoded = null;
+    const val = (k) => parts.find((p) => p.kind === k)?.value;
+    const yy = val("yy");
+    const jd = val("julian_day");
+    const mdy = val("mmddyy");
+    const ymd = val("yymmdd");
+    if (jd != null && yy != null) {
+      const year = 2e3 + Number(yy);
+      const day = Number(jd);
+      decoded = isoFromJulian(year, day);
+      if (!decoded) return plain(`Day "${jd}" is not a day of ${year} (1\u2013${isLeap(year) ? 366 : 365}).`);
+    } else if (mdy != null) {
+      decoded = isoFromYmd(2e3 + Number(mdy.slice(4, 6)), Number(mdy.slice(0, 2)), Number(mdy.slice(2, 4)));
+      if (!decoded) return plain(`"${mdy}" is not a month-day-year date.`);
+    } else if (ymd != null) {
+      decoded = isoFromYmd(2e3 + Number(ymd.slice(0, 2)), Number(ymd.slice(2, 4)), Number(ymd.slice(4, 6)));
+      if (!decoded) return plain(`"${ymd}" is not a year-month-day date.`);
+    }
+    const keyBody = s.key === "segments" ? (s.key_segments ?? []).map((name) => parts.find((p) => p.name === name)?.value ?? "").join("") : base;
+    const keySub = s.sublot ? sub : "";
+    return {
+      input,
+      fits: true,
+      reason: null,
+      base,
+      sublot: sub,
+      composite: base + sub,
+      key: keyBody + keySub,
+      key_sublot: keySub,
+      segments: parts,
+      decoded_date: decoded,
+      date_role: decoded ? s.date_role ?? null : null,
+      label: label2
+    };
+  } catch (err) {
+    return plain(`The lot could not be read against ${label2}: ${err instanceof Error ? err.message : String(err)}.`);
+  }
+}
+function formatLotIso(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return iso;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[Number(m[2]) - 1]} ${Number(m[3])}, ${m[1]}`;
+}
+
 // shared/extractionInvariants.ts
 var LOT_KEYS = ["lot_number", "lot_code", "buffer_lot"];
 var SUBLOT_KEYS = ["sub_lot_code", "sub_lot_number", "sublot_code"];
@@ -102,7 +302,11 @@ var CHECKS = [
   "supplier_in_text",
   "field_label_mismatch",
   "supplier_not_self",
-  "sublot_production_date_conflict"
+  "sublot_production_date_conflict",
+  // Migration 0110 — the supplier's DECLARED lot format, when it has one.
+  "lot_fits_declared_format",
+  "lot_code_production_date",
+  "lot_code_best_by_date"
 ];
 var SCALAR_KEYS = /* @__PURE__ */ new Set([
   ...LOT_KEYS,
@@ -695,6 +899,7 @@ function checkExtraction(item, opts = {}) {
     }
   }
   checkRecordProductionDates(item, tally, fail);
+  checkDeclaredLotFormat(item, opts.lotScheme ?? null, tally, fail);
   return { failures, tally, verbatimLotHits, verbatimLotChecks };
 }
 function checkRecordProductionDates(item, tally, fail) {
@@ -766,6 +971,128 @@ function checkRecordProductionDates(item, tally, fail) {
         `Lot ${shown} appears on ${rows.length} rows of this certificate with different production dates (${values}) \u2014 one of them is misread.`
       );
     }
+  }
+}
+var MONTHS = {
+  JAN: 1,
+  FEB: 2,
+  MAR: 3,
+  APR: 4,
+  MAY: 5,
+  JUN: 6,
+  JUL: 7,
+  AUG: 8,
+  SEP: 9,
+  SEPT: 9,
+  OCT: 10,
+  NOV: 11,
+  DEC: 12
+};
+function statedDays(raw) {
+  const out = /* @__PURE__ */ new Set();
+  const add = (y, mo, d) => {
+    const dt = mkDate(y, mo, d);
+    if (dt) out.add(dt.toISOString().slice(0, 10));
+  };
+  const s = raw.trim().toUpperCase();
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  if (m) {
+    add(+m[1], +m[2], +m[3]);
+    return out;
+  }
+  m = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/.exec(s);
+  if (m) {
+    const y = +m[3] < 100 ? 2e3 + +m[3] : +m[3];
+    add(y, +m[1], +m[2]);
+    add(y, +m[2], +m[1]);
+    return out;
+  }
+  m = /^(\d{1,2})[\s\-.]*([A-Z]{3,4})[A-Z]*[\s\-.,]*(\d{2,4})$/.exec(s);
+  if (m && MONTHS[m[2]]) {
+    add(+m[3] < 100 ? 2e3 + +m[3] : +m[3], MONTHS[m[2]], +m[1]);
+    return out;
+  }
+  m = /^([A-Z]{3,4})[A-Z]*[\s\-.]*(\d{1,2}),?[\s\-.]*(\d{2,4})$/.exec(s);
+  if (m && MONTHS[m[1]]) {
+    add(+m[3] < 100 ? 2e3 + +m[3] : +m[3], MONTHS[m[1]], +m[2]);
+  }
+  return out;
+}
+function possessive(name) {
+  if (!name) return "this supplier's";
+  return /s$/i.test(name.trim()) ? `${name.trim()}'` : `${name.trim()}'s`;
+}
+function checkDeclaredLotFormat(item, scheme, tally, fail) {
+  if (!scheme || scheme.spec.kind !== "structured") return;
+  const spec = scheme.spec;
+  const formatLabel = lotSchemeLabel(spec);
+  const whose = `${possessive(scheme.supplierName)} declared lot format (${formatLabel})`;
+  const rows = [];
+  const rec = safeParse(item.ai_records);
+  const envelope = rec && typeof rec === "object" ? rec : null;
+  const records = envelope && Array.isArray(envelope.records) ? envelope.records : [];
+  if (records.length > 0) {
+    const page = envelope.page_metadata && typeof envelope.page_metadata === "object" && !Array.isArray(envelope.page_metadata) ? envelope.page_metadata : {};
+    records.forEach((r, i) => {
+      const own = r && typeof r === "object" ? r.fields : null;
+      if (own && typeof own === "object" && !Array.isArray(own)) {
+        rows.push({ scope: `record[${i}]`, fields: { ...page, ...own } });
+      }
+    });
+  } else {
+    const flat = safeParse(item.ai_fields);
+    if (flat && typeof flat === "object" && !Array.isArray(flat)) {
+      rows.push({ scope: "ai_fields", fields: flat });
+    }
+  }
+  for (const { scope, fields } of rows) {
+    const lotKey = ["lot_number", "lot_code"].find((k) => asString(fields[k]) && !isPlaceholder(fields[k]));
+    if (!lotKey) continue;
+    const lotRaw = asString(fields[lotKey]);
+    const subRaw = SUBLOT_KEYS.map((k) => asString(fields[k])).find((v) => v && !isPlaceholder(v)) ?? "";
+    const d = decodeLot(spec, lotRaw, subRaw);
+    const shownLot = subRaw ? `${lotRaw} / sublot ${subRaw}` : lotRaw;
+    if (!d.fits) {
+      bump(tally, "lot_fits_declared_format", "fail");
+      fail(
+        "lot_fits_declared_format",
+        lotKey,
+        scope,
+        shownLot,
+        `does not parse under the declared format: ${d.reason}`,
+        `Lot "${shownLot}" does not fit ${whose}: ${d.reason} Check that the lot was read from the right place.`
+      );
+      continue;
+    }
+    bump(tally, "lot_fits_declared_format", "pass");
+    if (!d.decoded_date || !d.date_role) continue;
+    const check = d.date_role === "production" ? "lot_code_production_date" : "lot_code_best_by_date";
+    const dateKeys = d.date_role === "production" ? ["production_date", "mfg_date"] : ["best_by_date", "expiration_date"];
+    const dateKey = dateKeys.find((k) => asString(fields[k]) && !isPlaceholder(fields[k]));
+    if (!dateKey) {
+      bump(tally, check, "skip");
+      continue;
+    }
+    const stated = asString(fields[dateKey]);
+    const days = statedDays(stated);
+    if (days.size === 0) {
+      bump(tally, check, "skip");
+      continue;
+    }
+    if (days.has(d.decoded_date)) {
+      bump(tally, check, "pass");
+      continue;
+    }
+    const roleWords = d.date_role === "production" ? "production date" : "best-by date";
+    bump(tally, check, "fail");
+    fail(
+      check,
+      dateKey,
+      scope,
+      stated,
+      `${dateKey} ${stated} but lot ${d.base} decodes to ${d.decoded_date} (${d.date_role})`,
+      `This row's ${label(dateKey).toLowerCase()} is ${stated}, but lot ${d.base} decodes to a ${roleWords} of ${formatLotIso(d.decoded_date)} under ${whose}. One of the two is wrong \u2014 check the certificate. Nothing has been changed.`
+    );
   }
 }
 // Annotate the CommonJS export names for ESM import in node:

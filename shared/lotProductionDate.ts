@@ -28,7 +28,12 @@ import {
   type StoredDateReading,
 } from './searchDates';
 
-export type ProductionDateSource = 'extracted' | 'extracted_code_date_legacy' | 'reviewer';
+/**
+ * 'lot_decode' (migration 0110) is the one source that is NOT read off a page:
+ * the supplier's declared lot format decoded it. Never covering, never written
+ * over a stated value — see productionDateFromLot in shared/lotScheme.ts.
+ */
+export type ProductionDateSource = 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | 'lot_decode';
 export type ProductionDateStatus = 'resolved' | 'ambiguous' | 'unparseable' | 'conflict';
 
 export interface ProductionDateResolution {

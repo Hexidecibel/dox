@@ -6,7 +6,9 @@ import { findOrCreateProduct } from '../entities/products';
 import { extractRecordPdf } from './coaPageScope';
 
 import { attachLotToCoaDocument, extractLotNumber, extractSubLotCode } from '../entities/matching';
-import { normalizeLotNumber, normalizeSubLotCode, applyLotScheme, type LotScheme } from '../entities/lots';
+import { normalizeLotNumber, toResolvedScheme, type LotSchemeInput } from '../entities/lots';
+import { lotIdentity, type ResolvedLotScheme } from '../../../shared/lotScheme';
+import { loadResolvedLotScheme } from '../lot-schemes';
 import { getLearnedPreferences } from '../learnedPreferences';
 import { applyDocumentTypeRequirementDefaults } from '../requirement-defaults';
 import type { CoaRecordsPayload } from '../../../shared/types';
@@ -987,10 +989,12 @@ function firstField(
 
 /**
  * Compute the combined lot_key for a record per the Option B rule, refined by
- * the supplier's lot_scheme (0075):
- *   - 'auto'/'plain'/undefined: lot_key = norm(lot_number) + sub_lot_code.
- *   - 'lims_combined': same concat (Darigold).
- *   - 'date_code': strip to the bare MMDDYY date, sub_lot_code forced to ''.
+ * the supplier's scheme:
+ *   - legacy 'auto'/'plain'/'lims_combined'/undefined: norm(lot_number) + sub_lot_code.
+ *   - legacy 'date_code': strip to the bare MMDDYY date, sub_lot_code forced to ''.
+ *   - a DECLARED format (0110): the parts it declares, e.g. Darigold's
+ *     '10426203-03' with no sublot field is lot 10426203 + sublot 03; a lot that
+ *     does not fit keeps the legacy concat.
  * Returns { lotNumber, subLotCode, lotKey } with subLotCode='' when absent, or
  * null when the record has no usable lot number. The lot_key returned here MUST
  * match what attachLotToCoaDocument (→ findOrCreateLot with the same scheme)
@@ -998,41 +1002,27 @@ function firstField(
  */
 export function computeRecordLotKey(
   fields: Record<string, string | null>,
-  scheme?: LotScheme | null
+  scheme?: LotSchemeInput
 ): { lotNumber: string; subLotCode: string; lotKey: string } | null {
   const lotNumber = firstField(fields, COA_RECORD_LOT_KEYS);
   if (!lotNumber) return null;
-  const base = normalizeLotNumber(lotNumber);
-  if (!base) return null;
-  const rawSubLotCode = normalizeSubLotCode(firstField(fields, COA_RECORD_SUBLOT_KEYS));
-  const combined = applyLotScheme(scheme, base, rawSubLotCode);
+  if (!normalizeLotNumber(lotNumber)) return null;
+  const combined = lotIdentity(toResolvedScheme(scheme).spec, lotNumber, firstField(fields, COA_RECORD_SUBLOT_KEYS));
+  if (!combined.lotKey) return null;
   return { lotNumber, subLotCode: combined.subLotCode, lotKey: combined.lotKey };
 }
 
 /**
- * Resolve a supplier's lot_scheme (0075). Returns 'auto' when supplierId is
- * null, the row is missing, or the column is empty — so callers can pass the
- * result straight through with no behavior change for unconfigured suppliers.
+ * The supplier's lot scheme in force: its latest DECLARED format (0110), else
+ * the 0075 enum mapped onto an equivalent spec — so an unconfigured supplier
+ * behaves exactly as before. Never throws.
  */
 async function resolveLotScheme(
   db: D1Database,
   tenantId: string,
   supplierId: string | null
-): Promise<LotScheme> {
-  if (!supplierId) return 'auto';
-  try {
-    const row = await db
-      .prepare('SELECT lot_scheme FROM suppliers WHERE id = ? AND tenant_id = ?')
-      .bind(supplierId, tenantId)
-      .first<{ lot_scheme: string | null }>();
-    const s = (row?.lot_scheme ?? '').trim();
-    if (s === 'date_code' || s === 'lims_combined' || s === 'plain' || s === 'auto') {
-      return s;
-    }
-    return 'auto';
-  } catch {
-    return 'auto';
-  }
+): Promise<ResolvedLotScheme> {
+  return loadResolvedLotScheme(db, tenantId, supplierId);
 }
 
 /** Per-record decision from the reviewer (partial approval). */

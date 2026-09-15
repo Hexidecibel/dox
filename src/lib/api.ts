@@ -336,6 +336,8 @@ import type {
 } from '../../shared/types';
 import type { SupplierGapListResponse } from '../../shared/requirementGap';
 import type { ProductIdentifier, ProductIdentifierKind } from '../../shared/types';
+import type { SupplierLotSchemeResponse } from '../../shared/types';
+import type { LotSchemeSpec } from '../../shared/lotScheme';
 
 // ---------------------------------------------------------------------------
 // Modules (migration 0099). Its own import block for the same reason as the
@@ -1031,6 +1033,19 @@ export const api = {
      */
     delete: (id: string) =>
       fetchApi<{ success: boolean }>(`/suppliers/${id}`, { method: 'DELETE' }),
+
+    /**
+     * GET / PUT /api/suppliers/:id/lot-scheme — the supplier's declared lot
+     * format (migration 0110), its versions, and the fit preview.
+     */
+    lotScheme: {
+      get: (id: string) => fetchApi<SupplierLotSchemeResponse>(`/suppliers/${id}/lot-scheme`),
+      put: (id: string, data: { spec: LotSchemeSpec; note?: string | null }) =>
+        fetchApi<SupplierLotSchemeResponse>(`/suppliers/${id}/lot-scheme`, {
+          method: 'PUT',
+          body: JSON.stringify(data),
+        }),
+    },
 
     /**
      * POST /api/suppliers/lookup-or-create
