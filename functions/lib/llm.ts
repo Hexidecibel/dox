@@ -34,6 +34,7 @@ FIELD EXTRACTION RULES:
    - customer_name — company RECEIVING the product. Often labeled "Ship To", "Customer", "Sold To", or "Attention". If a company name appears prominently but is clearly the recipient (e.g., appears after "Ship To:"), it is the customer, NOT the supplier.
    - product_name — full product name (e.g., "Unsalted Sweet Cream Butter 68#")
    - product_code — supplier's internal product/item code or SKU
+   - customer_item_number — the CUSTOMER's own item number for this product, printed by the supplier and labelled as the customer's ("CUSTOMER ITEM #", "Customer Item", "Cust. Item No.", "Your Item #"). It is the buyer's SKU: NOT the supplier's item code (that is product_code), and NOT an order, invoice, sales order or PO number — never put it in order_number. Null when the page prints none.
    - lot_number — the lot or run number. Also the batch number, but ONLY when the document prints no separate lot; if it prints both, this is the lot.
    - batch_number — a batch identifier printed ALONGSIDE a separate lot ("Batch Number", "Batch", "Batch Code"). Null when the document prints only one of the two.
    - po_number — purchase order number
@@ -45,7 +46,7 @@ FIELD EXTRACTION RULES:
    - grade — quality grade (e.g., "Grade A", "Grade AA", "US Extra")
    - plant_number — facility ID or plant number
    - net_weight — net weight with units
-   - order_number — sales order or reference number
+   - order_number — sales order or reference number. A number labelled as the customer's item is NOT an order number; it is customer_item_number.
    - issuing_body — on a CERTIFICATE, the organisation that ISSUED it: the certifying agent, certification body, registrar, auditing firm, insurer or insurance broker whose name is on the letterhead. It is NOT the company being certified — that is supplier_name (rule 6). An ACCREDITATION body, which accredits the certifier rather than issuing this certificate (ANAB, IAF, a national accreditation service), is not the issuer.
    - certificate_number — the certificate's OWN number, as printed and labelled ("Certificate No.", "Cert #", "Certificate ID"). A policy number, a form number, an audit report number, a customer's item number and a document revision number are NOT certificate numbers. When the page prints none, this is null however many other numbers it prints.
    - scheme — the standard or programme a certification was granted against, as printed (e.g. "SQF Food Safety Code for Manufacturing Edition 9", "BRCGS Food Safety Issue 9", "FSSC 22000 v6", "USDA National Organic Program").
@@ -565,6 +566,10 @@ const FIELD_ALIASES: Record<string, string[]> = {
   po_number: ['po', 'purchase_order', 'purchase_order_number', 'po_no'],
   product_name: ['product', 'item', 'material', 'description', 'item_description'],
   product_code: ['item_code', 'sku', 'material_code', 'item_number', 'item_no'],
+  // The BUYER's item number, printed by the supplier (CMF "CUSTOMER ITEM #").
+  // Its own field so it is never filed as order_number (Phase 3). KEEP IN SYNC
+  // with functions/lib/llm.ts / bin/process-worker.
+  customer_item_number: ['customer_item', 'customer_item_no', 'customer_item_num', 'cust_item_number', 'cust_item_no', 'customer_sku', 'customer_part_number', 'your_item_number'],
   expiration_date: ['exp_date', 'best_by', 'use_by', 'best_before', 'sell_by', 'bb_date'],
   // Certificate-validity wordings ONLY. Deliberately no generic 'exp_date' /
   // 'expiry' here: those are the PRODUCT's shelf life and must stay on
