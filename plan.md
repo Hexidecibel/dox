@@ -94,9 +94,19 @@ Lot rows carry their own production date with provenance (migration 0106), searc
 - **Done (v2.11.0):** combined approve + arrival decision in the Review Queue;
   `sales_sheet` rejection reason; lot matches suggest-only (+ `bin/audit-asserted-lot-matches`);
   arrivals demo seed (`bin/seed-arrivals-demo`).
-- **Planned:** per-analyte "no limit configured" state; visible conversion flag;
-  required analytes per supplier; review-by date on supplier limits; renewal alert
-  lead time per client with per-type override.
+- **Done (local, 2026-09-15; migration 0107, not deployed) — supplier watch, AJ rulings 2026-09-14:**
+  - Required analytes per supplier: `supplier_required_analytes` + `checkRequiredAnalytes`; a missing one is
+    `missing_required` (never a pass), written to `document_spec_gaps` and carried in the same spec alert email.
+  - Review-by on supplier limits and required analytes: after the date the rule still applies and is flagged
+    "Watch period ended <date> — review"; frozen into `limit_snapshot`.
+  - "No limit configured" state (`unjudged`) in the review queue, document Test results panel and register tabs.
+  - Visible conversion flag: `conversion {from, to, rule, factor, operation}` on every scaled/equated verdict,
+    chip on the value; % w/w vs % v/v refused.
+  - Decimal sample basis fix: `cfu/0.1g` was read as per 1 g (10x).
+  - Settings › Spec Limits "Suppliers on watch" + supplier "Spec watch" tab; `bin/seed-supplier-watch`.
+  - **Waiting on:** 0107 on prod (surgical apply + stamp; renumber if a parallel 0107 lands first); AJ configures
+    Andersen (supplier `5b1b9455070243d5b568c12c1c984f7d`, COA type `96472de9ddab4f88bba0b8196b9fd057`).
+- **Planned:** renewal alert lead time per client with per-type override.
 - **Pending decision:** prod run of `bin/seed-arrivals-demo --remote`; revert of
   legacy auto-linked lot matches via `bin/audit-asserted-lot-matches --remote --apply`.
 
