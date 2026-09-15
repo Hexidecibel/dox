@@ -16,12 +16,18 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
 import { HelpWell } from '../../components/HelpWell';
 import OwnerRoutingPanel from '../../components/OwnerRoutingPanel';
+import { RenewalLeadTimePanel } from '../../components/RenewalLeadTime';
+import { useModuleAccess } from '../../contexts/ModuleAccessContext';
 
 export function OwnerRoutes() {
   const { user, isSuperAdmin } = useAuth();
   const { selectedTenantId } = useTenant();
 
   const tenantId = isSuperAdmin ? selectedTenantId || undefined : user?.tenant_id || undefined;
+  // The lead time belongs to the renewal alerts, which are Compliance; a tenant
+  // with Compliance switched off gets no renewal mail, so it gets no setting.
+  const { visible } = useModuleAccess();
+  const showLeadTime = visible.includes('compliance') && (!isSuperAdmin || !!tenantId);
 
   return (
     <Box>
@@ -37,6 +43,9 @@ export function OwnerRoutes() {
         admins, so a label with nobody behind it means those records are reported as unowned and
         nobody is emailed at all.
       </HelpWell>
+
+      {/* WHEN they are told, beside WHO is told (migration 0111). */}
+      {showLeadTime && <RenewalLeadTimePanel tenantId={tenantId} />}
 
       <OwnerRoutingPanel tenantId={tenantId} />
     </Box>

@@ -1140,6 +1140,31 @@ Existing surplus copies are reported (never changed) by `bin/audit-duplicate-doc
 
 ---
 
+## Renewal Alert Lead Time
+
+How many days before a document is due its owner is emailed (migration 0111). Clients differ: some want three months to chase suppliers, others one month so suppliers are not chased about something that cannot be renewed yet.
+
+The lead time is resolved **per document**, most specific first:
+
+1. `document_types.renewal_alert_lead_days`: the type's override (source `document_type`)
+2. `tenants.renewal_alert_lead_days`: the organization's setting (source `tenant`)
+3. 60 days (source `default`)
+
+A document is alerting when `days_until <= alert_lead_days`, or when it is already overdue or expired. The scheduled run (`POST /api/expirations/run-scheduled`) and the manual button (`POST /api/expirations/notify`) both work this way. Neither accepts a window any more. A `window_days` sent to either is ignored and reported as `window_days_ignored: true`. Each digest document in the response (`groups[].documents[]`, `unrouted.documents[]`) carries `alert_lead_days` and `alert_lead_source`, and the email row says "warned 90 days ahead (document type)".
+
+The dashboard (`GET /api/expirations`) look-ahead `window_days` is a view filter. It defaults to the organization's lead time. Each row has `status` (judged against the look-ahead) and `alert_status` (judged against its own lead time, which is what gets mailed).
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/expirations/lead-time` | super_admin (`tenant_id`), org_admin | The setting, its effective value, presets (30/60/90), who changed it and when, and the document types that override it. |
+| `PUT /api/expirations/lead-time` | super_admin (`tenant_id`), org_admin | `{ "lead_days": 90 }`, or `null` for the default. Whole number 7-365. Stamps who and when, and audits `renewal_alert_lead_time_updated` with the previous value. A no-op save writes nothing. |
+| `GET /api/expirations/lead-time/preview?lead_days=90` | super_admin, org_admin | Read-only. Counts what the change would do at the next run: `newly_entering_count`, `newly_entering_would_send_count` (re-alert cooldown applied), `leaving_count`, and up to 25 documents each way. Add `document_type_id` to preview a type override. Use `lead_days=inherit` to preview clearing it. |
+| `PUT /api/document-types/:id` | super_admin, org_admin | `{ "renewal_alert_lead_days": 30 }` or `null` to inherit. Also accepted on `POST /api/document-types`. A change audits `document_type.renewal_alert_lead_time_updated`. |
+
+**Changing the lead time does not re-send.** The re-alert ledger (`renewal_alert_state`) is keyed on the document and does not store a lead time. Lengthening the lead time adds documents to the alert set. Those never alerted get a first email, and the preview counts them before you save. Those alerted within the last 7 days stay quiet. Shortening it only removes documents. A lead time moves a document only between `current` and `expiring`, so it cannot trigger an escalation that skips the cooldown.
+
+---
+
 ## Agentic Integration
 
 The document portal supports an email-to-agent-to-portal pipeline for automated document ingestion. Here is the typical flow:

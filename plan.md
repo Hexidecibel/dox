@@ -110,7 +110,14 @@ Each supplier's lot format is declared data (migration 0110, append-only `suppli
   - Settings › Spec Limits "Suppliers on watch" + supplier "Spec watch" tab; `bin/seed-supplier-watch`.
   - **Waiting on:** 0109 on prod (surgical apply + stamp; renumbered from 0107 at merge); AJ configures
     Andersen (supplier `5b1b9455070243d5b568c12c1c984f7d`, COA type `96472de9ddab4f88bba0b8196b9fd057`).
-- **Planned:** renewal alert lead time per client with per-type override.
+- **Done (local, 2026-09-15; migration 0111, not deployed) — renewal alert lead time, SME ruling 2026-09-14:**
+  - `tenants.renewal_alert_lead_days` + `document_types.renewal_alert_lead_days` (NULL = inherit, 7-365, stamped + audited);
+    resolved per document type -> tenant -> 60 (`shared/renewalLeadTime.ts`).
+  - Engine judges each document against its own lead time on both the cron and "Send alert now"; `window_days` no longer
+    reaches the mail path (reported as `window_days_ignored`). Ledger untouched, so a change never re-sends inside the cooldown.
+  - Settings › Owner Routing "When owners are warned" (30/60/90/custom) + Document Types override, both with a read-only
+    preview (`/api/expirations/lead-time/preview`). Renewals look-ahead defaults to the lead time and says it is view-only.
+  - **Waiting on:** 0111 on prod (surgical apply + stamp; renumber if a parallel 0111 lands first).
 - **Pending decision:** prod run of `bin/seed-arrivals-demo --remote`; revert of
   legacy auto-linked lot matches via `bin/audit-asserted-lot-matches --remote --apply`.
 
