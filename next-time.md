@@ -6,6 +6,12 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ## 2026-09-14 v2.8.0 ON PROD — migrations through 0103, backfill waiting on a yes
 
+**2026-09-14 later: v2.9.0 ON PROD (supplier arrivals review — `/requests/arrivals`).**
+0104 applied to staging (unstamped) and prod (stamped, `d1_migrations` id 87; Time
+Travel bookmark + request_lines/request_upload_lines exports in `~/drops/dox-backups/`
+first). Pages deploy `5300ef93`; gate: vitest 223 files / 3114 tests, Playwright 7
+passed, 1 skipped. The 2.8.0 notes below still stand.
+
 **Prod is v2.8.0, Pages deploy `628f049a` (Production / master / `6908554`).**
 `bin/deploy` gate passed: vitest 221 files / 3090 tests, Playwright vs staging 7
 passed, 1 skipped. supdox.com `/releases/index.json` reports `current: 2.8.0`.
