@@ -1,5 +1,5 @@
 /**
- * shared/lotScheme.ts — a supplier's DECLARED lot format (migration 0109).
+ * shared/lotScheme.ts — a supplier's DECLARED lot format (migration 0110).
  *
  * The decoder is exercised on every lot shape AJ listed (R2) and on the §6
  * table; the validator refuses a declaration that cannot mean one thing; and
@@ -189,7 +189,7 @@ describe('legacy enum values run through the same engine, byte-identically', () 
   });
 });
 
-/** The 0075 transform, copied verbatim from the pre-0109 lots.ts, as the parity oracle. */
+/** The 0075 transform, copied verbatim from the pre-0110 lots.ts, as the parity oracle. */
 function legacyTransform(scheme: string | null | undefined, baseLotKey: string, subLotCode: string) {
   switch (scheme) {
     case 'date_code': {

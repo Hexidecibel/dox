@@ -1,5 +1,5 @@
 /**
- * Supplier › Lot format (migration 0109).
+ * Supplier › Lot format (migration 0110).
  *
  * Declare how this supplier's lot codes are built — segments, sublot, which date
  * the code encodes — and test it live against a typed lot and against every lot

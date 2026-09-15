@@ -192,7 +192,7 @@ export interface CoverageSubject {
   /** Linked lot records (document_lots → lots). Metadata lots are derived here. */
   lots: SubjectLot[];
   /**
-   * The supplier's DECLARED lot format (migration 0109), when it has a
+   * The supplier's DECLARED lot format (migration 0110), when it has a
    * structured one. A lot that fits it may IMPLY a date; that is read only when
    * the subject states none, and is at best `likely` (provenance 'lot_decode').
    */
@@ -655,7 +655,7 @@ interface DateValue {
 
 /**
  * The production date a subject's lot code IMPLIES under its supplier's declared
- * format (0109) — for a row-scoped subject its one lot, otherwise the lot in its
+ * format (0110) — for a row-scoped subject its one lot, otherwise the lot in its
  * metadata. null unless the format encodes a production date and the lot fits.
  */
 export function lotCodeImplies(s: CoverageSubject, lot?: SubjectLot | null): { date: string; role: 'production' | 'best_by'; base: string; provenance: string } | null {

@@ -1,4 +1,4 @@
--- 0109 — each supplier's lot format as DECLARED DATA; and a lot row's production
+-- 0110 — each supplier's lot format as DECLARED DATA; and a lot row's production
 -- date may now say it was decoded from that format.
 --
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -108,7 +108,7 @@ CREATE TABLE supplier_lot_schemes (
 CREATE INDEX idx_supplier_lot_schemes_current
   ON supplier_lot_schemes (tenant_id, supplier_id, version);
 
-CREATE TABLE lots_pre0109 AS SELECT * FROM lots;
+CREATE TABLE lots_pre0110 AS SELECT * FROM lots;
 
 DROP TABLE lots;
 
@@ -148,9 +148,9 @@ SELECT
   created_at, updated_at, sub_lot_code,
   production_date, production_date_raw, production_date_source, production_date_status,
   production_date_document_id
-FROM lots_pre0109;
+FROM lots_pre0110;
 
-DROP TABLE lots_pre0109;
+DROP TABLE lots_pre0110;
 
 CREATE UNIQUE INDEX idx_lots_identity ON lots(tenant_id, product_id, lot_key, sub_lot_code);
 CREATE INDEX idx_lots_lotkey   ON lots(tenant_id, lot_key);

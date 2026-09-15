@@ -1034,7 +1034,7 @@ export const api = {
 
     /**
      * GET / PUT /api/suppliers/:id/lot-scheme — the supplier's declared lot
-     * format (migration 0109), its versions, and the fit preview.
+     * format (migration 0110), its versions, and the fit preview.
      */
     lotScheme: {
       get: (id: string) => fetchApi<SupplierLotSchemeResponse>(`/suppliers/${id}/lot-scheme`),

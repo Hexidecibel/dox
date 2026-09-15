@@ -297,7 +297,7 @@ export async function ingestOrders(
           if (item.lot_number) {
             try {
               // The line's supplier, reached through its product, may have a
-              // DECLARED lot format (0109): the WMS composite '1042620303' is then
+              // DECLARED lot format (0110): the WMS composite '1042620303' is then
               // lot 10426203 + sublot 03, the same identity the certificate side
               // stores. No declared format (or no single supplier) → the
               // historical concat, unchanged; the legacy 0075 enum is still NOT

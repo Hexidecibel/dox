@@ -1557,7 +1557,7 @@ export function SupplierDetail() {
         )}
       </TabPanel>
 
-      {/* Lot format Tab — the supplier's DECLARED lot format (migration 0109): */}
+      {/* Lot format Tab — the supplier's DECLARED lot format (migration 0110): */}
       {/* template or segments, a live tester, and a read-only fit preview      */}
       {/* against every lot on file. Mounted lazily like Notes.                 */}
       <TabPanel value={tab} index={8}>

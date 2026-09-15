@@ -469,7 +469,7 @@ export async function mergeSuppliers(
       foldedAliases.push(c);
     }
 
-    // Declared lot formats (0109) belong to the loser and cannot move: the
+    // Declared lot formats (0110) belong to the loser and cannot move: the
     // winner's format governs the merged lots, and version numbers are per
     // supplier. They are removed (their FK would block the delete) and their
     // content goes into the audit row below, so nothing is lost silently.
@@ -484,7 +484,7 @@ export async function mergeSuppliers(
         await db.prepare('DELETE FROM supplier_lot_schemes WHERE supplier_id = ? AND tenant_id = ?').bind(loserId, tenantId).run();
       }
     } catch {
-      // Pre-0109 database: no declarations table.
+      // Pre-0110 database: no declarations table.
     }
 
     // Delete the loser row (FTS cleanup is trigger-driven).

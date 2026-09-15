@@ -67,7 +67,7 @@ const PROVENANCE_LABEL: Record<SearchFieldProvenance, string> = {
 export function lotRowLine(l: SearchMatchedLot): string {
   const parts = [`Lot ${l.lot_number}`];
   if (l.sub_lot_code) parts.push(`sublot ${l.sub_lot_code}`);
-  // A date decoded from the lot code (0109) is never written as if the
+  // A date decoded from the lot code (0110) is never written as if the
   // certificate stated it.
   if (l.production_date && l.production_date_source === 'lot_decode') parts.push(`lot code implies production ${formatIsoHuman(l.production_date)}`);
   else if (l.production_date) parts.push(`produced ${formatIsoHuman(l.production_date)}`);

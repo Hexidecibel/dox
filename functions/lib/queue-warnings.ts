@@ -25,7 +25,7 @@ import type { InvariantFailure } from '../../shared/extractionInvariants';
 import { validateLotSchemeSpec, type LotSchemeSpec } from '../../shared/lotScheme';
 
 /**
- * The SQL fragment a queue read selects so the lot-format checks (0109) have the
+ * The SQL fragment a queue read selects so the lot-format checks (0110) have the
  * item's supplier's CURRENT declared format. Two scalar subqueries rather than a
  * join, so a supplier with no declaration costs nothing and changes no row count.
  * `withInvariantWarnings` strips both columns from the response.

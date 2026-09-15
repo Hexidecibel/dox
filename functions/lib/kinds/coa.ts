@@ -992,7 +992,7 @@ function firstField(
  * the supplier's scheme:
  *   - legacy 'auto'/'plain'/'lims_combined'/undefined: norm(lot_number) + sub_lot_code.
  *   - legacy 'date_code': strip to the bare MMDDYY date, sub_lot_code forced to ''.
- *   - a DECLARED format (0109): the parts it declares, e.g. Darigold's
+ *   - a DECLARED format (0110): the parts it declares, e.g. Darigold's
  *     '10426203-03' with no sublot field is lot 10426203 + sublot 03; a lot that
  *     does not fit keeps the legacy concat.
  * Returns { lotNumber, subLotCode, lotKey } with subLotCode='' when absent, or
@@ -1013,7 +1013,7 @@ export function computeRecordLotKey(
 }
 
 /**
- * The supplier's lot scheme in force: its latest DECLARED format (0109), else
+ * The supplier's lot scheme in force: its latest DECLARED format (0110), else
  * the 0075 enum mapped onto an equivalent spec — so an unconfigured supplier
  * behaves exactly as before. Never throws.
  */

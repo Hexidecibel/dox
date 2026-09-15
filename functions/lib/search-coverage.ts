@@ -379,7 +379,7 @@ export async function indexedLotDocumentIds(db: D1Database, tenantId: string, co
 }
 
 /**
- * QUERY-TIME READING OF A DECLARED LOT FORMAT (0109). When the search names a
+ * QUERY-TIME READING OF A DECLARED LOT FORMAT (0110). When the search names a
  * supplier whose declared format encodes a PRODUCTION date, plus a production
  * date, the lots on file for that supplier whose lot code decodes to that day
  * (± the nearby window for a single day) are judged too — including lots whose

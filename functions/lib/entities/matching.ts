@@ -444,7 +444,7 @@ export async function attachLotToCoaDocument(
     source?: string;
     /**
      * Supplier's lot scheme — the legacy 0075 enum or the resolved (possibly
-     * declared, 0109) format, from `loadResolvedLotScheme`. Threaded into
+     * declared, 0110) format, from `loadResolvedLotScheme`. Threaded into
      * findOrCreateLot so the stored lot_key matches the order side, and so a
      * declared production-role format can supply a labelled fallback production
      * date. Omitted/null → 'auto' (today's behavior).

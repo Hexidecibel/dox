@@ -1,0 +1,108 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/report-lot-key-scheme — REPORT ONLY. Lists lots on file whose stored
+ * identity (lot_key, sub_lot_code) disagrees with what their supplier's lot
+ * format would store (migration 0110), and what a repair would be — including
+ * the 1032610210326102 class (a base read into the sublot field) and whether a
+ * repair would merge two lot rows. Changes nothing; there is no apply mode.
+ *
+ * The format per supplier is its DECLARED one when the target has
+ * supplier_lot_schemes; otherwise (e.g. production before 0110) the
+ * declarations bin/seed-supplier-lot-schemes would make, labelled "proposed".
+ *
+ * Usage:
+ *   bin/report-lot-key-scheme                       # LOCAL, Cush Co
+ *   bin/report-lot-key-scheme --remote              # PRODUCTION (read-only)
+ *   bin/report-lot-key-scheme --tenant <id> [--json]
+ *
+ * Flags:
+ *   --tenant ID     tenant (repeatable). Default: Cush Co (1f03c3e73add44bfafb33bb16508b78b)
+ *   --remote, -r    read PRODUCTION D1
+ *   --json          print the report as JSON
+ *   -h, --help      this help
+ */
+
+const fs = require('fs');
+const { query } = require('./lib/d1');
+const lotScheme = require('./lib/shared/lotScheme');
+const { DECLARATIONS } = require('./lib/lotSchemeSeed');
+const { reportLots, formatReport } = require('./lib/lotKeySchemeReport');
+
+function parseArgs(argv) {
+  const opts = { tenants: [], remote: false, json: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--tenant') opts.tenants.push(argv[++i]);
+    else if (a === '--remote' || a === '-r') opts.remote = true;
+    else if (a === '--json') opts.json = true;
+    else if (a === '-h' || a === '--help') {
+      const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+      console.log(lines.slice(3, lines.findIndex((l, j) => j > 2 && l.trim() === '*/')).join('\n').replace(/^ \* ?/gm, ''));
+      process.exit(0);
+    } else {
+      console.error(`Unknown argument: ${a}`);
+      process.exit(2);
+    }
+  }
+  if (opts.tenants.length === 0) opts.tenants = ['1f03c3e73add44bfafb33bb16508b78b'];
+  for (const t of opts.tenants) {
+    if (!/^[A-Za-z0-9_-]+$/.test(t || '')) {
+      console.error('--tenant must be an id.');
+      process.exit(2);
+    }
+  }
+  return opts;
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const { remote } = opts;
+  const has0110 = Number(query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'supplier_lot_schemes'`, { remote })[0]?.n ?? 0) > 0;
+  const out = [];
+  for (const t of opts.tenants) {
+    const tenant = query(`SELECT id, name FROM tenants WHERE id = '${t}'`, { remote })[0];
+    if (!tenant) {
+      console.log(`Tenant ${t}: not found — skipped.`);
+      continue;
+    }
+    const suppliers = query(`SELECT id, name, active FROM suppliers WHERE tenant_id = '${t}'`, { remote });
+    const formats = [];
+    if (has0110) {
+      const rows = query(
+        `SELECT s.supplier_id, s.spec, s.version FROM supplier_lot_schemes s
+          WHERE s.tenant_id = '${t}' AND s.version = (SELECT MAX(version) FROM supplier_lot_schemes x WHERE x.supplier_id = s.supplier_id)`,
+        { remote },
+      );
+      for (const r of rows) {
+        const v = lotScheme.validateLotSchemeSpec(JSON.parse(r.spec));
+        const sup = suppliers.find((s) => s.id === r.supplier_id);
+        if (v.ok && sup) formats.push({ supplier: sup, spec: v.spec, source: `declared v${r.version}` });
+      }
+    }
+    for (const d of DECLARATIONS) {
+      const matches = suppliers.filter((s) => s.active !== 0 && d.match.test(String(s.name).trim()));
+      if (matches.length !== 1 || formats.some((f) => f.supplier.id === matches[0].id)) continue;
+      formats.push({ supplier: matches[0], spec: lotScheme.LOT_SCHEME_TEMPLATES[d.template].spec, source: 'proposed — not declared' });
+    }
+    if (!opts.json) console.log(`== ${tenant.name} (${t}), ${remote ? 'PRODUCTION' : 'local'} — report only, nothing is changed`);
+    for (const f of formats) {
+      const lots = query(
+        `SELECT id AS lot_id, product_id, lot_number, sub_lot_code, lot_key FROM lots
+          WHERE tenant_id = '${t}' AND supplier_id = '${f.supplier.id}' ORDER BY lot_key`,
+        { remote },
+      );
+      const report = reportLots(f.spec, lots, lotScheme);
+      out.push({ tenant: t, supplier: f.supplier, source: f.source, format: lotScheme.lotSchemeLabel(f.spec), ...report });
+      if (!opts.json) for (const line of formatReport(f.supplier.name, lotScheme.lotSchemeLabel(f.spec), f.source, report)) console.log(line);
+    }
+  }
+  if (opts.json) console.log(JSON.stringify(out, null, 2));
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+}

@@ -1,6 +1,6 @@
 /**
  * GET /api/suppliers/:id/lot-scheme — the supplier's declared lot format
- *   (migration 0109), every version, and how the lots on file read against the
+ *   (migration 0110), every version, and how the lots on file read against the
  *   format in force. Read-only; any role in the tenant.
  * PUT /api/suppliers/:id/lot-scheme — declare a format (org_admin / super_admin).
  *   Body: { spec, note? }. Validated by shared/lotScheme.ts before anything is

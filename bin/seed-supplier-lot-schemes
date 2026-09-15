@@ -1,0 +1,173 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/seed-supplier-lot-schemes — declare the lot formats we have evidence for
+ * (migration 0110): Darigold plant · YY · Julian day + 2-digit sublot
+ * (production date), Country Morning best-by MMDDYY + product suffix, Andersen
+ * none. Reports how the lots already on file read against each one. The
+ * declarations and their evidence are in bin/lib/lotSchemeSeed.js.
+ *
+ * A supplier that already has a declaration is never overwritten. Declaring a
+ * format rewrites no stored lot key and no stored date; see
+ * bin/report-lot-key-scheme for keys a format would store differently.
+ *
+ * Usage:
+ *   bin/seed-supplier-lot-schemes                          # dry run, LOCAL, Cush Co
+ *   bin/seed-supplier-lot-schemes --tenant <id> --apply    # LOCAL write
+ *   bin/seed-supplier-lot-schemes --remote                 # dry run, PRODUCTION
+ *   bin/seed-supplier-lot-schemes --remote --apply         # prompts: type the tenant id
+ *
+ * Flags:
+ *   --tenant ID      tenant to seed (repeatable). Default: Cush Co
+ *                    (1f03c3e73add44bfafb33bb16508b78b).
+ *   --apply          write. Without it this is a dry run.
+ *   --remote, -r     target PRODUCTION D1
+ *   --yes, -y        skip the production confirmation prompt
+ *   -h, --help       this help
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { execFileSync } = require('child_process');
+const { query, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+const lotScheme = require('./lib/shared/lotScheme');
+const { buildSeedPlan, planToSql, formatPlan } = require('./lib/lotSchemeSeed');
+
+const DEFAULT_TENANTS = ['1f03c3e73add44bfafb33bb16508b78b'];
+
+function parseArgs(argv) {
+  const opts = { tenants: [], apply: false, remote: false, yes: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenants.push(argv[++i]); break;
+      case '--apply': opts.apply = true; break;
+      case '--remote': case '-r': opts.remote = true; break;
+      case '--yes': case '-y': opts.yes = true; break;
+      case '-h': case '--help': {
+        const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+        console.log(lines.slice(3, lines.findIndex((l, j) => j > 2 && l.trim() === '*/')).join('\n').replace(/^ \* ?/gm, ''));
+        process.exit(0);
+      }
+      // eslint-disable-next-line no-fallthrough
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  if (opts.tenants.length === 0) opts.tenants = DEFAULT_TENANTS;
+  for (const t of opts.tenants) {
+    if (!/^[A-Za-z0-9_-]+$/.test(t || '')) {
+      console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+      process.exit(2);
+    }
+  }
+  return opts;
+}
+
+function execSql(statements, remote) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-seed-lot-schemes-'));
+  const file = path.join(dir, 'seed.sql');
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  try {
+    execFileSync('npx', ['wrangler', 'd1', 'execute', DEFAULT_DB, remote ? '--remote' : '--local', `--file=${file}`],
+      { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+  } catch (err) {
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${err.stderr ? err.stderr.toString() : err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function promptSync(question) {
+  process.stdout.write(question);
+  let fd;
+  try {
+    fd = fs.openSync('/dev/tty', 'rs');
+  } catch {
+    console.error('\nNo terminal to confirm on. Re-run interactively, or pass --yes.');
+    process.exit(1);
+  }
+  const buf = Buffer.alloc(256);
+  const n = fs.readSync(fd, buf, 0, buf.length, null);
+  fs.closeSync(fd);
+  return buf.toString('utf8', 0, n).split('\n')[0];
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const remote = opts.remote;
+  const target = remote ? 'PRODUCTION' : 'local';
+
+  const hasTable = query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'supplier_lot_schemes'`, { remote });
+  const has0110 = Number(hasTable[0]?.n ?? 0) > 0;
+  if (!has0110) {
+    console.log('This database predates migration 0110 (no supplier_lot_schemes table). Dry run only; every declaration reads as new.\n');
+    if (opts.apply) {
+      console.error('--apply needs migrations/0110_supplier_lot_schemes.sql on the target first.');
+      process.exit(1);
+    }
+  }
+
+  for (const t of opts.tenants) {
+    const tenant = query(`SELECT id, name FROM tenants WHERE id = '${t}'`, { remote })[0];
+    if (!tenant) {
+      console.log(`Tenant ${t}: not in the ${target} database — skipped.\n`);
+      continue;
+    }
+    const suppliers = query(`SELECT id, name, active FROM suppliers WHERE tenant_id = '${t}'`, { remote });
+    const current = {};
+    if (has0110) {
+      const rows = query(
+        `SELECT s.supplier_id, s.spec FROM supplier_lot_schemes s
+          WHERE s.tenant_id = '${t}' AND s.version = (SELECT MAX(version) FROM supplier_lot_schemes x WHERE x.supplier_id = s.supplier_id)`,
+        { remote },
+      );
+      for (const r of rows) {
+        try { current[r.supplier_id] = JSON.parse(r.spec); } catch { current[r.supplier_id] = { unreadable: true }; }
+      }
+    }
+    const lots = query(
+      `SELECT id AS lot_id, supplier_id, lot_number, sub_lot_code, lot_key, production_date, production_date_source
+         FROM lots WHERE tenant_id = '${t}' AND supplier_id IS NOT NULL ORDER BY lot_key`,
+      { remote },
+    );
+    const lotsBySupplier = {};
+    for (const l of lots) (lotsBySupplier[l.supplier_id] = lotsBySupplier[l.supplier_id] || []).push(l);
+
+    const plan = buildSeedPlan(
+      { tenantId: t, suppliers, current, lotsBySupplier },
+      { lotScheme, newId: () => crypto.randomUUID().replace(/-/g, '') },
+    );
+    for (const line of formatPlan(plan, `${tenant.name} (${t}), ${target}`, lotScheme)) console.log(line);
+    const statements = planToSql(plan);
+    const declarations = plan.entries.filter((e) => e.action === 'insert').length;
+    if (!opts.apply) {
+      console.log(declarations === 0
+        ? 'DRY RUN — nothing to write.\n'
+        : `DRY RUN — ${declarations} declaration(s) (each with its audit row) not written. Re-run with --apply to write.\n`);
+      continue;
+    }
+    if (declarations === 0) {
+      console.log('Nothing to write.\n');
+      continue;
+    }
+    if (remote && !opts.yes) {
+      const answer = promptSync(`About to WRITE ${declarations} lot format declaration(s) to PRODUCTION D1 for ${tenant.name}.\nType the tenant id to continue: `);
+      if (answer.trim() !== t) {
+        console.error('That did not match. Nothing was written for this tenant.\n');
+        continue;
+      }
+    }
+    execSql(statements, remote);
+    console.log(`Wrote ${declarations} declaration(s) and their audit rows to ${target} D1.\n`);
+  }
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+}

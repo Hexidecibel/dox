@@ -1,5 +1,5 @@
 /**
- * Search reading a supplier's DECLARED lot format (migration 0109).
+ * Search reading a supplier's DECLARED lot format (migration 0110).
  *
  * AJ §6: "King and Prince asked for production date 7/31/2026. That is Julian
  * day 212, so the lot base is 10426212." With Darigold's format declared, a

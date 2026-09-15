@@ -884,7 +884,7 @@ export type ClassificationStatus =
  */
 export type LotScheme = 'auto' | 'date_code' | 'lims_combined' | 'plain';
 
-/** One DECLARED lot format version (migration 0109, supplier_lot_schemes). */
+/** One DECLARED lot format version (migration 0110, supplier_lot_schemes). */
 export interface SupplierLotSchemeVersion {
   id: string;
   supplier_id: string;
@@ -2290,7 +2290,7 @@ export type SearchCheckOutcome =
  * (bin/backfill-lot-production-dates). `reviewer` = typed by a person.
  */
 /**
- * 'lot_decode' (migration 0109): a date the supplier's DECLARED lot format
+ * 'lot_decode' (migration 0110): a date the supplier's DECLARED lot format
  * decodes from the lot code. Never covering — at best `likely`, confirm.
  */
 export type SearchFieldProvenance = 'extracted' | 'linked_record' | 'system' | 'extracted_code_date_legacy' | 'reviewer' | 'lot_decode';
@@ -2332,7 +2332,7 @@ export interface SearchMatchedLot {
   production_date_source: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | 'lot_decode' | null;
   production_date_status: 'resolved' | 'ambiguous' | 'unparseable' | 'conflict' | null;
   /**
-   * What the lot code itself implies under the supplier's DECLARED format (0109),
+   * What the lot code itself implies under the supplier's DECLARED format (0110),
    * with the provenance in words. Present only when the format decodes a date for
    * this lot; shown as "lot code implies …", never as a stated date.
    */

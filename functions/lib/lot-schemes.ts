@@ -1,5 +1,5 @@
 /**
- * A supplier's declared lot format, read and written (migration 0109).
+ * A supplier's declared lot format, read and written (migration 0110).
  *
  * The rules live in shared/lotScheme.ts (pure). This module is the D1 side:
  * which declaration is in force for a supplier, the append-only write, and the
@@ -73,7 +73,7 @@ function parseRow(r: RawVersionRow): LotSchemeVersionRow | null {
 
 /**
  * The lot format in force for one supplier. Never throws: a missing supplier,
- * a database that predates 0109, or an unreadable row all resolve to the legacy
+ * a database that predates 0110, or an unreadable row all resolve to the legacy
  * 'auto' behaviour, because a lookup hiccup must never block an approval.
  */
 export async function loadResolvedLotScheme(
@@ -114,7 +114,7 @@ export async function loadResolvedLotScheme(
       };
     }
   } catch {
-    // Pre-0109 database: no declarations table.
+    // Pre-0110 database: no declarations table.
   }
   return legacyResolvedScheme(supplier.lot_scheme, supplier.name);
 }

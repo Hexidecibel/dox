@@ -106,7 +106,7 @@ export const CHECKS = [
   'field_label_mismatch',
   'supplier_not_self',
   'sublot_production_date_conflict',
-  // Migration 0109 — the supplier's DECLARED lot format, when it has one.
+  // Migration 0110 — the supplier's DECLARED lot format, when it has one.
   'lot_fits_declared_format',
   'lot_code_production_date',
   'lot_code_best_by_date',
@@ -187,7 +187,7 @@ export interface CheckOptions {
    */
   selfNames?: Array<string | null | undefined>;
   /**
-   * The queue item's supplier's DECLARED lot format (migration 0109), when it
+   * The queue item's supplier's DECLARED lot format (migration 0110), when it
    * has one. Powers the three lot-format checks. Omit (or pass a legacy / 'none'
    * format) to skip them: without a declaration there is nothing to check a lot
    * against, and a guessed format is exactly what AJ forbids.
@@ -1073,7 +1073,7 @@ function checkRecordProductionDates(
 }
 
 // ---------------------------------------------------------------------------
-// The supplier's declared lot format (migration 0109)
+// The supplier's declared lot format (migration 0110)
 // ---------------------------------------------------------------------------
 //
 // AJ §6: the lot code is a deterministic encoding of a date for some suppliers,

@@ -1,5 +1,5 @@
 /**
- * A supplier's lot format, DECLARED as data (migration 0109; AJ Conner,
+ * A supplier's lot format, DECLARED as data (migration 0110; AJ Conner,
  * Any-Field COA Retrieval §6, R2 / R3 / R8).
  *
  * Darigold's lot code is a deterministic encoding of the production date:

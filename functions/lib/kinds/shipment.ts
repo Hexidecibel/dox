@@ -119,7 +119,7 @@ export async function produceShipment(
   const { tenantId } = ctx;
   let bound = 0;
   let suggested = 0;
-  // Same rule as the order side: a declared lot format (0109) of the line's
+  // Same rule as the order side: a declared lot format (0110) of the line's
   // product's single supplier splits the WMS composite; otherwise unchanged.
   const shipmentScheme = orderSideSchemeResolver(db, tenantId);
   let unmatched = 0;

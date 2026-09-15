@@ -1,5 +1,5 @@
 /**
- * A declared lot format on the WRITE path (migration 0109).
+ * A declared lot format on the WRITE path (migration 0110).
  *
  *   - declarations are append-only versions; a bad one is refused; resolution is
  *     per tenant

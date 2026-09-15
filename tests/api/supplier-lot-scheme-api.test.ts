@@ -1,5 +1,5 @@
 /**
- * /api/suppliers/:id/lot-scheme (migration 0109): declare a lot format, audited,
+ * /api/suppliers/:id/lot-scheme (migration 0110): declare a lot format, audited,
  * validated, tenant-isolated, and previewed against the lots on file.
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';

@@ -43,7 +43,7 @@ export { normalizeLotNumber, normalizeSubLotCode, normalizeProductNameKey };
  *   - 'date_code' : the leading MMDDYY (6-digit) run, sublot forced '' (CMF
  *                   '061626WHO' -> '061626'); a key with no leading 6 digits is kept.
  *
- * Since 0109 a supplier may DECLARE its lot format instead (supplier_lot_schemes,
+ * Since 0110 a supplier may DECLARE its lot format instead (supplier_lot_schemes,
  * shared/lotScheme.ts); the enum values are expressed as equivalent specs so
  * there is one engine and their keys are byte-identical.
  */
@@ -110,7 +110,7 @@ export interface FindOrCreateLotOpts {
   source?: string | null;
   /**
    * The supplier's lot scheme: a legacy 0075 enum value, or the resolved scheme
-   * (`loadResolvedLotScheme`, 0109) which may be a DECLARED format. Decides how
+   * (`loadResolvedLotScheme`, 0110) which may be a DECLARED format. Decides how
    * the lot and sublot combine into the stored lot_key; a declared
    * production-role format also supplies a labelled fallback production date
    * (never over a stated one). Omitted/null → 'auto' (today's behavior).
@@ -149,7 +149,7 @@ export async function findOrCreateLot(
   // so the matcher anchor (product_code + lot_key) lines up with the WMS
   // combined lot. The supplier's scheme decides the combine: the legacy enum
   // keeps the historical concat ('date_code' strips to the bare MMDDYY), and a
-  // DECLARED format (0109) splits a composite by its declared widths — so
+  // DECLARED format (0110) splits a composite by its declared widths — so
   // '10426203-03' with no sublot field is lot 10426203, sublot 03 — and falls
   // back to the historical concat for a lot that does not fit.
   const resolvedScheme = toResolvedScheme(opts.lotScheme);
@@ -277,7 +277,7 @@ export type ProductionDateWrite = ProductionDateResolution & { documentId: strin
 const NO_SETS: { sets: string[]; binds: (string | null)[] } = { sets: [], binds: [] };
 
 /**
- * The production-date columns to set on an EXISTING lot (migrations 0106, 0109).
+ * The production-date columns to set on an EXISTING lot (migrations 0106, 0110).
  *
  *   - nothing stored yet            -> store the new value as given
  *   - same day already resolved     -> leave it (the first certificate stays
@@ -289,7 +289,7 @@ const NO_SETS: { sets: string[]; binds: (string | null)[] } = { sets: [], binds:
  * An unresolved new value never displaces a resolved one, but one that cannot
  * be the stored day (an ambiguous reading that excludes it) is a conflict too.
  *
- * A LOT-CODE DECODE ('lot_decode', 0109) is a fallback and a validator, never an
+ * A LOT-CODE DECODE ('lot_decode', 0110) is a fallback and a validator, never an
  * authority:
  *   - it never displaces anything a certificate stated; if it disagrees with a
  *     stated resolved day the row becomes 'conflict' with both in raw

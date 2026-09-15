@@ -29,7 +29,7 @@ import {
 } from './searchDates';
 
 /**
- * 'lot_decode' (migration 0109) is the one source that is NOT read off a page:
+ * 'lot_decode' (migration 0110) is the one source that is NOT read off a page:
  * the supplier's declared lot format decoded it. Never covering, never written
  * over a stated value — see productionDateFromLot in shared/lotScheme.ts.
  */

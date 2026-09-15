@@ -1,5 +1,5 @@
 /**
- * Review-time checks against a supplier's DECLARED lot format (migration 0109).
+ * Review-time checks against a supplier's DECLARED lot format (migration 0110).
  *
  * The decode is a validator, never an authority: a lot that does not fit is
  * flagged with the reason; a decoded date that disagrees with the stated one is
