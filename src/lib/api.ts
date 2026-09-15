@@ -1250,6 +1250,8 @@ export const api = {
       criticality?: SpecCriticality;
       notes?: string | null;
       tenant_id?: string;
+      /** Watch review-by (0107), YYYY-MM-DD. Supplier limits only. */
+      review_by?: string | null;
     }) =>
       fetchApi<{ specLimit: ApiSpecLimit }>('/spec-limits', {
         method: 'POST',
