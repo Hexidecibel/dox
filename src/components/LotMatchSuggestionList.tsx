@@ -19,6 +19,8 @@ export interface LotMatchSuggestionLike {
   document_title?: string | null;
   match_basis: string | null;
   match_confidence: number | null;
+  /** The matcher's words when the product bridge was unsure or unconfirmed (0113). */
+  match_note?: string | null;
 }
 
 /** Plain words for the engine's basis codes. */
@@ -81,7 +83,7 @@ export function LotMatchSuggestionList({
               variant={high ? 'filled' : 'outlined'}
               label={pct != null ? `Suggested ${pct}%` : 'Suggested'}
             />
-            <Tooltip title={`Why: ${matchBasisLabel(s.match_basis)}. Not linked until someone confirms it.`}>
+            <Tooltip title={`Why: ${matchBasisLabel(s.match_basis)}.${s.match_note ? ` ${s.match_note}` : ''} Not linked until someone confirms it.`}>
               <Typography
                 variant="body2"
                 component={onOpenDocument ? 'button' : 'span'}
@@ -102,6 +104,11 @@ export function LotMatchSuggestionList({
             <Typography variant="caption" color="text.secondary">
               {matchBasisLabel(s.match_basis)}
             </Typography>
+            {s.match_note && (
+              <Typography variant="caption" color="warning.main" sx={{ flexBasis: '100%' }} data-testid="lot-match-note">
+                {s.match_note}
+              </Typography>
+            )}
             {canResolve && (
               <Box sx={{ display: 'inline-flex', gap: 0.5, ml: 'auto' }}>
                 <Button

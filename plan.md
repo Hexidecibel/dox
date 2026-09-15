@@ -85,6 +85,15 @@ A product named by our SKU, supplier item, name, alias or pack resolves through 
 - `bin/seed-product-identifiers` (dry run default). Prod dry run 2026-09-15: Cush Co 3 new products + 19 identifiers; Q8 1 product + 3.
   310348 left out (pending AJ); 08012 = 0801 not asserted. **Waiting on:** 0107 on prod, then `--remote --apply`.
 
+#### Phase 3b — One store for product identity (retire `supplier_product_map`) — **DONE** (local, 2026-09-15; migration 0113, not deployed)
+User decision: merge the two stores. Lot matching, the review-time teach and Supplier › Product identifiers all read/write `product_identifiers`.
+- Migration 0113: copy map rows (confirmed `supplier_name`, `distributor_sku` as `our_sku`, `source='migrated_product_map'`, duplicates skipped, idempotent); rebuild `product_identifiers` for the widened source CHECK; `lot_match_suggestions.match_note`. The map table stays, unread, for one release.
+- `shared/supplierProductBridge.ts` resolver (item # / customer item # > name + pack > unique name; ambiguous = no product + reason; unconfirmed labelled). `judgeBridgedPair`: a confirmed printed-number resolution to a different product records no suggestion; everything else stays a suggestion with a note.
+- Approve `product_maps` → `teachSupplierProduct` (audited, re-matches the record). `GET/PUT /api/product-map` removed; `GET /api/suppliers/:id/product-identifiers` + the Product page endpoints (one API, two views). Supplier tab renamed "Product identifiers".
+- Prod dry run: 3 map rows → 1 supplier_name inserted (HALF AND HALF → H&H 5 GL DISP), 2 skipped as seeded duplicates; our_sku 30417 and 0708 inserted.
+- **Waiting on:** 0107 + seed on prod (the resolver's CMF item numbers come from the seed), then 0113 surgically (it rebuilds `product_identifiers`, `bin/migrate-prod-one`); a human decision whether CMF's "5 Gallon Bag" Half-and-Half is our 0708 "H&H 5 GL DISP" (bag is not dispenser in the vocabulary, so those certificates now suggest at lot_only with a reason); optional `rematch-lots` run after deploy (adds/raises suggestions and notes, never deletes old ones).
+- **Follow-up (next release):** migration dropping `supplier_product_map` once prod shows every row accounted for.
+
 #### Phase 4 — Declared per-supplier lot scheme — **DONE** (local, 2026-09-15; not deployed)
 Each supplier's lot format is declared data (migration 0110, append-only `supplier_lot_schemes`), used to validate lots in review, split composites, and supply a labelled `lot_decode` production date only where none is stated — never covering, never over a stated date.
 - `shared/lotScheme.ts` (validator + decoder + legacy-enum parity); lots rebuilt for `'lot_decode'` + `production_date_scheme_id`.

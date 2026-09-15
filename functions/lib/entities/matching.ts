@@ -40,9 +40,15 @@ import type { ProductionDateResolution } from '../../../shared/lotProductionDate
 import {
   findOrCreateLot,
   normalizeLotNumber,
-  normalizeProductNameKey,
   type LotSchemeInput,
 } from './lots';
+import { loadProductCatalog } from '../product-identifiers';
+import type { PreparedCatalog } from '../../../shared/productIdentity';
+import {
+  bridgeEvidenceFromMetadata,
+  resolveSupplierProduct,
+  type BridgeResolution,
+} from '../../../shared/supplierProductBridge';
 
 // Confidence thresholds. "Strong" requires the product OR the distributor code
 // to agree (basis includes product or code). "Weak" is lot_only.
@@ -53,6 +59,10 @@ export const CONFIDENCE_LOT_PRODUCT = 0.85;
 // names — and thus product_ids — diverge.
 export const CONFIDENCE_LOT_CODE = 0.9;
 export const CONFIDENCE_LOT_ONLY = 0.5;
+// Product agreement that exists ONLY because an unconfirmed product identifier
+// bridged the two sides. Still a suggestion, ranked below anything a person has
+// stood behind, and its note says which identifier to confirm.
+export const CONFIDENCE_LOT_PRODUCT_UNCONFIRMED = 0.7;
 
 export type MatchBasis =
   | 'lot+product+supplier'
@@ -188,9 +198,12 @@ async function recordSuggestion(
     lotId: string | null;
     confidence: number;
     basis: MatchBasis;
+    /** The product bridge's words (ambiguity, unconfirmed identifier), or null. */
+    note?: string | null;
   }
 ): Promise<void> {
   const { tenantId, orderItemId, documentId, lotId, confidence, basis } = args;
+  const note = args.note ?? null;
   const linked = await db
     .prepare('SELECT coa_document_id FROM order_items WHERE id = ?')
     .bind(orderItemId)
@@ -200,50 +213,150 @@ async function recordSuggestion(
   await db
     .prepare(
       `INSERT INTO lot_match_suggestions
-         (id, tenant_id, order_item_id, document_id, lot_id, match_confidence, match_basis, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+         (id, tenant_id, order_item_id, document_id, lot_id, match_confidence, match_basis, match_note, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
        ON CONFLICT(order_item_id, document_id) DO UPDATE SET
          match_confidence = excluded.match_confidence,
          match_basis = excluded.match_basis,
+         match_note = excluded.match_note,
          lot_id = COALESCE(lot_match_suggestions.lot_id, excluded.lot_id)
        WHERE lot_match_suggestions.status = 'pending'
          AND (lot_match_suggestions.match_confidence IS NULL
-              OR lot_match_suggestions.match_confidence < excluded.match_confidence)`
+              OR lot_match_suggestions.match_confidence < excluded.match_confidence
+              OR (lot_match_suggestions.match_confidence = excluded.match_confidence
+                  AND lot_match_suggestions.match_basis = excluded.match_basis))`
     )
-    .bind(generateId(), tenantId, orderItemId, documentId, lotId, confidence, basis)
+    .bind(generateId(), tenantId, orderItemId, documentId, lotId, confidence, basis, note)
     .run();
 }
 
-interface ProductMapRow {
-  order_product_id: string;
-  distributor_sku: string | null;
+/**
+ * The COA side of the product bridge (migration 0113 retired
+ * `supplier_product_map`): which of OUR products this certificate is, read from
+ * the product identifier graph by `resolveSupplierProduct`
+ * (shared/supplierProductBridge.ts) — supplier item / customer item number
+ * first, then supplier name + pack, then a supplier name that names exactly one
+ * product. Evidence is the document's own metadata; `productName` (a split
+ * record's own name) outranks the metadata name, `fallbackProductName` (the
+ * linked product's name) is used only when the metadata has none.
+ */
+async function resolveCoaProduct(
+  db: D1Database,
+  tenantId: string,
+  catalog: PreparedCatalog | null,
+  args: {
+    documentId: string;
+    supplierId: string | null;
+    productName: string | null | undefined;
+    fallbackProductName?: string | null;
+  }
+): Promise<BridgeResolution> {
+  if (!catalog) return resolveSupplierProduct(null, bridgeEvidenceFromMetadata({}, { supplierId: null }));
+  const doc = await db
+    .prepare(
+      `SELECT supplier_id, primary_metadata,
+              CASE WHEN json_valid(extended_metadata) THEN json_remove(extended_metadata, '$.tables') END AS extended_lite
+         FROM documents WHERE id = ? AND tenant_id = ?`
+    )
+    .bind(args.documentId, tenantId)
+    .first<{ supplier_id: string | null; primary_metadata: string | null; extended_lite: string | null }>();
+  const metadata = { ...parseJsonObject(doc?.extended_lite), ...parseJsonObject(doc?.primary_metadata) };
+  const metadataName = typeof metadata.product_name === 'string' && metadata.product_name.trim() ? metadata.product_name : null;
+  return resolveSupplierProduct(
+    catalog,
+    bridgeEvidenceFromMetadata(metadata, {
+      supplierId: args.supplierId ?? doc?.supplier_id ?? null,
+      productName: args.productName || metadataName || args.fallbackProductName || null,
+    })
+  );
+}
+
+function parseJsonObject(raw: string | null | undefined): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+const ROUTE_WORDS: Record<NonNullable<BridgeResolution['route']>, string> = {
+  supplier_item: "the supplier's item number",
+  customer_item: 'the customer item number',
+  name_pack: "the supplier's product name and pack",
+  name: "the supplier's product name",
+};
+
+export interface BridgedPairJudgement {
+  /**
+   * True when OUR CONFIRMED identifier graph names the certificate, by a
+   * printed NUMBER, as a different product from the order line's (and neither
+   * the certificate's own product nor a product code agrees with the line): no
+   * suggestion is recorded. Never true on a name, a pack, or anything
+   * unconfirmed — those stay suggestions and say what they saw.
+   */
+  skip: boolean;
+  classification: MatchClassification;
+  note: string | null;
 }
 
 /**
- * Look up the teachable COA-product → order-product bridge
- * (`supplier_product_map`, migration 0075) for a COA product NAME. Keyed on
- * the normalized product-name key (durable across re-extraction), scoped to
- * (tenant, supplier). Returns null when supplier/name is unknown or no row
- * exists — callers then behave exactly as before the map existed.
+ * Classify one (certificate, order line) pair with the product bridge applied.
+ * Pure. With an empty bridge resolution (`product_id` and `note` null) this is
+ * exactly `classifyMatch` on the certificate's own product.
  */
-async function lookupProductMap(
-  db: D1Database,
-  tenantId: string,
-  supplierId: string | null,
-  coaProductName: string | null | undefined
-): Promise<ProductMapRow | null> {
-  if (!supplierId) return null;
-  const nameKey = normalizeProductNameKey(coaProductName);
-  if (!nameKey) return null;
-  const row = await db
-    .prepare(
-      `SELECT order_product_id, distributor_sku
-         FROM supplier_product_map
-        WHERE tenant_id = ? AND supplier_id = ? AND coa_product_name_key = ?`
-    )
-    .bind(tenantId, supplierId, nameKey)
-    .first<ProductMapRow>();
-  return row ?? null;
+export function judgeBridgedPair(args: {
+  bridge: BridgeResolution;
+  coaProductId: string | null;
+  orderProductId: string | null;
+  coaSupplierId: string | null;
+  titleProductCode: string | null;
+  orderProductCode: string | null;
+}): BridgedPairJudgement {
+  const { bridge, coaProductId, orderProductId, coaSupplierId, titleProductCode, orderProductCode } = args;
+  const bridgedCode =
+    bridge.our_skus.find((sku) => codesAgree(sku, orderProductCode)) ?? bridge.our_skus[0] ?? null;
+  const coaProductCode = titleProductCode ?? bridgedCode;
+  const classification = classifyMatch({
+    coaProductId: bridge.product_id ?? coaProductId,
+    orderProductId,
+    coaSupplierId,
+    orderSupplierId: null, // order side rarely knows the supplier
+    coaProductCode,
+    orderProductCode,
+  });
+
+  const bridgedElsewhere =
+    !!bridge.product_id && !!orderProductId && bridge.product_id !== orderProductId;
+  if (
+    bridgedElsewhere &&
+    bridge.confirmed &&
+    (bridge.route === 'supplier_item' || bridge.route === 'customer_item') &&
+    coaProductId !== orderProductId &&
+    !codesAgree(coaProductCode, orderProductCode)
+  ) {
+    return { skip: true, classification, note: null };
+  }
+
+  let cls = classification;
+  const notes: string[] = [];
+  if (bridgedElsewhere) {
+    notes.push(
+      `This certificate reads as ${bridge.product_label} by ${ROUTE_WORDS[bridge.route!]}, not this line's product.`
+    );
+  }
+  if (
+    bridge.product_id &&
+    !bridge.confirmed &&
+    bridge.product_id === orderProductId &&
+    coaProductId !== orderProductId &&
+    cls.confidence > CONFIDENCE_LOT_PRODUCT_UNCONFIRMED
+  ) {
+    cls = { ...cls, confidence: CONFIDENCE_LOT_PRODUCT_UNCONFIRMED, strong: false };
+  }
+  if (bridge.note) notes.push(bridge.note);
+  return { skip: false, classification: cls, note: notes.length ? notes.join(' ') : null };
 }
 
 interface OrderItemCandidate {
@@ -273,11 +386,13 @@ export async function linkCoaToOrders(
     productId: string | null;
     supplierId: string | null;
     /**
-     * The COA's product name (for the supplier_product_map bridge, 0075). When
-     * a map row exists for (tenant, supplier, normalized name), the mapped
-     * order_product_id / distributor_sku are substituted into classifyMatch so
-     * a name-divergent supplier (e.g. Country Morning) is suggested at
-     * lot+product confidence instead of lot_only. Omitted/unmapped → identical to pre-0075 behavior.
+     * The COA's product name, for the product bridge (shared/supplierProductBridge.ts,
+     * over product_identifiers). When the certificate's item number, customer
+     * item number, or supplier name (+ pack) resolves to one of our products,
+     * that product is substituted into classifyMatch, so a name-divergent
+     * supplier (e.g. Country Morning) is suggested at lot+product confidence
+     * instead of lot_only. No identifiers for the tenant: identical to
+     * classifying on the COA's own product.
      */
     coaProductName?: string | null;
   }
@@ -301,13 +416,14 @@ export async function linkCoaToOrders(
     .first<{ title: string | null }>();
   const titleProductCode = parseDistributorCode(doc?.title);
 
-  // supplier_product_map bridge (0075): if a reviewer has taught the COA-side
-  // product name → an order-side product (and optionally a distributor SKU),
-  // substitute the mapped ids into classifyMatch. No map row → null → behavior
-  // identical to pre-0075.
-  const mapped = await lookupProductMap(db, tenantId, coaSupplierId, coaProductName);
-  const effectiveProductId = mapped?.order_product_id ?? productId;
-  const coaProductCode = titleProductCode ?? mapped?.distributor_sku ?? null;
+  // Product bridge over product_identifiers (0107/0113): which of our products
+  // this certificate is, if its own evidence says so unambiguously.
+  const catalog = await loadProductCatalog(db, tenantId);
+  const bridge = await resolveCoaProduct(db, tenantId, catalog, {
+    documentId,
+    supplierId: coaSupplierId,
+    productName: coaProductName,
+  });
 
   // Candidate order_items in this tenant: either already lot-resolved to the
   // same key, or carrying a raw lot_number we still need to normalize.
@@ -329,22 +445,24 @@ export async function linkCoaToOrders(
       if (normalizeLotNumber(oi.lot_number) !== lotKey) continue;
     }
 
-    const cls = classifyMatch({
-      coaProductId: effectiveProductId,
+    const judged = judgeBridgedPair({
+      bridge,
+      coaProductId: productId,
       orderProductId: oi.product_id,
       coaSupplierId,
-      orderSupplierId: null, // order side rarely knows the supplier
-      coaProductCode,
+      titleProductCode,
       orderProductCode: oi.product_code,
     });
+    if (judged.skip) continue;
 
     await recordSuggestion(db, {
       tenantId,
       orderItemId: oi.id,
       documentId,
       lotId,
-      confidence: cls.confidence,
-      basis: cls.basis,
+      confidence: judged.classification.confidence,
+      basis: judged.classification.basis,
+      note: judged.note,
     });
   }
 }
@@ -450,7 +568,7 @@ export async function attachLotToCoaDocument(
      * date. Omitted/null → 'auto' (today's behavior).
      */
     lotScheme?: LotSchemeInput;
-    /** COA product name → supplier_product_map bridge (0075). */
+    /** COA product name, for the product bridge over product_identifiers. */
     coaProductName?: string | null;
   }
 ): Promise<string | null> {
@@ -538,12 +656,13 @@ export async function linkOrderToCoas(
 
   // COA documents whose linked lot shares the same key in this tenant. Join
   // documents to read each candidate's title (carries the distributor code).
-  // Pull the COA candidate's product NAME (for the supplier_product_map bridge)
-  // via document_products → products. A doc may carry several product links;
-  // MIN keeps the result deterministic. Null when the doc has no product link.
+  // Pull the COA candidate's product NAME (the product bridge's fallback when
+  // the document's metadata names none) via document_products → products. A
+  // doc may carry several product links; MIN keeps the result deterministic.
   const rows = await db
     .prepare(
-      `SELECT dl.document_id, l.id AS lot_id, l.product_id, l.supplier_id, d.title,
+      `SELECT dl.document_id, l.id AS lot_id, l.product_id,
+              COALESCE(l.supplier_id, d.supplier_id) AS supplier_id, d.title,
               (SELECT MIN(p.name)
                  FROM document_products dp
                  JOIN products p ON p.id = dp.product_id
@@ -556,24 +675,25 @@ export async function linkOrderToCoas(
     .bind(tenantId, lotKey)
     .all<CoaCandidate>();
 
+  const catalog = (rows.results ?? []).length > 0 ? await loadProductCatalog(db, tenantId) : null;
   for (const coa of rows.results ?? []) {
-    // supplier_product_map bridge (0075): substitute the mapped order-side
-    // product id / SKU for this COA candidate before classifying. No row →
-    // null → behavior identical to pre-0075.
-    const mapped = await lookupProductMap(
-      db,
-      tenantId,
-      coa.supplier_id,
-      coa.coa_product_name
-    );
-    const cls = classifyMatch({
-      coaProductId: mapped?.order_product_id ?? coa.product_id,
+    // Product bridge over product_identifiers for this certificate: its own
+    // metadata name first, the linked product's name when metadata has none.
+    const bridge = await resolveCoaProduct(db, tenantId, catalog, {
+      documentId: coa.document_id,
+      supplierId: coa.supplier_id,
+      productName: null,
+      fallbackProductName: coa.coa_product_name,
+    });
+    const judged = judgeBridgedPair({
+      bridge,
+      coaProductId: coa.product_id,
       orderProductId: productId,
       coaSupplierId: coa.supplier_id,
-      orderSupplierId: null,
-      coaProductCode: parseDistributorCode(coa.title) ?? mapped?.distributor_sku ?? null,
+      titleProductCode: parseDistributorCode(coa.title),
       orderProductCode,
     });
+    if (judged.skip) continue;
 
     await recordSuggestion(db, {
       tenantId,
@@ -581,8 +701,9 @@ export async function linkOrderToCoas(
       documentId: coa.document_id,
       // Prefer the order's own lot row for the FK; both resolve to the same key.
       lotId,
-      confidence: cls.confidence,
-      basis: cls.basis,
+      confidence: judged.classification.confidence,
+      basis: judged.classification.basis,
+      note: judged.note,
     });
   }
 }

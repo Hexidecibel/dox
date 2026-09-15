@@ -53,7 +53,7 @@ import { EmptyState } from '../../components/EmptyState';
 import { helpContent } from '../../lib/helpContent';
 import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
 import LotSchemeSelect from '../../components/LotSchemeSelect';
-import SupplierProductMapPanel from '../../components/SupplierProductMapPanel';
+import SupplierProductIdentifiersPanel from '../../components/SupplierProductIdentifiersPanel';
 import SupplierLotFormatPanel from '../../components/SupplierLotFormatPanel';
 import SupplierRequirementGaps from '../../components/SupplierRequirementGaps';
 import SupplierRequirementsEditor from '../../components/SupplierRequirementsEditor';
@@ -801,7 +801,7 @@ export function SupplierDetail() {
           <Tab label="Requirements" />
           <Tab label="Extraction Instructions" />
           <Tab label="Document Types" />
-          <Tab label="Product Mapping" />
+          <Tab label="Product identifiers" />
           <Tab label="Notes" />
           <Tab label="Lot format" />
           {/* Last, so hiding it for a tenant without Compliance shifts no index. */}
@@ -1526,14 +1526,14 @@ export function SupplierDetail() {
         </Dialog>
       </TabPanel>
 
-      {/* Product Mapping Tab — standalone editor for the COA-product ->        */}
-      {/* distributor-SKU bridge (supplier_product_map). Needed because the     */}
-      {/* teach-at-review picker only appears for multi-record COAs; this lets  */}
-      {/* an admin author maps for single-product suppliers too. Self-loads the */}
-      {/* supplier's COA products and persists each pick via PUT /product-map.  */}
+      {/* Product identifiers Tab — the supplier-side view of the product      */}
+      {/* identifier graph (0107; supplier_product_map retired by 0113): this   */}
+      {/* supplier's item numbers and product names -> our products, plus the   */}
+      {/* certificate products not yet identified, mapped in one click. Writes  */}
+      {/* go through the Product page's identifier endpoints (one API).         */}
       <TabPanel value={tab} index={6}>
         {tab === 6 && (
-          <SupplierProductMapPanel
+          <SupplierProductIdentifiersPanel
             tenantId={supplier.tenant_id}
             supplierId={supplier.id}
             supplierName={supplier.name}

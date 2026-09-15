@@ -11,7 +11,7 @@
 import type { ProductIdentifier, ProductIdentifierKind, ProductIdentifierSource } from '../../shared/types';
 import { prepareCatalog, type CatalogProduct, type PreparedCatalog } from '../../shared/productIdentity';
 import { normalizeCode, normalizeName } from '../../shared/productVocabulary';
-import { generateId } from './db';
+import { generateId, logAudit } from './db';
 
 export const IDENTIFIER_KINDS: readonly ProductIdentifierKind[] = ['our_sku', 'supplier_item', 'supplier_name', 'alias', 'gtin', 'pack'];
 export const SUPPLIER_KINDS: ReadonlySet<ProductIdentifierKind> = new Set(['supplier_item', 'supplier_name']);
@@ -143,4 +143,140 @@ export async function insertProductIdentifier(
     .run();
   const row = await db.prepare('SELECT * FROM product_identifiers WHERE id = ?').bind(id).first<ProductIdentifier>();
   return { row: row!, created: true };
+}
+
+// ---------------------------------------------------------------------------
+// Review-time teach (replaces the supplier_product_map write, migration 0113)
+// ---------------------------------------------------------------------------
+
+export interface TeachSupplierProductInput {
+  tenantId: string;
+  supplierId: string;
+  /** OUR product the reviewer picked. */
+  productId: string;
+  /** The certificate's product name, as printed. */
+  coaProductName: string;
+  /** The supplier's item number printed on the record, when there is one. */
+  supplierItem?: string | null;
+  /** The order-line product code shown with the picked product (our SKU), when there is one. */
+  ourSku?: string | null;
+  actorId: string | null;
+  /** Where the teach happened, for the evidence note and the audit row. */
+  queueItemId: string;
+  clientIp: string | null;
+}
+
+export interface TeachSupplierProductResult {
+  identifiers: ProductIdentifier[];
+  created: number;
+  confirmed: number;
+  skipped: Array<{ kind: ProductIdentifierKind; value: string; reason: string }>;
+}
+
+/**
+ * A reviewer mapping a certificate's product to one of ours at approval. Writes
+ * a CONFIRMED `supplier_name` identifier, plus a `supplier_item` when the record
+ * prints an item number and an `our_sku` when the picked product carries an
+ * order-line code — the same UX the old supplier_product_map write had, into the
+ * one store search and matching both read.
+ *
+ * A person stands behind this, so an existing UNCONFIRMED identifier with the
+ * same identity is confirmed (audited), never duplicated. An item number that
+ * is already a CONFIRMED identifier of a DIFFERENT product for this supplier is
+ * not written onto a second product: that would turn a certain number into an
+ * ambiguous one behind the reviewer's back. It is reported in `skipped` and in
+ * a `product_identifier.teach_skipped` audit row instead. Every row written is
+ * audited `product_identifier.added`.
+ */
+export async function teachSupplierProduct(
+  db: D1Database,
+  input: TeachSupplierProductInput,
+): Promise<TeachSupplierProductResult> {
+  const product = await db
+    .prepare('SELECT id, name FROM products WHERE id = ? AND tenant_id = ?')
+    .bind(input.productId, input.tenantId)
+    .first<{ id: string; name: string }>();
+  const supplier = await db
+    .prepare('SELECT id FROM suppliers WHERE id = ? AND tenant_id = ?')
+    .bind(input.supplierId, input.tenantId)
+    .first<{ id: string }>();
+  const result: TeachSupplierProductResult = { identifiers: [], created: 0, confirmed: 0, skipped: [] };
+  if (!product || !supplier) {
+    result.skipped.push({ kind: 'supplier_name', value: input.coaProductName, reason: 'product or supplier is not in this workspace' });
+    return result;
+  }
+
+  const note = `Taught at review (queue item ${input.queueItemId}): the reviewer mapped this certificate product to ${product.name}.`;
+  const wanted: Array<{ kind: ProductIdentifierKind; value: string | null | undefined; supplier: boolean }> = [
+    { kind: 'supplier_name', value: input.coaProductName, supplier: true },
+    { kind: 'supplier_item', value: input.supplierItem, supplier: true },
+    { kind: 'our_sku', value: input.ourSku, supplier: false },
+  ];
+
+  for (const w of wanted) {
+    const raw = (w.value ?? '').trim();
+    if (!raw) continue;
+    let valid: IdentifierInput;
+    try {
+      valid = validateIdentifierInput({
+        kind: w.kind, value: raw, supplier_id: w.supplier ? input.supplierId : null, confirmed: true, source: 'reviewer', note,
+      });
+    } catch (e) {
+      result.skipped.push({ kind: w.kind, value: raw, reason: e instanceof Error ? e.message : 'invalid' });
+      continue;
+    }
+
+    if (w.kind === 'supplier_item') {
+      const elsewhere = await db
+        .prepare(
+          `SELECT p.name FROM product_identifiers pi JOIN products p ON p.id = pi.product_id
+            WHERE pi.tenant_id = ? AND pi.kind = 'supplier_item' AND pi.supplier_id = ? AND pi.value_norm = ?
+              AND pi.confirmed = 1 AND pi.product_id <> ?
+            LIMIT 1`,
+        )
+        .bind(input.tenantId, input.supplierId, normalizeIdentifierValue('supplier_item', raw), input.productId)
+        .first<{ name: string }>();
+      if (elsewhere) {
+        result.skipped.push({ kind: w.kind, value: raw, reason: `already the confirmed item number of ${elsewhere.name}` });
+        continue;
+      }
+    }
+
+    const { row, created } = await insertProductIdentifier(db, input.tenantId, input.productId, valid, input.actorId);
+    if (created) {
+      result.created++;
+      result.identifiers.push(row);
+      await logAudit(
+        db, input.actorId, input.tenantId, 'product_identifier.added', 'product', input.productId,
+        JSON.stringify({ identifier: row, product_name: product.name, via: 'review_teach', queue_item_id: input.queueItemId }),
+        input.clientIp,
+      );
+    } else if (row.confirmed !== 1) {
+      await db
+        .prepare(
+          `UPDATE product_identifiers SET confirmed = 1, confirmed_by = ?, confirmed_at = datetime('now'), updated_at = datetime('now')
+            WHERE id = ?`,
+        )
+        .bind(input.actorId, row.id)
+        .run();
+      result.confirmed++;
+      result.identifiers.push({ ...row, confirmed: 1 });
+      await logAudit(
+        db, input.actorId, input.tenantId, 'product_identifier.confirmed', 'product', input.productId,
+        JSON.stringify({ identifier_id: row.id, kind: row.kind, value: row.value, via: 'review_teach', queue_item_id: input.queueItemId }),
+        input.clientIp,
+      );
+    } else {
+      result.identifiers.push(row);
+    }
+  }
+
+  if (result.skipped.length > 0) {
+    await logAudit(
+      db, input.actorId, input.tenantId, 'product_identifier.teach_skipped', 'product', input.productId,
+      JSON.stringify({ skipped: result.skipped, supplier_id: input.supplierId, queue_item_id: input.queueItemId }),
+      input.clientIp,
+    );
+  }
+  return result;
 }

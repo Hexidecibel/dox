@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Headless end-to-end verifier for the CMF lot_scheme + product-map bridge.
+# Headless end-to-end verifier for the CMF lot_scheme + product identifier bridge.
 #
 # Drives the REAL feature code over HTTP against the local dev server
 # (wrangler pages dev on :8788, local D1 + R2). Re-runnable and idempotent: it
@@ -8,8 +8,8 @@
 # Flow (mirrors the human review workflow):
 #   1. Reset + reseed the fixture (bin/seed-cmf-bridge).
 #   2. Wait for the dev server, log in as a@a.a/a, capture the JWT.
-#   3. For each CMF COA (C1-C3) approve it WITH the taught product_map, so a
-#      supplier_product_map row is written server-side. Approve C4 (no order
+#   3. For each CMF COA (C1-C3) approve it WITH the taught product_maps body, so
+#      confirmed product identifiers (0113) are written server-side. Approve C4 (no order
 #      line), C5 (non-date lot), C6 (Willamette, no map). This exercises the
 #      real produceCoaRecords + lot_scheme stripping + map-write path.
 #   4. POST /api/admin/rematch-lots for the tenant (applies the bridge to the
@@ -236,9 +236,9 @@ assert_eq "C4 COA NOT linked to any order (no false positive)" "0" "$C4_FALSEPOS
 C5_LOTKEY=$(d1_scalar "SELECT l.lot_key FROM lots l JOIN document_lots dl ON dl.lot_id=l.id JOIN documents d ON d.id=dl.document_id WHERE d.tenant_id='${TENANT_ID}' AND d.external_ref='queue-${Q_LIGHT}-LC32026'")
 assert_eq "C5 non-date lot NOT stripped (date_code fall-through)" "LC32026" "$C5_LOTKEY"
 
-# --- The map write itself happened (3 rows for CMF supplier) ---
-MAP_ROWS=$(d1_scalar "SELECT COUNT(*) FROM supplier_product_map WHERE tenant_id='${TENANT_ID}'")
-assert_eq "3 supplier_product_map rows written (the teach actions)" "3" "$MAP_ROWS"
+# --- The teach itself happened (3 confirmed CMF supplier_name identifiers) ---
+MAP_ROWS=$(d1_scalar "SELECT COUNT(*) FROM product_identifiers WHERE tenant_id='${TENANT_ID}' AND kind='supplier_name' AND source='reviewer' AND confirmed=1")
+assert_eq "3 supplier_name identifiers written (the teach actions)" "3" "$MAP_ROWS"
 
 # ===========================================================================
 # Results table

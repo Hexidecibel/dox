@@ -149,7 +149,7 @@ describe('POST /api/admin/rematch-lots', () => {
     expect(sugg).toEqual({ document_id: docId, match_basis: 'lot+code', status: 'pending' });
   });
 
-  it('surfaces a date_code + product-map CMF pair as a lot+product suggestion (0075)', async () => {
+  it('surfaces a date_code + product-identifier CMF pair as a lot+product suggestion (0075 lot scheme, 0113 bridge)', async () => {
     const supplierId = generateTestId();
     await db
       .prepare(
@@ -161,14 +161,15 @@ describe('POST /api/admin/rematch-lots', () => {
     const coaProductId = await makeProduct(seed.tenantId, 'Milk - Whole');
     const orderProductId = await makeProduct(seed.tenantId, '0417 MS WHOLE 5 GL BAG');
 
-    // Teach the bridge: COA name → order product.
+    // Teach the bridge: CMF calls the order product "Milk - Whole" (a confirmed
+    // supplier_name identifier; supplier_product_map is retired by 0113).
     await db
       .prepare(
-        `INSERT INTO supplier_product_map
-           (id, tenant_id, supplier_id, coa_product_name_key, order_product_id)
-         VALUES (?, ?, ?, 'MILK WHOLE', ?)`
+        `INSERT INTO product_identifiers
+           (id, tenant_id, product_id, kind, value, value_norm, supplier_id, confirmed, source)
+         VALUES (?, ?, ?, 'supplier_name', 'Milk - Whole', 'milk whole', ?, 1, 'reviewer')`
       )
-      .bind(generateTestId(), seed.tenantId, supplierId, orderProductId)
+      .bind(generateTestId(), seed.tenantId, orderProductId, supplierId)
       .run();
 
     // COA already in the graph: bare-date lot (stripped), doc + product link.
@@ -201,7 +202,7 @@ describe('POST /api/admin/rematch-lots', () => {
 
     // Both lots share the bare-date lot_key "061626" (the date_code scheme
     // stripped the COA suffix); they are distinct rows only because the COA and
-    // order products differ — the map bridges them at classify time. The
+    // order products differ — the identifier bridges them at classify time. The
     // matcher keys on lot_key, so the candidate join still finds the COA.
     expect((await getOrderItem(orderItemId))!.coa_document_id).toBeNull();
 
