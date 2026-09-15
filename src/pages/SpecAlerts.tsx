@@ -67,8 +67,11 @@ import type { SpecCriticality } from '../../shared/specCriticality';
 import type { ApiSpecCheck } from '../lib/types';
 import { EmptyState } from '../components/EmptyState';
 import { ConversionChip, conversionFromSnapshot } from '../components/SpecWarnings';
+import { ResultStateChip } from '../components/DocumentSpecResults';
+import { NO_LIMIT_CONFIGURED_LABEL } from '../../shared/specCheck';
+import type { ApiSpecGap } from '../lib/types';
 
-type TabKey = 'open' | 'acknowledged' | 'not_checked';
+type TabKey = 'open' | 'acknowledged' | 'not_checked' | 'incomplete' | 'no_limit';
 
 const TABS: Array<{ key: TabKey; label: string; hint: string }> = [
   { key: 'open', label: 'Open', hint: 'Out of spec, nobody has signed off yet' },
@@ -76,9 +79,25 @@ const TABS: Array<{ key: TabKey; label: string; hint: string }> = [
   {
     key: 'not_checked',
     label: 'Could not check',
-    hint: 'We held a limit and could not honestly apply it — NOT a pass',
+    hint: 'We held a limit and could not honestly apply it — verify by hand. NOT a pass, NOT a failure',
+  },
+  {
+    key: 'incomplete',
+    label: 'Incomplete',
+    hint: 'A required analyte for the supplier was not reported on the certificate',
+  },
+  {
+    key: 'no_limit',
+    label: NO_LIMIT_CONFIGURED_LABEL,
+    hint: 'Printed results nothing judged: no limit on file and no printed specification',
   },
 ];
+
+/** The two tabs that read `document_spec_gaps` (0107) rather than the register. */
+const GAP_TABS: Partial<Record<TabKey, 'missing_required' | 'unjudged'>> = {
+  incomplete: 'missing_required',
+  no_limit: 'unjudged',
+};
 
 type OriginKey = 'all' | 'approval' | 'bulk_recheck';
 
@@ -135,6 +154,7 @@ export function SpecAlerts() {
   const [tab, setTab] = useState<TabKey>('open');
   const [origin, setOrigin] = useState<OriginKey>('all');
   const [checks, setChecks] = useState<ApiSpecCheck[]>([]);
+  const [gaps, setGaps] = useState<ApiSpecGap[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -148,6 +168,15 @@ export function SpecAlerts() {
     setLoading(true);
     setError('');
     try {
+      const gapKind = GAP_TABS[tab];
+      if (gapKind) {
+        const res = await api.specGaps.list({ kind: gapKind, limit: 200 });
+        setGaps(res.specGaps);
+        setChecks([]);
+        setTotal(res.total);
+        setSelected(new Set());
+        return;
+      }
       const params =
         tab === 'not_checked'
           ? ({ verdict: 'not_checked' } as const)
@@ -235,7 +264,7 @@ export function SpecAlerts() {
           mb: 2,
         }}
       >
-        <Tabs value={tab} onChange={(_, v) => setTab(v)}>
+        <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" allowScrollButtonsMobile>
           {TABS.map((t) => (
             <Tab
               key={t.key}
@@ -244,6 +273,8 @@ export function SpecAlerts() {
             />
           ))}
         </Tabs>
+        {/* Gaps are only written at approval, so "who judged it" has one answer there. */}
+        {!GAP_TABS[tab] && (
         <ToggleButtonGroup
           size="small"
           exclusive
@@ -257,12 +288,84 @@ export function SpecAlerts() {
             </ToggleButton>
           ))}
         </ToggleButtonGroup>
+        )}
       </Box>
 
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
           <CircularProgress />
         </Box>
+      ) : GAP_TABS[tab] ? (
+        gaps.length === 0 ? (
+          <EmptyState
+            title="Nothing here"
+            description={
+              tab === 'incomplete'
+                ? 'No approved certificate is missing an analyte you require from its supplier. Required analytes are configured per supplier in Settings › Spec Limits.'
+                : 'Every printed result on an approved certificate had a limit or a printed specification to judge it against.'
+            }
+          />
+        ) : (
+          <Paper variant="outlined">
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ fontWeight: 600 }}>Test</TableCell>
+                    {tab === 'no_limit' && <TableCell sx={{ fontWeight: 600 }}>Result</TableCell>}
+                    <TableCell sx={{ fontWeight: 600 }}>State</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Document</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Supplier</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>When</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Why</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {gaps.map((g) => (
+                    <TableRow key={g.id} hover>
+                      <TableCell>{g.spec_test_name || g.test_name_raw}</TableCell>
+                      {tab === 'no_limit' && (
+                        <TableCell>
+                          {g.value_raw || '—'}
+                          {g.unit_raw ? ` ${g.unit_raw}` : ''}
+                        </TableCell>
+                      )}
+                      <TableCell>
+                        <ResultStateChip state={g.kind} />
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          size="small"
+                          sx={{ textTransform: 'none', p: 0, minWidth: 0 }}
+                          onClick={() => navigate(`/documents/${g.document_id}`)}
+                        >
+                          {g.document_title || g.document_id}
+                        </Button>
+                        {g.result_location && (
+                          <Typography variant="caption" color="text.secondary" display="block">
+                            {g.result_location}
+                          </Typography>
+                        )}
+                      </TableCell>
+                      <TableCell>{g.supplier_name || '—'}</TableCell>
+                      <TableCell>{fmtDate(g.created_at)}</TableCell>
+                      <TableCell>
+                        <Typography variant="caption" color="text.secondary">
+                          {g.reason}
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+            {total > gaps.length && (
+              <Typography variant="caption" color="text.secondary" sx={{ p: 1.5, display: 'block' }}>
+                Showing {gaps.length} of {total}.
+              </Typography>
+            )}
+          </Paper>
+        )
       ) : checks.length === 0 ? (
         <EmptyState
           title={tab === 'open' ? 'Nothing out of spec' : 'Nothing here'}

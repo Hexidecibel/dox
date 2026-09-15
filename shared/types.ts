@@ -14,7 +14,65 @@ export type {
   SpecOperator,
   UnitConversion,
   UnitConversionRule,
+  UnjudgedResult,
+  MissingRequiredAnalyte,
+  WatchStatus,
 } from './specCheck';
+import type { UnjudgedResult, MissingRequiredAnalyte } from './specCheck';
+
+/** One overdue watch in force for a queue item (see `overdueWatches`). */
+export interface OverdueWatchSummary {
+  kind: 'limit' | 'required_analyte';
+  id: string;
+  spec_test_id: string;
+  analyte_name: string;
+  review_by: string;
+}
+
+/** A `supplier_required_analytes` row (migration 0107), joined for display. */
+export interface ApiRequiredAnalyte {
+  id: string;
+  tenant_id: string;
+  supplier_id: string;
+  document_type_id: string;
+  spec_test_id: string;
+  effective_from: string | null;
+  review_by: string | null;
+  reason: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  test_name?: string;
+  supplier_name?: string | null;
+  document_type_name?: string | null;
+  created_by_name?: string | null;
+}
+
+/** A `document_spec_gaps` row (migration 0107): something NOT judged on a document. */
+export interface ApiSpecGap {
+  id: string;
+  tenant_id: string;
+  document_id: string;
+  version_number: number | null;
+  queue_item_id: string | null;
+  kind: 'missing_required' | 'unjudged';
+  spec_test_id: string | null;
+  required_analyte_id: string | null;
+  test_name_raw: string;
+  value_raw: string | null;
+  unit_raw: string | null;
+  result_key: string | null;
+  result_location: string | null;
+  reason: string;
+  snapshot: string | null;
+  judgement_origin: string | null;
+  notified_at: string | null;
+  created_at: string;
+  document_title?: string | null;
+  supplier_id?: string | null;
+  supplier_name?: string | null;
+  spec_test_name?: string | null;
+}
 import type { SpecVerdict, SpecVerdictKind, SpecOperator } from './specCheck';
 // Criticality (migration 0095) lives in its own module because the vocabulary
 // is not final — see shared/specCriticality.ts. Nothing outside that file may
@@ -774,6 +832,11 @@ export interface ApiSpecLimit {
    * than acted on, and a flat list of them is a list nobody reads.
    */
   criticality: SpecCriticality;
+  /**
+   * Watch review-by date (migration 0107), supplier-scoped limits only. After
+   * it passes the limit STILL applies and is flagged for review.
+   */
+  review_by?: string | null;
   notes: string | null;
   active: number;
   version: number;
@@ -1804,7 +1867,23 @@ export interface ProcessingQueueItem {
    * three limits under a fourteen-row COA — but the gap has to be discoverable,
    * so it is rendered as a quiet count.
    */
-  spec_summary?: { out_of_spec: number; not_checked: number; unmatched: number };
+  spec_summary?: {
+    out_of_spec: number;
+    not_checked: number;
+    unmatched: number;
+    /** Printed results with no limit in scope and no printed spec (0107 rulings). */
+    unjudged?: number;
+    /** Required analytes (0107) this certificate did not report. */
+    missing_required?: number;
+    /** Supplier watches in force for this document whose review-by has passed. */
+    watch_overdue?: number;
+  };
+  /** "No limit configured" — printed results nothing judged. Not warnings; shown so no assurance is implied. */
+  spec_unjudged?: UnjudgedResult[];
+  /** Required analytes for this supplier the certificate did not report — incomplete, never a pass. */
+  spec_missing_required?: MissingRequiredAnalyte[];
+  /** Watches (supplier limits / required analytes) in force here whose review-by date has passed. */
+  spec_watch_overdue?: OverdueWatchSummary[];
   /**
    * A third advisory pass, the same shape as the two above: when this document
    * would next be due, resolved from the extraction and the document type

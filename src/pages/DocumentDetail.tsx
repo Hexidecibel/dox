@@ -77,6 +77,7 @@ import { ProductLinker } from '../components/ProductLinker';
 import { useAuth } from '../contexts/AuthContext';
 import SupplierAutocomplete, { type SupplierValue } from '../components/SupplierAutocomplete';
 import EntityNotes from '../components/EntityNotes';
+import { DocumentSpecResults } from '../components/DocumentSpecResults';
 import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { helpContent } from '../lib/helpContent';
@@ -978,6 +979,11 @@ export function DocumentDetail() {
           }
         })()}
       </Paper>
+
+      {/* Test results — judged, could not check, no limit configured, and
+          required-but-not-reported, one table (AJ rulings 2026-09-14). Renders
+          nothing for a document with no register rows. */}
+      <DocumentSpecResults documentId={doc.id} />
 
       {/* Registry fields (categories multi, aliases, criteria, applies_to,
           owner, renewal). Viewable by all; editable by non-readers. */}

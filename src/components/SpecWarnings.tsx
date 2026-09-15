@@ -1,9 +1,18 @@
+import type { ReactElement } from 'react';
 import { Alert, Box, Chip, Tooltip, Typography } from '@mui/material';
 import {
   ErrorOutline as OutOfSpecIcon,
   HelpOutline as NotCheckedIcon,
+  RemoveCircleOutline as NoLimitIcon,
+  PlaylistRemove as MissingIcon,
+  Visibility as WatchIcon,
 } from '@mui/icons-material';
-import type { SpecVerdict } from '../lib/types';
+import type {
+  SpecVerdict,
+  UnjudgedResult,
+  MissingRequiredAnalyte,
+  OverdueWatchSummary,
+} from '../lib/types';
 import {
   SPEC_CRITICALITY_COLOR,
   SPEC_CRITICALITY_LABELS,
@@ -11,7 +20,7 @@ import {
   parseSpecCriticality,
 } from '../../shared/specCriticality';
 import type { SpecCriticality } from '../../shared/specCriticality';
-import { formatUnitConversion } from '../../shared/specCheck';
+import { formatUnitConversion, NO_LIMIT_CONFIGURED_LABEL, watchEndedLabel } from '../../shared/specCheck';
 import type { UnitConversion } from '../../shared/specCheck';
 
 /**
@@ -101,6 +110,10 @@ export function countSpecVerdicts(verdicts: SpecVerdict[] | undefined) {
  * unmissable, and distinguishable at a glance from the one that holds a load.
  */
 function verdictColor(v: SpecVerdict): string {
+  // Could-not-check is blue, not grey: grey is "No limit configured", and the
+  // two must never be mistaken for each other — one asks for a person to
+  // verify, the other says nothing was judged at all.
+  if (v.verdict === 'not_checked') return 'info.main';
   if (v.verdict !== 'out_of_spec') return 'text.secondary';
   const color = SPEC_CRITICALITY_COLOR[specCriticalityOf(v)];
   return color === 'error' ? 'error.main' : 'warning.main';
@@ -201,9 +214,17 @@ export function conversionFromSnapshot(
 }
 
 /** Row/cell-level marker: a small icon plus the sentence, in error colour. */
-export function SpecRowMarker({ verdicts }: { verdicts: SpecVerdict[] | undefined }) {
+export function SpecRowMarker({
+  verdicts,
+  unjudged,
+}: {
+  verdicts: SpecVerdict[] | undefined;
+  /** "No limit configured" results on this row (0107 rulings). */
+  unjudged?: UnjudgedResult[];
+}) {
   const live = liveSpecVerdicts(verdicts);
-  if (live.length === 0) return null;
+  const noLimit = unjudged || [];
+  if (live.length === 0 && noLimit.length === 0) return null;
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
       {live.map((v, i) => {
@@ -224,16 +245,105 @@ export function SpecRowMarker({ verdicts }: { verdicts: SpecVerdict[] | undefine
             <Typography variant="caption" sx={{ lineHeight: 1.35, fontWeight: bad ? 600 : 400 }}>
               {/* The tier is named on the failing line itself, not only in the
                   banner — this marker is often the only thing a reviewer reads
-                  while scanning a results table. */}
+                  while scanning a results table. A result we could not check
+                  says "verify" on the line, so it is never read as a failure
+                  (AJ, 2026-09-14). */}
               {critical && <strong>{SPEC_CRITICALITY_LABELS.high}: </strong>}
+              {!bad && <strong>{COULD_NOT_CHECK_LABEL}: </strong>}
               {v.message}
               <ConversionChip conversion={v.conversion} />
+              {v.watch?.review_overdue && <WatchEndedChip reviewBy={v.watch.review_by} />}
             </Typography>
           </Box>
         );
       })}
+      {noLimit.map((u, i) => (
+        <Box key={`u${i}`} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <NoLimitChip unjudged={u} />
+        </Box>
+      ))}
     </Box>
   );
+}
+
+/** The one label for a result we held a limit for and could not apply. */
+export const COULD_NOT_CHECK_LABEL = 'Could not check — verify';
+
+/**
+ * "No limit configured" — a printed result nothing judged. Deliberately the
+ * quietest thing on the screen and deliberately NOT green: the danger this
+ * guards against is a reviewer (or a buyer) reading an unflagged value as a
+ * checked one. Grey, dashed, labelled in words, with the rule in the tooltip.
+ */
+export function NoLimitChip({ unjudged }: { unjudged: UnjudgedResult }) {
+  const printed = `${unjudged.value_raw}${unjudged.unit_raw ? ` ${unjudged.unit_raw}` : ''}`;
+  return (
+    <Tooltip arrow title={`${unjudged.test_name_raw} ${printed}: ${unjudged.reason}. Add a limit in Settings › Spec Limits to judge it.`}>
+      <Chip
+        size="small"
+        variant="outlined"
+        icon={<NoLimitIcon sx={{ fontSize: 14 }} />}
+        label={`${unjudged.test_name_raw}: ${NO_LIMIT_CONFIGURED_LABEL}`}
+        data-testid="spec-no-limit-chip"
+        sx={{
+          height: 20,
+          fontSize: 11,
+          borderStyle: 'dashed',
+          color: 'text.secondary',
+          borderColor: 'grey.400',
+          bgcolor: 'grey.50',
+        }}
+      />
+    </Tooltip>
+  );
+}
+
+/** "Watch period ended 2026-10-01 — review", beside the value a watch judged. */
+export function WatchEndedChip({ reviewBy }: { reviewBy: string }) {
+  return (
+    <Tooltip
+      arrow
+      title="This supplier-specific limit or requirement is past its review-by date. It still applies — extend it or remove it in Settings › Spec Limits."
+    >
+      <Chip
+        size="small"
+        color="warning"
+        variant="outlined"
+        icon={<WatchIcon sx={{ fontSize: 14 }} />}
+        label={watchEndedLabel(reviewBy)}
+        data-testid="spec-watch-ended-chip"
+        sx={{ height: 20, fontSize: 11, ml: 0.5, verticalAlign: 'middle' }}
+      />
+    </Tooltip>
+  );
+}
+
+/** Unjudged results for one table row, keyed by row index. */
+export function unjudgedForTableRow(
+  unjudged: UnjudgedResult[] | undefined,
+  scope: string,
+  tableIndex: number
+): Record<number, UnjudgedResult[]> {
+  const out: Record<number, UnjudgedResult[]> = {};
+  for (const u of unjudged || []) {
+    if (u.scope !== scope || u.target.kind !== 'table' || u.target.table_index !== tableIndex) continue;
+    (out[u.target.row_index] ||= []).push(u);
+  }
+  return out;
+}
+
+/** Unjudged results for one structured group, keyed by cell name. */
+export function unjudgedForGroup(
+  unjudged: UnjudgedResult[] | undefined,
+  scope: string,
+  group: string
+): Record<string, UnjudgedResult[]> {
+  const out: Record<string, UnjudgedResult[]> = {};
+  for (const u of unjudged || []) {
+    if (u.scope !== scope || u.target.kind !== 'group' || u.target.group !== group) continue;
+    (out[u.target.cell] ||= []).push(u);
+  }
+  return out;
 }
 
 /** MUI `sx` tinting a table row that carries a CRITICAL out-of-spec result. */
@@ -271,27 +381,43 @@ export function specRowSx(
 export function SpecWarningBanner({
   verdicts,
   summary,
+  unjudged,
+  missingRequired,
+  watchOverdue,
 }: {
   verdicts: SpecVerdict[] | undefined;
   /** Server-side counts, including the `unmatched` total the array cannot carry. */
   summary?: { out_of_spec: number; not_checked: number; unmatched: number };
+  /** "No limit configured" results (0107 rulings). */
+  unjudged?: UnjudgedResult[];
+  /** Required analytes for this supplier the certificate did not report. */
+  missingRequired?: MissingRequiredAnalyte[];
+  /** Watches in force for this document past their review-by date. */
+  watchOverdue?: OverdueWatchSummary[];
 }) {
   const { outOfSpec, criticalOutOfSpec, notChecked } = countSpecVerdicts(verdicts);
-  const unmatched = summary?.unmatched ?? 0;
-  // `unmatched` alone never opens the banner. A tenant with three limits sees
-  // eleven unmatched tests on every fourteen-row COA, and an info bar on every
-  // single document is how a reviewer learns to skip past this component. It is
-  // reported only alongside a finding the reviewer is already reading.
-  if (outOfSpec === 0 && notChecked === 0) return null;
+  const noLimit = unjudged || [];
+  const missing = missingRequired || [];
+  const watches = watchOverdue || [];
+  // Unjudged results alone do NOT open the alert: a tenant with three limits
+  // sees eleven of them on every fourteen-row COA, and an alert on every single
+  // document is how a reviewer learns to skip this component. They still get a
+  // quiet, always-visible line of their own (below) — the SME's ruling is that
+  // the portal must never imply it judged a value it did not.
+  if (outOfSpec === 0 && notChecked === 0 && missing.length === 0 && watches.length === 0) {
+    return noLimit.length > 0 ? <NoLimitPanel unjudged={noLimit} /> : null;
+  }
+  const unmatched = noLimit.length > 0 ? 0 : (summary?.unmatched ?? 0);
   const live = liveSpecVerdicts(verdicts);
   const failures = live.filter((v) => v.verdict === 'out_of_spec');
   const unchecked = live.filter((v) => v.verdict === 'not_checked');
+  const missingByAnalyte = groupMissing(missing);
 
   // Red is reserved for a failure on a limit somebody marked as load-stopping.
   // A batch of tracked deviations is amber: still unmissable, still listed in
   // full, but it does not spend the reviewer's alarm on parameters the plant
   // knowingly writes tighter than it can hit.
-  const tone = criticalOutOfSpec > 0 ? 'error' : outOfSpec > 0 ? 'warning' : 'info';
+  const tone = criticalOutOfSpec > 0 ? 'error' : outOfSpec > 0 || missing.length > 0 ? 'warning' : 'info';
   const trackedFailures = outOfSpec - criticalOutOfSpec;
 
   return (
@@ -305,7 +431,11 @@ export function SpecWarningBanner({
             ? outOfSpec === 1
               ? 'This COA has an out-of-spec result on a tracked parameter'
               : `This COA has ${outOfSpec} out-of-spec results on tracked parameters`
-            : `${notChecked} ${notChecked === 1 ? 'result' : 'results'} could not be checked`}
+            : missingByAnalyte.length > 0
+              ? `This COA is incomplete — ${missingByAnalyte.length} required ${missingByAnalyte.length === 1 ? 'analyte is' : 'analytes are'} not reported`
+              : notChecked > 0
+                ? `${notChecked} ${notChecked === 1 ? 'result' : 'results'} could not be checked — verify by hand`
+                : 'A supplier watch on this COA is past its review-by date'}
       </Typography>
       {criticalOutOfSpec > 0 && trackedFailures > 0 && (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
@@ -332,20 +462,61 @@ export function SpecWarningBanner({
           ))}
         </Box>
       )}
+      {missingByAnalyte.length > 0 && (
+        <Box sx={{ mt: failures.length ? 1 : 0.5 }} data-testid="spec-missing-required">
+          <Typography variant="caption" sx={{ fontWeight: 700, color: 'secondary.main', display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <MissingIcon sx={{ fontSize: 14 }} />
+            Incomplete — required for this supplier, not reported
+          </Typography>
+          <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+            {missingByAnalyte.map((m) => (
+              <Typography component="li" variant="caption" key={m.spec_test_id} sx={{ display: 'list-item' }}>
+                {m.message}
+                {m.records > 1 && ` (${m.records} records)`}
+                {m.watch?.review_overdue && <WatchEndedChip reviewBy={m.watch.review_by} />}
+              </Typography>
+            ))}
+          </Box>
+        </Box>
+      )}
       {unchecked.length > 0 && (
-        <Box component="ul" sx={{ m: 0, mt: failures.length ? 1 : 0.5, pl: 2.5 }}>
-          {unchecked.map((v, i) => (
-            <Typography
-              component="li"
-              variant="caption"
-              key={i}
-              color="text.secondary"
-              sx={{ display: 'list-item' }}
-            >
-              {v.message}
-              <ConversionChip conversion={v.conversion} />
+        <Box sx={{ mt: failures.length || missingByAnalyte.length ? 1 : 0.5 }}>
+          <Typography variant="caption" sx={{ fontWeight: 700, color: 'info.main', display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <NotCheckedIcon sx={{ fontSize: 14 }} />
+            {COULD_NOT_CHECK_LABEL} — a limit applies but could not be compared; this is not a failure and not a pass
+          </Typography>
+          <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+            {unchecked.map((v, i) => (
+              <Typography
+                component="li"
+                variant="caption"
+                key={i}
+                color="text.secondary"
+                sx={{ display: 'list-item' }}
+              >
+                {v.message}
+                <ConversionChip conversion={v.conversion} />
+              </Typography>
+            ))}
+          </Box>
+        </Box>
+      )}
+      {watches.length > 0 && (
+        <Box sx={{ mt: 1 }} data-testid="spec-watch-overdue">
+          {watches.map((w) => (
+            <Typography key={`${w.kind}:${w.id}`} variant="caption" sx={{ display: 'block' }}>
+              <WatchEndedChip reviewBy={w.review_by} />{' '}
+              {w.kind === 'limit'
+                ? `The supplier-specific ${w.analyte_name} limit still applies.`
+                : `${w.analyte_name} is still required from this supplier.`}{' '}
+              Extend or remove it in Settings › Spec Limits.
             </Typography>
           ))}
+        </Box>
+      )}
+      {noLimit.length > 0 && (
+        <Box sx={{ mt: 1 }}>
+          <NoLimitPanel unjudged={noLimit} inline />
         </Box>
       )}
       {unmatched > 0 && (
@@ -366,44 +537,112 @@ export function SpecWarningBanner({
   );
 }
 
+/** One line per missing analyte, however many records of the COA miss it. */
+function groupMissing(
+  missing: MissingRequiredAnalyte[]
+): Array<MissingRequiredAnalyte & { records: number }> {
+  const by = new Map<string, MissingRequiredAnalyte & { records: number }>();
+  for (const m of missing) {
+    const prev = by.get(m.spec_test_id);
+    if (prev) prev.records += 1;
+    else by.set(m.spec_test_id, { ...m, records: 1 });
+  }
+  return [...by.values()];
+}
+
+/**
+ * The printed results nothing judged, as grey "No limit configured" chips — on
+ * its own when there is nothing else to say, or inline at the foot of the
+ * alert. Never coloured like a pass.
+ */
+export function NoLimitPanel({ unjudged, inline = false }: { unjudged: UnjudgedResult[]; inline?: boolean }) {
+  if (unjudged.length === 0) return null;
+  const unique = [...new Map(unjudged.map((u) => [u.test_name_raw.toLowerCase(), u])).values()];
+  return (
+    <Box
+      data-testid="spec-no-limit-panel"
+      sx={
+        inline
+          ? undefined
+          : { mb: 2, p: 1, border: '1px dashed', borderColor: 'grey.400', borderRadius: 1, bgcolor: 'grey.50' }
+      }
+    >
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+        <strong>Not judged:</strong> {unique.length} {unique.length === 1 ? 'result on this COA has' : 'results on this COA have'} no
+        limit configured and no printed specification. {unique.length === 1 ? 'It is' : 'They are'} shown, not checked.
+      </Typography>
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+        {unique.map((u, i) => (
+          <NoLimitChip key={i} unjudged={u} />
+        ))}
+      </Box>
+    </Box>
+  );
+}
+
 /**
  * One-glance chip for the COLLAPSED queue row. A reviewer working a long list
  * must be able to see which COA has a failing result without opening any of them.
  */
-export function SpecAlertChip({ verdicts }: { verdicts: SpecVerdict[] | undefined }) {
+export function SpecAlertChip({
+  verdicts,
+  missingRequired,
+}: {
+  verdicts: SpecVerdict[] | undefined;
+  missingRequired?: MissingRequiredAnalyte[];
+}) {
   const { outOfSpec, criticalOutOfSpec, notChecked } = countSpecVerdicts(verdicts);
-  if (outOfSpec === 0 && notChecked === 0) return null;
-  const live = liveSpecVerdicts(verdicts);
-  // The COUNT stays the honest total of failures; the word "critical" is added
-  // only when at least one of them is on a load-stopping limit. A reviewer
-  // working a long list is choosing which COA to open first, and that is
-  // exactly the choice the rank exists to inform.
-  const label =
-    outOfSpec > 0
-      ? `${outOfSpec} out of spec${criticalOutOfSpec > 0 ? ' (critical)' : ''}`
-      : `${notChecked} not checked`;
-  return (
-    <Tooltip
-      arrow
-      title={live
-        .slice(0, 4)
-        .map((v) => v.message)
-        .join('\n')}
-    >
-      <Chip
-        size="small"
-        color={criticalOutOfSpec > 0 ? 'error' : outOfSpec > 0 ? 'warning' : 'default'}
-        variant={outOfSpec > 0 ? 'filled' : 'outlined'}
-        icon={
-          outOfSpec > 0 ? (
-            <OutOfSpecIcon sx={{ fontSize: 14 }} />
-          ) : (
-            <NotCheckedIcon sx={{ fontSize: 14 }} />
-          )
-        }
-        label={label}
-        sx={{ whiteSpace: 'pre-line', ml: 0.5 }}
-      />
-    </Tooltip>
-  );
+  const missing = groupMissing(missingRequired || []);
+  const chips: ReactElement[] = [];
+  if (outOfSpec > 0 || notChecked > 0) {
+    const live = liveSpecVerdicts(verdicts);
+    // The COUNT stays the honest total of failures; the word "critical" is
+    // added only when at least one of them is on a load-stopping limit. A
+    // reviewer working a long list is choosing which COA to open first, and
+    // that is exactly the choice the rank exists to inform.
+    const label =
+      outOfSpec > 0
+        ? `${outOfSpec} out of spec${criticalOutOfSpec > 0 ? ' (critical)' : ''}`
+        : `${notChecked} could not check`;
+    chips.push(
+      <Tooltip
+        key="verdicts"
+        arrow
+        title={live
+          .slice(0, 4)
+          .map((v) => v.message)
+          .join('\n')}
+      >
+        <Chip
+          size="small"
+          color={criticalOutOfSpec > 0 ? 'error' : outOfSpec > 0 ? 'warning' : 'info'}
+          variant={outOfSpec > 0 ? 'filled' : 'outlined'}
+          icon={
+            outOfSpec > 0 ? (
+              <OutOfSpecIcon sx={{ fontSize: 14 }} />
+            ) : (
+              <NotCheckedIcon sx={{ fontSize: 14 }} />
+            )
+          }
+          label={label}
+          sx={{ whiteSpace: 'pre-line', ml: 0.5 }}
+        />
+      </Tooltip>
+    );
+  }
+  if (missing.length > 0) {
+    chips.push(
+      <Tooltip key="missing" arrow title={missing.map((m) => m.message).join('\n')}>
+        <Chip
+          size="small"
+          color="secondary"
+          variant="outlined"
+          icon={<MissingIcon sx={{ fontSize: 14 }} />}
+          label={`incomplete: ${missing.length} required`}
+          sx={{ whiteSpace: 'pre-line', ml: 0.5 }}
+        />
+      </Tooltip>
+    );
+  }
+  return chips.length ? <>{chips}</> : null;
 }

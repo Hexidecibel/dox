@@ -57,8 +57,10 @@ import {
   specVerdictsForTableRow,
   specVerdictsForGroup,
   specRowSx,
+  unjudgedForTableRow,
+  unjudgedForGroup,
 } from './SpecWarnings';
-import type { SpecVerdict, QueueArrivalDecisionInput } from '../lib/types';
+import type { SpecVerdict, UnjudgedResult, QueueArrivalDecisionInput } from '../lib/types';
 import {
   COA_RECORD_LOT_KEYS,
   COA_RECORD_SUBLOT_KEYS,
@@ -154,10 +156,13 @@ function cloneRecord(r: CoaRecord): CoaRecord {
 function GroupCells({
   cells,
   verdicts,
+  unjudged,
 }: {
   cells: Record<string, CoaResultCell>;
   /** Spec verdicts for this group, keyed by cell name. */
   verdicts?: Record<string, SpecVerdict[]>;
+  /** "No limit configured" results for this group, keyed by cell name. */
+  unjudged?: Record<string, UnjudgedResult[]>;
 }) {
   const entries = Object.entries(cells);
   if (entries.length === 0) return null;
@@ -183,7 +188,7 @@ function GroupCells({
                 <TableCell>{cell.unit ?? '—'}</TableCell>
                 <TableCell>
                   {cell.spec ?? '—'}
-                  <SpecRowMarker verdicts={cellVerdicts} />
+                  <SpecRowMarker verdicts={cellVerdicts} unjudged={unjudged?.[key]} />
                 </TableCell>
               </TableRow>
             );
@@ -198,10 +203,13 @@ function GroupCells({
 function RecordTable({
   table,
   verdicts,
+  unjudged,
 }: {
   table: ExtractedTable;
   /** Spec verdicts for this table, keyed by row index. */
   verdicts?: Record<number, SpecVerdict[]>;
+  /** "No limit configured" results for this table, keyed by row index. */
+  unjudged?: Record<number, UnjudgedResult[]>;
 }) {
   return (
     <Box sx={{ mb: 1.5 }}>
@@ -230,7 +238,9 @@ function RecordTable({
                   {row.map((cell, ci) => (
                     <TableCell key={ci} sx={failed ? { fontWeight: 700 } : undefined}>
                       {cell}
-                      {ci === row.length - 1 && <SpecRowMarker verdicts={rowVerdicts} />}
+                      {ci === row.length - 1 && (
+                        <SpecRowMarker verdicts={rowVerdicts} unjudged={unjudged?.[ri]} />
+                      )}
                     </TableCell>
                   ))}
                 </TableRow>
@@ -675,6 +685,7 @@ export default function CoaRecordsReviewTile({
                 <GroupCells
                   cells={cells}
                   verdicts={specVerdictsForGroup(item.spec_results, `record[${idx}]`, groupName)}
+                  unjudged={unjudgedForGroup(item.spec_unjudged, `record[${idx}]`, groupName)}
                 />
               </Box>
             ))}
@@ -690,6 +701,7 @@ export default function CoaRecordsReviewTile({
                 key={ti}
                 table={t}
                 verdicts={specVerdictsForTableRow(item.spec_results, `record[${idx}]`, ti)}
+                unjudged={unjudgedForTableRow(item.spec_unjudged, `record[${idx}]`, ti)}
               />
             ))}
           </>
@@ -741,7 +753,13 @@ export default function CoaRecordsReviewTile({
 
       {/* An out-of-spec RESULT outranks an extraction hint — it goes first, and
           in error colour, so it is never read as one more yellow nag. */}
-      <SpecWarningBanner verdicts={item.spec_results} summary={item.spec_summary} />
+      <SpecWarningBanner
+        verdicts={item.spec_results}
+        summary={item.spec_summary}
+        unjudged={item.spec_unjudged}
+        missingRequired={item.spec_missing_required}
+        watchOverdue={item.spec_watch_overdue}
+      />
 
       {/* Anything the document itself contradicts, before the reviewer scrolls. */}
       <InvariantWarningBanner warnings={item.invariant_warnings} dismissed={dismissedWarnings} />

@@ -31,6 +31,8 @@ import type {
   ApiSpecLimit,
   SpecCriticality,
   ApiSpecCheck,
+  ApiRequiredAnalyte,
+  ApiSpecGap,
   ApiClaimType,
   ClaimSubjectGrain,
   DocumentFacetLinkInput,
@@ -1267,6 +1269,8 @@ export const api = {
         criticality?: SpecCriticality;
         notes?: string | null;
         active?: boolean;
+        /** Watch review-by (0107), YYYY-MM-DD; null clears. Supplier limits only. */
+        review_by?: string | null;
       }
     ) =>
       fetchApi<{ specLimit: ApiSpecLimit }>(`/spec-limits/${id}`, {
@@ -1276,6 +1280,63 @@ export const api = {
 
     remove: (id: string) =>
       fetchApi<{ success: boolean }>(`/spec-limits/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * Required analytes per supplier (migration 0107) — the only thing that can
+   * make a COA incomplete. Together with supplier-scoped limits: a "watch".
+   */
+  specRequiredAnalytes: {
+    list: (params?: { tenant_id?: string; supplier_id?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
+      const qs = query.toString();
+      return fetchApi<{ requiredAnalytes: ApiRequiredAnalyte[] }>(
+        `/spec-required-analytes${qs ? `?${qs}` : ''}`
+      );
+    },
+    create: (data: {
+      supplier_id: string;
+      document_type_id: string;
+      spec_test_id: string;
+      effective_from?: string | null;
+      review_by?: string | null;
+      reason?: string | null;
+      tenant_id?: string;
+    }) =>
+      fetchApi<{ requiredAnalyte: ApiRequiredAnalyte }>('/spec-required-analytes', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: string, data: { effective_from?: string | null; review_by?: string | null; reason?: string | null }) =>
+      fetchApi<{ requiredAnalyte: ApiRequiredAnalyte }>(`/spec-required-analytes/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    remove: (id: string) =>
+      fetchApi<{ success: boolean }>(`/spec-required-analytes/${id}`, { method: 'DELETE' }),
+  },
+
+  /** What was NOT judged on approved documents (0107): incomplete + no limit configured. */
+  specGaps: {
+    list: (params?: {
+      kind?: 'all' | 'missing_required' | 'unjudged';
+      document_id?: string;
+      supplier_id?: string;
+      tenant_id?: string;
+      limit?: number;
+      offset?: number;
+    }) => {
+      const query = new URLSearchParams();
+      for (const [k, v] of Object.entries(params || {})) {
+        if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+      }
+      const qs = query.toString();
+      return fetchApi<{ specGaps: ApiSpecGap[]; total: number; limit: number; offset: number }>(
+        `/spec-gaps${qs ? `?${qs}` : ''}`
+      );
+    },
   },
 
   /**
