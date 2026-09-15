@@ -101,7 +101,8 @@ var CHECKS = [
   "product_code_in_text",
   "supplier_in_text",
   "field_label_mismatch",
-  "supplier_not_self"
+  "supplier_not_self",
+  "sublot_production_date_conflict"
 ];
 var SCALAR_KEYS = /* @__PURE__ */ new Set([
   ...LOT_KEYS,
@@ -693,7 +694,79 @@ function checkExtraction(item, opts = {}) {
       }
     }
   }
+  checkRecordProductionDates(item, tally, fail);
   return { failures, tally, verbatimLotHits, verbatimLotChecks };
+}
+function checkRecordProductionDates(item, tally, fail) {
+  const rec = safeParse(item.ai_records);
+  if (!rec || typeof rec !== "object") return;
+  const envelope = rec;
+  const page = envelope.page_metadata && typeof envelope.page_metadata === "object" && !Array.isArray(envelope.page_metadata) ? envelope.page_metadata : {};
+  const records = Array.isArray(envelope.records) ? envelope.records : [];
+  const groups = /* @__PURE__ */ new Map();
+  records.forEach((r, i) => {
+    const own = r && typeof r === "object" ? r.fields : null;
+    if (!own || typeof own !== "object" || Array.isArray(own)) return;
+    const fields = own;
+    const scope = `record[${i}]`;
+    const pick = (keys) => {
+      for (const k of keys) {
+        const inOwn = asString(fields[k]);
+        if (inOwn) return { key: k, raw: inOwn, fromPage: false };
+        const inPage = asString(page[k]);
+        if (inPage) return { key: k, raw: inPage, fromPage: true };
+      }
+      return null;
+    };
+    const prod = pick(PRODUCTION_KEYS);
+    const exp = pick(["expiration_date", "best_by_date"]);
+    const prodDate = prod && !isPlaceholder(prod.raw) ? parseDate(prod.raw) : null;
+    const expDate = exp && !isPlaceholder(exp.raw) ? parseDate(exp.raw) : null;
+    if (prod && exp && prodDate && expDate && (prod.fromPage || exp.fromPage)) {
+      if (expDate.getTime() < prodDate.getTime()) {
+        bump(tally, "date_ordering", "fail");
+        fail(
+          "date_ordering",
+          prod.key,
+          scope,
+          prod.raw,
+          `${prod.key} after ${exp.key} (${exp.fromPage ? "expiry from page header" : "production date from page header"})`,
+          `This row's ${label(prod.key).toLowerCase()} (${prod.raw}) is after its ${label(exp.key).toLowerCase()} (${exp.raw}) \u2014 one of these two dates is wrong.`
+        );
+      } else {
+        bump(tally, "date_ordering", "pass");
+      }
+    }
+    const lotRaw = asString(fields.lot_code) || asString(fields.lot_number) || asString(page.lot_code) || asString(page.lot_number);
+    const subRaw = asString(fields.sub_lot_code) || asString(fields.sub_lot_number) || asString(page.sub_lot_code) || asString(page.sub_lot_number);
+    const lot = normalizeLotNumber(lotRaw);
+    if (!lot || !prod || isPlaceholder(prod.raw)) return;
+    const key = `${lot}|${normalizeSubLotCode(subRaw)}`;
+    const day = prodDate ? prodDate.toISOString().slice(0, 10) : prod.raw.toUpperCase();
+    groups.set(key, [...groups.get(key) ?? [], { scope, raw: prod.raw, day }]);
+  });
+  for (const [key, rows] of groups) {
+    if (rows.length < 2) continue;
+    const days = new Set(rows.map((r) => r.day));
+    if (days.size === 1) {
+      bump(tally, "sublot_production_date_conflict", "pass");
+      continue;
+    }
+    const [lot, sub] = key.split("|");
+    const shown = `${lot}${sub ? `-${sub}` : ""}`;
+    const values = [...new Set(rows.map((r) => r.raw))].join(", ");
+    for (const r of rows) {
+      bump(tally, "sublot_production_date_conflict", "fail");
+      fail(
+        "sublot_production_date_conflict",
+        "production_date",
+        r.scope,
+        r.raw,
+        `${rows.length} records share lot ${shown} with ${days.size} different production dates`,
+        `Lot ${shown} appears on ${rows.length} rows of this certificate with different production dates (${values}) \u2014 one of them is misread.`
+      );
+    }
+  }
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

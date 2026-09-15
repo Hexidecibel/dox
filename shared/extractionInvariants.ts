@@ -103,6 +103,7 @@ export const CHECKS = [
   'supplier_in_text',
   'field_label_mismatch',
   'supplier_not_self',
+  'sublot_production_date_conflict',
 ] as const;
 
 export type InvariantCheck = (typeof CHECKS)[number];
@@ -948,5 +949,111 @@ export function checkExtraction(item: ExtractionInput, opts: CheckOptions = {}):
     }
   }
 
+  checkRecordProductionDates(item, tally, fail);
+
   return { failures, tally, verbatimLotHits, verbatimLotChecks };
+}
+
+// ---------------------------------------------------------------------------
+// Record-level production-date checks (migration 0106)
+// ---------------------------------------------------------------------------
+//
+// Production date is now stored per lot row and searched on, so two defects
+// that were cosmetic before now decide whether a certificate is sent:
+//
+//   1. A row's production date AFTER its expiration / best-by. The per-scope
+//      `date_ordering` check above only sees a record's own fields; on a
+//      multi-row certificate the expiry is usually printed once in the header
+//      (page_metadata) and the production date per row, so the pair was never
+//      compared. This compares the row as it will be stored — record fields
+//      over the page's — and only when the pair spans both (a pair inside one
+//      scope is already checked above, and must not be reported twice).
+//   2. Two rows naming the SAME lot + sublot with different production dates.
+//      One of them is misread, and the lot row can only hold one day: the lot
+//      writer marks it 'conflict' and search stops calling it covering. Better a
+//      reviewer sees it now, on the certificate, than a customer later.
+//
+// No lot-code (Julian) decoding here. That is a per-supplier declared scheme
+// and belongs to Phase 4.
+
+function checkRecordProductionDates(
+  item: ExtractionInput,
+  tally: InvariantTally,
+  fail: (check: InvariantCheck, field: string, scope: string, value: unknown, reason: string, message: string) => void
+): void {
+  const rec = safeParse(item.ai_records);
+  if (!rec || typeof rec !== 'object') return;
+  const envelope = rec as { page_metadata?: unknown; records?: unknown };
+  const page = envelope.page_metadata && typeof envelope.page_metadata === 'object' && !Array.isArray(envelope.page_metadata)
+    ? (envelope.page_metadata as Record<string, unknown>)
+    : {};
+  const records = Array.isArray(envelope.records) ? envelope.records : [];
+  const groups = new Map<string, Array<{ scope: string; raw: string; day: string }>>();
+
+  records.forEach((r: unknown, i: number) => {
+    const own = r && typeof r === 'object' ? (r as { fields?: unknown }).fields : null;
+    if (!own || typeof own !== 'object' || Array.isArray(own)) return;
+    const fields = own as Record<string, unknown>;
+    const scope = `record[${i}]`;
+    const pick = (keys: string[]) => {
+      for (const k of keys) {
+        const inOwn = asString(fields[k]);
+        if (inOwn) return { key: k, raw: inOwn, fromPage: false };
+        const inPage = asString(page[k]);
+        if (inPage) return { key: k, raw: inPage, fromPage: true };
+      }
+      return null;
+    };
+    const prod = pick(PRODUCTION_KEYS);
+    const exp = pick(['expiration_date', 'best_by_date']);
+    const prodDate = prod && !isPlaceholder(prod.raw) ? parseDate(prod.raw) : null;
+    const expDate = exp && !isPlaceholder(exp.raw) ? parseDate(exp.raw) : null;
+
+    if (prod && exp && prodDate && expDate && (prod.fromPage || exp.fromPage)) {
+      if (expDate.getTime() < prodDate.getTime()) {
+        bump(tally, 'date_ordering', 'fail');
+        fail(
+          'date_ordering',
+          prod.key,
+          scope,
+          prod.raw,
+          `${prod.key} after ${exp.key} (${exp.fromPage ? 'expiry from page header' : 'production date from page header'})`,
+          `This row's ${label(prod.key).toLowerCase()} (${prod.raw}) is after its ${label(exp.key).toLowerCase()} (${exp.raw}) — one of these two dates is wrong.`
+        );
+      } else {
+        bump(tally, 'date_ordering', 'pass');
+      }
+    }
+
+    const lotRaw = asString(fields.lot_code) || asString(fields.lot_number) || asString(page.lot_code) || asString(page.lot_number);
+    const subRaw = asString(fields.sub_lot_code) || asString(fields.sub_lot_number) || asString(page.sub_lot_code) || asString(page.sub_lot_number);
+    const lot = normalizeLotNumber(lotRaw);
+    if (!lot || !prod || isPlaceholder(prod.raw)) return;
+    const key = `${lot}|${normalizeSubLotCode(subRaw)}`;
+    const day = prodDate ? prodDate.toISOString().slice(0, 10) : prod.raw.toUpperCase();
+    groups.set(key, [...(groups.get(key) ?? []), { scope, raw: prod.raw, day }]);
+  });
+
+  for (const [key, rows] of groups) {
+    if (rows.length < 2) continue;
+    const days = new Set(rows.map((r) => r.day));
+    if (days.size === 1) {
+      bump(tally, 'sublot_production_date_conflict', 'pass');
+      continue;
+    }
+    const [lot, sub] = key.split('|');
+    const shown = `${lot}${sub ? `-${sub}` : ''}`;
+    const values = [...new Set(rows.map((r) => r.raw))].join(', ');
+    for (const r of rows) {
+      bump(tally, 'sublot_production_date_conflict', 'fail');
+      fail(
+        'sublot_production_date_conflict',
+        'production_date',
+        r.scope,
+        r.raw,
+        `${rows.length} records share lot ${shown} with ${days.size} different production dates`,
+        `Lot ${shown} appears on ${rows.length} rows of this certificate with different production dates (${values}) — one of them is misread.`
+      );
+    }
+  }
 }

@@ -300,3 +300,52 @@ describe('product_code_in_text — the few-shot fabrication', () => {
     expect(f).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Record-level production dates (migration 0106 — production date is now
+// stored per lot row and searched on, so these defects decide what is sent)
+// ---------------------------------------------------------------------------
+
+describe('record production dates', () => {
+  const TEXT = 'DARIGOLD Lot 10426203 Sub Lot 03 Lot 10426204 Sub Lot 13 Production Date 22-Jul-2026 23-Jul-2026';
+  const records = (page: Record<string, unknown>, recs: Array<Record<string, unknown>>) => checkExtraction({
+    ai_records: JSON.stringify({ page_metadata: page, records: recs.map((fields) => ({ fields })) }),
+    extracted_text: TEXT,
+  }).failures;
+
+  it('flags a row whose production date is after the expiry printed once in the header', () => {
+    const fs = records({ expiration_date: '2026-07-20' }, [
+      { lot_code: '10426203', sub_lot_code: '03', production_date: '2026-07-22' },
+    ]);
+    const f = fs.find((x) => x.check === 'date_ordering' && x.scope === 'record[0]');
+    expect(f).toBeDefined();
+    expect(f!.message).toMatch(/production date \(2026-07-22\) is after its expiration date \(2026-07-20\)/);
+  });
+
+  it('does not flag a sensible pair across scopes, nor double-report a pair inside one record', () => {
+    expect(records({ expiration_date: '2027-01-18' }, [
+      { lot_code: '10426203', sub_lot_code: '03', production_date: '2026-07-22' },
+    ]).filter((x) => x.check === 'date_ordering')).toEqual([]);
+    const inOne = records({}, [
+      { lot_code: '10426203', sub_lot_code: '03', production_date: '2026-07-22', expiration_date: '2026-07-20' },
+    ]).filter((x) => x.check === 'date_ordering');
+    expect(inOne).toHaveLength(1);
+  });
+
+  it('flags two rows naming the same lot and sublot with different production dates', () => {
+    const fs = records({}, [
+      { lot_code: '10426203', sub_lot_code: '03', production_date: '2026-07-22' },
+      { lot_code: '10426203-', sub_lot_code: '3', production_date: '2026-07-23' },
+      { lot_code: '10426204', sub_lot_code: '13', production_date: '2026-07-23' },
+    ]).filter((x) => x.check === 'sublot_production_date_conflict');
+    expect(fs.map((f) => f.scope)).toEqual(['record[0]', 'record[1]']);
+    expect(fs[0].message).toMatch(/Lot 10426203-03 appears on 2 rows of this certificate with different production dates/);
+  });
+
+  it('the same lot on two rows with the SAME production date is fine', () => {
+    expect(records({}, [
+      { lot_code: '10426203', sub_lot_code: '03', production_date: '2026-07-22' },
+      { lot_code: '10426203', sub_lot_code: '03', production_date: '22-Jul-2026' },
+    ]).filter((x) => x.check === 'sublot_production_date_conflict')).toEqual([]);
+  });
+});
