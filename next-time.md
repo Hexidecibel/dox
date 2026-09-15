@@ -4,7 +4,16 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**Lot matching is suggest-only (AJ §7, user confirmed 14 Sep).** Existing prod `matched` rows (9) untouched;
+**2026-09-15: v2.11.0 ON PROD** (coverage-aware search + combined approve/arrival decision +
+suggest-only lot matches + `sales_sheet` reject reason). Pages deploy `312baeb4`; gate: vitest
+229 files / 3208 tests, Playwright 7 passed, 1 skipped. No migrations. Plan: "Any-field COA
+retrieval (AJ 2026-09-08)" in `plan.md` (Phases 2-4 planned). **Still pending decisions:**
+(1) prod demo seed `bin/seed-arrivals-demo --remote` — not run; (2) legacy auto-link revert
+`bin/audit-asserted-lot-matches --remote --apply` — not run; dry-run on 2026-09-15 lists **7** lines
+(not 9), all tenant `1f03c3e73add44bfafb33bb16508b78b`, orders 1794419/1794420/1796635/1796855,
+all 85% confidence, linked 2026-06-24.
+
+**Lot matching is suggest-only (AJ §7, user confirmed 14 Sep).** Existing prod `matched` rows untouched;
 `bin/audit-asserted-lot-matches --remote` lists them (dry-run) — decide whether to `--apply`.
 
 ## 2026-09-14 v2.8.0 ON PROD — migrations through 0103, backfill waiting on a yes
