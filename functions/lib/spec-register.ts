@@ -29,8 +29,12 @@ import { resolveAlertRouting } from './alert-routing';
 import { isModuleEnabledForTenant } from './module-access';
 import { MODULES } from '../../shared/modules';
 import type { AlertRecipient } from './alert-routing';
-import type { SpecVerdict } from '../../shared/specCheck';
-import type { ConfiguredLimit } from '../../shared/specCheck';
+import type {
+  SpecVerdict,
+  ConfiguredLimit,
+  UnjudgedResult,
+  MissingRequiredAnalyte,
+} from '../../shared/specCheck';
 import {
   buildLimitSnapshot,
   registerIdentity,
@@ -164,6 +168,113 @@ export async function registerSpecChecks(
   }
 }
 
+/**
+ * WHAT WAS NOT JUDGED, written down beside what was (migration 0107).
+ *
+ * Two kinds, one table (`document_spec_gaps`), deliberately NOT new verdicts on
+ * `document_spec_checks` — see the migration for why a register row must stay a
+ * judgement of a printed result:
+ *
+ *   missing_required  a required analyte for this supplier the certificate did
+ *                     not report. Frozen with the requirement as it stood.
+ *   unjudged          a printed result with no limit in scope and no printed
+ *                     specification — "No limit configured".
+ *
+ * Same replace-on-rewrite rule as the register: re-approving a document version
+ * replaces its gaps. Same best-effort rule: a database without 0107 loses the
+ * gaps, never the approval or the register.
+ */
+export async function registerSpecGaps(
+  db: D1Database,
+  ctx: RegisterContext,
+  gaps: { unjudged: UnjudgedResult[]; missing_required: MissingRequiredAnalyte[] }
+): Promise<{ written: number }> {
+  const rows = [
+    ...uniqueGaps(gaps.missing_required, (m) => m.spec_test_id).map((m) => [
+      generateId(),
+      ctx.tenantId,
+      ctx.documentId,
+      ctx.versionNumber ?? null,
+      ctx.queueItemId ?? null,
+      'missing_required',
+      m.spec_test_id,
+      m.requirement_id,
+      m.analyte_name,
+      null,
+      null,
+      null,
+      null,
+      m.reason,
+      JSON.stringify({
+        analyte: m.analyte_name,
+        why: m.why,
+        printed_as: m.printed_as,
+        review_by: m.watch?.review_by ?? null,
+        review_overdue: m.watch?.review_overdue ?? false,
+        reason: m.requirement_reason,
+      }),
+    ]),
+    ...uniqueGaps(gaps.unjudged, (u) => registerIdentity(u).result_key).map((u) => {
+      const identity = registerIdentity(u);
+      return [
+        generateId(),
+        ctx.tenantId,
+        ctx.documentId,
+        ctx.versionNumber ?? null,
+        ctx.queueItemId ?? null,
+        'unjudged',
+        u.spec_test_id,
+        null,
+        u.test_name_raw,
+        u.value_raw ?? null,
+        u.unit_raw ?? null,
+        identity.result_key,
+        identity.result_location,
+        u.reason,
+        JSON.stringify({ why: u.why, ...(u.lab_verdict ? { lab_verdict: u.lab_verdict } : {}) }),
+      ];
+    }),
+  ];
+
+  try {
+    await db
+      .prepare(
+        `DELETE FROM document_spec_gaps
+          WHERE document_id = ?
+            AND (version_number IS ? OR version_number = ?)`
+      )
+      .bind(ctx.documentId, ctx.versionNumber ?? null, ctx.versionNumber ?? -1)
+      .run();
+    if (rows.length === 0) return { written: 0 };
+    const stmt = db.prepare(
+      `INSERT INTO document_spec_gaps
+         (id, tenant_id, document_id, version_number, queue_item_id, kind,
+          spec_test_id, required_analyte_id, test_name_raw, value_raw, unit_raw,
+          result_key, result_location, reason, snapshot, judgement_origin)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approval')`
+    );
+    await db.batch(rows.map((values) => stmt.bind(...values)));
+    return { written: rows.length };
+  } catch (err) {
+    console.error(
+      '[spec-register] writing spec gaps failed (migration 0107 not applied?):',
+      err instanceof Error ? err.message : String(err)
+    );
+    return { written: 0 };
+  }
+}
+
+/** One gap per identity — the unique index's rule, applied first in code. */
+function uniqueGaps<T>(items: T[], key: (t: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter((i) => {
+    const k = key(i);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 export type { AlertRecipient } from './alert-routing';
 
 /**
@@ -226,9 +337,17 @@ export async function notifySpecFailures(
   db: D1Database,
   apiKey: string | undefined,
   ctx: NotifyContext,
-  failures: SpecVerdict[]
+  failures: SpecVerdict[],
+  /**
+   * Required analytes (0107) the certificate did not report. They ride in the
+   * SAME one-per-document email as the failures — one send path, not a second
+   * one — and can open it on their own: a required analyte is a rule somebody
+   * wrote for this supplier on purpose (a watch), so a certificate missing it is
+   * an event for the owner. Absent or empty changes nothing about today's send.
+   */
+  missingRequired: MissingRequiredAnalyte[] = []
 ): Promise<number> {
-  if (failures.length === 0) return 0;
+  if (failures.length === 0 && missingRequired.length === 0) return 0;
   if (!apiKey) return 0;
 
   // MODULE FILTER — compute and store, but do not send.
@@ -288,6 +407,10 @@ export async function notifySpecFailures(
         limit: f.limit_text,
         source: f.source,
       })),
+      missingRequired: [...new Map(missingRequired.map((m) => [m.spec_test_id, m])).values()].map((m) => ({
+        analyte: m.analyte_name,
+        why: m.why,
+      })),
       appUrl: ctx.appUrl,
       alertUrl: alertLinkUrl(ctx.appUrl, alertToken),
     });
@@ -307,6 +430,23 @@ export async function notifySpecFailures(
       )
       .bind(ctx.documentId)
       .run();
+    if (missingRequired.length > 0) {
+      try {
+        await db
+          .prepare(
+            `UPDATE document_spec_gaps
+                SET notified_at = datetime('now')
+              WHERE document_id = ? AND kind = 'missing_required' AND notified_at IS NULL`
+          )
+          .bind(ctx.documentId)
+          .run();
+      } catch (err) {
+        console.error(
+          '[spec-register] stamping notified gaps failed:',
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    }
 
     return recipients.length;
   } catch (err) {
@@ -348,9 +488,17 @@ export async function registerAndNotifyForApproval(
   },
   verdicts: SpecVerdict[],
   limits: ConfiguredLimit[],
-  documentsByRecord: Array<{ documentId: string; title: string; recordIndex: number | null }>
+  documentsByRecord: Array<{ documentId: string; title: string; recordIndex: number | null }>,
+  /**
+   * What was not judged (0107), addressed by scope exactly like the verdicts.
+   * Optional: a caller without it registers verdicts only, as before.
+   */
+  coverage: { unjudged?: UnjudgedResult[]; missing_required?: MissingRequiredAnalyte[] } = {}
 ): Promise<void> {
-  if (verdicts.length === 0 || documentsByRecord.length === 0) return;
+  const unjudged = coverage.unjudged ?? [];
+  const missing = coverage.missing_required ?? [];
+  if (verdicts.length === 0 && unjudged.length === 0 && missing.length === 0) return;
+  if (documentsByRecord.length === 0) return;
 
   try {
     // 'ai_fields' verdicts come from the flat path, which produces exactly one
@@ -363,17 +511,29 @@ export async function registerAndNotifyForApproval(
     }
     const flatTarget = documentsByRecord.length === 1 ? documentsByRecord[0] : null;
 
-    const grouped = new Map<string, { doc: (typeof documentsByRecord)[number]; verdicts: SpecVerdict[] }>();
-    for (const v of verdicts) {
-      const m = /^record\[(\d+)\]$/.exec(v.scope);
+    type Doc = (typeof documentsByRecord)[number];
+    const grouped = new Map<
+      string,
+      { doc: Doc; verdicts: SpecVerdict[]; unjudged: UnjudgedResult[]; missing: MissingRequiredAnalyte[] }
+    >();
+    const entryFor = (scope: string) => {
+      const m = /^record\[(\d+)\]$/.exec(scope);
       const target = m ? (byRecord.get(Number(m[1])) ?? [])[0] : flatTarget;
-      if (!target) continue;
-      const entry = grouped.get(target.documentId) ?? { doc: target, verdicts: [] };
-      entry.verdicts.push(v);
+      if (!target) return null;
+      const entry = grouped.get(target.documentId) ?? { doc: target, verdicts: [], unjudged: [], missing: [] };
       grouped.set(target.documentId, entry);
-    }
+      return entry;
+    };
+    for (const v of verdicts) entryFor(v.scope)?.verdicts.push(v);
+    for (const u of unjudged) entryFor(u.scope)?.unjudged.push(u);
+    for (const m of missing) entryFor(m.scope)?.missing.push(m);
 
-    for (const { doc, verdicts: docVerdicts } of grouped.values()) {
+    for (const { doc, verdicts: docVerdicts, unjudged: docUnjudged, missing: docMissing } of grouped.values()) {
+      await registerSpecGaps(
+        db,
+        { tenantId: base.tenantId, documentId: doc.documentId, versionNumber: 1, queueItemId: base.queueItemId },
+        { unjudged: docUnjudged, missing_required: docMissing }
+      );
       const { failures } = await registerSpecChecks(
         db,
         {
@@ -399,7 +559,7 @@ export async function registerAndNotifyForApproval(
         supplierName: base.supplierName,
         documentTypeId: base.documentTypeId,
         appUrl: base.appUrl,
-      }, failures);
+      }, failures, docMissing);
     }
   } catch (err) {
     console.error(

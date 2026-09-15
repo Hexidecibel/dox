@@ -57,7 +57,9 @@ import SupplierProductMapPanel from '../../components/SupplierProductMapPanel';
 import SupplierRequirementGaps from '../../components/SupplierRequirementGaps';
 import SupplierRequirementsEditor from '../../components/SupplierRequirementsEditor';
 import EntityNotes from '../../components/EntityNotes';
+import { SupplierWatchPanel } from '../../components/SupplierWatchPanel';
 import { useAuth } from '../../contexts/AuthContext';
+import { useModuleAccess } from '../../contexts/ModuleAccessContext';
 import type { LotScheme } from '../../lib/types';
 
 interface TabPanelProps {
@@ -237,6 +239,7 @@ export function SupplierDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { isAdmin } = useAuth();
+  const complianceVisible = useModuleAccess().visible.includes('compliance');
   const [supplier, setSupplier] = useState<ApiSupplier | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -787,7 +790,7 @@ export function SupplierDetail() {
 
       {/* Tabs */}
       <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-        <Tabs value={tab} onChange={(_, v) => setTab(v)}>
+        <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons="auto">
           <Tab label="Products" />
           <Tab label="Templates" />
           <Tab label={`Documents${documentsTotal ? ` (${documentsTotal})` : ''}`} />
@@ -796,6 +799,8 @@ export function SupplierDetail() {
           <Tab label="Document Types" />
           <Tab label="Product Mapping" />
           <Tab label="Notes" />
+          {/* Last, so hiding it for a tenant without Compliance shifts no index. */}
+          {complianceVisible && <Tab label="Spec watch" />}
         </Tabs>
       </Box>
 
@@ -1541,7 +1546,7 @@ export function SupplierDetail() {
       {/* Mounted lazily like Product Mapping so the fetch only fires when the  */}
       {/* tab is actually opened.                                               */}
       <TabPanel value={tab} index={7}>
-        {tab === 6 && (
+        {tab === 7 && (
           <EntityNotes
             entityType="supplier"
             entityId={supplier.id}
@@ -1551,6 +1556,17 @@ export function SupplierDetail() {
           />
         )}
       </TabPanel>
+
+      {/* Spec watch (migration 0107): this supplier's limits over the company
+          defaults and the analytes its certificates must report, with their
+          review-by dates. The same panel as Settings › Spec Limits, scoped. */}
+      {complianceVisible && (
+        <TabPanel value={tab} index={8}>
+          {tab === 8 && (
+            <SupplierWatchPanel supplierId={supplier.id} tenantId={supplier.tenant_id} canEdit={isAdmin} />
+          )}
+        </TabPanel>
+      )}
     </Box>
   );
 }

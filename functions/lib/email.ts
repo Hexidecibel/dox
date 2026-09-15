@@ -627,6 +627,12 @@ export function buildSpecAlertEmail(params: {
     /** 'printed' = the COA's own stated limit; 'limit' = ours. */
     source: 'printed' | 'limit';
   }>;
+  /**
+   * Required analytes (migration 0107) the certificate did not report. Listed
+   * in their own table under the failures — incomplete is a different finding
+   * from out of spec and is never counted as one. May be the only content.
+   */
+  missingRequired?: Array<{ analyte: string; why: 'not_on_certificate' | 'no_result' }>;
   appUrl?: string;
   /**
    * Token-gated /alert/<token> landing page for this alert. This is the link a
@@ -638,11 +644,19 @@ export function buildSpecAlertEmail(params: {
 }): { subject: string; html: string; text: string } {
   const { tenantName, documentTitle, documentId, supplierName, failures } = params;
   const n = failures.length;
+  const missing = params.missingRequired ?? [];
+  const m = missing.length;
 
+  const missingSubject =
+    m === 1
+      ? `required ${missing[0].analyte} not reported`
+      : `${m} required analytes not reported`;
   const subject =
-    n === 1
-      ? `SupDox: out-of-spec ${failures[0].test} on ${documentTitle}`
-      : `SupDox: ${n} out-of-spec results on ${documentTitle}`;
+    n === 0
+      ? `SupDox: ${missingSubject} on ${documentTitle}`
+      : n === 1
+        ? `SupDox: out-of-spec ${failures[0].test} on ${documentTitle}${m ? `; ${missingSubject}` : ''}`
+        : `SupDox: ${n} out-of-spec results on ${documentTitle}${m ? `; ${missingSubject}` : ''}`;
 
   const sourceLabel = (s: 'printed' | 'limit') =>
     s === 'limit' ? 'our limit' : "the COA's own limit";
@@ -696,7 +710,7 @@ export function buildSpecAlertEmail(params: {
     </tr>
     <tr>
       <td style="padding:32px;">
-        <h2 style="margin:0 0 16px;color:#333;font-size:18px;">${n === 1 ? 'A result is' : `${n} results are`} outside the acceptance limit</h2>
+        ${n > 0 ? `<h2 style="margin:0 0 16px;color:#333;font-size:18px;">${n === 1 ? 'A result is' : `${n} results are`} outside the acceptance limit</h2>
         <p style="margin:0 0 24px;color:#555;line-height:1.6;">
           <strong>${escapeHtml(documentTitle)}</strong>${supplierName ? ` from <strong>${escapeHtml(supplierName)}</strong>` : ''} came in with ${n === 1 ? 'a test result' : 'test results'} outside the limit${n === 1 ? '' : 's'} on file for ${escapeHtml(tenantName)}.
         </p>
@@ -708,7 +722,14 @@ export function buildSpecAlertEmail(params: {
             <th style="padding:10px 12px;text-align:left;color:#666;font-size:13px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #eee;">Against</th>
           </tr>
           ${rows}
-        </table>
+        </table>` : ''}
+        ${m > 0 ? `<h2 style="margin:0 0 16px;color:#333;font-size:18px;">${m === 1 ? 'A required analyte was' : `${m} required analytes were`} not reported</h2>
+        <p style="margin:0 0 16px;color:#555;line-height:1.6;">
+          ${n > 0 ? 'The certificate' : `<strong>${escapeHtml(documentTitle)}</strong>${supplierName ? ` from <strong>${escapeHtml(supplierName)}</strong>` : ''}`} does not report ${m === 1 ? 'an analyte' : 'analytes'} ${escapeHtml(tenantName)} requires from this supplier, so it is incomplete.
+        </p>
+        <ul style="margin:0 0 24px;padding-left:20px;color:#333;line-height:1.8;">
+          ${missing.map((x) => `<li><strong>${escapeHtml(x.analyte)}</strong> — ${x.why === 'no_result' ? 'listed with no result' : 'not on the certificate'}</li>`).join('\n')}
+        </ul>` : ''}
         ${link ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;">See the result</a></p>` : ''}
         ${alertLink ? `<p style="margin:8px 0 0;color:#999;font-size:12px;">No login needed. This link works for 30 days.${portalLink ? ` If you have a SupDox account, the full record is <a href="${escapeHtml(portalLink)}" style="color:#1A365D;">here</a>.` : ''}</p>` : ''}
         <p style="margin:16px 0 0;color:#777;font-size:13px;line-height:1.6;">
@@ -730,7 +751,10 @@ export function buildSpecAlertEmail(params: {
   const textLines = failures.map(
     (f) => `- ${f.test}: ${f.value || '—'} (limit ${f.limit || '—'}, ${sourceLabel(f.source)})`
   );
-  const text = `Out of spec — ${documentTitle}${supplierName ? ` from ${supplierName}` : ''}\n\n${textLines.join('\n')}\n${link ? `\n${link}\n` : ''}\nSupDox does not reject or hold anything on its own — this is for a person to look at.\n`;
+  const missingLines = missing.map(
+    (x) => `- ${x.analyte}: required, ${x.why === 'no_result' ? 'listed with no result' : 'not on the certificate'}`
+  );
+  const text = `${n > 0 ? 'Out of spec' : 'Incomplete certificate'} — ${documentTitle}${supplierName ? ` from ${supplierName}` : ''}\n\n${[...textLines, ...missingLines].join('\n')}\n${link ? `\n${link}\n` : ''}\nSupDox does not reject or hold anything on its own — this is for a person to look at.\n`;
 
   return { subject, html, text };
 }

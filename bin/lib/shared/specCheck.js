@@ -20,31 +20,42 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // shared/specCheck.ts
 var specCheck_exports = {};
 __export(specCheck_exports, {
+  NO_LIMIT_CONFIGURED_LABEL: () => NO_LIMIT_CONFIGURED_LABEL,
   STRICT_UNIT_POLICY: () => STRICT_UNIT_POLICY,
   checkConfiguredLimits: () => checkConfiguredLimits,
   checkPrintedSpecs: () => checkPrintedSpecs,
+  checkRequiredAnalytes: () => checkRequiredAnalytes,
   classifySpecDisagreement: () => classifySpecDisagreement,
   collectPrintedAssertions: () => collectPrintedAssertions,
   compareToLimit: () => compareToLimit,
+  describeUnitConversion: () => describeUnitConversion,
   detectTableShape: () => detectTableShape,
   findSpecDisagreements: () => findSpecDisagreements,
   formatLimit: () => formatLimit,
+  formatUnitConversion: () => formatUnitConversion,
   isControlRowLabel: () => isControlRowLabel,
+  isoDay: () => isoDay,
   matchSpecTest: () => matchSpecTest,
   normalizeUnit: () => normalizeUnit,
+  overdueWatches: () => overdueWatches,
   parseLimitExpression: () => parseLimitExpression,
   parseMeasuredValue: () => parseMeasuredValue,
   readVerdictWord: () => readVerdictWord,
+  requiredAnalyteApplies: () => requiredAnalyteApplies,
   resolveSpecLimits: () => resolveSpecLimits,
   resolveUnits: () => resolveUnits,
   resultRestatesSpec: () => resultRestatesSpec,
   specResultKey: () => specResultKey,
   specVerdictKey: () => specVerdictKey,
   toSpecLimit: () => toSpecLimit,
+  unitConversionNote: () => unitConversionNote,
   unitEquivalenceNote: () => unitEquivalenceNote,
   unitFactor: () => unitFactor,
   unitInferenceNote: () => unitInferenceNote,
-  validateLimitShape: () => validateLimitShape
+  unitRefusalNote: () => unitRefusalNote,
+  validateLimitShape: () => validateLimitShape,
+  watchEndedLabel: () => watchEndedLabel,
+  watchStatus: () => watchStatus
 });
 module.exports = __toCommonJS(specCheck_exports);
 
@@ -75,7 +86,8 @@ function normalizeUnit(raw) {
   if (!s) return UNKNOWN_UNIT;
   const n = norm(s);
   if (n === "percent" || n === "pct" || s.includes("%")) {
-    return { family: "percent", perBasis: 1, canonical: "%" };
+    const basis = percentBasis(s);
+    return basis ? { family: `percent:${basis}`, perBasis: 1, canonical: `% ${basis}` } : { family: "percent", perBasis: 1, canonical: "%" };
   }
   if (isEmptyCell(s)) return UNKNOWN_UNIT;
   if (!n) return UNKNOWN_UNIT;
@@ -83,13 +95,11 @@ function normalizeUnit(raw) {
   if (n === "c" || n === "degc" || n === "f" || n === "degf") {
     return { family: "temp", perBasis: 1, canonical: s };
   }
-  const m = /^(cfu|mpn|apc|spc|tpc|count|ct)(per|\/)?(\d+)?(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/.exec(
-    n
-  );
+  const m = parseEnumerationUnit(s);
   if (m) {
-    const method = m[1] === "cfu" || m[1] === "mpn" ? m[1] : "cfu";
-    const amount = m[3] ? Number(m[3]) : 1;
-    const basisRaw = m[4] ?? "";
+    const method = m.method === "cfu" || m.method === "mpn" ? m.method : "cfu";
+    const amount = m.amount;
+    const basisRaw = m.basis;
     const basis = basisRaw.startsWith("g") ? "mass" : basisRaw ? "volume" : "";
     if (!basis) return { family: `${method}:unspecified`, perBasis: amount, canonical: s };
     let perBasis = amount;
@@ -99,10 +109,38 @@ function normalizeUnit(raw) {
   }
   return { family: `other:${n}`, perBasis: 1, canonical: s };
 }
+function percentBasis(raw) {
+  const t = raw.toLowerCase().replace(/\s+/g, "");
+  if (/w\/v|wt\/vol|m\/v/.test(t)) return "w/v";
+  if (/w\/w|wt\/wt|m\/m/.test(t)) return "w/w";
+  if (/v\/v|vol\/vol/.test(t)) return "v/v";
+  return null;
+}
+var ENUMERATION_METHOD_RE = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?$/;
+var ENUMERATION_BASIS_RE = /^(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/;
+function parseEnumerationUnit(raw) {
+  const lower = raw.toLowerCase();
+  const num = /(\d*\.\d+|\d+)/.exec(lower);
+  if (!num) {
+    const m = /^(cfu|mpn|apc|spc|tpc|count|ct)(per)?(g|gram|grams|ml|milliliter|milliliters|l|liter|liters|oz)?$/.exec(
+      norm(lower)
+    );
+    return m ? { method: m[1], amount: 1, basis: m[3] ?? "" } : null;
+  }
+  const head = ENUMERATION_METHOD_RE.exec(norm(lower.slice(0, num.index)));
+  const tail = ENUMERATION_BASIS_RE.exec(norm(lower.slice(num.index + num[0].length)));
+  if (!head || !tail) return null;
+  const amount = Number(num[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return { method: head[1], amount, basis: tail[1] ?? "" };
+}
 var STRICT_UNIT_POLICY = {};
 function resolveUnits(from, to, policy = STRICT_UNIT_POLICY) {
   if (from.family === "unknown" || to.family === "unknown") return { factor: 1, equated: false };
   if (from.family === to.family) return { factor: to.perBasis / from.perBasis, equated: false };
+  if (from.family.startsWith("percent") && to.family.startsWith("percent")) {
+    return from.family === "percent" || to.family === "percent" ? { factor: 1, equated: false } : null;
+  }
   const [fMethod, fBasis] = from.family.split(":");
   const [tMethod, tBasis] = to.family.split(":");
   if (fMethod !== tMethod) return null;
@@ -123,6 +161,45 @@ function unitEquivalenceNote(value, limit) {
   const v = value.canonical || "the printed unit";
   const l = limit.canonical || "the limit unit";
   return `${v} judged as ${l}, per this tenant's setting`;
+}
+function roundFactor(x) {
+  return Number(x.toPrecision(6));
+}
+function describeUnitConversion(from, to, match) {
+  const scaled = Math.abs(match.factor - 1) > 1e-9;
+  if (!match.equated && !scaled) return null;
+  const operation = !scaled ? "1:1" : match.factor < 1 ? `\xF7 ${roundFactor(1 / match.factor)}` : `\xD7 ${roundFactor(match.factor)}`;
+  return {
+    from: from.canonical || "the printed unit",
+    to: to.canonical || "the limit unit",
+    rule: match.equated ? "tenant_volume_mass" : "sample_basis",
+    factor: roundFactor(match.factor),
+    operation
+  };
+}
+function unitConversionNote(c) {
+  if (c.rule === "tenant_volume_mass") {
+    return `${c.from} judged as ${c.to}, per this tenant's setting${c.operation === "1:1" ? "" : `, ${c.operation}`}`;
+  }
+  return `${c.from} converted to ${c.to}, ${c.operation}`;
+}
+function formatUnitConversion(c) {
+  const how = c.rule === "tenant_volume_mass" ? c.operation === "1:1" ? "tenant setting" : `tenant setting, ${c.operation}` : c.operation;
+  return `Converted: ${c.from} \u2192 ${c.to} (${how})`;
+}
+function unitRefusalNote(from, to) {
+  const [fm, fb] = from.family.split(":");
+  const [tm, tb] = to.family.split(":");
+  if (fm === "percent" && tm === "percent") {
+    return " (a % w/w, % v/v or % w/v comparison depends on the product, so it is left for a person to verify)";
+  }
+  if (fm === tm && (fb === "volume" && tb === "mass" || fb === "mass" && tb === "volume")) {
+    return " (per-volume against per-mass depends on the product, so it is left for a person to verify \u2014 a tenant whose products make them the same number can say so in Settings \u203A Spec Limits)";
+  }
+  if (fm !== tm && (fm === "cfu" || fm === "mpn") && (tm === "cfu" || tm === "mpn")) {
+    return " (different counting methods)";
+  }
+  return "";
 }
 function isKnownUnit(raw) {
   const u = normalizeUnit(raw);
@@ -391,16 +468,21 @@ function compareToLimit(value, limit, policy = STRICT_UNIT_POLICY) {
   if (match === null) {
     return {
       verdict: "not_checked",
-      reason: `result is in ${vu.canonical || "an unknown unit"} but the limit is in ${lu.canonical || "another unit"} \u2014 not comparable`,
+      reason: `result is in ${vu.canonical || "an unknown unit"} but the limit is in ${lu.canonical || "another unit"} \u2014 not comparable${unitRefusalNote(vu, lu)}`,
       value_num: null
     };
   }
   const v = value.value * match.factor;
-  const say = (c) => match.equated ? {
-    ...c,
-    reason: `${c.reason} (${unitEquivalenceNote(vu, lu)})`,
-    unit_equivalence_applied: true
-  } : c;
+  const conversion = describeUnitConversion(vu, lu, match);
+  const say = (c) => {
+    if (!conversion) return c;
+    return {
+      ...c,
+      reason: `${c.reason} (${unitConversionNote(conversion)})`,
+      ...match.equated ? { unit_equivalence_applied: true } : {},
+      conversion
+    };
+  };
   const exceedsCeiling = (bound, inclusive) => inclusive ? v > bound : v >= bound;
   const belowFloor = (bound, inclusive) => inclusive ? v < bound : v <= bound;
   switch (limit.operator) {
@@ -578,8 +660,11 @@ function judgePrinted(scope, target, row, policy = STRICT_UNIT_POLICY) {
   }
   if (!cmp) return null;
   const limitText = formatLimit(limit);
-  const equatedSuffix = cmp.unit_equivalence_applied ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(withUnit(limit, unitRaw).unit))})` : "";
-  const equated = cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {};
+  const equatedSuffix = cmp.conversion ? ` (${unitConversionNote(cmp.conversion)})` : "";
+  const equated = {
+    ...cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {},
+    ...cmp.conversion ? { conversion: cmp.conversion } : {}
+  };
   if (cmp.verdict === "out_of_spec") {
     return {
       ...base,
@@ -688,6 +773,16 @@ function resultRestatesSpec(resultRaw, specRaw, unitRaw = "") {
   if (value.kind !== "numeric") return false;
   return (result.match(/\d/g) || []).length >= 4;
 }
+function isoDay(raw) {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(raw ?? "").trim());
+  return m ? m[1] : null;
+}
+function watchStatus(reviewBy, asOf) {
+  const day = isoDay(reviewBy);
+  if (!day) return null;
+  const today = isoDay(asOf);
+  return { review_by: day, review_overdue: !!today && today > day };
+}
 function specificity(l) {
   return (l.product_id ? 4 : 0) + (l.supplier_id ? 2 : 0) + (l.document_type_id ? 1 : 0);
 }
@@ -737,6 +832,7 @@ function toSpecLimit(l, test) {
     basis_grams: null
   };
 }
+var NO_LIMIT_CONFIGURED_LABEL = "No limit configured";
 function detectCrosstab(headers, tests) {
   if (headers.length < 2) return null;
   const matched = headers.map((h) => matchSpecTest(h, tests));
@@ -801,23 +897,46 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
   const unmatched = /* @__PURE__ */ new Set();
   const controlRows = /* @__PURE__ */ new Set();
   const nonMeasurementRows = /* @__PURE__ */ new Set();
-  if (tests.length === 0) {
-    return { verdicts, unmatched: [], control_rows: [], non_measurement_rows: [] };
-  }
-  const judge = (scope, target, testName, valueRaw, unitRaw, specRaw = "", unitHint = null) => {
+  const unjudged = [];
+  const noteUnjudged = (scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, matched) => {
+    if (isBlankResult(valueRaw)) return;
+    if (parseLimitExpression(specRaw)) return;
+    const labWord = readVerdictWord(verdictRaw || valueRaw);
+    if (labWord === "fail") return;
+    const printed = `${valueRaw}${unitRaw && !isEmptyCell(unitRaw) && !trailingUnit(valueRaw) ? ` ${unitRaw}` : ""}`;
+    const reason = matched ? `${matched.name} is a configured analyte, but no limit applies to this supplier and document type, and the certificate prints no specification for it` : "no configured analyte matches this name, and the certificate prints no specification for it";
+    unjudged.push({
+      scope,
+      target,
+      test_name_raw: testName,
+      value_raw: valueRaw,
+      unit_raw: unitRaw || null,
+      state: "unjudged",
+      why: matched ? "no_limit_in_scope" : "no_analyte",
+      spec_test_id: matched ? matched.id : null,
+      ...labWord ? { lab_verdict: labWord } : {},
+      reason,
+      message: `${testName}: ${NO_LIMIT_CONFIGURED_LABEL.toLowerCase()} \u2014 ${printed} was printed and not judged.`
+    });
+  };
+  const judge = (scope, target, testName, valueRaw, unitRaw, specRaw = "", unitHint = null, verdictRaw = "") => {
     if (!testName) return;
     const test = matchSpecTest(testName, tests);
     if (!test) {
       unmatched.add(testName);
+      noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, null);
       return;
     }
     const configured = resolved.get(test.id);
     if (!configured) {
       unmatched.add(testName);
+      noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, test);
       return;
     }
     if (isBlankResult(valueRaw)) return;
     const limit = toSpecLimit(configured, test);
+    const watch = watchStatus(configured.review_by, opts.asOf);
+    const watched = watch ? { watch } : {};
     if (resultRestatesSpec(valueRaw, specRaw, unitRaw)) {
       const limitTextOnly = formatLimit(limit);
       verdicts.push({
@@ -832,6 +951,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
         limit_id: configured.id,
         criticality: parseSpecCriticality(configured.criticality),
         value_num: null,
+        ...watched,
         reason: RESTATED_SPEC_REASON,
         verdict: "not_checked",
         message: `${test.name} could not be judged against our limit of ${limitTextOnly} \u2014 ${RESTATED_SPEC_REASON}.`
@@ -854,6 +974,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
         limit_id: configured.id,
         criticality: parseSpecCriticality(configured.criticality),
         value_num: null,
+        ...watched,
         lab_verdict: labVerdict,
         verdict: "not_checked",
         reason: reason2,
@@ -873,7 +994,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
     const cmp = compareToLimit(value, effectiveLimit, policy);
     if (cmp.verdict === "in_spec" && !opts.includePasses) return;
     const limitText = formatLimit(limit);
-    const equatedSuffix = cmp.unit_equivalence_applied ? ` (${unitEquivalenceNote(normalizeUnit(value.unit), normalizeUnit(effectiveLimit.unit))})` : "";
+    const equatedSuffix = cmp.conversion ? ` (${unitConversionNote(cmp.conversion)})` : "";
     const reason = inferred ? `${cmp.reason} (${inferenceNote})` : cmp.reason;
     const base = {
       scope,
@@ -891,7 +1012,9 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       value_num: cmp.value_num,
       reason,
       ...cmp.unit_equivalence_applied ? { unit_equivalence_applied: true } : {},
-      ...inferred ? { unit_inferred_from: inferred.from } : {}
+      ...cmp.conversion ? { conversion: cmp.conversion } : {},
+      ...inferred ? { unit_inferred_from: inferred.from } : {},
+      ...watched
     };
     if (cmp.verdict === "out_of_spec") {
       verdicts.push({
@@ -978,7 +1101,8 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
           cell(shape.result),
           cell(shape.unit),
           cell(shape.spec),
-          headerHint
+          headerHint,
+          cell(shape.verdict)
         );
       });
     });
@@ -1001,7 +1125,8 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
     verdicts,
     unmatched: [...unmatched],
     control_rows: [...controlRows],
-    non_measurement_rows: [...nonMeasurementRows]
+    non_measurement_rows: [...nonMeasurementRows],
+    unjudged
   };
 }
 function unitHintFor(header, unitsRowCell) {
@@ -1010,6 +1135,115 @@ function unitHintFor(header, unitsRowCell) {
   const cell = unitsRowCell.trim();
   if (cell && isKnownUnit(cell)) return { unit: cell, from: "units_row" };
   return null;
+}
+function requiredAnalyteApplies(r, ctx, asOf) {
+  if (!ctx.supplier_id || r.supplier_id !== ctx.supplier_id) return false;
+  if (!ctx.document_type_id || r.document_type_id !== ctx.document_type_id) return false;
+  const from = isoDay(r.effective_from);
+  const today = isoDay(asOf);
+  if (from && today && today < from) return false;
+  return true;
+}
+function reportedAnalytes(sources, tests) {
+  const out = /* @__PURE__ */ new Map();
+  const note = (name, value) => {
+    const t = matchSpecTest(name, tests);
+    if (!t) return;
+    const has = !isBlankResult(value) && !isDateOrTimeCell(value);
+    const prev = out.get(t.id);
+    if (!prev || !prev.withResult && has) out.set(t.id, { withResult: has, printedAs: name });
+  };
+  for (const src of sources) {
+    for (const table of src.tables ?? []) {
+      const headers = table.headers || [];
+      const rows = table.rows || [];
+      const shape = detectTableShape(headers);
+      if (shape.result === -1 && shape.spec === -1) {
+        const cross = detectCrosstab(headers, tests);
+        if (cross) {
+          for (const ci of cross.resultIndexes) {
+            const header = headers[ci] ?? "";
+            const product = rows.filter(
+              (r) => !isControlRowLabel(cross.labelIndex >= 0 ? r[cross.labelIndex] : "")
+            );
+            if (product.length === 0) note(header, "");
+            for (const r of product) note(header, String(r[ci] ?? "").trim());
+          }
+          continue;
+        }
+      }
+      const valueCol = shape.result !== -1 ? shape.result : shape.verdict;
+      if (valueCol === -1 || shape.test === -1) continue;
+      for (const r of rows) {
+        note(String(r[shape.test] ?? "").trim(), String(r[valueCol] ?? "").trim());
+      }
+    }
+    for (const cells of Object.values(src.groups ?? {})) {
+      if (!cells || typeof cells !== "object") continue;
+      for (const [cellName, cell] of Object.entries(cells)) {
+        if (!cell || typeof cell !== "object") continue;
+        note(cellName.replace(/_/g, " "), String(cell.value ?? "").trim());
+      }
+    }
+  }
+  return out;
+}
+function checkRequiredAnalytes(sources, tests, required, ctx, opts = {}) {
+  const applicable = required.filter((r) => requiredAnalyteApplies(r, ctx, opts.asOf));
+  if (applicable.length === 0) return [];
+  const isRecord = (s) => /^record\[\d+\]$/.test(s.scope);
+  const shared = sources.filter((s) => !isRecord(s));
+  const recordScopes = [...new Set(sources.filter(isRecord).map((s) => s.scope))];
+  const units = recordScopes.length > 0 ? recordScopes.map((scope) => ({ scope, sources: [...sources.filter((s) => s.scope === scope), ...shared] })) : [{ scope: shared[0]?.scope ?? "ai_fields", sources: shared }];
+  const noResults = sources.every((s) => (s.tables ?? []).length === 0 && Object.keys(s.groups ?? {}).length === 0);
+  const byId = new Map(tests.map((t) => [t.id, t]));
+  const out = [];
+  for (const unit of units) {
+    const reported = reportedAnalytes(unit.sources, tests);
+    for (const r of applicable) {
+      const seen = reported.get(r.spec_test_id);
+      if (seen?.withResult) continue;
+      const name = byId.get(r.spec_test_id)?.name ?? "A required analyte";
+      const watch = watchStatus(r.review_by, opts.asOf);
+      const why = seen ? "no_result" : "not_on_certificate";
+      const reason = why === "no_result" ? `required for this supplier, printed as "${seen.printedAs}" with no result` : noResults ? "required for this supplier, and no test results were read from this certificate at all" : "required for this supplier, and not reported on this certificate under its name or any alias";
+      out.push({
+        scope: unit.scope,
+        state: "missing_required",
+        requirement_id: r.id,
+        spec_test_id: r.spec_test_id,
+        analyte_name: name,
+        why,
+        printed_as: seen ? seen.printedAs : null,
+        watch,
+        requirement_reason: r.reason ?? null,
+        reason,
+        message: why === "no_result" ? `${name} is required for this supplier and was printed with no result \u2014 the certificate is incomplete.` : `${name} is required for this supplier and is not on this certificate \u2014 the certificate is incomplete.`
+      });
+    }
+  }
+  return out;
+}
+function overdueWatches(tests, limits, required, ctx, asOf) {
+  const name = (id) => tests.find((t) => t.id === id)?.name ?? "an analyte";
+  const out = [];
+  for (const l of resolveSpecLimits(limits, ctx).values()) {
+    const w = watchStatus(l.review_by, asOf);
+    if (w?.review_overdue) {
+      out.push({ kind: "limit", id: l.id, spec_test_id: l.spec_test_id, analyte_name: name(l.spec_test_id), review_by: w.review_by });
+    }
+  }
+  for (const r of required) {
+    if (!requiredAnalyteApplies(r, ctx, asOf)) continue;
+    const w = watchStatus(r.review_by, asOf);
+    if (w?.review_overdue) {
+      out.push({ kind: "required_analyte", id: r.id, spec_test_id: r.spec_test_id, analyte_name: name(r.spec_test_id), review_by: w.review_by });
+    }
+  }
+  return out;
+}
+function watchEndedLabel(reviewBy) {
+  return `Watch period ended ${reviewBy} \u2014 review`;
 }
 function validateLimitShape(input) {
   const { operator } = input;
@@ -1150,29 +1384,40 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  NO_LIMIT_CONFIGURED_LABEL,
   STRICT_UNIT_POLICY,
   checkConfiguredLimits,
   checkPrintedSpecs,
+  checkRequiredAnalytes,
   classifySpecDisagreement,
   collectPrintedAssertions,
   compareToLimit,
+  describeUnitConversion,
   detectTableShape,
   findSpecDisagreements,
   formatLimit,
+  formatUnitConversion,
   isControlRowLabel,
+  isoDay,
   matchSpecTest,
   normalizeUnit,
+  overdueWatches,
   parseLimitExpression,
   parseMeasuredValue,
   readVerdictWord,
+  requiredAnalyteApplies,
   resolveSpecLimits,
   resolveUnits,
   resultRestatesSpec,
   specResultKey,
   specVerdictKey,
   toSpecLimit,
+  unitConversionNote,
   unitEquivalenceNote,
   unitFactor,
   unitInferenceNote,
-  validateLimitShape
+  unitRefusalNote,
+  validateLimitShape,
+  watchEndedLabel,
+  watchStatus
 });

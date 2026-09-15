@@ -84,7 +84,10 @@ function uniqueByRegisterIdentity(verdicts) {
   return { kept, dropped };
 }
 function buildLimitSnapshot(verdict, limits) {
-  const equated = verdict.unit_equivalence_applied ? { unit_equivalence: "volume_mass" } : {};
+  const equated = {
+    ...verdict.unit_equivalence_applied ? { unit_equivalence: "volume_mass" } : {},
+    ...verdict.conversion ? { conversion: verdict.conversion } : {}
+  };
   if (verdict.source !== "limit" || !verdict.limit_id) {
     return verdict.limit_text ? JSON.stringify({ printed: verdict.limit_text, ...equated }) : null;
   }
@@ -100,7 +103,12 @@ function buildLimitSnapshot(verdict, limits) {
     severity: l.severity,
     criticality: parseSpecCriticality(l.criticality),
     text: verdict.limit_text,
-    ...equated
+    ...equated,
+    // A supplier watch (0107) is frozen like criticality: whether the tighter
+    // limit was inside its review period when this result was judged is part of
+    // what it was judged against, and extending the watch later must not
+    // rewrite that. Absent = not a watch limit.
+    ...verdict.watch ? { supplier_id: l.supplier_id, review_by: verdict.watch.review_by, review_overdue: verdict.watch.review_overdue } : {}
   });
 }
 // Annotate the CommonJS export names for ESM import in node:

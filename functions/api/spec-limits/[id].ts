@@ -21,6 +21,7 @@ import {
   badRequest,
   num,
   readCriticality,
+  readReviewBy,
   validateScope,
   findScopeConflict,
   scopeConflictResponse,
@@ -76,6 +77,17 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     );
     if (conflict) return scopeConflictResponse(conflict);
 
+    // Review-by is validated against the RESULTING scope, like the conflict
+    // check: moving a watch limit off its supplier while it still carries a
+    // review-by would leave a tenant-wide limit claiming to be a watch.
+    const reviewBy = readReviewBy(body.review_by, resultingScope.supplier_id);
+    if (reviewBy && 'error' in reviewBy) return badRequest(reviewBy.error);
+    if (!reviewBy && limit.review_by && !resultingScope.supplier_id) {
+      return badRequest(
+        'This limit has a review-by date, which only a supplier-specific limit can carry — clear review_by in the same request'
+      );
+    }
+
     const updates: string[] = [];
     const params: (string | number | null)[] = [];
     const push = (sql: string, value: string | number | null) => {
@@ -108,6 +120,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.supplier_id !== undefined) push('supplier_id = ?', body.supplier_id || null);
     if (body.document_type_id !== undefined) push('document_type_id = ?', body.document_type_id || null);
     if (body.product_id !== undefined) push('product_id = ?', body.product_id || null);
+    if (reviewBy) push('review_by = ?', reviewBy.review_by);
 
     if (updates.length === 0) return badRequest('No fields to update');
 
@@ -131,12 +144,14 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           value_min: limit.value_min,
           value_max: limit.value_max,
           criticality: limit.criticality,
+          review_by: limit.review_by ?? null,
         },
         after: {
           operator,
           value_min: valueMin,
           value_max: valueMax,
           criticality: body.criticality !== undefined ? body.criticality : limit.criticality,
+          review_by: reviewBy ? reviewBy.review_by : (limit.review_by ?? null),
         },
       }),
       getClientIp(context.request)

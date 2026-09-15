@@ -43,6 +43,36 @@ export interface LimitBody {
   notes?: string | null;
   active?: boolean | number;
   tenant_id?: string;
+  /** Watch review-by date, YYYY-MM-DD (migration 0107). Supplier-scoped limits only. */
+  review_by?: string | null;
+}
+
+/**
+ * Read a review-by date off a body (migration 0107), or say why it cannot be.
+ *
+ * A review-by belongs to a SUPPLIER WATCH — a supplier-scoped limit tighter
+ * than the company default for a period — so it is refused on a limit with no
+ * supplier: a tenant-wide limit has no "company default" to return to, and a
+ * date on it would put "watch period ended" on every certificate from every
+ * supplier. Passing the date never loosens the limit (see shared/specCheck.ts
+ * `watchStatus`); it only asks a person to extend or remove it.
+ *
+ * `undefined` = not submitted; `null` / '' = clear it.
+ */
+export function readReviewBy(
+  value: unknown,
+  resultingSupplierId: string | null | undefined
+): { review_by: string | null } | { error: string } | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return { review_by: null };
+  const s = String(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || Number.isNaN(Date.parse(`${s}T00:00:00Z`))) {
+    return { error: 'review_by must be a date in YYYY-MM-DD form' };
+  }
+  if (!resultingSupplierId) {
+    return { error: 'review_by applies to a supplier-specific (watch) limit — choose a supplier first' };
+  }
+  return { review_by: s };
 }
 
 const SEVERITIES = new Set(['warn', 'alert']);
@@ -258,6 +288,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const criticality = readCriticality(body.criticality);
     if ('error' in criticality) return badRequest(criticality.error);
 
+    const reviewBy = readReviewBy(body.review_by, body.supplier_id);
+    if (reviewBy && 'error' in reviewBy) return badRequest(reviewBy.error);
+
     const scopeError = await validateScope(context.env.DB, tenantId, body);
     if (scopeError) return badRequest(scopeError);
 
@@ -268,8 +301,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     await context.env.DB.prepare(
       `INSERT INTO spec_limits
          (id, tenant_id, spec_test_id, supplier_id, document_type_id, product_id,
-          operator, value_min, value_max, unit, severity, criticality, notes, active, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          operator, value_min, value_max, unit, severity, criticality, notes, active, updated_by,
+          review_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         id,
@@ -286,7 +320,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         criticality.criticality,
         body.notes ? sanitizeString(body.notes) : null,
         body.active === false || body.active === 0 ? 0 : 1,
-        user.id
+        user.id,
+        reviewBy && 'review_by' in reviewBy ? reviewBy.review_by : null
       )
       .run();
 
@@ -304,6 +339,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         valueMax,
         unit: body.unit,
         criticality: criticality.criticality,
+        supplier_id: body.supplier_id || null,
+        review_by: reviewBy && 'review_by' in reviewBy ? reviewBy.review_by : null,
       }),
       getClientIp(context.request)
     );

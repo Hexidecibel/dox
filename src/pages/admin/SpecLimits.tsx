@@ -101,6 +101,8 @@ import type { ApiSpecTest, ApiSpecLimit, ApiSupplier, ApiDocumentType } from '..
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
 import { EmptyState } from '../../components/EmptyState';
+import { ReviewByCell, SupplierWatchPanel } from '../../components/SupplierWatchPanel';
+import { useSearchParams } from 'react-router-dom';
 
 /** Operators, worded the way someone writing a spec would say them. */
 const OPERATORS: Array<{ value: string; label: string; needs: 'max' | 'min' | 'both' | 'none' }> = [
@@ -206,7 +208,14 @@ function LimitTable({
             <TableRow key={l.id} sx={{ opacity: l.active ? 1 : 0.5 }}>
               {showAnalyte && <TableCell>{l.test_name}</TableCell>}
               <TableCell sx={{ fontWeight: 600 }}>{limitText(l)}</TableCell>
-              <TableCell>{scopeText(l)}</TableCell>
+              <TableCell>
+                {scopeText(l)}
+                {l.supplier_id && l.review_by && (
+                  <Box sx={{ mt: 0.25 }}>
+                    <ReviewByCell reviewBy={l.review_by} asOf={new Date().toISOString().slice(0, 10)} />
+                  </Box>
+                )}
+              </TableCell>
               {/* Grouped by tier, the chip on every row would repeat the
                   section heading, so it is dropped there instead of shown
                   twice. */}
@@ -284,7 +293,12 @@ export function SpecLimits() {
   const [limitDocType, setLimitDocType] = useState('');
   const [limitSeverity, setLimitSeverity] = useState('alert');
   const [limitCriticality, setLimitCriticality] = useState<SpecCriticality>(DEFAULT_SPEC_CRITICALITY);
+  // Watch review-by (migration 0107) — offered only once a supplier is chosen.
+  const [limitReviewBy, setLimitReviewBy] = useState('');
   const [saving, setSaving] = useState(false);
+  // Bumped after every load so the watch panel re-reads what this page changed.
+  const [watchReload, setWatchReload] = useState(0);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   // How the list is laid out. 'analyte' is the original shape and stays the
   // default — it is how the person maintaining aliases thinks. 'criticality'
@@ -308,6 +322,7 @@ export function SpecLimits() {
       setSuppliers((s as { suppliers: ApiSupplier[] }).suppliers || []);
       setDocTypes((d as { documentTypes: ApiDocumentType[] }).documentTypes || []);
       setUnitEquiv(p ? p.volume_mass_equivalent : null);
+      setWatchReload((n) => n + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load spec limits');
     } finally {
@@ -319,6 +334,18 @@ export function SpecLimits() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTenantId]);
+
+  // Arriving from a supplier's Spec watch tab ("Add a tighter limit"): open the
+  // limit dialog already scoped to that supplier, once analytes have loaded.
+  useEffect(() => {
+    const watchSupplier = searchParams.get('watch_supplier');
+    if (!watchSupplier || specTests.length === 0) return;
+    openCreateLimit(undefined, watchSupplier);
+    const next = new URLSearchParams(searchParams);
+    next.delete('watch_supplier');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, specTests.length]);
 
   const limitsByTest = useMemo(() => {
     const out: Record<string, ApiSpecLimit[]> = {};
@@ -427,17 +454,18 @@ export function SpecLimits() {
     }
   };
 
-  const openCreateLimit = (specTestId?: string) => {
+  const openCreateLimit = (specTestId?: string, supplierId?: string) => {
     setEditingLimit(null);
     setLimitTestId(specTestId || specTests[0]?.id || '');
     setLimitOperator('<=');
     setLimitMin('');
     setLimitMax('');
     setLimitUnit(specTests.find((t) => t.id === specTestId)?.default_unit || '');
-    setLimitSupplier('');
+    setLimitSupplier(supplierId || '');
     setLimitDocType('');
     setLimitSeverity('alert');
     setLimitCriticality(DEFAULT_SPEC_CRITICALITY);
+    setLimitReviewBy('');
     setLimitDialog(true);
   };
 
@@ -452,6 +480,7 @@ export function SpecLimits() {
     setLimitDocType(l.document_type_id || '');
     setLimitSeverity(l.severity);
     setLimitCriticality(criticalityOf(l));
+    setLimitReviewBy(l.review_by || '');
     setLimitDialog(true);
   };
 
@@ -469,6 +498,9 @@ export function SpecLimits() {
         document_type_id: limitDocType || null,
         severity: limitSeverity,
         criticality: limitCriticality,
+        // A review-by only exists on a supplier watch; moving a limit to
+        // "all suppliers" clears it in the same request.
+        review_by: limitSupplier ? limitReviewBy || null : null,
       };
       if (editingLimit) {
         await api.specLimits.update(editingLimit.id, payload);
@@ -613,6 +645,14 @@ export function SpecLimits() {
           }
         />
       </Paper>
+
+      {specTests.length > 0 && (
+        <SupplierWatchPanel
+          tenantId={activeTenantId}
+          reloadKey={watchReload}
+          onChanged={load}
+        />
+      )}
 
       {specTests.length === 0 ? (
         <EmptyState
@@ -845,6 +885,19 @@ export function SpecLimits() {
               ))}
             </Select>
           </FormControl>
+
+          {limitSupplier && (
+            <TextField
+              label="Review by (watch)"
+              type="date"
+              value={limitReviewBy}
+              onChange={(e) => setLimitReviewBy(e.target.value)}
+              fullWidth
+              margin="normal"
+              InputLabelProps={{ shrink: true }}
+              helperText="A supplier-specific limit is a watch over the company default. On this date it is flagged for review — it keeps applying until you extend or remove it."
+            />
+          )}
 
           <FormControl fullWidth margin="normal">
             <InputLabel>Document type</InputLabel>

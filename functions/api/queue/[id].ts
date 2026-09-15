@@ -1255,7 +1255,7 @@ async function registerFlatApproveSpecChecks(
 ): Promise<void> {
   try {
     const specConfig = await loadSpecConfig(context.env.DB, String(item.tenant_id));
-    const { results } = specResultsWithConfig(
+    const { results, unjudged, missing_required } = specResultsWithConfig(
       { tables: typeof tables === 'string' ? tables : tables ? JSON.stringify(tables) : item.tables },
       specConfig,
       {
@@ -1280,7 +1280,8 @@ async function registerFlatApproveSpecChecks(
       },
       results,
       specConfig.limits,
-      documents.map((d) => ({ documentId: d.documentId, title: d.title, recordIndex: null }))
+      documents.map((d) => ({ documentId: d.documentId, title: d.title, recordIndex: null })),
+      { unjudged, missing_required }
     );
   } catch (err) {
     console.error(
@@ -1371,7 +1372,7 @@ async function handleCoaRecordsApprove(
   // deliberately after the documents exist: the approval stands regardless.
   try {
     const specConfig = await loadSpecConfig(context.env.DB, String(item.tenant_id));
-    const { results } = specResultsWithConfig(
+    const { results, unjudged, missing_required } = specResultsWithConfig(
       { ai_records: JSON.stringify(payload) },
       specConfig,
       {
@@ -1404,7 +1405,11 @@ async function handleCoaRecordsApprove(
         documentId: d.documentId,
         title: d.title,
         recordIndex: d.recordIndex,
-      }))
+      })),
+      // What was NOT judged goes down beside what was (0107): required
+      // analytes this certificate did not report, and printed results with no
+      // limit configured.
+      { unjudged, missing_required }
     );
   } catch (err) {
     console.error(

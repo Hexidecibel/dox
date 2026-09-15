@@ -1790,7 +1790,7 @@ export default function ReviewQueue() {
                     )}
                     {/* An out-of-spec RESULT is the one thing worth spotting
                         from the collapsed list without opening anything. */}
-                    <SpecAlertChip verdicts={item.spec_results} />
+                    <SpecAlertChip verdicts={item.spec_results} missingRequired={item.spec_missing_required} />
                     {item.status === 'pending' && <IntakeHistoryChips history={item.intake_history} />}
                     {item.template_id && (
                       <Tooltip title={helpContent.review_queue.main.fieldTooltips.templateMatch} arrow>
@@ -2786,7 +2786,13 @@ export default function ReviewQueue() {
 
                           return (
                             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                              <SpecWarningBanner verdicts={item.spec_results} summary={item.spec_summary} />
+                              <SpecWarningBanner
+                                verdicts={item.spec_results}
+                                summary={item.spec_summary}
+                                unjudged={item.spec_unjudged}
+                                missingRequired={item.spec_missing_required}
+                                watchOverdue={item.spec_watch_overdue}
+                              />
                               <InvariantWarningBanner
                                 warnings={item.invariant_warnings}
                                 dismissed={itemDismissed}

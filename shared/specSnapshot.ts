@@ -117,7 +117,15 @@ export function buildLimitSnapshot(
   verdict: SpecVerdict,
   limits: ConfiguredLimit[]
 ): string | null {
-  const equated = verdict.unit_equivalence_applied ? { unit_equivalence: 'volume_mass' } : {};
+  // `conversion` sits beside the older `unit_equivalence` key rather than
+  // replacing it: rows written before it existed carry only the latter, and a
+  // reader handles both. It covers sample-basis arithmetic (CFU/100 g → CFU/g)
+  // as well as the tenant equivalence, because the SME ruling is that ANY
+  // conversion behind a comparison is part of what it was judged against.
+  const equated = {
+    ...(verdict.unit_equivalence_applied ? { unit_equivalence: 'volume_mass' } : {}),
+    ...(verdict.conversion ? { conversion: verdict.conversion } : {}),
+  };
   if (verdict.source !== 'limit' || !verdict.limit_id) {
     // A printed-spec verdict's "limit" is the document's own text, which is
     // already captured verbatim in limit_text.
@@ -140,5 +148,12 @@ export function buildLimitSnapshot(
     criticality: parseSpecCriticality(l.criticality),
     text: verdict.limit_text,
     ...equated,
+    // A supplier watch (0107) is frozen like criticality: whether the tighter
+    // limit was inside its review period when this result was judged is part of
+    // what it was judged against, and extending the watch later must not
+    // rewrite that. Absent = not a watch limit.
+    ...(verdict.watch
+      ? { supplier_id: l.supplier_id, review_by: verdict.watch.review_by, review_overdue: verdict.watch.review_overdue }
+      : {}),
   });
 }
