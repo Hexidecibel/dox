@@ -7,6 +7,7 @@ import type { Env, User } from '../../lib/types';
 import { withInvariantWarnings } from '../../lib/queue-warnings';
 import { specConfigLoader, withSpecConfig } from '../../lib/spec-warnings';
 import { withRenewalProposal } from '../../lib/renewal-proposal';
+import { loadQueueIntakeHistory } from '../../lib/intake/duplicates';
 
 /**
  * GET /api/queue
@@ -146,9 +147,27 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       })
     );
 
+    // Exact-duplicate facts (migration 0107): what else arrived identical to
+    // each card, and whether this exact file was rejected or approved before.
+    // One batch for the page, not a query per row.
+    const history = await loadQueueIntakeHistory(
+      context.env.DB,
+      (results.results ?? []).map((r) => ({
+        id: String(r.id),
+        tenant_id: String(r.tenant_id),
+        checksum: r.checksum == null ? null : String(r.checksum),
+        status: String(r.status),
+      })),
+    );
+    const rows = results.results ?? [];
+    const itemsWithHistory = items.map((it, i) => ({
+      ...it,
+      intake_history: history.get(String(rows[i]?.id)),
+    }));
+
     return new Response(
       JSON.stringify({
-        items,
+        items: itemsWithHistory,
         total: countResult?.total || 0,
         limit,
         offset,

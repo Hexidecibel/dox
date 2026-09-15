@@ -61,6 +61,12 @@ export interface PollConnectorSummary {
   listed: number;
   dispatched: number;
   skipped_already_processed: number;
+  /**
+   * Of `dispatched`, how many were byte-identical to a file already approved
+   * or already waiting, and so were recorded as received again instead of
+   * queued (migration 0107). Still dispatched: the key is marked processed.
+   */
+  received_again?: number;
   errors: string[];
 }
 
@@ -307,7 +313,7 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
 
           // Enqueue into processing_queue → worker → Review Queue. Nothing
           // auto-ingests.
-          await enqueueDocument(env.DB, {
+          const enqueued = await enqueueDocument(env.DB, {
             id: generateId(),
             tenantId: row.tenant_id,
             documentTypeId: row.document_type_id,
@@ -337,6 +343,9 @@ export async function pollAllR2Connectors(env: Env): Promise<PollSummary> {
             .bind(generateId(), row.id, key, Date.now(), connectorRunId)
             .run();
 
+          if (enqueued.outcome === 'duplicate') {
+            summary.received_again = (summary.received_again ?? 0) + 1;
+          }
           summary.dispatched++;
           result.total_dispatched++;
         } catch (err) {

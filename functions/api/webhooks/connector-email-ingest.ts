@@ -130,7 +130,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     });
 
     const sourceDetail = `email:${payload.sender}`;
-    const items: { queue_id: string; file_name: string }[] = [];
+    // `queue_id` is null for an attachment that was an exact duplicate of a
+    // file already approved or already waiting (migration 0107); it is
+    // recorded as received again instead, and `intake_duplicate_id` names the
+    // record a reviewer can "Review anyway" from.
+    const items: { queue_id: string | null; file_name: string; intake_duplicate_id?: string }[] = [];
     for (const att of attachments) {
       const checksum = await computeChecksum(att.content);
       const safeName = att.filename
@@ -148,7 +152,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         },
       });
 
-      const { queueId } = await enqueueDocument(context.env.DB, {
+      const enqueued = await enqueueDocument(context.env.DB, {
         id: generateId(),
         tenantId: connector.tenant_id,
         documentTypeId: connector.document_type_id,
@@ -164,6 +168,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         sourceId: connector.id,
         supplierId: connector.supplier_id,
         connectorRunId,
+        clientIp: getClientIp(context.request),
       });
 
       try {
@@ -178,7 +183,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         console.warn(`email-ingest: failed to write processed_keys for ${r2Key}:`, err);
       }
 
-      items.push({ queue_id: queueId, file_name: att.filename });
+      items.push(
+        enqueued.outcome === 'duplicate'
+          ? { queue_id: null, file_name: att.filename, intake_duplicate_id: enqueued.duplicate.intake_duplicate_id }
+          : { queue_id: enqueued.queueId, file_name: att.filename },
+      );
     }
 
     // 5. Audit log

@@ -383,6 +383,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // That ordering is the whole safety argument — this block cannot fail the
     // upload, because the upload is already done. The try/catch is belt to
     // that braces.
+    //
+    // EXACT DUPLICATES (0107): if these bytes are already approved or already
+    // waiting in the Review Queue, the helper links this arrival to that
+    // document / queue item instead of making a second card. The supplier's
+    // response below is deliberately identical either way: their file was
+    // received, their lines say `received`, and nothing about our internal
+    // records crosses to them.
     await enqueueSupplierUpload(db, {
       tenantId: link.tenant_id,
       supplierId: link.supplier_id,

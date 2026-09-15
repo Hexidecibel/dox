@@ -528,12 +528,14 @@ export function buildEmailIngestSummaryEmail(params: {
   const statusIcon = (status: string) => {
     if (status === 'ingested') return '&#x2705;';
     if (status === 'queued') return '&#x23F3;';
+    if (status === 'duplicate') return '&#x2139;&#xFE0F;';
     return '&#x274C;';
   };
 
   const statusLabel = (status: string) => {
     if (status === 'ingested') return 'Ingested';
     if (status === 'queued') return 'Queued for Review';
+    if (status === 'duplicate') return 'Already received';
     return 'Error';
   };
 
@@ -543,6 +545,8 @@ export function buildEmailIngestSummaryEmail(params: {
       detail = `Confidence: ${Math.round(r.confidence * 100)}%`;
     } else if (r.status === 'queued') {
       detail = 'Needs manual review before ingestion';
+    } else if (r.status === 'duplicate') {
+      detail = 'This exact file was already received, so it was not queued again';
     } else if (r.status === 'error' && r.error) {
       detail = r.error;
     }

@@ -1,0 +1,111 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/audit-duplicate-documents — list the documents that are the same file
+ * approved more than once. REPORT ONLY.
+ *
+ * WHY
+ *   Until migration 0107 nothing at intake compared checksums, so the same
+ *   email forwarded twice became two queue items and, on prod, two approved
+ *   documents — each with its own spec register rows, which then read as
+ *   duplicate results. Intake now records a repeat arrival instead of queueing
+ *   it (functions/lib/intake/duplicates.ts). The copies that already exist are
+ *   this script's job: show every same-file group with what hangs off each
+ *   copy, so a PERSON can decide which to keep.
+ *
+ *   A duplicate group is two or more live documents in one tenant that are the
+ *   same bytes AND came from different arrivals. One file approved into several
+ *   sublot documents is a split, not a duplicate, and is counted separately.
+ *   Grouping rules: bin/lib/duplicateDocumentsAudit.js.
+ *
+ * Usage:
+ *   ./bin/audit-duplicate-documents [--tenant <id>] [--remote | --staging] [--json]
+ *
+ *   --tenant <id>   only this tenant (default: all tenants)
+ *   --remote        read PROD D1 (doc-upload-db --remote)
+ *   --staging       read STAGING D1 (doc-upload-db-staging --remote)
+ *   --json          machine-readable report instead of text
+ *   -h / --help     show this help
+ *
+ * SAFETY
+ *   - Read-only. Every statement goes through bin/lib/d1.js, whose query()
+ *     refuses anything that is not a SELECT.
+ *   - There is no --apply. Archiving a later copy is a decision about a
+ *     compliance record (its requirement links, spec results, lots and order
+ *     lines may be the ones people use) and waits for a human to make it.
+ *   - Remote reads need CLOUDFLARE_API_TOKEN in the environment (or .dev.vars).
+ */
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const d1 = require('./lib/d1');
+const audit = require('./lib/duplicateDocumentsAudit');
+
+function usage() {
+  const src = fs.readFileSync(__filename, 'utf8').split('\n');
+  console.log(src.slice(2, 36).map((l) => l.replace(/^ \* ?/, '')).join('\n'));
+}
+
+const args = process.argv.slice(2);
+let tenant = null;
+let remote = false;
+let db = d1.DEFAULT_DB;
+let asJson = false;
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--tenant') tenant = args[++i] || null;
+  else if (a === '--remote' || a === '-r') remote = true;
+  else if (a === '--staging') {
+    remote = true;
+    db = 'doc-upload-db-staging';
+  } else if (a === '--json') asJson = true;
+  else if (a === '-h' || a === '--help') {
+    usage();
+    process.exit(0);
+  } else {
+    console.error(`Unknown argument: ${a}`);
+    process.exit(2);
+  }
+}
+
+if (remote && !process.env.CLOUDFLARE_API_TOKEN) {
+  const devVars = path.join(d1.PROJECT_ROOT, '.dev.vars');
+  if (fs.existsSync(devVars)) {
+    for (const line of fs.readFileSync(devVars, 'utf8').split('\n')) {
+      const m = /^([A-Z0-9_]+)=(.*)$/.exec(line.trim());
+      if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+    }
+  }
+}
+
+const opts = { remote, db };
+const q = (sql) => d1.query(sql, opts);
+
+const versionRows = q(audit.versionGroupsSql(tenant));
+const queueRows = q(audit.queueGroupsSql(tenant));
+
+const docIds = [...new Set([...versionRows, ...queueRows].map((r) => r.document_id))];
+const queueIds = [
+  ...new Set(
+    [...versionRows, ...queueRows].map((r) => audit.queueIdFromExternalRef(r.external_ref)).filter(Boolean),
+  ),
+];
+
+const linkRows = [];
+for (const part of audit.chunk(docIds)) linkRows.push(...q(audit.linksSql(part)));
+const queueItems = [];
+for (const part of audit.chunk(queueIds)) queueItems.push(...q(audit.queueItemsSql(part)));
+
+const report = audit.buildReport({ versionRows, queueRows, queueItems, linkRows });
+
+if (asJson) {
+  console.log(JSON.stringify({ target: remote ? db + ' (remote)' : db + ' (local)', tenant, ...report }, null, 2));
+} else {
+  console.log('audit-duplicate-documents (report only, nothing is changed)');
+  console.log(`  target : ${remote ? `REMOTE ${db}` : `LOCAL ${db}`}`);
+  console.log(`  tenant : ${tenant || 'all'}`);
+  console.log('');
+  console.log(audit.renderText(report));
+}

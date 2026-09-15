@@ -1805,6 +1805,103 @@ export interface ProcessingQueueItem {
    * reviewer confirms is recomputed and frozen at approve time.
    */
   renewal_proposal?: ResolvedRenewal;
+  /**
+   * What intake knows about this exact file (byte-identical, by checksum) —
+   * migration 0107. Computed when the queue is read; never blocks an approval.
+   */
+  intake_history?: QueueIntakeHistory;
+}
+
+// ---------------------------------------------------------------------------
+// Exact-duplicate intake (migration 0107)
+// ---------------------------------------------------------------------------
+
+/**
+ * Why an arrival did not become a new review card:
+ *   already_approved — the identical file was already approved (into
+ *                      `matched_document_id`, or into order/shipment records
+ *                      when that is NULL and `matched_queue_id` is set)
+ *   already_waiting  — the identical file is still waiting in the Review Queue
+ *                      (`matched_queue_id`)
+ * An arrival identical to a REJECTED item is queued normally and is not a
+ * suppression, so it has no kind here.
+ */
+export type IntakeDuplicateMatchKind = 'already_approved' | 'already_waiting';
+
+/** One suppressed arrival, as the API returns it. */
+export interface IntakeDuplicate {
+  id: string;
+  tenant_id: string;
+  checksum: string;
+  match_kind: IntakeDuplicateMatchKind;
+  matched_document_id: string | null;
+  matched_document_title: string | null;
+  matched_queue_id: string | null;
+  matched_queue_file_name: string | null;
+  matched_queue_status: 'pending' | 'approved' | 'rejected' | null;
+  source: string;
+  source_detail: string | null;
+  source_id: string | null;
+  connector_run_id: string | null;
+  request_upload_id: string | null;
+  file_name: string;
+  file_size: number;
+  mime_type: string;
+  received_at: string;
+  created_by: string | null;
+  created_by_name: string | null;
+  /** NULL while still suppressed; the queue item "Review anyway" created. */
+  queue_id: string | null;
+  overridden_by: string | null;
+  overridden_by_name: string | null;
+  overridden_at: string | null;
+}
+
+export interface IntakeDuplicateListResponse {
+  duplicates: IntakeDuplicate[];
+  total: number;
+  /** Suppressed rows nobody has sent for review (queue_id IS NULL), same filters minus `state`. */
+  open_count: number;
+  limit: number;
+  offset: number;
+}
+
+export interface IntakeDuplicateReviewResponse {
+  duplicate: IntakeDuplicate;
+  queue_id: string;
+}
+
+/**
+ * What a door tells its caller when an arrival was not queued because the
+ * exact file was already here. Deliberately small: a door whose caller is
+ * outside the tenant (a supplier, a partner API) must not learn a document
+ * title from it, so titles are resolved only on the staff-side endpoints.
+ */
+export interface IntakeDuplicateNotice {
+  intake_duplicate_id: string;
+  match_kind: IntakeDuplicateMatchKind;
+  matched_document_id: string | null;
+  matched_queue_id: string | null;
+}
+
+/** A previous rejection of this exact file, shown on a new card. */
+export interface IntakeRejectedMatch {
+  queue_id: string;
+  file_name: string;
+  rejected_at: string | null;
+  rejection_reason: RejectionReason | null;
+  rejection_note: string | null;
+}
+
+export interface QueueIntakeHistory {
+  /** Identical arrivals recorded against THIS waiting item instead of a second card. */
+  also_received: Array<Pick<IntakeDuplicate, 'id' | 'source' | 'source_detail' | 'file_name' | 'received_at' | 'queue_id'>>;
+  /** The most recent other rejection of this exact file, if any. */
+  previously_rejected: IntakeRejectedMatch | null;
+  /** Approved documents that are this exact file (e.g. after "Review anyway"). */
+  identical_documents: Array<{ id: string; title: string }>;
+  /** Set when a person sent this item for review despite the match. */
+  sent_anyway: Pick<IntakeDuplicate, 'id' | 'match_kind' | 'matched_document_id' | 'matched_document_title' | 'overridden_by_name' | 'overridden_at'> | null;
 }
 
 /**
@@ -1882,6 +1979,7 @@ export interface LearnedFieldHint {
 export interface QueuedResponse {
   queued: true;
   items: Array<{
+    /** Queue item id; '' when the file was not queued (invalid, or an exact duplicate). */
     id: string;
     file_name: string;
     duplicate?: {
@@ -1889,6 +1987,14 @@ export interface QueuedResponse {
       document_title: string;
       file_name: string;
     } | null;
+    /**
+     * Set when this exact file was already approved or is already waiting, so
+     * no new review card was made (migration 0107). "Review anyway" is
+     * POST /api/intake-duplicates/:intake_duplicate_id/review.
+     */
+    intake_duplicate?: IntakeDuplicateNotice | null;
+    /** Queued, but this exact file was rejected before. */
+    previously_rejected?: IntakeRejectedMatch | null;
   }>;
   document_type?: {
     id: string;

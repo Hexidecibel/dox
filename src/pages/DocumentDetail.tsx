@@ -77,6 +77,7 @@ import { ProductLinker } from '../components/ProductLinker';
 import { useAuth } from '../contexts/AuthContext';
 import SupplierAutocomplete, { type SupplierValue } from '../components/SupplierAutocomplete';
 import EntityNotes from '../components/EntityNotes';
+import { ReceivedAgainPanel } from '../components/IntakeDuplicateNotes';
 import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { helpContent } from '../lib/helpContent';
@@ -1383,6 +1384,10 @@ export function DocumentDetail() {
           />
         </>
       )}
+
+      {/* Received again (migration 0107): this exact file arriving after it  */}
+      {/* was first received. Renders nothing for a file that never has.      */}
+      <ReceivedAgainPanel documentId={doc.id} />
 
       {/* Version History */}
       <Typography variant="h6" fontWeight={600} gutterBottom>

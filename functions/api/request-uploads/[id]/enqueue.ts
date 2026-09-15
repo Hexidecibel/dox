@@ -45,7 +45,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const upload = await db
       .prepare(
         `SELECT id, link_id, request_id, supplier_id, r2_key, file_name, file_size,
-                mime_type, checksum, queue_id
+                mime_type, checksum, queue_id, document_id
            FROM request_uploads WHERE id = ? AND tenant_id = ?`,
       )
       .bind(id, tenantId)
@@ -60,8 +60,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         mime_type: string;
         checksum: string | null;
         queue_id: string | null;
+        document_id: string | null;
       }>();
     if (!upload) throw new NotFoundError('Arrival not found');
+    if (upload.document_id) {
+      throw new ConflictError('This file is already linked to a document, so there is nothing left to read.');
+    }
     if (upload.queue_id) {
       throw new ConflictError(
         'This file is already in the Review Queue. Reprocess it from there if it needs reading again.',
@@ -79,7 +83,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const checksum = upload.checksum ?? (await computeChecksum(await object.arrayBuffer()));
 
     const ip = getClientIp(context.request);
-    const queueId = await enqueueSupplierUpload(db, {
+    const { queueId, duplicate } = await enqueueSupplierUpload(db, {
       tenantId,
       supplierId: upload.supplier_id,
       requestId: upload.request_id,
@@ -93,6 +97,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       ip,
       actorId: user.id,
     });
+    if (duplicate) {
+      // The exact file is already approved or already waiting (0107). The
+      // arrival now points at that, and the ledger row can still be sent for
+      // review anyway from the Review Queue.
+      return json({ arrival: await loadArrival(db, tenantId, upload.id), intake_duplicate: duplicate });
+    }
     if (!queueId) {
       return json({ error: 'The file could not be put on the queue. Try again shortly.' }, 500);
     }
@@ -108,7 +118,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       ip,
     );
 
-    return json({ arrival: await loadArrival(db, tenantId, upload.id) });
+    return json({ arrival: await loadArrival(db, tenantId, upload.id), intake_duplicate: null });
   } catch (err) {
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;

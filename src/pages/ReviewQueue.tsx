@@ -104,6 +104,7 @@ import { InfoTooltip } from '../components/InfoTooltip';
 import { EmptyState } from '../components/EmptyState';
 import { helpContent } from '../lib/helpContent';
 import { formatDateTime } from '../utils/format';
+import { IntakeHistoryAlerts, IntakeHistoryChips, ReceivedAgainList } from '../components/IntakeDuplicateNotes';
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -214,6 +215,14 @@ export default function ReviewQueue() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('pending');
+  // "Received again" (migration 0107): files byte-identical to one already
+  // approved or already waiting, recorded instead of queued. A view beside the
+  // status filters rather than a status, because those rows are not queue
+  // items. ?view=received-again opens it directly.
+  const [showReceivedAgain, setShowReceivedAgain] = useState(
+    () => new URLSearchParams(window.location.search).get('view') === 'received-again'
+  );
+  const [receivedAgainOpen, setReceivedAgainOpen] = useState<number | null>(null);
   // "Mine" — only items whose (supplier, doctype) is owned by the current user.
   // Server-side filter passed to api.queue.list. Default off.
   const [mineOnly, setMineOnly] = useState(false);
@@ -689,6 +698,15 @@ export default function ReviewQueue() {
   useEffect(() => {
     loadQueue();
   }, [loadQueue]);
+
+  // Count of files received again that nobody has sent for review, for the chip.
+  useEffect(() => {
+    const tid = isSuperAdmin ? (tenantFilter || selectedTenantId || undefined) : undefined;
+    api.intakeDuplicates
+      .list({ state: 'open', limit: 1, tenant_id: tid })
+      .then((res) => setReceivedAgainOpen(res.open_count))
+      .catch(() => setReceivedAgainOpen(null));
+  }, [isSuperAdmin, tenantFilter, selectedTenantId, showReceivedAgain]);
 
   // Deep link: /review?item=<queue_id> opens that item once the list has it.
   // The supplier-arrivals screen links here so "approve this file" is one
@@ -1497,12 +1515,28 @@ export default function ReviewQueue() {
               key={s}
               label={s.charAt(0).toUpperCase() + s.slice(1)}
               size="small"
-              variant={statusFilter === s ? 'filled' : 'outlined'}
-              color={statusFilter === s ? 'primary' : 'default'}
-              onClick={() => setStatusFilter(s)}
+              variant={!showReceivedAgain && statusFilter === s ? 'filled' : 'outlined'}
+              color={!showReceivedAgain && statusFilter === s ? 'primary' : 'default'}
+              onClick={() => {
+                setShowReceivedAgain(false);
+                setStatusFilter(s);
+              }}
               sx={{ textTransform: 'capitalize' }}
             />
           ))}
+          <Tooltip
+            title="Files that arrived again, identical to one already approved or already waiting. Kept, not reviewed twice."
+            arrow
+          >
+            <Chip
+              data-testid="received-again-filter"
+              label={`Received again${receivedAgainOpen ? ` (${receivedAgainOpen})` : ''}`}
+              size="small"
+              variant={showReceivedAgain ? 'filled' : 'outlined'}
+              color={showReceivedAgain ? 'primary' : 'default'}
+              onClick={() => setShowReceivedAgain(true)}
+            />
+          </Tooltip>
         </Box>
 
         {/* "Mine" — server-side filter to items owned by the current user via
@@ -1624,7 +1658,9 @@ export default function ReviewQueue() {
         </Box>
       )}
 
-      {loading ? (
+      {showReceivedAgain ? (
+        <ReceivedAgainList tenantId={isSuperAdmin ? (tenantFilter || selectedTenantId || undefined) : undefined} />
+      ) : loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
           <CircularProgress />
         </Box>
@@ -1755,6 +1791,7 @@ export default function ReviewQueue() {
                     {/* An out-of-spec RESULT is the one thing worth spotting
                         from the collapsed list without opening anything. */}
                     <SpecAlertChip verdicts={item.spec_results} />
+                    {item.status === 'pending' && <IntakeHistoryChips history={item.intake_history} />}
                     {item.template_id && (
                       <Tooltip title={helpContent.review_queue.main.fieldTooltips.templateMatch} arrow>
                         <Chip label="Template matched" color="info" size="small" sx={{ ml: 0.5 }} />
@@ -1818,6 +1855,7 @@ export default function ReviewQueue() {
 
                 {isExpanded && (
                   <Box sx={{ px: 2, pb: 2 }}>
+                    <IntakeHistoryAlerts history={item.intake_history} />
                     {item.source === 'request_link' && (
                       <SupplierClaimPanel
                         queueId={item.id}

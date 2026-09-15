@@ -1,5 +1,7 @@
 import { generateId, logAudit } from '../../lib/db';
-import { uploadFile } from '../../lib/r2';
+import { computeChecksum, uploadFile } from '../../lib/r2';
+import { admitIntake, auditRejectedResend } from '../../lib/intake/duplicates';
+import type { IntakeRejectedMatch } from '../../../shared/types';
 import { extractText } from '../../lib/extract';
 import { extractFields, classifyDocumentType } from '../../lib/llm';
 import type { DocumentTypeCandidate } from '../../lib/llm';
@@ -39,7 +41,9 @@ const EMAIL_LLM_TEXT_CHAR_LIMIT = 6000;
 
 interface EmailIngestResult {
   fileName: string;
-  status: 'ingested' | 'queued' | 'skipped' | 'error';
+  status: 'ingested' | 'queued' | 'duplicate' | 'skipped' | 'error';
+  /** Set when status is 'duplicate' (migration 0107). */
+  intakeDuplicateId?: string;
   documentId?: string;
   queueId?: string;
   confidence?: number;
@@ -177,6 +181,44 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         const fileData = await file.arrayBuffer();
+        const checksum = await computeChecksum(fileData);
+
+        // EXACT DUPLICATE CHECK (migration 0107), before any model is called.
+        // This door inserts its own queue row (it extracts inline), so it asks
+        // the shared admission helper directly rather than through
+        // enqueueDocument — same rule, same ledger, same audit rows. A
+        // forwarded email is the exact case this exists for: the same
+        // attachment forwarded twice used to become two approved documents.
+        const queueId = generateId();
+        const r2Key = `pending/${mapping.tenant_slug}/${queueId}/${fileName}`;
+        const sourceDetail = JSON.stringify({ sender: senderEmail, subject });
+        const admission = await admitIntake(context.env.DB, {
+          tenantId: mapping.tenant_id,
+          documentTypeId,
+          fileR2Key: r2Key,
+          fileName,
+          fileSize: file.size,
+          mimeType,
+          checksum,
+          createdBy: mapping.default_user_id,
+          source: 'email',
+          sourceDetail,
+          outputKind: null,
+          sourceId: null,
+          supplierId: null,
+          clientIp: context.request.headers.get('cf-connecting-ip') || 'webhook',
+        });
+        if (admission.outcome === 'duplicate') {
+          // Stored anyway, so "Review anyway" has the bytes to replay.
+          await uploadFile(context.env.FILES, r2Key, fileData, mimeType);
+          results.push({
+            fileName,
+            status: 'duplicate',
+            intakeDuplicateId: admission.notice.intake_duplicate_id,
+          });
+          continue;
+        }
+        const previouslyRejected: IntakeRejectedMatch | null = admission.previouslyRejected;
 
         // Extract text
         const text = await extractText(fileData.slice(0), mimeType, fileName);
@@ -306,9 +348,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         // supplier here.
         {
           // === ALWAYS QUEUE FOR REVIEW ===
-          const queueId = generateId();
-          const r2Key = `pending/${mapping.tenant_slug}/${queueId}/${fileName}`;
-
+          // queueId / r2Key were minted before the duplicate check above.
           await uploadFile(context.env.FILES, r2Key, fileData, mimeType);
 
           // Pre-resolve a known supplier (read-only; null for unknown/junk).
@@ -326,8 +366,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           }
 
           await context.env.DB.prepare(
-            `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, extracted_text, ai_fields, ai_confidence, confidence_score, product_names, supplier, supplier_id, source, source_detail, status, created_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'email', ?, 'pending', ?)`
+            `INSERT INTO processing_queue (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type, extracted_text, ai_fields, ai_confidence, confidence_score, product_names, supplier, supplier_id, source, source_detail, status, created_by, checksum)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'email', ?, 'pending', ?, ?)`
           )
             .bind(
               queueId,
@@ -344,10 +384,25 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
               JSON.stringify(productNames),
               supplier,
               resolvedSupplierId,
-              JSON.stringify({ sender: senderEmail, subject }),
-              mapping.default_user_id
+              sourceDetail,
+              mapping.default_user_id,
+              // This door never stored a checksum, so nothing it queued could
+              // ever be recognised as a duplicate afterwards.
+              checksum
             )
             .run();
+
+          if (previouslyRejected) {
+            await auditRejectedResend(context.env.DB, {
+              tenantId: mapping.tenant_id,
+              queueId,
+              actorId: mapping.default_user_id,
+              source: 'email',
+              fileName,
+              rejected: previouslyRejected,
+              clientIp: context.request.headers.get('cf-connecting-ip') || 'webhook',
+            });
+          }
 
           // Audit log
           await logAudit(
