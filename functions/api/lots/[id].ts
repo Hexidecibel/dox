@@ -96,6 +96,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          d.title           AS document_title,
          lms.match_confidence AS match_confidence,
          lms.match_basis   AS match_basis,
+         lms.match_note    AS match_note,
          lms.status        AS status
        FROM lot_match_suggestions lms
        JOIN order_items oi ON oi.id = lms.order_item_id

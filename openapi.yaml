@@ -2760,6 +2760,54 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/suppliers/{id}/product-identifiers:
+    get:
+      tags: [Suppliers]
+      summary: Supplier-side view of the product identifier graph
+      description: |
+        Any role in the tenant. Migration 0113 retired `supplier_product_map`
+        and REMOVED `GET/PUT /api/product-map`; this is its replacement.
+        Without query parameters: every `supplier_item` / `supplier_name`
+        identifier for this supplier with the product of ours it names (our
+        SKUs and pack alongside), plus `unidentified` — the product names and
+        item numbers this supplier's certificates carry that do not resolve to
+        one confirmed product, each with the resolver's reason.
+        With `coa_product` and/or `item`: `{ resolution }`, resolved the way lot
+        matching does (item number first, then name + pack, then a name that
+        names exactly one product; an ambiguous name resolves to no product).
+        Writes go through `POST /api/products/{id}/identifiers` and
+        `PUT/DELETE /api/product-identifiers/{id}` (org_admin / super_admin, audited).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: coa_product, in: query, required: false, schema: { type: string } }
+        - { name: item, in: query, required: false, schema: { type: string } }
+      responses:
+        '200':
+          description: The identifiers and unidentified certificate products, or one resolution
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  supplier: { type: object, properties: { id: { type: string }, name: { type: string } } }
+                  identifiers: { type: array, items: { type: object } }
+                  unidentified: { type: array, items: { type: object } }
+                  resolution:
+                    type: object
+                    properties:
+                      product_id: { type: [string, 'null'] }
+                      product_label: { type: [string, 'null'] }
+                      route: { type: [string, 'null'], enum: [supplier_item, customer_item, name_pack, name, null] }
+                      confirmed: { type: boolean }
+                      our_skus: { type: array, items: { type: string } }
+                      candidates: { type: array, items: { type: object } }
+                      note: { type: [string, 'null'] }
+        '404':
+          description: Supplier not found in the tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/spec-checks:
     get:
       tags: [Spec Register]

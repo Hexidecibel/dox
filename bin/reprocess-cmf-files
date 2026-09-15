@@ -8,8 +8,9 @@
 # worker (Qwen extraction) -> ai_records -> approve (PUT /api/queue/:id with a
 # product_maps bridge block) -> produceCoaRecords -> rematch. The point is to
 # validate the STEADY-STATE lot_scheme=date_code path: lots stored STRIPPED to
-# bare MMDDYY at PRODUCE time (no rectify/backfill), the supplier_product_map
-# bridge, and matching against a real prod-derived order side.
+# bare MMDDYY at PRODUCE time (no rectify/backfill), the product identifier
+# bridge (0113; supplier_product_map is retired), and matching against a real
+# prod-derived order side.
 #
 # NOTHING writes to prod. Prod R2/D1 are READ-ONLY sources for the corpus +
 # order-side rows. All writes land in LOCAL D1 (doc-upload-db) + LOCAL R2.
@@ -77,8 +78,8 @@ PROD_SKU_WHIP="cmffile_prod_sku_whip"     # 0801
 PROD_SKU_SOUR="cmffile_prod_sku_sour"     # 0829 (no COA on file -> gap)
 
 # CMF (supplier-scoped) COA-side products — names match what the COA body says.
-# These are the supplier_product_map "from" side. Created so the bridge has a
-# coa_product_id to record (provenance); the bridge keys on the normalized name.
+# The certificate side of the product identifier bridge; the bridge itself
+# keys on supplier_name identifiers attached to the order-side products.
 PROD_CMF_WHOLE="cmffile_prod_cmf_whole"
 PROD_CMF_HH="cmffile_prod_cmf_hh"
 PROD_CMF_WHIP="cmffile_prod_cmf_whip"
@@ -133,6 +134,7 @@ DELETE FROM document_lots WHERE lot_id IN (SELECT id FROM lots WHERE tenant_id='
 DELETE FROM document_lots WHERE document_id IN (SELECT id FROM documents WHERE tenant_id='${TENANT_ID}');
 DELETE FROM lots WHERE tenant_id='${TENANT_ID}';
 DELETE FROM supplier_product_map WHERE tenant_id='${TENANT_ID}';
+DELETE FROM product_identifiers WHERE tenant_id='${TENANT_ID}';
 DELETE FROM product_suppliers WHERE tenant_id='${TENANT_ID}';
 DELETE FROM document_products WHERE document_id IN (SELECT id FROM documents WHERE tenant_id='${TENANT_ID}');
 DELETE FROM document_versions WHERE document_id IN (SELECT id FROM documents WHERE tenant_id='${TENANT_ID}');
@@ -392,8 +394,9 @@ do_status() {
 # FLAT (no ai_records, since the worker only emits ai_records for >=2-record
 # docs) -> they take the flat approve path (produceCoa), which ALSO resolves the
 # supplier lot_scheme and strips the lot at produce time. The flat path has no
-# product_maps body param, so the 3 known bridges are pre-seeded directly into
-# supplier_product_map (the "taught" state); linkCoaToOrders reads that table.
+# product_maps body param, so the 3 known bridges are pre-seeded directly as
+# confirmed supplier_name + our_sku product identifiers (the "taught" state);
+# linkCoaToOrders resolves the certificate product through them.
 # Records-shaped items (if any) still get the per-record-index product_maps body.
 do_approve() {
   [ -f "$KEYFILE" ] || { echo "No API key. Run --prep first." >&2; exit 1; }
@@ -403,30 +406,31 @@ do_approve() {
   d1_local "SELECT coa_match_status, COUNT(*) FROM order_items
     WHERE order_id='${ORDER_ID}' GROUP BY coa_match_status;"
 
-  # Pre-seed the 3 teach mappings (normalized COA product name -> order SKU
-  # product + distributor_sku). MUST mirror normalizeProductNameKey EXACTLY
-  # (functions/lib/entities/lots.ts): UPPERCASE, collapse non-[A-Z0-9] to a
-  # single space, trim. e.g. "Milk - Whole" -> "MILK WHOLE".
+  # Pre-seed the 3 teach mappings as confirmed product identifiers on the
+  # order-side products. value_norm MUST mirror normalizeName / normalizeCode
+  # (shared/productVocabulary.ts): names lower-cased with every run of
+  # non-[a-z0-9%] collapsed to one space; codes upper-case alphanumerics.
   echo ""
-  echo "Seeding supplier_product_map bridges (Milk-Whole->0417, Half-and-Half->0708, Heavy-Whipping->0801)..."
-  local NK; NK() { node -e 'process.stdout.write(process.argv[1].toUpperCase().replace(/[^A-Z0-9]+/g," ").trim())' "$1"; }
-  local NKW NKH NKWP
-  NKW=$(NK "Milk - Whole")
-  NKH=$(NK "Half-and-Half")
-  NKWP=$(NK "Cream - Heavy Whipping 40%")
-  d1_local "INSERT INTO supplier_product_map
-      (id,tenant_id,supplier_id,coa_product_name_key,coa_product_id,order_product_id,distributor_sku,created_by,created_at,updated_at)
+  echo "Seeding product identifier bridges (Milk-Whole->0417, Half-and-Half->0708, Heavy-Whipping->0801)..."
+  local NN; NN() { node -e 'process.stdout.write(process.argv[1].toLowerCase().replace(/[^a-z0-9%]+/g," ").trim())' "$1"; }
+  local NNW NNH NNWP
+  NNW=$(NN "Milk - Whole")
+  NNH=$(NN "Half-and-Half")
+  NNWP=$(NN "Cream - Heavy Whipping 40%")
+  d1_local "INSERT OR IGNORE INTO product_identifiers
+      (id,tenant_id,product_id,kind,value,value_norm,supplier_id,confirmed,source,note,created_by,confirmed_by,confirmed_at)
     VALUES
-      ('cmffile_map_whole','${TENANT_ID}','${SUP_CMF}','${NKW}','${PROD_CMF_WHOLE}','${PROD_SKU_WHOLE}','0417','${ADMIN_ID}',datetime('now'),datetime('now')),
-      ('cmffile_map_hh','${TENANT_ID}','${SUP_CMF}','${NKH}','${PROD_CMF_HH}','${PROD_SKU_HH}','0708','${ADMIN_ID}',datetime('now'),datetime('now')),
-      ('cmffile_map_whip','${TENANT_ID}','${SUP_CMF}','${NKWP}','${PROD_CMF_WHIP}','${PROD_SKU_WHIP}','0801','${ADMIN_ID}',datetime('now'),datetime('now'))
-    ON CONFLICT(tenant_id,supplier_id,coa_product_name_key) DO UPDATE SET
-      order_product_id=excluded.order_product_id,distributor_sku=excluded.distributor_sku,updated_at=datetime('now');"
+      ('cmffile_pi_whole','${TENANT_ID}','${PROD_SKU_WHOLE}','supplier_name','Milk - Whole','${NNW}','${SUP_CMF}',1,'seed','bin/reprocess-cmf-files fixture','${ADMIN_ID}','${ADMIN_ID}',datetime('now')),
+      ('cmffile_pi_hh','${TENANT_ID}','${PROD_SKU_HH}','supplier_name','Half-and-Half','${NNH}','${SUP_CMF}',1,'seed','bin/reprocess-cmf-files fixture','${ADMIN_ID}','${ADMIN_ID}',datetime('now')),
+      ('cmffile_pi_whip','${TENANT_ID}','${PROD_SKU_WHIP}','supplier_name','Cream - Heavy Whipping 40%','${NNWP}','${SUP_CMF}',1,'seed','bin/reprocess-cmf-files fixture','${ADMIN_ID}','${ADMIN_ID}',datetime('now')),
+      ('cmffile_pi_sku_whole','${TENANT_ID}','${PROD_SKU_WHOLE}','our_sku','0417','0417',NULL,1,'seed','bin/reprocess-cmf-files fixture','${ADMIN_ID}','${ADMIN_ID}',datetime('now')),
+      ('cmffile_pi_sku_hh','${TENANT_ID}','${PROD_SKU_HH}','our_sku','0708','0708',NULL,1,'seed','bin/reprocess-cmf-files fixture','${ADMIN_ID}','${ADMIN_ID}',datetime('now')),
+      ('cmffile_pi_sku_whip','${TENANT_ID}','${PROD_SKU_WHIP}','our_sku','0801','0801',NULL,1,'seed','bin/reprocess-cmf-files fixture','${ADMIN_ID}','${ADMIN_ID}',datetime('now'));"
 
   # All ready COA items (id + ai_fields.product_name). The flat approve path
   # only creates the document_products link when `product_name` is in the body
   # (it does NOT fall back to ai_fields.product_name), and that link is what the
-  # supplier_product_map bridge resolves against in linkOrderToCoas. So we MUST
+  # product identifier bridge falls back to in linkOrderToCoas. So we MUST
   # pass product_name explicitly — otherwise non-title-coded COAs (plain CMF
   # titles like "261475- Whole") get no product link and the bridge can't fire.
   local ITEMS

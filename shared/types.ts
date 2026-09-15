@@ -1001,24 +1001,6 @@ export interface SupplierRow {
 export interface ApiSupplier extends SupplierRow {}
 
 /**
- * A teachable COA-product → order-product bridge row (supplier_product_map).
- * Keyed on the normalized COA product name so it survives re-extraction.
- */
-export interface ProductMapEntry {
-  id: string;
-  tenant_id: string;
-  supplier_id: string;
-  coa_product_name_key: string;
-  coa_product_id: string | null;
-  order_product_id: string;
-  distributor_sku: string | null;
-  order_product_name?: string | null; // joined from products on GET, for display
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-/**
  * A distributor-catalog product that appears on order_items, for the
  * order-product picker in the product-bridge teach control.
  */
@@ -1026,16 +1008,6 @@ export interface OrderProductOption {
   product_id: string;
   product_code: string | null;
   product_name: string | null;
-}
-
-/** GET /api/product-map?supplier_id=&coa_product= */
-export interface ProductMapGetResponse {
-  mapping: ProductMapEntry | null;
-}
-
-/** PUT /api/product-map */
-export interface ProductMapPutResponse {
-  mapping: ProductMapEntry;
 }
 
 /** GET /api/order-products?search=&limit= */
@@ -2246,7 +2218,11 @@ export interface SearchConstraint {
 
 /** Kinds of product identifier (migration 0107). */
 export type ProductIdentifierKind = 'our_sku' | 'supplier_item' | 'supplier_name' | 'alias' | 'gtin' | 'pack';
-export type ProductIdentifierSource = 'seed' | 'reviewer' | 'extracted' | 'import';
+/**
+ * Who put an identifier there. 'migrated_product_map' (0113) = copied from the
+ * retired supplier_product_map, where a person taught it at review.
+ */
+export type ProductIdentifierSource = 'seed' | 'reviewer' | 'extracted' | 'import' | 'migrated_product_map';
 
 export interface ProductIdentifier {
   id: string;
@@ -2266,6 +2242,52 @@ export interface ProductIdentifier {
   confirmed_by: string | null;
   confirmed_at: string | null;
   updated_at: string;
+}
+
+/**
+ * Which of OUR products a supplier's certificate is, read from the identifier
+ * graph (shared/supplierProductBridge.ts). `product_id` is null when nothing
+ * names exactly one product; `candidates` + `note` then say why.
+ */
+export interface ProductBridgeResolution {
+  product_id: string | null;
+  product_label: string | null;
+  route: 'supplier_item' | 'customer_item' | 'name_pack' | 'name' | null;
+  confirmed: boolean;
+  our_skus: string[];
+  candidates: Array<{ product_id: string; label: string }>;
+  note: string | null;
+}
+
+/** One identifier a supplier's paperwork uses, with the product of ours it names. */
+export interface SupplierProductIdentifierRow extends ProductIdentifier {
+  product_name: string;
+  product_active: 0 | 1;
+  product_our_skus: string[];
+  /** "5 gal bag", from the product's pack identifier or name. */
+  product_pack: string | null;
+}
+
+/** A product name / item number this supplier's certificates carry that does not resolve to one confirmed product. */
+export interface SupplierUnidentifiedProduct {
+  product_name: string | null;
+  supplier_item: string | null;
+  document_count: number;
+  last_seen: string | null;
+  sample_document_id: string;
+  resolution: ProductBridgeResolution;
+}
+
+/** GET /api/suppliers/:id/product-identifiers */
+export interface SupplierProductIdentifiersResponse {
+  supplier: { id: string; name: string };
+  identifiers: SupplierProductIdentifierRow[];
+  unidentified: SupplierUnidentifiedProduct[];
+}
+
+/** GET /api/suppliers/:id/product-identifiers?coa_product=&item= */
+export interface SupplierProductResolveResponse {
+  resolution: ProductBridgeResolution;
 }
 
 /** One route by which a phrase reached a product. */
@@ -4462,6 +4484,8 @@ export interface LotSuggestion {
   document_title?: string | null;
   match_confidence: number | null;
   match_basis: string | null;
+  /** The matcher's words when the product bridge was unsure (0113). */
+  match_note?: string | null;
   status: string;
 }
 
@@ -4774,6 +4798,8 @@ export interface LotMatchSuggestion {
   match_basis: string | null;
   /** Engine confidence in [0, 1]. */
   match_confidence: number | null;
+  /** The matcher's words when the product bridge was unsure or unconfirmed (0113). */
+  match_note?: string | null;
   status: 'pending' | 'accepted' | 'rejected';
 }
 

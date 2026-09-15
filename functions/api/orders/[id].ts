@@ -57,7 +57,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // each via POST /api/lot-matches/:id. Highest confidence first.
     const suggestionsResult = await context.env.DB.prepare(
       `SELECT lms.id, lms.order_item_id, lms.document_id, d.title AS document_title,
-              lms.lot_id, l.lot_number, lms.match_basis, lms.match_confidence, lms.status
+              lms.lot_id, l.lot_number, lms.match_basis, lms.match_confidence, lms.match_note, lms.status
          FROM lot_match_suggestions lms
          JOIN order_items oi ON oi.id = lms.order_item_id
          LEFT JOIN documents d ON d.id = lms.document_id

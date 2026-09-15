@@ -234,7 +234,7 @@ Triggers: `trg_lots_au_fts`
   supplier_id TEXT REFERENCES suppliers(id)
   superseded INTEGER NOT NULL DEFAULT 0 CHECK (superseded IN (0, 1))
   confirmed INTEGER NOT NULL DEFAULT 0 CHECK (confirmed IN (0, 1))
-  source TEXT NOT NULL CHECK (source IN ('seed', 'reviewer', 'extracted', 'import'))
+  source TEXT NOT NULL CHECK (source IN ('seed', 'reviewer', 'extracted', 'import', 'migrated_product_map'))
   note TEXT
   created_by TEXT REFERENCES users(id)
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -776,6 +776,7 @@ Triggers: `trg_customers_ad_fts`, `trg_customers_ai_fts`, `trg_customers_au_fts`
   status TEXT DEFAULT 'pending'
   created_at TEXT DEFAULT (datetime('now'))
   UNIQUE(order_item_id, document_id)
+  match_note TEXT
 ```
 
 Indexes: `idx_lms_order_item`, `idx_lms_tenant_status`

@@ -291,7 +291,7 @@ describe('PUT /api/queue/:id — Phase 2 reviewer-decision capture', () => {
   it('links product from ai_fields.product_name when the approve body omits it (bridge regression)', async () => {
     // Single-product COA whose product name lives ONLY in ai_fields (the common
     // Country Morning shape). A bare approve must still create the
-    // document_products link so the supplier_product_map bridge can resolve it.
+    // document_products link so the product identifier bridge can fall back to its name.
     const queueId = generateTestId();
     const r2Key = `queue/${queueId}/cmf.pdf`;
     const docTypeId = await ensureDocumentType(seed.tenantId);

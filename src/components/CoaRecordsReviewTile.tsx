@@ -458,8 +458,9 @@ export default function CoaRecordsReviewTile({
         : { supplier_name: supplier.supplierName.trim() };
 
       // Taught product bridges for APPROVED records only. The server writes each
-      // entry to supplier_product_map AFTER resolving the supplier_id, keying on
-      // the record's COA product name.
+      // entry as confirmed product identifiers (the record's COA product name,
+      // its item number, the picked product's order code) AFTER resolving the
+      // supplier_id, then re-matches the record.
       const productMapsBody: Record<
         string,
         { coa_product: string; order_product_id: string; distributor_sku?: string | null }
@@ -653,7 +654,7 @@ export default function CoaRecordsReviewTile({
         )}
 
         {/* Teach the COA-product -> order-product bridge for this record. Only
-            available once the supplier is saved (we need its id to key the map).
+            available once the supplier is saved (identifiers are per supplier).
             Disabled until the supplier is verified. */}
         <Box sx={{ mt: 1.5, mb: groupEntries.length || record.tables?.length ? 2 : 0 }}>
           {supplier.supplierId ? (
@@ -662,6 +663,7 @@ export default function CoaRecordsReviewTile({
               supplierId={supplier.supplierId}
               supplierName={supplier.supplierName}
               coaProductName={coaProductNameFor(record)}
+              supplierItem={record.fields?.product_code || pageMetadata.product_code || null}
               disabled={readOnly || submitting || !supplierVerified}
               value={productMaps[idx] ?? null}
               onChange={(v) => setProductMaps((prev) => ({ ...prev, [idx]: v }))}

@@ -21,6 +21,7 @@ import {
   parseDistributorCode,
   classifyMatch,
 } from '../../functions/lib/entities/matching';
+import { insertProductIdentifier } from '../../functions/lib/product-identifiers';
 import { onRequestPost as resolveLotMatch } from '../../functions/api/lot-matches/[id]';
 import { onRequestGet as listLotMatches } from '../../functions/api/lot-matches/index';
 import { onRequestGet as getOrder } from '../../functions/api/orders/[id]';
@@ -658,45 +659,80 @@ describe('lot_scheme date_code (0075)', () => {
   });
 });
 
-// --- supplier_product_map (0075): teach-at-review product bridge ------------
+// --- product identifier bridge (0107 / 0113): teach-at-review product bridge -
+// supplier_product_map (0075) is retired; the matcher resolves the certificate's
+// product from product_identifiers (shared/supplierProductBridge.ts).
 
-async function makeProductMap(
+async function makeIdentifier(
   tenantId: string,
-  supplierId: string,
-  coaProductNameKey: string,
-  orderProductId: string,
-  distributorSku?: string | null
+  productId: string,
+  kind: 'supplier_name' | 'supplier_item' | 'our_sku' | 'pack',
+  value: string,
+  supplierId: string | null,
+  opts: { confirmed?: boolean } = {}
 ): Promise<void> {
+  await insertProductIdentifier(
+    db,
+    tenantId,
+    productId,
+    { kind, value, supplier_id: supplierId, confirmed: opts.confirmed ?? true, source: 'reviewer' },
+    null
+  );
+}
+
+async function setMetadata(docId: string, metadata: Record<string, unknown>): Promise<void> {
   await db
-    .prepare(
-      `INSERT INTO supplier_product_map
-         (id, tenant_id, supplier_id, coa_product_name_key, order_product_id, distributor_sku)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    )
-    .bind(
-      generateTestId(),
-      tenantId,
-      supplierId,
-      coaProductNameKey,
-      orderProductId,
-      distributorSku ?? null
-    )
+    .prepare('UPDATE documents SET primary_metadata = ? WHERE id = ?')
+    .bind(JSON.stringify(metadata), docId)
     .run();
 }
 
-describe('supplier_product_map bridge (0075)', () => {
-  it('COA→orders: a map row upgrades a name-divergent pair from lot_only to a lot+product suggestion', async () => {
+/** A COA document on its own (COA-side product) lot, linked the way approval links it. */
+async function makeCoaOnLot(
+  supplierId: string,
+  coaProductId: string,
+  lotNumber: string,
+  metadata?: Record<string, unknown>
+): Promise<{ docId: string; lotId: string }> {
+  const docId = await makeDocument(seed.tenantId, supplierId);
+  if (metadata) await setMetadata(docId, metadata);
+  const lot = await findOrCreateLot(db, seed.tenantId, {
+    lotNumber,
+    productId: coaProductId,
+    supplierId,
+    lotScheme: 'date_code',
+  });
+  await db
+    .prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)')
+    .bind(generateTestId(), docId, lot!.id)
+    .run();
+  await db
+    .prepare('INSERT INTO document_products (id, document_id, product_id) VALUES (?, ?, ?)')
+    .bind(generateTestId(), docId, coaProductId)
+    .run();
+  return { docId, lotId: lot!.id };
+}
+
+async function getNote(orderItemId: string, docId: string): Promise<string | null> {
+  const row = await db
+    .prepare('SELECT match_note FROM lot_match_suggestions WHERE order_item_id = ? AND document_id = ?')
+    .bind(orderItemId, docId)
+    .first<{ match_note: string | null }>();
+  return row?.match_note ?? null;
+}
+
+describe('product identifier bridge (0113)', () => {
+  it('COA→orders: a supplier_name identifier upgrades a name-divergent pair from lot_only to a lot+product suggestion', async () => {
     const supplierId = await makeSupplier(seed.tenantId, 'Country Morning Farms');
     // Two DIFFERENT product rows: the COA-side ("Milk - Whole") and the
     // order-side distributor SKU product. classifyMatch would see different
-    // product_ids → lot_only, except the map substitutes the order product.
+    // product_ids → lot_only, except the identifier names the order product.
     const coaProductId = await makeProduct(seed.tenantId, 'Milk - Whole');
     const orderProductId = await makeProduct(seed.tenantId, '0417 MS WHOLE 5 GL BAG');
 
-    // Teach the bridge: COA name "Milk - Whole" → the order product.
-    await makeProductMap(seed.tenantId, supplierId, 'MILK WHOLE', orderProductId);
+    // Teach: CMF calls the order product "Milk - Whole".
+    await makeIdentifier(seed.tenantId, orderProductId, 'supplier_name', 'Milk - Whole', supplierId);
 
-    // Order line resolved to the bare-date lot + the order product.
     const orderLot = await findOrCreateLot(db, seed.tenantId, {
       lotNumber: '061626',
       productId: orderProductId,
@@ -706,58 +742,30 @@ describe('supplier_product_map bridge (0075)', () => {
       lotId: orderLot!.id,
     });
 
-    // COA doc carries the COA-side product; lot stripped by date_code.
-    const docId = await makeDocument(seed.tenantId, supplierId);
-    const coaLot = await findOrCreateLot(db, seed.tenantId, {
-      lotNumber: '061626WHO',
-      productId: coaProductId,
-      supplierId,
-      lotScheme: 'date_code',
-    });
-    await db
-      .prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)')
-      .bind(generateTestId(), docId, coaLot!.id)
-      .run();
-    await db
-      .prepare('INSERT INTO document_products (id, document_id, product_id) VALUES (?, ?, ?)')
-      .bind(generateTestId(), docId, coaProductId)
-      .run();
+    const { docId, lotId } = await makeCoaOnLot(supplierId, coaProductId, '061626WHO');
 
     await linkCoaToOrders(db, seed.tenantId, {
       documentId: docId,
-      lotId: coaLot!.id,
+      lotId,
       productId: coaProductId,
       supplierId,
       coaProductName: 'Milk - Whole',
     });
 
-    await expectSuggestedOnly(orderItemId, docId, { confidence: 0.85 });
+    const sugg = await expectSuggestedOnly(orderItemId, docId, { confidence: 0.85 });
+    expect(sugg.match_basis).toBe('lot+product');
+    expect(await getNote(orderItemId, docId)).toBeNull();
   });
 
-  it('order→COAs: a map row upgrades the same pair via the rematch path', async () => {
+  it('order→COAs: the same identifier upgrades the pair via the rematch path', async () => {
     const supplierId = await makeSupplier(seed.tenantId, 'Country Morning Farms');
     const coaProductId = await makeProduct(seed.tenantId, 'Half-and-Half');
-    const orderProductId = await makeProduct(seed.tenantId, '0801 WHIP 5 GL BAG');
-    await makeProductMap(seed.tenantId, supplierId, 'HALF AND HALF', orderProductId);
+    const orderProductId = await makeProduct(seed.tenantId, '0708 H&H 5 GL DISP');
+    // A value copied from the old map by 0113 is the NORMALIZED 0075 key.
+    await makeIdentifier(seed.tenantId, orderProductId, 'supplier_name', 'HALF AND HALF', supplierId);
 
-    // COA already in the graph: bare-date lot, COA-side product, doc-product link.
-    const docId = await makeDocument(seed.tenantId, supplierId);
-    const coaLot = await findOrCreateLot(db, seed.tenantId, {
-      lotNumber: '052226HAH',
-      productId: coaProductId,
-      supplierId,
-      lotScheme: 'date_code',
-    });
-    await db
-      .prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)')
-      .bind(generateTestId(), docId, coaLot!.id)
-      .run();
-    await db
-      .prepare('INSERT INTO document_products (id, document_id, product_id) VALUES (?, ?, ?)')
-      .bind(generateTestId(), docId, coaProductId)
-      .run();
+    const { docId } = await makeCoaOnLot(supplierId, coaProductId, '052226HAH');
 
-    // Order line lands on the bare-date lot + order product.
     const orderLot = await findOrCreateLot(db, seed.tenantId, {
       lotNumber: '052226',
       productId: orderProductId,
@@ -776,11 +784,10 @@ describe('supplier_product_map bridge (0075)', () => {
     await expectSuggestedOnly(orderItemId, docId, { confidence: 0.85 });
   });
 
-  it('no map row → behavior identical to today (name-divergent pair stays lot_only)', async () => {
+  it('no identifiers → behavior identical to today (name-divergent pair stays lot_only)', async () => {
     const supplierId = await makeSupplier(seed.tenantId, 'Country Morning Farms');
     const coaProductId = await makeProduct(seed.tenantId, 'Milk - Whole');
     const orderProductId = await makeProduct(seed.tenantId, '0417 MS WHOLE 5 GL BAG');
-    // NO makeProductMap call.
 
     const orderLot = await findOrCreateLot(db, seed.tenantId, {
       lotNumber: '061626',
@@ -790,26 +797,11 @@ describe('supplier_product_map bridge (0075)', () => {
       productId: orderProductId,
       lotId: orderLot!.id,
     });
-
-    const docId = await makeDocument(seed.tenantId, supplierId);
-    const coaLot = await findOrCreateLot(db, seed.tenantId, {
-      lotNumber: '061626WHO',
-      productId: coaProductId,
-      supplierId,
-      lotScheme: 'date_code',
-    });
-    await db
-      .prepare('INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)')
-      .bind(generateTestId(), docId, coaLot!.id)
-      .run();
-    await db
-      .prepare('INSERT INTO document_products (id, document_id, product_id) VALUES (?, ?, ?)')
-      .bind(generateTestId(), docId, coaProductId)
-      .run();
+    const { docId, lotId } = await makeCoaOnLot(supplierId, coaProductId, '061626WHO');
 
     await linkCoaToOrders(db, seed.tenantId, {
       documentId: docId,
-      lotId: coaLot!.id,
+      lotId,
       productId: coaProductId,
       supplierId,
       coaProductName: 'Milk - Whole',
@@ -821,6 +813,108 @@ describe('supplier_product_map bridge (0075)', () => {
     const sugg = await getSuggestions(orderItemId);
     expect(sugg).toHaveLength(1);
     expect(sugg[0].match_basis).toBe('lot_only');
+    expect(await getNote(orderItemId, docId)).toBeNull();
+  });
+
+  describe('Country Morning: one name on the 300 gal tote (30904 = our 10286) and the 5 gal bag (50903 = our 0801)', () => {
+    async function cmfFixture() {
+      const supplierId = await makeSupplier(seed.tenantId, 'Country Morning Farms');
+      const coaProductId = await makeProduct(seed.tenantId, 'Cream - Heavy Whipping 40%');
+      const tote = await makeProduct(seed.tenantId, '40% CREAM 300GL');
+      const bag = await makeProduct(seed.tenantId, 'WHIP 5 GL BAG (1/CS), M');
+      for (const [p, item, sku, pack] of [
+        [tote, '30904', '10286', '300 Gallon Tote'],
+        [bag, '50903', '0801', '5 Gallon Bag'],
+      ] as const) {
+        await makeIdentifier(seed.tenantId, p, 'supplier_item', item, supplierId);
+        await makeIdentifier(seed.tenantId, p, 'supplier_name', 'Cream - Heavy Whipping 40%', supplierId);
+        await makeIdentifier(seed.tenantId, p, 'our_sku', sku, null);
+        await makeIdentifier(seed.tenantId, p, 'pack', pack, null);
+      }
+      // Order 1794420's shape: the 0801 BAG line on lot 061626.
+      const bagLot = await findOrCreateLot(db, seed.tenantId, { lotNumber: '061626', productId: bag });
+      const bagLine = await makeOrderWithItem(seed.tenantId, { productId: bag, lotId: bagLot!.id, productCode: '0801' });
+      const toteLot = await findOrCreateLot(db, seed.tenantId, { lotNumber: '061626', productId: tote });
+      const toteLine = await makeOrderWithItem(seed.tenantId, { productId: tote, lotId: toteLot!.id, productCode: '10286' });
+      return { supplierId, coaProductId, tote, bag, bagLot: bagLot!.id, toteLot: toteLot!.id, bagLine: bagLine.orderItemId, toteLine: toteLine.orderItemId };
+    }
+
+    it('a TOTE certificate (item 30904) is suggested to the tote line and NOT offered to the bag line', async () => {
+      const f = await cmfFixture();
+      const { docId, lotId } = await makeCoaOnLot(f.supplierId, f.coaProductId, '061626HCR', {
+        product_name: 'Cream - Heavy Whipping 40%', product_code: '30904', net_weight: '300 Gallon Tote',
+      });
+
+      await linkCoaToOrders(db, seed.tenantId, {
+        documentId: docId, lotId, productId: f.coaProductId, supplierId: f.supplierId, coaProductName: 'Cream - Heavy Whipping 40%',
+      });
+
+      const toteSugg = await expectSuggestedOnly(f.toteLine, docId, { confidence: 0.85 });
+      expect(toteSugg.match_basis).toBe('lot+product');
+      expect(await getSuggestions(f.bagLine)).toHaveLength(0);
+
+      // The rematch path (order side) agrees.
+      await linkOrderToCoas(db, seed.tenantId, { orderItemId: f.bagLine, lotId: f.bagLot, productId: f.bag });
+      expect(await getSuggestions(f.bagLine)).toHaveLength(0);
+    });
+
+    it('a BAG certificate with no item number is disambiguated by its pack', async () => {
+      const f = await cmfFixture();
+      const { docId, lotId } = await makeCoaOnLot(f.supplierId, f.coaProductId, '061626HCB', {
+        product_name: 'Cream - Heavy Whipping 40%', net_weight: '5 Gallon Bag',
+      });
+      await linkCoaToOrders(db, seed.tenantId, {
+        documentId: docId, lotId, productId: f.coaProductId, supplierId: f.supplierId, coaProductName: 'Cream - Heavy Whipping 40%',
+      });
+      const bagSugg = await expectSuggestedOnly(f.bagLine, docId);
+      expect(bagSugg.match_basis).toBe('lot+product');
+      // Name + pack is not a number: the tote line still gets the lot_only
+      // candidate, saying what the certificate reads as.
+      const toteSugg = await expectSuggestedOnly(f.toteLine, docId, { confidence: 0.5 });
+      expect(toteSugg.match_basis).toBe('lot_only');
+      expect(await getNote(f.toteLine, docId)).toMatch(/reads as WHIP 5 GL BAG .* by the supplier's product name and pack, not this line's product/);
+    });
+
+    it('the ambiguous name alone yields NO product: both lines get lot_only, carrying the ambiguity as a reason', async () => {
+      const f = await cmfFixture();
+      const { docId, lotId } = await makeCoaOnLot(f.supplierId, f.coaProductId, '061626HCX', {
+        product_name: 'Cream - Heavy Whipping 40%',
+      });
+      await linkCoaToOrders(db, seed.tenantId, {
+        documentId: docId, lotId, productId: f.coaProductId, supplierId: f.supplierId, coaProductName: 'Cream - Heavy Whipping 40%',
+      });
+      for (const line of [f.bagLine, f.toteLine]) {
+        const s = await expectSuggestedOnly(line, docId, { confidence: 0.5 });
+        expect(s.match_basis).toBe('lot_only');
+        expect(await getNote(line, docId)).toMatch(/for 2 of our products .* so no product is assumed/);
+      }
+    });
+  });
+
+  it('an UNCONFIRMED identifier still suggests, ranked below a confirmed one, and says "via unconfirmed identifier"', async () => {
+    const supplierId = await makeSupplier(seed.tenantId, 'Country Morning Farms');
+    const coaProductId = await makeProduct(seed.tenantId, 'Buttermilk - 1%');
+    const orderProductId = await makeProduct(seed.tenantId, 'BUTTERMILK 1% 5 GL BAG');
+    await makeIdentifier(seed.tenantId, orderProductId, 'supplier_name', 'Buttermilk - 1%', supplierId, { confirmed: false });
+
+    const orderLot = await findOrCreateLot(db, seed.tenantId, { lotNumber: '061226', productId: orderProductId });
+    const { orderItemId } = await makeOrderWithItem(seed.tenantId, { productId: orderProductId, lotId: orderLot!.id });
+    const { docId, lotId } = await makeCoaOnLot(supplierId, coaProductId, '061226BUO', { product_name: 'Buttermilk - 1%' });
+
+    await linkCoaToOrders(db, seed.tenantId, {
+      documentId: docId, lotId, productId: coaProductId, supplierId, coaProductName: 'Buttermilk - 1%',
+    });
+
+    const s = await expectSuggestedOnly(orderItemId, docId, { confidence: 0.7 });
+    expect(s.match_basis).toBe('lot+product');
+    expect(await getNote(orderItemId, docId)).toMatch(/via unconfirmed identifier Country Morning Farms product name "Buttermilk - 1%"/);
+
+    // Confirming the identifier and re-running refreshes the words (same tier,
+    // same basis: the note is rewritten, confidence is raised).
+    await db.prepare('UPDATE product_identifiers SET confirmed = 1 WHERE product_id = ?').bind(orderProductId).run();
+    await linkOrderToCoas(db, seed.tenantId, { orderItemId, lotId: orderLot!.id, productId: orderProductId });
+    await expectSuggestedOnly(orderItemId, docId, { confidence: 0.85 });
+    expect(await getNote(orderItemId, docId)).toBeNull();
   });
 });
 

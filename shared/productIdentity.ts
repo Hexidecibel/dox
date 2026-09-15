@@ -95,7 +95,7 @@ export interface PreparedCatalog {
 
 const CODE_KINDS: ReadonlySet<ProductIdentifierKind> = new Set(['our_sku', 'supplier_item', 'gtin']);
 
-function viaOf(i: CatalogIdentifier): SearchProductMatchedVia {
+export function viaOf(i: CatalogIdentifier): SearchProductMatchedVia {
   return {
     kind: i.kind,
     value: i.value,
@@ -171,7 +171,7 @@ export function productLabel(p: PreparedProduct): string {
   return parts.length ? `${p.product_name} (${parts.join(', ')})` : p.product_name;
 }
 
-function describeVia(v: SearchProductMatchedVia): string {
+export function describeVia(v: SearchProductMatchedVia): string {
   const q = v.confirmed ? '' : 'unconfirmed ';
   const former = v.superseded ? 'former ' : '';
   switch (v.kind) {
@@ -378,14 +378,22 @@ function sameSupplier(s: ProductSubject, supplierId: string, supplierName: strin
  * reading that as a pack would call every butter certificate the wrong pack.
  */
 function subjectPack(s: ProductSubject, matchedName: string | null): Pack | null {
+  return documentPack(s.metadata, matchedName);
+}
+
+/**
+ * A document's pack from its own metadata (shared with the lot matcher's
+ * product bridge, shared/supplierProductBridge.ts).
+ */
+export function documentPack(metadata: Record<string, unknown>, matchedName: string | null): Pack | null {
   const fromName = matchedName ? findPacks(matchedName).find((p) => p.quantity !== null) : undefined;
   if (fromName) return fromName;
   for (const k of ['package_size', 'pack_size', 'pack', 'container_size']) {
-    const v = str(s.metadata[k]);
+    const v = str(metadata[k]);
     const p = v ? (findPacks(v).find((x) => x.quantity !== null) ?? findPacks(v)[0]) : undefined;
     if (p) return p;
   }
-  const nw = str(s.metadata.net_weight);
+  const nw = str(metadata.net_weight);
   if (nw) {
     const p = findPacks(nw).find((x) => x.unit === 'gal' || x.container !== null);
     if (p) return p;
@@ -393,7 +401,18 @@ function subjectPack(s: ProductSubject, matchedName: string | null): Pack | null
   return null;
 }
 
-function sameName(a: ProductPhrase, b: ProductPhrase): boolean {
+/** The supplier's item number a document prints, under any of the keys extraction has used. */
+export function documentSupplierItem(metadata: Record<string, unknown>): string | null {
+  return str(metadata.product_code) ?? str(metadata.item_number) ?? str(metadata.supplier_item_number);
+}
+
+/** The customer item number (OUR SKU, printed by the supplier) a document prints. */
+export function documentCustomerItem(metadata: Record<string, unknown>): string | null {
+  return str(metadata.customer_item_number);
+}
+
+/** Same product words and attributes, packs set aside ("Milk - Whole 5 gal" names "Milk - Whole"). */
+export function sameName(a: ProductPhrase, b: ProductPhrase): boolean {
   if (a.words.length === 0 || a.words.length !== b.words.length) return false;
   if (!a.words.every((w) => b.words.includes(w))) return false;
   return a.attributes.length === b.attributes.length && a.attributes.every((x) => b.attributes.includes(x));
@@ -422,7 +441,7 @@ function checkOneCandidate(k: SearchProductCandidate, catalogNames: NameEntry[],
   };
 
   // 1. The customer item number — OUR SKU, printed by the supplier.
-  const customerItem = str(md.customer_item_number);
+  const customerItem = documentCustomerItem(md);
   let customerVerdict: SearchConstraintCheck | null = null;
   if (customerItem && k.our_skus.length > 0) {
     const hit = k.our_skus.find((sku) => normalizeCode(sku) === normalizeCode(customerItem));
@@ -434,7 +453,7 @@ function checkOneCandidate(k: SearchProductCandidate, catalogNames: NameEntry[],
   }
 
   // 2. The supplier's item number.
-  const supplierItem = str(md.product_code) ?? str(md.item_number) ?? str(md.supplier_item_number);
+  const supplierItem = documentSupplierItem(md);
   if (supplierItem) {
     const items = k.supplier_items.filter((i) => sameSupplier(s, i.supplier_id, i.supplier_name) !== false);
     if (items.length > 0) {

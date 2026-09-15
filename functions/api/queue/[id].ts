@@ -33,9 +33,37 @@ import type { Env, User } from '../../lib/types';
 import { parseCoaRecords } from '../../../shared/types';
 import type { TemplateFieldMapping, CoaRecordsPayload } from '../../../shared/types';
 import { produceCoaRecords, type CoaRecordDecision } from '../../lib/kinds/coa';
-import { normalizeProductNameKey } from '../../lib/entities/lots';
-import { upsertProductMap } from '../product-map';
+import { teachSupplierProduct } from '../../lib/product-identifiers';
+import { linkCoaToOrders } from '../../lib/entities/matching';
+import { documentSupplierItem } from '../../../shared/productIdentity';
 
+/** Re-run COA -> order matching for every lot a just-approved document is attached to. */
+async function rematchDocumentLots(
+  db: D1Database,
+  tenantId: string,
+  documentId: string,
+  supplierId: string,
+  coaProductName: string
+): Promise<void> {
+  const lots = await db
+    .prepare(
+      `SELECT l.id, l.product_id FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
+        WHERE dl.document_id = ? AND l.tenant_id = ?`
+    )
+    .bind(documentId, tenantId)
+    .all<{ id: string; product_id: string | null }>();
+  for (const lot of lots.results ?? []) {
+    await linkCoaToOrders(db, tenantId, {
+      documentId,
+      lotId: lot.id,
+      productId: lot.product_id,
+      supplierId,
+      coaProductName,
+    });
+  }
+}
+
+/** Per-record product mapping taught at review (written as product identifiers, 0113). */
 type ProductMapInput = Record<
   string,
   {
@@ -229,9 +257,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       /**
        * COA product-bridge teaching (plan Part B): per-record COA-product ->
        * order-product mapping keyed by record_index. For each record whose
-       * decision resolves to 'approve', a supplier_product_map row is upserted
-       * AFTER the supplier_id is resolved/created. This is the PRIMARY write
-       * path for the bridge — a brand-new supplier has no id until approve.
+       * decision resolves to 'approve', confirmed product identifiers are
+       * written (supplier_name, plus supplier_item / our_sku when known;
+       * migration 0113 retired supplier_product_map) AFTER the supplier_id is
+       * resolved/created, and that record's document is re-matched. This is the
+       * PRIMARY write path for the bridge — a brand-new supplier has no id until
+       * approve. `distributor_sku` is the picked product's order-line code.
        * Failures here warn but never fail the approval.
        */
       product_maps?: Record<
@@ -1337,36 +1368,46 @@ async function handleCoaRecordsApprove(
     );
   }
 
-  // Product-bridge teaching (plan Part B). PRIMARY write path: the supplier_id
-  // is resolved/created by produceCoaRecords, so we have it here even for a
-  // brand-new supplier. Write one supplier_product_map row per APPROVED record
-  // (i.e. each record that actually produced a document) for which the reviewer
-  // supplied a mapping. Best-effort: any failure warns, never breaks approval.
+  // Product-bridge teaching. PRIMARY write path: the supplier_id is
+  // resolved/created by produceCoaRecords, so we have it here even for a
+  // brand-new supplier. For each APPROVED record (one that produced a document)
+  // the reviewer mapped, write CONFIRMED product identifiers (migration 0113
+  // retired supplier_product_map): the certificate's product name, the record's
+  // supplier item number when it prints one, and the picked product's order
+  // code. Then re-run matching for that record's document, so the teach counts
+  // for this approval and not only the next one. Best-effort: any failure
+  // warns, never breaks approval.
   if (productMaps && result.supplierId) {
     const supplierId = result.supplierId;
-    const approvedIndexes = new Set(result.documents.map((d) => d.recordIndex));
+    const docsByIndex = new Map(result.documents.map((d) => [d.recordIndex, d.documentId]));
     for (const [rawIdx, entry] of Object.entries(productMaps)) {
       const recordIndex = Number(rawIdx);
-      if (!Number.isFinite(recordIndex) || !approvedIndexes.has(recordIndex)) {
+      const documentId = Number.isFinite(recordIndex) ? docsByIndex.get(recordIndex) : undefined;
+      if (!documentId) {
         continue; // held/rejected/unknown record — don't teach it
       }
       if (!entry || !entry.coa_product || !entry.order_product_id) {
         continue;
       }
+      const record =
+        payload.records.find((r) => r.record_index === recordIndex) ?? payload.records[recordIndex];
+      const recordFields = { ...(payload.page_metadata ?? {}), ...(record?.fields ?? {}) } as Record<string, unknown>;
       try {
-        await upsertProductMap(context.env.DB, {
-          id: generateId(),
+        await teachSupplierProduct(context.env.DB, {
           tenantId: item.tenant_id,
           supplierId,
-          coaProductNameKey: normalizeProductNameKey(entry.coa_product),
-          coaProductId: entry.coa_product_id ?? null,
-          orderProductId: entry.order_product_id,
-          distributorSku: entry.distributor_sku ?? null,
-          createdBy: user.id,
+          productId: entry.order_product_id,
+          coaProductName: entry.coa_product,
+          supplierItem: documentSupplierItem(recordFields),
+          ourSku: entry.distributor_sku ?? null,
+          actorId: user.id,
+          queueItemId: item.id,
+          clientIp: getClientIp(context.request),
         });
+        await rematchDocumentLots(context.env.DB, item.tenant_id, documentId, supplierId, entry.coa_product);
       } catch (err) {
         console.warn(
-          `[queue-approve] product_map upsert failed for record ${recordIndex}:`,
+          `[queue-approve] product identifier teach failed for record ${recordIndex}:`,
           err instanceof Error ? err.message : String(err)
         );
       }

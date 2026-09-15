@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Seed a REALISTIC, prod-derived LOCAL test fixture for the per-supplier
-# `lot_scheme` (migration 0075) + the teach-at-review `supplier_product_map`
-# bridge that links COA records to order lines whose product names diverge.
+# `lot_scheme` (migration 0075) + the teach-at-review product bridge that links
+# COA records to order lines whose product names diverge. Since migration 0113
+# the bridge is the product identifier graph (`product_identifiers`), taught at
+# review as confirmed supplier_name / supplier_item / our_sku identifiers;
+# `supplier_product_map` is retired and no longer read.
 #
 # This fixture mirrors ACTUAL production patterns from the real distributor
 # tenant (Country Morning Farms COAs + the WMS order side), so a green
@@ -27,7 +30,7 @@
 #     0801         -> "WHIP 5 GL BAG"
 #     0829         -> "MS NATURAL SOUR CREAM"
 #   So the ONLY path from a CMF COA product to a WMS order product is the taught
-#   supplier_product_map bridge (names diverge; no shared code in the COA body).
+#   product identifier bridge (names diverge; no shared code in the COA body).
 # - A DIFFERENT supplier (Willamette) needs NO map: its COA TITLE carries the
 #   distributor code "(1167) ... LOT 6141", the order line has product_code 1167
 #   lot 6141, and classifyMatch strong-links on lot+code via the (NNNN) prefix.
@@ -171,6 +174,7 @@ DELETE FROM document_lots WHERE lot_id IN (SELECT id FROM lots WHERE tenant_id =
 DELETE FROM document_lots WHERE document_id IN (SELECT id FROM documents WHERE tenant_id = '${TENANT_ID}');
 DELETE FROM lots WHERE tenant_id = '${TENANT_ID}';
 DELETE FROM supplier_product_map WHERE tenant_id = '${TENANT_ID}';
+DELETE FROM product_identifiers WHERE tenant_id = '${TENANT_ID}';
 DELETE FROM product_suppliers WHERE tenant_id = '${TENANT_ID}';
 DELETE FROM document_products WHERE document_id IN (SELECT id FROM documents WHERE tenant_id = '${TENANT_ID}');
 DELETE FROM document_versions WHERE document_id IN (SELECT id FROM documents WHERE tenant_id = '${TENANT_ID}');
@@ -375,7 +379,7 @@ ON CONFLICT(id) DO UPDATE SET order_number=excluded.order_number;
 -- ---- Order items (all coa_match_status='unmatched'; each lot-bound so the
 --      rematcher picks them up). The COA side uses a DIFFERENT product (CMF
 --      supplier-scoped) so the ONLY strong-link path for CMF lines is the taught
---      supplier_product_map bridge. Willamette (L6) strong-links on the (1167)
+--      product identifier bridge. Willamette (L6) strong-links on the (1167)
 --      title code with NO map. L5 has NO COA on file -> stays unmatched (a real
 --      collectible gap, not a failure). ----
 INSERT INTO order_items

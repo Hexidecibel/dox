@@ -73,6 +73,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          oi.product_name     AS product_name,
          lms.match_basis     AS match_basis,
          lms.match_confidence AS match_confidence,
+         lms.match_note      AS match_note,
          lms.status          AS status,
          o.order_number      AS order_number,
          lms.created_at      AS created_at

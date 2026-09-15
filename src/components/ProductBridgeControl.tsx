@@ -6,11 +6,13 @@
  * order-catalog product (e.g. "0417 — MS WHOLE 5 GL BAG"). The mapping itself
  * is NOT persisted here — the selection is lifted to the tile via `onChange`
  * and written server-side in the COA approve body (`product_maps`) after the
- * supplier is resolved. (A standalone PUT exists in api.productMap for editing
- * outside review, but this control never calls it.)
+ * supplier is resolved, as confirmed product identifiers (migration 0113).
  *
- * Prefill: when supplierId + coaProductName are present we GET the existing
- * mapping on mount so a previously-taught bridge shows up pre-selected.
+ * Prefill: when supplierId + coaProductName are present we resolve the record
+ * against the product identifier graph the way lot matching does
+ * (GET /api/suppliers/:id/product-identifiers?coa_product=&item=) and pre-select
+ * the product ONLY when exactly one is named. An ambiguous name ("Cream - Heavy
+ * Whipping 40%" on a tote and a bag) pre-selects nothing and says why.
  *
  * Gate: disabled until the supplier is verified — there's no supplier_id to key
  * the map on until then.
@@ -41,6 +43,8 @@ interface Props {
   supplierId?: string;
   supplierName: string;
   coaProductName: string;
+  /** The supplier's item number printed on the record, when there is one (decides between products sharing a name). */
+  supplierItem?: string | null;
   disabled?: boolean;
   value: ProductBridgeValue | null;
   onChange: (value: ProductBridgeValue | null) => void;
@@ -59,6 +63,7 @@ export default function ProductBridgeControl({
   // supplierName is part of the public prop contract (callers pass it for
   // future labeling) but not currently rendered.
   coaProductName,
+  supplierItem = null,
   disabled = false,
   value,
   onChange,
@@ -67,6 +72,7 @@ export default function ProductBridgeControl({
   const [searchQuery, setSearchQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [prefilling, setPrefilling] = useState(false);
+  const [resolutionNote, setResolutionNote] = useState<string | null>(null);
   // Guard so we only attempt the prefill once per (supplier, coaProduct) pair.
   const prefilledFor = useRef<string | null>(null);
 
@@ -106,7 +112,7 @@ export default function ProductBridgeControl({
   // Prefill from an existing taught mapping when supplier + coa product known.
   useEffect(() => {
     if (disabled || !supplierId || !coaProductName.trim()) return;
-    const key = `${supplierId}::${coaProductName.trim()}`;
+    const key = `${supplierId}::${coaProductName.trim()}::${supplierItem ?? ''}`;
     if (prefilledFor.current === key) return;
     prefilledFor.current = key;
     // Don't clobber an explicit local selection.
@@ -115,15 +121,17 @@ export default function ProductBridgeControl({
     setPrefilling(true);
     (async () => {
       try {
-        const res = await api.productMap.get({
-          supplier_id: supplierId,
+        const { resolution } = await api.suppliers.productIdentifiers.resolve(supplierId, {
           coa_product: coaProductName.trim(),
+          item: supplierItem,
         });
-        if (cancelled || !res.mapping) return;
+        if (cancelled) return;
+        setResolutionNote(resolution.note);
+        if (!resolution.product_id) return;
         onChange({
-          order_product_id: res.mapping.order_product_id,
-          distributor_sku: res.mapping.distributor_sku,
-          order_product_name: res.mapping.order_product_name ?? null,
+          order_product_id: resolution.product_id,
+          distributor_sku: resolution.our_skus[0] ?? null,
+          order_product_name: resolution.product_label,
         });
       } catch {
         // Non-fatal — no prefill.
@@ -135,7 +143,7 @@ export default function ProductBridgeControl({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [supplierId, coaProductName, disabled]);
+  }, [supplierId, coaProductName, supplierItem, disabled]);
 
   // Merge the selected option into the options list so the Autocomplete can
   // resolve its value even when it's not in the current search results.
@@ -180,7 +188,7 @@ export default function ProductBridgeControl({
                 ? `Map "${coaProductName.trim()}" → order product…`
                 : 'Map → order product…'
             }
-            helperText={disabled ? 'Verify the supplier first' : undefined}
+            helperText={disabled ? 'Verify the supplier first' : resolutionNote ?? undefined}
             InputProps={{
               ...params.InputProps,
               startAdornment: (
