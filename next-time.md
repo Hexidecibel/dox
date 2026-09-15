@@ -4,6 +4,22 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-15 (overnight, later): v2.13.0 ON PROD — Phase 3 product identity shipped.** Merge 4ca927e,
+release 352a4c6, Pages deploy `dc131fc3`; gate: vitest 237 files / 3321 tests, Playwright 7 passed,
+1 skipped; typecheck 56 (baseline); staging deploy `b20c3080`. Migration **0107_product_identifiers**
+applied to staging and prod (stamped `d1_migrations` id 90; table + 4 indexes verified). Backup:
+`~/drops/dox-backups/doc-upload-db-20260915T093349Z.*` (Time Travel bookmark
+`000016e9-00000fb3-000050e7-36c60e8d7294ab26c3c25d977389c4f3` + products SQL). Identifier seed applied on
+prod, matching its dry run: Cush Co 3 new products + 19 identifiers (0801, 0417 attached to the existing
+WMS products), Q8 Darigold Review 1 new product (2235) + 3 identifiers; all confirmed; re-run writes 0.
+Not seeded: 310348, 08012=0801, 30417=0417. **process-worker NOT restarted** — it loads the extraction
+prompts at process start (running since Sep 2), so `customer_item_number` reaches the worker only after
+`sudo systemctl restart dox-process-worker.service`. **Numbering:** the intake-duplicates worktree has
+its own `0107_intake_duplicates.sql`; it lands second and must renumber (0108). **AJ questions:** what
+310348 is (older Darigold item for 2235?); is 08012 the same as 0801; is 30417 the same as 0417; the WMS
+description for 10284 (product currently named from the certificate, "Whole Milk 300 Gallon Tote");
+should lot-only match suggestions be limited by product, since CMF lot codes are shared across products?
+
 **2026-09-15 (overnight): v2.12.0 ON PROD — Phase 2 shipped.** Pages deploy `8302abd3` (136cdc0); gate:
 vitest 232 files / 3261 tests, Playwright 7 passed, 1 skipped; typecheck 56 (baseline). Migration **0106**
 applied to staging and prod (stamped `d1_migrations` id 89); prod view/trigger were checked first and matched
