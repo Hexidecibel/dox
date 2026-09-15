@@ -172,11 +172,11 @@ export function RequestArrivals() {
 
       <HelpWell id="requests.arrivals" title="What suppliers sent back">
         Each card is a file a supplier sent through their request link, with the requirements they
-        said it covers. Two steps turn it into a closed requirement: first approve it in the{' '}
-        <strong>Review Queue</strong> (is what we read from it right?), then decide here whether it
-        satisfies what you asked for. Nothing a supplier uploads counts as accepted until someone
-        here says so. If it is the wrong document, send it back with a reason — the supplier reads
-        that reason on their link.
+        said it covers. Approving it in the <strong>Review Queue</strong> checks what we read from
+        it, and on the same card you can accept the requirements it satisfies or send them back. A
+        file approved without that choice waits here for you to decide. Nothing a supplier uploads
+        counts as accepted until someone says so. If it is the wrong document, send it back with a
+        reason — the supplier reads that reason on their link.
       </HelpWell>
 
       {error && (
