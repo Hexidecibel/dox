@@ -789,11 +789,11 @@ const ingestHistory = {
 const search: ModuleHelpExpanded = {
   headline: 'Search',
   well:
-    'Full-text search across documents and orders. Toggle the AI button to use natural-language queries; the parser converts them into structured filters before running.',
+    'Search documents, orders, customers and bundles. Document results say whether anything on file actually covers what you asked for, and list near misses and unreviewed files separately.',
   list: {
     headline: 'Search',
     well:
-      "Cross-cutting search over your tenant's documents and orders. Type a lot (1042620303) or a dated phrase (production date 7/31/2026) and search checks each document's own fields: covering documents come first, nearby documents that do not match are listed separately with the reason, and files still in the Review Queue are shown as not on file yet. When nothing covers the search, it says so. The AI button takes a question in plain words and answers it the same way.",
+      "Search over your tenant's documents, orders, customers and bundles. Type a lot (1042620303) or a dated phrase (production date 7/31/2026) and search checks each document's own fields: covering documents come first, nearby documents that do not match are listed separately with the reason, and files still in the Review Queue are shown as not on file yet. When nothing covers the search, it says so. The AI button takes a question in plain words and answers it the same way.",
     columnTooltips: {
       aiToggle: "Switch between keyword search (exact match) and natural-language search (LLM parses your query into filters). Keyword is faster; AI is more forgiving when you don't know the exact words used.",
       docCategory: 'Filter docs by the legacy category field — being phased out in favor of document_type. Most tenants leave this alone.',
@@ -808,18 +808,24 @@ const search: ModuleHelpExpanded = {
       {
         heading: 'What Search does',
         body:
-          'Search is the cross-cutting query surface for documents and orders. Two tabs (Documents, Orders), two modes per tab (keyword, AI). Use it when you don\'t want to navigate to the specific list page first — same data, just a query box up front.',
+          "One box for everything on file: documents, orders, customers and bundles. The All tab shows the top few of each; the Documents, Orders, Customers and Bundles tabs show the full list for one kind. Use it when you have a lot number, a date, a supplier or a product and do not want to go to a list page first.",
+      },
+      {
+        heading: 'Reading document results',
+        body:
+          "Document results come back in up to three groups. Covering documents actually contain what you asked for — the lot, production date or supplier is in the document's own fields. Nearby — does not match are documents that look close (same supplier, similar lot, a nearby date) but miss at least one thing you asked for; each says which. In the Review Queue — not on file yet are files that arrived but nobody has reviewed; they are not approved records until someone approves them. " +
+          "When nothing covers your search you see \"No covering document on file\" first, before any nearby documents, so a near miss is never mistaken for an answer.",
       },
       {
         heading: 'Keyword vs. AI mode',
         body:
-          "Keyword search is exact-match SQLite full-text against title, description, tags, file_name, and indexed file content (for docs); order_number, po_number, customer fields (for orders). Fast, predictable, but you have to know the right words. " +
-          "AI mode takes your natural-language query and runs it through an LLM that emits structured filters — \"COAs for Butter from March\" becomes {document_type: 'COA', product: 'Butter', date_from: '2025-03-01'}. The structured query then runs against the same data. Slower and pricier per query, but tolerant of fuzzy wording.",
+          "Keyword search is fast and matches the words you type. Plurals and common unit spellings (gal / gallon) match each other. " +
+          "AI mode takes a question in plain words (\"COA for lot 1042620303 produced 7/31/2026\"), works out what you are asking for, and checks each document against it the same way. If part of your question could not be applied, it is listed above the results instead of being quietly dropped — the results are then broader than what you asked.",
       },
       {
         heading: 'Filters and exports',
         body:
-          "Document keyword search supports category + date-range filters, plus a CSV/JSON export of the result set (uses the same query the search ran). Order keyword search supports a status filter. AI mode disables the manual filters because the LLM produces its own. " +
+          "Document keyword search supports category + date-range filters, plus a CSV/JSON export of the result set (uses the same query the search ran). Order keyword search supports a status filter. AI mode disables the manual filters because it works them out from your question. " +
           "Tenant scoping always applies — super_admin sees only the tenant currently selected in the tenant switcher; others only their own tenant.",
       },
       {

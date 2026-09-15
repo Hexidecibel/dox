@@ -46,6 +46,58 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Any-field COA retrieval (AJ 2026-09-08) + Walkthrough 2 follow-ups
+
+**Status:** in-progress — Phase 1 and Phase 5 (part) done, shipping in v2.11.0
+
+**Source:** AJ spec `20260908_IDP_Feature_Request__AnyField_COA_Retrieval_and_Identifier_Graph.docx`
+plus the Walkthrough 2 notes.
+
+#### Phase 1 — Coverage-aware search — **DONE** (v2.11.0)
+- `/api/search` and `/api/documents/search/natural` return `coverage`,
+  `constraints`, `dropped_constraints`, `unreviewed_candidates`
+  (`shared/searchCoverage.ts`, `shared/searchDates.ts`,
+  `functions/lib/search-coverage.ts`). A near miss is never returned as a match.
+- Search page shows covering / nearby-not-matching / in-the-Review-Queue, with a
+  "no covering document on file" state first. NL prompt fixes in `functions/lib/llm.ts`;
+  plurals and gal/gallon match.
+
+#### Phase 2 — Lot-row retrieval + production_date — **planned**
+- Retrieve at the lot-row level (multi-record COAs), not only the document.
+- `production_date` as a real column, not a metadata key.
+- Backfill older Darigold documents that store production date under `code_date`.
+- Stop sibling text matching (a lot on the same page is not the lot asked for).
+
+#### Phase 3 — Product cross-reference + pack/attribute aliases — **planned**
+- Product identifier graph: 2235 ↔ 810004 / 310348, 10286 ↔ CMF 30904,
+  0801 ↔ CMF 50903.
+- Pack/attribute aliases: U/S = NS, 55.115# = 25 kg.
+- Extract CMF "CUSTOMER ITEM #" as its own field.
+
+#### Phase 4 — Declared per-supplier lot scheme — **planned**
+- Declared scheme: segments / widths / sublot / date encoding. Darigold
+  plant(3) | YY | DDD verified on 45 lots, plant prefixes 103 / 104 / 121 / 220.
+- Review-time validator: decoded lot vs extracted production date.
+- Remove "convert Julian dates" from the extraction prompts (`functions/lib/llm.ts`
+  + `bin/process-worker`) — decoding belongs to the declared scheme, not the model.
+
+#### Phase 5 — Walkthrough 2 follow-ups
+- **Done (v2.11.0):** combined approve + arrival decision in the Review Queue;
+  `sales_sheet` rejection reason; lot matches suggest-only (+ `bin/audit-asserted-lot-matches`);
+  arrivals demo seed (`bin/seed-arrivals-demo`).
+- **Planned:** per-analyte "no limit configured" state; visible conversion flag;
+  required analytes per supplier; review-by date on supplier limits; renewal alert
+  lead time per client with per-type override.
+- **Pending decision:** prod run of `bin/seed-arrivals-demo --remote`; revert of
+  legacy auto-linked lot matches via `bin/audit-asserted-lot-matches --remote --apply`.
+
+#### Deferred (needs AJ)
+- Per-product shelf life (R4) — effective-dated table keyed product + supplier.
+- Customer PO capture (R6).
+- Search export as zip / email on behalf.
+- Presence/absence result normalization.
+- E. coli / MPN handling.
+
 ### Supplier-portal arrivals — staff review and accept
 
 **Status:** done — built locally 2026-09-14 (migration 0104; not deployed)
