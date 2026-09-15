@@ -414,7 +414,8 @@ function main() {
   const existingRows = loadExistingRows(opts.tenant, remote, opts.pageSize);
 
   if (limits.length === 0) {
-    console.log(
+    // stderr under --json, so the JSON on stdout stays parseable.
+    (opts.json ? console.error : console.log)(
       'No active spec limits for this tenant. Only the certificates\' own printed\n' +
       'specs will be judged — see bin/recheck-spec-limits --printed-only.\n'
     );

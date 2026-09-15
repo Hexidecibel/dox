@@ -4,6 +4,39 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+## 2026-09-14 v2.8.0 ON PROD — migrations through 0103, backfill waiting on a yes
+
+**Prod is v2.8.0, Pages deploy `628f049a` (Production / master / `6908554`).**
+`bin/deploy` gate passed: vitest 221 files / 3090 tests, Playwright vs staging 7
+passed, 1 skipped. supdox.com `/releases/index.json` reports `current: 2.8.0`.
+Companion Workers untouched (no source change since `b758f17`).
+
+**Migrations.** Prod `d1_migrations` already had 0095-0102 (schema verified column by
+column). **0103 applied + stamped (id 86)** via the new `bin/migrate-prod-one`; 144
+existing register rows stamped `judgement_origin='approval'`, 0 NULL. Time Travel
+bookmark taken first (`bin/backup`, in `~/drops/dox-backups/`) — `wrangler d1
+export` cannot export a DB with FTS5 tables, so a bookmark is the whole-DB backup.
+Prod ALSO still has a stale legacy `_migrations` (73 rows, stops at 0085) — ignore it.
+**Staging was ~30 migrations behind** (stopped at 0072, deploy 3 months old): applied
+0073-0103 unstamped (staging has no tracking table) and redeployed before e2e.
+
+**⚠️ Stale Cloudflare token trap:** `~/.config/fish/config.fish` exports an old
+`CLOUDFLARE_API_TOKEN` into every shell and it overrides `.env`. Export the token
+from `.env` in the same command before any wrangler/bin call, or fix config.fish.
+
+**Spec register backfill — DRY RUN ONLY, needs the user's go-ahead.**
+`bin/backfill-spec-register --tenant 1f03c3e73add44bfafb33bb16508b78b --remote`
+(Cush Co): 522 docs examined, **416 docs / 1218 rows to write — 1055 in spec,
+41 out of spec, 122 not judged**; 16 docs skipped (approval rows exist), 90 nothing
+to judge. It also found **56 artifact rows already in the register** (clock-time
+values from Medosweet incubation logs, written at approval before today's engine
+fix) — removable only with `--prune-artifacts`, a separate decision. Q8 Darigold
+Review and Medosweet tenants: 0 rows. A real run emails nobody (script imports no
+sender; notify only ever runs from queue approval with in-memory verdicts).
+To write: add `--apply` (prompts for the tenant id).
+
+---
+
 ## 2026-09-02 THE LOOP CLOSES — supplier portal proven end to end on prod
 
 **Prod is on `b758f17`.** Migrations 0088-0094 all applied and stamped.
