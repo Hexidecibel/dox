@@ -1,4 +1,5 @@
-import { verifyToken, hashApiKey } from '../lib/auth';
+import { verifyToken } from '../lib/auth';
+import { authenticateApiKey } from '../lib/api-key-auth';
 import { checkModuleAccess } from '../lib/module-access';
 import type { Env, User } from '../lib/types';
 
@@ -156,42 +157,11 @@ const auth: PagesFunction<Env> = async (context) => {
 
   // --- API Key authentication ---
   if (!token && apiKeyHeader && apiKeyHeader.startsWith('dox_sk_')) {
-    const keyHash = await hashApiKey(apiKeyHeader);
-    const row = await context.env.DB.prepare(
-      `SELECT ak.*, u.id as uid, u.email, u.name, u.role, u.tenant_id, u.active
-       FROM api_keys ak
-       JOIN users u ON ak.user_id = u.id
-       WHERE ak.key_hash = ? AND ak.revoked = 0`
-    )
-      .bind(keyHash)
-      .first<{
-        id: string;
-        expires_at: string | null;
-        uid: string;
-        email: string;
-        name: string;
-        role: string;
-        tenant_id: string | null;
-        active: number;
-      }>();
-
-    if (!row) {
-      return new Response(JSON.stringify({ error: 'Invalid API key' }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    // Check expiration
-    if (row.expires_at && new Date(row.expires_at) < new Date()) {
-      return new Response(JSON.stringify({ error: 'API key expired' }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (!row.active) {
-      return new Response(JSON.stringify({ error: 'Account not found or inactive' }), {
+    // Lookup, expiry (a date-only expiry is valid THROUGH that day) and the
+    // active-user check all live in one place that takes an explicit clock.
+    const result = await authenticateApiKey(context.env.DB, apiKeyHeader, new Date());
+    if (!result.ok) {
+      return new Response(JSON.stringify({ error: result.error }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -201,17 +171,10 @@ const auth: PagesFunction<Env> = async (context) => {
     context.env.DB.prepare(
       "UPDATE api_keys SET last_used_at = datetime('now') WHERE id = ?"
     )
-      .bind(row.id)
+      .bind(result.keyId)
       .run();
 
-    context.data.user = {
-      id: row.uid,
-      email: row.email,
-      name: row.name,
-      role: row.role as User['role'],
-      tenant_id: row.tenant_id,
-      active: row.active,
-    };
+    context.data.user = result.user;
 
     return context.next();
   }

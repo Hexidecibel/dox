@@ -1223,7 +1223,7 @@ const apiKeys: ModuleHelpExpanded = {
       lastUsed:
         "When the key last authenticated a request. Empty means it's never been used (recently issued or forgotten). A last-used timestamp from months ago plus an active status is a strong signal the key is stale and ripe for revocation.",
       status:
-        "Active = the key is live and accepting auth. Expired = the expires_at has passed; the key auto-rejects requests but stays in the list for audit. Revoked = a human revoked the key; permanent (cannot be unrevoked, just create a new one).",
+        "Active = the key is live and accepting auth. Expired = the expiry has passed; the key auto-rejects requests but stays in the list for audit. An expiry date means the key works THROUGH that day: to 11:59 PM in the creating admin's time zone for keys made on this screen, or the end of that day UTC for older keys and API callers that sent a bare date. Revoked = a human revoked the key; permanent (cannot be unrevoked, just create a new one).",
     },
   },
   help: {

@@ -197,6 +197,13 @@ export function generateApiKey(): { key: string; prefix: string } {
 }
 
 /**
+ * API key expiry — re-exported so backend callers reach it next to the rest of
+ * the key helpers. The definition is shared with the frontend and lives in
+ * `shared/apiKeyExpiry.ts`; do not compare `expires_at` anywhere else.
+ */
+export { isApiKeyExpired, parseApiKeyExpiry, validateNewApiKeyExpiry } from '../../shared/apiKeyExpiry';
+
+/**
  * SHA-256 hash an API key for secure storage.
  */
 export async function hashApiKey(key: string): Promise<string> {
