@@ -11,7 +11,7 @@ import {
 import { decideArrival, preflightArrivalDecision } from '../../lib/request-arrivals';
 // NOTE: `deleteFile` is deliberately NOT imported any more — rejecting a queue
 // item no longer destroys its R2 object. See handleReject's R2 RETENTION note.
-import { invariantWarningsFor, withInvariantWarnings } from '../../lib/queue-warnings';
+import { LOT_SCHEME_SELECT, invariantWarningsFor, withInvariantWarnings } from '../../lib/queue-warnings';
 import { loadSpecConfig, withSpecConfig, specResultsWithConfig } from '../../lib/spec-warnings';
 import { registerAndNotifyForApproval } from '../../lib/spec-register';
 import {
@@ -66,7 +66,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
               dt.renewal_interval_months as type_renewal_interval_months,
               t.name as tenant_name, t.slug as tenant_slug,
               u.name as created_by_name, r.name as reviewed_by_name,
-              CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists
+              CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists,
+              ${LOT_SCHEME_SELECT}
        FROM processing_queue pq
        LEFT JOIN document_types dt ON pq.document_type_id = dt.id
        LEFT JOIN tenants t ON pq.tenant_id = t.id
@@ -263,7 +264,8 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     // columns the COA-only QueueItem type omits but the order/shipment approve
     // branch needs (present at runtime via pq.*).
     const item = await context.env.DB.prepare(
-      `SELECT pq.*, t.slug as tenant_slug, t.name as tenant_name
+      `SELECT pq.*, t.slug as tenant_slug, t.name as tenant_name,
+              ${LOT_SCHEME_SELECT}
        FROM processing_queue pq
        LEFT JOIN tenants t ON pq.tenant_id = t.id
        WHERE pq.id = ?`
@@ -277,6 +279,8 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         connector_run_id: string | null;
         tenant_name: string | null;
         extracted_text: string | null;
+        lot_scheme_spec: string | null;
+        lot_scheme_supplier_name: string | null;
       }>();
 
     if (!item) {
@@ -391,6 +395,8 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
             ai_records: body.records ? JSON.stringify(body.records) : null,
             extracted_text: item.extracted_text,
             tenant_name: item.tenant_name,
+            lot_scheme_spec: item.lot_scheme_spec,
+            lot_scheme_supplier_name: item.lot_scheme_supplier_name,
           });
           if (remaining.length > 0) {
             await logAudit(

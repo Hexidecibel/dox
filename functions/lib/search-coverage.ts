@@ -64,6 +64,7 @@ import { catalogCodes, makeProductIdentityConstraint, resolveProductPhrase, type
 import { makeOrderConstraint } from '../../shared/orderCoverage';
 import { loadProductCatalog } from './product-identifiers';
 import { normalizeLotNumber } from '../../shared/lotNormalize';
+import { decodeLot, formatLotIso, lotSchemeLabel, validateLotSchemeSpec, type LotSchemeSpec } from '../../shared/lotScheme';
 
 export const DOC_SCAN_CAP = 5000;
 export const QUEUE_SCAN_CAP = 300;
@@ -130,6 +131,7 @@ interface DocScanRow {
   document_type_name: string | null;
   product_names: string | null;
   lot_rows: string | null;
+  lot_scheme_spec: string | null;
 }
 
 interface QueueScanRow {
@@ -166,7 +168,10 @@ const DOC_SUBJECT_SELECT = `SELECT d.id, d.supplier_id, d.created_at, d.updated_
                         char(31))
                  FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
                  LEFT JOIN products lp ON lp.id = l.product_id
-                WHERE dl.document_id = d.id) AS lot_rows
+                WHERE dl.document_id = d.id) AS lot_rows,
+              (SELECT sls.spec FROM supplier_lot_schemes sls
+                WHERE sls.supplier_id = d.supplier_id AND sls.tenant_id = d.tenant_id
+                ORDER BY sls.version DESC LIMIT 1) AS lot_scheme_spec
          FROM documents d
          LEFT JOIN suppliers s ON s.id = d.supplier_id
          LEFT JOIN document_types dt ON dt.id = d.document_type_id`;
@@ -190,6 +195,23 @@ function parseLotRows(raw: string | null): SubjectLot[] {
   }).filter((l) => l.lot_number || l.lot_key);
 }
 
+/** A stored declaration, validated once per distinct JSON. Only a structured one is kept. */
+const schemeCache = new Map<string, LotSchemeSpec | null>();
+function structuredScheme(raw: string | null): LotSchemeSpec | null {
+  if (!raw) return null;
+  if (schemeCache.has(raw)) return schemeCache.get(raw) ?? null;
+  let spec: LotSchemeSpec | null = null;
+  try {
+    const v = validateLotSchemeSpec(JSON.parse(raw));
+    spec = v.ok && v.spec.kind === 'structured' ? v.spec : null;
+  } catch {
+    spec = null;
+  }
+  if (schemeCache.size > 500) schemeCache.clear();
+  schemeCache.set(raw, spec);
+  return spec;
+}
+
 function addDocRow(corpus: Pick<CoverageCorpus, 'docs' | 'updatedAt' | 'otherIdentifiers'>, r: DocScanRow): void {
   const metadata = { ...parseJsonObject(r.extended_lite), ...parseJsonObject(r.primary_metadata) };
   for (const k of ['po_number', 'order_number', 'product_code', 'customer_po', 'shipment_number', 'customer_item_number']) {
@@ -207,6 +229,10 @@ function addDocRow(corpus: Pick<CoverageCorpus, 'docs' | 'updatedAt' | 'otherIde
     product_names: r.product_names ? r.product_names.split(FIELD_SEP).filter(Boolean) : [],
     metadata,
     lots: parseLotRows(r.lot_rows),
+    lot_scheme: (() => {
+      const spec = structuredScheme(r.lot_scheme_spec);
+      return spec ? { supplier_name: r.supplier_name, spec } : null;
+    })(),
     created_at: r.created_at,
     renewal_due_date: r.renewal_due_date,
     text_match: null,
@@ -333,6 +359,9 @@ export async function indexedLotDocumentIds(db: D1Database, tenantId: string, co
         );
       }
     }
+    if (c.kind === 'date' && (c.role === 'production' || c.role === 'any') && (c.date_from || c.date_to)) {
+      for (const id of await lotCodeImpliedDocumentIds(db, tenantId, c, constraints)) out.add(id);
+    }
     if (c.kind === 'lot') {
       const base = c.lot_parts?.base ?? (c.value.length > 8 ? c.value.slice(0, -2) : c.value);
       // A prefix range on the index: every key starting with the base. Keys are
@@ -347,6 +376,97 @@ export async function indexedLotDocumentIds(db: D1Database, tenantId: string, co
     }
   }
   return out;
+}
+
+/**
+ * QUERY-TIME READING OF A DECLARED LOT FORMAT (0109). When the search names a
+ * supplier whose declared format encodes a PRODUCTION date, plus a production
+ * date, the lots on file for that supplier whose lot code decodes to that day
+ * (± the nearby window for a single day) are judged too — including lots whose
+ * certificate states no production date, which the date index cannot reach.
+ * The date constraint says so in its `note`. Coverage rules are unchanged: a
+ * decoded date is `likely` at best, and only a stated production date covers.
+ */
+async function lotCodeImpliedDocumentIds(
+  db: D1Database,
+  tenantId: string,
+  c: SearchConstraint,
+  constraints: SearchConstraint[],
+): Promise<string[]> {
+  const supplierNames = constraints
+    .filter((x) => x.kind === 'supplier')
+    .map((x) => x.value.trim())
+    .filter((v) => v.replace(/[%_]/g, '').length >= 3);
+  if (supplierNames.length === 0) return [];
+  const single = !!c.date_from && c.date_from === c.date_to;
+  const from = c.date_from ? (single ? addDaysIso(c.date_from, -NEAR_DATE_DAYS) : c.date_from) : '0000-01-01';
+  const to = c.date_to ? (single ? addDaysIso(c.date_to, NEAR_DATE_DAYS) : c.date_to) : '9999-12-31';
+  const out: string[] = [];
+  const notes: string[] = [];
+  for (const name of supplierNames) {
+    let rows: Array<{ id: string; name: string; spec: string | null }> = [];
+    try {
+      const res = await db
+        .prepare(
+          `SELECT s.id, s.name,
+                  (SELECT sls.spec FROM supplier_lot_schemes sls WHERE sls.supplier_id = s.id AND sls.tenant_id = s.tenant_id
+                    ORDER BY sls.version DESC LIMIT 1) AS spec
+             FROM suppliers s WHERE s.tenant_id = ? AND s.active = 1 AND (s.name = ? OR LOWER(s.name) LIKE LOWER(?))`,
+        )
+        .bind(tenantId, name, `%${name.replace(/[%_]/g, '')}%`)
+        .all<{ id: string; name: string; spec: string | null }>();
+      rows = res.results ?? [];
+    } catch {
+      return out;
+    }
+    for (const sup of rows) {
+      const spec = structuredScheme(sup.spec);
+      if (!spec || spec.date_role !== 'production') continue;
+      const lots = await db
+        .prepare(
+          `SELECT l.lot_number, l.sub_lot_code, dl.document_id
+             FROM lots l JOIN document_lots dl ON dl.lot_id = l.id
+            WHERE l.tenant_id = ? AND l.supplier_id = ?
+            LIMIT 5000`,
+        )
+        .bind(tenantId, sup.id)
+        .all<{ lot_number: string; sub_lot_code: string; document_id: string }>();
+      let exact = 0;
+      for (const l of lots.results ?? []) {
+        const d = decodeLot(spec, l.lot_number, l.sub_lot_code);
+        if (!d.fits || !d.decoded_date || d.decoded_date < from || d.decoded_date > to) continue;
+        out.push(l.document_id);
+        if (c.date_from && c.date_to && d.decoded_date >= c.date_from && d.decoded_date <= c.date_to) exact++;
+      }
+      if (single && c.date_from) {
+        const example = impliedLotExample(spec, c.date_from);
+        notes.push(
+          `${sup.name}'s declared lot format (${lotSchemeLabel(spec)}) puts a ${formatLotIso(c.date_from)} production in lot codes like ${example}; `
+          + `${exact} lot${exact === 1 ? '' : 's'} on file decode${exact === 1 ? 's' : ''} to that day. A decoded date is shown as likely — confirm; only a stated production date covers.`,
+        );
+      }
+    }
+  }
+  if (notes.length > 0) c.note = [c.note, ...notes].filter(Boolean).join(' ');
+  return out;
+}
+
+/** "???26212" — the lot shape a declared format gives a day, unknown segments as '?'. */
+function impliedLotExample(spec: LotSchemeSpec, iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  const start = Date.UTC(y, 0, 1);
+  const julian = Math.round((Date.UTC(y, m - 1, d) - start) / 86_400_000) + 1;
+  const pad = (n: number, w: number) => String(n).padStart(w, '0');
+  const yy = pad(y % 100, 2);
+  return (spec.segments ?? []).map((g) => {
+    switch (g.kind) {
+      case 'yy': return yy;
+      case 'julian_day': return pad(julian, 3);
+      case 'mmddyy': return `${pad(m, 2)}${pad(d, 2)}${yy}`;
+      case 'yymmdd': return `${yy}${pad(m, 2)}${pad(d, 2)}`;
+      default: return '?'.repeat(g.width ?? g.min_width ?? 1);
+    }
+  }).join('');
 }
 
 /** Bring every document an indexed lot-row lookup found into the corpus. */

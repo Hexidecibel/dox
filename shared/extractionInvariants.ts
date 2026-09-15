@@ -29,10 +29,12 @@
  * the error rate, never as an accuracy figure.
  *
  * Dependency rule: this module must stay pure and import nothing but
- * `./lotNormalize`, because it is bundled for plain Node.
+ * `./lotNormalize` and `./lotScheme` (itself pure), because it is bundled for
+ * plain Node.
  */
 
 import { normalizeLotNumber, normalizeSubLotCode } from './lotNormalize';
+import { decodeLot, formatLotIso, lotSchemeLabel, type LotSchemeSpec } from './lotScheme';
 
 // ---------------------------------------------------------------------------
 // Field keys we know how to check.
@@ -104,6 +106,10 @@ export const CHECKS = [
   'field_label_mismatch',
   'supplier_not_self',
   'sublot_production_date_conflict',
+  // Migration 0109 — the supplier's DECLARED lot format, when it has one.
+  'lot_fits_declared_format',
+  'lot_code_production_date',
+  'lot_code_best_by_date',
 ] as const;
 
 export type InvariantCheck = (typeof CHECKS)[number];
@@ -180,6 +186,13 @@ export interface CheckOptions {
    * detect once you know who "we" are. Omit to skip that check.
    */
   selfNames?: Array<string | null | undefined>;
+  /**
+   * The queue item's supplier's DECLARED lot format (migration 0109), when it
+   * has one. Powers the three lot-format checks. Omit (or pass a legacy / 'none'
+   * format) to skip them: without a declaration there is nothing to check a lot
+   * against, and a guessed format is exactly what AJ forbids.
+   */
+  lotScheme?: { supplierName: string | null; spec: LotSchemeSpec } | null;
 }
 
 export interface CheckResult {
@@ -950,6 +963,7 @@ export function checkExtraction(item: ExtractionInput, opts: CheckOptions = {}):
   }
 
   checkRecordProductionDates(item, tally, fail);
+  checkDeclaredLotFormat(item, opts.lotScheme ?? null, tally, fail);
 
   return { failures, tally, verbatimLotHits, verbatimLotChecks };
 }
@@ -1055,5 +1069,154 @@ function checkRecordProductionDates(
         `Lot ${shown} appears on ${rows.length} rows of this certificate with different production dates (${values}) — one of them is misread.`
       );
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The supplier's declared lot format (migration 0109)
+// ---------------------------------------------------------------------------
+//
+// AJ §6: the lot code is a deterministic encoding of a date for some suppliers,
+// and it is a VALIDATOR, never an authority. Three checks, each only when the
+// queue item's supplier has DECLARED a structured format:
+//
+//   lot_fits_declared_format — the extracted lot does not parse under the format.
+//     On prod Darigold's non-fitting lots are all extraction errors: three lots
+//     merged into one field, a PO in the lot field, a base in the sublot field.
+//   lot_code_production_date — the format decodes a production date and the row
+//     states a different one. Both values are named; nothing is overwritten.
+//   lot_code_best_by_date — the same for a best-by format (Country Morning),
+//     against the row's best-by or expiration date.
+//
+// A stated date that reads two ways ("04-05-2026") passes when either reading
+// is the decoded day: the decode is not allowed to settle the ambiguity, and it
+// has nothing to contradict.
+
+const MONTHS: Record<string, number> = {
+  JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6, JUL: 7, AUG: 8, SEP: 9, SEPT: 9, OCT: 10, NOV: 11, DEC: 12,
+};
+
+/** Every calendar day a stated date could be, as ISO. Empty when it is not a date. */
+function statedDays(raw: string): Set<string> {
+  const out = new Set<string>();
+  const add = (y: number, mo: number, d: number) => {
+    const dt = mkDate(y, mo, d);
+    if (dt) out.add(dt.toISOString().slice(0, 10));
+  };
+  const s = raw.trim().toUpperCase();
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  if (m) {
+    add(+m[1], +m[2], +m[3]);
+    return out;
+  }
+  m = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/.exec(s);
+  if (m) {
+    const y = +m[3] < 100 ? 2000 + +m[3] : +m[3];
+    add(y, +m[1], +m[2]);
+    add(y, +m[2], +m[1]);
+    return out;
+  }
+  m = /^(\d{1,2})[\s\-.]*([A-Z]{3,4})[A-Z]*[\s\-.,]*(\d{2,4})$/.exec(s);
+  if (m && MONTHS[m[2]]) {
+    add(+m[3] < 100 ? 2000 + +m[3] : +m[3], MONTHS[m[2]], +m[1]);
+    return out;
+  }
+  m = /^([A-Z]{3,4})[A-Z]*[\s\-.]*(\d{1,2}),?[\s\-.]*(\d{2,4})$/.exec(s);
+  if (m && MONTHS[m[1]]) {
+    add(+m[3] < 100 ? 2000 + +m[3] : +m[3], MONTHS[m[1]], +m[2]);
+  }
+  return out;
+}
+
+function possessive(name: string | null): string {
+  if (!name) return "this supplier's";
+  return /s$/i.test(name.trim()) ? `${name.trim()}'` : `${name.trim()}'s`;
+}
+
+function checkDeclaredLotFormat(
+  item: ExtractionInput,
+  scheme: { supplierName: string | null; spec: LotSchemeSpec } | null,
+  tally: InvariantTally,
+  fail: (check: InvariantCheck, field: string, scope: string, value: unknown, reason: string, message: string) => void
+): void {
+  if (!scheme || scheme.spec.kind !== 'structured') return;
+  const spec = scheme.spec;
+  const formatLabel = lotSchemeLabel(spec);
+  const whose = `${possessive(scheme.supplierName)} declared lot format (${formatLabel})`;
+
+  // The rows as they will be stored: each record over its page, or the flat fields.
+  const rows: Array<{ scope: string; fields: Record<string, unknown> }> = [];
+  const rec = safeParse(item.ai_records);
+  const envelope = rec && typeof rec === 'object' ? (rec as { page_metadata?: unknown; records?: unknown }) : null;
+  const records = envelope && Array.isArray(envelope.records) ? envelope.records : [];
+  if (records.length > 0) {
+    const page = envelope!.page_metadata && typeof envelope!.page_metadata === 'object' && !Array.isArray(envelope!.page_metadata)
+      ? (envelope!.page_metadata as Record<string, unknown>)
+      : {};
+    records.forEach((r: unknown, i: number) => {
+      const own = r && typeof r === 'object' ? (r as { fields?: unknown }).fields : null;
+      if (own && typeof own === 'object' && !Array.isArray(own)) {
+        rows.push({ scope: `record[${i}]`, fields: { ...page, ...(own as Record<string, unknown>) } });
+      }
+    });
+  } else {
+    const flat = safeParse(item.ai_fields);
+    if (flat && typeof flat === 'object' && !Array.isArray(flat)) {
+      rows.push({ scope: 'ai_fields', fields: flat as Record<string, unknown> });
+    }
+  }
+
+  for (const { scope, fields } of rows) {
+    const lotKey = ['lot_number', 'lot_code'].find((k) => asString(fields[k]) && !isPlaceholder(fields[k]));
+    if (!lotKey) continue;
+    const lotRaw = asString(fields[lotKey]);
+    const subRaw = SUBLOT_KEYS.map((k) => asString(fields[k])).find((v) => v && !isPlaceholder(v)) ?? '';
+    const d = decodeLot(spec, lotRaw, subRaw);
+    const shownLot = subRaw ? `${lotRaw} / sublot ${subRaw}` : lotRaw;
+
+    if (!d.fits) {
+      bump(tally, 'lot_fits_declared_format', 'fail');
+      fail(
+        'lot_fits_declared_format',
+        lotKey,
+        scope,
+        shownLot,
+        `does not parse under the declared format: ${d.reason}`,
+        `Lot "${shownLot}" does not fit ${whose}: ${d.reason} Check that the lot was read from the right place.`
+      );
+      continue;
+    }
+    bump(tally, 'lot_fits_declared_format', 'pass');
+    if (!d.decoded_date || !d.date_role) continue;
+
+    const check: InvariantCheck = d.date_role === 'production' ? 'lot_code_production_date' : 'lot_code_best_by_date';
+    const dateKeys = d.date_role === 'production'
+      ? ['production_date', 'mfg_date']
+      : ['best_by_date', 'expiration_date'];
+    const dateKey = dateKeys.find((k) => asString(fields[k]) && !isPlaceholder(fields[k]));
+    if (!dateKey) {
+      bump(tally, check, 'skip');
+      continue;
+    }
+    const stated = asString(fields[dateKey]);
+    const days = statedDays(stated);
+    if (days.size === 0) {
+      bump(tally, check, 'skip');
+      continue;
+    }
+    if (days.has(d.decoded_date)) {
+      bump(tally, check, 'pass');
+      continue;
+    }
+    const roleWords = d.date_role === 'production' ? 'production date' : 'best-by date';
+    bump(tally, check, 'fail');
+    fail(
+      check,
+      dateKey,
+      scope,
+      stated,
+      `${dateKey} ${stated} but lot ${d.base} decodes to ${d.decoded_date} (${d.date_role})`,
+      `This row's ${label(dateKey).toLowerCase()} is ${stated}, but lot ${d.base} decodes to a ${roleWords} of ${formatLotIso(d.decoded_date)} under ${whose}. One of the two is wrong — check the certificate. Nothing has been changed.`
+    );
   }
 }

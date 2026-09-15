@@ -2259,7 +2259,11 @@ export type SearchCheckOutcome =
  * code date, and the page prints it under a production date label
  * (bin/backfill-lot-production-dates). `reviewer` = typed by a person.
  */
-export type SearchFieldProvenance = 'extracted' | 'linked_record' | 'system' | 'extracted_code_date_legacy' | 'reviewer';
+/**
+ * 'lot_decode' (migration 0109): a date the supplier's DECLARED lot format
+ * decodes from the lot code. Never covering — at best `likely`, confirm.
+ */
+export type SearchFieldProvenance = 'extracted' | 'linked_record' | 'system' | 'extracted_code_date_legacy' | 'reviewer' | 'lot_decode';
 
 export interface SearchConstraintCheck {
   constraint_id: string;
@@ -2295,8 +2299,14 @@ export interface SearchMatchedLot {
   lot_key: string;
   production_date: string | null;
   production_date_raw: string | null;
-  production_date_source: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | null;
+  production_date_source: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | 'lot_decode' | null;
   production_date_status: 'resolved' | 'ambiguous' | 'unparseable' | 'conflict' | null;
+  /**
+   * What the lot code itself implies under the supplier's DECLARED format (0109),
+   * with the provenance in words. Present only when the format decodes a date for
+   * this lot; shown as "lot code implies …", never as a stated date.
+   */
+  lot_code_implies?: { date: string; role: 'production' | 'best_by'; provenance: string } | null;
   /** As printed on this row's document, when the document is this row alone. */
   quantity: string | null;
   net_weight: string | null;
@@ -4288,7 +4298,7 @@ export interface LotListItem {
   /** Migration 0106: the production date its certificate states (ISO), with provenance. */
   production_date?: string | null;
   production_date_raw?: string | null;
-  production_date_source?: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | null;
+  production_date_source?: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | 'lot_decode' | null;
   production_date_status?: 'resolved' | 'ambiguous' | 'unparseable' | 'conflict' | null;
   created_at: string;
   /** COUNT(document_lots) for this lot — COA docs linked to it. */

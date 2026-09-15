@@ -22,6 +22,30 @@
 
 import { checkExtraction } from '../../shared/extractionInvariants';
 import type { InvariantFailure } from '../../shared/extractionInvariants';
+import { validateLotSchemeSpec, type LotSchemeSpec } from '../../shared/lotScheme';
+
+/**
+ * The SQL fragment a queue read selects so the lot-format checks (0109) have the
+ * item's supplier's CURRENT declared format. Two scalar subqueries rather than a
+ * join, so a supplier with no declaration costs nothing and changes no row count.
+ * `withInvariantWarnings` strips both columns from the response.
+ */
+export const LOT_SCHEME_SELECT = `(SELECT sls.spec FROM supplier_lot_schemes sls
+            WHERE sls.supplier_id = pq.supplier_id AND sls.tenant_id = pq.tenant_id
+            ORDER BY sls.version DESC LIMIT 1) AS lot_scheme_spec,
+          (SELECT sup.name FROM suppliers sup WHERE sup.id = pq.supplier_id AND sup.tenant_id = pq.tenant_id) AS lot_scheme_supplier_name`;
+
+function declaredScheme(row: WarnableRow): { supplierName: string | null; spec: LotSchemeSpec } | null {
+  const raw = row.lot_scheme_spec;
+  if (typeof raw !== 'string' || !raw) return null;
+  try {
+    const v = validateLotSchemeSpec(JSON.parse(raw));
+    if (!v.ok || v.spec.kind !== 'structured') return null;
+    return { supplierName: str(row.lot_scheme_supplier_name), spec: v.spec };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Above this, skip the text-grounded checks rather than burn worker CPU on a
@@ -36,6 +60,9 @@ export interface WarnableRow {
   extracted_text?: unknown;
   /** Tenant name, when the caller's query joined it. Powers supplier_not_self. */
   tenant_name?: unknown;
+  /** The supplier's current declared lot format JSON (LOT_SCHEME_SELECT). Powers the lot-format checks. */
+  lot_scheme_spec?: unknown;
+  lot_scheme_supplier_name?: unknown;
   /** Callers pass whole `SELECT pq.*` rows; everything else is carried through. */
   [key: string]: unknown;
 }
@@ -58,7 +85,7 @@ export function invariantWarningsFor(row: WarnableRow): InvariantFailure[] {
         ai_records: str(row.ai_records),
         extracted_text: text && text.length > MAX_TEXT_CHARS ? null : text,
       },
-      { selfNames: [str(row.tenant_name)] }
+      { selfNames: [str(row.tenant_name)], lotScheme: declaredScheme(row) }
     ).failures;
   } catch (err) {
     console.error(
@@ -76,5 +103,7 @@ export function invariantWarningsFor(row: WarnableRow): InvariantFailure[] {
 export function withInvariantWarnings<T extends WarnableRow>(
   row: T
 ): T & { invariant_warnings: InvariantFailure[] } {
-  return { ...row, invariant_warnings: invariantWarningsFor(row) };
+  const warnings = invariantWarningsFor(row);
+  const { lot_scheme_spec: _spec, lot_scheme_supplier_name: _name, ...rest } = row;
+  return { ...(rest as T), invariant_warnings: warnings };
 }

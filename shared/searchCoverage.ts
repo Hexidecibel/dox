@@ -52,6 +52,7 @@ import {
   type StoredDateReading,
 } from './searchDates';
 import { normalizeLotNumber, normalizeSubLotCode } from './lotNormalize';
+import { decodeLot, lotDecodeProvenance, type LotSchemeSpec } from './lotScheme';
 import { checkProductIdentity } from './productIdentity';
 import { checkOrder } from './orderCoverage';
 
@@ -170,7 +171,7 @@ export interface SubjectLot {
   /** Migration 0106 — the row's own production date and where it came from. */
   production_date?: string | null;
   production_date_raw?: string | null;
-  production_date_source?: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | null;
+  production_date_source?: 'extracted' | 'extracted_code_date_legacy' | 'reviewer' | 'lot_decode' | null;
   production_date_status?: 'resolved' | 'ambiguous' | 'unparseable' | 'conflict' | null;
   /** The product record the lot row is linked to (product identity checks read it). */
   product_name?: string | null;
@@ -190,6 +191,12 @@ export interface CoverageSubject {
   metadata: Record<string, unknown>;
   /** Linked lot records (document_lots → lots). Metadata lots are derived here. */
   lots: SubjectLot[];
+  /**
+   * The supplier's DECLARED lot format (migration 0109), when it has a
+   * structured one. A lot that fits it may IMPLY a date; that is read only when
+   * the subject states none, and is at best `likely` (provenance 'lot_decode').
+   */
+  lot_scheme?: { supplier_name: string | null; spec: LotSchemeSpec } | null;
   created_at: string | null;
   renewal_due_date: string | null;
   /** Did the free-text part of the query hit this document? null = not asked. */
@@ -632,6 +639,7 @@ interface DateHitEval {
   provenance: SearchFieldProvenance;
   lot_row?: boolean;
   row_status?: SubjectLot['production_date_status'];
+  decoded_lot?: string;
 }
 
 interface DateValue {
@@ -641,6 +649,25 @@ interface DateValue {
   /** Read from the lot row (0106) rather than the document's metadata. */
   lot_row?: boolean;
   row_status?: SubjectLot['production_date_status'];
+  /** For provenance 'lot_decode': the lot the date was decoded from. */
+  decoded_lot?: string;
+}
+
+/**
+ * The production date a subject's lot code IMPLIES under its supplier's declared
+ * format (0109) — for a row-scoped subject its one lot, otherwise the lot in its
+ * metadata. null unless the format encodes a production date and the lot fits.
+ */
+export function lotCodeImplies(s: CoverageSubject, lot?: SubjectLot | null): { date: string; role: 'production' | 'best_by'; base: string; provenance: string } | null {
+  const scheme = s.lot_scheme;
+  if (!scheme || scheme.spec.kind !== 'structured' || !scheme.spec.date_role) return null;
+  const one = lot ?? (s.lots.length === 1 ? s.lots[0] : null);
+  const lotRaw = one ? one.lot_number : metaString(s.metadata.lot_number) ?? metaString(s.metadata.lot_code);
+  const subRaw = one ? one.sub_lot_code : metaString(s.metadata.sub_lot_code);
+  if (!lotRaw) return null;
+  const d = decodeLot(scheme.spec, lotRaw, subRaw);
+  if (!d.fits || !d.decoded_date || !d.date_role) return null;
+  return { date: d.decoded_date, role: d.date_role, base: d.base, provenance: lotDecodeProvenance(scheme.supplier_name, scheme.spec) };
 }
 
 /** The one lot row a row-scoped subject is judged on, when it states a production date. */
@@ -661,12 +688,14 @@ function subjectDateValues(s: CoverageSubject, fields: string[]): DateValue[] {
       const value = row.production_date ?? row.production_date_raw;
       if (!value) continue;
       const source = row.production_date_source ?? 'extracted';
+      const implied = source === 'lot_decode' ? lotCodeImplies(s, row) : null;
       out.push({
         field: f,
         value,
         provenance: source === 'extracted' ? 'extracted' : source,
         lot_row: true,
         row_status: row.production_date_status,
+        ...(source === 'lot_decode' ? { decoded_lot: implied?.base ?? row.lot_number } : {}),
       });
       continue;
     }
@@ -680,6 +709,15 @@ function subjectDateValues(s: CoverageSubject, fields: string[]): DateValue[] {
     }
     const v = metaString(s.metadata[f]);
     if (v) out.push({ field: f, value: v, provenance: 'extracted' });
+  }
+  // Nothing on the subject STATES a production date, but its lot code implies
+  // one under the supplier's declared format: offered as the fallback R3
+  // allows — labelled, and never covering (checkDate makes it `likely`).
+  if (fields.includes('production_date') && !out.some((v) => DATE_ROLE_FIELDS.production.includes(v.field))) {
+    const implied = lotCodeImplies(s, s.row_scoped && s.lots.length === 1 ? s.lots[0] : null);
+    if (implied && implied.role === 'production') {
+      out.push({ field: 'production_date', value: implied.date, provenance: 'lot_decode', lot_row: !!s.row_scoped, decoded_lot: implied.base });
+    }
   }
   return out;
 }
@@ -720,7 +758,7 @@ export function checkDate(c: SearchConstraint, s: CoverageSubject, order: DateOr
       const readings = readStoredDates(v.value, v.field === 'created_at' ? null : order);
       if (readings.length === 0) unparsed.push(v);
       for (const r of readings) {
-        hits.push({ field: v.field, raw: v.value, reading: r, provenance: v.provenance, lot_row: v.lot_row, row_status: v.row_status });
+        hits.push({ field: v.field, raw: v.value, reading: r, provenance: v.provenance, lot_row: v.lot_row, row_status: v.row_status, decoded_lot: v.decoded_lot });
       }
     }
     return { hits, unparsed };
@@ -748,7 +786,16 @@ export function checkDate(c: SearchConstraint, s: CoverageSubject, order: DateOr
       const how = r.order && r.raw !== r.iso
         ? ` (read as ${r.order === 'mdy' ? 'month/day' : 'day/month'} because this document writes its other dates that way)`
         : '';
-      if (provenance === 'extracted_code_date_legacy') {
+      if (provenance === 'lot_decode') {
+        // R3 (b): the lot code, decoded under the supplier's DECLARED format. A
+        // fallback and a validator, never an authority — likely, for a person.
+        const how = s.lot_scheme ? lotDecodeProvenance(s.lot_scheme.supplier_name, s.lot_scheme.spec) : "decoded from the lot code using the supplier's declared format";
+        best = better(best, {
+          ...common,
+          outcome: 'likely',
+          message: `Lot code implies production ${formatIsoHuman(r.iso)}: lot ${matching[0].decoded_lot ?? ''} ${how}. No production date is stated for ${onThis} — open the certificate to confirm before using it.`.replace('lot  ', 'lot '),
+        });
+      } else if (provenance === 'extracted_code_date_legacy') {
         // Not verified: the value is right, its ROLE was inferred from the page
         // by the backfill. Shown as likely, for a person to confirm.
         best = better(best, {
@@ -791,7 +838,9 @@ export function checkDate(c: SearchConstraint, s: CoverageSubject, order: DateOr
         }
       }
       const shown = hits.length === 1 ? describeReading(hits[0].reading) : rawValue;
-      const msg = `The ${label} on ${onThis} is ${shown}; you asked for ${asked}.`;
+      const msg = provenance === 'lot_decode' && hits[0].reading.kind === 'exact'
+        ? `Lot code implies production ${formatIsoHuman(hits[0].reading.iso)} (lot ${hits[0].decoded_lot ?? ''}, decoded under the supplier's declared format; no production date is stated); you asked for ${asked}.`
+        : `The ${label} on ${onThis} is ${shown}; you asked for ${asked}.`;
       best = better(best, {
         ...common,
         outcome: nearest !== null && nearest <= NEAR_DATE_DAYS ? 'near' : 'mismatch',
@@ -804,7 +853,7 @@ export function checkDate(c: SearchConstraint, s: CoverageSubject, order: DateOr
   if (best && best.outcome !== 'mismatch') return best;
   // A near or mismatched row date still answers the question for this row:
   // the document's code date is not consulted as a production date then.
-  if (best && own.hits.some((h) => h.lot_row)) return best;
+  if (best && own.hits.some((h) => h.lot_row || h.provenance === 'lot_decode')) return best;
 
   if (!best && own.unparsed.length > 0) {
     const u = own.unparsed[0];
@@ -1080,6 +1129,10 @@ export function matchedLotOf(v: SubjectVerdict, s: CoverageSubject): SearchMatch
     production_date_raw: l.production_date_raw ?? null,
     production_date_source: l.production_date_source ?? null,
     production_date_status: l.production_date_status ?? null,
+    lot_code_implies: (() => {
+      const implied = lotCodeImplies(s, l);
+      return implied ? { date: implied.date, role: implied.role, provenance: implied.provenance } : null;
+    })(),
     // Quantity and weight are printed per row: they belong to the row only when
     // this document IS that row (a split certificate), never borrowed otherwise.
     quantity: single ? metaString(s.metadata.quantity) : null,
