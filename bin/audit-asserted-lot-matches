@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# Report order lines that the lot matcher LINKED on its own, before matching
+# became suggest-only (14 Sep 2026), and optionally turn each back into a
+# pending suggestion for a person to confirm.
+#
+# WHY
+#   The client's rule (AJ, IDP request section 7): "It does not assert a
+#   lot-to-shipment match as established fact. It presents the evidence and I
+#   make the call." Until 14 Sep the engine auto-linked STRONG matches, writing
+#   order_items.coa_document_id + coa_match_status='matched' with nobody in the
+#   loop. The code no longer does that (functions/lib/entities/matching.ts),
+#   but rows it already wrote are still asserted. Prod had 9 such lines when
+#   the change was made.
+#
+#   The code change deliberately does NOT rewrite those rows: they may already
+#   have gone out on a customer COA report, so silently unlinking them would
+#   change history. This script shows exactly which lines they are, and only
+#   with --apply turns them into suggestions.
+#
+# WHAT COUNTS AS "ASSERTED"
+#   coa_match_status = 'matched' with NO accepted lot_match_suggestions row for
+#   the same (order_item_id, document_id). Accepting a suggestion always writes
+#   that accepted row (POST /api/lot-matches/:id), so a matched line without one
+#   was linked by the engine, not by a person.
+#
+# Usage:
+#   ./bin/audit-asserted-lot-matches [--tenant <id>] [target] [--apply] [--yes]
+#
+#   (no --apply)      DRY-RUN: print the asserted lines, change nothing
+#   --tenant <id>     only this tenant (default: all tenants)
+#   --staging         target STAGING D1 (doc-upload-db-staging --remote)
+#   --remote          target PROD D1 (doc-upload-db --remote)
+#   --apply           convert each asserted line into a PENDING suggestion
+#                     (match_basis 'legacy_auto_link', its recorded confidence
+#                     kept) and clear the line's link; one audit row per line
+#                     ('lot_match.auto_link_reverted'). A pair a person already
+#                     REJECTED keeps its rejection and is just unlinked.
+#   --yes / -y        skip the typed confirmation
+#   -h / --help       show this help
+#
+# SAFETY
+#   - Dry-run by default; --remote --apply asks you to type 'revert'.
+#   - DB-only; sends nothing, calls no API.
+#   - Idempotent: after --apply the lines are no longer 'matched', so a re-run
+#     finds nothing.
+#   - Not a migration: does not touch d1_migrations.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PROD_DB="doc-upload-db"
+STAGING_DB="doc-upload-db-staging"
+
+TARGET="local"
+TENANT=""
+APPLY=0
+SKIP_CONFIRM=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tenant) TENANT="${2:-}"; shift 2 ;;
+    --staging) TARGET="staging"; shift ;;
+    --remote|-r) TARGET="prod"; shift ;;
+    --apply) APPLY=1; shift ;;
+    --yes|-y) SKIP_CONFIRM=1; shift ;;
+    -h|--help) sed -n '2,50p' "$0"; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+case "$TARGET" in
+  local)   DB="$PROD_DB"; LOC_FLAG="--local"; TARGET_LABEL="LOCAL D1 ($DB)" ;;
+  staging) DB="$STAGING_DB"; LOC_FLAG="--remote"; TARGET_LABEL="STAGING D1 ($DB, remote)" ;;
+  prod)    DB="$PROD_DB"; LOC_FLAG="--remote"; TARGET_LABEL="REMOTE (PROD) D1 ($DB)" ;;
+esac
+
+if [ "$LOC_FLAG" = "--remote" ]; then
+  if [ ! -f .dev.vars ]; then echo "ERROR: .dev.vars not found (needed for remote D1 creds)." >&2; exit 1; fi
+  set -a
+  # shellcheck disable=SC1091
+  source .dev.vars
+  set +a
+fi
+
+TENANT_ESC="${TENANT//\'/\'\'}"
+TENANT_CLAUSE=""
+[ -n "$TENANT" ] && TENANT_CLAUSE="AND o.tenant_id = '$TENANT_ESC'"
+
+echo "audit-asserted-lot-matches"
+echo "  target : $TARGET_LABEL"
+echo "  tenant : ${TENANT:-all}"
+echo "  apply  : $([ "$APPLY" = 1 ] && echo yes || echo "no (dry-run)")"
+echo
+
+QUERY="SELECT oi.id AS order_item_id, o.tenant_id, o.order_number, oi.product_name, oi.product_code,
+              COALESCE(l.lot_number, oi.lot_number) AS lot_number,
+              oi.coa_document_id, d.title AS coa_title, oi.lot_id,
+              oi.match_confidence, oi.coa_matched_at,
+              (SELECT status FROM lot_match_suggestions x
+                WHERE x.order_item_id = oi.id AND x.document_id = oi.coa_document_id) AS existing_suggestion
+         FROM order_items oi
+         JOIN orders o ON o.id = oi.order_id
+         LEFT JOIN lots l ON l.id = oi.lot_id
+         LEFT JOIN documents d ON d.id = oi.coa_document_id
+        WHERE oi.coa_match_status = 'matched'
+          AND oi.coa_document_id IS NOT NULL
+          $TENANT_CLAUSE
+          AND NOT EXISTS (
+            SELECT 1 FROM lot_match_suggestions s
+             WHERE s.order_item_id = oi.id AND s.document_id = oi.coa_document_id
+               AND s.status = 'accepted')
+        ORDER BY o.tenant_id, oi.coa_matched_at, oi.id;"
+
+if ! RAW=$(npx wrangler d1 execute "$DB" $LOC_FLAG --json --command "$QUERY" 2>&1); then
+  echo "ERROR: query failed on $TARGET_LABEL." >&2
+  printf '%s\n' "$RAW" | tail -8 >&2
+  exit 1
+fi
+
+ROWS=$(printf '%s' "$RAW" | node -e '
+  let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+    let rows=[];
+    try{const s=d.search(/[[{]/);const j=JSON.parse(s>=0?d.slice(s):d);rows=(Array.isArray(j)?j[0]:j.result[0]).results||[];}catch{}
+    process.stdout.write(JSON.stringify(rows));
+  });
+')
+N=$(printf '%s' "$ROWS" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).length))')
+
+printf '%s' "$ROWS" | node -e '
+  let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+    const rows=JSON.parse(d);
+    if(rows.length===0){console.log("No asserted lot matches. Every matched order line was accepted by a person.");return;}
+    console.log(rows.length+" order line(s) linked by the engine with no person accepting the match:");
+    console.log("");
+    for(const r of rows){
+      const pct=r.match_confidence==null?"?":Math.round(r.match_confidence*100)+"%";
+      console.log("  ["+r.tenant_id+"] order "+r.order_number+"  lot "+(r.lot_number||"-")+"  "+(r.product_code?"("+r.product_code+") ":"")+(r.product_name||""));
+      console.log("      COA: "+(r.coa_title||r.coa_document_id)+"  confidence "+pct+"  linked "+(r.coa_matched_at||"?")+(r.existing_suggestion?"  [existing suggestion: "+r.existing_suggestion+"]":""));
+      console.log("      order_item "+r.order_item_id);
+    }
+  });
+'
+echo
+
+if [ "$APPLY" != "1" ]; then
+  if [ "$N" != "0" ]; then
+    echo "DRY-RUN. Nothing changed. These lines still count as having a COA on reports."
+    echo "Re-run with --apply to turn each into a pending suggestion a person confirms."
+  fi
+  exit 0
+fi
+[ "$N" = "0" ] && exit 0
+
+if [ "$SKIP_CONFIRM" != "1" ]; then
+  echo "This will UNLINK $N order line(s) on $TARGET_LABEL and re-offer each match as a"
+  echo "pending suggestion. Until someone confirms them, these lines report as missing a COA."
+  read -r -p "Type 'revert' to continue: " reply
+  [ "$reply" = "revert" ] || { echo "Aborted."; exit 1; }
+fi
+
+SQL=$(ROWS_JSON="$ROWS" node <<'NODE'
+{
+  const rows = JSON.parse(process.env.ROWS_JSON);
+  const q = (v) => (v == null ? 'NULL' : "'" + String(v).replace(/'/g, "''") + "'");
+  const id = () => require('crypto').randomBytes(8).toString('hex');
+  const out = [];
+  for (const r of rows) {
+    // Re-offer the match. A pair that already has a suggestion row keeps it:
+    // a pending one is left pending, a REJECTED one stays rejected (a person
+    // said no, and unlinking is then simply what they asked for).
+    out.push(
+      `INSERT OR IGNORE INTO lot_match_suggestions (id, tenant_id, order_item_id, document_id, lot_id, match_confidence, match_basis, status) ` +
+      `VALUES (${q(id())}, ${q(r.tenant_id)}, ${q(r.order_item_id)}, ${q(r.coa_document_id)}, ${q(r.lot_id)}, ${r.match_confidence == null ? 'NULL' : Number(r.match_confidence)}, 'legacy_auto_link', 'pending');`
+    );
+    out.push(
+      `UPDATE order_items SET coa_document_id = NULL, lot_matched = 0, match_confidence = NULL, ` +
+      `coa_match_status = 'unmatched', coa_matched_at = NULL ` +
+      `WHERE id = ${q(r.order_item_id)} AND coa_match_status = 'matched' AND coa_document_id = ${q(r.coa_document_id)};`
+    );
+    const details = JSON.stringify({
+      order_number: r.order_number,
+      document_id: r.coa_document_id,
+      lot_number: r.lot_number,
+      match_confidence: r.match_confidence,
+      linked_at: r.coa_matched_at,
+      reason: 'linked by the matcher before suggest-only (14 Sep 2026); no person accepted it',
+      via: 'bin/audit-asserted-lot-matches',
+    });
+    out.push(
+      `INSERT INTO audit_log (user_id, tenant_id, action, resource_type, resource_id, details, ip_address) ` +
+      `VALUES (NULL, ${q(r.tenant_id)}, 'lot_match.auto_link_reverted', 'order_item', ${q(r.order_item_id)}, ${q(details)}, NULL);`
+    );
+  }
+  process.stdout.write(out.join('\n'));
+}
+NODE
+)
+
+TMP_SQL="$(mktemp "${TMPDIR:-/tmp}/audit-asserted-lot-matches.XXXXXX.sql")"
+trap 'rm -f "$TMP_SQL"' EXIT
+printf '%s\n' "$SQL" > "$TMP_SQL"
+npx wrangler d1 execute "$DB" $LOC_FLAG --file "$TMP_SQL"
+echo
+echo "Done. $N line(s) unlinked and re-offered as suggestions; confirm them on each order."

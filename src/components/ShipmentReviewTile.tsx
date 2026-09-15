@@ -35,8 +35,9 @@ import type { ParsedShipment } from '../../shared/connectorOutput';
  * shipped against it. The reviewer edits the rows, then "Accept & produce"
  * re-runs the shipment producer (produceShipment) over the edited records.
  *
- * Producing a shipment can emit WEAK COA→lot match suggestions (the engine
- * found a plausible-but-not-certain COA for a shipped lot). Those only exist
+ * Producing a shipment emits COA→lot match suggestions: every candidate COA for
+ * a shipped lot, high-confidence ones included, because the engine never links
+ * a COA to a shipment on its own. Those only exist
  * AFTER the producer runs, so we fetch + render them in a second section once
  * accept succeeds, with Confirm / Reject controls.
  */
@@ -264,9 +265,9 @@ export default function ShipmentReviewTile({
             COA → lot match suggestions
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
-            These weak matches are produced by accepting the shipment — the engine found
-            candidate COAs for the shipped lots but isn&apos;t certain. Confirm the correct
-            ones to bind the COA to the order line.
+            Accepting the shipment looks for COAs matching the shipped lots. Every match is a
+            suggestion, however confident, and nothing is linked until you confirm it. Highest
+            confidence first.
           </Typography>
 
           {suggestionsLoading ? (

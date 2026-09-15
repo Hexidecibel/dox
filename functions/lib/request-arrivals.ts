@@ -24,6 +24,15 @@
  * 409). Accepting a file on the supplier's own description of it is the exact
  * thing 0092 said a claim is not. Needs-attention has no such precondition.
  *
+ * The Review Queue can make both judgements in ONE click for a `request_link`
+ * item (PUT /api/queue/:id with `arrival_decision`). That is still two
+ * judgements recorded as two: the approval writes what it always wrote, then
+ * `decideArrival` runs exactly as the arrivals screen runs it, with
+ * `via: 'review_queue_combined'` on its audit rows. The reviewer is shown the
+ * supplier's claims as pre-ticked boxes and has to choose accept or send back,
+ * so the decision is still a person's, just made on the screen they were
+ * already on. Nothing is accepted by default.
+ *
  * WHAT A DECISION WRITES
  * ----------------------
  * One `db.batch`, so a decision cannot half-happen:
@@ -781,20 +790,41 @@ export async function confirmRequirementLink(
   };
 }
 
+/** Where a decision came from, for the audit trail. */
+export type ArrivalDecisionVia = 'arrival' | 'review_queue_combined';
+
+export interface DecideArrivalOptions {
+  /**
+   * 'arrival' for POST /api/request-uploads/:id/decide, 'review_queue_combined'
+   * when the Review Queue approved (or rejected) the file and decided it in the
+   * same action. Written into every audit row this decision produces, so the
+   * two paths stay distinguishable after the fact.
+   */
+  via?: ArrivalDecisionVia;
+  /** The queue item the combined action approved or rejected. */
+  queueItemId?: string | null;
+}
+
+interface DecisionContext {
+  upload: UploadRow;
+  rootRequestId: string;
+  current: { id: string; status: DocumentRequestStatus };
+  lines: RequestLineRow[];
+  entries: Array<{ index: number; decision: DecideArrivalLine; line: RequestLineRow }>;
+}
+
 /**
- * Decide what one arrival satisfies. See the module header for what is written.
- *
- * Every check runs before any write, so a refusal on the third line leaves the
- * first two untouched.
+ * Every check a decision can fail WITHOUT knowing which document it is about:
+ * the arrival exists in this tenant, the body is well-formed, the ask is still
+ * live, every line is on the current version, none repeats, every decision is a
+ * known word. Reads only.
  */
-export async function decideArrival(
+async function loadDecisionContext(
   db: D1Database,
-  user: User,
   tenantId: string,
   uploadId: string,
   rawDecisions: unknown,
-  ip: string | null,
-): Promise<DecideArrivalResponse> {
+): Promise<DecisionContext> {
   const upload = await loadUploadRow(db, tenantId, uploadId);
 
   if (!Array.isArray(rawDecisions) || rawDecisions.length === 0) {
@@ -824,33 +854,8 @@ export async function decideArrival(
   const lines = await loadLines(db, tenantId, current.id);
   const linesById = new Map(lines.map((l) => [l.id, l]));
 
-  const claimRows = await db
-    .prepare(
-      `SELECT ul.id AS claim_id, ul.claimed_by, ul.decision,
-              l.line_kind, l.requirement_id, l.name
-         FROM request_upload_lines ul
-         JOIN request_lines l ON l.id = ul.line_id
-        WHERE ul.upload_id = ? AND ul.tenant_id = ?`,
-    )
-    .bind(upload.id, tenantId)
-    .all<{
-      claim_id: string;
-      claimed_by: 'supplier' | 'staff';
-      decision: string | null;
-      line_kind: RequestLineKind;
-      requirement_id: string | null;
-      name: string;
-    }>();
-  const claimsByKey = new Map((claimRows.results ?? []).map((c) => [lineKey(c), c]));
-
-  // --- validate everything before writing anything ---------------------------
   const seen = new Set<string>();
-  const at = nowIso();
-  const statements: D1PreparedStatement[] = [];
-  const lineAudits: Array<{ line: RequestLineRow; decision: DecideArrivalLine; documentId: string | null }> = [];
-  const staffClaims: Array<{ line: RequestLineRow; claimId: string }> = [];
-  const registryAudits: Array<{ line: RequestLineRow; documentId: string; action: string }> = [];
-
+  const entries: DecisionContext['entries'] = [];
   for (const [i, raw] of (rawDecisions as unknown[]).entries()) {
     if (!raw || typeof raw !== 'object') {
       throw new BadRequestError(`decisions[${i}] must be an object`);
@@ -871,7 +876,99 @@ export async function decideArrival(
     if (d.decision !== 'accepted' && d.decision !== 'needs_attention') {
       throw new BadRequestError(`decisions[${i}].decision must be accepted or needs_attention`);
     }
+    entries.push({ index: i, decision: d, line });
+  }
 
+  return { upload, rootRequestId: arrivalVersion.root_request_id, current, lines, entries };
+}
+
+/**
+ * The Review Queue's combined approve-and-decide runs this BEFORE it approves
+ * anything, so a decision that could never have been saved (a stale line id, a
+ * cancelled ask, a typo'd decision) is refused while nothing has happened yet.
+ *
+ * What it cannot check is anything about the document, because the document
+ * does not exist until the approval creates it. See `runCombinedArrivalDecision`
+ * in functions/api/queue/[id].ts for what happens if that part fails afterwards.
+ *
+ * `willApprove: false` is the reject-and-send-back path: there will be no
+ * document, so an `accepted` decision is refused here rather than by the 409
+ * after the rejection has already been written.
+ */
+export async function preflightArrivalDecision(
+  db: D1Database,
+  tenantId: string,
+  uploadId: string,
+  rawDecisions: unknown,
+  opts: { willApprove: boolean },
+): Promise<void> {
+  const ctx = await loadDecisionContext(db, tenantId, uploadId, rawDecisions);
+  if (!opts.willApprove) {
+    const accepted = ctx.entries.find((e) => e.decision.decision === 'accepted');
+    if (accepted) {
+      throw new BadRequestError(
+        `"${accepted.line.name}" cannot be accepted from a file that is being rejected. ` +
+          `Send it back instead, or approve the file.`,
+      );
+    }
+  }
+  if (ctx.entries.some((e) => e.decision.document_id)) {
+    throw new BadRequestError(
+      'document_id cannot be chosen in the Review Queue: the document is the one this approval creates.',
+    );
+  }
+}
+
+/**
+ * Decide what one arrival satisfies. See the module header for what is written.
+ *
+ * Every check runs before any write, so a refusal on the third line leaves the
+ * first two untouched.
+ */
+export async function decideArrival(
+  db: D1Database,
+  user: User,
+  tenantId: string,
+  uploadId: string,
+  rawDecisions: unknown,
+  ip: string | null,
+  opts: DecideArrivalOptions = {},
+): Promise<DecideArrivalResponse> {
+  const via: ArrivalDecisionVia = opts.via ?? 'arrival';
+  const { upload, rootRequestId, current, entries } = await loadDecisionContext(
+    db,
+    tenantId,
+    uploadId,
+    rawDecisions,
+  );
+
+  const claimRows = await db
+    .prepare(
+      `SELECT ul.id AS claim_id, ul.claimed_by, ul.decision,
+              l.line_kind, l.requirement_id, l.name
+         FROM request_upload_lines ul
+         JOIN request_lines l ON l.id = ul.line_id
+        WHERE ul.upload_id = ? AND ul.tenant_id = ?`,
+    )
+    .bind(upload.id, tenantId)
+    .all<{
+      claim_id: string;
+      claimed_by: 'supplier' | 'staff';
+      decision: string | null;
+      line_kind: RequestLineKind;
+      requirement_id: string | null;
+      name: string;
+    }>();
+  const claimsByKey = new Map((claimRows.results ?? []).map((c) => [lineKey(c), c]));
+
+  // --- validate everything before writing anything ---------------------------
+  const at = nowIso();
+  const statements: D1PreparedStatement[] = [];
+  const lineAudits: Array<{ line: RequestLineRow; decision: DecideArrivalLine; documentId: string | null }> = [];
+  const staffClaims: Array<{ line: RequestLineRow; claimId: string }> = [];
+  const registryAudits: Array<{ line: RequestLineRow; documentId: string; action: string }> = [];
+
+  for (const { index: i, decision: d, line } of entries) {
     let documentId: string | null = upload.document_id;
 
     if (d.decision === 'accepted') {
@@ -996,7 +1093,8 @@ export async function decideArrival(
         from: line.status,
         to: decision.decision,
         note: decision.status_note ?? null,
-        via: 'arrival',
+        via,
+        ...(opts.queueItemId ? { queue_item_id: opts.queueItemId } : {}),
         upload_id: upload.id,
         document_id: documentId,
       },
@@ -1011,7 +1109,7 @@ export async function decideArrival(
       'request_upload.claim_added',
       'request_upload',
       upload.id,
-      JSON.stringify({ claim_id: claimId, line_id: line.id, line_name: line.name, request_id: current.id }),
+      JSON.stringify({ claim_id: claimId, line_id: line.id, line_name: line.name, request_id: current.id, via }),
       ip,
     );
   }
@@ -1030,6 +1128,7 @@ export async function decideArrival(
         upload_id: upload.id,
         link_action: action,
         source: 'request_accept',
+        via,
       }),
       ip,
     );
@@ -1043,8 +1142,10 @@ export async function decideArrival(
     upload.id,
     JSON.stringify({
       request_id: current.id,
-      root_request_id: arrivalVersion.root_request_id,
+      root_request_id: rootRequestId,
       supplier_id: upload.supplier_id,
+      via,
+      ...(opts.queueItemId ? { queue_item_id: opts.queueItemId } : {}),
       decisions: lineAudits.map(({ line, decision, documentId }) => ({
         line_id: line.id,
         line_name: line.name,

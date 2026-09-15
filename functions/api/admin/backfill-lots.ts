@@ -9,9 +9,9 @@
  * graph only has a handful of lots while ~285 documents still carry a usable
  * `lot_number` (often with `code_date` / `expiration_date`) in their
  * primary_metadata blob. Until those are promoted into the graph, the
- * order↔COA matcher finds nothing for them. Backfilling lights up the real
- * linkage immediately (a COA with lot "6141" binds to the order line shipped
- * as lot 6141).
+ * order↔COA matcher finds nothing for them. Backfilling surfaces the real
+ * matches immediately (a COA with lot "6141" is SUGGESTED for the order line
+ * shipped as lot 6141; a person accepts it).
  *
  * Auth: super_admin only — system-wide maintenance op.
  *
@@ -29,8 +29,10 @@
  * bad row never aborts the batch.
  *
  * Returns JSON counts so an operator can drive successive batches:
- *   { documents_scanned, lots_created, links_created, orders_linked,
+ *   { documents_scanned, lots_created, links_created, orders_suggested,
  *     skipped, errors }
+ * `orders_suggested` counts net-new pending match suggestions; the matcher
+ * never links an order line itself.
  */
 
 import { requireRole, errorToResponse } from '../../lib/permissions';
@@ -52,7 +54,7 @@ interface BackfillResult {
   documents_scanned: number;
   lots_created: number;
   links_created: number;
-  orders_linked: number;
+  orders_suggested: number;
   skipped: number;
   errors: Array<{ document_id: string; error: string }>;
 }
@@ -122,7 +124,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       documents_scanned: 0,
       lots_created: 0,
       links_created: 0,
-      orders_linked: 0,
+      orders_suggested: 0,
       skipped: 0,
       errors: [],
     };
@@ -177,7 +179,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         // Snapshot graph state so we can attribute what this doc created.
         const beforeLots = await countLots(db, row.tenant_id);
         const beforeLinks = await countDocLinks(db, row.id);
-        const beforeMatched = await countMatchedForDoc(db, row.id);
+        const beforeSuggested = await countSuggestionsForDoc(db, row.id);
 
         const lotId = await attachLotToCoaDocument(db, row.tenant_id, {
           documentId: row.id,
@@ -197,11 +199,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
         const afterLots = await countLots(db, row.tenant_id);
         const afterLinks = await countDocLinks(db, row.id);
-        const afterMatched = await countMatchedForDoc(db, row.id);
+        const afterSuggested = await countSuggestionsForDoc(db, row.id);
 
         result.lots_created += Math.max(0, afterLots - beforeLots);
         result.links_created += Math.max(0, afterLinks - beforeLinks);
-        result.orders_linked += Math.max(0, afterMatched - beforeMatched);
+        result.orders_suggested += Math.max(0, afterSuggested - beforeSuggested);
       } catch (err) {
         result.errors.push({
           document_id: row.id,
@@ -225,7 +227,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           documents_scanned: result.documents_scanned,
           lots_created: result.lots_created,
           links_created: result.links_created,
-          orders_linked: result.orders_linked,
+          orders_suggested: result.orders_suggested,
           skipped: result.skipped,
           errors: result.errors.length,
         }),
@@ -274,14 +276,14 @@ async function countDocLinks(
   return Number(r?.c) || 0;
 }
 
-async function countMatchedForDoc(
+async function countSuggestionsForDoc(
   db: D1Database,
   documentId: string
 ): Promise<number> {
   const r = await db
     .prepare(
-      `SELECT COUNT(*) AS c FROM order_items
-       WHERE coa_document_id = ? AND coa_match_status = 'matched'`
+      `SELECT COUNT(*) AS c FROM lot_match_suggestions
+       WHERE document_id = ? AND status = 'pending'`
     )
     .bind(documentId)
     .first<{ c: number }>();

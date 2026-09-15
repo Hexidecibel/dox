@@ -17,6 +17,8 @@ import {
 import { api } from '../lib/api';
 import type { LotDetail } from '../lib/types';
 import { formatDate } from '../utils/format';
+import { useAuth } from '../contexts/AuthContext';
+import { LotMatchSuggestionList } from './LotMatchSuggestionList';
 
 /**
  * Level-3 expansion content for a lot: its COA documents + matched order
@@ -30,6 +32,8 @@ export function LotDetailPanel({ lotId }: { lotId: string }) {
   const [detail, setDetail] = useState<LotDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
+  const { isReader } = useAuth();
 
   useEffect(() => {
     let cancelled = false;
@@ -48,7 +52,7 @@ export function LotDetailPanel({ lotId }: { lotId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [lotId]);
+  }, [lotId, reloadKey]);
 
   if (loading) {
     return (
@@ -154,12 +158,25 @@ export function LotDetailPanel({ lotId }: { lotId: string }) {
                   <Typography variant="body2">{line.quantity ?? '—'}</Typography>
                 </TableCell>
                 <TableCell>
-                  <Chip
-                    label={line.coa_match_status || 'unmatched'}
-                    size="small"
-                    color={matchStatusColor(line.coa_match_status)}
-                    variant="outlined"
-                  />
+                  {(() => {
+                    const pending = line.coa_document_id
+                      ? []
+                      : detail.suggestions.filter((s) => s.order_item_id === line.order_item_id);
+                    return pending.length > 0 ? (
+                      <LotMatchSuggestionList
+                        suggestions={pending}
+                        canResolve={!isReader}
+                        onResolved={() => setReloadKey((k) => k + 1)}
+                      />
+                    ) : (
+                      <Chip
+                        label={line.coa_match_status || 'unmatched'}
+                        size="small"
+                        color={matchStatusColor(line.coa_match_status)}
+                        variant="outlined"
+                      />
+                    );
+                  })()}
                 </TableCell>
               </TableRow>
             ))}

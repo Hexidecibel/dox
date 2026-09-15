@@ -2,8 +2,8 @@
  * Linkage rule registry (Phase P4).
  *
  * A THIN, declarative orchestration layer over `matching.ts`. The actual
- * matching SQL — strong/weak classification, applyStrongLink, recordSuggestion
- * — lives in `matching.ts` and stays the single source of truth. This module
+ * matching SQL — classification and recordSuggestion (every match is a
+ * suggestion a person accepts) — lives in `matching.ts` and stays the single source of truth. This module
  * exists so that *adding a new cross-document linkage* later is additive: you
  * append a rule entry to LINKAGE_RULES, you don't edit the producers
  * (shipment.ts / coa.ts / order.ts) that drive linkage.

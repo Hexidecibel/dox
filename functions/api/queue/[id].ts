@@ -7,6 +7,7 @@ import {
   BadRequestError,
   errorToResponse,
 } from '../../lib/permissions';
+import { decideArrival, preflightArrivalDecision } from '../../lib/request-arrivals';
 // NOTE: `deleteFile` is deliberately NOT imported any more — rejecting a queue
 // item no longer destroys its R2 object. See handleReject's R2 RETENTION note.
 import { invariantWarningsFor, withInvariantWarnings } from '../../lib/queue-warnings';
@@ -15,6 +16,8 @@ import { registerAndNotifyForApproval } from '../../lib/spec-register';
 import {
   REJECTION_REASONS,
   type RejectionReason,
+  type QueueArrivalDecisionInput,
+  type QueueArrivalDecisionOutcome,
 } from '../../../shared/types';
 import { approveQueueItem, approveMultiProductQueueItem } from '../../lib/queue-approve';
 import {
@@ -229,6 +232,17 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           coa_product_id?: string | null;
         }
       >;
+      /**
+       * Supplier-portal items only (`source = 'request_link'`): decide what the
+       * file satisfies in the same action. Accept/send-back per line, exactly
+       * the body POST /api/request-uploads/:id/decide takes, minus
+       * `document_id` (it is the document this approval creates). With
+       * `status: 'rejected'` only `needs_attention` is allowed. See
+       * `runCombinedArrivalDecision` for what happens when this half fails.
+       */
+      arrival_decision?: QueueArrivalDecisionInput;
+      /** Reviewer-edited tables, when a client sends them (spec audit only). */
+      tables?: unknown;
     };
 
     if (!body.status || !['approved', 'rejected'].includes(body.status)) {
@@ -248,6 +262,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       .first<QueueItem & {
         output_kind: string | null;
         ai_records: string | null;
+        supplier_id: string | null;
         source_id: string | null;
         connector_run_id: string | null;
         tenant_name: string | null;
@@ -263,6 +278,15 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (item.status !== 'pending') {
       throw new BadRequestError(`Queue item is already ${item.status}`);
     }
+
+    // Combined approve-and-decide. Everything the decision can fail on that
+    // does not depend on the document is checked NOW, before the queue half
+    // writes anything, so a stale line id or a cancelled request is a plain
+    // 400/409 with nothing changed.
+    const combinedUploadId =
+      body.arrival_decision == null
+        ? null
+        : await preflightCombinedArrivalDecision(context, item, body.status, body.arrival_decision);
 
     // Defined as a const arrow (not a hoisted declaration) so TypeScript keeps
     // the non-null narrowing of `item` inside the closure.
@@ -421,11 +445,18 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         // and the document it became are now two rows that should know about
         // each other. Provenance only — see the note on the helper for what
         // this deliberately does NOT do to the request's checklist.
-        await linkApprovedDocumentToRequestUpload(context, user, item.id, response);
+        await linkApprovedDocumentToRequestUpload(context, user, item.id, response, combinedUploadId !== null);
+        if (combinedUploadId) {
+          return await runCombinedArrivalDecision(context, user, item, combinedUploadId, body.arrival_decision!, response);
+        }
       }
       return response;
     }
-    return await handleReject(context, user, item, body.rejection_reason, body.rejection_note);
+    const rejected = await handleReject(context, user, item, body.rejection_reason, body.rejection_note);
+    if (combinedUploadId && rejected.ok) {
+      return await runCombinedArrivalDecision(context, user, item, combinedUploadId, body.arrival_decision!, rejected);
+    }
+    return rejected;
 
   } catch (err) {
     const httpErr = errorToResponse(err);
@@ -446,33 +477,35 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
  *
  * WHAT THIS DOES, AND THE LINE IT STOPS AT
  * ---------------------------------------
- * It fills one FK. It does NOT move `request_lines.status` from `received` to
- * `accepted`, and that omission is the decision, not an oversight.
+ * It fills one FK. On its own it does NOT move `request_lines.status` from
+ * `received` to `accepted`, and an approval never will by implication.
  *
  * Approving a queue item and accepting a checklist line are two different
- * judgements made by two different people about two different questions:
+ * judgements about two different questions:
  *
- *   - Queue approve asks "is this extraction faithful to this file?" The
- *     reviewer is looking at field values against a PDF. They have not seen
- *     the request, its line, its `criteria`, or its `acceptable_formats`.
+ *   - Queue approve asks "is this extraction faithful to this file?"
  *   - Line accept asks "does this document satisfy what we asked this supplier
- *     for?" That is the assigned buyer's job. Its home is
- *     POST /api/request-uploads/:id/decide (migration 0104), which gates on
- *     `requireLineWorker`, REQUIRES the `document_id` this helper writes, names
- *     the accepted document on the line, and audits
+ *     for?" Its logic is `decideArrival` (functions/lib/request-arrivals.ts,
+ *     migration 0104): it REQUIRES the `document_id` this helper writes, names
+ *     the accepted document on the line, confirms the registry link, and audits
  *     `request_line_status_changed` — the same action as the hand-edit escape
  *     hatch, PUT /api/request-lines/:id.
  *
- * Writing `accepted` from here would stamp the extraction reviewer as the
- * person who made a judgement they were never shown the inputs for. Worse, one
- * arrival may claim SEVEN lines (that many-to-many is the whole point of
- * `request_upload_lines`), so a single approve would accept seven items on the
- * strength of the supplier's own claim about what their file covers. Migration
- * 0092 states the invariant that forbids exactly this: a claim is "CLAIMED,
- * not proven... it does not mean a reviewer agreed, which is why it moves the
- * line to `received` and never to `accepted`". Auto-accepting here would
- * restore the supplier's control over the progress bar through the back door,
- * with a click on an unrelated screen as the rubber stamp.
+ * Until 14 Sep 2026 those were also two SCREENS: approve here, then Decide on
+ * Requests › Arrivals. The client asked for one action, and it now is one. For
+ * a `request_link` item the reviewer sees the supplier's claims as pre-ticked
+ * boxes on the queue card, chooses accept or send back, and the approve body
+ * carries that as `arrival_decision` (see `runCombinedArrivalDecision`).
+ *
+ * What did NOT change is the rule this comment used to defend: an approval
+ * with no `arrival_decision` accepts nothing. Writing `accepted` from a bare
+ * approve would let one click accept every line the supplier claimed (one
+ * arrival may claim SEVEN) on the strength of the supplier's own description of
+ * their file, which is exactly what 0092 says a claim is not: "CLAIMED, not
+ * proven". The combined path is different in the way that matters. The
+ * decision is an explicit per-line choice a person made on screen, recorded
+ * with `via: 'review_queue_combined'`. The two-step path (plain approve here,
+ * Decide on the arrivals screen later) keeps working unchanged.
  *
  * ONE COLUMN, SOMETIMES N DOCUMENTS
  * ---------------------------------
@@ -490,7 +523,8 @@ async function linkApprovedDocumentToRequestUpload(
   context: EventContext<Env, string, Record<string, unknown>>,
   user: User,
   queueItemId: string,
-  response: Response
+  response: Response,
+  combined = false
 ): Promise<void> {
   try {
     const upload = await context.env.DB.prepare(
@@ -548,8 +582,10 @@ async function linkApprovedDocumentToRequestUpload(
         // The full set, because the column can only hold the first.
         document_ids: documentIds,
         document_count: documentIds.length,
-        // Said explicitly so the trail cannot be misread as an acceptance.
+        // Said explicitly so the trail cannot be misread as an acceptance. A
+        // combined action records its decision in its own rows, next.
         line_status_unchanged: true,
+        ...(combined ? { via: 'review_queue_combined' } : {}),
       }),
       getClientIp(context.request)
     );
@@ -559,6 +595,165 @@ async function linkApprovedDocumentToRequestUpload(
       err instanceof Error ? err.message : String(err)
     );
   }
+}
+
+/**
+ * Validate a combined `arrival_decision` before the queue half runs. Returns
+ * the arrival's upload id. Throws (400/404/409) with nothing written.
+ */
+async function preflightCombinedArrivalDecision(
+  context: EventContext<Env, string, Record<string, unknown>>,
+  item: QueueItem & { output_kind: string | null },
+  status: 'approved' | 'rejected',
+  decision: QueueArrivalDecisionInput
+): Promise<string> {
+  const source = (item as unknown as { source?: string | null }).source ?? null;
+  if (source !== 'request_link') {
+    throw new BadRequestError(
+      'arrival_decision is only for files a supplier sent through a request link'
+    );
+  }
+  const upload = await context.env.DB.prepare(
+    `SELECT id FROM request_uploads WHERE queue_id = ? AND tenant_id = ?`
+  )
+    .bind(item.id, item.tenant_id)
+    .first<{ id: string }>();
+  if (!upload) {
+    throw new BadRequestError('No supplier arrival is attached to this queue item');
+  }
+  const decisions = decision && typeof decision === 'object' ? decision.decisions : undefined;
+  const kind = item.output_kind || 'coa';
+  if (
+    status === 'approved' &&
+    (kind === 'order' || kind === 'shipment') &&
+    Array.isArray(decisions) &&
+    decisions.some((d) => d && (d as { decision?: string }).decision === 'accepted')
+  ) {
+    throw new BadRequestError(
+      `An ${kind} approval produces records, not a document, so nothing can be accepted from it`
+    );
+  }
+  await preflightArrivalDecision(context.env.DB, item.tenant_id, upload.id, decisions, {
+    willApprove: status === 'approved',
+  });
+  return upload.id;
+}
+
+/**
+ * The decision half of a combined Review Queue action, run AFTER the queue half
+ * (approve or reject) has succeeded.
+ *
+ * WHY NOT ONE TRANSACTION
+ * -----------------------
+ * An approval is not one D1 batch and cannot be made into one: it moves the
+ * file in R2, and its producers (approveQueueItem, produceCoaRecords, the spec
+ * register, requirement defaults) each issue their own statements. The two
+ * halves therefore cannot be rolled back together, and faking it would mean
+ * deleting a document a reviewer approved because a checklist write failed.
+ *
+ * WHAT HAPPENS INSTEAD
+ * --------------------
+ *   1. Before the approval, `preflightCombinedArrivalDecision` runs every check
+ *      that does not need the document. Most refusals end there, with nothing
+ *      written.
+ *   2. After it, `decideArrival` runs exactly as the arrivals screen runs it.
+ *      It validates everything before its single batch, so the decision itself
+ *      is still all-or-nothing.
+ *   3. If it refuses anyway (realistically, someone recorded between the two
+ *      that this document does NOT satisfy a requirement: a `rejected`
+ *      registry link, 409), the response is still 200. The approval DID
+ *      happen, and a non-2xx would invite the client to retry an approval that
+ *      is already done. The body carries
+ *      `arrival_decision: { applied: false, status, error }`, the arrival is
+ *      left exactly as it was (pending on Requests › Arrivals), and a
+ *      `request_upload.combined_decision_failed` audit row records why.
+ *
+ * The approval standing on its own is consistent with the model. "Is this
+ * extraction faithful?" never depended on the checklist, which is why the two
+ * judgements were separate in the first place.
+ */
+async function runCombinedArrivalDecision(
+  context: EventContext<Env, string, Record<string, unknown>>,
+  user: User,
+  item: QueueItem,
+  uploadId: string,
+  decision: QueueArrivalDecisionInput,
+  queueResponse: Response
+): Promise<Response> {
+  const payload = (await queueResponse.clone().json()) as Record<string, unknown> & {
+    item?: { status?: string };
+  };
+  const ip = getClientIp(context.request);
+
+  let outcome: QueueArrivalDecisionOutcome;
+  if (payload.item?.status === 'pending') {
+    // A records COA with held records: the file has not finished becoming a
+    // document, so nothing is decided from it yet.
+    outcome = {
+      applied: false,
+      status: 409,
+      error:
+        'Some records are still held, so this file has not finished becoming a document. ' +
+        'Nothing was decided. Finish the approval, then decide it on Requests › Arrivals.',
+      upload_id: uploadId,
+    };
+  } else {
+    try {
+      const result = await decideArrival(
+        context.env.DB,
+        user,
+        item.tenant_id,
+        uploadId,
+        decision.decisions,
+        ip,
+        { via: 'review_queue_combined', queueItemId: item.id }
+      );
+      outcome = { applied: true, ...result };
+    } catch (err) {
+      const httpErr = errorToResponse(err);
+      if (!httpErr) {
+        console.error(
+          '[queue] combined arrival decision failed:',
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+      const errBody = httpErr ? ((await httpErr.json()) as { error?: string }) : null;
+      outcome = {
+        applied: false,
+        status: httpErr?.status ?? 500,
+        error: errBody?.error ?? 'The decision could not be saved',
+        upload_id: uploadId,
+      };
+    }
+  }
+
+  if (!outcome.applied) {
+    try {
+      await logAudit(
+        context.env.DB,
+        user.id,
+        item.tenant_id,
+        'request_upload.combined_decision_failed',
+        'request_upload',
+        uploadId,
+        JSON.stringify({
+          queue_item_id: item.id,
+          queue_status: payload.item?.status ?? null,
+          status: outcome.status,
+          error: outcome.error,
+          via: 'review_queue_combined',
+        }),
+        ip
+      );
+    } catch {
+      // The response still says it; the audit row is only the durable copy.
+    }
+  }
+
+  return new Response(JSON.stringify({ ...payload, arrival_decision: outcome }), {
+    status: queueResponse.status,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
 async function handleApprove(
@@ -752,7 +947,7 @@ async function handleMultiProductApprove(
     // Each product carries the tables the reviewer assigned to it; judged
     // together here because a verdict cannot be attributed to one product's
     // document more precisely than the reviewer's own split already did.
-    products.flatMap((p) => p.tables ?? [])
+    (products ?? []).flatMap((p) => p.tables ?? [])
   );
 
   return new Response(
@@ -1082,6 +1277,7 @@ async function handleCoaRecordsApprove(
   item: QueueItem & {
     output_kind: string | null;
     ai_records: string | null;
+    tenant_name?: string | null;
   },
   payload: CoaRecordsPayload,
   rawDecisions: Record<string, CoaRecordDecision> | undefined,

@@ -59,6 +59,8 @@ interface FulfillmentRow {
   coa_document_id: string | null;
   coa_file_name: string | null;
   coa_match_status: string | null;
+  /** Pending lot-match suggestions for this line (not yet accepted by anyone). */
+  coa_suggestions_pending: number;
   order_created_at: string;
 }
 
@@ -66,7 +68,8 @@ export type GapStatus = 'ok' | 'missing_lot' | 'missing_coa' | 'expired';
 
 // For a `missing_coa` line, is the product even known to us?
 //   have_other_lot — a COA for this distributor code exists (for a different
-//                    lot). Actionable: collect THIS lot's COA; it'll auto-link.
+//                    lot). Actionable: collect THIS lot's COA; its match is
+//                    then suggested for someone to accept.
 //   none_on_file   — no COA on file for this product code at all.
 export type CoaAvailability = 'have_other_lot' | 'none_on_file' | null;
 
@@ -151,6 +154,8 @@ const SHAPE_SQL = `
     oi.coa_document_id    AS coa_document_id,
     dv.file_name          AS coa_file_name,
     oi.coa_match_status   AS coa_match_status,
+    (SELECT COUNT(*) FROM lot_match_suggestions lms
+      WHERE lms.order_item_id = oi.id AND lms.status = 'pending') AS coa_suggestions_pending,
     o.created_at          AS order_created_at
   FROM order_items oi
   JOIN orders o ON o.id = oi.order_id
@@ -210,6 +215,10 @@ function buildSelector(opts: {
 // Order of precedence (first match wins):
 //   missing_lot  — the line has no lot linked.
 //   missing_coa  — has a lot, but no COA document and no 'matched' COA status.
+//                  A PENDING match suggestion is still missing_coa: the engine
+//                  never asserts a match, only a person accepting one does.
+//                  The row carries `coa_suggestions_pending` so the screen can
+//                  say a click would close it.
 //   expired      — has a lot + COA, but the lot's expiration_date < asOf.
 //   ok           — otherwise.
 function computeGap(row: FulfillmentRow, asOf: string): GapStatus {
@@ -276,6 +285,7 @@ function formatJson(rows: FulfillmentRow[], asOf: string, codeSet: Set<string>) 
       coa_document_id: r.coa_document_id,
       coa_file_name: r.coa_file_name,
       coa_match_status: r.coa_match_status,
+      coa_suggestions_pending: Number(r.coa_suggestions_pending) || 0,
       gap,
       coa_availability: availability,
     };

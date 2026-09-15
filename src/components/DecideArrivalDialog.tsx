@@ -14,7 +14,8 @@
  * not tick (a staff claim on the server).
  *
  * ACCEPT IS DISABLED UNTIL THE FILE IS APPROVED, and says why, with a way to
- * get there. The server refuses it too (409); disabling it here is so nobody
+ * get there. (The Review Queue can now approve and decide in one action; this
+ * dialog is the second step for a file approved without deciding.) The server refuses it too (409); disabling it here is so nobody
  * types a note into a form that is going to bounce. Sending back is never
  * disabled.
  *
@@ -52,6 +53,7 @@ import type {
   RequestLineStatus,
 } from '../lib/types';
 import { claimChip } from './ArrivalCard';
+import { AttentionReasonField } from './SupplierClaimPanel';
 
 /** A line on the CURRENT version, offered for "add a requirement". */
 export interface DecidableLine {
@@ -220,7 +222,9 @@ export function DecideArrivalDialog({
             ) : (
               'Approve it in the Review Queue'
             )}
-            , then come back. You can send requirements back to the supplier now.
+
+            , where you can accept these requirements in the same step. You can send requirements
+            back to the supplier now.
           </Alert>
         )}
 
@@ -314,16 +318,9 @@ export function DecideArrivalDialog({
           )}
 
           {decision === 'needs_attention' && (
-            <TextField
-              label="What the supplier needs to fix"
-              fullWidth
-              multiline
-              minRows={2}
-              value={attentionReason}
-              onChange={(e) => setAttentionReason(e.target.value)}
-              placeholder="e.g. This is the 2023 statement; we need one signed this year."
-              helperText="The supplier reads this on their link. Leave it blank and they see a sentence built from the requirement's own criteria."
-            />
+            <Box>
+              <AttentionReasonField value={attentionReason} onChange={setAttentionReason} />
+            </Box>
           )}
 
           <TextField

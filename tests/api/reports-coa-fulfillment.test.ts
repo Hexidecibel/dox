@@ -207,7 +207,16 @@ beforeAll(async () => {
   // MISSING_COA line: lot present, no COA, status not matched.
   const lotNoCoa = await makeLot(seed.tenantId, product, supplier, 'LOT-NOCOA', '2027-01-01');
   missingCoaOrderId = await makeOrder(seed.tenantId, 'ORD-NOCOA', customer, 'Globex', null);
-  await makeItem(missingCoaOrderId, 'Widget', lotNoCoa, null, 'suggested');
+  const missingCoaItem = await makeItem(missingCoaOrderId, 'Widget', lotNoCoa, null, 'suggested');
+  // A HIGH-confidence match suggestion nobody has accepted. It must not count
+  // as a COA: the engine never asserts a lot-to-shipment match.
+  await db
+    .prepare(
+      `INSERT INTO lot_match_suggestions (id, tenant_id, order_item_id, document_id, lot_id, match_confidence, match_basis, status)
+       VALUES (?, ?, ?, ?, ?, 0.95, 'lot+product+supplier', 'pending')`,
+    )
+    .bind(generateTestId(), seed.tenantId, missingCoaItem, coaOk, lotNoCoa)
+    .run();
 
   // EXPIRED line: lot + COA, but lot expired before AS_OF.
   const lotExpired = await makeLot(seed.tenantId, product, supplier, 'LOT-EXP', '2025-01-01');
@@ -251,6 +260,18 @@ describe('COA Fulfillment report — rows + gap rules', () => {
     expect(byOrder('ORD-NOLOT')?.gap).toBe('missing_lot');
     expect(byOrder('ORD-NOCOA')?.gap).toBe('missing_coa');
     expect(byOrder('ORD-EXP')?.gap).toBe('expired');
+  });
+
+  it('never treats an unaccepted match suggestion as a COA, and says one is waiting', async () => {
+    const { body } = await runReport(
+      { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId },
+      `as_of=${AS_OF}`,
+    );
+    const row = body.rows.find((r: any) => r.order_number === 'ORD-NOCOA');
+    expect(row.gap).toBe('missing_coa');
+    expect(row.coa_document_id).toBeNull();
+    expect(row.coa_suggestions_pending).toBe(1);
+    expect(body.rows.find((r: any) => r.order_number === 'ORD-OK').coa_suggestions_pending).toBe(0);
   });
 
   it('joins lot, supplier, COA file name into the OK row', async () => {

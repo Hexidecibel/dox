@@ -181,7 +181,7 @@ export type {
 export { AUTH_TOKEN_KEY, AUTH_USER_KEY } from '../../shared/types';
 // Value exports (not types): the rejection-reason enum + its reviewer-facing
 // labels, so the reject dialog and the API stay in lockstep.
-export { REJECTION_REASONS, REJECTION_REASON_LABELS } from '../../shared/types';
+export { REJECTION_REASONS, REJECTION_REASON_LABELS, ATTENTION_REASON_PRESETS } from '../../shared/types';
 export { parseCoaRecords } from '../../shared/types';
 // Value export: the notes entity-type list, so a component and the API agree.
 export { NOTE_ENTITY_TYPES } from '../../shared/types';
@@ -254,6 +254,8 @@ export type {
   DecideArrivalLine,
   DecideArrivalRequest,
   DecideArrivalResponse,
+  QueueArrivalDecisionInput,
+  QueueArrivalDecisionOutcome,
   SupplierRequestItem,
   RequestLineInput,
   CreateDocumentRequestRequest,

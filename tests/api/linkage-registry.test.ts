@@ -23,7 +23,7 @@ beforeAll(async () => {
 }, 30_000);
 
 describe('linkage registry', () => {
-  it('a lot-keyed run with orderItemId binds order ↔ COA', async () => {
+  it('a lot-keyed run with orderItemId suggests order ↔ COA', async () => {
     const tenantId = seed.tenantId;
     const product = await findOrCreateProduct(db, tenantId, 'Linkage Product');
 
@@ -68,12 +68,17 @@ describe('linkage registry', () => {
       productId: product.id,
     });
 
+    // The rule surfaces the match as a suggestion; it never links on its own.
     const item = await db
       .prepare('SELECT coa_document_id, coa_match_status FROM order_items WHERE id = ?')
       .bind(itemId)
       .first<{ coa_document_id: string | null; coa_match_status: string }>();
-    expect(item!.coa_document_id).toBe(docId);
-    expect(item!.coa_match_status).toBe('matched');
+    expect(item!.coa_document_id).toBeNull();
+    const sugg = await db
+      .prepare('SELECT document_id, status FROM lot_match_suggestions WHERE order_item_id = ?')
+      .bind(itemId)
+      .first<{ document_id: string; status: string }>();
+    expect(sugg).toEqual({ document_id: docId, status: 'pending' });
   });
 
   it('exposes the canonical lot-keyed rules in LINKAGE_RULES', () => {

@@ -70,7 +70,7 @@ async function seedCoaDocumentForLot(
 }
 
 describe('produceShipment — WMS hop', () => {
-  it('binds order_item.lot_id and sets coa_document_id when a matching COA lot exists', async () => {
+  it('binds order_item.lot_id and SUGGESTS (never links) a matching COA', async () => {
     const tenantId = seed.tenantId;
     const product = await findOrCreateProduct(db, tenantId, 'Ascorbic Acid');
 
@@ -90,7 +90,9 @@ describe('produceShipment — WMS hop', () => {
       { tenantId }
     );
 
-    expect(result.bound).toBe(1);
+    // `bound` counts lines a person has linked; the match only waits for one.
+    expect(result.bound).toBe(0);
+    expect(result.suggested).toBe(1);
     expect(result.unmatched).toBe(0);
     expect(result.errors).toBe(0);
 
@@ -99,8 +101,12 @@ describe('produceShipment — WMS hop', () => {
       .bind(itemId)
       .first<{ lot_id: string | null; coa_document_id: string | null; coa_match_status: string }>();
     expect(item!.lot_id).not.toBeNull();
-    expect(item!.coa_document_id).toBe(coaDocId);
-    expect(item!.coa_match_status).toBe('matched');
+    expect(item!.coa_document_id).toBeNull();
+    const sugg = await db
+      .prepare('SELECT document_id, match_basis, status FROM lot_match_suggestions WHERE order_item_id = ?')
+      .bind(itemId)
+      .first<{ document_id: string; match_basis: string; status: string }>();
+    expect(sugg).toEqual({ document_id: coaDocId, match_basis: 'lot+product', status: 'pending' });
   });
 
   it('records unmatched (no throw) when the order is not ingested yet', async () => {
@@ -130,13 +136,18 @@ describe('produceShipment — WMS hop', () => {
     const ship = { order_number: 'ORD-IDEM', product_code: 'SC', lot_number: 'SC-2' };
 
     const r1 = await produceShipment(db, [ship], { tenantId });
-    expect(r1.bound).toBe(1);
+    expect(r1.suggested).toBe(1);
     const lotIdAfter1 = (
       await db.prepare('SELECT lot_id FROM order_items WHERE id = ?').bind(itemId).first<{ lot_id: string }>()
     )!.lot_id;
 
     const r2 = await produceShipment(db, [ship], { tenantId });
-    expect(r2.bound).toBe(1); // still binds (same strong match), no error
+    expect(r2.suggested).toBe(1); // same suggestion, not a second one
+    const suggCount = await db
+      .prepare('SELECT COUNT(*) AS n FROM lot_match_suggestions WHERE order_item_id = ?')
+      .bind(itemId)
+      .first<{ n: number }>();
+    expect(suggCount!.n).toBe(1);
     const lotIdAfter2 = (
       await db.prepare('SELECT lot_id FROM order_items WHERE id = ?').bind(itemId).first<{ lot_id: string }>()
     )!.lot_id;

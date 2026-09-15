@@ -26,7 +26,7 @@ beforeEach(async () => {
 
 interface RematchResult {
   order_items_processed: number;
-  strong_links_made: number;
+  high_confidence_suggestions: number;
   suggestions_created: number;
 }
 
@@ -99,7 +99,7 @@ async function getOrderItem(id: string) {
 }
 
 describe('POST /api/admin/rematch-lots', () => {
-  it('retroactively makes a STRONG link when distributor codes agree', async () => {
+  it('retroactively surfaces a high-confidence suggestion (no link) when distributor codes agree', async () => {
     const orderProduct = await makeProduct(seed.tenantId, 'WILL CAGE FREE WHOLE LIQ');
     const coaProduct = await makeProduct(seed.tenantId, 'Willamette Cage-Free Liquid Whole Egg');
 
@@ -136,14 +136,20 @@ describe('POST /api/admin/rematch-lots', () => {
     const body = (await res.json()) as RematchResult;
 
     expect(body.order_items_processed).toBe(1);
-    expect(body.strong_links_made).toBe(1);
+    expect(body.suggestions_created).toBe(1);
+    expect(body.high_confidence_suggestions).toBe(1);
 
     const oi = await getOrderItem(orderItemId);
-    expect(oi!.coa_document_id).toBe(docId);
-    expect(oi!.coa_match_status).toBe('matched');
+    expect(oi!.coa_document_id).toBeNull();
+    expect(oi!.coa_match_status).toBe('unmatched');
+    const sugg = await db
+      .prepare('SELECT document_id, match_basis, status FROM lot_match_suggestions WHERE order_item_id = ?')
+      .bind(orderItemId)
+      .first<{ document_id: string; match_basis: string; status: string }>();
+    expect(sugg).toEqual({ document_id: docId, match_basis: 'lot+code', status: 'pending' });
   });
 
-  it('flips a date_code + product-map CMF pair from unmatched to matched (0075)', async () => {
+  it('surfaces a date_code + product-map CMF pair as a lot+product suggestion (0075)', async () => {
     const supplierId = generateTestId();
     await db
       .prepare(
@@ -202,11 +208,15 @@ describe('POST /api/admin/rematch-lots', () => {
     const res = await rematchPost(makeContext(superUser()));
     expect(res.status).toBe(200);
     const body = (await res.json()) as RematchResult;
-    expect(body.strong_links_made).toBe(1);
+    expect(body.high_confidence_suggestions).toBe(1);
 
     const oi = await getOrderItem(orderItemId);
-    expect(oi!.coa_document_id).toBe(docId);
-    expect(oi!.coa_match_status).toBe('matched');
+    expect(oi!.coa_document_id).toBeNull();
+    const sugg = await db
+      .prepare('SELECT document_id, match_basis, status FROM lot_match_suggestions WHERE order_item_id = ?')
+      .bind(orderItemId)
+      .first<{ document_id: string; match_basis: string; status: string }>();
+    expect(sugg).toEqual({ document_id: docId, match_basis: 'lot+product', status: 'pending' });
   });
 
   it('blocks non-admin roles', async () => {
@@ -236,7 +246,7 @@ describe('POST /api/admin/rematch-lots', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as RematchResult;
     expect(body.order_items_processed).toBe(0);
-    expect(body.strong_links_made).toBe(0);
+    expect(body.suggestions_created).toBe(0);
   });
 });
 

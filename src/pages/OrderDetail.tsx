@@ -48,6 +48,7 @@ import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { EmptyState } from '../components/EmptyState';
 import { helpContent } from '../lib/helpContent';
+import { LotMatchSuggestionList, type LotMatchSuggestionLike } from '../components/LotMatchSuggestionList';
 
 const ORDER_STATUSES = ['pending', 'enriched', 'matched', 'fulfilled', 'delivered', 'error'] as const;
 
@@ -73,6 +74,10 @@ interface OrderItem {
   coa_document_title: string | null;
 }
 
+interface OrderLineSuggestion extends LotMatchSuggestionLike {
+  order_item_id: string;
+}
+
 interface Order {
   id: string;
   order_number: string;
@@ -96,10 +101,13 @@ export function OrderDetail() {
   const navigate = useNavigate();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
-  const { isAdmin, isSuperAdmin } = useAuth();
+  const { isAdmin, isSuperAdmin, isReader } = useAuth();
 
   const [order, setOrder] = useState<Order | null>(null);
   const [items, setItems] = useState<OrderItem[]>([]);
+  // Pending lot-match suggestions, by order line. The matcher never links on
+  // its own; a person confirms each one here.
+  const [suggestions, setSuggestions] = useState<OrderLineSuggestion[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -123,6 +131,7 @@ export function OrderDetail() {
       const result = await api.orders.get(id) as any;
       setOrder(result.order);
       setItems(result.items || []);
+      setSuggestions(result.suggestions || []);
       setNewStatus(result.order.status);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load order');
@@ -134,6 +143,8 @@ export function OrderDetail() {
   useEffect(() => {
     loadOrder();
   }, [id]);
+
+  const suggestionsFor = (itemId: string) => suggestions.filter((s) => s.order_item_id === itemId);
 
   const handleStatusChange = async () => {
     if (!id || !newStatus || newStatus === order?.status) return;
@@ -431,6 +442,16 @@ export function OrderDetail() {
                     </Button>
                   )}
                 </Box>
+                {!item.coa_document_id && suggestionsFor(item.id).length > 0 && (
+                  <Box sx={{ mt: 1 }}>
+                    <LotMatchSuggestionList
+                      suggestions={suggestionsFor(item.id)}
+                      canResolve={!isReader}
+                      onResolved={loadOrder}
+                      onOpenDocument={(docId) => navigate(`/documents/${docId}`)}
+                    />
+                  </Box>
+                )}
               </CardContent>
             </Card>
           ))}
@@ -489,6 +510,13 @@ export function OrderDetail() {
                       >
                         {item.coa_document_title || 'View COA'}
                       </Button>
+                    ) : suggestionsFor(item.id).length > 0 ? (
+                      <LotMatchSuggestionList
+                        suggestions={suggestionsFor(item.id)}
+                        canResolve={!isReader}
+                        onResolved={loadOrder}
+                        onOpenDocument={(docId) => navigate(`/documents/${docId}`)}
+                      />
                     ) : (
                       '-'
                     )}

@@ -110,7 +110,12 @@ import type {
   RejectionReason,
 } from './types';
 import type { ParsedCustomer, ParsedOrder, ParsedShipment } from '../../shared/connectorOutput';
-import type { TypeRenewalPolicy, RenewalDecisionPayload } from '../../shared/types';
+import type {
+  TypeRenewalPolicy,
+  RenewalDecisionPayload,
+  QueueArrivalDecisionInput,
+  QueueArrivalDecisionOutcome,
+} from '../../shared/types';
 import { AUTH_TOKEN_KEY } from './types';
 
 const API_BASE = '/api';
@@ -2146,16 +2151,39 @@ export const api = {
        * records as no decision at all rather than as a decision to skip.
        */
       renewal?: RenewalDecisionPayload;
+      /**
+       * Supplier-portal items only: decide what the file satisfies in the same
+       * action. The response's `arrival_decision` says whether that half was
+       * applied; `applied: false` means the approval still happened.
+       */
+      arrival_decision?: QueueArrivalDecisionInput;
     }) =>
-      fetchApi<{ document?: any; documents?: any[]; summary?: string; item?: any }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
+      fetchApi<{
+        document?: any;
+        documents?: any[];
+        summary?: string;
+        item?: any;
+        arrival_decision?: QueueArrivalDecisionOutcome;
+      }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     /**
      * Reject a queue item. `reason` is a small closed enum (see
      * REJECTION_REASONS) and should always be supplied — a rejection without a
      * reason is a bare fact that no post-mortem can use. `note` is optional
      * free text. Rejecting no longer deletes the source file from R2.
      */
-    reject: (id: string, data?: { rejection_reason?: RejectionReason; rejection_note?: string }) =>
-      fetchApi<{ item: { id: string; status: 'rejected'; rejection_reason: RejectionReason | null } }>(
+    reject: (
+      id: string,
+      data?: {
+        rejection_reason?: RejectionReason;
+        rejection_note?: string;
+        /** Supplier-portal items only: send requirements back in the same action. */
+        arrival_decision?: QueueArrivalDecisionInput;
+      }
+    ) =>
+      fetchApi<{
+        item: { id: string; status: 'rejected'; rejection_reason: RejectionReason | null };
+        arrival_decision?: QueueArrivalDecisionOutcome;
+      }>(
         `/queue/${id}`,
         { method: 'PUT', body: JSON.stringify({ status: 'rejected', ...(data || {}) }) }
       ),

@@ -1,0 +1,35 @@
+<!--
+  Arrivals demo: a Certificate of Liability Insurance from the demo supplier,
+  Northfield Creamery Ingredients, Inc. (the same company as the committed
+  spec sheet in public/setup-samples/fsqa/specification-sheet.pdf, so one
+  supplier's portal link carries every file in the demo).
+  Source of truth for tests/fixtures/arrivals-demo/pdf/certificate-of-insurance.pdf;
+  rebuild with `bin/seed-arrivals-demo --render`. Fictional names and numbers.
+-->
+<style>@page{size:letter;margin:0.75in}body{font-family:Arial,Helvetica,sans-serif;font-size:9.5pt;color:#111;line-height:1.35}
+h1{font-size:13pt;margin:0 0 10px;text-align:center}
+table{border-collapse:collapse;width:100%;margin:0 0 10px}
+td,th{border:1px solid #333;padding:4px 6px;vertical-align:top;font-size:9pt}
+th{background:#eee;text-align:left}
+.k{width:150px;background:#f6f6f6}
+.note{font-size:8.5pt;color:#333;margin-top:10px;line-height:1.4}</style>
+<h1>CERTIFICATE OF LIABILITY INSURANCE</h1>
+<table>
+<tr><td class="k">Certificate Number</td><td>COI-2026-11873</td><td class="k">Date Issued</td><td>08/28/2026</td></tr>
+<tr><td class="k">Producer</td><td>Lakeshore Commercial Insurance Services, LLC<br>200 E Wisconsin Avenue, Suite 1100, Milwaukee, WI 53202</td>
+    <td class="k">Insurer</td><td>Great Plains Mutual Casualty Company (NAIC 31842)</td></tr>
+<tr><td class="k">Insured</td><td>Northfield Creamery Ingredients, Inc.<br>1425 Kettle Creek Road, Northfield, WI 53012</td>
+    <td class="k">Certificate Holder</td><td>Our customer, as named on file<br>Additional insured where required by written contract</td></tr>
+</table>
+<table>
+<tr><th>Type of Insurance</th><th>Policy Number</th><th>Policy Effective Date</th><th>Policy Expiration Date</th><th>Limits</th></tr>
+<tr><td>Commercial General Liability</td><td>GL-7730152</td><td>09/01/2026</td><td>09/01/2027</td><td>$2,000,000 each occurrence</td></tr>
+<tr><td>Products / Completed Operations</td><td>GL-7730152</td><td>09/01/2026</td><td>09/01/2027</td><td>$4,000,000 aggregate</td></tr>
+<tr><td>Umbrella Liability</td><td>UMB-510277</td><td>09/01/2026</td><td>09/01/2027</td><td>$5,000,000 aggregate</td></tr>
+<tr><td>Product Recall / Contamination</td><td>PR-338104</td><td>09/01/2026</td><td>09/01/2027</td><td>$1,000,000 each loss</td></tr>
+</table>
+<div class="note"><b>Description of Operations:</b> Manufacture of spray-dried dairy ingredients, including cheese powders and
+cultured dairy powders, at 1425 Kettle Creek Road, Northfield, Wisconsin.<br><br>
+Should any of the above described policies be cancelled before the expiration date thereof, notice will be delivered in
+accordance with the policy provisions.</div>
+<div class="note" style="margin-top:22px">Authorized Representative: <b>Renata Voss</b>, Lakeshore Commercial Insurance Services, LLC</div>
