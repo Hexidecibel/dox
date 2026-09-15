@@ -183,9 +183,13 @@ describe('a decimal sample basis is read as a decimal, not 10x off', () => {
   });
 
   it('a bare "per 0.1 g" names no method, so it is not claimed as a CFU basis', () => {
+    // Recognised as a method-less count on a 0.1 g basis — and refused against
+    // a CFU limit, because the method is exactly what it does not say.
     const u = normalizeUnit('per 0.1 g');
     expect(u.family.startsWith('cfu')).toBe(false);
-    expect(u.perBasis).toBe(1);
+    expect(u.family).toBe('any:mass');
+    expect(u.perBasis).toBeCloseTo(0.1);
+    expect(unitFactor(u, normalizeUnit('CFU/g'))).toBeNull();
   });
 
   it('whole-number bases are unchanged', () => {

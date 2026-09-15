@@ -41,6 +41,11 @@ function specResultKey(scope, target) {
   const where = target.kind === "table" ? `t${target.table_index}r${target.row_index}${target.col_index === void 0 ? "" : `c${target.col_index}`}` : `g${target.group}/${target.cell}`;
   return `${scope}::${where}`;
 }
+var ENUMERATION_METHOD_SRC = "cfu|mpn|apc|spc|tpc|count|ct|somaticcells|somaticcell|cells|cell|scc";
+var ENUMERATION_BASIS_SRC = "grams|gram|g|milliliters|milliliter|ml|liters|liter|l|fluidounces|fluidounce|fluidoz|floz|ozwt|wtoz|ozavdp|avdpoz|ounces|ounce|ozs|oz";
+var ENUMERATION_METHOD_RE = new RegExp(`^(${ENUMERATION_METHOD_SRC})?(per)?$`);
+var ENUMERATION_BASIS_RE = new RegExp(`^(${ENUMERATION_BASIS_SRC})?$`);
+var ENUMERATION_WHOLE_RE = new RegExp(`^(${ENUMERATION_METHOD_SRC})?(per)?(${ENUMERATION_BASIS_SRC})?$`);
 var ABSENT_PHRASE_SRC = "absent|negative|neg|non[\\s-]*detect(?:able|ed)?|not\\s*detect(?:able|ed)?|none\\s*detect(?:able|ed)?|no\\s*growth|no\\s*detection|nd";
 var PRESENT_PHRASE_SRC = "present|positive|detectable|detected|pos";
 var ABSENT_PHRASE_RE = new RegExp(`^(?:${ABSENT_PHRASE_SRC})\\b`, "i");
