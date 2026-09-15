@@ -746,6 +746,37 @@ curl -X POST http://localhost:8788/api/reports/generate \
 
 CSV columns: Title, Category, Tags, Status, Current Version, File Name, File Size (KB), Uploaded By, Created Date, Last Updated.
 
+The filters are exactly the four in the body — `tenantId`, `category` (the legacy
+category field), `dateFrom` and `dateTo` (against `created_at`). There is no
+supplier, document-type, product or status filter, and no supplier or products
+column. Every call writes a `report.generate` audit row with the format, the
+category filter and the row count.
+
+#### GET /api/reports/coa-fulfillment
+
+One row per shipped order line — customer ▸ order ▸ lot ▸ COA — each classified
+`ok` / `missing_lot` / `missing_coa` / `expired` against `as_of`. Any
+authenticated user; `tenant_id` is super_admin only.
+
+```bash
+# The screen's JSON feed
+curl "http://localhost:8788/api/reports/coa-fulfillment?from=2026-01-01" \
+  -H "Authorization: Bearer $TOKEN"
+
+# The same rows as a CSV worklist, limited to the lines still needing a COA
+curl "http://localhost:8788/api/reports/coa-fulfillment?format=csv&gaps_only=1" \
+  -H "Authorization: Bearer $TOKEN" -o coa-worklist.csv
+```
+
+CSV columns: Customer, Order, PO, Product, Code, Lot, Status, Action.
+
+`format=csv` writes a `report.generate` audit row (`report_kind:
+"coa_fulfillment"`) with the filters and the row count, so an export of
+fulfillment data is provable the same way a document report is. The JSON form
+writes nothing — it is a screen read, not an export. CSV defaults to `limit=5000`
+(max 5000) rather than the JSON default of 200, so the file is not silently the
+first page.
+
 ---
 
 ### Audit
@@ -766,7 +797,18 @@ curl "http://localhost:8788/api/audit?action=document_created&dateFrom=2024-01-0
 # Filter by user
 curl "http://localhost:8788/api/audit?userId=USER_ID" \
   -H "Authorization: Bearer $TOKEN"
+
+# super_admin narrowing to one tenant — the parameter is snake case
+curl "http://localhost:8788/api/audit?tenant_id=TENANT_ID" \
+  -H "Authorization: Bearer $TOKEN"
 ```
+
+Filters: `tenant_id` (super_admin only; an org_admin is pinned to their own
+tenant and a `tenant_id` from them is ignored), `action` (comma-separated for
+several), `userId`, `resourceType`, `dateFrom`, `dateTo` (inclusive, through end
+of day), `limit` (max 200), `offset`. The tenant parameter is `tenant_id`, not
+`tenantId`; the screen and the CSV export share one `buildAuditFilters` helper so
+they cannot drift.
 
 #### GET /api/audit/export
 
@@ -1165,6 +1207,68 @@ The dashboard (`GET /api/expirations`) look-ahead `window_days` is a view filter
 
 ---
 
+## Spec Gaps — what was NOT judged
+
+`document_spec_gaps` (migration 0109) is the other half of the register. A register of passes and failures alone would imply everything absent from it was fine, so what could not be judged is recorded too — in its own table, because a gap has no value, no limit and nothing to acknowledge.
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/spec-gaps` | any tenant user | `kind` (`all` default, `missing_required`, `unjudged`), `document_id`, `supplier_id`, `limit` (max 500), `offset`. Returns `{ specGaps, total, limit, offset }`. |
+
+- `missing_required` — an analyte this supplier's certificates of this type MUST report (a watch set through `/api/spec-required-analytes`) that this certificate did not report. **A COA is complete by default**; only a watch makes one incomplete.
+- `unjudged` — a printed result with no limit in scope and no printed specification.
+
+Read-only. Rows are written at approval and replaced on re-approval: an unjudged result is resolved by configuring a limit, a missing analyte by the supplier sending one.
+
+---
+
+## Product Identifiers
+
+What one of OUR products goes by (migration 0107), and who said so. One row per identifier: `our_sku`, `supplier_item`, `supplier_name`, `alias`, `gtin` or `pack`, each with `source`, `confirmed`, `superseded` (a former number) and its evidence in `note`. Since migration 0113 this is the ONLY store of supplier-side product identity — `GET/PUT /api/product-map` is removed.
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/products/:id/identifiers` | any tenant user | `{ identifiers }` for one product. |
+| `POST /api/products/:id/identifiers` | org_admin, super_admin | `{ kind, value, supplier_id?, confirmed?, superseded?, note? }`. Written `confirmed: true, source: 'reviewer'` unless the body says otherwise. 201 when created, 200 with `created: false` when it already existed. Audited. |
+| `PUT /api/product-identifiers/:id` | org_admin, super_admin | `{ confirmed?, superseded?, note? }`. Audited. |
+| `DELETE /api/product-identifiers/:id` | org_admin, super_admin | Removes it. The `product_identifier.removed` audit row carries the whole row, since nothing else keeps it. |
+| `GET /api/suppliers/:id/product-identifiers` | any tenant user | The supplier-side view: this supplier's identifiers with our product for each, plus the certificate products that resolve to nothing and why. `?coa_product=&item=` returns a single `resolution`. |
+
+The value, kind and supplier of an identifier are its **identity** and are not editable — a wrong number is removed and the right one added, so the audit log shows both. Uniqueness is per product, not per tenant: two products claiming one number is an ambiguity search must SHOW, not one the schema may hide. Anything reached through an unconfirmed identifier is reported as `likely` ("confirm"), never covering.
+
+---
+
+## Declared Lot Formats
+
+Each supplier's lot format is **declared data** (migration 0110), never a global regex: a pattern that silently mis-parses another supplier's lot is worse than no parser.
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/suppliers/:id/lot-scheme` | any tenant user | Every declared version, the one in force, and a read-only preview of how this supplier's stored lots read against it. With no declaration the legacy `suppliers.lot_scheme` enum is mapped onto an equivalent spec. |
+| `PUT /api/suppliers/:id/lot-scheme` | org_admin, super_admin | `{ spec, note? }`. Validated before anything is written; a declaration that cannot mean one thing (a Julian day with no year, a date segment with no role) is refused 400. Appends a **new version** — nothing is updated in place, so a stored decode stays explainable. Re-saving the format in force writes nothing and returns `unchanged: true`. Audited `supplier.lot_scheme_declared` with the previous spec and the fit counts. |
+
+`spec.kind = 'none'` is a declaration ("this supplier's lot codes encode nothing"), distinct from having no row at all.
+
+**A declaration is a validator and a labelled fallback, never an authority.** Saving one rewrites no stored lot key and no stored date. It flags Review Queue invariants, fills `lots.production_date` only when nothing was stated (as `production_date_source = 'lot_decode'`), and makes search read a decoded date as *likely — confirm*. Stored keys a format would store differently are reported by `bin/report-lot-key-scheme`, which applies nothing.
+
+---
+
+## Verified Supplier List Import
+
+What a supplier owes, derived from the client's verified supplier list instead of one uniform guess (migration 0112). The rules live in `shared/requirementDerivation.ts` and are reached through exactly one door, so a spreadsheet and a future webhook cannot produce different requirements for the same supplier.
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `POST /api/supplier-list/import` | super_admin, org_admin | Exactly one list source: `csv`, `xlsx_base64` (first sheet), `rows`, or `rerun_of` (an earlier applied run, whose stored input is re-run). Plus `dry_run` (**default true**), `file_name`, `pack`, `tenant_id` (super_admin). 200 on a dry run, 201 on an apply. |
+| `GET /api/supplier-list/imports` | super_admin, org_admin | Applied runs, newest first (`{ imports }`). A dry run is not a run and never appears. |
+| `GET /api/supplier-list/imports/:id` | super_admin, org_admin | One run with its per-row outcomes (`{ import }`). |
+
+**`dry_run` defaults to true and writes nothing at all** — not even a run row. A caller has to say it means to write. The response is the same shape either way, so the reviewer reads one report.
+
+Applying creates missing suppliers, writes derived rows with their provenance, **adopts** rows nobody had attributed (never lowering their tier — a lower derived tier is left for a person), and **flags** derived rows the list no longer implies rather than deleting them. A row a human or a packet wrote is never touched. A requirement slug the tenant does not hold is reported, never invented.
+
+---
+
 ## Agentic Integration
 
 The document portal supports an email-to-agent-to-portal pipeline for automated document ingestion. Here is the typical flow:
@@ -1482,6 +1586,8 @@ What is deliberately **not** a match: a lot the query only prefixes (`partial_lo
 The natural-language endpoint never loosens: an unknown document type or an uncomparable filter goes into `dropped_constraints`, and coverage is then `none`. A date phrase typed with a role ("produced 7/31/2026") overrides the model's reading, so a production date is never applied to upload time.
 
 Query-time folding (no index rebuild): simple plurals (`bags` -> `bag`) and `gal/gallon`, `lb/lbs/pound`, `oz/ounce`.
+
+`GET /api/search` parameters: `q` (required), `tenant_id` (super_admin), `limit` (max 200), `offset`, `limit_per_type` (max 25), and `lot` + `sublot` — a lot typed as its own input rather than inside `q`. Given both, the two halves are matched **part against part**: a sublot never matches against a base lot number.
 
 ---
 

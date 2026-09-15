@@ -450,3 +450,117 @@ describe('COA Fulfillment report — missing-COA availability (collect vs absent
     expect(body.summary.no_product_coa).toBeGreaterThanOrEqual(1);
   });
 });
+
+/**
+ * The CSV export used to live in the browser (src/pages/Reports.tsx built a
+ * blob from the rows already on screen). That made it the one export in dox
+ * with no audit row, while the help text claimed every export was provable,
+ * and it exported only the page the screen happened to hold. These pin the
+ * server version: same rows, an audit row, and the whole filtered set.
+ */
+describe('COA Fulfillment report — CSV export', () => {
+  async function runCsv(user: any, qs: string) {
+    const res = await coaReport(
+      makeContext(`http://localhost/api/reports/coa-fulfillment?${qs}`, user),
+    );
+    return { res, text: await res.text() };
+  }
+
+  async function reportAudits(tenantId: string): Promise<number> {
+    const row = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM audit_log
+          WHERE tenant_id = ? AND action = 'report.generate'`,
+      )
+      .bind(tenantId)
+      .first<{ n: number }>();
+    return Number(row?.n ?? 0);
+  }
+
+  it('returns a CSV worklist with the reviewer columns', async () => {
+    const { res, text } = await runCsv(
+      { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId },
+      `format=csv&as_of=${AS_OF}`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Type')).toBe('text/csv');
+    expect(res.headers.get('Content-Disposition')).toContain('coa-fulfillment-');
+
+    const lines = text.split('\n');
+    expect(lines[0]).toBe('Customer,Order,PO,Product,Code,Lot,Status,Action');
+    expect(text).toContain('ORD-OK');
+    expect(text).toContain('No COA');
+    // The row-count header is the file's own answer to "is this everything?"
+    expect(Number(res.headers.get('X-Report-Rows'))).toBe(lines.length - 1);
+    expect(res.headers.get('X-Report-Truncated')).toBe('false');
+  });
+
+  it('writes a report.generate audit row naming the report and the row count', async () => {
+    const before = await reportAudits(seed.tenantId);
+
+    await runCsv(
+      { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId },
+      `format=csv&as_of=${AS_OF}`,
+    );
+
+    expect(await reportAudits(seed.tenantId)).toBe(before + 1);
+
+    const row = await db
+      .prepare(
+        `SELECT user_id, resource_type, details FROM audit_log
+          WHERE tenant_id = ? AND action = 'report.generate'
+          ORDER BY created_at DESC, id DESC LIMIT 1`,
+      )
+      .bind(seed.tenantId)
+      .first<{ user_id: string; resource_type: string; details: string }>();
+
+    expect(row?.user_id).toBe(seed.orgAdminId);
+    expect(row?.resource_type).toBe('report');
+    const details = JSON.parse(row!.details);
+    expect(details.report_kind).toBe('coa_fulfillment');
+    expect(details.format).toBe('csv');
+    expect(details.count).toBeGreaterThan(0);
+  });
+
+  it('reading the JSON feed is not an export and writes no audit row', async () => {
+    const before = await reportAudits(seed.tenantId);
+    await runReport(
+      { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId },
+      `as_of=${AS_OF}`,
+    );
+    expect(await reportAudits(seed.tenantId)).toBe(before);
+  });
+
+  it('gaps_only drops the lines that are already OK', async () => {
+    const { text: all } = await runCsv(
+      { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId },
+      `format=csv&as_of=${AS_OF}`,
+    );
+    const { text: gaps } = await runCsv(
+      { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId },
+      `format=csv&gaps_only=1&as_of=${AS_OF}`,
+    );
+    expect(all).toContain('ORD-OK');
+    expect(gaps).not.toContain('ORD-OK');
+    expect(gaps).toContain('ORD-NOCOA');
+  });
+
+  it('is tenant-scoped exactly as the JSON feed is', async () => {
+    const { text } = await runCsv(
+      { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId },
+      `format=csv&tenant_id=${seed.tenantId2}&as_of=${AS_OF}`,
+    );
+    // The cross-tenant tenant_id is ignored, so tenant 2's orders never appear.
+    expect(text).not.toContain('ORD-AVAIL-A');
+  });
+
+  it('refuses a format it does not produce rather than silently returning JSON', async () => {
+    const res = await coaReport(
+      makeContext(
+        `http://localhost/api/reports/coa-fulfillment?format=xlsx&as_of=${AS_OF}`,
+        { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId },
+      ),
+    );
+    expect(res.status).toBe(400);
+  });
+});

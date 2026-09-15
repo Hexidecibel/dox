@@ -112,32 +112,6 @@ function SummaryHeader({ summary }: { summary: CoaFulfillmentSummary }) {
   );
 }
 
-/** Build a CSV worklist string from the visible rows. */
-function buildCsv(rows: CoaFulfillmentRow[]): string {
-  const header = ['Customer', 'Order', 'PO', 'Product', 'Code', 'Lot', 'Status', 'Action'];
-  const statusLabel: Record<CoaGapStatus, string> = {
-    ok: 'OK', missing_lot: 'No lot', missing_coa: 'No COA', expired: 'Expired',
-  };
-  const action = (r: CoaFulfillmentRow): string => {
-    if (r.gap !== 'missing_coa') return '';
-    return r.coa_availability === 'have_other_lot'
-      ? 'Collect this lot COA'
-      : 'No COA on file for product';
-  };
-  const esc = (v: string | number | null): string => {
-    const s = v == null ? '' : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const lines = [header.join(',')];
-  for (const r of rows) {
-    lines.push([
-      r.customer_name, r.order_number, r.po_number, r.product_name,
-      r.product_code, r.lot_number, statusLabel[r.gap], action(r),
-    ].map(esc).join(','));
-  }
-  return lines.join('\n');
-}
-
 function GapChip({ gap }: { gap: CoaGapStatus }) {
   const cfg = GAP_CHIP[gap];
   return <Chip size="small" label={cfg.label} color={cfg.color} variant={gap === 'ok' ? 'outlined' : 'filled'} />;
@@ -148,6 +122,7 @@ export function Reports() {
   const [rows, setRows] = useState<CoaFulfillmentRow[]>([]);
   const [summary, setSummary] = useState<CoaFulfillmentSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState('');
 
   const [from, setFrom] = useState('');
@@ -182,16 +157,29 @@ export function Reports() {
   );
   const groups = useMemo(() => groupRows(visibleRows), [visibleRows]);
 
-  const exportCsv = useCallback(() => {
-    const csv = buildCsv(visibleRows);
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `coa-${view === 'needs' ? 'worklist' : 'fulfillment'}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [visibleRows, view]);
+  // Goes through the server, which writes the report.generate audit row and
+  // exports the whole filtered set. The old version serialized the rows this
+  // page had already fetched: no audit row for a compliance export, and
+  // silently only the first page of a long worklist.
+  const exportCsv = useCallback(async () => {
+    setExporting(true);
+    setError('');
+    try {
+      const { truncated } = await api.reports.coaFulfillmentCsv({
+        tenantId: selectedTenantId || undefined,
+        from: from || undefined,
+        to: to || undefined,
+        gapsOnly: view === 'needs',
+      });
+      if (truncated) {
+        setError('The export hit the 5,000-row limit. Narrow the date range to get the rest.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Export failed');
+    } finally {
+      setExporting(false);
+    }
+  }, [selectedTenantId, from, to, view]);
 
   return (
     <Box>
@@ -249,8 +237,8 @@ export function Reports() {
         >
           Needs COA{summary ? ` (${summary.total - summary.ok})` : ''}
         </Button>
-        <Button onClick={exportCsv} size="small" disabled={loading || rows.length === 0}>
-          Export CSV
+        <Button onClick={exportCsv} size="small" disabled={loading || exporting || rows.length === 0}>
+          {exporting ? 'Exporting…' : 'Export CSV'}
         </Button>
       </Box>
 

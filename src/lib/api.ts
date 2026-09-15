@@ -1764,6 +1764,64 @@ export const api = {
       const qs = query.toString();
       return fetchApi<CoaFulfillmentResponse>(`/reports/coa-fulfillment${qs ? `?${qs}` : ''}`);
     },
+
+    /**
+     * GET /api/reports/coa-fulfillment?format=csv
+     * Downloads the fulfillment worklist as a CSV and triggers the browser
+     * save. Goes through the SERVER rather than serializing the rows already
+     * on screen, for two reasons: the server writes the `report.generate`
+     * audit row (a client-side blob is an export nobody can prove happened),
+     * and it exports the whole filtered set instead of whatever page the
+     * screen had fetched.
+     * Returns the row count and whether the server capped it.
+     */
+    coaFulfillmentCsv: async (params?: {
+      tenantId?: string;
+      from?: string;
+      to?: string;
+      customerId?: string;
+      asOf?: string;
+      gapsOnly?: boolean;
+    }): Promise<{ rows: number; truncated: boolean }> => {
+      const query = new URLSearchParams({ format: 'csv' });
+      if (params?.tenantId) query.set('tenant_id', params.tenantId);
+      if (params?.from) query.set('from', params.from);
+      if (params?.to) query.set('to', params.to);
+      if (params?.customerId) query.set('customer_id', params.customerId);
+      if (params?.asOf) query.set('as_of', params.asOf);
+      if (params?.gapsOnly) query.set('gaps_only', '1');
+
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`${API_BASE}/reports/coa-fulfillment?${query.toString()}`, { headers });
+      if (!res.ok) {
+        let message: string;
+        try {
+          const body = await res.json();
+          message = body.error || res.statusText;
+        } catch {
+          message = (await res.text()) || res.statusText;
+        }
+        throw new Error(message);
+      }
+
+      const rows = Number(res.headers.get('X-Report-Rows') || '0');
+      const truncated = res.headers.get('X-Report-Truncated') === 'true';
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const disposition = res.headers.get('Content-Disposition');
+      const match = disposition?.match(/filename="([^"]+)"/);
+      a.download = match?.[1] || `coa-fulfillment-${new Date().toISOString().split('T')[0]}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      return { rows, truncated };
+    },
   },
 
   expirations: {

@@ -66,6 +66,19 @@ tags:
     description: |
       The renewal dashboard, renewal alerts, and how far ahead owners are
       warned (renewal alert lead time, migration 0111).
+  - name: Suppliers
+    description: |
+      Suppliers, the product identifiers each one's certificates are read
+      through, and each supplier's declared lot format (migration 0110).
+  - name: Products
+    description: |
+      Our products and the identifier graph that says what each one goes by —
+      our SKU, a supplier's item number or name, an alias, a GTIN, a pack
+      (migration 0107).
+  - name: Supplier Requirements
+    description: |
+      What a supplier owes, derived from the verified supplier list rather than
+      guessed uniformly (migration 0112).
   - name: GraphQL
     description: GraphQL API (alternative to REST)
 
@@ -90,6 +103,25 @@ components:
         and optionally have an expiration date.
 
   schemas:
+    SupplierListImportResponse:
+      type: object
+      description: |
+        What a supplier-list import did, or would do. Identical in shape for a
+        dry run and an apply — the only difference is `dry_run` and whether
+        `run_id` is set — so a reviewer reads the same report either way.
+      properties:
+        dry_run: { type: boolean }
+        run_id: { type: [string, 'null'], description: The stored run. Always null on a dry run, which stores nothing. }
+        pack: { type: string }
+        file_name: { type: [string, 'null'] }
+        counts: { type: object }
+        suppliers: { type: array, items: { type: object }, description: Per supplier, the requirements derived and why. }
+        flagged: { type: array, items: { type: object }, description: Derived rows the list no longer implies. Flagged, never deleted. }
+        rows: { type: array, items: { type: object }, description: Per input row, what became of it. }
+        unmatched: { type: array, items: { type: object }, description: Products and claims the row named that the tenant does not hold. Reported, never invented. }
+        rule_problems: { type: array, items: { type: string } }
+        unrecognized_headers: { type: array, items: { type: string } }
+        rules: { type: object, description: The rules in force for this pack, echoed back. }
     ResolvedRenewalAlertLead:
       type: object
       description: A resolved renewal alert lead time and which rung answered.
@@ -1545,6 +1577,17 @@ paths:
         - name: limit_per_type
           in: query
           schema: { type: integer, default: 5, maximum: 25 }
+        - name: lot
+          in: query
+          schema: { type: string }
+          description: |
+            A lot typed as its own input rather than inside `q`. Combined with
+            `sublot` the two are matched PART AGAINST PART — a sublot never
+            matches against a base lot number.
+        - name: sublot
+          in: query
+          schema: { type: string }
+          description: The sublot half of a two-input lot search. Only meaningful alongside `lot`.
       responses:
         '200':
           description: Grouped results, plus coverage fields
@@ -2070,9 +2113,17 @@ paths:
       tags: [Reports]
       summary: Generate a document report
       description: |
-        Generates a report of documents matching the given filters.
-        Returns CSV (default) or JSON format. CSV includes Content-Disposition for download.
-        Non-super_admins are scoped to their own tenant.
+        Generates a report of every non-deleted document matching the given
+        filters. Returns CSV (default) or JSON. CSV includes Content-Disposition
+        for download. Non-super_admins are scoped to their own tenant.
+
+        The filters are exactly the four below — tenant, the legacy `category`
+        field, and a `created_at` range. There is no supplier, document-type,
+        product or status filter, and the output carries no supplier or products
+        column; the columns are the ten listed in the response schema.
+
+        Writes a `report.generate` audit row with the format, the category
+        filter and the row count.
         **Requires any authenticated user.**
       requestBody:
         required: true
@@ -2145,7 +2196,48 @@ paths:
             text/csv:
               schema:
                 type: string
-              description: CSV format response with Content-Disposition header
+              description: |
+                CSV format response with Content-Disposition header. Columns:
+                Title, Category, Tags, Status, Current Version, File Name,
+                File Size (KB), Uploaded By, Created Date, Last Updated.
+
+  /api/reports/coa-fulfillment:
+    get:
+      tags: [Reports]
+      summary: COA fulfillment — is a certificate on file for each shipped line?
+      description: |
+        One row per shipped order line, joined customer - order - lot - COA,
+        each classified `ok` / `missing_lot` / `missing_coa` / `expired` against
+        `as_of`. Any authenticated user; `tenant_id` is super_admin only and
+        everyone else is pinned to their own tenant.
+
+        With `format=csv` the same rows are returned as a CSV worklist and the
+        request writes a `report.generate` audit row (`report_kind:
+        "coa_fulfillment"`) with the filters and the row count. The JSON form
+        writes no audit row — it is a screen read, not an export.
+      parameters:
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: customer_id, in: query, schema: { type: string } }
+        - { name: as_of, in: query, schema: { type: string, format: date }, description: Pins "today" for the expiry rule. Defaults to the server's UTC date. }
+        - { name: limit, in: query, schema: { type: integer, default: 200, maximum: 1000 }, description: "For `format=csv`: default 5000, maximum 5000." }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+        - { name: format, in: query, schema: { type: string, enum: [json, csv], default: json } }
+        - { name: gaps_only, in: query, schema: { type: boolean, default: false }, description: "CSV only: emit just the lines that are not `ok` (the Needs COA worklist)." }
+      responses:
+        '200':
+          description: Rows plus a summary, or a CSV worklist
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rows: { type: array, items: { type: object } }
+                  summary: { type: object }
+            text/csv:
+              schema: { type: string }
+              description: 'Columns: Customer, Order, PO, Product, Code, Lot, Status, Action.'
 
   /api/audit:
     get:
@@ -2156,18 +2248,22 @@ paths:
         - super_admin can query all entries, optionally filtered by tenant.
         - org_admin can only see their own tenant's entries.
         - user/reader get 403.
+
+        Filters are built by the same `buildAuditFilters` helper the CSV export
+        uses, so the screen and the export cannot drift. The tenant parameter is
+        spelled `tenant_id` (snake case) — a `tenantId` parameter is ignored.
         **Requires super_admin or org_admin role.**
       parameters:
-        - name: tenantId
+        - name: tenant_id
           in: query
           schema:
             type: string
-          description: Filter by tenant (super_admin only)
+          description: Filter by tenant (super_admin only; ignored for org_admin, who is pinned to their own tenant)
         - name: action
           in: query
           schema:
             type: string
-          description: Filter by action type
+          description: Filter by action type. Comma-separated for multiple (e.g. `login,logout`).
         - name: userId
           in: query
           schema:
@@ -2189,7 +2285,7 @@ paths:
           schema:
             type: string
             format: date
-          description: End date (inclusive)
+          description: End date (inclusive, through end of day)
         - $ref: '#/components/parameters/LimitParam'
         - $ref: '#/components/parameters/OffsetParam'
       responses:
@@ -3132,6 +3228,321 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '404':
           description: Document type not in this tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/spec-gaps:
+    get:
+      tags: [Spec Register]
+      summary: What was NOT judged on an approved document
+      description: |
+        The other half of `/api/spec-checks` (migration 0109). Any role in the
+        tenant — evidence, not configuration. Read-only: rows are written at
+        approval and replaced on re-approval, and there is nothing to
+        acknowledge (an unjudged result is fixed by configuring a limit, a
+        missing analyte by the supplier sending one).
+
+        `kind=missing_required` — an analyte this supplier's certificates of
+        this type MUST report (a supplier watch, `/api/spec-required-analytes`)
+        that the certificate did not report.
+        `kind=unjudged` — a printed result with no limit in scope and no printed
+        specification.
+      parameters:
+        - { name: kind, in: query, schema: { type: string, enum: [all, missing_required, unjudged], default: all } }
+        - { name: document_id, in: query, schema: { type: string } }
+        - { name: supplier_id, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: Gap rows and total
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  specGaps: { type: array, items: { type: object } }
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+
+  /api/suppliers/{id}/lot-scheme:
+    get:
+      tags: [Suppliers]
+      summary: The supplier's declared lot format, and how its lots read against it
+      description: |
+        Migration 0110. Any role in the tenant. Returns every declared VERSION
+        (the table is append-only), the one in force, and a read-only fit
+        preview over this supplier's stored lots. With no declaration the
+        legacy `suppliers.lot_scheme` enum is mapped onto an equivalent spec.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Versions, the resolved spec, and the fit preview
+          content:
+            application/json:
+              schema: { type: object }
+        '404':
+          description: Supplier not found in the tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [Suppliers]
+      summary: Declare a lot format (appends a version)
+      description: |
+        org_admin / super_admin. Body `{ spec, note? }`. The spec is validated
+        before anything is written — a declaration that cannot mean one thing
+        (a Julian day with no year, a date segment with no role) is refused 400.
+        A new VERSION is appended; nothing is updated in place, so a stored
+        decode stays explainable. Saving the format already in force writes
+        nothing and returns `unchanged: true`. Audited
+        (`supplier.lot_scheme_declared`) with the previous spec and the fit
+        counts the new one produces.
+
+        **A declaration is a validator and a labelled fallback, never an
+        authority**: saving one rewrites no stored lot key and no stored date.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [spec]
+              properties:
+                spec: { type: object }
+                note: { type: string }
+      responses:
+        '200':
+          description: The declaration in force after the call
+          content:
+            application/json:
+              schema: { type: object }
+        '400':
+          description: The spec is not a valid declaration
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/products/{id}/identifiers:
+    get:
+      tags: [Products]
+      summary: What this product goes by
+      description: |
+        Migration 0107. Any role in the tenant. One row per identifier — our
+        SKU, a supplier's item number, a supplier's product name, an alias, a
+        GTIN, a pack — each with `source`, `confirmed`, `superseded` and the
+        evidence in `note`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The product's identifiers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  identifiers: { type: array, items: { type: object } }
+    post:
+      tags: [Products]
+      summary: Add an identifier
+      description: |
+        org_admin / super_admin, audited. A person adding an identifier here
+        stands behind it, so it is written `confirmed: true`, `source:
+        'reviewer'` unless the body says `confirmed: false` — search then
+        labels every result reached through it "via unconfirmed identifier".
+        `kind` and `supplier_id` are paired: the supplier kinds require one,
+        the rest refuse one. Uniqueness is per product, so two products may
+        legitimately claim one number — that ambiguity is something search
+        shows rather than hides.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, value]
+              properties:
+                kind: { type: string, enum: [our_sku, supplier_item, supplier_name, alias, gtin, pack] }
+                value: { type: string }
+                supplier_id: { type: [string, 'null'] }
+                confirmed: { type: boolean, default: true }
+                superseded: { type: boolean, default: false }
+                note: { type: string }
+      responses:
+        '200':
+          description: 'The identifier already existed (`created: false`)'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  identifier: { type: object }
+                  created: { type: boolean }
+        '201':
+          description: 'The identifier as stored (`created: true`)'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  identifier: { type: object }
+                  created: { type: boolean }
+        '400':
+          description: Invalid kind/value/supplier pairing
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/product-identifiers/{id}:
+    put:
+      tags: [Products]
+      summary: Confirm an identifier, mark it a former number, or edit its note
+      description: |
+        org_admin / super_admin, own tenant, audited. The value, kind and
+        supplier of an identifier are its IDENTITY and are not editable: a
+        wrong number is removed and the right one added, so the audit log shows
+        both.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirmed: { type: boolean }
+                superseded: { type: boolean }
+                note: { type: [string, 'null'] }
+      responses:
+        '200':
+          description: The identifier after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  identifier: { type: object }
+    delete:
+      tags: [Products]
+      summary: Remove an identifier
+      description: |
+        org_admin / super_admin, own tenant. The `product_identifier.removed`
+        audit row carries the WHOLE row, since nothing else keeps it.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+
+  /api/supplier-list/import:
+    post:
+      tags: [Supplier Requirements]
+      summary: Derive supplier requirements from the verified supplier list
+      description: |
+        Migration 0112. super_admin / org_admin. The ONE door to the derivation
+        rules (`shared/requirementDerivation.ts`), so a spreadsheet and a future
+        webhook get the same answer for the same supplier.
+
+        Exactly one list source: `csv`, `xlsx_base64` (first sheet), `rows`, or
+        `rerun_of` (the id of an earlier APPLIED run, whose stored input is
+        re-run). `dry_run` DEFAULTS TO TRUE and writes nothing at all — not even
+        a run row; a caller has to say it means to write.
+
+        Applying creates missing suppliers, writes derived rows with their
+        provenance, ADOPTS rows nobody had attributed (never lowering a tier),
+        FLAGS derived rows the list no longer implies rather than deleting them,
+        and never touches a row a human or a packet wrote.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                csv: { type: string }
+                xlsx_base64: { type: string }
+                rows: { type: array, items: { type: object } }
+                rerun_of: { type: string }
+                dry_run: { type: boolean, default: true }
+                file_name: { type: string }
+                pack: { type: string }
+                tenant_id: { type: string, description: super_admin only }
+      responses:
+        '200':
+          description: The plan a dry run would apply. Nothing was written.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierListImportResponse' }
+        '201':
+          description: Applied. `run_id` is the stored run.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierListImportResponse' }
+        '400':
+          description: No list source, more than one, or the rows are unreadable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/supplier-list/imports:
+    get:
+      tags: [Supplier Requirements]
+      summary: Applied supplier-list import runs
+      description: |
+        super_admin / org_admin. Newest first, summary only — a run's per-row
+        outcomes are on `GET /api/supplier-list/imports/{id}`. A dry run is not
+        a run and never appears here.
+      parameters:
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+        - { name: limit, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+      responses:
+        '200':
+          description: Run summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imports: { type: array, items: { type: object } }
+
+  /api/supplier-list/imports/{id}:
+    get:
+      tags: [Supplier Requirements]
+      summary: One import run, with its per-row outcomes
+      description: super_admin / org_admin, own tenant.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The run, its counts, its row outcomes and its stored input
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  import: { type: object }
+        '404':
+          description: Run not found in the tenant
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

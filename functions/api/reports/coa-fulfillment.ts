@@ -1,5 +1,10 @@
+import { getClientIp, logAudit } from '../../lib/db';
 import { requireTenantAccess, BadRequestError, errorToResponse } from '../../lib/permissions';
 import type { Env, User } from '../../lib/types';
+
+/** Cap for the CSV export. High enough to be the whole worklist for a real
+ *  tenant, low enough that a Worker never builds an unbounded string. */
+const CSV_MAX_ROWS = 5000;
 
 /**
  * GET /api/reports/coa-fulfillment
@@ -299,6 +304,65 @@ function formatJson(rows: FulfillmentRow[], asOf: string, codeSet: Set<string>) 
   return { rows: out, summary };
 }
 
+// ── format: the same rows as a CSV worklist ─────────────────────────────────
+//
+// WHY THIS LIVES HERE AND NOT IN THE PAGE
+//
+// The COA Fulfillment screen used to build this CSV in the browser from the
+// rows it had already fetched. That made it the one export in dox with no
+// audit row — the help text claims every export is provable, and for this one
+// it was not — and it silently exported only the page the screen happened to
+// have (the JSON default is 200 lines). Both problems are the same problem:
+// the export was not a request. Now it is, it is audited like
+// /api/reports/generate, and `limit` for CSV defaults to the full set.
+//
+// Columns are deliberately the reviewer's worklist, not the row type: what to
+// chase, for whom, and what the next action is.
+const CSV_HEADERS = ['Customer', 'Order', 'PO', 'Product', 'Code', 'Lot', 'Status', 'Action'] as const;
+
+const CSV_STATUS_LABEL: Record<GapStatus, string> = {
+  ok: 'OK',
+  missing_lot: 'No lot',
+  missing_coa: 'No COA',
+  expired: 'Expired',
+};
+
+function csvAction(gap: GapStatus, availability: CoaAvailability): string {
+  if (gap !== 'missing_coa') return '';
+  return availability === 'have_other_lot'
+    ? 'Collect this lot COA'
+    : 'No COA on file for product';
+}
+
+/** RFC 4180: quote only what needs it, and double an embedded quote. */
+function csvCell(value: string | number | null | undefined): string {
+  const s = value == null ? '' : String(value);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+type FulfillmentJsonRow = ReturnType<typeof formatJson>['rows'][number];
+
+function formatCsv(rows: FulfillmentJsonRow[]): string {
+  const lines = [CSV_HEADERS.join(',')];
+  for (const r of rows) {
+    lines.push(
+      [
+        r.customer_name,
+        r.order_number,
+        r.po_number,
+        r.product_name,
+        r.product_code,
+        r.lot_number,
+        CSV_STATUS_LABEL[r.gap],
+        csvAction(r.gap, r.coa_availability),
+      ]
+        .map(csvCell)
+        .join(','),
+    );
+  }
+  return lines.join('\n');
+}
+
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
     const user = context.data.user as User;
@@ -321,7 +385,22 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // `as_of` keeps expiry deterministic/testable — callers (and tests) can
     // pin "today". Default to the server's current UTC date when absent.
     const asOf = url.searchParams.get('as_of') || new Date().toISOString().slice(0, 10);
-    const limit = Math.min(parseInt(url.searchParams.get('limit') || '200', 10), 1000);
+
+    // A CSV is an export, not a page: defaulting it to the screen's 200 would
+    // hand someone a file that silently stops a fifth of the way through their
+    // worklist. An explicit `limit` still wins, and the cap is still a cap.
+    const formatParam = url.searchParams.get('format');
+    if (formatParam !== null && formatParam !== 'json' && formatParam !== 'csv') {
+      throw new BadRequestError("format must be 'json' or 'csv'");
+    }
+    const wantsCsv = formatParam === 'csv';
+    const gapsOnly = url.searchParams.get('gaps_only') === '1'
+      || url.searchParams.get('gaps_only') === 'true';
+    const maxLimit = wantsCsv ? CSV_MAX_ROWS : 1000;
+    const limit = Math.min(
+      parseInt(url.searchParams.get('limit') || (wantsCsv ? `${CSV_MAX_ROWS}` : '200'), 10),
+      maxLimit,
+    );
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
     // 1. selector
@@ -342,8 +421,51 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // 3. gap_rules + 4. format
     const body = formatJson(result.results || [], asOf, codeSet);
 
-    return new Response(JSON.stringify(body), {
-      headers: { 'Content-Type': 'application/json' },
+    if (!wantsCsv) {
+      return new Response(JSON.stringify(body), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const csvRows = gapsOnly ? body.rows.filter((r) => r.gap !== 'ok') : body.rows;
+    const csv = formatCsv(csvRows);
+
+    // Audited exactly like POST /api/reports/generate — same action, same
+    // resource type — because it is the same kind of event: data left the
+    // system as a file. `report_kind` is what tells the two apart on the
+    // audit screen. The JSON branch above writes nothing: rendering a screen
+    // is not an export, and auditing every page load would bury the exports.
+    await logAudit(
+      context.env.DB,
+      user.id,
+      tenantId,
+      'report.generate',
+      'report',
+      null,
+      JSON.stringify({
+        report_kind: 'coa_fulfillment',
+        format: 'csv',
+        from,
+        to,
+        customer_id: customerId,
+        as_of: asOf,
+        gaps_only: gapsOnly,
+        count: csvRows.length,
+        truncated: body.rows.length >= limit,
+      }),
+      getClientIp(context.request),
+    );
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    return new Response(csv, {
+      headers: {
+        'Content-Type': 'text/csv',
+        'Content-Disposition': `attachment; filename="coa-${gapsOnly ? 'worklist' : 'fulfillment'}-${stamp}.csv"`,
+        // Says whether the file is the whole answer, the same way the audit
+        // export does. A silent first page is the failure mode this replaces.
+        'X-Report-Rows': String(csvRows.length),
+        'X-Report-Truncated': body.rows.length >= limit ? 'true' : 'false',
+      },
     });
   } catch (err) {
     const httpErr = errorToResponse(err);
