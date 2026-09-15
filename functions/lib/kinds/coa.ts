@@ -20,6 +20,7 @@ import { lotIdentity, type ResolvedLotScheme } from '../../../shared/lotScheme';
 import { loadResolvedLotScheme } from '../lot-schemes';
 import { getLearnedPreferences } from '../learnedPreferences';
 import { applyDocumentTypeRequirementDefaults } from '../requirement-defaults';
+import { recordClassification } from '../classification';
 import type { CoaRecordsPayload } from '../../../shared/types';
 import { buildFlatExtendedMetadata } from '../../../shared/coaExtendedMetadata';
 import { resolveProductionDate } from '../../../shared/lotProductionDate';
@@ -511,6 +512,18 @@ export async function produceCoa(
     documentTypeId: item.document_type_id,
     actorId: userId,
   });
+  // Say what the reviewer just decided about the document's TYPE
+  // (migration 0081). Approving IS a human affirming the classification;
+  // approving with no type resolved leaves it in the needs-review backlog.
+  // Best-effort, same contract as the call above.
+  await recordClassification(db, {
+    documentId: docId,
+    tenantId: item.tenant_id,
+    documentTypeId: item.document_type_id,
+    actorId: userId,
+    byHuman: true,
+    clientIp: clientIp ?? null,
+  });
 
   // Insert document version
   const versionId = generateId();
@@ -819,6 +832,18 @@ export async function produceMultiProductCoa(
       tenantId: item.tenant_id,
       documentTypeId: item.document_type_id,
       actorId: userId,
+    });
+    // Say what the reviewer just decided about the document's TYPE
+    // (migration 0081). Approving IS a human affirming the classification;
+    // approving with no type resolved leaves it in the needs-review backlog.
+    // Best-effort, same contract as the call above.
+    await recordClassification(db, {
+      documentId: docId,
+      tenantId: item.tenant_id,
+      documentTypeId: item.document_type_id,
+      actorId: userId,
+      byHuman: true,
+      clientIp: clientIp ?? null,
     });
 
     // Insert document version
@@ -1278,6 +1303,18 @@ export async function produceCoaRecords(
         tenantId: item.tenant_id,
         documentTypeId: item.document_type_id,
         actorId: userId,
+      });
+      // Say what the reviewer just decided about the document's TYPE
+      // (migration 0081). Approving IS a human affirming the classification;
+      // approving with no type resolved leaves it in the needs-review backlog.
+      // Best-effort, same contract as the call above.
+      await recordClassification(db, {
+        documentId: docId,
+        tenantId: item.tenant_id,
+        documentTypeId: item.document_type_id,
+        actorId: userId,
+        byHuman: true,
+        clientIp: clientIp ?? null,
       });
 
       // The text this row is SEARCHED on (0106): the certificate's text with the

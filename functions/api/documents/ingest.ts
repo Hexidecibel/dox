@@ -23,6 +23,7 @@ import {
   isValidRenewalType,
 } from '../../lib/registry';
 import { applyDocumentTypeRequirementDefaults } from '../../lib/requirement-defaults';
+import { recordClassification } from '../../lib/classification';
 import type { DocumentFacetInput } from '../../lib/registry';
 import type { Env, User, Document } from '../../lib/types';
 
@@ -461,6 +462,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
       }
 
+      // What INGEST may say about the classification (migration 0081): the
+      // type it declared was proposed, not confirmed. Ingest is a
+      // caller-asserted upsert — an agent, a mail pipeline, an API key — so it
+      // writes 'needs_review', never 'classified', and `recordClassification`
+      // refuses to demote a row a human has already ruled on.
+      await recordClassification(context.env.DB, {
+        documentId: existingDoc.id,
+        tenantId,
+        documentTypeId:
+          effectiveDocTypeId ||
+          (existingDoc as unknown as { document_type_id: string | null }).document_type_id,
+        actorId: user.id,
+        byHuman: false,
+        clientIp: getClientIp(context.request),
+      });
+
       // Link products if provided (update flow)
       if (productLinks.length > 0) {
         for (const link of productLinks) {
@@ -636,6 +653,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           actorId: user.id,
         });
       }
+
+      // What INGEST may say about the classification (migration 0081): the
+      // type it declared was proposed, not confirmed. Ingest is a
+      // caller-asserted upsert — an agent, a mail pipeline, an API key — so it
+      // writes 'needs_review', never 'classified', and `recordClassification`
+      // refuses to demote a row a human has already ruled on.
+      await recordClassification(context.env.DB, {
+        documentId: docId,
+        tenantId,
+        documentTypeId: effectiveDocTypeId,
+        actorId: user.id,
+        byHuman: false,
+        clientIp: getClientIp(context.request),
+      });
 
       // Insert version
       const versionId = generateId();

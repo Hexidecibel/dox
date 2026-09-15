@@ -193,6 +193,64 @@ describe('PUT /api/queue/:id — flat COA approve persists extraction tables', (
   });
 });
 
+/**
+ * Migration 0081 defined `documents.classification_status` and
+ * `functions/lib/requirement-gaps.ts` counts by it, but nothing wrote it — so
+ * the unclassified bucket was COUNT(*) on every tenant, forever. Approval is
+ * the main door; these pin that it writes, and that it names the approver.
+ */
+describe('PUT /api/queue/:id — approve records the classification (0081)', () => {
+  async function classificationFor(queueItemId: string) {
+    const row = await db
+      .prepare(
+        `SELECT classification_status AS status,
+                classification_reviewed_at AS at,
+                classification_reviewed_by AS by
+           FROM documents WHERE external_ref = ?`,
+      )
+      .bind(`queue-${queueItemId}`)
+      .first<{ status: string; at: string | null; by: string | null }>();
+    expect(row).toBeTruthy();
+    return row!;
+  }
+
+  it('classifies the document and names the approver when the item has a type', async () => {
+    const queueId = await seedFlatQueueItem(seed.tenantId, seed.orgAdminId, null);
+    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
+
+    const response = await updateQueueItem(
+      makePutContext(queueId, { status: 'approved', product_name: 'Cream' }, user),
+    );
+    expect(response.status).toBe(200);
+
+    const row = await classificationFor(queueId);
+    expect(row.status).toBe('classified');
+    expect(row.by).toBe(seed.orgAdminId);
+    expect(row.at).toBeTruthy();
+  });
+
+  it('leaves an approved-but-untyped document in the needs-review backlog', async () => {
+    const queueId = await seedFlatQueueItem(seed.tenantId, seed.orgAdminId, null);
+    // The classifier did not resolve to one of this tenant's types.
+    await db
+      .prepare('UPDATE processing_queue SET document_type_id = NULL WHERE id = ?')
+      .bind(queueId)
+      .run();
+    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
+
+    const response = await updateQueueItem(
+      makePutContext(queueId, { status: 'approved', product_name: 'Cream' }, user),
+    );
+    expect(response.status).toBe(200);
+
+    const row = await classificationFor(queueId);
+    expect(row.status).toBe('needs_review');
+    // No stamp: the reviewer ruled on the extraction, not the classification.
+    expect(row.by).toBeNull();
+    expect(row.at).toBeNull();
+  });
+});
+
 describe('buildFlatExtendedMetadata', () => {
   it('wraps a table array under the `tables` key', () => {
     expect(buildFlatExtendedMetadata(JSON.stringify(TABLES))).toBe(
