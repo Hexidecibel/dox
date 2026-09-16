@@ -102,6 +102,8 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
 import { EmptyState } from '../../components/EmptyState';
 import { ReviewByCell, SupplierWatchPanel } from '../../components/SupplierWatchPanel';
+import { UnmatchedAnalytesPanel } from '../../components/UnmatchedAnalytesPanel';
+import type { UnmatchedAnalyteGroup } from '../../lib/types';
 import { useSearchParams } from 'react-router-dom';
 
 /** Operators, worded the way someone writing a spec would say them. */
@@ -401,6 +403,21 @@ export function SpecLimits() {
     setTestDialog(true);
   };
 
+  /**
+   * "New analyte" from the unmatched panel: the dialog opens already carrying
+   * every spelling the certificates printed, so the analyte that gets created
+   * matches them on the next document rather than needing a second pass. The
+   * NAME is the commonest spelling and is meant to be edited — what a lab prints
+   * is not always what a QA manager calls it.
+   */
+  const openCreateTestFromUnmatched = (group: UnmatchedAnalyteGroup) => {
+    setEditingTest(null);
+    setTestName(group.name);
+    setTestAliases(group.spellings.map((s) => s.name).join(', '));
+    setTestUnit(group.example?.unit_raw || '');
+    setTestDialog(true);
+  };
+
   const openEditTest = (t: ApiSpecTest) => {
     setEditingTest(t);
     setTestName(t.name);
@@ -645,6 +662,17 @@ export function SpecLimits() {
           }
         />
       </Paper>
+
+      {/* Before the limits themselves, deliberately: a limit that never matches
+          a spelling is the one failure this page cannot otherwise show, and it
+          looks identical to everything being fine. */}
+      <UnmatchedAnalytesPanel
+        tenantId={activeTenantId}
+        specTests={specTests}
+        reloadKey={watchReload}
+        onAliasAdded={load}
+        onCreateAnalyte={openCreateTestFromUnmatched}
+      />
 
       {specTests.length > 0 && (
         <SupplierWatchPanel

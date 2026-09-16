@@ -20,7 +20,7 @@
 import { describe, it, expect } from 'vitest';
 // @ts-expect-error — plain CJS module, no types.
 import mod from '../../bin/lib/specLimitsImport.js';
-import { normalizeUnit, validateLimitShape } from '../../shared/specCheck';
+import { normalizeUnit, validateLimitShape, limitThresholdChanged } from '../../shared/specCheck';
 
 const {
   parseAnalyteSheet,
@@ -32,6 +32,7 @@ const {
   buildPlan,
   planToSql,
   sqlText,
+  limitMateriallyDiffers,
 } = mod;
 
 /** The real workbook's shape: a banner row, a header row, then data. */
@@ -505,4 +506,152 @@ describe('planToSql escaping', () => {
     expect(sql).toContain("'Chris''s Analyte'");
     expect(sql).toContain("'it''s fine'");
   });
+});
+
+// ---------------------------------------------------------------------------
+// Criticality (migration 0095) — the optional column
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY THE COLUMN IS FOUND BY NAME AND THE OTHERS BY POSITION: the six original
+ * columns have always been there, so a positional read cannot drift; an
+ * OPTIONAL column can be absent or elsewhere, and reading position 6 would file
+ * whatever is there — often the notes — as a tier.
+ *
+ * WHY AN UNKNOWN WORD IS FATAL RATHER THAN A DEFAULT: quietly defaulting a
+ * typo'd "Criticial" DEMOTES a limit somebody deliberately marked as
+ * load-stopping, and nothing downstream would ever show that it happened. The
+ * REST API answers 400 for the same reason. A BLANK cell is the opposite: it is
+ * the default, and it is what every workbook written before tiers existed has.
+ */
+describe('criticality column', () => {
+  const HEADER_WITH_TIER = [...ANALYTE_HEADER, 'criticality'];
+  const sheetWithTier = (...rows: unknown[][]) => [
+    ['Limits by Analyte — banner', '', '', '', '', '', ''],
+    HEADER_WITH_TIER,
+    ...rows,
+  ];
+
+  it('accepts the words the screen shows and the words the database stores', () => {
+    const p = parseAnalyteSheet(
+      sheetWithTier(
+        ['Coliform', '≤', '10', 'CFU/g', '', '', 'Critical'],
+        ['Standard Plate Count', '≤', '20000', 'CFU/g', '', '', 'low'],
+        ['Yeast', '≤', '100', 'CFU/g', '', '', 'Tracked']
+      )
+    );
+    expect(p.errors).toEqual([]);
+    expect(p.analytes.map((a: any) => a.criticality)).toEqual(['high', 'low', 'medium']);
+  });
+
+  it('defaults a blank cell to the middle tier, and says nothing about it', () => {
+    const p = parseAnalyteSheet(sheetWithTier(['Coliform', '≤', '10', 'CFU/g', '', '', '']));
+    expect(p.errors).toEqual([]);
+    expect(p.analytes[0].criticality).toBe('medium');
+  });
+
+  it('defaults every row when the column is absent entirely', () => {
+    const p = parseAnalyteSheet(analyteSheet(['Coliform', '≤', '10', 'CFU/g', '', '']));
+    expect(p.errors).toEqual([]);
+    expect(p.analytes[0].criticality).toBe('medium');
+  });
+
+  it('fails the import on a word it does not know, naming the row', () => {
+    const p = parseAnalyteSheet(
+      sheetWithTier(['Coliform', '≤', '10', 'CFU/g', '', '', 'Criticial'])
+    );
+    expect(p.analytes).toHaveLength(0);
+    expect(p.errors[0]).toMatch(/row 3 \(Coliform\)/);
+    expect(p.errors[0]).toMatch(/Criticial/);
+    expect(p.errors[0]).toMatch(/Critical \(high\)/);
+  });
+
+  it('writes the tier on a created limit', () => {
+    const p = buildPlan({
+      tenantId: 't1',
+      analytes: parseAnalyteSheet(
+        sheetWithTier(['Coliform', '≤', '10', 'CFU/g', '', '', 'Critical'])
+      ).analytes,
+      variants: [],
+      existingTests: [],
+      existingLimits: [],
+      ...ENGINE,
+    });
+    const sql = planToSql(p).join('\n');
+    expect(sql).toMatch(/criticality/);
+    expect(sql).toMatch(/'high'/);
+  });
+
+  it('updates a tier WITHOUT moving the version — a rank is not a threshold', () => {
+    const analytes = parseAnalyteSheet(
+      sheetWithTier(['Coliform', '≤', '10', 'CFU/g', '', '', 'Critical'])
+    ).analytes;
+    const p = buildPlan({
+      tenantId: 't1',
+      analytes,
+      variants: [],
+      existingTests: [{ id: 'st1', name: 'Coliform', aliases: [], default_unit: 'CFU/g' }],
+      existingLimits: [
+        {
+          id: 'l1',
+          spec_test_id: 'st1',
+          supplier_id: null,
+          document_type_id: null,
+          product_id: null,
+          operator: '<=',
+          value_min: null,
+          value_max: 10,
+          unit: 'CFU/g',
+          severity: 'alert',
+          criticality: 'medium',
+          notes: null,
+          active: 1,
+          version: 3,
+        },
+      ],
+      ...ENGINE,
+    });
+    expect(p.limits[0].action).toBe('update');
+    expect(p.limits[0].bumpVersion).toBe(false);
+    expect(p.limits[0].version).toBe(3);
+    expect(planToSql(p).join('\n')).toMatch(/criticality = 'high'/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// One version rule, two writers
+// ---------------------------------------------------------------------------
+
+/**
+ * The importer and `PUT /api/spec-limits/:id` must answer "is this a new version
+ * of the limit?" identically — they did not, which is what this now pins. The
+ * rule lives in the engine (`limitThresholdChanged`); the importer reads it from
+ * the generated bundle, so this also catches a bundle left stale after an edit
+ * to shared/specCheck.ts.
+ */
+describe('version rule, shared with the REST API', () => {
+  const before = {
+    operator: '<=',
+    value_min: null,
+    value_max: 10,
+    unit: 'CFU/g',
+  };
+
+  const cases: Array<[string, Record<string, unknown>, boolean]> = [
+    ['an unchanged limit', { ...before }, false],
+    ['a moved maximum', { ...before, value_max: 20 }, true],
+    ['a moved operator', { ...before, operator: '<' }, true],
+    ['a moved unit', { ...before, unit: 'CFU/mL' }, true],
+    ['a unit that was cleared', { ...before, unit: null }, true],
+    ['a minimum that appeared', { ...before, value_min: 1 }, true],
+    ['the same number as text', { ...before, value_max: '10' }, false],
+  ];
+
+  for (const [name, after, expected] of cases) {
+    it(`${expected ? 'bumps' : 'holds'} for ${name}`, () => {
+      expect(limitMateriallyDiffers(before, after)).toBe(expected);
+      // …and the engine the API calls says exactly the same thing.
+      expect(limitThresholdChanged(before, after)).toBe(expected);
+    });
+  }
 });

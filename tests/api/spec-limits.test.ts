@@ -369,3 +369,116 @@ describe('spec-limits', () => {
     expect(r.status).toBe(403);
   });
 });
+
+/**
+ * WHEN `version` MOVES — one rule, and `bin/lib/specLimitsImport.js` applies the
+ * same one (both call `limitThresholdChanged`; the importer's half is pinned in
+ * tests/unit/specLimitsImport.test.ts).
+ *
+ * The counter's whole job is to tell a reader of an old verdict that the limit
+ * on screen is not the one that judged it. Bumping it for a notes fix inflates
+ * it until it means nothing; not bumping it for a moved threshold is worse,
+ * because the frozen `limit_snapshot` would then cite one version for two
+ * different sets of numbers.
+ *
+ * This endpoint used to bump on EVERY edit, so the same limit reached a
+ * different version depending on whether it was last touched through the app or
+ * through the workbook.
+ */
+describe('spec-limits — version moves only when the threshold does', () => {
+  /** A limit on its own analyte, so each case is free of the scope-uniqueness rule. */
+  const freshLimit = async (body: Record<string, unknown> = {}) => {
+    const analyte = (
+      await call(
+        createTest,
+        ctx('http://localhost/api/spec-tests', 'POST', orgAdmin, {
+          name: `Version Probe ${generateTestId().slice(0, 8)}`,
+        })
+      )
+    ).body.specTest.id as string;
+    const created = await call(
+      createLimit,
+      ctx('http://localhost/api/spec-limits', 'POST', orgAdmin, {
+        spec_test_id: analyte,
+        operator: '<=',
+        value_max: 10,
+        unit: 'CFU/g',
+        notes: 'first note',
+        criticality: 'medium',
+        ...body,
+      })
+    );
+    expect(created.body.specLimit.version).toBe(1);
+    return created.body.specLimit.id as string;
+  };
+
+  const put = (id: string, body: Record<string, unknown>) =>
+    call(updateLimit, ctx(`http://localhost/api/spec-limits/${id}`, 'PUT', orgAdmin, body, { id }));
+
+  it('bumps when the value moves', async () => {
+    const id = await freshLimit();
+    expect((await put(id, { value_max: 20 })).body.specLimit.version).toBe(2);
+  });
+
+  it('bumps when the operator moves', async () => {
+    const id = await freshLimit();
+    expect((await put(id, { operator: '<', value_max: 10 })).body.specLimit.version).toBe(2);
+  });
+
+  it('bumps when the unit moves — the same number is a different quantity', async () => {
+    const id = await freshLimit();
+    expect((await put(id, { unit: 'CFU/mL' })).body.specLimit.version).toBe(2);
+  });
+
+  it('does NOT bump for notes', async () => {
+    const id = await freshLimit();
+    const r = await put(id, { notes: 'clarified for the auditor' });
+    expect(r.body.specLimit.version).toBe(1);
+    expect(r.body.specLimit.notes).toBe('clarified for the auditor');
+  });
+
+  it('does NOT bump for criticality — a rank is not a threshold', async () => {
+    const id = await freshLimit();
+    const r = await put(id, { criticality: 'high' });
+    expect(r.body.specLimit.version).toBe(1);
+    expect(r.body.specLimit.criticality).toBe('high');
+  });
+
+  it('does NOT bump for severity, or for deactivating the limit', async () => {
+    const id = await freshLimit();
+    expect((await put(id, { severity: 'warn' })).body.specLimit.version).toBe(1);
+    expect((await put(id, { active: false })).body.specLimit.version).toBe(1);
+  });
+
+  it('does NOT bump for a scope move — other documents, same threshold', async () => {
+    const id = await freshLimit();
+    const r = await put(id, { supplier_id: supplierId });
+    expect(r.body.specLimit.version).toBe(1);
+    expect(r.body.specLimit.supplier_id).toBe(supplierId);
+  });
+
+  it('says in the audit row whether this was a new version', async () => {
+    const id = await freshLimit();
+    await put(id, { notes: 'a note' });
+    const quiet = await db
+      .prepare(
+        `SELECT details FROM audit_log WHERE action = 'spec_limit.updated' AND resource_id = ?
+          ORDER BY id DESC LIMIT 1`
+      )
+      .bind(id)
+      .first<{ details: string }>();
+    expect(JSON.parse(quiet!.details).version_bumped).toBe(false);
+
+    await put(id, { value_max: 5 });
+    const loud = await db
+      .prepare(
+        `SELECT details FROM audit_log WHERE action = 'spec_limit.updated' AND resource_id = ?
+          ORDER BY id DESC LIMIT 1`
+      )
+      .bind(id)
+      .first<{ details: string }>();
+    const parsed = JSON.parse(loud!.details);
+    expect(parsed.version_bumped).toBe(true);
+    expect(parsed.after.version).toBe(2);
+  });
+});

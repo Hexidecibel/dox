@@ -272,6 +272,20 @@ function norm(s: unknown): string {
 }
 
 /**
+ * The key `matchSpecTest` compares names on, exported so nothing else has to
+ * re-invent it.
+ *
+ * Anything that GROUPS printed spellings — the unmatched-analyte panel, the
+ * list of spellings a tenant has decided are not tests — has to fold them
+ * exactly the way matching does, or it will offer to add an alias that changes
+ * nothing ("%FAT" and "FAT" are one key) or hide a spelling that is still being
+ * skipped. One function, one answer.
+ */
+export function normalizeTestName(name: unknown): string {
+  return norm(name);
+}
+
+/**
  * Twelve significant figures: enough for any real unit factor, and it stops a
  * float wobble (1e-3 / 1e3 * 1e6 = 0.9999999999999999) from turning a result
  * that sits exactly ON a limit into one a hair either side of it.
@@ -1967,6 +1981,14 @@ export interface ConfiguredLimit {
   /** Tie-breaker when two limits are equally specific. */
   updated_at?: string | null;
   /**
+   * The revision counter (migration 0084), bumped when and only when the
+   * threshold semantics move (`limitThresholdChanged`). Frozen into
+   * `limit_snapshot` so an old verdict can name WHICH revision judged it.
+   * Optional: a config assembled by hand, or read before this was selected,
+   * genuinely has no version, and a made-up 1 would be a false citation.
+   */
+  version?: number | null;
+  /**
    * When a supplier-scoped limit's WATCH PERIOD is due for review (migration
    * 0109), as YYYY-MM-DD. Passing it never loosens anything — the limit keeps
    * applying and the verdict is flagged instead. See `watchStatus`.
@@ -2218,6 +2240,38 @@ export interface ConfiguredCheckResult {
    * which means we HELD a limit and could not apply it.
    */
   unjudged: UnjudgedResult[];
+  /**
+   * EVERY printed result whose name produced no judgement, one entry per result
+   * rather than one per spelling — the evidence behind `unmatched`.
+   *
+   * `unmatched` is a Set of names and answers "how many tests on this COA were
+   * skipped". It cannot answer the question the admin screen has to ask across a
+   * whole corpus: how many RESULTS a spelling covers, and which document to open
+   * to see one. Counting documents instead would understate a crosstab that
+   * prints the same unrecognised analyte on twelve lot rows.
+   *
+   * `spec_test_id` is what separates the two gaps that both land here: NULL is an
+   * ALIAS gap (no configured analyte answers to this spelling, and adding the
+   * alias fixes it), non-null is a SCOPE gap (the analyte exists, no limit
+   * applies to this supplier or document type, and an alias would change
+   * nothing). Blank cells are left out — a spelling with nothing under it is a
+   * heading, not a result.
+   */
+  unmatched_results: UnmatchedResult[];
+}
+
+/**
+ * One printed result that matched no limit, with where it was and what it said.
+ * See `ConfiguredCheckResult.unmatched_results`.
+ */
+export interface UnmatchedResult {
+  scope: string;
+  target: SpecTarget;
+  test_name_raw: string;
+  value_raw: string;
+  unit_raw: string | null;
+  /** The analyte this spelling DOES match, when the gap is a missing limit rather than a missing alias. */
+  spec_test_id: string | null;
 }
 
 /**
@@ -2443,6 +2497,7 @@ export function checkConfiguredLimits(
   const resolved = resolveSpecLimits(limits, ctx);
   const verdicts: SpecVerdict[] = [];
   const unmatched = new Set<string>();
+  const unmatchedResults: UnmatchedResult[] = [];
   const controlRows = new Set<string>();
   const nonMeasurementRows = new Set<string>();
   const unjudged: UnjudgedResult[] = [];
@@ -2556,6 +2611,19 @@ export function checkConfiguredLimits(
         }
       }
       unmatched.add(testName);
+      // The per-result evidence. Unlike `unmatched` this skips a blank cell:
+      // the name still counts as a test nobody could check, but there is no
+      // result behind it to count or to show anybody.
+      if (!isBlankResult(valueRaw)) {
+        unmatchedResults.push({
+          scope,
+          target,
+          test_name_raw: testName,
+          value_raw: valueRaw,
+          unit_raw: unitRaw || null,
+          spec_test_id: test ? test.id : null,
+        });
+      }
       noteUnjudged(scope, target, testName, valueRaw, unitRaw, specRaw, verdictRaw, test);
       return;
     }
@@ -2846,6 +2914,7 @@ export function checkConfiguredLimits(
   return {
     verdicts,
     unmatched: [...unmatched],
+    unmatched_results: unmatchedResults,
     control_rows: [...controlRows],
     non_measurement_rows: [...nonMeasurementRows],
     unjudged,
@@ -3133,6 +3202,60 @@ export function validateLimitShape(input: {
     default:
       return `Unknown operator "${operator}".`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// When a limit's `version` moves — ONE rule, two writers
+// ---------------------------------------------------------------------------
+
+/**
+ * The fields that decide what a result is judged against. Move one of these and
+ * a verdict recorded yesterday was reached under a different rule from the one
+ * on screen today; move anything else and it was not.
+ */
+export const LIMIT_THRESHOLD_FIELDS = ['operator', 'value_min', 'value_max', 'unit'] as const;
+
+export type LimitThresholdShape = {
+  operator?: string | null;
+  value_min?: number | string | null;
+  value_max?: number | string | null;
+  unit?: string | null;
+};
+
+/**
+ * Does this edit change the THRESHOLD SEMANTICS — i.e. should `spec_limits.version`
+ * bump?
+ *
+ * The SME's own change rule is "changing a limit value requires a new version",
+ * and the counter exists so a reader of an old verdict can tell that the limit
+ * on screen is not the one that judged it. Notes, severity, criticality and a
+ * watch review-by date all leave the arithmetic exactly where it was, so bumping
+ * for them inflates the counter until it stops meaning anything — and the tier
+ * and the watch are frozen into `limit_snapshot` in their own right, so nothing
+ * is lost by holding the version still.
+ *
+ * It lives HERE, in the engine both writers already import, because the API PUT
+ * and `bin/lib/specLimitsImport.js` were answering this question differently:
+ * the API bumped on every edit including a notes-only one, the importer only on
+ * operator/value/unit. Two answers to "is this a new version of the limit?" is a
+ * broken audit trail, whichever one you read.
+ *
+ * A missing/empty value on either side is "absent"; absent vs a value is a
+ * change, absent vs absent is not.
+ */
+export function limitThresholdChanged(
+  before: LimitThresholdShape,
+  after: LimitThresholdShape
+): boolean {
+  const absent = (v: unknown) => v === null || v === undefined || v === '';
+  return LIMIT_THRESHOLD_FIELDS.some((f) => {
+    const a = before[f];
+    const b = after[f];
+    if (absent(a)) return !absent(b);
+    if (absent(b)) return true;
+    if (f === 'value_min' || f === 'value_max') return Number(a) !== Number(b);
+    return String(a) !== String(b);
+  });
 }
 
 // ---------------------------------------------------------------------------

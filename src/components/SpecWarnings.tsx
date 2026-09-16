@@ -397,7 +397,14 @@ export function SpecWarningBanner({
 }: {
   verdicts: SpecVerdict[] | undefined;
   /** Server-side counts, including the `unmatched` total the array cannot carry. */
-  summary?: { out_of_spec: number; not_checked: number; unmatched: number };
+  summary?: {
+    out_of_spec: number;
+    not_checked: number;
+    unmatched: number;
+    /** Buffer / blank / control rows recognised and deliberately not judged. */
+    control_rows?: number;
+    control_row_labels?: string[];
+  };
   /** "No limit configured" results (0109 rulings). */
   unjudged?: UnjudgedResult[];
   /** Required analytes for this supplier the certificate did not report. */
@@ -542,6 +549,7 @@ export function SpecWarningBanner({
           limit configured, so {unmatched === 1 ? 'it was' : 'they were'} not checked.
         </Typography>
       )}
+      <ControlRowsLine summary={summary} />
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
         Compared against the limits on file and the one printed on this COA — no
         AI, no guessing. This does not block approval; it asks for your eyes. A
@@ -551,6 +559,37 @@ export function SpecWarningBanner({
         result — every judged result is shown either way.
       </Typography>
     </Alert>
+  );
+}
+
+/**
+ * "2 control rows recognised and not judged as product."
+ *
+ * Quiet, and it opens nothing: a buffer row is not a finding. It is here because
+ * the engine excludes those rows from product verdicts and, until now, said so
+ * to nobody — leaving the two readings a reviewer can make of a skipped row
+ * ("it was missed" / "a clean buffer means clean product") both available and
+ * both wrong. Naming the rows is what makes the line checkable against the table.
+ */
+function ControlRowsLine({
+  summary,
+}: {
+  summary?: { control_rows?: number; control_row_labels?: string[] };
+}) {
+  const count = summary?.control_rows ?? 0;
+  if (count <= 0) return null;
+  const labels = summary?.control_row_labels ?? [];
+  return (
+    <Typography
+      variant="caption"
+      color="text.secondary"
+      sx={{ display: 'block', mt: 1 }}
+      data-testid="spec-control-rows"
+    >
+      {count} {count === 1 ? 'control row' : 'control rows'}
+      {labels.length > 0 && ` (${labels.join(', ')})`} recognised and not judged as
+      product.
+    </Typography>
   );
 }
 

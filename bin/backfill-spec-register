@@ -287,8 +287,11 @@ function loadTests(tenant, remote) {
  * the middle tier rather than inventing one).
  */
 function loadLimits(tenant, remote) {
+  // `version` rides along for the same reason criticality does: the snapshot
+  // names WHICH revision judged the result, and a bulk row that omitted it
+  // would be re-explainable on different terms from an approval-written one.
   const base = `id, spec_test_id, operator, value_min, value_max, unit, severity, active,
-            supplier_id, document_type_id, product_id, updated_at`;
+            supplier_id, document_type_id, product_id, updated_at, version`;
   let rows;
   try {
     rows = query(

@@ -21,7 +21,25 @@
  * that did the same would delete every spelling an operator added by hand
  * between runs, and the failure is invisible: the limit stays configured, it
  * just stops matching that supplier's COA. So a re-import is strictly additive.
+ *
+ * WHAT IT IMPORTS FROM THE ENGINE, AND WHY
+ * ----------------------------------------
+ * Two things are read from the generated bundles rather than restated here:
+ * the version rule (`limitThresholdChanged`) and the criticality vocabulary.
+ * Both are single-source-of-truth by explicit design — the version rule because
+ * this importer and the REST API used to answer that question differently, and
+ * the tier words because `shared/specCriticality.ts` says no literal of that
+ * vocabulary may be written anywhere else, so a rename fails loudly instead of
+ * splitting in two. `normalizeUnit` / `validateLimitShape` are still INJECTED by
+ * the driver; that predates this and is left alone.
  */
+
+const { limitThresholdChanged } = require('./shared/specCheck');
+const {
+  SPEC_CRITICALITY_VALUES,
+  SPEC_CRITICALITY_LABELS,
+  DEFAULT_SPEC_CRITICALITY,
+} = require('./shared/specCriticality');
 
 // ---------------------------------------------------------------------------
 // Small shared helpers
@@ -130,6 +148,57 @@ function mapOperator(operatorCell, valueCell) {
 }
 
 // ---------------------------------------------------------------------------
+// Criticality (migration 0095) — optional column
+// ---------------------------------------------------------------------------
+
+/**
+ * Every spelling of a tier the sheet may use, folded onto the stored value.
+ *
+ * BUILT FROM THE VOCABULARY, never typed out: the stored words ('high') and the
+ * words the UI shows a person ('Critical') are both accepted, because the person
+ * filling in the workbook is reading the screen, not the schema. Renaming a tier
+ * in shared/specCriticality.ts therefore renames what this accepts, with nothing
+ * here to keep in step.
+ */
+const CRITICALITY_WORDS = new Map();
+for (const tier of SPEC_CRITICALITY_VALUES) {
+  CRITICALITY_WORDS.set(ciKey(tier), tier);
+  CRITICALITY_WORDS.set(ciKey(SPEC_CRITICALITY_LABELS[tier]), tier);
+}
+
+/** The words a row may use, for the error message, in tier order. */
+const CRITICALITY_CHOICES = SPEC_CRITICALITY_VALUES.map(
+  (tier) => `${SPEC_CRITICALITY_LABELS[tier]} (${tier})`
+).join(', ');
+
+/**
+ * Map one sheet cell to a criticality tier.
+ *
+ * A BLANK CELL IS THE DEFAULT, and that is not the same decision as a typo. An
+ * absent column means the workbook predates tiers and every limit lands on the
+ * middle tier, which is what it landed on before this existed — nothing changes
+ * for an existing sheet. An unrecognised WORD is a hard error naming the row,
+ * for the same reason the REST API answers 400 rather than falling back: quietly
+ * defaulting "Criticial" would DEMOTE a limit somebody deliberately marked as
+ * load-stopping, and no screen would ever show that it had happened.
+ *
+ * @returns {{criticality: string} | {error: string}}
+ */
+function mapCriticality(valueCell) {
+  const raw = cell(valueCell);
+  if (raw === '') return { criticality: DEFAULT_SPEC_CRITICALITY };
+  const tier = CRITICALITY_WORDS.get(ciKey(raw));
+  if (!tier) {
+    return {
+      error:
+        `criticality "${raw}" is not one of the tiers — use one of ${CRITICALITY_CHOICES}, ` +
+        'or leave the cell blank to accept the default',
+    };
+  }
+  return { criticality: tier };
+}
+
+// ---------------------------------------------------------------------------
 // Sheet parsing
 // ---------------------------------------------------------------------------
 
@@ -144,6 +213,29 @@ const TENANT_WIDE_SCOPES = new Set(['', 'all suppliers', 'all', 'any', 'all prod
 function findHeaderRow(rows, firstHeaderCell) {
   for (let i = 0; i < rows.length; i++) {
     if (ciKey((rows[i] || [])[0]).startsWith(firstHeaderCell)) return i;
+  }
+  return -1;
+}
+
+/**
+ * The spellings of the criticality header. The six original columns are read by
+ * POSITION, because the workbook's layout is fixed and a positional read of a
+ * column that has always been there cannot drift. A column that is OPTIONAL
+ * cannot be positional — a sheet that omits it would shift nothing, and a sheet
+ * that adds it somewhere else would be read as notes — so it is found by name.
+ */
+const CRITICALITY_HEADERS = new Set([
+  'criticality',
+  'how much it matters',
+  'priority',
+  'tier',
+]);
+
+/** Column index of the optional criticality column, or -1. */
+function findCriticalityColumn(headerRow) {
+  const cells = headerRow || [];
+  for (let i = 0; i < cells.length; i++) {
+    if (CRITICALITY_HEADERS.has(ciKey(cells[i]))) return i;
   }
   return -1;
 }
@@ -164,6 +256,8 @@ function parseAnalyteSheet(rows) {
       errors: ['"Limits by Analyte": no header row — expected a cell reading "analyte".'],
     };
   }
+
+  const criticalityCol = findCriticalityColumn(rows[header]);
 
   const seen = new Map(); // ciKey -> first row number
   for (let i = header + 1; i < rows.length; i++) {
@@ -202,6 +296,12 @@ function parseAnalyteSheet(rows) {
       continue;
     }
 
+    const tier = mapCriticality(criticalityCol >= 0 ? row[criticalityCol] : '');
+    if (tier.error) {
+      errors.push(`"Limits by Analyte" row ${rowNo} (${name}): ${tier.error}.`);
+      continue;
+    }
+
     // A presence limit has no magnitude, so a unit on it would be noise the
     // comparator would then try to reconcile.
     const unit = mapped.operator === 'absent' ? null : cell(row[3]) || null;
@@ -215,6 +315,7 @@ function parseAnalyteSheet(rows) {
       unit,
       notes: cell(row[5]) || null,
       severity: 'alert',
+      criticality: tier.criticality,
     });
   }
 
@@ -372,18 +473,16 @@ function validateUnit(unit, normalizeUnit) {
 // Plan building
 // ---------------------------------------------------------------------------
 
-const LIMIT_FIELDS = ['operator', 'value_min', 'value_max', 'unit'];
-
-/** Do two limits differ in a way that changes what gets judged? */
+/**
+ * Do two limits differ in a way that changes what gets judged — i.e. should
+ * `version` move?
+ *
+ * The rule itself now lives in the engine (`limitThresholdChanged`), shared with
+ * the REST API's PUT, which used to bump on every edit. This name is kept
+ * because it is what this module's callers and tests already say.
+ */
 function limitMateriallyDiffers(existing, desired) {
-  return LIMIT_FIELDS.some((f) => {
-    const a = existing[f];
-    const b = desired[f];
-    if (a === null || a === undefined || a === '') return !(b === null || b === undefined || b === '');
-    if (b === null || b === undefined || b === '') return true;
-    if (f === 'value_min' || f === 'value_max') return Number(a) !== Number(b);
-    return String(a) !== String(b);
-  });
+  return limitThresholdChanged(existing, desired);
 }
 
 /**
@@ -487,6 +586,7 @@ function buildPlan(input) {
       value_max: a.value_max,
       unit: a.unit,
       severity: a.severity,
+      criticality: a.criticality || DEFAULT_SPEC_CRITICALITY,
       notes: a.notes,
     };
     const existingLimit = existingTest ? limitsByTest.get(existingTest.id) || null : null;
@@ -505,6 +605,7 @@ function buildPlan(input) {
             value_max: existingLimit.value_max === null ? null : Number(existingLimit.value_max),
             unit: existingLimit.unit,
             notes: existingLimit.notes,
+            criticality: existingLimit.criticality || DEFAULT_SPEC_CRITICALITY,
             version: Number(existingLimit.version || 1),
           }
         : null,
@@ -517,16 +618,20 @@ function buildPlan(input) {
       const cosmetic =
         cell(existingLimit.notes) !== cell(desired.notes) ||
         cell(existingLimit.severity) !== cell(desired.severity) ||
+        limitPlan.before.criticality !== desired.criticality ||
         Number(existingLimit.active) !== 1;
       if (material) {
         limitPlan.action = 'update';
         limitPlan.bumpVersion = true;
         limitPlan.version = limitPlan.before.version + 1;
       } else if (cosmetic) {
-        // Notes and severity do not change any verdict, so `version` -- which
-        // is frozen into document_spec_checks.limit_snapshot as the audit trail
-        // of WHAT WAS JUDGED -- must not move for them.
+        // Notes, severity and the criticality tier do not change any verdict, so
+        // `version` -- which is frozen into document_spec_checks.limit_snapshot
+        // as the audit trail of WHAT WAS JUDGED -- must not move for them. The
+        // REST API now agrees (functions/api/spec-limits/[id].ts); it used to
+        // bump for all three.
         limitPlan.action = 'update';
+        limitPlan.criticalityMoved = limitPlan.before.criticality !== desired.criticality;
       }
     }
 
@@ -596,16 +701,19 @@ function planToSql(plan) {
     if (limit.action === 'create') {
       stmts.push(
         `INSERT INTO spec_limits (id, tenant_id, spec_test_id, supplier_id, document_type_id,\n` +
-          `  product_id, operator, value_min, value_max, unit, severity, notes, active, version)\n` +
+          `  product_id, operator, value_min, value_max, unit, severity, criticality, notes,\n` +
+          `  active, version)\n` +
           `VALUES (${sqlText(limit.id)}, ${t}, ${sqlText(limit.specTestId)}, NULL, NULL,\n` +
           `  NULL, ${sqlText(d.operator)}, ${sqlNum(d.value_min)}, ${sqlNum(d.value_max)}, ` +
-          `${sqlText(d.unit)}, ${sqlText(d.severity)}, ${sqlText(d.notes)}, 1, 1);`
+          `${sqlText(d.unit)}, ${sqlText(d.severity)}, ${sqlText(d.criticality)}, ` +
+          `${sqlText(d.notes)}, 1, 1);`
       );
     } else if (limit.action === 'update') {
       stmts.push(
         `UPDATE spec_limits SET operator = ${sqlText(d.operator)}, ` +
           `value_min = ${sqlNum(d.value_min)}, value_max = ${sqlNum(d.value_max)}, ` +
           `unit = ${sqlText(d.unit)}, severity = ${sqlText(d.severity)}, ` +
+          `criticality = ${sqlText(d.criticality)}, ` +
           `notes = ${sqlText(d.notes)}, active = 1, version = ${limit.version}, ` +
           `updated_at = datetime('now') WHERE id = ${sqlText(limit.id)};`
       );
@@ -674,13 +782,22 @@ function formatPlan(plan, opts = {}) {
   for (const l of plan.limits) {
     const verb =
       l.action === 'create' ? 'CREATE  ' : l.action === 'update' ? 'UPDATE  ' : 'unchanged';
-    out.push(`  ${verb} ${l.testName}: ${describeLimit(l.desired)}`);
+    out.push(
+      `  ${verb} ${l.testName}: ${describeLimit(l.desired)}` +
+        `  [${SPEC_CRITICALITY_LABELS[l.desired.criticality] || l.desired.criticality}]`
+    );
     if (l.action === 'update' && l.before) {
       out.push(`            was ${describeLimit(l.before)}`);
+      if (l.criticalityMoved) {
+        out.push(
+          `            tier ${SPEC_CRITICALITY_LABELS[l.before.criticality] || l.before.criticality}` +
+            ` → ${SPEC_CRITICALITY_LABELS[l.desired.criticality] || l.desired.criticality}`
+        );
+      }
       out.push(
         l.bumpVersion
           ? `            threshold moved — version ${l.before.version} → ${l.version}`
-          : `            notes/severity only — version stays at ${l.version}`
+          : `            no threshold change — version stays at ${l.version}`
       );
     }
   }
@@ -708,6 +825,8 @@ function formatPlan(plan, opts = {}) {
 module.exports = {
   cell,
   ciKey,
+  mapCriticality,
+  findCriticalityColumn,
   sqlText,
   sqlNum,
   mapOperator,
