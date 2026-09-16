@@ -291,6 +291,53 @@ contradiction between his unit column and his notes, the Mold ≤1 against Yeast
 requires to be PRESENT on a COA**, which is the difference between "Andersen
 looks clean" and "Andersen does not test for the organisms you care about".
 
+**Alias gap on the screen + one version rule + tiers in the workbook (2026-09-15).**
+Three follow-ups closed together, plus migration 0114.
+
+1. **The unmatched-spelling panel** (`GET /api/spec-unmatched`, Settings › Spec
+   Limits, above the limits themselves). `bin/recheck-spec-limits` had been the
+   only way to see which printed test names nothing recognises, and the person
+   who maintains the aliases does not have a terminal. The derivation moved into
+   `shared/unmatchedAnalytes.ts` and BOTH the script and the endpoint call it, so
+   they cannot come to different answers; the engine gained
+   `ConfiguredCheckResult.unmatched_results` (one entry per printed result, with
+   `spec_test_id` separating an ALIAS gap from a missing-limit SCOPE gap — an
+   alias fixes only the first). Spellings fold on the match key, so "Flavor" and
+   "FLAVOR" are one row: on prod that turns 195 names into **144, covering 2,074
+   results across 522 approved documents**. Each row carries counts, suppliers and
+   an example document, and three answers: add as an alias of an existing analyte
+   (`POST /api/spec-tests/:id/aliases`, which MERGES — the existing PUT replaces
+   the whole array and would delete a second admin's addition), create the analyte
+   pre-filled with every spelling, or **"not a test"** (migration 0114,
+   `spec_unmatched_ignores`, keyed on the match key, audited, readable, undoable).
+   The dismissal is what makes the list usable: only about a dozen of the 144 are
+   analytes — the rest are Flavor, Color, LOT CODE, TIME IN, Best By Date. The
+   scan is bounded (2,000 most recent documents) and reports `scan_truncated`.
+2. **One rule for `version`.** The PUT bumped on every edit, the importer only on
+   operator/value/unit — so a limit's version depended on which door last touched
+   it. The importer's semantics win (they are the SME's own change rule) and the
+   rule now lives once, `limitThresholdChanged` in `shared/specCheck.ts`, called by
+   both. Notes, severity, criticality, active and a scope move do not bump; the
+   audit row says `version_bumped` either way. **`buildLimitSnapshot` now writes
+   `version`** — migration 0085 described the snapshot as carrying it and it never
+   did, so a register row could show the numbers but not which revision produced
+   them. Omitted, never invented, when the loaded row has none.
+3. **Criticality in the spreadsheet importer.** Optional column, found by HEADER
+   (the six original columns stay positional), accepting both the words the screen
+   shows and the words the database stores. Blank = the middle tier, exactly as
+   before; an unrecognised word is a hard error naming the row, because quietly
+   defaulting a typo demotes a limit somebody marked load-stopping. `review_by`
+   was NOT added: the importer writes tenant-wide limits only and a review-by is
+   refused on those by design (it belongs to a supplier watch).
+
+Also: `control_rows` now reaches the review queue as a quiet line ("1 control row
+(Buffer) recognised and not judged as product"), riding the already-plumbed
+`spec_summary`; and `bin/recheck-spec-limits --json` no longer prints its banners
+to stdout, which made the JSON unparseable.
+
+**Open:** SCHEMA.md is NOT regenerated for 0114 (it is generated from a live D1
+and 0114 is not applied anywhere yet) — run `./bin/schema-doc` after applying.
+
 
 
 ### COA extraction — deferred items after the 2026-08-04/05 measurement sessions

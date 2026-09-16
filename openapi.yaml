@@ -2894,6 +2894,189 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/spec-unmatched:
+    get:
+      tags: [Spec Register]
+      summary: Printed test names no configured analyte recognises
+      description: |
+        org_admin+. Replays the spec engine over this tenant's approved
+        documents and reports every printed test name that matched no analyte —
+        the alias gap, which is otherwise invisible: a limit whose analyte never
+        matches a supplier's spelling never runs, and the register cannot report
+        a check that never happened.
+
+        Spellings are grouped by the key the matcher compares on, so `Flavor`
+        and `FLAVOR` are one entry. A name that matches an analyte but has no
+        limit in scope is NOT listed — that is a missing limit, not a missing
+        alias.
+
+        The scan is BOUNDED (the most recent `scan` documents, default and
+        maximum 2000) and `scan_truncated` says when the tenant holds more, in
+        which case the counts are a floor. Same derivation as
+        `bin/recheck-spec-limits` (shared/unmatchedAnalytes.ts).
+      parameters:
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only, and then required }
+        - { name: limit, in: query, schema: { type: integer, default: 25, maximum: 100 }, description: groups per page }
+        - $ref: '#/components/parameters/OffsetParam'
+        - { name: scan, in: query, schema: { type: integer, maximum: 2000 }, description: cap on documents replayed }
+        - { name: include_ignored, in: query, schema: { type: string, enum: ['1'] }, description: also return the dismissed spellings }
+      responses:
+        '200':
+          description: The gap, with what each spelling costs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unmatched:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string, description: normalized match key }
+                        name: { type: string, description: the commonest spelling }
+                        results: { type: integer }
+                        documents: { type: integer }
+                        spellings:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name: { type: string }
+                              results: { type: integer }
+                              documents: { type: integer }
+                        suppliers:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              id: { type: string, nullable: true }
+                              name: { type: string, nullable: true }
+                              results: { type: integer }
+                        example:
+                          type: object
+                          nullable: true
+                          properties:
+                            document_id: { type: string }
+                            document_title: { type: string, nullable: true }
+                            supplier_id: { type: string, nullable: true }
+                            supplier_name: { type: string, nullable: true }
+                            test_name_raw: { type: string }
+                            value_raw: { type: string }
+                            unit_raw: { type: string, nullable: true }
+                  total_groups: { type: integer }
+                  total_results: { type: integer }
+                  documents_scanned: { type: integer }
+                  documents_with_results: { type: integer }
+                  scan_truncated: { type: boolean }
+                  scan_cap: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  ignored_count: { type: integer }
+                  ignored:
+                    type: array
+                    description: Only with `include_ignored=1`.
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name_key: { type: string }
+                        name_raw: { type: string }
+                        reason: { type: string, nullable: true }
+                        created_at: { type: string }
+                        created_by: { type: string, nullable: true }
+                        created_by_name: { type: string, nullable: true }
+        '400':
+          description: super_admin without `tenant_id`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Not org_admin or super_admin
+
+  /api/spec-unmatched/ignore:
+    post:
+      tags: [Spec Register]
+      summary: Record that a printed name is not a test
+      description: |
+        org_admin+. Keeps a spelling off the configuration worklist (migration
+        0114). It changes NO verdict — the engine never reads this table, and the
+        result is still reported as unjudged on the document. Keyed on the match
+        key, so dismissing `Flavor` also dismisses `FLAVOR`. Idempotent, and
+        audited as `spec_unmatched.ignored`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, description: the spelling as printed }
+                reason: { type: string, nullable: true }
+                tenant_id: { type: string, description: super_admin only }
+      responses:
+        '201':
+          description: Dismissed (or already dismissed)
+        '400':
+          description: No name, or super_admin without `tenant_id`
+        '403':
+          description: Not org_admin or super_admin
+    delete:
+      tags: [Spec Register]
+      summary: Put a dismissed spelling back on the worklist
+      description: org_admin+. Audited as `spec_unmatched.restored`.
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string } }
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+      responses:
+        '200':
+          description: Restored
+        '404':
+          description: That spelling is not dismissed
+
+  /api/spec-tests/{id}/aliases:
+    post:
+      tags: [Spec Register]
+      summary: Add a spelling to an analyte
+      description: |
+        org_admin+. MERGES into `spec_tests.aliases`; `PUT /api/spec-tests/{id}`
+        replaces the whole array, which would silently delete a spelling another
+        admin added between a read and a write — and the failure is invisible,
+        because the limit stays configured and simply stops matching one
+        supplier's certificates. An alias already present is reported, not an
+        error. Audited as `spec_test.alias_added`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                names: { type: array, items: { type: string } }
+      responses:
+        '201':
+          description: At least one spelling added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  specTest: { type: object, description: the analyte, aliases already parsed }
+                  added: { type: array, items: { type: string } }
+                  already_present: { type: array, items: { type: string } }
+                  same_as_name: { type: array, items: { type: string } }
+        '200':
+          description: Nothing to add — every spelling was already recognised
+        '409':
+          description: Another analyte already answers to that spelling
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/spec-checks:
     get:
       tags: [Spec Register]
