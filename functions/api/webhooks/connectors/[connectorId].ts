@@ -89,10 +89,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return jsonResponse({ error: 'No webhook authentication configured' }, 403);
     }
 
-    // 3. Parse request body
-    let payload: unknown;
+    // 3. Reject a body that is not JSON. The parse IS the check — nothing
+    //    downstream reads the parsed value, so it is not bound.
     try {
-      payload = JSON.parse(rawBody);
+      JSON.parse(rawBody);
     } catch {
       return jsonResponse({ error: 'Invalid JSON body' }, 400);
     }

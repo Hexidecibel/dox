@@ -1,0 +1,191 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/typecheck-ratchet - typecheck the FUNCTIONS project and fail only if it
+ * got worse.
+ *
+ * WHY THIS EXISTS
+ *
+ * `npx tsc --noEmit` in this repo checks NOTHING. The root tsconfig.json is
+ * `{ "files": [], "references": [...] }` and `--noEmit` does not build project
+ * references, so it compiles an empty program and exits 0. `npm run build`
+ * builds `tsconfig.app.json` only. The result: the entire Cloudflare Functions
+ * half of the codebase - every API route, every lib - has never been
+ * typechecked by anything that runs automatically. The real command is
+ *
+ *     tsc -p tsconfig.functions.json --noEmit
+ *
+ * and it reports 56 pre-existing errors. That number is why this is a RATCHET
+ * and not a gate: a hard failure would mean either fixing 56 errors in one
+ * sitting (several of which are genuine @cloudflare/workers-types vs
+ * lib.dom.d.ts incompatibilities with no safe fix) or leaving the check turned
+ * off for another year. A ratchet turns it on today and lets the number only
+ * fall.
+ *
+ * WHAT IT FAILS ON
+ *
+ *   1. The TOTAL error count went up.
+ *   2. A file that had ZERO errors in the baseline now has some. This is the
+ *      important half: without it, deleting one error in an old file would pay
+ *      for introducing one in a brand-new file, and new code is exactly where
+ *      a type error is still cheap to fix.
+ *
+ * A file that was already dirty may not get dirtier either - its count is
+ * compared too - but its existing errors are tolerated.
+ *
+ * WHAT IT DOES NOT DO
+ *
+ * It never lowers the baseline on its own. Fixing errors is a deliberate act
+ * that comes with `--update`, so the baseline file's diff shows in review who
+ * moved the number and by how much.
+ *
+ * Usage:
+ *   bin/typecheck-ratchet            # check against the baseline (CI + local)
+ *   bin/typecheck-ratchet --update   # re-record the baseline after fixing some
+ *   bin/typecheck-ratchet --list     # print the current errors, grouped by file
+ */
+
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+const PROJECT_ROOT = path.resolve(__dirname, '..');
+const PROJECT = 'tsconfig.functions.json';
+const BASELINE_PATH = path.join(PROJECT_ROOT, 'tests', 'typecheck-baseline.json');
+
+/** `path/to/file.ts(12,34): error TS2345: ...` - the leading location is the
+ *  only part we key on. Continuation lines (the indented "Type X is not
+ *  assignable" detail) never match, which is what makes the count right. */
+const ERROR_LINE = /^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/;
+
+function runTsc() {
+  const res = spawnSync(
+    process.platform === 'win32' ? 'npx.cmd' : 'npx',
+    ['tsc', '-p', PROJECT, '--noEmit'],
+    { cwd: PROJECT_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+  );
+  if (res.error) {
+    console.error(`Could not run tsc: ${res.error.message}`);
+    process.exit(2);
+  }
+  return `${res.stdout || ''}${res.stderr || ''}`;
+}
+
+/** @returns {{ total: number, byFile: Record<string, number>, lines: string[] }} */
+function parse(output) {
+  const byFile = {};
+  const lines = [];
+  let total = 0;
+  for (const raw of output.split(/\r?\n/)) {
+    const m = ERROR_LINE.exec(raw);
+    if (!m) continue;
+    // Normalized so a baseline recorded on one machine reads the same on
+    // another (and in a git worktree, whose absolute path differs).
+    const file = path.relative(PROJECT_ROOT, path.resolve(PROJECT_ROOT, m[1])).split(path.sep).join('/');
+    byFile[file] = (byFile[file] || 0) + 1;
+    total += 1;
+    lines.push(raw);
+  }
+  return { total, byFile, lines };
+}
+
+function readBaseline() {
+  if (!fs.existsSync(BASELINE_PATH)) {
+    console.error(
+      `No baseline at ${path.relative(PROJECT_ROOT, BASELINE_PATH)}.\n` +
+      'Record one with: bin/typecheck-ratchet --update',
+    );
+    process.exit(2);
+  }
+  return JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
+}
+
+function writeBaseline(current) {
+  const sorted = {};
+  for (const file of Object.keys(current.byFile).sort()) sorted[file] = current.byFile[file];
+  const body = {
+    _comment: [
+      'Pre-existing `tsc -p tsconfig.functions.json --noEmit` errors, per file.',
+      'Enforced by bin/typecheck-ratchet: the total may not rise, and a file',
+      'absent from this list may not gain errors. Lower it deliberately with',
+      'bin/typecheck-ratchet --update; never raise it to make CI pass.',
+    ],
+    project: PROJECT,
+    total: current.total,
+    files: sorted,
+  };
+  fs.writeFileSync(BASELINE_PATH, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
+}
+
+function main() {
+  const args = process.argv.slice(2);
+  if (args.includes('-h') || args.includes('--help')) {
+    const src = fs.readFileSync(__filename, 'utf8').split('\n');
+    const end = src.findIndex((l, i) => i > 2 && l.trim() === '*/');
+    console.log(src.slice(3, end).join('\n').replace(/^ \* ?/gm, ''));
+    return;
+  }
+
+  const current = parse(runTsc());
+
+  if (args.includes('--list')) {
+    for (const line of current.lines) console.log(line);
+    console.log(`\n${current.total} error(s) in ${Object.keys(current.byFile).length} file(s).`);
+    return;
+  }
+
+  if (args.includes('--update')) {
+    const had = fs.existsSync(BASELINE_PATH) ? readBaseline().total : null;
+    writeBaseline(current);
+    console.log(
+      had === null
+        ? `Baseline recorded: ${current.total} error(s).`
+        : `Baseline updated: ${had} -> ${current.total} error(s).`,
+    );
+    return;
+  }
+
+  const baseline = readBaseline();
+  const baseFiles = baseline.files || {};
+  const problems = [];
+
+  if (current.total > baseline.total) {
+    problems.push(`Total errors rose: ${baseline.total} -> ${current.total}.`);
+  }
+
+  for (const [file, n] of Object.entries(current.byFile)) {
+    const was = baseFiles[file] || 0;
+    if (was === 0) {
+      problems.push(`${file}: ${n} new error(s) in a file that was clean.`);
+    } else if (n > was) {
+      problems.push(`${file}: ${was} -> ${n} error(s).`);
+    }
+  }
+
+  if (problems.length > 0) {
+    console.error('typecheck ratchet FAILED\n');
+    for (const p of problems) console.error(`  - ${p}`);
+    console.error('\nThe offending errors:\n');
+    for (const line of current.lines) {
+      const m = ERROR_LINE.exec(line);
+      if (!m) continue;
+      const file = path.relative(PROJECT_ROOT, path.resolve(PROJECT_ROOT, m[1])).split(path.sep).join('/');
+      if ((current.byFile[file] || 0) > (baseFiles[file] || 0)) console.error(`  ${line}`);
+    }
+    console.error(
+      '\nFix them, or - only if they are genuinely unfixable and you have said ' +
+      'so in the commit message - re-record with bin/typecheck-ratchet --update.',
+    );
+    process.exit(1);
+  }
+
+  const fixed = baseline.total - current.total;
+  console.log(
+    fixed > 0
+      ? `typecheck ratchet OK - ${current.total} error(s), ${fixed} fewer than the baseline (${baseline.total}).\n` +
+        'Run bin/typecheck-ratchet --update to bank the improvement.'
+      : `typecheck ratchet OK - ${current.total} error(s), at the baseline.`,
+  );
+}
+
+main();

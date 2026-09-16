@@ -1,4 +1,6 @@
-import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+// R2Bucket from the ambient global, not the package — see the note at the top
+// of functions/lib/kinds/coa.ts.
+import type { D1Database } from '@cloudflare/workers-types';
 import { produceCoa, produceMultiProductCoa } from './kinds/coa';
 import type { RenewalWrite } from './renewal-proposal';
 
@@ -72,7 +74,10 @@ export interface ApproveOptions {
   fields?: Record<string, string>;
   productName?: string;
   userId: string;
-  clientIp?: string;
+  /** `string | null` because that is what `getClientIp` returns and what
+   *  `produceCoa` accepts; declaring it `string | undefined` made every
+   *  caller a type error that the R2Bucket mismatch used to hide. */
+  clientIp?: string | null;
   autoIngested?: boolean;
   /**
    * Which extraction path the user approved. Defaults to 'text' to match the
@@ -129,7 +134,10 @@ export interface MultiProductApproveOptions {
     tables?: Array<{ name: string; headers: string[]; rows: string[][] }>;
   }>;
   userId: string;
-  clientIp?: string;
+  /** `string | null` because that is what `getClientIp` returns and what
+   *  `produceCoa` accepts; declaring it `string | undefined` made every
+   *  caller a type error that the R2Bucket mismatch used to hide. */
+  clientIp?: string | null;
   /** Which extraction path the user approved — see ApproveOptions.selectedSource. */
   selectedSource?: 'text' | 'vlm';
   /** Phase 2 capture: per-field source picks derived in the UI. */

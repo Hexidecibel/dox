@@ -20,6 +20,7 @@ import {
 } from '../../lib/registry';
 import type { DocumentFacetInput } from '../../lib/registry';
 import { applyDocumentTypeRequirementDefaults } from '../../lib/requirement-defaults';
+import { recordClassification } from '../../lib/classification';
 import type { Env, User, Document } from '../../lib/types';
 import type { RenewalType } from '../../../shared/types';
 
@@ -436,6 +437,23 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           actorId: user.id,
         });
       }
+    }
+
+    // A person setting or correcting the document's type on this screen IS the
+    // human affirmation migration 0081's 'classified' state describes — the
+    // second of the two doors that write it, alongside Review Queue approval.
+    // Gated on the type actually being present and having CHANGED, so a title
+    // edit does not re-stamp classification_reviewed_at with today's date and
+    // claim someone re-examined the classification.
+    if (newDocTypeId && newDocTypeId !== currentDocTypeId) {
+      await recordClassification(context.env.DB, {
+        documentId: docId,
+        tenantId: doc.tenant_id,
+        documentTypeId: newDocTypeId,
+        actorId: user.id,
+        byHuman: true,
+        clientIp: getClientIp(context.request),
+      });
     }
 
     await logAudit(

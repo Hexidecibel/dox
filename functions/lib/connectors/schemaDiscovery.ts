@@ -142,15 +142,6 @@ function normName(s: string): string {
     .trim();
 }
 
-/**
- * Tight variant: same as normName but strips whitespace entirely, so
- * "so #" -> "so", "p o" -> "po", "cust no" -> "custno". Useful for matching
- * abbreviations that may or may not have a separator.
- */
-function normNameTight(s: string): string {
-  return normName(s).replace(/\s+/g, '');
-}
-
 interface ScoredSuggestion {
   target: CoreFieldKey | null;
   confidence: number;

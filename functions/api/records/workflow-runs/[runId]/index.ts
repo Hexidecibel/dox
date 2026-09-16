@@ -12,9 +12,7 @@ import {
 import { loadSheetForUser } from '../../../../lib/records/helpers';
 import {
   hydrateStepRun,
-  hydrateWorkflow,
   parseWorkflowSteps,
-  type WorkflowDbRow,
   type WorkflowStepRunDbRow,
 } from '../../../../lib/records/workflows';
 import type { Env, User } from '../../../../lib/types';

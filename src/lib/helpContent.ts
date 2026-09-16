@@ -796,11 +796,7 @@ const search: ModuleHelpExpanded = {
       "Search over your tenant's documents, orders, customers and bundles. Type a lot (1042620303) or a dated phrase (production date 7/31/2026) and search checks each document's own fields: covering documents come first, nearby documents that do not match are listed separately with the reason, and files still in the Review Queue are shown as not on file yet. When nothing covers the search, it says so. The AI button takes a question in plain words and answers it the same way.",
     columnTooltips: {
       aiToggle: "Switch between keyword search (exact match) and natural-language search (LLM parses your query into filters). Keyword is faster; AI is more forgiving when you don't know the exact words used.",
-      docCategory: 'Filter docs by the legacy category field — being phased out in favor of document_type. Most tenants leave this alone.',
-      docDateRange: "Restrict to docs created or updated within a window. Date-from inclusive, date-to inclusive — both optional.",
-      orderStatus: "Filter orders to a single lifecycle stage (pending, enriched, matched, fulfilled, delivered, error).",
-      exportFormat: "Pick the export format. CSV for spreadsheets and BI tools; JSON for piping into another system. Export only available on documents tab in keyword mode.",
-      relevanceScore: 'How closely the result matches the query (0-100). Computed by the search engine when AI mode is on; hidden in keyword mode where matches are binary.',
+      lotSublot: "Type a lot and a sublot as two separate inputs when the certificate prints them apart. Each part is matched against the lot row's own part — a sublot never matches against the base number.",
     },
   },
   help: {
@@ -836,17 +832,16 @@ const search: ModuleHelpExpanded = {
           "AI mode takes a question in plain words (\"COA for lot 1042620303 produced 7/31/2026\"), works out what you are asking for, and checks each document against it the same way. If part of your question could not be applied, it is listed above the results instead of being quietly dropped — the results are then broader than what you asked.",
       },
       {
-        heading: 'Filters and exports',
+        heading: 'Scope',
         body:
-          "Document keyword search supports category + date-range filters, plus a CSV/JSON export of the result set (uses the same query the search ran). Order keyword search supports a status filter. AI mode disables the manual filters because it works them out from your question. " +
-          "Tenant scoping always applies — super_admin sees only the tenant currently selected in the tenant switcher; others only their own tenant.",
+          "Tenant scoping always applies — super_admin sees only the tenant currently selected in the tenant switcher; everyone else only their own tenant. " +
+          "The Search page has no export button today; to get a result set out as a file, use the exports described under Reports.",
       },
       {
         heading: 'Common questions',
         body:
           "AI search returned nothing? The parser couldn\'t pull structured filters from your query. Try keyword mode or simplify the wording. " +
-          "Search returned more than expected? Keyword search ORs across fields by default — a query that matches a tag won\'t exclude docs that don\'t. Refine via the manual filters. " +
-          "Export is empty? You\'re in AI mode (export not supported there) or no docs matched — try export from keyword mode.",
+          "Search returned more than expected? Keyword search ORs across fields by default — a query that matches a tag won\'t exclude docs that don\'t. Add a lot, a date or a product to turn the query into a constraint.",
       },
     ],
   },
@@ -863,11 +858,11 @@ const search: ModuleHelpExpanded = {
 const documentTypes: ModuleHelpExpanded = {
   headline: 'Document Types',
   well:
-    "Document types (COA, Spec Sheet, SDS, etc.) are per-tenant tags. Each type carries optional naming-format hints and extraction-field guidance so the AI pipeline knows what to pull when an inbound file is classified as that type.",
+    "Document types (COA, Spec Sheet, SDS, etc.) are per-tenant tags. Each type carries extraction-field guidance and its own extraction instructions so the AI pipeline knows what to pull when an inbound file is classified as that type, plus how long a document of that type stays current.",
   list: {
     headline: 'Document Types',
     well:
-      "Per-tenant catalog of the document categories you care about — Certificate of Analysis, Spec Sheet, SDS, Lab Report, etc. Each type can flip on auto-ingest (skip review when extraction confidence clears the bar), control whether tabular data is extracted, and carry a naming-format hint plus an extraction-field list that the AI uses to tighten parsing on inbound files.",
+      "Per-tenant catalog of the document categories you care about — Certificate of Analysis, Spec Sheet, SDS, Lab Report, etc. Each type controls whether tabular data is extracted, carries an extraction-field list the AI uses to tighten parsing on inbound files, and sets the renewal period and alert lead time for documents of that type.",
     emptyTitle: 'No document types yet',
     emptyDescription:
       "Document types are how dox classifies inbound files. Add the categories your tenant cares about (COA, Spec Sheet, SDS, etc.) and the AI pipeline will route every ingest to one of them.",
@@ -881,11 +876,11 @@ const documentTypes: ModuleHelpExpanded = {
       renewalPeriod:
         "How long a document of this type stays current. Annual unless you change it; specification sheets default to three years, because both major food-safety schemes define a current spec sheet as one revised or reviewed inside that window. A document that states its own expiry date always overrides this — a certificate of insurance reading 'expires 09/01/2027' expires then, whatever the type says. 'Does not renew' is for types that are never re-collected on a cadence: a Certificate of Analysis is superseded by the next lot's certificate, so it is never overdue and stays off the renewal dashboard entirely.",
       autoIngest:
-        "When on, documents the AI extracts as this type with confidence >= the auto-ingest threshold skip the Review Queue and land in the library directly. Requires a few approved examples to calibrate, so the toggle is a no-op for the first 3 ingests of each (supplier, type) pair.",
+        "NOT IMPLEMENTED — the toggle is stored but no code path skips the Review Queue. Nothing in dox auto-ingests; every document is reviewed by a human before it becomes a record.",
       extractTables:
         'When on, the AI also extracts tabular data (test results, spec rows, line items) into structured tables on the document. Off keeps extraction to scalar fields only — faster, less reliable for spec / lab docs that hinge on table content.',
       namingFormat:
-        "Per-type filename template applied at ingest, e.g. {lot_number}_{product}_{doc_type}.{ext}. Placeholders are any metadata key the AI extracts — {lot_number}, {supplier}, {expiration_date}, etc. Falls back to the source filename when a placeholder is missing. Defined on the document type so all ingests of that type get the same naming convention.",
+        "NOT IMPLEMENTED — the field is stored and editable, but no code reads it, so files are never renamed. Migration 0018 added it when the separate naming_templates table (0014) was dropped, and the renaming half was never built. Leave it blank until it does something.",
       extractionFields:
         "Comma-separated list of canonical fields the AI is asked to look for when classifying a document as this type — e.g. lot_number, expiration_date, manufacturer, product_name. Acts as a hint to the LLM (and pre-populates editable fields in the Review Queue). Leave blank to let the AI guess from the file alone.",
     },
@@ -893,21 +888,20 @@ const documentTypes: ModuleHelpExpanded = {
   detail: {
     headline: 'Document type detail',
     well:
-      "Configuration for one document type — naming format, extraction fields, and the auto-ingest / extract-tables toggles. Most tenants set this up once per category and revisit when they want to tighten extraction on a noisy supplier.",
+      "Configuration for one document type — extraction fields, extraction instructions, renewal period and alert lead time, and the extract-tables toggle. Most tenants set this up once per category and revisit when they want to tighten extraction on a noisy supplier.",
   },
   help: {
     sections: [
       {
         heading: 'What document types are',
         body:
-          "A document type is a tenant-scoped category for inbound files — Certificate of Analysis, Spec Sheet, Safety Data Sheet, Lab Report, etc. Every document in the library carries a document_type_id, set at ingest by the AI's classifier and confirmed (or corrected) by a reviewer. Document types drive: which extraction template the AI applies, the naming format used to rename the file at rest, the type filter in the Documents list, and the auto-ingest gate.",
+          "A document type is a tenant-scoped category for inbound files — Certificate of Analysis, Spec Sheet, Safety Data Sheet, Lab Report, etc. Every document in the library carries a document_type_id, set at ingest by the AI's classifier and confirmed (or corrected) by a reviewer. Document types drive: which extraction instructions the AI applies, the type filter in the Documents list, the renewal period and alert lead time, and which checklist requirements an approved document of that type is proposed against.",
       },
       {
-        heading: 'Naming format — what it is and why',
+        heading: 'Naming format — not implemented',
         body:
-          "The naming_format field is a string like {lot_number}_{product}_{doc_type}.{ext}. When a file ingests as this document type, dox renames it to match — so the file in R2 (and the file_name shown in the library) follows your organization's convention rather than whatever the vendor sent. " +
-          "Placeholders are any key the AI extracts: {lot_number}, {supplier}, {expiration_date}, {document_type}, {product_name}, plus the literal {ext} for the original file extension. If a placeholder is missing from a particular document, that segment is dropped (no \"undefined\" placeholders ever land in the filename). " +
-          "Set this once per type; it applies to every future ingest of that type and to every connector / email / API that drops files in. Existing documents keep their original names unless you re-ingest them.",
+          "The naming_format field on a document type is stored and editable but NOTHING READS IT. No file is renamed at ingest; the file keeps the name the vendor or the connector gave it. " +
+          "The history: migration 0014 added a naming_templates table, migration 0018 dropped it and moved the field onto document_types, and the code that would have applied the template was never written. The field is left in place rather than removed so existing values are not silently discarded, but do not configure against it expecting an effect.",
       },
       {
         heading: 'Extraction fields — what they do',
@@ -919,15 +913,15 @@ const documentTypes: ModuleHelpExpanded = {
       {
         heading: 'Auto-ingest and extract tables',
         body:
-          "Auto-ingest — when on, documents the AI extracts as this type with confidence >= the auto-ingest threshold skip the Review Queue and land directly in the library. dox needs a handful of reviewer-approved examples (3+ per supplier+type) to calibrate the threshold; the toggle is a no-op until that calibration completes. Use it on high-trust types where the AI is reliably right and review is bottlenecking ingest. " +
+          "Auto-ingest — NOT IMPLEMENTED. The toggle is stored and reported, but no code path ever skips the Review Queue: nothing in dox auto-ingests, by a deliberate decision (every document is reviewed by a human before it becomes a record). Leave it off. " +
           "Extract tables — when on, the AI also pulls tabular data (test results, line items, spec rows) into structured tables on the document. On for COA / Spec Sheet (table content is the point); off for SDS / generic notes where there's no useful table. Extracting tables is slower and noisier, so leave off when you don't need it.",
       },
       {
         heading: 'Common questions',
         body:
           "AI keeps misclassifying a file as the wrong type? Tighten the extraction_fields list — adding 2-3 distinguishing fields nudges the classifier toward the right type. " +
-          "Naming format isn't applying? Check the placeholder spelling. Placeholders are case-sensitive and must match the canonical field name (lot_number, not LotNumber). Also confirm extraction is actually pulling that field — if the AI doesn't extract {lot_number}, the filename will be missing that segment. " +
-          "Auto-ingest stays disabled? You don't have enough approved examples yet. Approve 3+ docs of this (supplier, type) pair from the Review Queue and the gate opens automatically. " +
+          "Naming format isn't applying? It never does — see \"Naming format — not implemented\" above. " +
+          "Auto-ingest doesn't skip the queue? It never does — see \"Auto-ingest and extract tables\" above. " +
           "Want to retire a type? Deactivate rather than delete. Existing documents keep their type even after deactivation; new ingests just stop landing on it.",
       },
     ],
@@ -937,40 +931,19 @@ const documentTypes: ModuleHelpExpanded = {
 const namingTemplates: ModuleHelpExpanded = {
   headline: 'Naming Templates',
   well:
-    "Naming templates control how ingested files are renamed at rest. They live on the document type (since migration 0018) — set the template once per type and every inbound file of that type follows the same convention.",
+    "NOT IMPLEMENTED. File renaming at ingest does not exist in dox: a file keeps the name the vendor, connector or uploader gave it.",
   list: {
     headline: 'Naming Templates',
     well:
-      "Naming templates aren't a separate page in dox — they're the naming_format field on each document type. Set the template on the Document Types page, and every inbound file classified as that type gets renamed at ingest. Use generic placeholders like {lot_number}, {supplier}, or {doc_type} — any metadata key the AI extracts is fair game.",
+      "NOT IMPLEMENTED. Migration 0014 created a naming_templates table, migration 0018 dropped it in favour of a naming_format field on each document type, and the code that would apply that template was never written — nothing in dox reads naming_format. Files keep their original names. The field is still editable on the Document Types page; setting it has no effect.",
   },
   help: {
     sections: [
       {
-        heading: 'What a naming template is',
+        heading: 'Why this page says nothing else',
         body:
-          "A naming template is a string like {lot_number}_{product}_{doc_type}.{ext} that dox uses to rename inbound files. Templates live on the document_type — set the template on the Document Types page and every file ingested as that type is renamed accordingly. There is no separate Naming Templates page; the field lives on the document type itself.",
-      },
-      {
-        heading: 'Placeholder syntax',
-        body:
-          "Placeholders are wrapped in curly braces and use the canonical (snake_case) name of the metadata field. Common ones: {lot_number}, {product}, {supplier}, {doc_type}, {expiration_date}, {manufacturer}, {batch_size}. Plus the special {ext} for the original file extension. " +
-          "Anything outside the braces is treated as a literal — so {lot_number}_{product}.pdf produces filenames like 12345_ButterMilk.pdf. Underscores, dashes, dots are all fine; avoid path separators (/) and spaces — dox sanitizes them but the result is uglier than necessary. " +
-          "If a placeholder isn't extracted from a particular document, that segment is dropped entirely (no literal \"undefined\" or \"null\" lands in the filename). Order the template so missing-but-rare fields land at the tail rather than the head.",
-      },
-      {
-        heading: 'Example templates',
-        body:
-          "Strict COA convention: {lot_number}_{product}_{doc_type}_{expiration_date}.{ext} -> 12345_ButterMilk_COA_2027-08-31.pdf. " +
-          "Supplier-first sort order: {supplier}_{lot_number}_{doc_type}.{ext} -> ACMECorp_12345_COA.pdf. " +
-          "SDS with manufacturer: {manufacturer}_{product}_SDS.{ext} -> Sigma_AceticAcid_SDS.pdf. " +
-          "Always wins (least surprise): {doc_type}_{product}_{lot_number}.{ext} — the doc type prefix means alphabetical sort groups COAs together, specs together, etc.",
-      },
-      {
-        heading: 'Common gotchas',
-        body:
-          "Placeholder produces nothing? The AI didn't extract that field. Open one of the affected documents and check primary_metadata / extended_metadata; if the field is missing, either tighten the extraction_fields list on the document type or accept that this template segment will be skipped. " +
-          "Filename has __ (double underscore)? A placeholder evaluated to empty and the literals around it collapsed. dox cleans up consecutive separators automatically, but if it bothers you, drop the unreliable placeholder from the template. " +
-          "Want different conventions per supplier? Naming templates are per-type, not per-supplier+type. The recommended pattern is to keep the template generic and let supplier metadata fall in via {supplier}; if you really need supplier-specific naming, fork the document type (one COA-AcmeCorp, one COA-OtherCorp) and template each.",
+          "This module previously documented placeholder syntax, example templates and troubleshooting for a renaming feature that has never run. Rather than describe behaviour a reader cannot observe, the detail is removed until the feature exists. " +
+          "If you need a convention enforced on the stored filename today, do it before the file reaches dox (at the connector, the mailbox rule or the upload step).",
       },
     ],
   },
@@ -994,7 +967,7 @@ const bundles: ModuleHelpExpanded = {
       status:
         "Draft = editable; you can add / remove documents and tweak metadata. Finalized = read-only and version-pinned; the ZIP you download today will be byte-identical to the one you download in a year, even if the underlying docs are revised.",
       items: 'How many documents are currently pinned in the bundle.',
-      createdBy: 'Which user created the bundle. Only the original creator (and admins) can finalize or delete.',
+      createdBy: 'Which user created the bundle. Recorded for provenance — it does not restrict who may edit it: any super_admin, org_admin or user in the tenant can finalize or delete, and only a super_admin can change a bundle once it is finalized.',
       created: 'When the bundle was first created.',
     },
   },
@@ -1008,7 +981,7 @@ const bundles: ModuleHelpExpanded = {
       {
         heading: 'What a bundle is',
         body:
-          "A bundle is a named collection of documents that travel together as a single deliverable. Each bundle has a display name, an optional product link (scopes the bundle to one SKU), a status (draft or finalized), and zero or more bundle items — each item points at a document and pins a specific version of it. The Download ZIP action streams every pinned-version file plus a manifest into a single archive.",
+          "A bundle is a named collection of documents that travel together as a single deliverable. Each bundle has a display name, an optional product link (scopes the bundle to one SKU), a status (draft or finalized), and zero or more bundle items — each item points at a document and pins a specific version of it. The Download ZIP action streams every pinned-version file into a single archive; duplicate file names are suffixed so nothing is overwritten. There is no manifest file in the archive.",
       },
       {
         heading: 'Why version pinning matters',
@@ -1026,7 +999,7 @@ const bundles: ModuleHelpExpanded = {
         heading: 'Common questions',
         body:
           "Document was revised after I finalized — does the ZIP update? No. Finalized bundles are version-pinned. Re-create the bundle as a fresh Draft if you need the latest revisions. " +
-          "Can readers download bundles? Yes, if their role allows downloads on the underlying documents. The bundle ZIP respects per-document permissions; any doc the user can't see is omitted with a manifest note. " +
+          "Can readers download bundles? Yes — any role that can see the bundle can download it. The ZIP is scoped by the bundle's tenant, not per document: it contains every pinned file in the bundle, and a file whose bytes cannot be fetched is skipped silently. " +
           "Need to scope to multiple products? Leave the product link empty — bundles can carry docs across many products. The product link is purely informational; it doesn't restrict what you can add.",
       },
     ],
@@ -1040,21 +1013,21 @@ const reports: ModuleHelpExpanded = {
   list: {
     headline: 'Reports',
     well:
-      "Exports are surfaced inline on the screens they apply to rather than behind one central builder. The Audit log's Export CSV button calls /api/audit/export and streams a CSV of the filtered log; the COA Fulfillment page builds its CSV from the rows already on screen; /api/reports/generate builds a CSV or JSON document snapshot and writes a report.generate row to the audit log. Every export is scoped by the caller's role and tenant, exactly as the screen it came from is.",
+      "Exports are surfaced inline on the screens they apply to rather than behind one central builder. The Audit log's Export CSV button calls /api/audit/export and streams a CSV of the filtered log; the COA Fulfillment page's Export CSV button calls /api/reports/coa-fulfillment?format=csv; /api/reports/generate builds a CSV or JSON document snapshot. Every one of the three runs on the server, is scoped by the caller's role and tenant exactly as the screen it came from is, and writes its own audit row — report.generate for the two report exports, audit.export for the audit log.",
   },
   help: {
     sections: [
       {
         heading: 'What reports do',
         body:
-          "Reports in dox are inline exports rather than a separate builder. The Audit log (Admin → Audit Log) has an Export CSV button in the page header that calls /api/audit/export with the filters currently applied on screen — action type and date range — and streams back every matching row, not just the page you are looking at. The COA Fulfillment page has its own Export CSV button that writes out the rows already loaded. /api/reports/generate remains available for document snapshots in CSV or JSON. Exports are tenant-scoped and respect the caller's role exactly as the screen they came from does: the audit export is org_admin and super_admin only (a user or a reader gets a 403), an org_admin is pinned to their own tenant and cannot widen it by passing a tenant id, and a super_admin can scope to any tenant.",
+          "Reports in dox are inline exports rather than a separate builder. The Audit log (Admin → Audit Log) has an Export CSV button in the page header that calls /api/audit/export with the filters currently applied on screen — action type and date range — and streams back every matching row, not just the page you are looking at. The COA Fulfillment page has its own Export CSV button, which calls /api/reports/coa-fulfillment?format=csv: it exports the whole filtered set rather than the page on screen, honours the All lines / Needs COA toggle, and is audited. /api/reports/generate remains available for document snapshots in CSV or JSON. Exports are tenant-scoped and respect the caller's role exactly as the screen they came from does: the audit export is org_admin and super_admin only (a user or a reader gets a 403), an org_admin is pinned to their own tenant and cannot widen it by passing a tenant id, and a super_admin can scope to any tenant.",
       },
       {
         heading: 'Report types',
         body:
-          "Documents export — every document matching the current filters (status, doctype, supplier, date range). Columns: title, type, supplier, products, current version, file_name, file_size, created_at, updated_at. Use it for compliance attestations, customer ship-sets, or feeding downstream BI. " +
+          "Documents export (POST /api/reports/generate) — every active document matching the filters it accepts, which are tenant, category and a created-at date range. Columns: Title, Category, Tags, Status, Current Version, File Name, File Size (KB), Uploaded By, Created Date, Last Updated. There is no supplier or products column; if you need those, read them from the document itself. Use it for compliance attestations, customer ship-sets, or feeding downstream BI. " +
           "Audit export — every audit_log row matching the filters on the Audit Log screen (action type and date range; the endpoint also accepts userId, resourceType and, for super_admins, tenant_id). Columns: id, timestamp, user_id, user_name, user_email, tenant_id, action, resource_type, resource_id, ip_address, details (JSON). Every field is quoted and escaped per RFC 4180, so the commas, quotes and newlines inside the details blob survive the round trip. The rows are streamed, so the export is not capped at the 200-row page size of the screen; an export matching more than 100,000 rows stops there and says so in the response. Use it for regulator-facing audits or internal review. " +
-          "Search export — same shape as the documents export but constrained by the search query. Only available in keyword mode (AI mode disables export because the LLM-emitted filters aren't repeatable on demand).",
+          "COA Fulfillment export — the rows on the COA Fulfillment screen (all lines, or just the ones needing a COA), as a CSV. Columns: Customer, Order, PO, Product, Code, Lot, Status, Action.",
       },
       {
         heading: 'Snapshot vs. live',
@@ -1065,7 +1038,7 @@ const reports: ModuleHelpExpanded = {
       {
         heading: 'Common questions',
         body:
-          "Why doesn't AI search support export? AI mode lets an LLM produce the structured filters from natural language. Those filters aren't deterministic across calls (the LLM's parse can drift), so re-running the same query later might not produce the same result set. Keyword search uses literal SQLite filters that are stable, so we can persist them in the audit log and the export is repeatable. Switch to keyword mode if you need the export. " +
+          "Can I export a search result set? Not today — Search has no export control. Use the documents export (POST /api/reports/generate) with the filters it accepts, or the COA Fulfillment export. " +
           "Can I schedule recurring reports? Not built in. The /api/reports/generate endpoint is API-key authable, so a downstream cron / agent can call it on a schedule and shuttle the result wherever you want. " +
           "Export is empty? Either no rows match the active filters, or the user's role doesn't see any of the matching rows. Check the filter chips before assuming a bug.",
       },
@@ -1335,7 +1308,7 @@ const users: ModuleHelpExpanded = {
     columnTooltips: {
       id: 'Internal identifier for the user. Useful when grepping audit logs or API logs.',
       name: 'Display name for the user — shown in the navbar, on uploaded documents, and in audit entries.',
-      email: 'Primary identifier and login. Also the destination for password-reset emails and (for org_admins) expiration alerts.',
+      email: 'Primary identifier and login. Also the destination for password-reset emails, and for any alert an owner route (Settings › Owner Routing) points at this user.',
       role:
         "super_admin = cross-tenant access, manage tenants and all users. org_admin = manage own tenant's users (user + reader only — cannot create org_admins or super_admins) and view audit. user = create / upload / edit / delete documents. reader = read-only, can download files but cannot modify anything.",
       tenant:
@@ -1476,7 +1449,7 @@ const settings: ModuleHelpExpanded = {
         heading: 'Common questions',
         body:
           "Where do I change branding (logo, colors)? Tenant-level branding for the in-app UI isn't editable yet — it's on the roadmap. Public-facing forms (records sheet forms, public-link drops) carry per-form branding (logo + accent color). " +
-          "Where do I configure expiration alert recipients? They go to all org_admins of the tenant by default. There's no per-user opt-in/out yet. " +
+          "Where do I configure expiration alert recipients? Settings › Owner Routing. A renewal alert is grouped by the record's owner label ('QA', 'Insurance', 'Purchasing'), and an owner route points that label at a portal user or a bare email address. A record whose owner resolves to nobody is NOT broadcast to the admins — it is reported as a routing gap, so a missing route shows up instead of being papered over. How far ahead owners are warned is set on the same screen (60 days unless you change it) and can be overridden per document type. Spec alerts fall back to the tenant's org_admins when nothing else routes; renewal alerts deliberately do not. " +
           "Why can't I see other tenants' settings? Tenant isolation — even super_admin has to switch tenant context (via the tenant switcher in the navbar) to view another tenant's settings.",
       },
     ],

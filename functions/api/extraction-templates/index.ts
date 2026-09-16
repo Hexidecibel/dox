@@ -2,7 +2,6 @@ import { generateId } from '../../lib/db';
 import { logAudit, getClientIp } from '../../lib/db';
 import {
   requireRole,
-  requireTenantAccess,
   BadRequestError,
   errorToResponse,
 } from '../../lib/permissions';

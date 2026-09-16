@@ -2,6 +2,7 @@ import { createYoga, createSchema } from 'graphql-yoga';
 import { typeDefs } from '../lib/graphql/schema';
 import { resolvers } from '../lib/graphql/resolvers';
 import { buildContext, type GraphQLContext } from '../lib/graphql/context';
+import { maskGraphQLError } from '../lib/graphql/errors';
 import type { Env } from '../lib/types';
 
 /**
@@ -21,6 +22,16 @@ function createYogaHandler() {
     graphiql: true,
     // Disable landing page (we use GraphiQL)
     landingPage: false,
+    // Masking stays ON. The override only un-masks the five DELIBERATE
+    // caller-facing errors the REST surface already answers by message and
+    // status (`errorToResponse`), so that "you may not see this" and "that
+    // does not exist" mean the same thing over both transports. Every other
+    // throw — a D1 failure, a TypeError, a resolver bug — is still reduced to
+    // the generic message below. See functions/lib/graphql/errors.ts.
+    maskedErrors: {
+      maskError: maskGraphQLError,
+      errorMessage: 'Unexpected error.',
+    },
   });
 }
 

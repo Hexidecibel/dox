@@ -1,0 +1,433 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/backfill-classification-status — give existing documents the
+ * classification state migration 0081 defined and nothing ever wrote.
+ *
+ * THE GAP THIS CLOSES
+ *
+ * 0081 added `documents.classification_status` with a DEFAULT of
+ * 'unclassified', a CHECK, two reviewed_* stamps and a tenant-scoped index.
+ * `functions/lib/requirement-gaps.ts` counts by it on every supplier gap
+ * report. Nothing ever wrote it, so every row in every tenant has sat at the
+ * default since the day the column landed, and the "unclassified" figure has
+ * been `COUNT(*)` wearing the clothes of a backlog.
+ *
+ * Approval, the document page and ingest now write it going forward. This pass
+ * is for the history.
+ *
+ * THE RULE, THE SAME ONE THE LIVE PATHS USE
+ * (functions/lib/classification.ts, which is where it is explained)
+ *
+ *   has a document_type_id, and a HUMAN put it there  -> classified
+ *   has a document_type_id from a machine door        -> needs_review
+ *   has no document_type_id                           -> needs_review
+ *   (nothing is ever set to 'unclassifiable' here: that state asserts a person
+ *    looked and decided, and no person has.)
+ *
+ * WHO COUNTS AS A HUMAN, IN HISTORY
+ *
+ * The evidence is the audit log, in TWO shapes. A Review Queue approval files
+ * its row against the QUEUE item (`resource_type = 'processing_queue'`) and
+ * names the documents it produced inside the details JSON — `document_id`, or
+ * `document_ids` for a multi-product / per-record split. A document edited on
+ * its own page files against the document. Both are read; reading only the
+ * second finds almost nothing (on production it credited 3 of 579).
+ *
+ * A document with a type and no such row is 'needs_review' — a type nobody is
+ * recorded as having confirmed. The reviewed_at/by stamps come from that audit
+ * row, so they name the real person and the real time, never this script and
+ * never today.
+ *
+ * WHAT IT WILL NOT DO
+ *   - Touch a row that is not 'unclassified'. The UPDATE itself says
+ *     `AND classification_status = 'unclassified'`, so a second --apply writes
+ *     nothing and a stale plan cannot overwrite a live decision.
+ *   - Invent a reviewer. No audit evidence means no stamps and no 'classified'.
+ *   - Write anything without --apply.
+ *
+ * Usage:
+ *   bin/backfill-classification-status --tenant <id>                   # dry run, LOCAL
+ *   bin/backfill-classification-status --tenant <id> --apply           # LOCAL write
+ *   bin/backfill-classification-status --tenant <id> --remote          # dry run, PRODUCTION
+ *   bin/backfill-classification-status --tenant <id> --remote --apply  # prompts first
+ *   bin/backfill-classification-status --all --remote                  # dry run, every tenant
+ *
+ * Flags:
+ *   --tenant ID     tenant to backfill (required unless --all)
+ *   --all           every tenant in the database (dry run only unless --tenant)
+ *   --apply         actually write. Without it this is a dry run.
+ *   --remote, -r    target PRODUCTION D1 (with --apply, asks you to type the tenant id)
+ *   --yes, -y       skip the production confirmation prompt
+ *   --page-size N   D1 paging size (default 500)
+ *   --json          emit the plan as JSON instead of prose
+ *   -h, --help      this help
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const { query, queryPaged, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+
+const STATES = ['unclassified', 'needs_review', 'classified', 'unclassifiable'];
+
+/**
+ * Audit actions that prove a PERSON ruled on a document.
+ *
+ * Two shapes, because the approve path does not file its row against the
+ * document. `queue_item.*` rows carry `resource_type = 'processing_queue'` and
+ * the resource id is the QUEUE item; the document ids live in the details JSON
+ * as `document_id` (single) or `document_ids` (a multi-product or per-record
+ * split, one queue item -> several documents). Reading only
+ * `resource_type = 'document'` finds almost nothing: on production it credited
+ * 3 documents out of 579, because every real approval is filed the other way.
+ */
+const QUEUE_ACTIONS = [
+  'queue_item.approved',
+  'queue_item.approved_with_warnings',
+  'queue_item.approved_out_of_spec',
+  'queue_item.partial_approved',
+];
+/** Rows filed directly against the document by a person. */
+const DOCUMENT_ACTIONS = ['document_updated', 'document_created', 'document.renewal_decided'];
+
+function parseArgs(argv) {
+  const opts = { tenant: null, all: false, apply: false, remote: false, yes: false, pageSize: 500, json: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenant = argv[++i]; break;
+      case '--all': opts.all = true; break;
+      case '--apply': opts.apply = true; break;
+      case '--remote':
+      case '-r': opts.remote = true; break;
+      case '--yes':
+      case '-y': opts.yes = true; break;
+      case '--page-size': opts.pageSize = Number(argv[++i]); break;
+      case '--json': opts.json = true; break;
+      case '-h':
+      case '--help': printHelp(); process.exit(0); break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  if (!opts.tenant && !opts.all) {
+    console.error('--tenant <id> is required (or --all). Run with --help for usage.');
+    process.exit(2);
+  }
+  if (opts.tenant && !/^[A-Za-z0-9_-]+$/.test(opts.tenant)) {
+    console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+    process.exit(2);
+  }
+  if (opts.all && opts.apply) {
+    // Writing every tenant at once removes the one moment where somebody reads
+    // the plan for the tenant they meant. Apply is per tenant, always.
+    console.error('--all is a reporting mode. Re-run with --tenant <id> --apply to write one tenant.');
+    process.exit(2);
+  }
+  return opts;
+}
+
+function printHelp() {
+  const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+  const end = lines.findIndex((l, i) => i > 2 && l.trim() === '*/');
+  console.log(lines.slice(3, end).join('\n').replace(/^ \* ?/gm, ''));
+}
+
+function hasColumn(table, column, remote) {
+  const rows = query(
+    `SELECT COUNT(*) AS n FROM pragma_table_info('${table}') WHERE name = '${column}'`,
+    { remote },
+  );
+  return Number((rows || [])[0]?.n ?? 0) > 0;
+}
+
+function sqlStr(v) {
+  if (v === null || v === undefined) return 'NULL';
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
+
+function execSql(statements, remote, label) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-classification-backfill-'));
+  const file = path.join(dir, `${label}.sql`);
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  try {
+    execFileSync(
+      'npx',
+      ['wrangler', 'd1', 'execute', DEFAULT_DB, remote ? '--remote' : '--local', `--file=${file}`],
+      { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 },
+    );
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString() : '';
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${stderr || err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function promptSync(question) {
+  process.stdout.write(question);
+  let fd;
+  try {
+    fd = fs.openSync('/dev/tty', 'rs');
+  } catch {
+    console.error('\nNo terminal to confirm on. Re-run interactively, or pass --yes.');
+    process.exit(1);
+  }
+  const buf = Buffer.alloc(256);
+  let out = '';
+  for (;;) {
+    const n = fs.readSync(fd, buf, 0, buf.length, null);
+    if (n === 0) break;
+    out += buf.toString('utf8', 0, n);
+    if (out.includes('\n')) break;
+  }
+  fs.closeSync(fd);
+  return out.split('\n')[0];
+}
+
+/**
+ * Build the plan for one tenant. Pure apart from its two reads, so the dry run
+ * and the apply cannot disagree about what would happen.
+ */
+function planTenant(tenantId, remote, pageSize, has0081) {
+  const { rows: docs } = queryPaged(
+    (limit, offset) =>
+      `SELECT id, document_type_id,
+              ${has0081 ? 'classification_status' : "'unclassified' AS classification_status"}
+         FROM documents
+        WHERE tenant_id = ${sqlStr(tenantId)} AND status = 'active'
+        ORDER BY id LIMIT ${limit} OFFSET ${offset}`,
+    { remote, pageSize },
+  );
+
+  // Two reads for the whole tenant rather than one per document. The audit log
+  // is the only evidence for every 'classified' decision below.
+  const { rows: docAudits } = queryPaged(
+    (limit, offset) =>
+      `SELECT resource_id AS document_id, user_id, created_at AS at
+         FROM audit_log
+        WHERE tenant_id = ${sqlStr(tenantId)}
+          AND resource_type = 'document'
+          AND action IN (${DOCUMENT_ACTIONS.map(sqlStr).join(',')})
+          AND resource_id IS NOT NULL
+        ORDER BY id LIMIT ${limit} OFFSET ${offset}`,
+    { remote, pageSize },
+  );
+  const { rows: queueAudits } = queryPaged(
+    (limit, offset) =>
+      `SELECT details, user_id, created_at AS at
+         FROM audit_log
+        WHERE tenant_id = ${sqlStr(tenantId)}
+          AND resource_type = 'processing_queue'
+          AND action IN (${QUEUE_ACTIONS.map(sqlStr).join(',')})
+          AND details IS NOT NULL
+        ORDER BY id LIMIT ${limit} OFFSET ${offset}`,
+    { remote, pageSize },
+  );
+
+  // Latest human touch per document, with who did it.
+  const human = new Map();
+  const note = (documentId, at, userId) => {
+    if (!documentId || !userId) return;
+    const prev = human.get(documentId);
+    if (!prev || String(at) > String(prev.at)) human.set(documentId, { at, user_id: userId });
+  };
+  for (const a of docAudits) note(a.document_id, a.at, a.user_id);
+  for (const a of queueAudits) {
+    let parsed;
+    try {
+      parsed = JSON.parse(a.details);
+    } catch {
+      continue; // A details blob that will not parse is not evidence.
+    }
+    if (typeof parsed?.document_id === 'string') note(parsed.document_id, a.at, a.user_id);
+    if (Array.isArray(parsed?.document_ids)) {
+      for (const id of parsed.document_ids) note(id, a.at, a.user_id);
+    }
+  }
+
+  const counts = { unclassified: 0, needs_review: 0, classified: 0, unclassifiable: 0 };
+  const from = { unclassified: 0, needs_review: 0, classified: 0, unclassifiable: 0 };
+  const updates = [];
+  let untouched = 0;
+
+  for (const d of docs) {
+    const current = d.classification_status || 'unclassified';
+    from[current] = (from[current] ?? 0) + 1;
+
+    if (current !== 'unclassified') {
+      // Already decided by the live paths or a previous run. Counted as-is so
+      // the report describes the whole corpus, not only what this pass moves.
+      counts[current] = (counts[current] ?? 0) + 1;
+      untouched += 1;
+      continue;
+    }
+
+    const touch = d.document_type_id ? human.get(d.id) : null;
+    const target = d.document_type_id && touch ? 'classified' : 'needs_review';
+    counts[target] += 1;
+    updates.push({
+      id: d.id,
+      target,
+      reviewed_at: target === 'classified' ? touch.at : null,
+      reviewed_by: target === 'classified' ? touch.user_id : null,
+      had_type: !!d.document_type_id,
+    });
+  }
+
+  return { tenantId, total: docs.length, from, counts, updates, untouched };
+}
+
+function planToSql(plan) {
+  return plan.updates.map((u) =>
+    `UPDATE documents SET classification_status = ${sqlStr(u.target)}` +
+    (u.target === 'classified'
+      ? `, classification_reviewed_at = ${sqlStr(u.reviewed_at)}, classification_reviewed_by = ${sqlStr(u.reviewed_by)}`
+      : '') +
+    ` WHERE id = ${sqlStr(u.id)} AND tenant_id = ${sqlStr(plan.tenantId)}` +
+    " AND classification_status = 'unclassified';");
+}
+
+function batch(statements, size = 200) {
+  const out = [];
+  for (let i = 0; i < statements.length; i += size) out.push(statements.slice(i, i + size));
+  return out;
+}
+
+function formatPlan(plan, label) {
+  const lines = [];
+  lines.push('');
+  lines.push(`Classification status — ${label}`);
+  lines.push(`  active documents:            ${plan.total}`);
+  lines.push('');
+  lines.push('  BEFORE');
+  for (const s of STATES) lines.push(`    ${s.padEnd(15)} ${plan.from[s] ?? 0}`);
+  lines.push('');
+  lines.push('  AFTER (what --apply would leave)');
+  for (const s of STATES) lines.push(`    ${s.padEnd(15)} ${plan.counts[s] ?? 0}`);
+  lines.push('');
+  const withType = plan.updates.filter((u) => u.had_type).length;
+  const classified = plan.updates.filter((u) => u.target === 'classified').length;
+  lines.push(`  to write:                    ${plan.updates.length}`);
+  lines.push(`    of those, carry a type:    ${withType}`);
+  lines.push(`    a human is recorded for:   ${classified}  -> classified`);
+  lines.push(`    no human recorded:         ${plan.updates.length - classified}  -> needs_review`);
+  lines.push(`  left alone (already ruled):  ${plan.untouched}`);
+  lines.push('');
+  if (withType > classified) {
+    lines.push(
+      `  NOTE: ${withType - classified} document(s) carry a type that no audit row credits to a\n` +
+      '  person. They become needs_review, not classified — a type nobody is recorded as\n' +
+      '  having confirmed is exactly what that state is for.',
+    );
+    lines.push('');
+  }
+  return lines;
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const remote = opts.remote;
+  const targetLabel = remote ? 'PRODUCTION' : 'local';
+
+  const has0081 = hasColumn('documents', 'classification_status', remote);
+  if (!has0081) {
+    (opts.json ? console.error : console.log)(
+      'This database predates migration 0081 — every document reads as unclassified.\n' +
+      'Dry run only; --apply needs 0081 on the target first.\n',
+    );
+    if (opts.apply) {
+      console.error('--apply needs migrations/0081_documents_classification_status.sql on the target first.');
+      process.exit(1);
+    }
+  }
+
+  const tenants = opts.all
+    ? query('SELECT id, name FROM tenants ORDER BY name', { remote })
+    : query(`SELECT id, name FROM tenants WHERE id = ${sqlStr(opts.tenant)}`, { remote });
+
+  if (tenants.length === 0) {
+    console.error(
+      opts.all
+        ? 'No tenants in this database. Check the --remote flag.'
+        : `No tenant "${opts.tenant}" in this database. Check the id, or the --remote flag.`,
+    );
+    process.exit(1);
+  }
+
+  const plans = tenants.map((t) => ({
+    tenant: t,
+    plan: planTenant(t.id, remote, opts.pageSize, has0081),
+  }));
+
+  if (opts.json) {
+    console.log(JSON.stringify({
+      target: targetLabel,
+      applied: opts.apply,
+      has_0081: has0081,
+      tenants: plans.map(({ tenant, plan }) => ({
+        id: tenant.id,
+        name: tenant.name,
+        total: plan.total,
+        before: plan.from,
+        after: plan.counts,
+        to_write: plan.updates.length,
+        untouched: plan.untouched,
+      })),
+    }, null, 2));
+  } else {
+    for (const { tenant, plan } of plans) {
+      for (const line of formatPlan(plan, `${tenant.name} (${tenant.id}), ${targetLabel}`)) console.log(line);
+    }
+  }
+
+  const statements = plans.flatMap(({ plan }) => planToSql(plan));
+
+  if (!opts.apply) {
+    if (!opts.json) {
+      console.log(
+        statements.length === 0
+          ? 'DRY RUN — nothing to write.'
+          : `DRY RUN — ${statements.length} document(s) not written. Re-run with --apply to write.`,
+      );
+      console.log('');
+    }
+    return;
+  }
+
+  if (statements.length === 0) {
+    console.log('Nothing to do — every active document already has a classification state.');
+    return;
+  }
+
+  if (remote && !opts.yes) {
+    const answer = promptSync(
+      `\nAbout to WRITE to PRODUCTION D1 for tenant ${opts.tenant}:\n` +
+      `  ${statements.length} document classification state(s)\n` +
+      'Type the tenant id to continue: ',
+    );
+    if (answer.trim() !== opts.tenant) {
+      console.error('That did not match. Nothing was written.');
+      process.exit(1);
+    }
+  }
+
+  const batches = batch(statements);
+  batches.forEach((b, i) => {
+    execSql(b, remote, `classification-${i + 1}`);
+    console.log(`  batch ${i + 1}/${batches.length} — ${b.length} statement(s)`);
+  });
+  console.log('');
+  console.log(`Wrote ${statements.length} classification state(s) in ${targetLabel} D1.`);
+  console.log('');
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+}

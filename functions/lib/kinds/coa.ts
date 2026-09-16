@@ -1,4 +1,13 @@
-import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+// `R2Bucket` is taken from the AMBIENT global (tsconfig.functions.json's
+// `types: ["@cloudflare/workers-types"]`), NOT imported from the package.
+// The package ships two declarations of the same API — index.d.ts (globals)
+// and index.ts (a module) — and TypeScript does not consider them identical,
+// because the module copy's Headers has `getAll` and the global one does not.
+// Importing R2Bucket here made every hand-off to functions/lib/r2.ts (which
+// uses the global) a type error: 11 of them across this file and
+// functions/api/queue/[id].ts. D1Database is imported because it is not
+// otherwise in scope here and its two copies DO match structurally.
+import type { D1Database } from '@cloudflare/workers-types';
 import { generateId, logAudit } from '../db';
 import { buildR2Key, uploadFile, downloadFile, deleteFile, computeChecksum } from '../r2';
 import { findOrCreateSupplier } from '../suppliers';
@@ -11,6 +20,7 @@ import { lotIdentity, type ResolvedLotScheme } from '../../../shared/lotScheme';
 import { loadResolvedLotScheme } from '../lot-schemes';
 import { getLearnedPreferences } from '../learnedPreferences';
 import { applyDocumentTypeRequirementDefaults } from '../requirement-defaults';
+import { recordClassification } from '../classification';
 import type { CoaRecordsPayload } from '../../../shared/types';
 import { buildFlatExtendedMetadata } from '../../../shared/coaExtendedMetadata';
 import { resolveProductionDate } from '../../../shared/lotProductionDate';
@@ -502,6 +512,18 @@ export async function produceCoa(
     documentTypeId: item.document_type_id,
     actorId: userId,
   });
+  // Say what the reviewer just decided about the document's TYPE
+  // (migration 0081). Approving IS a human affirming the classification;
+  // approving with no type resolved leaves it in the needs-review backlog.
+  // Best-effort, same contract as the call above.
+  await recordClassification(db, {
+    documentId: docId,
+    tenantId: item.tenant_id,
+    documentTypeId: item.document_type_id,
+    actorId: userId,
+    byHuman: true,
+    clientIp: clientIp ?? null,
+  });
 
   // Insert document version
   const versionId = generateId();
@@ -811,6 +833,18 @@ export async function produceMultiProductCoa(
       documentTypeId: item.document_type_id,
       actorId: userId,
     });
+    // Say what the reviewer just decided about the document's TYPE
+    // (migration 0081). Approving IS a human affirming the classification;
+    // approving with no type resolved leaves it in the needs-review backlog.
+    // Best-effort, same contract as the call above.
+    await recordClassification(db, {
+      documentId: docId,
+      tenantId: item.tenant_id,
+      documentTypeId: item.document_type_id,
+      actorId: userId,
+      byHuman: true,
+      clientIp: clientIp ?? null,
+    });
 
     // Insert document version
     const versionId = generateId();
@@ -1038,7 +1072,8 @@ export interface CoaRecordsApproveOptions {
    */
   decisions?: Record<number, CoaRecordDecision>;
   userId: string;
-  clientIp?: string;
+  /** `string | null` to match `getClientIp`, like the other approve paths. */
+  clientIp?: string | null;
   selectedSource?: 'text' | 'vlm';
   supplierId?: string;
   supplierName?: string;
@@ -1268,6 +1303,18 @@ export async function produceCoaRecords(
         tenantId: item.tenant_id,
         documentTypeId: item.document_type_id,
         actorId: userId,
+      });
+      // Say what the reviewer just decided about the document's TYPE
+      // (migration 0081). Approving IS a human affirming the classification;
+      // approving with no type resolved leaves it in the needs-review backlog.
+      // Best-effort, same contract as the call above.
+      await recordClassification(db, {
+        documentId: docId,
+        tenantId: item.tenant_id,
+        documentTypeId: item.document_type_id,
+        actorId: userId,
+        byHuman: true,
+        clientIp: clientIp ?? null,
       });
 
       // The text this row is SEARCHED on (0106): the certificate's text with the

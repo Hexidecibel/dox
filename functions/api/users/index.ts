@@ -48,7 +48,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 };
 
 // POST is handled by /api/auth/register — redirect callers there
-export const onRequestPost: PagesFunction<Env> = async (context) => {
+export const onRequestPost: PagesFunction<Env> = async (_context) => {
   // Forward to the register endpoint logic
   return new Response(
     JSON.stringify({ error: 'Use POST /api/auth/register to create users' }),

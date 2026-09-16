@@ -1,6 +1,5 @@
 import {
   requireRole,
-  requireTenantAccess,
   errorToResponse,
 } from '../../lib/permissions';
 import type { Env, User } from '../../lib/types';

@@ -648,7 +648,16 @@ engine. Repurpose or drop 0076's `document_categories` — decide in P1.
   `claim_type_requirements` (claim → what proves it). All tenant-scoped rows.
 - `migrations/0081_documents_classification_status.sql` —
   `classification_status` + `classification_reviewed_at/_by`, indexed
-  `(tenant_id, classification_status)`.
+  `(tenant_id, classification_status)`. **Producer shipped 2026-09-15**
+  (`functions/lib/classification.ts`): until then the column had NO writer, so
+  the unclassified bucket `functions/lib/requirement-gaps.ts` counts was
+  `COUNT(*)` on every tenant. Review Queue approval with a type → `classified`
+  + the reviewer stamped; approval with no type → `needs_review`, stamps left
+  NULL; a human setting the type on the document page → `classified`; ingest
+  declaring one → `needs_review` (a machine proposes, it does not confirm, and
+  it never demotes a row a person ruled on). History:
+  `bin/backfill-classification-status` (dry run on prod: 579 documents →
+  550 classified / 29 needs_review; NOT applied).
 - `shared/types.ts` — `RegistryFacet`, `RegistryLinkStatus`, `RegistryLinkSource`,
   `ClaimSubjectType`/`Grain`, `ClassificationStatus`, the five row types and the
   two Api* join shapes.

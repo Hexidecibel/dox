@@ -31,7 +31,6 @@ import type {
   RecordColumnRow,
   RecordRowData,
   RecordWorkflow,
-  RecordWorkflowRun,
   RecordWorkflowStep,
   RecordWorkflowStepRun,
   SetCellStepConfig,
