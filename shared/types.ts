@@ -20,6 +20,46 @@ export type {
 } from './specCheck';
 import type { UnjudgedResult, MissingRequiredAnalyte } from './specCheck';
 
+// The alias gap. Defined in shared/unmatchedAnalytes.ts, which is also bundled
+// for bin/ so the CLI and the admin page answer with the same shape.
+export type {
+  UnmatchedAnalyteGroup,
+  UnmatchedSpelling,
+  UnmatchedExample,
+} from './unmatchedAnalytes';
+import type { UnmatchedAnalyteGroup } from './unmatchedAnalytes';
+
+/** One spelling a person has said is not a test (migration 0114). */
+export interface ApiIgnoredSpelling {
+  id: string;
+  name_key: string;
+  name_raw: string;
+  reason: string | null;
+  created_at: string;
+  created_by: string | null;
+  created_by_name: string | null;
+}
+
+/**
+ * `GET /api/spec-unmatched`. The scan is BOUNDED and says so: `scan_truncated`
+ * means the tenant holds more approved documents than one read replays, and the
+ * counts are therefore a floor.
+ */
+export interface ApiUnmatchedAnalyteResponse {
+  unmatched: UnmatchedAnalyteGroup[];
+  total_groups: number;
+  total_results: number;
+  documents_scanned: number;
+  documents_with_results: number;
+  scan_truncated: boolean;
+  scan_cap: number;
+  limit: number;
+  offset: number;
+  ignored_count: number;
+  /** Only when `include_ignored=1` was asked for. */
+  ignored?: ApiIgnoredSpelling[];
+}
+
 /** One overdue watch in force for a queue item (see `overdueWatches`). */
 export interface OverdueWatchSummary {
   kind: 'limit' | 'required_analyte';
@@ -1905,6 +1945,15 @@ export interface ProcessingQueueItem {
     missing_required?: number;
     /** Supplier watches in force for this document whose review-by has passed. */
     watch_overdue?: number;
+    /**
+     * Crosstab rows recognised as laboratory CONTROLS (buffer, blank, negative
+     * control) and deliberately not judged as product. Quiet: it opens no alert
+     * and is never a warning — it exists so a skipped row cannot be read either
+     * as one that was missed or as a clean product result.
+     */
+    control_rows?: number;
+    /** Which rows those were, as printed. */
+    control_row_labels?: string[];
   };
   /** "No limit configured" — printed results nothing judged. Not warnings; shown so no assurance is implied. */
   spec_unjudged?: UnjudgedResult[];

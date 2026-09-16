@@ -28,6 +28,7 @@ import type {
   DocumentTypeGetResponse,
   ApiRequirement,
   ApiSpecTest,
+  ApiUnmatchedAnalyteResponse,
   ApiSpecLimit,
   SpecCriticality,
   ApiSpecCheck,
@@ -1252,11 +1253,66 @@ export const api = {
         body: JSON.stringify(data),
       }),
 
+    /**
+     * POST /api/spec-tests/:id/aliases — teach this analyte one more spelling.
+     *
+     * MERGES; `update` REPLACES. The one-click fix on the unmatched panel must
+     * not send back an alias list it read before another admin added to it —
+     * the loss would be invisible and would stop a check from running.
+     */
+    addAlias: (id: string, name: string) =>
+      fetchApi<{
+        specTest: ApiSpecTest;
+        added: string[];
+        already_present: string[];
+        same_as_name: string[];
+      }>(`/spec-tests/${id}/aliases`, {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      }),
+
     /** DELETE cascades to this analyte's limits; the count comes back. */
     remove: (id: string) =>
       fetchApi<{ success: boolean; limits_removed: number }>(`/spec-tests/${id}`, {
         method: 'DELETE',
       }),
+  },
+
+  /**
+   * The alias gap: printed test names no configured analyte recognises. Read
+   * from a bounded replay of the spec engine over approved documents, shared
+   * with `bin/recheck-spec-limits`.
+   */
+  specUnmatched: {
+    list: (params?: {
+      tenant_id?: string;
+      limit?: number;
+      offset?: number;
+      include_ignored?: boolean;
+    }) => {
+      const query = new URLSearchParams();
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      if (params?.limit !== undefined) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      if (params?.include_ignored) query.set('include_ignored', '1');
+      const qs = query.toString();
+      return fetchApi<ApiUnmatchedAnalyteResponse>(`/spec-unmatched${qs ? `?${qs}` : ''}`);
+    },
+
+    /** "That is not a test" — worklist only; no verdict changes (migration 0114). */
+    ignore: (data: { name: string; reason?: string | null; tenant_id?: string }) =>
+      fetchApi<{ ignored: unknown }>('/spec-unmatched/ignore', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    restore: (params: { name: string; tenant_id?: string }) => {
+      const query = new URLSearchParams({ name: params.name });
+      if (params.tenant_id) query.set('tenant_id', params.tenant_id);
+      return fetchApi<{ success: boolean }>(`/spec-unmatched/ignore?${query.toString()}`, {
+        method: 'DELETE',
+      });
+    },
   },
 
   /**

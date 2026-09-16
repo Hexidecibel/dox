@@ -64,6 +64,10 @@ const {
   checkConfiguredLimits,
   findSpecDisagreements,
 } = require('./lib/shared/specCheck');
+const {
+  documentSpecSources,
+  scanUnmatchedAnalytes,
+} = require('./lib/shared/unmatchedAnalytes');
 
 function parseArgs(argv) {
   const opts = {
@@ -127,29 +131,15 @@ function queryOrNull(sql, opts, what) {
   }
 }
 
-function safeParse(raw) {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-/** Rebuild the engine's source list from an approved document's metadata. */
-function sourcesFor(doc) {
-  const extended = safeParse(doc.extended_metadata);
-  if (!extended) return [];
-  const sources = [];
-  if (Array.isArray(extended.tables) && extended.tables.length > 0) {
-    sources.push({ scope: 'ai_fields', tables: extended.tables });
-  }
-  if (extended.groups && typeof extended.groups === 'object') {
-    sources.push({ scope: 'ai_fields', groups: extended.groups });
-  }
-  return sources;
-}
+/**
+ * Rebuild the engine's source list from an approved document's metadata.
+ *
+ * Shared with `GET /api/spec-unmatched` (shared/unmatchedAnalytes.ts) rather
+ * than kept here: the admin panel reports the same alias gap this script does,
+ * and two derivations of "which spellings were skipped" would eventually
+ * disagree about a spelling with nothing to say which was right.
+ */
+const sourcesFor = (doc) => documentSpecSources(doc.extended_metadata);
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -200,7 +190,10 @@ function main() {
     const flag = Number((tenantRows || [])[0]?.spec_volume_mass_equivalent ?? 0) === 1;
     unitPolicy = { volume_mass_equivalent: flag };
     if (flag) {
-      console.log(
+      // stderr under --json: this banner used to go to stdout and made the
+      // document unparseable, so every JSON consumer had to strip a preamble.
+      const say = opts.json ? console.error : console.log;
+      say(
         'Unit equivalence is ON for this tenant: CFU/mL is judged against CFU/g\n' +
         '(and MPN/mL against MPN/g) as the same number. Findings below say so.\n'
       );
@@ -215,7 +208,8 @@ function main() {
   }
 
   if (!opts.printedOnly && limits.length === 0) {
-    console.log(
+    // stderr under --json, for the reason given at the equivalence banner.
+    (opts.json ? console.error : console.log)(
       'No active spec limits for this tenant — nothing of ours to check.\n' +
       'Run with --printed-only to see what the COAs\' own printed specs would flag.'
     );
@@ -236,7 +230,19 @@ function main() {
   );
 
   const findings = [];
-  const unmatched = new Map();
+  /**
+   * The alias gap, derived by the SAME function the Spec Limits page calls
+   * (`scanUnmatchedAnalytes`), so the script and the screen can never come to
+   * different conclusions about which spellings are being skipped. It runs the
+   * engine a second time over the same documents — the cost is CPU on an
+   * already-fetched corpus, and one answer is worth more than one pass.
+   *
+   * Spellings are grouped by the key `matchSpecTest` matches on, so "Flavor" and
+   * "FLAVOR" are one line: one alias fixes both.
+   */
+  const unmatchedScan = opts.printedOnly
+    ? { groups: [], total_groups: 0, total_results: 0 }
+    : scanUnmatchedAnalytes(docs, tests, limits, { unitPolicy });
   /**
    * THE CATCHES. A certificate asserted a pass on a row whose extracted value
    * breaches a limit — the one finding a human reviewer cannot make, because
@@ -279,10 +285,6 @@ function main() {
         // way a two-state verdict would.
         { unitPolicy, includePasses: true }
       );
-    }
-
-    for (const name of configured.unmatched) {
-      unmatched.set(name, (unmatched.get(name) || 0) + 1);
     }
 
     const allVerdicts = [...printed, ...configured.verdicts];
@@ -369,9 +371,20 @@ function main() {
           reverse,
           out_of_spec: outOfSpec,
           not_checked: notChecked,
-          unmatched: [...unmatched.entries()]
-            .sort((a, b) => b[1] - a[1])
-            .map(([name, count]) => ({ name, count })),
+          // One entry per unrecognised ANALYTE, with every spelling of it and
+          // the results it covers — the same shape /api/spec-unmatched serves.
+          // `count` is kept as an alias of `results` so an existing reader of
+          // this JSON does not break.
+          unmatched: unmatchedScan.groups.map((g) => ({
+            name: g.name,
+            count: g.results,
+            results: g.results,
+            documents: g.documents,
+            spellings: g.spellings,
+            suppliers: g.suppliers,
+            example: g.example,
+          })),
+          unmatched_results: unmatchedScan.total_results,
         },
         null,
         2
@@ -458,15 +471,32 @@ function main() {
     console.log('');
   }
 
-  if (unmatched.size > 0) {
-    console.log('Printed test names with no configured limit');
+  if (unmatchedScan.groups.length > 0) {
+    console.log('Printed test names no configured analyte recognises');
     console.log('-'.repeat(72));
     console.log('  Each of these was skipped entirely. If one is a test you DO hold a');
     console.log('  limit for, it is spelled differently here than in your analyte — add');
     console.log('  it as an alias in Settings › Spec Limits, or that check never runs.');
+    console.log('  That page shows this same list, with one click per fix.');
     console.log('');
-    for (const [name, count] of [...unmatched.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40)) {
-      console.log(`  ${String(count).padStart(5)}×  ${name}`);
+    console.log(
+      `  ${unmatchedScan.total_groups} name(s), ${unmatchedScan.total_results} printed result(s).`
+    );
+    console.log('');
+    for (const g of unmatchedScan.groups.slice(0, 40)) {
+      const others = g.spellings.length > 1 ? `  (also ${g.spellings.slice(1).map((s) => s.name).join(', ')})` : '';
+      console.log(
+        `  ${String(g.results).padStart(5)} result(s) in ${String(g.documents).padStart(4)} doc(s)  ${g.name}${others}`
+      );
+      if (g.example) {
+        console.log(
+          `            e.g. ${g.example.supplier_name || '—'} · ${g.example.document_title || g.example.document_id}` +
+            ` printed "${g.example.value_raw}${g.example.unit_raw ? ` ${g.example.unit_raw}` : ''}"`
+        );
+      }
+    }
+    if (unmatchedScan.groups.length > 40) {
+      console.log(`  … and ${unmatchedScan.groups.length - 40} more.`);
     }
     console.log('');
   }

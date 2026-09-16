@@ -226,7 +226,7 @@ async function loadUnitPolicy(db: D1Database, tenantId: string): Promise<UnitPol
  */
 const LIMIT_COLUMNS =
   `id, spec_test_id, operator, value_min, value_max, unit, severity, active,
-   supplier_id, document_type_id, product_id, updated_at`;
+   supplier_id, document_type_id, product_id, updated_at, version`;
 
 /**
  * Read the tenant's active limits, degrading to the pre-0095 column list if
@@ -329,6 +329,11 @@ export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<
         document_type_id: row.document_type_id == null ? null : String(row.document_type_id),
         product_id: row.product_id == null ? null : String(row.product_id),
         updated_at: row.updated_at == null ? null : String(row.updated_at),
+        // Frozen into limit_snapshot: which revision of this limit judged the
+        // result. NULL stays NULL rather than defaulting to 1 — a snapshot that
+        // cited a version the row never had would be worse than one that is
+        // silent about it.
+        version: row.version == null ? null : Number(row.version),
         review_by: isoDay(row.review_by),
       };
     });
@@ -368,6 +373,24 @@ export interface SpecSummary {
   missing_required: number;
   /** Supplier watches in force for this document whose review-by has passed. */
   watch_overdue: number;
+  /**
+   * Crosstab rows the engine recognised as laboratory CONTROLS (a buffer, a
+   * blank, a negative control) and deliberately did not judge as product.
+   *
+   * It had computed this since the crosstab work and thrown it away here, so
+   * the one surface that could have said "we saw those rows and skipped them on
+   * purpose" said nothing at all — leaving a reviewer to conclude either that
+   * the rows were missed or, worse, that a clean buffer was a clean product.
+   * Quiet by design: it opens no alert and is never a warning.
+   */
+  control_rows: number;
+  /**
+   * WHICH rows those were, as printed. Carried on the summary rather than as
+   * another top-level field because the summary object is already plumbed to
+   * every surface that renders spec findings, and a count with no names is not
+   * checkable against the table sitting next to it.
+   */
+  control_row_labels?: string[];
 }
 
 /** Everything the spec pass says about one row, beyond the verdicts. */
@@ -384,6 +407,7 @@ const EMPTY_SUMMARY: SpecSummary = {
   unjudged: 0,
   missing_required: 0,
   watch_overdue: 0,
+  control_rows: 0,
 };
 
 /**
@@ -429,6 +453,10 @@ export function specResultsWithConfig(
         unjudged: configured.unjudged.length,
         missing_required: missing.length,
         watch_overdue: watchOverdue.length,
+        control_rows: configured.control_rows.length,
+        ...(configured.control_rows.length > 0
+          ? { control_row_labels: configured.control_rows }
+          : {}),
       },
     };
   } catch (err) {

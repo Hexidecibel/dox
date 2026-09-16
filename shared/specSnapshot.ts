@@ -144,6 +144,15 @@ export function buildLimitSnapshot(
     value_min: l.value_min,
     value_max: l.value_max,
     unit: l.unit,
+    // WHICH REVISION judged this. Migration 0085 said the snapshot was
+    // "{operator, value_min, value_max, version}" and the version was the one
+    // key never actually written — so a reader could see the numbers but not
+    // which edition of the limit they came from, which is the entire job of the
+    // counter. Now that a version moves only when the threshold semantics move
+    // (`limitThresholdChanged`), it is a stable name for the rule that was
+    // applied, not a running total of every notes edit. Omitted, never invented,
+    // when the loaded row carried none.
+    ...(l.version === null || l.version === undefined ? {} : { version: Number(l.version) }),
     severity: l.severity,
     criticality: parseSpecCriticality(l.criticality),
     text: verdict.limit_text,

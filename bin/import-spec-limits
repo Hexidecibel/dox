@@ -171,7 +171,7 @@ function loadTests(tenant, remote) {
 function loadLimits(tenant, remote) {
   return query(
     `SELECT id, spec_test_id, supplier_id, document_type_id, product_id, operator,
-            value_min, value_max, unit, severity, notes, active, version
+            value_min, value_max, unit, severity, criticality, notes, active, version
        FROM spec_limits WHERE tenant_id = '${tenant}'`,
     { remote }
   );
