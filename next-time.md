@@ -4,7 +4,33 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-15 (latest): v2.18.0 ON PROD — one store for product identity (migration 0113).**
+**2026-09-15 (latest): v2.19.0 ON PROD — the alias gap on the screen (migration 0114).**
+Merge eec348e of `worktree-agent-aec1bb19007e59a00` (no conflicts; worktree + branch removed), SCHEMA.md
+08e2f79, release 930ca8f (tag v2.19.0 pushed). Pages deploy `7eab91e6`, staging `573d2925`; gate: vitest
+224 files / 3381 tests locally (batched: unit 100/1869, api-a 62/724, api-b 62/788), deploy e2e 276 files /
+3772 tests + Playwright 7 passed; typecheck 56 (baseline, none in changed files); `npm run build:worker-shared`
+left no diff. Prod backup bookmark `000016f0-00000042-000050e8-dca640ef2520271b5d92bad9b16ef66e`.
+**0114 is a new table only** (`spec_unmatched_ignores` + one unique index on `(tenant_id, name_key)`), applied
+and stamped on prod, applied on staging (no tracking table there). Prod after: spec_limits 20 and
+document_spec_checks 1306 **unchanged**, spec_unmatched_ignores 0. Prod smoke: releases index current 2.19.0;
+unauthenticated `/api/spec-unmatched` → 401 JSON.
+**The prod headline this feature exposes** (`bin/recheck-spec-limits --tenant 1f03c3e7… --remote`, read-only,
+522 documents): **144 unrecognised printed test names over 2,074 results** on Cush Co. Verdicts identical to
+the last run — in spec 1,143 / out of spec 41 / could-not-check 125, 12 catches — so adding `version` to
+`buildLimitSnapshot` changed nothing. Most of the 144 are not analytes: Flavor 233, Color 172, Aroma 153,
+Odor 64, plus lot/product codes (LOT CODE 38, Product 30, Incubator Temp 27). **The real analytes hiding in
+there** are worth a pass with AJ: Butterfat 192 (also `Butterfat %`), pH 143, FAT 126, MOISTURE 118, SALT 103,
+Solids Nonfat 61, Total Solids 54, BACTERIA 40, `Staph cp (cfu/g)` 37, Preformed Butterfat 24, Titratable
+Acidity 22, COLIFORM 1:1 AEROBIC 21 / COLIFORM AEROBIC 17 — each is either an alias to add or a test we do
+not hold a limit for.
+**Also in this release:** `buildLimitSnapshot` now records `version` (documented in 0085 since the start,
+never actually written), and a limit's version bumps only when its threshold moves (`limitThresholdChanged`
+in shared/specCheck.ts, adopted by both the API and the importer).
+**Note on SCHEMA.md:** the local D1 is shared with two sibling worktrees, and one of them has already applied
+its unmerged `document_export_links` migration to it. That table was stripped from the regenerated file;
+regenerate again when the search-export branch (taking 0115) merges.
+
+**2026-09-15: v2.18.0 ON PROD — one store for product identity (migration 0113).**
 Merge b086829 of `worktree-agent-a6a4f0a93347d00ea` (worktree + branch now removed), SCHEMA.md 38798f5,
 release e031012 (tag v2.18.0 pushed). Pages deploy `ec313b9e`, staging `5ee2be28`; gate: vitest 273 files /
 3716 tests, Playwright 7 passed (1 skipped). The first prod `bin/deploy` passed its gate and then failed at
