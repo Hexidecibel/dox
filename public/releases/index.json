@@ -1,6 +1,11 @@
 {
-  "current": "2.18.0",
+  "current": "2.19.0",
   "versions": [
+    {
+      "version": "2.19.0",
+      "date": "2026-09-15",
+      "title": "The test names your limits never saw"
+    },
     {
       "version": "2.18.0",
       "date": "2026-09-15",
