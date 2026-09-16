@@ -1,6 +1,11 @@
 {
-  "current": "2.19.0",
+  "current": "2.20.0",
   "versions": [
+    {
+      "version": "2.20.0",
+      "date": "2026-09-15",
+      "title": "Take the documents with you"
+    },
     {
       "version": "2.19.0",
       "date": "2026-09-15",

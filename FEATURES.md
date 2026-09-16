@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.20.0](releases/v2.20.0.md) — 2026-09-15 — Take the documents with you
 - [v2.19.0](releases/v2.19.0.md) — 2026-09-15 — The test names your limits never saw
 - [v2.18.0](releases/v2.18.0.md) — 2026-09-15 — One place for product identity
 - [v2.17.0](releases/v2.17.0.md) — 2026-09-15 — Renewal warnings on your schedule, and requirements from your supplier list
