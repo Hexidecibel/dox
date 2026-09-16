@@ -793,10 +793,11 @@ const search: ModuleHelpExpanded = {
   list: {
     headline: 'Search',
     well:
-      "Search over your tenant's documents, orders, customers and bundles. Type a lot (1042620303) or a dated phrase (production date 7/31/2026) and search checks each document's own fields: covering documents come first, nearby documents that do not match are listed separately with the reason, and files still in the Review Queue are shown as not on file yet. When nothing covers the search, it says so. The AI button takes a question in plain words and answers it the same way.",
+      "Search over your tenant's documents, orders, customers and bundles. Type a lot (1042620303) or a dated phrase (production date 7/31/2026) and search checks each document's own fields: covering documents come first, nearby documents that do not match are listed separately with the reason, and files still in the Review Queue are shown as not on file yet. When nothing covers the search, it says so. The AI button takes a question in plain words and answers it the same way. Results can be selected and taken with you: download them as a ZIP with a manifest, or send them to someone as a link that expires.",
     columnTooltips: {
       aiToggle: "Switch between keyword search (exact match) and natural-language search (LLM parses your query into filters). Keyword is faster; AI is more forgiving when you don't know the exact words used.",
       lotSublot: "Type a lot and a sublot as two separate inputs when the certificate prints them apart. Each part is matched against the lot row's own part — a sublot never matches against the base number.",
+      exportSelection: "Tick the documents you want to take with you. Covering results have a checkbox (and a Select all); a nearby result has to be added with Include anyway, so a near miss is never swept into an export by a default. The bar at the top of the results shows how many are selected and offers Download ZIP or Send by email.",
     },
   },
   help: {
@@ -835,7 +836,15 @@ const search: ModuleHelpExpanded = {
         heading: 'Scope',
         body:
           "Tenant scoping always applies — super_admin sees only the tenant currently selected in the tenant switcher; everyone else only their own tenant. " +
-          "The Search page has no export button today; to get a result set out as a file, use the exports described under Reports.",
+          "Everything you can select and export is scoped the same way: an export can only ever contain documents from the tenant you are searching.",
+      },
+      {
+        heading: 'Taking results with you',
+        body:
+          "Tick the results you want and a bar appears at the top of the list showing how many are selected. Covering results have a checkbox, and Select all N takes the whole covering group; a document under Nearby — does not match has to be added with Include anyway first, so a near miss is never exported by accident. The selection survives your next search, so you can gather documents from several queries before sending them. " +
+          "Download ZIP gives you the current version of each selected document plus a manifest.csv listing, per file, the document, supplier, document type, lot and production date. Over 50 documents or 40 MB the export is refused with the limit in the message — it is never quietly cut short. " +
+          "Send by email sends a link, not attachments. The recipient gets the list of documents and one page where they can download the whole set or one file at a time; the link expires in 30 days. The mail comes from the portal with your address as the reply-to, so a reply comes back to you, and \"on behalf of\" is printed as context when you are sending for someone else. Any role that can download a document can export, readers included. " +
+          "Every export is recorded in the audit log: what was downloaded, what was sent and to whom, and when a recipient opened the link or pulled a file.",
       },
       {
         heading: 'Common questions',
@@ -1013,7 +1022,7 @@ const reports: ModuleHelpExpanded = {
   list: {
     headline: 'Reports',
     well:
-      "Exports are surfaced inline on the screens they apply to rather than behind one central builder. The Audit log's Export CSV button calls /api/audit/export and streams a CSV of the filtered log; the COA Fulfillment page's Export CSV button calls /api/reports/coa-fulfillment?format=csv; /api/reports/generate builds a CSV or JSON document snapshot. Every one of the three runs on the server, is scoped by the caller's role and tenant exactly as the screen it came from is, and writes its own audit row — report.generate for the two report exports, audit.export for the audit log.",
+      "Exports are surfaced inline on the screens they apply to rather than behind one central builder. Search has its own — selected results leave as a ZIP or as an emailed link (see /help/search). The Audit log's Export CSV button calls /api/audit/export and streams a CSV of the filtered log; the COA Fulfillment page's Export CSV button calls /api/reports/coa-fulfillment?format=csv; /api/reports/generate builds a CSV or JSON document snapshot. Every one of the three runs on the server, is scoped by the caller's role and tenant exactly as the screen it came from is, and writes its own audit row — report.generate for the two report exports, audit.export for the audit log.",
   },
   help: {
     sections: [
@@ -1038,7 +1047,7 @@ const reports: ModuleHelpExpanded = {
       {
         heading: 'Common questions',
         body:
-          "Can I export a search result set? Not today — Search has no export control. Use the documents export (POST /api/reports/generate) with the filters it accepts, or the COA Fulfillment export. " +
+          "Can I export a search result set? Yes — select the results on the Search page and either download them as a ZIP with a manifest or send them to someone as a link that expires in 30 days. Both are audited. Use the documents export (POST /api/reports/generate) or the COA Fulfillment export when you want a table of rows rather than the files themselves. " +
           "Can I schedule recurring reports? Not built in. The /api/reports/generate endpoint is API-key authable, so a downstream cron / agent can call it on a schedule and shuttle the result wherever you want. " +
           "Export is empty? Either no rows match the active filters, or the user's role doesn't see any of the matching rows. Check the filter chips before assuming a bug.",
       },
@@ -1156,6 +1165,7 @@ const audit: ModuleHelpExpanded = {
           "Document operations: document_created, document_updated, document_deleted, document_version_uploaded, document_downloaded (when configured). " +
           "Tenant operations: tenant_updated, tenant_deactivated. " +
           "Reports: report.generate (with the filter parameters used), audit.export (an audit-log CSV export, with the filters used and the row count). " +
+          "Exports out of Search: document_export.zip (the id list of every document downloaded), document_export.sent (the recipients and the id list), document_export_link.view and document_export_link.download (the recipient opening the link and pulling files). " +
           "Read-only operations like list / get aren't logged by default — too noisy. The principle is \"every state change, plus auth events.\"",
       },
       {

@@ -46,6 +46,42 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### Documents out of Search — select, ZIP, send on behalf of (AJ 2026-09-14)
+
+**Status:** done (local, migration 0115; not deployed)
+
+**Source:** AJ Conner, 2026-09-14 — "the more frictionless it is for them to
+interact with it and get the data directly, the better". He spends one to three
+hours a day answering document requests, and the person searching is usually
+forwarding to a salesperson, hence "on behalf of".
+
+- Selection in search: a covering result gets a checkbox and a "Select all N";
+  a likely / nearby one needs an explicit **Include anyway** first, so the
+  coverage distinction the v2.11-2.13 work established is never undone by a
+  default. A sticky bar shows "N selected". Selection survives the next search.
+  `src/components/search/{SelectableResult,ExportSelectionBar,SendExportDialog}.tsx`,
+  wired through `CoverageResults` + `UniversalSearchPanel` (`enableExport`,
+  decided in `src/pages/Search.tsx` by the `library` module).
+- `POST /api/document-exports/zip` — the current version of each selected
+  document plus `manifest.csv` (file name, document, supplier, type, lot,
+  production date, version, filed-on). One zipper: `functions/lib/document-export.ts`
+  is the bundle download's fflate assembly lifted out. Reader may export.
+  Refuses over 40 MB / 50 documents WITH the number in the message. ONE audit
+  row per export naming every document.
+- `POST /api/document-exports/send` — a token-gated link, never attachments,
+  from the portal's sender with reply-to of the person who pressed send;
+  `on_behalf_of` is printed as context. 30 sends/hour/user. The link is revoked
+  if the send fails.
+- Migration 0115 `document_export_links` + `/export/:token`
+  (`src/pages/ExportLanding.tsx`, allow-list projection, files addressed by
+  POSITION not id, view and download audited).
+- Tests: `tests/api/document-exports.test.ts` (21), `tests/unit/documentExport.test.ts` (13),
+  `src/components/search/ExportSelection.test.tsx` (10).
+
+**Deferred:** the same selection from the Requests / supplier side (kept to
+search deliberately); a "sent documents" admin screen listing and revoking live
+export links; per-version pinning (bundles already do that).
+
 ### Any-field COA retrieval (AJ 2026-09-08) + Walkthrough 2 follow-ups
 
 **Status:** in-progress — Phase 1 and Phase 5 (part) shipped in v2.11.0; Phases 2 and 3 on prod (v2.12.0 / v2.13.0); Phase 4 done locally (migration 0110, undeployed)
@@ -335,8 +371,7 @@ Also: `control_rows` now reaches the review queue as a quiet line ("1 control ro
 `spec_summary`; and `bin/recheck-spec-limits --json` no longer prints its banners
 to stdout, which made the JSON unparseable.
 
-**Open:** SCHEMA.md is NOT regenerated for 0114 (it is generated from a live D1
-and 0114 is not applied anywhere yet) — run `./bin/schema-doc` after applying.
+**Open:** nothing — SCHEMA.md was regenerated after 0114 was applied.
 
 
 

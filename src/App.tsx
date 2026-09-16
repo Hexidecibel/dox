@@ -16,6 +16,7 @@ import { PublicForm } from './pages/forms/PublicForm';
 import { UpdateRequestForm } from './pages/forms/UpdateRequestForm';
 import { PublicApprovalPage } from './pages/forms/PublicApprovalPage';
 import { AlertLanding } from './pages/AlertLanding';
+import { ExportLanding } from './pages/ExportLanding';
 import { PublicDrop } from './pages/PublicDrop';
 // The external supplier request page. Unauthenticated, token-gated: see
 // functions/api/supplier-requests/public/[token].ts.
@@ -84,6 +85,12 @@ function App() {
               shell, no nav; the per-alert token in the URL is the gate and the
               server projects onto a hard allow-list. */}
           <Route path="/alert/:token" element={<AlertLanding />} />
+
+          {/* Documents sent out of search (migration 0115). The recipient is a
+              customer or a salesperson who will never have an account; they see
+              the exact set that was emailed and can take the ZIP or one file.
+              The per-send token is the gate and the set cannot widen. */}
+          <Route path="/export/:token" element={<ExportLanding />} />
 
           {/* The supplier's side of a document request. No account, no
               password: the token is the gate, exactly as /alert/ and /u/ do it. */}

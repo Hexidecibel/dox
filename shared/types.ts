@@ -5120,6 +5120,69 @@ export interface AlertLandingView {
   renewals: AlertLandingRenewal[];
 }
 
+// ---------------------------------------------------------------------------
+// Getting documents out of search (migration 0115)
+// ---------------------------------------------------------------------------
+
+/** What the caller wants zipped. Version pinning is implicit: current only. */
+export interface DocumentExportZipRequest {
+  document_ids: string[];
+  tenant_id?: string;
+}
+
+/** Sending that same selection to somebody, on behalf of somebody else. */
+export interface DocumentExportSendRequest {
+  document_ids: string[];
+  recipients: string[];
+  /** Free text: the salesperson or customer this was pulled for. */
+  on_behalf_of?: string;
+  message?: string;
+  tenant_id?: string;
+}
+
+export interface DocumentExportSendResponse {
+  sent: true;
+  recipients: string[];
+  document_count: number;
+  /** Ids asked for that are not in the export (deleted, or another tenant's). */
+  missing_ids: string[];
+  expires_at: string;
+}
+
+/**
+ * One document on an export landing page.
+ *
+ * `index` is the file's POSITION in the link's own frozen list and is the only
+ * handle a recipient gets: it addresses nothing outside this export, so a
+ * forwarded link cannot be edited into a different document.
+ */
+export interface DocumentExportItem {
+  index: number;
+  title: string;
+  supplier_name: string | null;
+  document_type_name: string | null;
+  lot_label: string | null;
+  production_date: string | null;
+  file_name: string;
+  file_size: number;
+}
+
+/**
+ * The ENTIRE payload an unauthenticated export-link holder can see. An
+ * allow-list, not a convenience shape — see `buildExportLandingView`. Nothing
+ * here carries an internal id.
+ */
+export interface DocumentExportLandingView {
+  tenant_name: string;
+  sent_by_name: string | null;
+  /** The sender's address, which is also the email's reply-to. */
+  sent_by_email: string | null;
+  on_behalf_of: string | null;
+  message: string | null;
+  expires_at: string;
+  documents: DocumentExportItem[];
+}
+
 // ===========================================================================
 // Document requests — the composer (migration 0090)
 // ===========================================================================

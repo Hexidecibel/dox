@@ -16,6 +16,10 @@ import { ResultCardOrder } from './ResultCardOrder';
 import { ResultCardCustomer } from './ResultCardCustomer';
 import { ResultCardBundle } from './ResultCardBundle';
 import { CoverageResults, UnreviewedCandidatesSection } from './CoverageResults';
+import { SelectableResult } from './SelectableResult';
+import type { SearchSelection } from './SelectableResult';
+import { ExportSelectionBar } from './ExportSelectionBar';
+import { SendExportDialog } from './SendExportDialog';
 import { useSearchParamsState } from '../../hooks/useSearchParamsState';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { useRecentSearches } from '../../hooks/useRecentSearches';
@@ -62,11 +66,22 @@ const EMPTY_RESPONSE: UniversalSearchResponse = {
 export interface UniversalSearchPanelProps {
   syncToUrl?: boolean;
   tenantId?: string;
+  /**
+   * Turn on selection + the export bar. OFF by default, and passed in rather
+   * than read from a context here, so this panel keeps rendering standalone
+   * (its own tests, any future embed) and so the `library` module gate is
+   * decided once, by the page that owns the surface.
+   */
+  enableExport?: boolean;
+  /** Who the export email says it is from, and where replies go. */
+  exportSender?: { name: string; email: string };
 }
 
 export function UniversalSearchPanel({
   syncToUrl = true,
   tenantId,
+  enableExport = false,
+  exportSender,
 }: UniversalSearchPanelProps) {
   const urlBound = useSearchParamsState();
   const [localState, setLocalState] = useState<SearchState>({ q: '', type: 'all' });
@@ -158,9 +173,93 @@ export function UniversalSearchPanel({
     if (aiMode && trimmed) runAi(trimmed);
   };
 
+  // ── Export selection ─────────────────────────────────────────────────────
+  // The whole selected DOCUMENT is held, not just its id: the send dialog and
+  // the bar have to name what is being sent, and a selection deliberately
+  // SURVIVES the next search — the normal shape of this job is "find the COA
+  // for lot A, then the spec sheet, then send both".
+  const [selectedDocs, setSelectedDocs] = useState<UniversalSearchDocument[]>([]);
+  const [includedAnyway, setIncludedAnyway] = useState<Set<string>>(new Set());
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [sendOpen, setSendOpen] = useState(false);
+
+  const selectedIds = new Set(selectedDocs.map((d) => d.id));
+
+  const toggleDoc = useCallback((doc: UniversalSearchDocument) => {
+    setSelectedDocs((prev) =>
+      prev.some((d) => d.id === doc.id) ? prev.filter((d) => d.id !== doc.id) : [...prev, doc],
+    );
+  }, []);
+
+  const selectMany = useCallback((docs: UniversalSearchDocument[]) => {
+    setSelectedDocs((prev) => {
+      const have = new Set(prev.map((d) => d.id));
+      return [...prev, ...docs.filter((d) => !have.has(d.id))];
+    });
+  }, []);
+
+  const includeAnyway = useCallback((doc: UniversalSearchDocument) => {
+    setIncludedAnyway((prev) => new Set(prev).add(doc.id));
+    setSelectedDocs((prev) => (prev.some((d) => d.id === doc.id) ? prev : [...prev, doc]));
+  }, []);
+
+  const selection: SearchSelection | undefined = enableExport
+    ? {
+        selectedIds,
+        includedAnyway,
+        onToggle: toggleDoc,
+        onIncludeAnyway: includeAnyway,
+        onSelectMany: selectMany,
+      }
+    : undefined;
+
+  const runDownload = useCallback(() => {
+    setExportBusy(true);
+    setExportError(null);
+    setExportNotice(null);
+    api.documentExports
+      .downloadZip(selectedDocs.map((d) => d.id), tenantId)
+      .then((res) => setExportNotice(`${res.count} document${res.count === 1 ? '' : 's'} downloaded.`))
+      .catch((e: unknown) => setExportError(e instanceof Error ? e.message : 'Export failed'))
+      .finally(() => setExportBusy(false));
+  }, [selectedDocs, tenantId]);
+
+  const runSend = useCallback(
+    (input: { recipients: string; onBehalfOf: string; message: string }) => {
+      setExportBusy(true);
+      setExportError(null);
+      setExportNotice(null);
+      api.documentExports
+        .send({
+          document_ids: selectedDocs.map((d) => d.id),
+          recipients: input.recipients
+            .split(/[,;\s]+/)
+            .map((s) => s.trim())
+            .filter(Boolean),
+          on_behalf_of: input.onBehalfOf.trim() || undefined,
+          message: input.message.trim() || undefined,
+          tenant_id: tenantId,
+        })
+        .then((res) => {
+          setSendOpen(false);
+          setSelectedDocs([]);
+          setIncludedAnyway(new Set());
+          setExportNotice(
+            `Sent ${res.document_count} document${res.document_count === 1 ? '' : 's'} to ${res.recipients.join(', ')}.`,
+          );
+        })
+        .catch((e: unknown) => setExportError(e instanceof Error ? e.message : 'Send failed'))
+        .finally(() => setExportBusy(false));
+    },
+    [selectedDocs, tenantId],
+  );
+
   const constrained = data.coverage === 'covered' || data.coverage === 'likely' || data.coverage === 'none' || data.coverage === 'ambiguous';
   const hasQuery = state.q.trim() !== '' || (lotOpen && lotBase.trim() !== '');
   const coverageProps = {
+    selection,
     documents: data.documents.results,
     coverage: data.coverage,
     constraints: data.constraints,
@@ -262,6 +361,7 @@ export function UniversalSearchPanel({
                 Understood as: {aiData.parsed_query.intent_summary}
               </Typography>
               <CoverageResults
+                selection={selection}
                 documents={aiData.results as unknown as UniversalSearchDocument[]}
                 coverage={aiData.coverage}
                 constraints={aiData.constraints}
@@ -351,7 +451,9 @@ export function UniversalSearchPanel({
               onSeeAll={() => setStatePatch({ type: 'documents' })}
             >
               {data.documents.results.slice(0, 5).map((d) => (
-                <ResultCardDocument key={d.id} doc={d} />
+                <SelectableResult key={d.id} doc={d} selection={selection} mode="plain">
+                  <ResultCardDocument doc={d} />
+                </SelectableResult>
               ))}
             </Section>
           )}
@@ -399,7 +501,11 @@ export function UniversalSearchPanel({
 
       {!loading && tab === 'documents' && constrained && <CoverageResults {...coverageProps} />}
       {!loading && tab === 'documents' && !constrained &&
-        data.documents.results.map((d) => <ResultCardDocument key={d.id} doc={d} />)}
+        data.documents.results.map((d) => (
+          <SelectableResult key={d.id} doc={d} selection={selection} mode="plain">
+            <ResultCardDocument doc={d} />
+          </SelectableResult>
+        ))}
       {!loading && tab === 'documents' && !constrained && (
         <Box sx={{ mt: 2 }}>
           <UnreviewedCandidatesSection items={unreviewed} />
@@ -412,6 +518,42 @@ export function UniversalSearchPanel({
       {!loading && tab === 'bundles' &&
         data.bundles.results.map((b) => <ResultCardBundle key={b.id} bundle={b} />)}
       </>)}
+
+      {enableExport && (
+        <>
+          <ExportSelectionBar
+            count={selectedDocs.length}
+            busy={exportBusy}
+            error={exportError}
+            notice={exportNotice}
+            onDownload={runDownload}
+            onSend={() => {
+              setExportError(null);
+              setSendOpen(true);
+            }}
+            onClear={() => {
+              setSelectedDocs([]);
+              setIncludedAnyway(new Set());
+              setExportError(null);
+              setExportNotice(null);
+            }}
+            onDismissMessage={() => {
+              setExportError(null);
+              setExportNotice(null);
+            }}
+          />
+          <SendExportDialog
+            open={sendOpen}
+            documents={selectedDocs}
+            senderName={exportSender?.name ?? 'You'}
+            senderEmail={exportSender?.email ?? 'your address'}
+            busy={exportBusy}
+            error={sendOpen ? exportError : null}
+            onClose={() => setSendOpen(false)}
+            onSend={runSend}
+          />
+        </>
+      )}
     </Box>
   );
 }

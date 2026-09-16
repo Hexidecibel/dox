@@ -6,6 +6,16 @@ interface SendEmailOptions {
   to: string | string[];
   subject: string;
   html: string;
+  /**
+   * Where a reply should go.
+   *
+   * THE `from` ADDRESS NEVER MOVES. Every email the portal sends comes from
+   * its own sender, because sending as a customer's domain is impersonation
+   * and fails their SPF besides. When a person sends documents to somebody
+   * (migration 0115), the honest arrangement is: from the portal, reply-to the
+   * human who pressed send.
+   */
+  replyTo?: string;
 }
 
 export async function sendEmail(apiKey: string, options: SendEmailOptions): Promise<boolean> {
@@ -21,6 +31,7 @@ export async function sendEmail(apiKey: string, options: SendEmailOptions): Prom
         to: Array.isArray(options.to) ? options.to : [options.to],
         subject: options.subject,
         html: options.html,
+        ...(options.replyTo ? { reply_to: options.replyTo } : {}),
       }),
     });
     return res.ok;
@@ -844,6 +855,108 @@ export function buildRenewalRoutingGapEmail(
   const text = `${count} renewal record${count === 1 ? '' : 's'} for ${tenantName} could not be routed to an owner, so NO renewal alert was sent for ${count === 1 ? 'it' : 'them'}.\n\n`
     + docs.map((d) => `- ${d.title} (due ${d.renewal_due_date || '—'}) — ${d.owner ? `owner "${d.owner}" has no route configured` : 'no owner set'}`).join('\n')
     + `\n\nSet an owner on the record and map that owner label to recipients.\n`;
+
+  return { subject, html, text };
+}
+
+/**
+ * "Here are the documents you asked for" — the email a person sends out of
+ * search (migration 0115).
+ *
+ * WHAT IS IN IT AND WHAT IS NOT. There are no attachments: a dozen
+ * certificates blows every mail size limit, and an attachment in an inbox can
+ * never be withdrawn or counted. What the recipient gets is a list of what was
+ * sent and ONE link to a page that hands over the files, which expires and can
+ * be revoked.
+ *
+ * NOBODY IS IMPERSONATED. The email comes from the portal's own sender, with a
+ * reply-to of the person who pressed send, and says in words who sent it and —
+ * when it was pulled for a colleague — who it was pulled for. The portal never
+ * sends as a customer's domain.
+ */
+export function buildDocumentExportEmail(params: {
+  tenantName: string;
+  senderName: string;
+  senderEmail: string;
+  onBehalfOf?: string | null;
+  message?: string | null;
+  documents: { title: string; supplier_name: string | null; document_type_name: string | null; lot_label: string | null }[];
+  linkUrl: string;
+  expiresAt: string;
+}): { subject: string; html: string; text: string } {
+  const count = params.documents.length;
+  const subject =
+    count === 1
+      ? `${params.tenantName}: 1 document from ${params.senderName}`
+      : `${params.tenantName}: ${count} documents from ${params.senderName}`;
+
+  const sentLine = params.onBehalfOf
+    ? `${escapeHtml(params.senderName)} sent these on behalf of ${escapeHtml(params.onBehalfOf)}.`
+    : `${escapeHtml(params.senderName)} sent these.`;
+
+  const rows = params.documents
+    .map((d) => {
+      const detail = [d.supplier_name, d.document_type_name, d.lot_label ? `Lot ${d.lot_label}` : null]
+        .filter(Boolean)
+        .map((s) => escapeHtml(String(s)))
+        .join(' · ');
+      return `<tr>
+        <td style="padding:8px 0;border-bottom:1px solid #eee;">
+          <div style="color:#333;font-weight:600;">${escapeHtml(d.title)}</div>
+          ${detail ? `<div style="color:#666;font-size:13px;">${detail}</div>` : ''}
+        </td>
+      </tr>`;
+    })
+    .join('');
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr>
+      <td style="background:#1A365D;padding:24px 32px;">
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">${escapeHtml(params.tenantName)}</h1>
+        <p style="margin:6px 0 0;color:#cbd5e0;font-size:13px;">${count} document${count === 1 ? '' : 's'}</p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:32px;">
+        <p style="margin:0 0 16px;color:#555;line-height:1.6;">${sentLine}</p>
+        ${params.message ? `<p style="margin:0 0 16px;padding:12px 16px;background:#f8f9fa;border-left:3px solid #1A365D;color:#333;line-height:1.6;white-space:pre-wrap;">${escapeHtml(params.message)}</p>` : ''}
+        <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">${rows}</table>
+        <p style="margin:0 0 24px;text-align:center;">
+          <a href="${escapeHtml(params.linkUrl)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Open the documents</a>
+        </p>
+        <p style="margin:0;color:#666;font-size:13px;line-height:1.6;">
+          The link works until ${escapeHtml(formatFriendlyDate(params.expiresAt))} and shows only the documents listed above.
+          Reply to this email to reach ${escapeHtml(params.senderName)} directly.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:16px 32px;background:#f8f9fa;border-top:1px solid #eee;">
+        <p style="margin:0;color:#999;font-size:12px;text-align:center;">
+          Sent through SupDox by ${escapeHtml(params.senderEmail)}.
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  const text =
+    `${params.senderName} sent you ${count} document${count === 1 ? '' : 's'} from ${params.tenantName}` +
+    `${params.onBehalfOf ? ` on behalf of ${params.onBehalfOf}` : ''}.\n\n` +
+    (params.message ? `${params.message}\n\n` : '') +
+    params.documents
+      .map((d) => `- ${d.title}${d.supplier_name ? ` (${d.supplier_name})` : ''}${d.lot_label ? ` — Lot ${d.lot_label}` : ''}`)
+      .join('\n') +
+    `\n\nOpen them here: ${params.linkUrl}\nThe link works until ${formatFriendlyDate(params.expiresAt)}.\n` +
+    `Reply to this email to reach ${params.senderName} (${params.senderEmail}).\n`;
 
   return { subject, html, text };
 }

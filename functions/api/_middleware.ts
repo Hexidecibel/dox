@@ -64,6 +64,13 @@ const PUBLIC_ROUTES = [
   // the gate, the route is read-only, and the prefix is narrow so no future
   // /api/alerts/* admin endpoint is allowlisted by accident.
   '/api/alerts/public',
+  // Document export links — /export/<token>, the page an "here are the
+  // documents you asked for" email points at (migration 0115). Same posture as
+  // the alert landing above, and the same narrow prefix so no future
+  // /api/document-exports/* admin endpoint is allowlisted by accident: the two
+  // authed endpoints beneath /api/document-exports (zip, send) sit OUTSIDE this
+  // prefix and stay behind the JWT gate and the `library` module gate.
+  '/api/document-exports/public',
   // The external supplier request page — /r/<token> reads and uploads through
   // here. Same posture as the four above: the unguessable per-ask token is the
   // gate, and the prefix is narrow so no future /api/supplier-requests/* admin

@@ -115,6 +115,11 @@ describe('moduleForApiPath', () => {
     expect(moduleForApiPath('/api/expirations/run-scheduled')).toBe('compliance');
     expect(moduleForApiPath('/api/lots')).toBe('fulfillment');
     expect(moduleForApiPath('/api/workflow-approvals')).toBe('records');
+    // Getting documents OUT of search (0115) is the library's surface, even
+    // though /api/documents itself stays unowned: this prefix serves only the
+    // export, so gating it cannot take a switched-ON module down with it.
+    expect(moduleForApiPath('/api/document-exports/zip')).toBe('library');
+    expect(moduleForApiPath('/api/document-exports/send')).toBe('library');
   });
 
   it('leaves shared read primitives always-on', () => {

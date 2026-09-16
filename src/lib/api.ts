@@ -361,6 +361,11 @@ import type {
 // the Settings screen.
 // ---------------------------------------------------------------------------
 import type {
+  DocumentExportSendRequest,
+  DocumentExportSendResponse,
+} from '../../shared/types';
+
+import type {
   ModuleKey,
   ModuleAccessResponse,
   ModuleListResponse,
@@ -3204,6 +3209,59 @@ export const api = {
       const query = new URLSearchParams({ type, id });
       return fetchApi<ActivityEventDetailResponse>(`/activity/event?${query.toString()}`);
     },
+  },
+
+  /**
+   * Getting documents OUT of search (migration 0115): the selection a person
+   * made becomes either a ZIP in their downloads folder or an email to
+   * somebody else. Both are audited server-side with the id list.
+   */
+  documentExports: {
+    /**
+     * POST /api/document-exports/zip — streams a ZIP back, so this one reads
+     * the raw response and drives the browser download itself rather than
+     * going through `fetchApi`, which assumes JSON.
+     */
+    downloadZip: async (documentIds: string[], tenantId?: string): Promise<{ count: number }> => {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`${API_BASE}/document-exports/zip`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ document_ids: documentIds, tenant_id: tenantId }),
+      });
+
+      if (!res.ok) {
+        let message: string;
+        try {
+          const body = (await res.json()) as { error?: string };
+          message = body.error || res.statusText;
+        } catch {
+          message = (await res.text()) || res.statusText;
+        }
+        throw new Error(message);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const disposition = res.headers.get('Content-Disposition');
+      const match = disposition?.match(/filename="([^"]+)"/);
+      a.download = match?.[1] || `documents-${new Date().toISOString().split('T')[0]}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return { count: Number(res.headers.get('X-Export-Documents') || documentIds.length) };
+    },
+
+    /** POST /api/document-exports/send — the "on behalf of" email. */
+    send: (body: DocumentExportSendRequest): Promise<DocumentExportSendResponse> =>
+      fetchApi<DocumentExportSendResponse>('/document-exports/send', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
   },
 
   search: {

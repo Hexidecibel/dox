@@ -3730,6 +3730,179 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/document-exports/zip:
+    post:
+      tags: [Documents]
+      summary: Export selected documents as a ZIP
+      description: |
+        Zips the CURRENT version of each selected document plus a `manifest.csv`
+        naming, per file, the document, supplier, document type, lot and
+        production date.
+
+        Tenant-scoped in SQL: an id belonging to another tenant is reported as
+        missing, never exported. **Any authenticated user with tenant access,
+        reader included** — the same bar as downloading one document at a time.
+
+        Writes ONE audit row (`document_export.zip`) naming every document.
+
+        Refused with 413 over 50 documents or 40 MB of source files; the message
+        states the cap. Module-gated under `library`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [document_ids]
+              properties:
+                document_ids:
+                  type: array
+                  items: { type: string }
+                tenant_id:
+                  type: string
+      responses:
+        '200':
+          description: ZIP archive
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+          headers:
+            X-Export-Documents:
+              schema: { type: integer }
+            X-Export-Missing:
+              schema: { type: integer }
+        '400': { description: Empty selection }
+        '404': { description: Nothing in the selection is available }
+        '413': { description: Over the document or size cap }
+
+  /api/document-exports/send:
+    post:
+      tags: [Documents]
+      summary: Email the selected documents as a token-gated link
+      description: |
+        Mints a `document_export_links` row (migration 0115) and emails a LINK —
+        never attachments — from the portal's own sender with a reply-to of the
+        calling user. `on_behalf_of` is free text printed as context; nothing
+        impersonates a recipient's domain.
+
+        Rate limited to 30 sends per hour per user. The link is revoked if the
+        email fails, so a live link never exists for a message nobody received.
+        Audited as `document_export.sent` with the recipients and the id list.
+        Module-gated under `library`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [document_ids, recipients]
+              properties:
+                document_ids:
+                  type: array
+                  items: { type: string }
+                recipients:
+                  type: array
+                  items: { type: string, format: email }
+                on_behalf_of: { type: string }
+                message: { type: string }
+                tenant_id: { type: string }
+      responses:
+        '200':
+          description: Sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent: { type: boolean }
+                  recipients:
+                    type: array
+                    items: { type: string }
+                  document_count: { type: integer }
+                  missing_ids:
+                    type: array
+                    items: { type: string }
+                  expires_at: { type: string }
+        '400': { description: No recipients, or an address that is not valid }
+        '413': { description: Over the document or size cap }
+        '429': { description: Rate limited }
+        '502': { description: The email could not be sent; the link was revoked }
+        '503': { description: Email is not configured for this portal }
+
+  /api/document-exports/public/{token}:
+    get:
+      tags: [Documents]
+      summary: What an export link contains (public, token-gated)
+      description: |
+        The unauthenticated read behind `/export/:token`. The response is an
+        explicit allow-list carrying no internal id; files are addressed by
+        their POSITION in the link's own frozen list. Every unusable state —
+        unknown, expired, revoked — answers 404 alike. Each view is audited
+        (`document_export_link.view`) and rate limited per (link, IP).
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The documents this export contained
+        '404': { description: Unknown, expired or revoked }
+        '429': { description: Rate limited }
+
+  /api/document-exports/public/{token}/download:
+    get:
+      tags: [Documents]
+      summary: The recipient's ZIP (public, token-gated)
+      description: |
+        The same archive and manifest as the signed-in export. The document set
+        comes from the link, never from the request. Audited as
+        `document_export_link.download`.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: ZIP archive
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '404': { description: Unknown, expired or revoked }
+        '429': { description: Rate limited }
+
+  /api/document-exports/public/{token}/file/{index}:
+    get:
+      tags: [Documents]
+      summary: One file out of an export (public, token-gated)
+      description: |
+        `index` is a POSITION in the link's own list, not a document id, so it
+        addresses nothing outside this export. Audited as
+        `document_export_link.file`.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+        - name: index
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: The file
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404': { description: Unknown link, or a position not in the export }
+        '429': { description: Rate limited }
+
   /api/graphql:
     post:
       tags: [GraphQL]
