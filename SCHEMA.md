@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 137 tables, 2 views, 228 indexes, 36 triggers.
+Objects: 138 tables, 2 views, 229 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -1929,6 +1929,20 @@ Indexes: `idx_spec_limits_product`, `idx_spec_limits_scope`, `idx_spec_limits_su
 ```
 
 Indexes: `idx_spec_tests_tenant`
+
+### `spec_unmatched_ignores`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  name_key TEXT NOT NULL
+  name_raw TEXT NOT NULL
+  reason TEXT
+  created_by TEXT REFERENCES users(id)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+```
+
+Indexes: `idx_spec_unmatched_ignores_key`
 
 ### `tenant_modules`
 
