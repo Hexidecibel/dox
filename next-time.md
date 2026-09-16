@@ -4,7 +4,67 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-15 (latest): v2.19.0 ON PROD — the alias gap on the screen (migration 0114).**
+**2026-09-15 (latest): v2.20.0 ON PROD — take the documents with you (migration 0115).**
+Two branches merged into master: `worktree-agent-a4e8b54c043828bc7` (docs/CI/classification/GraphQL, merge
+baa118d, NO conflicts) and `worktree-agent-a074bf8b415c0c27a` (search export, merge f1d0e68). SCHEMA.md
+f49eff9, release 1cf9a7f (tag v2.20.0 pushed). Pages deploy `968bf7be`, staging `158c228d`. Both worktrees
+and both branches are gone. Prod backup bookmark
+`000016f0-00000116-000050e8-98165985cb37f3e88b7dc14b2f9ce1d0`.
+
+**0115, not 0114.** The export branch was written against 0114, which v2.19.0 took for
+`spec_unmatched_ignores`; it was renamed to `0115_document_export_links.sql` on merge and every reference
+moved with it (tests/helpers/db.ts import + list + `cleanTables`, the CLAUDE.md row and feature bullet, API.md,
+openapi.yaml, plan.md, todo.md, and the code comments that cite the number). New table only —
+`document_export_links` + three indexes — applied and stamped on prod (`d1_migrations`), applied on staging
+(still no tracking table there). **Prod after: documents 600 and document_versions 615 unchanged,
+document_export_links 0.** SCHEMA.md regenerated locally against the real D1: 139 tables / 232 indexes, which
+is exactly v2.19.0's 138/229 plus this table and its three indexes and nothing foreign — the note under the
+v2.19.0 entry about the stripped table is now closed. A stale local `_migrations` stamp for
+`0114_document_export_links.sql` was deleted (local dev DB only).
+
+**Conflicts and how they went.** openapi.yaml: kept master+A's file and re-inserted B's five
+`/api/document-exports` paths ahead of `/api/graphql` (`yaml.safe_load` clean, 57 paths, no duplicate keys).
+API.md and CLAUDE.md: both sides kept, B's section and migration row renumbered. tests/helpers/db.ts: both
+0114 and 0115 imported and applied, `document_export_links` added to `cleanTables`. SCHEMA.md: master's kept
+then regenerated. **`src/lib/helpContent.ts` did not conflict but needed a hand merge** — A had deleted the
+false "you can export a search result set" claims and B had just built the real thing, so the help now
+describes what exists (selection with Include anyway for near misses, ZIP + manifest.csv with the stated cap,
+send-by-link with a 30-day expiry and the sender as reply-to, and the four `document_export*` audit actions).
+
+**NEW GATE: the Functions typecheck ratchet** (from branch A). `npm run typecheck:functions` runs
+`bin/typecheck-ratchet` against `tests/typecheck-baseline.json`, and it is wired into `.github/workflows/test.yml`
+and into `bin/e2e` — so it now runs on every `bin/deploy`. It fails if the TOTAL rises or if a file that had
+zero errors gains any. **Baseline is 27** (A brought it down from 56 by fixing the `R2Bucket` import cause,
+3 real bugs it was hiding, and 17 unused imports); this release ended at 27, at the baseline, with B's new
+files clean. **To bank a fix: `bin/typecheck-ratchet --update`** — it never lowers itself, so the baseline
+diff shows in review who fixed what. Never raise it to make CI pass. `npm run typecheck` (the frontend
+project build) reports the same 27, all inside `functions/`.
+
+**Gate numbers.** Local batches: unit 102 files / 1891 tests, api 126 / 1553, frontend 53 / 401. The deploy's
+own `bin/e2e`: ratchet OK at 27, vitest 281 files / 3845 tests, Playwright passed. `npm run build` clean.
+Staging smoke: unauthenticated `POST /api/document-exports/zip` → 401 JSON, `GET /api/document-exports/public/zzz`
+→ 404 JSON ("These documents are no longer available"), `/export/zzz` → 200. Prod smoke: `/releases/index.json`
+current 2.20.0; the same two API answers; `/api/graphql` unauthenticated still a clean JSON error
+(GET → `Must provide query string.` BAD_REQUEST, POST of a real query → 401 `UNAUTHENTICATED`, no stack).
+**Nothing exercised `/api/document-exports/send` — no email was sent anywhere.**
+
+**Classification backfill: DRY RUN ONLY, NOT APPLIED ON PROD.** `bin/backfill-classification-status --all --remote`
+(the script refuses `--all --apply`, and writes nothing without `--apply`) over 579 active prod documents:
+**550 would become `classified`, 29 `needs_review`, 0 left `unclassified`.** By tenant — Cush Co 557 (532/25),
+Q8 Darigold Review 16 (16/0), Medosweet Farms 6 (2/4); AJ Clean, System and Test Lab have no active documents.
+The `needs_review` rows are documents carrying a type nobody is recorded as having chosen. Going forward the
+status is written at approval by `functions/lib/classification.ts`, so this backfill is only about history.
+To apply it: one tenant at a time, `bin/backfill-classification-status --tenant <id> --remote --apply` (it prompts).
+
+**Two open follow-ups.**
+1. **Export links have no revoke screen.** `document_export_links` has `revoked_at` and the send path uses it
+   when an email fails, but a person who mails the wrong recipient cannot pull the link back without a DB
+   write. A "sent documents" admin list that shows live links, their recipients, view/download counts, and a
+   revoke button is the missing half.
+2. **The classification backfill is still unapplied on prod** (see above) — 579 documents read `unclassified`
+   there until someone runs it per tenant.
+
+**2026-09-15: v2.19.0 ON PROD — the alias gap on the screen (migration 0114).**
 Merge eec348e of `worktree-agent-aec1bb19007e59a00` (no conflicts; worktree + branch removed), SCHEMA.md
 08e2f79, release 930ca8f (tag v2.19.0 pushed). Pages deploy `7eab91e6`, staging `573d2925`; gate: vitest
 224 files / 3381 tests locally (batched: unit 100/1869, api-a 62/724, api-b 62/788), deploy e2e 276 files /

@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### Documents out of Search — select, ZIP, send on behalf of (AJ 2026-09-14)
 
-**Status:** done (local, migration 0115; not deployed)
+**Status:** done — shipped in v2.20.0 (migration 0115, on prod 2026-09-15)
 
 **Source:** AJ Conner, 2026-09-14 — "the more frictionless it is for them to
 interact with it and get the data directly, the better". He spends one to three
