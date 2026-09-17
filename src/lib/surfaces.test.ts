@@ -33,8 +33,10 @@ import type { Role } from './types';
  * order. 65 paths: 53 surfaces inside the authenticated shell, 10 public
  * no-shell routes, and the two redirects.
  *
- * Added since: `/setup` and `/setup/:step` (the first-run wizard) and
- * `/export/:token` (documents sent out of search, migration 0115).
+ * Added since: `/setup` and `/setup/:step` (the first-run wizard),
+ * `/export/:token` (documents sent out of search, migration 0115), and
+ * `/documents/sent` (the register of those sends, and the revoke button,
+ * migration 0116).
  */
 const ROUTE_SNAPSHOT: readonly string[] = [
   '/login',
@@ -54,6 +56,10 @@ const ROUTE_SNAPSHOT: readonly string[] = [
   '/dashboard',
   '/documents',
   '/documents/new',
+  // Documents you sent (migration 0116) -- what left by link, and the revoke
+  // button 0115 shipped without. Declared before '/documents/:id' in SURFACES
+  // so "sent" is never read as a document id.
+  '/documents/sent',
   '/documents/:id',
   '/search',
   '/profile',
@@ -155,7 +161,7 @@ describe('SURFACES — the path-set snapshot', () => {
   });
 
   it('accounts for every snapshot path exactly once', () => {
-    expect(ROUTE_SNAPSHOT.length).toBe(67);
+    expect(ROUTE_SNAPSHOT.length).toBe(68);
     expect(new Set(ROUTE_SNAPSHOT).size).toBe(ROUTE_SNAPSHOT.length);
     expect(SURFACES.length).toBe(ROUTE_SNAPSHOT.length - NON_SURFACE_PATHS.length);
   });
@@ -226,6 +232,10 @@ describe('SURFACES — the path-set snapshot', () => {
       // /import, /review and /spec-alerts are the three drift fixes; the rest
       // carried their tier over from App.tsx unchanged.
       '/documents/new',
+      // The page tier IS the send tier: POST /api/document-exports/send is
+      // gated to `user`+ (mailing an unauthenticated URL to 50 documents is
+      // publishing, not reading), so a `reader` can never have a row on it.
+      '/documents/sent',
       '/expirations',
       '/import',
       '/reports',

@@ -1638,8 +1638,11 @@ attachments**: attachments blow mail size limits and leave no trail. The mail
 comes from the portal's own sender with a **reply-to of the calling user**, and
 `on_behalf_of` is printed as context ("Dana sent these on behalf of Marco in
 Sales") — nothing is sent as a customer's domain. 30 sends per hour per user.
-If the send fails the link is revoked, so a live link never exists for a
-message nobody received. Audited as `document_export.sent` with the recipients.
+**`user` and above**, unlike the ZIP: minting an unauthenticated URL to up to
+50 documents and mailing it outside the organization is publishing, not
+reading, so a `reader` is refused 403. If the send fails the link is revoked,
+so a live link never exists for a message nobody received. Audited as
+`document_export.sent` with the recipients.
 
 The recipient's page is `/export/:token`, reading
 `GET /api/document-exports/public/:token` (allow-list projection, no internal
@@ -1648,6 +1651,35 @@ is a POSITION in the link's own frozen list**, not a document id, so a
 forwarded link can never be edited into covering something else. Links expire
 in 30 days, carry a `revoked_at` kill switch, and every view and download
 writes an audit row.
+
+**`GET /api/document-exports/links`** — "Documents you sent". One row per send:
+when, by whom, on whose behalf, to which addresses, how many documents (with
+the first few titles), the view and download counts, and a resolved `state` of
+`active` / `expired` / `revoked` (revoked wins over expired — what a reader
+wants to know is whether a person stopped it). An **admin sees the
+organization's sends, anybody else their own**; `scope=mine|tenant` is a
+request, and the response reports the `scope` it actually answered in, so a
+client can never render "everyone" over a filtered list. **The token is never
+returned** — this is the accountability screen, not a second way to open every
+export ever sent.
+
+**`POST /api/document-exports/links/:id/revoke`** — the kill switch, reachable
+at last (migration 0116 records who pressed it). Effective immediately and on
+**all three** recipient routes: the landing read, the ZIP and the per-file
+download all resolve a token through the one gate, `loadUsableExportLink`,
+which returns null for a revoked row, and all three answer the same 404 they
+answer for a token that never existed. The sender may revoke their own; an
+admin may revoke anyone's; another tenant's link is a 404, never a 403. A
+second press is a no-op that does not move the first revocation's timestamp.
+Audited as `document_export.revoked` with the recipients, the id list, and the
+view/download counts at the moment it was pulled.
+
+**There is deliberately no "extend".** Lengthening a link after the fact
+quietly changes the terms of a mail already sent ("this link expires on the
+15th") and hides that decision in a row nobody re-reads. A new send is the
+honest answer: it names its own recipients, its own expiry and its own audit
+row. Revoking also cannot recall a file already downloaded, and the UI says so
+rather than implying otherwise.
 
 ---
 

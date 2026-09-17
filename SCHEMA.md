@@ -1497,6 +1497,7 @@ Indexes: `idx_document_claims_document`, `idx_document_claims_subject`, `idx_doc
   last_viewed_at TEXT
   download_count INTEGER NOT NULL DEFAULT 0
   last_downloaded_at TEXT
+  revoked_by TEXT REFERENCES users(id)
 ```
 
 Indexes: `idx_document_export_links_sender`, `idx_document_export_links_tenant`, `idx_document_export_links_token`

@@ -15,6 +15,8 @@
 #   5. Update `public/releases/index.json` and the FEATURES.md index.
 #   6. Bump `package.json` version (no auto tag, no auto commit).
 #   7. Open the draft in $EDITOR for human polish.
+#  7b. Refuse to go on until the notes say WHO each change reaches
+#      ([existing] / [new-orgs] / [config]); non-interactively, fail.
 #   8. Commit + tag + prompt to deploy.
 #
 # --dry-run stops after step 4 (prints the draft, touches nothing on disk
@@ -108,6 +110,22 @@ git log "$RANGE" --pretty=format:"%H%x09%s%x09%b%x1e" --no-merges \
     out += 'sha: ' + process.env.SHORT_SHA + '\n';
     out += 'title: TODO\n';
     out += '---\n\n';
+    // WHO EACH CHANGE REACHES. Three things ship under one heading and read
+    // identically: a migration everybody has tomorrow, a changed starter-pack
+    // default only a NEW organisation gets, and a feature that does nothing
+    // until somebody configures it. AJ Conner asked for the difference to be
+    // on the page; the guard below refuses to cut a release without it.
+    //
+    // HTML comments do not render in the in-app notes, so this reminder is
+    // safe to leave in the file — and `hasReachMarker` strips comments before
+    // looking, so it can never satisfy its own guard.
+    out += '<!--\n';
+    out += '  Mark each bullet with who it reaches. Put the token FIRST:\n';
+    out += '    - [existing] ...  live for every organisation on deploy\n';
+    out += '    - [new-orgs] ...  a changed default; existing configuration is unchanged\n';
+    out += '    - [config]   ...  shipped, but inert until somebody sets it up\n';
+    out += '  A token on a paragraph of its own claims the section beneath it.\n';
+    out += '-->\n\n';
     out += '## TODO — write a one-line summary\n\n';
     out += 'TODO: paragraph describing the why.\n\n';
 
@@ -196,6 +214,63 @@ echo "==> Bumped package.json to $NEW_VERSION"
 EDITOR_BIN="${EDITOR:-vi}"
 echo "==> Opening $RELEASE_FILE in $EDITOR_BIN for polish (close to continue)"
 "$EDITOR_BIN" "$RELEASE_FILE"
+
+# --- 7b. Who does each change reach? -----------------------------------
+#
+# AJ Conner, reviewing v2.7.0-v2.20.0: "Mark in each release which changes
+# reach existing tenants and which only land on new ones. The GFSI change is
+# right ... but it applies to newly set-up orgs only, so our config keeps the
+# old rule. That is the first product default to drift from our tenant and it
+# will not be the last."
+#
+# A convention nobody enforces is a convention that is followed for two
+# releases. The vocabulary and the matcher live in shared/releaseReach.ts and
+# are read here through the esbuild mirror, so the guard and the in-app chip
+# can never recognise different words.
+#
+# The bar is ONE marker anywhere, deliberately. Demanding one per bullet would
+# be a script arguing with prose a human is still writing, and the predictable
+# result is a flag to skip it. One marker means the question was asked.
+check_reach() {
+  RELEASE_FILE="$RELEASE_FILE" node -e "
+    const fs = require('fs');
+    const path = require('path');
+    const { hasReachMarker } = require(path.resolve('bin/lib/shared/releaseReach.js'));
+    process.exit(hasReachMarker(fs.readFileSync(process.env.RELEASE_FILE, 'utf8')) ? 0 : 1);
+  "
+}
+
+while ! check_reach; do
+  echo
+  echo "==> These notes do not say who any of the changes reach."
+  echo "    Mark each bullet with a leading token:"
+  echo "      - [existing] ...  live for every organisation on deploy"
+  echo "      - [new-orgs] ...  a changed default; existing configuration is unchanged"
+  echo "      - [config]   ...  shipped, but inert until somebody sets it up"
+  echo
+  # Non-interactive (CI, a pipe): fail rather than block on a prompt nobody
+  # can answer. The message above is the whole fix.
+  if [[ ! -t 0 ]]; then
+    echo "ERROR: refusing to cut a release whose notes answer nobody's 'does this reach us?'." >&2
+    echo "Add the markers to $RELEASE_FILE and run bin/release again." >&2
+    exit 1
+  fi
+  read -r -p "[e]dit again / [c]ontinue without markers / [a]bort? [E/c/a] " REACH_ANSWER
+  case "${REACH_ANSWER:-e}" in
+    c|C)
+      echo "==> Continuing with no reach markers, on your word."
+      break
+      ;;
+    a|A)
+      echo "Aborted. $RELEASE_FILE is on disk; nothing was committed or tagged." >&2
+      exit 1
+      ;;
+    *)
+      "$EDITOR_BIN" "$RELEASE_FILE"
+      ;;
+  esac
+done
+
 # Mirror any edits back to the public copy.
 cp "$RELEASE_FILE" "$PUBLIC_FILE"
 

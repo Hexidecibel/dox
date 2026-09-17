@@ -363,6 +363,8 @@ import type {
 import type {
   DocumentExportSendRequest,
   DocumentExportSendResponse,
+  DocumentExportLinkListResponse,
+  DocumentExportRevokeResponse,
 } from '../../shared/types';
 
 import type {
@@ -3262,6 +3264,33 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(body),
       }),
+
+    /**
+     * GET /api/document-exports/links — what this organization (admins) or
+     * this person (everybody else) has sent out. The server decides the scope
+     * and reports which one it answered in; never assume the asked-for one.
+     */
+    listLinks: (params?: {
+      scope?: 'tenant' | 'mine';
+      tenant_id?: string;
+      limit?: number;
+    }): Promise<DocumentExportLinkListResponse> => {
+      const q = new URLSearchParams();
+      if (params?.scope) q.set('scope', params.scope);
+      if (params?.tenant_id) q.set('tenant_id', params.tenant_id);
+      if (params?.limit) q.set('limit', String(params.limit));
+      const qs = q.toString();
+      return fetchApi<DocumentExportLinkListResponse>(
+        `/document-exports/links${qs ? `?${qs}` : ''}`,
+      );
+    },
+
+    /** POST /api/document-exports/links/:id/revoke — immediate; no undo. */
+    revokeLink: (id: string): Promise<DocumentExportRevokeResponse> =>
+      fetchApi<DocumentExportRevokeResponse>(
+        `/document-exports/links/${encodeURIComponent(id)}/revoke`,
+        { method: 'POST' },
+      ),
   },
 
   search: {

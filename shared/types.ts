@@ -5183,6 +5183,69 @@ export interface DocumentExportLandingView {
   documents: DocumentExportItem[];
 }
 
+/**
+ * The state of one sent link, as the INTERNAL "Documents you sent" list shows
+ * it. Three states, resolved on the server so the screen and any script agree:
+ *
+ *   revoked  someone pulled it back; every recipient route now 404s
+ *   expired  its 30 days ran out on their own
+ *   active   it still opens
+ *
+ * `revoked` wins over `expired` when both are true: what a reader wants to know
+ * is whether a PERSON stopped it, and "expired" would hide that.
+ */
+export type DocumentExportLinkState = 'active' | 'expired' | 'revoked';
+
+/**
+ * One row of "Documents you sent".
+ *
+ * NO TOKEN. The list is a record of what left the building, not a second way to
+ * reach the files: printing the token here would turn a screen anyone in the
+ * tenant can open into a bearer credential for every export ever sent. The
+ * documents are named instead, which is the question the screen exists for.
+ *
+ * `view_count` / `download_count` are counts of REQUESTS, not of people. The
+ * URL is a bearer credential and may be forwarded, so nothing here can say
+ * WHICH recipient opened it — the UI must say so in words beside the numbers.
+ */
+export interface DocumentExportLinkSummary {
+  id: string;
+  state: DocumentExportLinkState;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  revoked_by_name: string | null;
+  sent_by_id: string;
+  sent_by_name: string | null;
+  sent_by_email: string | null;
+  on_behalf_of: string | null;
+  message: string | null;
+  recipients: string[];
+  /** How many documents the email named — the frozen list's length. */
+  document_count: number;
+  /** Titles, in the order they were sent. Capped; see `documents_truncated`. */
+  document_titles: string[];
+  documents_truncated: boolean;
+  view_count: number;
+  last_viewed_at: string | null;
+  download_count: number;
+  last_downloaded_at: string | null;
+  /** Whether THIS caller may revoke it (their own send, or they are an admin). */
+  can_revoke: boolean;
+}
+
+export interface DocumentExportLinkListResponse {
+  links: DocumentExportLinkSummary[];
+  /** 'tenant' = everything this organization sent; 'mine' = this user's sends. */
+  scope: 'tenant' | 'mine';
+  /** Whether this caller is allowed to ask for the tenant-wide list at all. */
+  can_see_tenant: boolean;
+}
+
+export interface DocumentExportRevokeResponse {
+  link: DocumentExportLinkSummary;
+}
+
 // ===========================================================================
 // Document requests — the composer (migration 0090)
 // ===========================================================================

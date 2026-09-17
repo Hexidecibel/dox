@@ -226,7 +226,7 @@ async function loadUnitPolicy(db: D1Database, tenantId: string): Promise<UnitPol
  */
 const LIMIT_COLUMNS =
   `id, spec_test_id, operator, value_min, value_max, unit, severity, active,
-   supplier_id, document_type_id, product_id, updated_at, version`;
+   supplier_id, document_type_id, product_id, updated_at, version, notes`;
 
 /**
  * Read the tenant's active limits, degrading to the pre-0095 column list if
@@ -335,6 +335,12 @@ export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<
         // silent about it.
         version: row.version == null ? null : Number(row.version),
         review_by: isoDay(row.review_by),
+        // WHY this limit exists, carried only so a supplier watch's rationale
+        // can be frozen beside its numbers (`buildLimitSnapshot`). It is in
+        // LIMIT_COLUMNS rather than one of the fallback attempts because
+        // `notes` has been on spec_limits since 0084 — there is no database
+        // this code runs against that lacks it.
+        notes: row.notes == null ? null : String(row.notes),
       };
     });
 

@@ -166,6 +166,36 @@ function CriticalityChip({ limit }: { limit: ApiSpecLimit }) {
 }
 
 /**
+ * A limit's recorded reason, where there is one — and the ABSENCE of one on a
+ * supplier watch, which is the thing AJ asked to be able to see.
+ *
+ * The column is 0084's `notes` and has been there since the beginning; nothing
+ * in the app has ever read it. Nine limits on the live tenant carry a note
+ * nobody could see, two of them open questions addressed to a person.
+ *
+ * A note on a TENANT-WIDE limit is printed but never chased: the company
+ * standard does not have to justify itself to itself. A supplier-scoped limit
+ * is a decision to hold one vendor tighter than what they certify against, and
+ * "no reason recorded" on one of those is itself the finding.
+ */
+export function LimitRationale({ limit }: { limit: ApiSpecLimit }) {
+  if (limit.notes) {
+    return (
+      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.25 }}>
+        {limit.supplier_id ? 'Why: ' : ''}
+        {limit.notes}
+      </Typography>
+    );
+  }
+  if (!limit.supplier_id) return null;
+  return (
+    <Typography variant="caption" color="warning.main" display="block" sx={{ mt: 0.25 }}>
+      No reason recorded — edit to say why this supplier is held tighter.
+    </Typography>
+  );
+}
+
+/**
  * The limit rows themselves. One renderer for both layouts so the analyte view
  * and the criticality view can never drift into showing different facts about
  * the same limit. Module scope, handlers passed in — a component redefined on
@@ -217,6 +247,7 @@ function LimitTable({
                     <ReviewByCell reviewBy={l.review_by} asOf={new Date().toISOString().slice(0, 10)} />
                   </Box>
                 )}
+                <LimitRationale limit={l} />
               </TableCell>
               {/* Grouped by tier, the chip on every row would repeat the
                   section heading, so it is dropped there instead of shown
@@ -297,6 +328,13 @@ export function SpecLimits() {
   const [limitCriticality, setLimitCriticality] = useState<SpecCriticality>(DEFAULT_SPEC_CRITICALITY);
   // Watch review-by (migration 0109) — offered only once a supplier is chosen.
   const [limitReviewBy, setLimitReviewBy] = useState('');
+  // WHY this limit is written this way (0084's `notes`, asked for at last).
+  // AJ Conner, reviewing v2.7.0-v2.20.0: "tightening past what a supplier
+  // certifies against is a decision purchasing and the supplier will ask
+  // about, and it is hard to defend a year later with no recorded rationale."
+  // It sits beside the review-by because they are one question in two halves:
+  // why, and when to look again.
+  const [limitNotes, setLimitNotes] = useState('');
   const [saving, setSaving] = useState(false);
   // Bumped after every load so the watch panel re-reads what this page changed.
   const [watchReload, setWatchReload] = useState(0);
@@ -483,6 +521,7 @@ export function SpecLimits() {
     setLimitSeverity('alert');
     setLimitCriticality(DEFAULT_SPEC_CRITICALITY);
     setLimitReviewBy('');
+    setLimitNotes('');
     setLimitDialog(true);
   };
 
@@ -498,6 +537,7 @@ export function SpecLimits() {
     setLimitSeverity(l.severity);
     setLimitCriticality(criticalityOf(l));
     setLimitReviewBy(l.review_by || '');
+    setLimitNotes(l.notes || '');
     setLimitDialog(true);
   };
 
@@ -518,6 +558,10 @@ export function SpecLimits() {
         // A review-by only exists on a supplier watch; moving a limit to
         // "all suppliers" clears it in the same request.
         review_by: limitSupplier ? limitReviewBy || null : null,
+        // Sent whatever the scope: a tenant-wide limit may carry a note too,
+        // it simply is not asked for. Nine limits on the live tenant already
+        // hold one written before anything in the app could show it.
+        notes: limitNotes.trim() || null,
       };
       if (editingLimit) {
         await api.specLimits.update(editingLimit.id, payload);
@@ -914,17 +958,50 @@ export function SpecLimits() {
             </Select>
           </FormControl>
 
+          {/* WHY, AND WHEN TO LOOK AGAIN — one box, because they are one
+              question. A supplier-specific limit is a decision to hold this
+              vendor tighter than what they certify against; purchasing and the
+              vendor will ask about it, and in a year nobody will remember. The
+              review-by says when to revisit, the rationale says what to
+              revisit. Neither is offered on a tenant-wide limit: the company
+              standard needs no defence against itself. */}
           {limitSupplier && (
-            <TextField
-              label="Review by (watch)"
-              type="date"
-              value={limitReviewBy}
-              onChange={(e) => setLimitReviewBy(e.target.value)}
-              fullWidth
-              margin="normal"
-              InputLabelProps={{ shrink: true }}
-              helperText="A supplier-specific limit is a watch over the company default. On this date it is flagged for review — it keeps applying until you extend or remove it."
-            />
+            <Box sx={{ mt: 2, p: 1.5, border: 1, borderColor: 'divider', borderRadius: 1 }}>
+              <Typography variant="subtitle2" fontWeight={600}>
+                This supplier is on watch
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                Holding one supplier tighter than the company default is a decision somebody will
+                be asked to defend. Record why, and when to look at it again.
+              </Typography>
+              <TextField
+                label="Why this supplier is held tighter"
+                value={limitNotes}
+                onChange={(e) => setLimitNotes(e.target.value)}
+                fullWidth
+                margin="normal"
+                multiline
+                minRows={2}
+                required
+                error={!limitNotes.trim()}
+                placeholder="e.g. Three coliform excursions in Q2 2026; agreed with the supplier on 14 Aug pending their corrective action."
+                helperText={
+                  limitNotes.trim()
+                    ? 'Shown wherever this watch appears, and frozen onto every result it judges — so a verdict a year from now still says why.'
+                    : 'Needed: a limit tighter than what the supplier certifies against is hard to defend later with no recorded reason.'
+                }
+              />
+              <TextField
+                label="Review by"
+                type="date"
+                value={limitReviewBy}
+                onChange={(e) => setLimitReviewBy(e.target.value)}
+                fullWidth
+                margin="normal"
+                InputLabelProps={{ shrink: true }}
+                helperText="On this date the watch is flagged for review — it keeps applying until you extend or remove it. Nothing lapses on its own."
+              />
+            </Box>
           )}
 
           <FormControl fullWidth margin="normal">
@@ -978,7 +1055,11 @@ export function SpecLimits() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setLimitDialog(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveLimit} disabled={saving || !limitTestId}>
+          <Button
+            variant="contained"
+            onClick={saveLimit}
+            disabled={saving || !limitTestId || (Boolean(limitSupplier) && !limitNotes.trim())}
+          >
             Save
           </Button>
         </DialogActions>

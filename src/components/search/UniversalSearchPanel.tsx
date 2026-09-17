@@ -246,8 +246,12 @@ export function UniversalSearchPanel({
           setSendOpen(false);
           setSelectedDocs([]);
           setIncludedAnyway(new Set());
+          // The link is a bearer credential, so the moment after a send is the
+          // moment somebody notices they typed the wrong address. Point at the
+          // place it can be pulled back before they have to go looking.
           setExportNotice(
-            `Sent ${res.document_count} document${res.document_count === 1 ? '' : 's'} to ${res.recipients.join(', ')}.`,
+            `Sent ${res.document_count} document${res.document_count === 1 ? '' : 's'} to ${res.recipients.join(', ')}. ` +
+              `Sent the wrong thing? Documents you sent (under Documents in the menu) can revoke the link.`,
           );
         })
         .catch((e: unknown) => setExportError(e instanceof Error ? e.message : 'Send failed'))

@@ -1,0 +1,30 @@
+-- Migration 0116: who pulled an export link back.
+--
+-- 0115 shipped document_export_links with a revoked_at kill switch and no way
+-- to press it: the only revoker was the send path itself, when the email it
+-- had just minted a link for failed to go out. A person who mailed a dozen
+-- certificates to the wrong address could not withdraw them without a hand
+-- written UPDATE against production.
+--
+-- AJ Conner, reviewing v2.7.0-v2.20.0: "the link is the credential, so a
+-- forwarded mail hands the set to whoever holds the URL." Revocation is the
+-- only control that answers that, and a control nobody can reach is not one.
+--
+-- WHY A COLUMN AND NOT JUST THE AUDIT ROW. Every revoke writes
+-- document_export.revoked into audit_log, and that stays the authoritative
+-- record. But the "Documents you sent" list has to show, per row and at a
+-- glance, that a named person stopped this link -- and joining every row of a
+-- list screen against a filtered audit scan to render one name is the shape
+-- that makes a screen too slow to open, which is how it ends up unused. The
+-- same argument 0115 used for view_count / download_count.
+--
+-- NULLABLE, no default, and no backfill. NULL means "nobody recorded a
+-- reviser", which is the literal truth for the one existing producer: when a
+-- send fails the link is revoked because the email did not happen, not because
+-- a person decided anything. Stamping the sender's id onto that would assert a
+-- decision that was never made.
+--
+-- Plain-ASCII header (the 0110 D1 import finding). May need renumbering if a
+-- parallel 0116 lands first.
+
+ALTER TABLE document_export_links ADD COLUMN revoked_by TEXT REFERENCES users(id);

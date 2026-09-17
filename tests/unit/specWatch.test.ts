@@ -180,6 +180,53 @@ describe('review-by — the watch still applies after the date, and says so', ()
     expect(snap).toMatchObject({ review_by: '2026-09-01', review_overdue: true, supplier_id: 'sup_andersen', value_max: 1 });
   });
 
+  it("freezes a supplier watch's RATIONALE, and never a tenant-wide note", () => {
+    // AJ Conner, reviewing v2.7.0-v2.20.0: "tightening past what a supplier
+    // certifies against is a decision purchasing and the supplier will ask
+    // about, and it is hard to defend a year later with no recorded
+    // rationale." The note is editable and deletable; the question a year from
+    // now is what it said WHEN THIS RESULT WAS JUDGED.
+    const limits = [
+      limit({ notes: 'Company standard, agreed with QA in 2024.' }),
+      limit({
+        id: 'l_coli_watch',
+        supplier_id: 'sup_andersen',
+        value_max: 1,
+        review_by: '2026-12-01',
+        notes: 'Three coliform excursions in Q2 2026; agreed 14 Aug pending corrective action.',
+      }),
+    ];
+    const watched = checkConfiguredLimits(flat([['Coliform', '5', 'CFU/g']]), TESTS, limits, CTX, {
+      asOf: '2026-09-15',
+    });
+    const snap = JSON.parse(buildLimitSnapshot(watched.verdicts[0], limits)!);
+    expect(snap.rationale).toBe(
+      'Three coliform excursions in Q2 2026; agreed 14 Aug pending corrective action.',
+    );
+
+    // The TENANT-WIDE limit's note is commentary about the company standard,
+    // not a defence of holding one vendor tighter. Copying it onto every
+    // verdict would fill the register with prose no register row is asked.
+    const companyOnly = checkConfiguredLimits(
+      flat([['Coliform', '50', 'CFU/g']]),
+      TESTS,
+      [limits[0]],
+      CTX,
+      { asOf: '2026-09-15' },
+    );
+    expect(
+      JSON.parse(buildLimitSnapshot(companyOnly.verdicts[0], [limits[0]])!).rationale,
+    ).toBeUndefined();
+  });
+
+  it('a supplier limit with no rationale snapshots none rather than an empty string', () => {
+    const limits = [limit({ id: 'l_bare_watch', supplier_id: 'sup_andersen', value_max: 1 })];
+    const r = checkConfiguredLimits(flat([['Coliform', '5', 'CFU/g']]), TESTS, limits, CTX, {
+      asOf: '2026-09-15',
+    });
+    expect(JSON.parse(buildLimitSnapshot(r.verdicts[0], limits)!).rationale).toBeUndefined();
+  });
+
   it('a limit with no review-by carries no watch and snapshots none', () => {
     const limits = [limit()];
     const r = checkConfiguredLimits(flat([['Coliform', '50', 'CFU/g']]), TESTS, limits, CTX, { asOf: '2026-09-15' });

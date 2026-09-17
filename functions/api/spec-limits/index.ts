@@ -40,6 +40,19 @@ export interface LimitBody {
   severity?: string;
   /** Presentation rank (migration 0095). Absent means "leave it on the default". */
   criticality?: string;
+  /**
+   * WHY this limit is written the way it is. The column is 0084's; what is new
+   * is that the UI now asks for it on a supplier-scoped (watch) limit and
+   * shows it wherever the watch is visible.
+   *
+   * NOT REQUIRED BY THE API, and that is deliberate rather than a gap. Two
+   * other producers write limits — `bin/lib/specLimitsImport.js` (AJ's
+   * workbook) and `bin/seed-supplier-watch` — and a 400 here would make an
+   * import of twenty thresholds fail on the one row whose spreadsheet cell was
+   * blank, which is how a limit ends up not being written at all. The UI asks
+   * for it, the read path reports where it is missing (`rationale_missing`),
+   * and the register freezes whatever was there at judgement time.
+   */
   notes?: string | null;
   active?: boolean | number;
   tenant_id?: string;
@@ -341,6 +354,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         criticality: criticality.criticality,
         supplier_id: body.supplier_id || null,
         review_by: reviewBy && 'review_by' in reviewBy ? reviewBy.review_by : null,
+        // The rationale is in the audit row because that is the only copy that
+        // cannot be edited afterwards. Without it, a forensic read of the log
+        // could recover every number a limit was ever given and none of the
+        // reasons — which is the half AJ asked for.
+        notes: body.notes ? sanitizeString(body.notes) : null,
       }),
       getClientIp(context.request)
     );

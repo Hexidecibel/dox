@@ -3826,10 +3826,119 @@ paths:
                     items: { type: string }
                   expires_at: { type: string }
         '400': { description: No recipients, or an address that is not valid }
+        '403': { description: A reader may download an export but may not mail one }
         '413': { description: Over the document or size cap }
         '429': { description: Rate limited }
         '502': { description: The email could not be sent; the link was revoked }
         '503': { description: Email is not configured for this portal }
+
+  /api/document-exports/links:
+    get:
+      tags: [Documents]
+      summary: Documents you sent - the register of export links
+      description: |
+        One row per send (migrations 0115 + 0116): when, by whom, on whose
+        behalf, to which addresses, how many documents with the first few
+        titles, the view and download counts, and a resolved `state` of
+        `active` / `expired` / `revoked` (revoked wins over expired).
+
+        An admin (super_admin / org_admin) sees the organization's sends;
+        anybody else sees their own. `scope` is a request, not a guarantee -
+        the response reports the scope it actually answered in.
+
+        THE TOKEN IS NEVER RETURNED. This is the accountability screen, not a
+        second way to open every export ever sent. Counts are counts of
+        REQUESTS against the link, not of people: the URL is a bearer
+        credential and may be forwarded, so nothing here can say which
+        recipient opened it. Module-gated under `library`.
+      parameters:
+        - name: scope
+          in: query
+          schema: { type: string, enum: [tenant, mine] }
+        - name: tenant_id
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 200, default: 100 }
+      responses:
+        '200':
+          description: The sends, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  links:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        state: { type: string, enum: [active, expired, revoked] }
+                        created_at: { type: string }
+                        expires_at: { type: string }
+                        revoked_at: { type: string, nullable: true }
+                        revoked_by_name: { type: string, nullable: true }
+                        sent_by_id: { type: string }
+                        sent_by_name: { type: string, nullable: true }
+                        sent_by_email: { type: string, nullable: true }
+                        on_behalf_of: { type: string, nullable: true }
+                        message: { type: string, nullable: true }
+                        recipients:
+                          type: array
+                          items: { type: string }
+                        document_count: { type: integer }
+                        document_titles:
+                          type: array
+                          items: { type: string }
+                        documents_truncated: { type: boolean }
+                        view_count: { type: integer }
+                        last_viewed_at: { type: string, nullable: true }
+                        download_count: { type: integer }
+                        last_downloaded_at: { type: string, nullable: true }
+                        can_revoke: { type: boolean }
+                  scope: { type: string, enum: [tenant, mine] }
+                  can_see_tenant: { type: boolean }
+        '400': { description: No organization selected }
+        '403': { description: Another tenant }
+
+  /api/document-exports/links/{id}/revoke:
+    post:
+      tags: [Documents]
+      summary: Revoke a sent export link
+      description: |
+        Shuts the link off immediately and on ALL THREE recipient routes - the
+        landing read, the ZIP and the per-file download - because every one of
+        them resolves its token through `loadUsableExportLink`, which returns
+        null for a revoked row, and all three then answer the same 404 they
+        answer for a token that never existed.
+
+        The sender may revoke their own; an admin may revoke anyone's in the
+        tenant. Another tenant's link answers 404, never 403, so the endpoint
+        cannot be used as a probe. A second press is a no-op that does not move
+        the first revocation's timestamp.
+
+        It cannot recall a file already downloaded, and THERE IS NO EXTEND:
+        lengthening a link after the fact changes the terms of a mail already
+        sent. Send again instead. Audited as `document_export.revoked` with the
+        recipients, the id list and the counts at the moment it was pulled.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The link, now revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  link: { type: object }
+        '403': { description: Not the sender, and not an admin }
+        '404': { description: No such link in this tenant }
 
   /api/document-exports/public/{token}:
     get:
