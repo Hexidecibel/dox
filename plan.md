@@ -46,6 +46,83 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### One file is not one document — detect a supplier packet, propose the split, let a human decide (AJ's packet, 2026-09-16)
+
+**Status:** done — built 2026-09-17 (migrations 0118 packet_split + 0119 request_one_document_per_file). Not yet deployed.
+
+**The problem, measured.** `tests/fixtures/real-corpus/pdf/packet-fdlw-2026.pdf` is
+36 pages holding **25 separate documents** with an index page listing every one.
+dox treats an upload as one document, so it classified as **"Letter of
+Guarantee"** (page 3 answering for all 25) and produced
+`document_expires_on = 2027-01-02` — **a date printed nowhere in the file**,
+being page 3's "valid one year from the date hereof" clause applied to a packet
+holding four real expiries (SQF 2026-04-23, both OU kosher letters 2026-06-30,
+the alouette IFANCA halal 2026-10-31). A packet like that is normal practice.
+
+**THE HARD RULE: NOTHING SPLITS WITHOUT A PERSON.** A wrong split turns one
+wrong document into twenty-five, each with its own type, renewal date and place
+in a compliance file. Detection proposes; a reviewer confirms, adjusts, or says
+"not a packet".
+
+**What shipped.**
+
+1. **Detection — `shared/packetDetect.ts`, pure and unit-tested.** Runs on the
+   per-page text and per-page image measurement the OCR routing pass
+   (`shared/pdfPageOcr.ts`) already computes, so it costs no second read of the
+   file. Signals in order of trust: the file's own **index page** (the
+   supplier's declaration of its own structure, used verbatim); a **repeated
+   closing block** (the sign-off that ends every statement); a **title-shaped
+   opening line** (a closed list of document words, so an eight-page HACCP
+   plan's table headers cannot fire it); a **picture page**; a date line and a
+   text-density jump, both corroborating only. **When the layout signals
+   disagree the answer is COARSE and says so** — multi-signal boundaries only,
+   low confidence band — rather than a precise-looking list invented to look
+   decisive. Declines outright on a non-PDF, under 4 pages, or a multi-lot COA
+   (`produceCoaRecords` splits that better, knowing the lots).
+
+2. **The review card — `src/components/PacketSplitCard.tsx`**, at the TOP of the
+   expanded card, because on a packet every field below it is one contained
+   document's answer wearing the whole file's name. Three actions: **Split into
+   N documents**, **Adjust** (merge adjacent, move a boundary, drop a part),
+   **Not a packet** (remembered on the item). Ignoring all three changes nothing.
+
+3. **The carve — `functions/lib/packet-split.ts`**, using the splitter that
+   already exists (`functions/lib/kinds/coaPageScope.ts#extractRecordPdf`). Every
+   range is carved BEFORE any row is written, so a half-done split is
+   unreachable. One child queue item per part at `processing_status='queued'`,
+   type deliberately NOT inherited, supplier inherited (the one fact a packet
+   genuinely answers), parent left as the source of record and refused by the
+   approve path. Audit rows for the split and the dismissal.
+
+4. **The cheap half — migration 0119.** `request_lines.one_document_per_file`
+   (+ the template mirror): "send each document as its own file", expressible
+   as a flag rather than as prose in `acceptable_formats`, rendered on the
+   supplier portal and in the request detail, in the allow-list projection.
+
+**Measured, detection** (`bin/packet-detect`, no model calls): **26/26 ranges
+exact** against the parts recorded in `corpus.json`; page 36 (a near-blank back
+cover) reported as covered by no part rather than bolted onto the HACCP plan;
+**zero false alarms** across 4 real specification sheets, 40 doctype fixtures and
+the packet's own 8-page HACCP master plan; the COA guard stands down when the
+file is declared a multi-record certificate.
+
+**Measured, after a confirmed split** (`bin/eval-aj-docs --set packet`,
+2026-09-17, `Qwen3.6-35B-A3B-UD-Q8_K_XL`; the detected ranges are byte-identical
+to the recorded ones, so this IS the post-split number): **23/26 part types
+correct** (the recorded 2026-09-16 figure was 22/26), **9/9** where a type in the
+FSQA pack fits, value accuracy 95.5% (84/88) over parts + whole, and **zero
+fabrications on any of the twenty-six parts** — the run's only fabrication is the
+whole-file entry's `2027-01-02`, which is what that entry exists to record. All
+four printed expiry dates land on their own parts. The three type misses are the
+"nothing in the pack fits" family the README already tracks (PHO and Yellow
+Prussiate pulled to "Allergen Statement", Environmental Program to "Sanitation
+Program") — a configuration question, not a split question.
+
+**Deliberately uncertain.** Existing queue items carry no proposal (detection
+runs in the worker; no backfill sweep). Only the index method is measured on a
+real file — the letterhead path reproduces this packet's 26 parts with the index
+page removed, but no other real multi-document PDF has been through it.
+
 ### Documents out of Search — select, ZIP, send on behalf of (AJ 2026-09-14)
 
 **Status:** done — shipped in v2.20.0 (migration 0115, on prod 2026-09-15)

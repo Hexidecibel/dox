@@ -101,6 +101,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       body.acceptable_formats !== undefined ||
       body.criteria !== undefined ||
       body.owner !== undefined ||
+      // Setting "send it as its own file" IS a change to what was asked for
+      // (migration 0119), so it goes through the same draft-only gate as the
+      // wording — the supplier already received the version without it.
+      body.one_document_per_file !== undefined ||
       body.tier !== undefined ||
       body.sort_order !== undefined;
 
@@ -159,7 +163,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     await context.env.DB.prepare(
       `UPDATE request_lines
           SET name = ?, explanation = ?, acceptable_formats = ?, criteria = ?,
-              owner = ?, tier = ?, status = ?, status_note = ?, attention_reason = ?,
+              owner = ?, one_document_per_file = ?, tier = ?, status = ?, status_note = ?, attention_reason = ?,
               accepted_document_id = CASE WHEN ? THEN accepted_document_id ELSE NULL END,
               status_changed_at = CASE WHEN ? THEN datetime('now') ELSE status_changed_at END,
               status_changed_by = CASE WHEN ? THEN ? ELSE status_changed_by END,
@@ -174,6 +178,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           : (body.acceptable_formats || null),
         body.criteria === undefined ? line.criteria : (body.criteria || null),
         body.owner === undefined ? line.owner : (body.owner || null),
+        body.one_document_per_file === undefined
+          ? (line.one_document_per_file ? 1 : 0)
+          : (body.one_document_per_file ? 1 : 0),
         body.tier === undefined ? line.tier : body.tier,
         nextStatus,
         body.status_note === undefined ? line.status_note : (body.status_note || null),

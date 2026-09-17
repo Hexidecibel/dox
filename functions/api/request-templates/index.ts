@@ -162,6 +162,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         acceptable_formats: l.acceptable_formats,
         criteria: l.criteria,
         owner: l.owner,
+        one_document_per_file: !!l.one_document_per_file,
         tier: l.tier,
         sort_order: typeof l.sort_order === 'number' ? l.sort_order : i,
       }));

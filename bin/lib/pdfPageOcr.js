@@ -166,9 +166,13 @@ function ocrPageTexts(pdfBuffer, pageNumbers, log) {
  * no page qualifies, or when poppler/tesseract are absent. A no-op here is
  * always the pre-existing behaviour.
  *
- * Returns `{ applied, pages, text, provenance, ocrPages, ms }`; `provenance` is
- * one row per page (`PageTextProvenance`) and is what a reviewer is eventually
- * shown, so a text page is as provable as an OCR'd one.
+ * Returns `{ applied, pages, text, provenance, ocrPages, ms, facts }`;
+ * `provenance` is one row per page (`PageTextProvenance`) and is what a
+ * reviewer is eventually shown, so a text page is as provable as an OCR'd one.
+ * `facts` is the per-page `{ page, chars, imageCoverage, imageCount }` this
+ * pass routes on, handed back so packet detection can reuse the measurement
+ * rather than read the operator list a second time; null only when the read
+ * failed or there was no per-page text array to read against.
  *
  * NOTE on `text`: it is the pages joined with newlines and NOT re-collapsed,
  * matching what the geometry pass produces rather than the legacy
@@ -178,7 +182,7 @@ function ocrPageTexts(pdfBuffer, pageNumbers, log) {
  */
 async function applyPerPageOcr({ pdfBuffer, factsBuffer, pages, log }) {
   const started = Date.now();
-  const noop = { applied: false, pages, text: null, provenance: null, ocrPages: [], ms: 0 };
+  const noop = { applied: false, pages, text: null, provenance: null, ocrPages: [], ms: 0, facts: null };
   if (!Array.isArray(pages) || pages.length === 0) return noop;
 
   const facts = await collectPageImageFacts(factsBuffer);
@@ -186,9 +190,14 @@ async function applyPerPageOcr({ pdfBuffer, factsBuffer, pages, log }) {
   if (facts.length !== pages.length) return noop;
 
   const withText = facts.map((f) => ({ ...f, chars: String(pages[f.page - 1] || '').trim().length }));
+  // The facts ride out on EVERY return from here on, applied or not. They cost
+  // an operator-list read the caller has already paid for, and packet
+  // detection (shared/packetDetect.ts) wants the same per-page image coverage
+  // this pass routes on — recomputing it there would be the second read of the
+  // same thing, which is how two answers to one question get made.
   const decisions = selectPagesForOcr(withText, MAX_OCR_PAGES_PER_DOCUMENT);
   const wanted = decisions.filter((d) => d.ocr).map((d) => d.page);
-  if (!wanted.length) return noop;
+  if (!wanted.length) return { ...noop, facts: withText };
 
   if (log) log(`  per-page OCR: ${wanted.length} of ${pages.length} page(s) look like an unread image (page ${wanted.join(', ')})`);
   const ocrTexts = ocrPageTexts(pdfBuffer, wanted, log);
@@ -238,6 +247,7 @@ async function applyPerPageOcr({ pdfBuffer, factsBuffer, pages, log }) {
     provenance,
     ocrPages,
     ms,
+    facts: withText,
   };
 }
 

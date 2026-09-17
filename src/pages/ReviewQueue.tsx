@@ -106,6 +106,7 @@ import { EmptyState } from '../components/EmptyState';
 import { helpContent } from '../lib/helpContent';
 import { formatDateTime } from '../utils/format';
 import { IntakeHistoryAlerts, IntakeHistoryChips, ReceivedAgainList } from '../components/IntakeDuplicateNotes';
+import { PacketSplitCard, PacketChip } from '../components/PacketSplitCard';
 import { PageSourceNote, PageSourceTable } from '../components/PageTextSources';
 
 function formatFileSize(bytes: number): string {
@@ -1805,6 +1806,10 @@ export default function ReviewQueue() {
                         from the collapsed list without opening anything. */}
                     <SpecAlertChip verdicts={item.spec_results} missingRequired={item.spec_missing_required} />
                     {item.status === 'pending' && <IntakeHistoryChips history={item.intake_history} />}
+                    {/* A packet is worth spotting from the collapsed list: its
+                        extracted fields are one contained document's answers
+                        wearing the whole file's name. */}
+                    <PacketChip item={item} />
                     {item.template_id && (
                       <Tooltip title={helpContent.review_queue.main.fieldTooltips.templateMatch} arrow>
                         <Chip label="Template matched" color="info" size="small" sx={{ ml: 0.5 }} />
@@ -1868,6 +1873,17 @@ export default function ReviewQueue() {
 
                 {isExpanded && (
                   <Box sx={{ px: 2, pb: 2 }}>
+                    {/* IS THIS ONE FILE OR SEVERAL DOCUMENTS? (migration 0118)
+                        FIRST, above everything: on a packet every field below
+                        is one contained document's answer standing in for all
+                        the others, and a reviewer who reads those first has
+                        already been misled. Rendered only when there is
+                        something to say — a proposal, a dismissal, a split, or
+                        this item being one part of one — so an ordinary upload
+                        costs no request and shows no row. */}
+                    {(item.packet_proposal || item.packet_split_at || item.packet_parent_id) && (
+                      <PacketSplitCard queueId={item.id} onSplit={() => { void loadQueue(); }} />
+                    )}
                     <IntakeHistoryAlerts history={item.intake_history} />
                     {item.source === 'request_link' && (
                       <SupplierClaimPanel
@@ -3194,11 +3210,13 @@ export default function ReviewQueue() {
                       <CardActions sx={{ px: 0, pt: 0 }}>
                         <Tooltip
                           title={
-                            !isSupplierVerified(item.id)
-                              ? 'Verify the supplier before approving.'
-                              : arrivalChoicePending(item.id)
-                                ? 'Choose what to do with the supplier request above.'
-                                : ''
+                            item.packet_split_at
+                              ? 'This file was split into separate documents. Approve the parts — this one stays as the source file.'
+                              : !isSupplierVerified(item.id)
+                                ? 'Verify the supplier before approving.'
+                                : arrivalChoicePending(item.id)
+                                  ? 'Choose what to do with the supplier request above.'
+                                  : ''
                           }
                           arrow
                         >
@@ -3209,7 +3227,7 @@ export default function ReviewQueue() {
                               color="success"
                               size="small"
                               onClick={(e) => { e.stopPropagation(); handleApprove(item.id); }}
-                              disabled={isActioning || isProcessing || !isSupplierVerified(item.id) || arrivalChoicePending(item.id)}
+                              disabled={isActioning || isProcessing || !isSupplierVerified(item.id) || arrivalChoicePending(item.id) || !!item.packet_split_at}
                               startIcon={isActioning ? <CircularProgress size={16} color="inherit" /> : <CheckIcon />}
                             >
                               {approveLabel(arrivalDrafts[item.id])}

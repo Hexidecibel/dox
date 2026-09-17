@@ -122,6 +122,9 @@ import type {
   RenewalDecisionPayload,
   QueueArrivalDecisionInput,
   QueueArrivalDecisionOutcome,
+  QueuePacketView,
+  QueuePacketChild,
+  PacketRangeInput,
 } from '../../shared/types';
 import { AUTH_TOKEN_KEY } from './types';
 
@@ -2522,6 +2525,31 @@ export const api = {
       fetchApi<{ success: boolean }>(`/queue/${id}/results`, { method: 'PUT', body: JSON.stringify(data) }),
     reprocess: (id: string) =>
       fetchApi<{ success: boolean }>(`/queue/${id}/reprocess`, { method: 'POST' }),
+
+    /**
+     * Is this one file, or several documents in one file? (migration 0118)
+     *
+     * `packet` READS the proposal the extraction worker stored plus whatever a
+     * person has since decided. `packetSplit` and `packetDismiss` are the two
+     * answers. There is no call that splits without a person, by design: a
+     * wrong split turns one wrong document into twenty-five.
+     */
+    packet: (id: string) => fetchApi<QueuePacketView>(`/queue/${id}/packet`),
+    /**
+     * Confirm the split. Pass nothing to take the proposal exactly as it
+     * stands; pass `parts` to take the ranges the reviewer edited. Same
+     * endpoint either way — what separates them is the `method` the server
+     * records ('adjusted' when they differ), which is the only feedback the
+     * detector ever gets.
+     */
+    packetSplit: (id: string, parts?: PacketRangeInput[]) =>
+      fetchApi<{ parent_id: string; method: string; children: QueuePacketChild[] }>(
+        `/queue/${id}/packet/split`,
+        { method: 'POST', body: JSON.stringify(parts ? { parts } : {}) },
+      ),
+    /** "Not a packet." Remembered on the item, so the card stops asking. */
+    packetDismiss: (id: string) =>
+      fetchApi<{ dismissed: boolean }>(`/queue/${id}/packet/dismiss`, { method: 'POST' }),
   },
 
   /**

@@ -324,6 +324,23 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       throw new BadRequestError(`Queue item is already ${item.status}`);
     }
 
+    // A SPLIT PARENT IS A CONTAINER AND IS NEVER APPROVED (migration 0118).
+    //
+    // Approving it would produce exactly the document this whole feature
+    // exists to prevent: one record typed from one page of a file holding
+    // twenty-five documents, carrying one renewal date for all of them. The
+    // parts ARE the documents; the parent is only the envelope they arrived
+    // in, and its file stays in R2 as the source of record.
+    //
+    // REJECT is deliberately still allowed. Once the parts are handled the
+    // container has to be clearable, and rejecting it touches no child —
+    // twenty-five documents are twenty-five decisions.
+    if ((item as { packet_split_at?: string | null }).packet_split_at && body.status === 'approved') {
+      throw new BadRequestError(
+        'This file was split into separate documents. Approve the parts — the original stays as the source file.',
+      );
+    }
+
     // Combined approve-and-decide. Everything the decision can fail on that
     // does not depend on the document is checked NOW, before the queue half
     // writes anything, so a stale line id or a cancelled request is a plain

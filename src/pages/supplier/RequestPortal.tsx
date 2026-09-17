@@ -661,6 +661,15 @@ function ItemCard({
               <strong>We will check:</strong> {item.criteria}
             </Typography>
           )}
+          {/* Migration 0119. Said plainly to the person uploading, because the
+              expensive alternative is us detecting a 36-page packet afterwards
+              and asking one of our own people to carve it into 25 documents. */}
+          {item.one_document_per_file && (
+            <Typography variant="body2" sx={{ mt: 0.5, color: '#555' }}>
+              <strong>Send this on its own:</strong> one document per file, please — not combined
+              with other documents into a single PDF.
+            </Typography>
+          )}
           {checked && item.also_covers.length > 0 && (
             <Typography variant="caption" sx={{ mt: 1, display: 'block', color: ACCENT }}>
               Ticking this also ticked {item.also_covers.length} other item

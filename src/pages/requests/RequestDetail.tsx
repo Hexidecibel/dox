@@ -797,6 +797,12 @@ export function RequestDetail() {
                         <strong>We check:</strong> {line.criteria}
                       </Typography>
                     )}
+                    {line.one_document_per_file && (
+                      <Typography variant="body2" color="text.secondary">
+                        <strong>Asked for on its own:</strong> one document per file, not combined
+                        into a packet
+                      </Typography>
+                    )}
                     {line.owner && (
                       <Typography variant="caption" color="text.secondary" display="block">
                         Owner: {line.owner}
@@ -1037,6 +1043,11 @@ export function RequestDetail() {
                   {item.criteria && (
                     <Typography variant="caption" color="text.secondary" display="block">
                       Checked against: {item.criteria}
+                    </Typography>
+                  )}
+                  {item.one_document_per_file && (
+                    <Typography variant="caption" color="text.secondary" display="block">
+                      Asked for on its own, not combined into a packet
                     </Typography>
                   )}
                 </Box>

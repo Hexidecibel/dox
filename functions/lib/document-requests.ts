@@ -128,6 +128,8 @@ export interface ResolvedLine {
   acceptable_formats: string | null;
   criteria: string | null;
   owner: string | null;
+  /** "Send it as its own file, not combined with anything else" (migration 0119). */
+  one_document_per_file: boolean;
   tier: SupplierRequirementTier;
   sort_order: number;
 }
@@ -264,6 +266,9 @@ export async function resolveLines(
       acceptable_formats: clean(entry.acceptable_formats),
       criteria: clean(entry.criteria),
       owner: clean(entry.owner),
+      // Absent means NOT asked. There is no third state: either the ask said
+      // "one document per file" or it did not.
+      one_document_per_file: entry.one_document_per_file === true,
       tier: tierRaw,
       sort_order:
         typeof entry.sort_order === 'number' && Number.isFinite(entry.sort_order)
@@ -291,9 +296,9 @@ function lineInsertStatements(
       .prepare(
         `INSERT INTO request_lines
            (id, tenant_id, request_id, line_kind, requirement_id, name, explanation,
-            acceptable_formats, criteria, owner, tier, status, status_note,
+            acceptable_formats, criteria, owner, one_document_per_file, tier, status, status_note,
             attention_reason, accepted_document_id, sort_order, created_by, updated_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         generateId(),
@@ -306,6 +311,7 @@ function lineInsertStatements(
         l.acceptable_formats,
         l.criteria,
         l.owner,
+        l.one_document_per_file ? 1 : 0,
         l.tier,
         carried?.status ?? 'not_started',
         carried?.note ?? null,
@@ -881,6 +887,7 @@ export async function amendRequest(
           acceptable_formats: l.acceptable_formats,
           criteria: l.criteria,
           owner: l.owner,
+          one_document_per_file: !!l.one_document_per_file,
           tier: l.tier,
           sort_order: typeof l.sort_order === 'number' ? l.sort_order : i,
         }))
@@ -1033,6 +1040,7 @@ export async function reissueRequest(
     acceptable_formats: l.acceptable_formats,
     criteria: l.criteria,
     owner: l.owner,
+    one_document_per_file: !!l.one_document_per_file,
     tier: l.tier,
     sort_order: typeof l.sort_order === 'number' ? l.sort_order : i,
   }));
@@ -1081,6 +1089,7 @@ export function templateLinesToResolved(rows: RequestTemplateLineRow[]): Resolve
     acceptable_formats: l.acceptable_formats,
     criteria: l.criteria,
     owner: l.owner,
+    one_document_per_file: !!l.one_document_per_file,
     tier: l.tier,
     sort_order: typeof l.sort_order === 'number' ? l.sort_order : i,
   }));
@@ -1099,8 +1108,8 @@ export function templateLineInsertStatements(
       .prepare(
         `INSERT INTO request_template_lines
            (id, tenant_id, template_id, line_kind, requirement_id, name, explanation,
-            acceptable_formats, criteria, owner, tier, sort_order, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            acceptable_formats, criteria, owner, one_document_per_file, tier, sort_order, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         generateId(),
@@ -1113,6 +1122,7 @@ export function templateLineInsertStatements(
         l.acceptable_formats,
         l.criteria,
         l.owner,
+        l.one_document_per_file ? 1 : 0,
         l.tier,
         l.sort_order,
         userId,
@@ -1240,6 +1250,7 @@ function attentionReasonFor(l: RequestLineRow): string | null {
   if (criteria) parts.push(`The replacement needs to show: ${criteria}`);
   const formats = clean(l.acceptable_formats);
   if (formats) parts.push(`Acceptable formats: ${formats}`);
+  if (l.one_document_per_file) parts.push('Please send it as its own file, not combined with other documents.');
   if (parts.length === 1) {
     parts.push(
       'Please send a current version. If you are not sure what changed, reply to the message that brought you here.',
@@ -1285,6 +1296,9 @@ export function buildSupplierRequestView(input: SupplierViewInputs): SupplierReq
       explanation: l.explanation,
       acceptable_formats: l.acceptable_formats,
       criteria: l.criteria,
+      // IN the allow-list deliberately: it is an instruction TO the supplier,
+      // and asking for something without saying so is not an ask.
+      one_document_per_file: !!l.one_document_per_file,
       tier: l.tier,
       status: l.status,
       attention_reason: attentionReasonFor(l),

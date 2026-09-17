@@ -324,6 +324,9 @@ describe('the response is an allow-list', () => {
       'explanation',
       'acceptable_formats',
       'criteria',
+      // Migration 0119. An instruction TO the supplier, so withholding it
+      // would be asking for something and not saying so.
+      'one_document_per_file',
       'tier',
       'status',
       'attention_reason',

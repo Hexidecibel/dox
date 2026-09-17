@@ -29,6 +29,58 @@ export type {
 } from './unmatchedAnalytes';
 import type { UnmatchedAnalyteGroup } from './unmatchedAnalytes';
 
+// Packet detection. Defined in shared/packetDetect.ts (dependency-free, so it
+// can be bundled for the extraction worker) and re-exported here with the rest
+// of the API shapes.
+export type {
+  PacketProposal,
+  PacketPart,
+  PacketMethod,
+  PacketDecline,
+  PacketConfidenceBand,
+  PacketRangeInput,
+} from './packetDetect';
+import type { PacketProposal } from './packetDetect';
+
+/** One part of a file a reviewer already split (migration 0118). */
+export interface QueuePacketChild {
+  id: string;
+  file_name: string;
+  /** The 1-based `[from, to]` page range this part was carved from. */
+  pages: [number, number] | null;
+  part_index: number | null;
+  /** The packet index's own words for this part, when it had an index. */
+  label: string | null;
+  status: string;
+  processing_status: string;
+  document_type_id: string | null;
+  document_type_name: string | null;
+}
+
+/**
+ * Everything the review card needs to ask "is this one file or several?" and to
+ * show what was decided. GET /api/queue/:id/packet.
+ *
+ * `proposal` non-null with both stamps null is the only state that ASKS. A
+ * dismissal and a split are both answers, and the card shows what happened
+ * rather than asking again.
+ */
+export interface QueuePacketView {
+  queue_id: string;
+  proposal: PacketProposal | null;
+  dismissed_at: string | null;
+  split_at: string | null;
+  split_method: string | null;
+  part_count: number | null;
+  /** Set when THIS item is one part of a split file. */
+  parent: { id: string; file_name: string } | null;
+  part_of_pages: [number, number] | null;
+  part_index: number | null;
+  part_label: string | null;
+  /** The parts this item was split into. Empty unless `split_at` is set. */
+  children: QueuePacketChild[];
+}
+
 /** One spelling a person has said is not a test (migration 0114). */
 export interface ApiIgnoredSpelling {
   id: string;
@@ -1885,6 +1937,45 @@ export interface ProcessingQueueItem {
    * why a page that is a pasted certificate image needs its own decision.
    */
   text_page_sources: string | null;
+  /**
+   * PACKET DETECTION (migration 0118). JSON-stringified `PacketProposal` —
+   * "this one file looks like N documents, and here is where each one starts".
+   *
+   * NULL means nothing was detected, which is what every ordinary
+   * single-document upload says and what every row extracted before the
+   * migration says. A proposal is only ever a PROPOSAL: nothing splits until a
+   * person confirms, because a wrong split turns one wrong document into
+   * twenty-five. See shared/packetDetect.ts.
+   */
+  packet_proposal?: string | null;
+  /** When a reviewer answered "not a packet". The card then stops asking. */
+  packet_dismissed_at?: string | null;
+  packet_dismissed_by?: string | null;
+  /**
+   * When this item was split into parts. A row with this set is a CONTAINER:
+   * its parts are the documents, and the approve endpoint refuses it.
+   */
+  packet_split_at?: string | null;
+  packet_split_by?: string | null;
+  /**
+   * Where the confirmed ranges came from — the detector's own method
+   * ('index' / 'letterhead' / 'heuristic') or 'adjusted' when the reviewer
+   * edited them. The only feedback the detector gets.
+   */
+  packet_split_method?: string | null;
+  packet_part_count?: number | null;
+  /** Set on a CHILD: the container it was carved out of. */
+  packet_parent_id?: string | null;
+  /** Set on a CHILD: JSON `[from, to]`, the 1-based page range it holds. */
+  packet_pages?: string | null;
+  packet_part_index?: number | null;
+  /**
+   * Set on a CHILD: the packet index's own words for this part. A HINT for the
+   * reviewer and never an input to classification — the client packet's index
+   * calls page 6 a "Global Standard for Food Safety Certificate" and the page
+   * is an SQF certificate from NSF.
+   */
+  packet_part_label?: string | null;
   // Phase 3: per-field pre-fill hints derived from past reviewer picks.
   // JSON-stringified Record<field_key, LearnedFieldHint>; null when no signal.
   learned_field_hints: string | null;
@@ -5323,6 +5414,18 @@ export interface RequestLineRow {
   criteria: string | null;
   owner: string | null;
   tier: SupplierRequirementTier;
+  /**
+   * "Send each document as its own file" (migration 0119). The cheap half of
+   * the packet problem: a supplier who combines twenty-five documents into one
+   * PDF is answering an ask that did not say not to.
+   *
+   * A FLAG rather than a sentence in `acceptable_formats`, because prose is
+   * unqueryable, gets worded differently by every author and cannot be counted
+   * later. False is the default and is not a neutral choice — a demand in every
+   * issued request that nobody at this end decided to make is noise on the
+   * lines where a single document was what was asked for anyway.
+   */
+  one_document_per_file: boolean;
   status: RequestLineStatus;
   /**
    * INTERNAL. Where a reviewer writes "third time they've sent the 2023 cert,
@@ -5598,6 +5701,13 @@ export interface SupplierRequestItem {
   explanation: string | null;
   acceptable_formats: string | null;
   criteria: string | null;
+  /**
+   * "Send this as its own file, not combined with anything else" (migration
+   * 0119). In the allow-list deliberately: it is an instruction TO the
+   * supplier, and withholding it would be asking for something and not saying
+   * so.
+   */
+  one_document_per_file: boolean;
   /** 'required' | 'recommended' — what we expect, which they may fairly know. */
   tier: SupplierRequirementTier;
   /**
@@ -5875,6 +5985,8 @@ export interface RequestLineInput {
   acceptable_formats?: string | null;
   criteria?: string | null;
   owner?: string | null;
+  /** "Send it as its own file." Defaults to false (migration 0119). */
+  one_document_per_file?: boolean;
   tier?: SupplierRequirementTier;
   sort_order?: number;
 }
@@ -5948,6 +6060,12 @@ export interface RequestTemplateLineRow {
   acceptable_formats: string | null;
   criteria: string | null;
   owner: string | null;
+  /**
+   * Mirrored from request_lines (migration 0119): a template that cannot carry
+   * the instruction drops it silently every time a request is drafted from one,
+   * which is the path most requests come through.
+   */
+  one_document_per_file: boolean;
   tier: SupplierRequirementTier;
   sort_order: number;
   created_at: string;
@@ -6005,6 +6123,7 @@ export interface UpdateRequestLineRequest {
   acceptable_formats?: string | null;
   criteria?: string | null;
   owner?: string | null;
+  one_document_per_file?: boolean;
   tier?: SupplierRequirementTier;
   sort_order?: number;
 }

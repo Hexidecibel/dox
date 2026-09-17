@@ -120,8 +120,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         context.env.DB.prepare(
           `INSERT INTO request_lines
              (id, tenant_id, request_id, line_kind, requirement_id, name, explanation,
-              acceptable_formats, criteria, owner, tier, sort_order, created_by, updated_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              acceptable_formats, criteria, owner, one_document_per_file, tier, sort_order, created_by, updated_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           generateId(),
           tenantId,
@@ -133,6 +133,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           l.acceptable_formats,
           l.criteria,
           l.owner,
+          l.one_document_per_file ? 1 : 0,
           l.tier,
           base + i,
           user.id,

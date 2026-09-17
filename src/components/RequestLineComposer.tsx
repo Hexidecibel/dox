@@ -42,6 +42,7 @@ import {
   Chip,
   Collapse,
   Divider,
+  FormControlLabel,
   IconButton,
   InputAdornment,
   MenuItem,
@@ -91,6 +92,12 @@ export interface RequestLineDraft {
   acceptable_formats: string;
   criteria: string;
   owner: string;
+  /**
+   * "Send this as its own file" (migration 0119). The cheap half of the packet
+   * problem: a supplier who combines twenty-five documents into one PDF is
+   * answering an ask that did not say not to.
+   */
+  one_document_per_file: boolean;
   tier: SupplierRequirementTier;
   /** True when the gap report put this line here rather than a person. */
   seeded?: boolean;
@@ -112,6 +119,7 @@ export function draftFromRequirement(
     acceptable_formats: '',
     criteria: '',
     owner: '',
+    one_document_per_file: false,
     tier: 'required',
     ...extras,
   };
@@ -129,6 +137,7 @@ export function draftFromFreeText(name: string): RequestLineDraft {
     acceptable_formats: '',
     criteria: '',
     owner: '',
+    one_document_per_file: false,
     tier: 'required',
   };
 }
@@ -162,6 +171,7 @@ export function draftsToLineInputs(drafts: RequestLineDraft[]): RequestLineInput
     acceptable_formats: d.acceptable_formats.trim() || null,
     criteria: d.criteria.trim() || null,
     owner: d.owner.trim() || null,
+    one_document_per_file: d.one_document_per_file,
     tier: d.tier,
     sort_order: i,
   }));
@@ -192,6 +202,7 @@ export interface ExistingLine {
   acceptable_formats: string | null;
   criteria: string | null;
   owner: string | null;
+  one_document_per_file: boolean;
   tier: SupplierRequirementTier;
   sort_order: number;
 }
@@ -241,6 +252,8 @@ export function diffLineDrafts(
       patch.acceptable_formats = input.acceptable_formats ?? null;
     if ((input.criteria ?? null) !== current.criteria) patch.criteria = input.criteria ?? null;
     if ((input.owner ?? null) !== current.owner) patch.owner = input.owner ?? null;
+    if ((input.one_document_per_file ?? false) !== !!current.one_document_per_file)
+      patch.one_document_per_file = input.one_document_per_file ?? false;
     if (input.tier !== current.tier) patch.tier = input.tier;
     if (i !== current.sort_order) patch.sort_order = i;
     if (Object.keys(patch).length > 0) update.push({ id: current.id, patch });
@@ -261,6 +274,7 @@ export function draftsFromLines(lines: ExistingLine[]): RequestLineDraft[] {
     acceptable_formats: l.acceptable_formats ?? '',
     criteria: l.criteria ?? '',
     owner: l.owner ?? '',
+    one_document_per_file: !!l.one_document_per_file,
     tier: l.tier,
   }));
 }
@@ -679,6 +693,36 @@ export function RequestLineComposer({
                         disabled={disabled}
                         onChange={(e) => update(draft.key, { owner: e.target.value })}
                         helperText="Who on their side is expected to produce it. Internal note — the supplier does not see this."
+                      />
+                      {/* THE CHEAP HALF OF THE PACKET PROBLEM (migration 0119).
+                          A supplier who sends twenty-five documents in one PDF
+                          is answering an ask that did not say not to — and the
+                          expensive half is detecting it afterwards and asking a
+                          human to carve it up. A checkbox rather than a
+                          sentence in "Acceptable formats" so the ask is
+                          countable: which of our requests said this, and did
+                          they honour it. */}
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={draft.one_document_per_file}
+                            disabled={disabled}
+                            onChange={(e) =>
+                              update(draft.key, { one_document_per_file: e.target.checked })
+                            }
+                          />
+                        }
+                        label={
+                          <Box>
+                            <Typography variant="body2">One document per file</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              The supplier is told to send this on its own, not combined into a packet with
+                              other documents. Leave it off where a single document is obviously what was asked for.
+                            </Typography>
+                          </Box>
+                        }
+                        sx={{ alignItems: 'flex-start', ml: 0 }}
                       />
                     </Stack>
                   </Collapse>

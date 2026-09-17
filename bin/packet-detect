@@ -1,0 +1,303 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/packet-detect — does shared/packetDetect.ts find the documents inside a
+ * file, and does it stay quiet on a file that holds one?
+ *
+ * WHY A HARNESS RATHER THAN AN EYEBALL. A splitter is judged on two numbers
+ * that pull against each other: how many of the real documents it finds, and
+ * how often it claims a split on a file that has none. Tuning one by eye moves
+ * the other silently. This runs both halves over the same corpora the
+ * extraction numbers come from and prints them together.
+ *
+ *   accuracy      the 36-page client packet against the page ranges recorded in
+ *                 tests/fixtures/real-corpus/corpus.json, range by range:
+ *                 EXACT / off-by-one / merged / split / missed
+ *   false alarms  every single-document file we have — the four real
+ *                 specification sheets, the forty synthetic doctype fixtures,
+ *                 and (the one that matters) the packet's OWN eight-page HACCP
+ *                 master plan, which is one document with a repeated header on
+ *                 every page and is exactly the shape a naive detector breaks
+ *
+ * NO MODEL CALLS. This runs the production TEXT path (bin/lib/corpusText.js,
+ * the same module bin/eval-aj-docs and bin/measure-doctype-extraction use) and
+ * then the pure detector. Nothing is classified and nothing is extracted, so it
+ * is safe to run while the fleet is asleep and cheap to run in a loop.
+ *
+ * READ-ONLY. No dox API, no D1, no R2, no writes except --emit-fixture.
+ *
+ * Usage:
+ *   bin/packet-detect                          # the corpora, both halves
+ *   bin/packet-detect <file.pdf> [...]         # just these files
+ *   bin/packet-detect --parts                  # also every carved packet part,
+ *                                              #   as negatives
+ *   bin/packet-detect --dir <path>             # every PDF in a directory
+ *   bin/packet-detect --emit-fixture <path>    # write the page-facts fixture
+ *                                              #   tests/unit/packetDetect uses
+ *   bin/packet-detect --json
+ *
+ * Exit: 0 everything as expected   1 a miss or a false alarm   2 bad usage
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+const ROOT = path.resolve(__dirname, '..');
+const REAL = path.join(ROOT, 'tests/fixtures/real-corpus');
+const DOCTYPE_PDF = path.join(ROOT, 'tests/fixtures/doctype-corpus/pdf');
+const BUILD = path.join(REAL, '.build');
+const PACKET = path.join(REAL, 'pdf/packet-fdlw-2026.pdf');
+
+const { extractPdfText } = require('./lib/corpusText');
+const { collectPageImageFacts } = require('./lib/pdfPageOcr');
+
+const C = process.stdout.isTTY
+  ? { g: '\x1b[32m', r: '\x1b[31m', y: '\x1b[33m', c: '\x1b[36m', d: '\x1b[2m', b: '\x1b[1m', x: '\x1b[0m' }
+  : { g: '', r: '', y: '', c: '', d: '', b: '', x: '' };
+
+/** esbuild one TS entrypoint to CJS, so this can never measure a stale copy. */
+function bundle(entry, name) {
+  fs.mkdirSync(BUILD, { recursive: true });
+  const out = path.join(BUILD, name);
+  execFileSync('npx', [
+    'esbuild', path.join(ROOT, entry),
+    '--bundle', '--platform=node', '--format=cjs', '--target=node20', `--outfile=${out}`,
+  ], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  return require(out);
+}
+
+/** `{ pages, facts }` for one PDF, from the production text path. */
+async function readPages(pdf) {
+  const res = await extractPdfText(pdf);
+  let facts = res.pageFacts;
+  if (!facts || facts.length !== res.pages.length) {
+    // The per-page pass declines on a document that went to OCR whole. Read the
+    // operator list directly rather than pretend every page is text-shaped.
+    const buf = fs.readFileSync(pdf);
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    const got = await collectPageImageFacts(ab);
+    facts = got.length === res.pages.length ? got : null;
+  }
+  return {
+    route: res.route,
+    pages: res.pages.map((text, i) => ({
+      page: i + 1,
+      text,
+      imageCoverage: facts && facts[i] ? facts[i].imageCoverage : 0,
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Scoring the packet against its recorded ground truth
+// ---------------------------------------------------------------------------
+
+/** The recorded parts, as [from, to] ranges. */
+function truthRanges() {
+  const corpus = JSON.parse(fs.readFileSync(path.join(REAL, 'corpus.json'), 'utf8'));
+  return corpus.documents
+    .filter((d) => d.part_of === 'packet-fdlw-2026' && Array.isArray(d.pages) && d.pages.length)
+    .map((d) => ({ id: d.id, from: Math.min(...d.pages), to: Math.max(...d.pages) }))
+    .sort((a, b) => a.from - b.from);
+}
+
+/**
+ * Compare proposed ranges with recorded ones. Every recorded range gets exactly
+ * one verdict, and every proposed range that answers to no recorded one is
+ * counted as a SPURIOUS part — a reviewer has to deal with both kinds.
+ */
+function scoreRanges(proposed, truth) {
+  const used = new Set();
+  const rows = [];
+  for (const t of truth) {
+    let verdict = 'MISSED';
+    let match = null;
+    // exact
+    let i = proposed.findIndex((p, idx) => !used.has(idx) && p.pages[0] === t.from && p.pages[1] === t.to);
+    if (i >= 0) { verdict = 'exact'; match = proposed[i]; used.add(i); }
+    if (!match) {
+      // off by one at either edge
+      i = proposed.findIndex((p, idx) => !used.has(idx)
+        && Math.abs(p.pages[0] - t.from) <= 1 && Math.abs(p.pages[1] - t.to) <= 1);
+      if (i >= 0) { verdict = 'off-by-one'; match = proposed[i]; used.add(i); }
+    }
+    if (!match) {
+      // a proposed range that swallows this one along with something else
+      i = proposed.findIndex((p, idx) => !used.has(idx) && p.pages[0] <= t.from && p.pages[1] >= t.to);
+      if (i >= 0) { verdict = 'merged'; match = proposed[i]; used.add(i); }
+    }
+    if (!match) {
+      // several proposed ranges inside this one
+      const inside = proposed.filter((p, idx) => !used.has(idx) && p.pages[0] >= t.from && p.pages[1] <= t.to);
+      if (inside.length > 1) {
+        verdict = 'split';
+        match = inside[0];
+        for (const p of inside) used.add(proposed.indexOf(p));
+      }
+    }
+    rows.push({ truth: t, verdict, match });
+  }
+  const spurious = proposed.filter((_, idx) => !used.has(idx));
+  return { rows, spurious };
+}
+
+// ---------------------------------------------------------------------------
+
+function parseArgs(argv) {
+  const o = { files: [], dirs: [], json: false, parts: false, emit: null, help: false };
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
+      case '--json': o.json = true; break;
+      case '--parts': o.parts = true; break;
+      case '--dir': o.dirs.push(argv[++i]); break;
+      case '--emit-fixture': o.emit = argv[++i]; break;
+      case '-h': case '--help': o.help = true; break;
+      default:
+        if (argv[i].startsWith('--')) { console.error(`unknown flag: ${argv[i]}`); process.exit(2); }
+        o.files.push(argv[i]);
+    }
+  }
+  return o;
+}
+
+function listPdfs(dir) {
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.pdf')).sort().map((f) => path.join(dir, f));
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(2, 43).join('\n').replace(/^ ?\*\/?/gm, ''));
+    return 0;
+  }
+  const { detectPacket, formatPages } = bundle('shared/packetDetect.ts', 'packetDetect.cjs');
+
+  const explicit = [...opts.files, ...opts.dirs.flatMap(listPdfs)];
+  let bad = 0;
+
+  // ------------------------------------------------------------------ files
+  if (explicit.length) {
+    for (const pdf of explicit) {
+      const { pages, route } = await readPages(pdf);
+      const r = detectPacket({ isPdf: pdf.toLowerCase().endsWith('.pdf'), pages });
+      renderOne(path.basename(pdf), route, r, formatPages);
+    }
+    return 0;
+  }
+
+  // ------------------------------------------------------- the client packet
+  console.log(`${C.b}THE PACKET${C.x} ${C.d}tests/fixtures/real-corpus/pdf/packet-fdlw-2026.pdf${C.x}`);
+  const packet = await readPages(PACKET);
+  const proposal = detectPacket({ isPdf: true, pages: packet.pages });
+  renderOne('packet-fdlw-2026.pdf', packet.route, proposal, formatPages);
+
+  if (opts.emit) {
+    // The fixture the unit test runs on: enough of each page to reach every
+    // signal, and the true character count beside it so the density signal is
+    // not measured against a truncated page.
+    const CAP = 2000;
+    const out = {
+      _readme:
+        'GENERATED by bin/packet-detect --emit-fixture. Per-page facts for the real 36-page ' +
+        'client packet, as the production text path produces them. Each page text is capped at ' +
+        `${CAP} characters (detection only ever reads the head of a page); chars is the TRUE count.`,
+      source: 'tests/fixtures/real-corpus/pdf/packet-fdlw-2026.pdf',
+      route: packet.route,
+      pages: packet.pages.map((p) => ({
+        page: p.page,
+        chars: String(p.text || '').trim().length,
+        imageCoverage: Math.round(p.imageCoverage * 1000) / 1000,
+        text: String(p.text || '').slice(0, CAP),
+      })),
+    };
+    fs.mkdirSync(path.dirname(path.resolve(ROOT, opts.emit)), { recursive: true });
+    fs.writeFileSync(path.resolve(ROOT, opts.emit), `${JSON.stringify(out, null, 1)}\n`);
+    console.log(`${C.d}fixture written: ${opts.emit}${C.x}`);
+  }
+
+  const truth = truthRanges();
+  const { rows, spurious } = scoreRanges(proposal.parts, truth);
+  const tally = { exact: 0, 'off-by-one': 0, merged: 0, split: 0, MISSED: 0 };
+  console.log(`\n${C.b}RANGE BY RANGE${C.x} ${C.d}against the ${truth.length} parts recorded in corpus.json${C.x}`);
+  for (const row of rows) {
+    tally[row.verdict]++;
+    const got = row.match ? `${row.match.pages[0]}-${row.match.pages[1]}` : '—';
+    const col = row.verdict === 'exact' ? C.g : row.verdict === 'off-by-one' ? C.y : C.r;
+    console.log(`  ${col}${row.verdict.padEnd(11)}${C.x} ${row.truth.id.padEnd(34)} ${C.d}truth ${row.truth.from}-${row.truth.to}, proposed ${got}${C.x}`);
+  }
+  if (spurious.length) {
+    for (const p of spurious) console.log(`  ${C.r}${'spurious'.padEnd(11)}${C.x} ${''.padEnd(34)} ${C.d}proposed ${p.pages[0]}-${p.pages[1]} answers to no recorded part${C.x}`);
+  }
+  console.log(`\n  ${C.b}${tally.exact}/${truth.length}${C.x} exact` +
+    `${tally['off-by-one'] ? `, ${tally['off-by-one']} off by one` : ''}` +
+    `${tally.merged ? `, ${C.r}${tally.merged} merged${C.x}` : ''}` +
+    `${tally.split ? `, ${C.r}${tally.split} over-split${C.x}` : ''}` +
+    `${tally.MISSED ? `, ${C.r}${tally.MISSED} missed${C.x}` : ''}` +
+    `${spurious.length ? `, ${C.r}${spurious.length} spurious${C.x}` : ''}`);
+  if (tally.MISSED || tally.merged || spurious.length) bad++;
+
+  // ---------------------------------------------------------- false alarms
+  console.log(`\n${C.b}FALSE ALARMS${C.x} ${C.d}every file we have that holds ONE document — any 'PACKET' here is a defect${C.x}`);
+  const singles = [
+    ...listPdfs(path.join(REAL, 'pdf')).filter((f) => !f.includes('packet-fdlw')),
+    ...listPdfs(DOCTYPE_PDF),
+  ];
+  let alarms = 0;
+  for (const pdf of singles) {
+    const { pages } = await readPages(pdf);
+    const r = detectPacket({ isPdf: true, pages });
+    if (r.looksLikePacket) {
+      alarms++;
+      console.log(`  ${C.r}PACKET${C.x} ${path.basename(pdf).padEnd(52)} ${C.d}${r.parts.length} parts, ${r.method}, ${r.confidence_band}${C.x}`);
+    }
+  }
+  console.log(`  ${alarms ? C.r : C.g}${singles.length - alarms}/${singles.length}${C.x} single-document files left alone` +
+    `${C.d} (${listPdfs(path.join(REAL, 'pdf')).length - 1} real specification sheets, ${listPdfs(DOCTYPE_PDF).length} synthetic doctype fixtures)${C.x}`);
+  if (alarms) bad++;
+
+  // THE ONE THAT MATTERS: the packet's own multi-page parts, which ARE single
+  // documents and DO carry a repeated header on every page.
+  const multi = truth.filter((t) => t.to > t.from);
+  console.log(`\n${C.b}THE PACKET'S OWN MULTI-PAGE PARTS${C.x} ${C.d}each is ONE document with the same running header on every page${C.x}`);
+  let partAlarms = 0;
+  for (const t of multi) {
+    const slice = packet.pages.filter((p) => p.page >= t.from && p.page <= t.to).map((p, i) => ({ ...p, page: i + 1 }));
+    const r = detectPacket({ isPdf: true, pages: slice });
+    const flag = r.looksLikePacket ? `${C.r}PACKET (${r.parts.length} parts)${C.x}` : `${C.g}one document${C.x} ${C.d}(${r.declined})${C.x}`;
+    console.log(`  ${t.id.padEnd(34)} ${C.d}pages ${t.from}-${t.to}, ${t.to - t.from + 1} pages${C.x}  ${flag}`);
+    if (r.looksLikePacket) partAlarms++;
+  }
+  if (partAlarms) bad++;
+
+  // A multi-lot COA is produceCoaRecords' job and must stay so.
+  const coaGuard = detectPacket({ isPdf: true, pages: packet.pages, coaRecordCount: 4 });
+  console.log(`\n${C.b}THE COA GUARD${C.x}  the same 36 pages, declared as a 4-record COA: ` +
+    `${coaGuard.looksLikePacket ? `${C.r}still proposes a split${C.x}` : `${C.g}stands down${C.x} ${C.d}(${coaGuard.declined})${C.x}`}`);
+  if (coaGuard.looksLikePacket) bad++;
+
+  console.log(`\n${bad ? `${C.r}${C.b}NOT CLEAN${C.x}` : `${C.g}${C.b}clean${C.x}`}`);
+  return bad ? 1 : 0;
+}
+
+function renderOne(name, route, r, formatPages) {
+  console.log(`\n  ${C.b}${name}${C.x} ${C.d}${route}, ${r.page_count} pages${C.x}`);
+  if (!r.looksLikePacket) {
+    console.log(`  ${C.g}one document${C.x} ${C.d}— ${r.declined}${C.x}`);
+    for (const n of r.notes) console.log(`    ${C.d}${n}${C.x}`);
+    return;
+  }
+  console.log(`  ${C.c}${r.parts.length} documents${C.x}, ${r.method}, confidence ${C.b}${r.confidence.toFixed(2)}${C.x} (${r.confidence_band})`);
+  for (const n of r.notes) console.log(`    ${C.d}${n}${C.x}`);
+  if (r.uncovered_pages.length) console.log(`    ${C.y}not in any part: page ${formatPages(r.uncovered_pages)}${C.x}`);
+  for (const p of r.parts) {
+    const range = p.pages[0] === p.pages[1] ? `${p.pages[0]}` : `${p.pages[0]}-${p.pages[1]}`;
+    console.log(`      ${C.d}${range.padStart(6)}${C.x}  ${(p.label || p.preview.slice(0, 48) || '(no label)').slice(0, 52)}`);
+  }
+}
+
+main().then((code) => process.exit(code)).catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

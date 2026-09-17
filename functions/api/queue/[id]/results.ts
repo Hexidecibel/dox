@@ -60,6 +60,19 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       // posts it ONLY when at least one page was read by OCR, so an ordinary
       // text document leaves the column NULL and the review card unchanged.
       text_page_sources?: string | null;
+      /**
+       * "This one file looks like N documents" (migration 0118). JSON-stringified
+       * `PacketProposal`. The worker posts it ONLY when a packet was detected,
+       * so an ordinary upload leaves the column NULL and the review card is
+       * unchanged — and it is deliberately WITHDRAWN when the same document
+       * turns out to be a multi-lot COA, because produceCoaRecords already
+       * splits that and splits it better.
+       *
+       * A PROPOSAL, never an instruction. Nothing in the write path below acts
+       * on it; the split happens only from POST /api/queue/:id/packet/split,
+       * which a person has to hit.
+       */
+      packet_proposal?: string | null;
       // Phase 3 sidecars
       learned_field_hints?: string | null;
       uncertainty?: string | null;
@@ -231,6 +244,16 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.text_page_sources !== undefined) {
       updates.push('text_page_sources = ?');
       params.push(body.text_page_sources);
+    }
+
+    // The packet proposal (migration 0118). Stored, never acted on. It is NOT
+    // written over a split that already happened: a reviewer's decision
+    // outranks a re-extraction's opinion, and a re-processed container would
+    // otherwise start asking to be split a second time while its parts sit in
+    // the queue.
+    if (body.packet_proposal !== undefined) {
+      updates.push('packet_proposal = CASE WHEN packet_split_at IS NULL THEN ? ELSE packet_proposal END');
+      params.push(body.packet_proposal);
     }
 
     if (body.learned_field_hints !== undefined) {
