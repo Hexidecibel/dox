@@ -4470,10 +4470,22 @@ async function preflightModels() {
   // 'vision' only matters when the VLM path can run.
   const tags = ['best'];
   if (QWEN_VLM_MODE !== 'off') tags.push('vision');
+  // 'fast' is NOT in that list, and that was the gap. It is the tag
+  // classifyDocument() runs on, and a classification failure is caught as
+  // "non-critical" at runtime — correctly, since a document that cannot be
+  // typed still gets extracted. But it means an outage confined to `fast`
+  // produces NO error anywhere: every document comes back untyped, so the 0098
+  // document-type instruction layer (which is keyed on the type) silently
+  // applies to nothing, and the only symptom is a queue full of items parked
+  // for a human. It is checked below and WARNED about, never aborted on —
+  // aborting would turn a degradation into an outage and change the runtime
+  // behaviour this preflight is only supposed to describe.
+  const warnOnlyTags = ['fast'];
 
   console.log('  Models:');
   const failures = [];
-  for (const tag of tags) {
+  for (const tag of [...tags, ...warnOnlyTags]) {
+    const warnOnly = warnOnlyTags.includes(tag);
     // 'vision' resolves against VLM_ENV so a QWEN_VLM_MODEL pin is reported
     // here exactly like any other override instead of as a separate knob.
     const tagEnv = tag === 'vision' ? VLM_ENV : process.env;
@@ -4499,6 +4511,21 @@ async function preflightModels() {
         console.log(`    ${tag}: ${res.model}  (best available)`);
       }
     } catch (err) {
+      if (warnOnly) {
+        console.warn(`    ${tag}: UNAVAILABLE — ${err.message}`);
+        console.warn('');
+        console.warn(
+          `[models] NOTHING IS SERVING "${tag}". Chain: ${chain.join(' > ')}. ` +
+          'Document-type classification runs on this tag and fails non-fatally, so every ' +
+          'document will extract UNTYPED: the per-document-type extraction instructions ' +
+          '(migration 0098) will not apply to anything, and every item will park for a ' +
+          'reviewer with no document_type_id. The worker is starting anyway because ' +
+          'untyped extraction beats no extraction — but this is the quiet failure, not a ' +
+          'nuisance warning. Check it with bin/check-model-chain.'
+        );
+        console.warn('');
+        continue;
+      }
       failures.push(`${tag}: ${err.message}`);
       console.error(`    ${tag}: UNAVAILABLE — ${err.message}`);
     }
@@ -4507,6 +4534,7 @@ async function preflightModels() {
     console.error('');
     console.error('Error: no usable model for tag(s) — refusing to start.');
     for (const f of failures) console.error(`  ${f}`);
+    console.error('  Diagnose with: bin/check-model-chain');
     process.exit(1);
   }
 }

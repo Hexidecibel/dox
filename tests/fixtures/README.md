@@ -19,3 +19,27 @@ reported as a measurement, no reagent lot in a product field). Checked by
 `bin/check-spec-corpus` and by `tests/unit/specCorpus.test.ts`. The PDFs are
 build output and are gitignored; the HTML is the source of truth, so a reviewer
 can read exactly what a fixture claims to print.
+
+## `doctype-corpus/` — generated documents for everything that is not a COA
+
+Its own [README](doctype-corpus/README.md). Ten document types the incoming
+corpus is heaviest in, each rendered clean / moderate / nasty plus a scanned
+variant of the clean one, with ground truth written as the fixture is authored.
+Driven by `bin/render-doctype-corpus` and `bin/measure-doctype-extraction`.
+Again: HTML is the source, `pdf/` is gitignored build output.
+
+## `real-corpus/` — what a supplier actually sends
+
+Its own [README](real-corpus/README.md). The other three corpora are synthetic,
+which makes them diagnosable and also makes them agree with assumptions a real
+supplier packet breaks: that one file is one document, that its type exists in
+the tenant's catalog, and that it has a text layer. This one holds the documents
+the client SME sent on 2026-09-16 — a 36-page packet containing 25 separate
+documents, and four specification sheets from three suppliers on three
+templates. Driven by `bin/eval-aj-docs` (which has a `--verify` mode needing no
+model at all) and scored by `doctype-corpus/score.mjs`, so the numbers are
+comparable.
+
+**The PDFs here ARE tracked**, unlike the two corpora above. Theirs are build
+output rebuilt from `html/`; a real supplier PDF has no source to rebuild from,
+so the PDF is the source.

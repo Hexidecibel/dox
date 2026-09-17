@@ -1,0 +1,526 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/eval-aj-docs — run classification + extraction over the REAL-document
+ * corpus and score it against ground truth written from the page.
+ *
+ * WHY A SECOND HARNESS. tests/fixtures/doctype-corpus is synthetic: every
+ * fixture was written to be one document, of one type that exists in the FSQA
+ * starter pack, with a clean text layer. tests/fixtures/real-corpus is what a
+ * supplier actually sends, and it breaks three of those assumptions at once:
+ *
+ *   * ONE FILE IS NOT ONE DOCUMENT. packet-fdlw-2026 is 36 pages holding 25
+ *     separately-dated documents. dox's intake treats an upload as one
+ *     document, so the whole packet is classified once, typed once, and given
+ *     one renewal date. The manifest grades the packet BOTH ways — as the
+ *     single file the product would ingest today, and part by part, split on
+ *     the page ranges its own table of contents declares.
+ *   * "NONE" IS OFTEN THE RIGHT ANSWER. Eighteen of the packet's parts have no
+ *     matching type in the starter pack. Forcing them onto the nearest name is
+ *     the failure; leaving them unresolved for a human is the behaviour.
+ *     `document_type_expected_none` says so, and score.mjs grades it.
+ *   * FIVE PAGES HAVE NO TEXT LAYER. The SQF, both kosher and both halal
+ *     certificates are inserted images — which is to say the five documents in
+ *     the packet that actually carry expiry dates are exactly the five a
+ *     text-layer read cannot see.
+ *
+ * WHAT IS MEASURED. The production text path via bin/lib/corpusText.js (the
+ * same module bin/measure-doctype-extraction uses), then
+ * functions/lib/llm.ts#classifyDocumentType on the `fast` chain against the
+ * FSQA starter pack's 27 types, then #extractFields on `best`, told what the
+ * classifier decided. llm.ts is bundled fresh on every run, so this can never
+ * measure a stale copy of the prompt. Scoring is
+ * tests/fixtures/doctype-corpus/score.mjs — the same scorer, so the two corpora
+ * produce comparable numbers.
+ *
+ * PAGE SPLITTING uses functions/lib/kinds/coaPageScope.ts#extractRecordPdf —
+ * the product's own splitter, the one the COA records path runs, bundled the
+ * same way as llm.ts. The point is partly to measure it: if the splitter can
+ * carve this packet into its 25 documents, "offer a split at review" is a
+ * smaller feature than it sounds.
+ *
+ * THE CHAIN GUARD. The extraction fleet sleeps. A run against an empty chain
+ * scores whatever did not throw and reports it as a number. bin/check-model-chain
+ * runs first, in-process, and this exits 3 rather than producing one.
+ *
+ * READ-ONLY. Talks to the model router and nothing else. No dox API, no D1, no
+ * R2, no Cloudflare credentials, no writes of any kind.
+ *
+ * Usage:
+ *   bin/eval-aj-docs                      # everything: whole files + packet parts
+ *   bin/eval-aj-docs --verify             # NO MODEL CALLS. Assert every
+ *                                         #   pdf_text_must_contain is findable
+ *                                         #   in the text the model would see
+ *   bin/eval-aj-docs --classify-only      # the classification pass alone (~3s/doc)
+ *   bin/eval-aj-docs --force-ocr          # NOT the production path — rasterise and
+ *                                         #   OCR every page, to see what is on the
+ *                                         #   five inserted certificate IMAGES that
+ *                                         #   the text-layer route never reads
+ *   bin/eval-aj-docs --set specs          # specs | packet | packet-parts | packet-whole
+ *   bin/eval-aj-docs --doc packet-p04-sqf-certificate
+ *   bin/eval-aj-docs --concurrency 3
+ *   bin/eval-aj-docs --out runs/2026-09-16.json
+ *   bin/eval-aj-docs --rescore runs/2026-09-16.json    # no model calls
+ *   bin/eval-aj-docs --json
+ *
+ * Exit: 0 ran and scored   2 bad usage / no selection   3 model chain EMPTY
+ *
+ * Env:
+ *   QWEN_URL     model router (default https://qwen.cush.rocks)
+ *   QWEN_SECRET  bearer token. If unset, read from
+ *                /etc/systemd/system/dox-process-worker.service. Never printed.
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const { pathToFileURL } = require('node:url');
+
+const ROOT = path.resolve(__dirname, '..');
+const DIR = path.join(ROOT, 'tests/fixtures/real-corpus');
+const CORPUS = path.join(DIR, 'corpus.json');
+const BUILD = path.join(DIR, '.build');
+const SCORER = path.join(ROOT, 'tests/fixtures/doctype-corpus/score.mjs');
+const STARTER_PACK = path.join(ROOT, 'starter-packs/fsqa.json');
+
+const { extractPdfText } = require('./lib/corpusText');
+const { checkChains, render: renderChains, resolveSecret } = require('./check-model-chain');
+
+const C = process.stdout.isTTY
+  ? { g: '\x1b[32m', r: '\x1b[31m', y: '\x1b[33m', c: '\x1b[36m', d: '\x1b[2m', b: '\x1b[1m', x: '\x1b[0m' }
+  : { g: '', r: '', y: '', c: '', d: '', b: '', x: '' };
+
+function parseArgs(argv) {
+  const o = {
+    doc: null, set: null, concurrency: 2, json: false, out: null, rescore: null,
+    classifyOnly: false, verify: false, classifyModel: 'fast', forceOcr: false, help: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
+      case '--doc': o.doc = argv[++i]; break;
+      case '--set': o.set = argv[++i]; break;
+      case '--classify-only': o.classifyOnly = true; break;
+      case '--classify-model': o.classifyModel = argv[++i]; break;
+      case '--verify': o.verify = true; break;
+      case '--force-ocr': o.forceOcr = true; break;
+      case '--concurrency': o.concurrency = Math.max(1, parseInt(argv[++i], 10) || 1); break;
+      case '--json': o.json = true; break;
+      case '--out': o.out = argv[++i]; break;
+      case '--rescore': o.rescore = argv[++i]; break;
+      case '-h': case '--help': o.help = true; break;
+      default: console.error(`unknown flag: ${argv[i]}`); process.exit(2);
+    }
+  }
+  return o;
+}
+
+/**
+ * The candidate list the classifier chooses from — the FSQA starter pack's 27
+ * document types, which is what a real tenant is seeded with. Using the real
+ * pack is the whole point here: eighteen of this corpus's documents have no
+ * match in it, and that fact is the finding.
+ */
+function loadCandidates() {
+  const pack = JSON.parse(fs.readFileSync(STARTER_PACK, 'utf8'));
+  return (pack.document_types || []).map((d) => ({ name: d.name, slug: d.slug || null }));
+}
+
+/** key_groups, with the doctype corpus's groups folded in under this one's. */
+function loadCorpus() {
+  const corpus = JSON.parse(fs.readFileSync(CORPUS, 'utf8'));
+  if (corpus.extends_key_groups) {
+    const base = JSON.parse(fs.readFileSync(path.resolve(DIR, corpus.extends_key_groups), 'utf8'));
+    corpus.key_groups = { ...(base.key_groups || {}), ...(corpus.key_groups || {}) };
+  }
+  return corpus;
+}
+
+/** esbuild one TS entrypoint to CJS. Bundled fresh so this cannot measure a stale copy. */
+function bundle(entry, name) {
+  fs.mkdirSync(BUILD, { recursive: true });
+  const out = path.join(BUILD, name);
+  execFileSync('npx', [
+    'esbuild', path.join(ROOT, entry),
+    '--bundle', '--platform=node', '--format=cjs', '--target=node20', `--outfile=${out}`,
+  ], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  return require(out);
+}
+
+/**
+ * Materialize the PDF a run reads. A whole-file document is its own PDF; a part
+ * is carved out of the packet with the PRODUCT's splitter, so this measures
+ * extractRecordPdf on a real multi-document file at the same time.
+ */
+async function materialize(doc, pageScope) {
+  const src = path.join(DIR, doc.pdf);
+  if (!doc.pages || doc.pages.length === 0) return { pdf: src, scoped: false, reason: null };
+  fs.mkdirSync(path.join(BUILD, 'parts'), { recursive: true });
+  const out = path.join(BUILD, 'parts', `${doc.id}.pdf`);
+  const bytes = fs.readFileSync(src);
+  const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const res = await pageScope.extractRecordPdf(ab, doc.pages, 'application/pdf', path.basename(src));
+  if (!res.scoped) return { pdf: src, scoped: false, reason: res.reason };
+  fs.writeFileSync(out, Buffer.from(res.bytes));
+  return { pdf: out, scoped: true, reason: null, includedPages: res.includedPages };
+}
+
+// ---------------------------------------------------------------------------
+// --verify: ground truth that is not on the page is not ground truth
+// ---------------------------------------------------------------------------
+
+function normalizeLoose(v) {
+  return String(v ?? '').toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
+    .replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim();
+}
+
+async function verify(corpus, runs, opts) {
+  let bad = 0;
+  let checked = 0;
+  for (const run of runs) {
+    const { text, route } = await extractPdfText(run.pdf, { forceOcr: opts.forceOcr });
+    const hay = normalizeLoose(text);
+    // An image-only page's claims are what OCR reads off it, so they are only
+    // checkable under --force-ocr. Under the production route the same page
+    // yields a caption and a page number, which is the finding, not a failure.
+    //
+    // The inverse also holds and is why --force-ocr checks NOTHING ELSE: the
+    // text-layer claims are written against the geometry serializer's output,
+    // pipe-delimited columns and all, and OCR does not produce that. Asserting
+    // them against a rasterised page would fail on the difference between two
+    // correct reads of the same document.
+    const ocrClaims = run.doc.pdf_text_must_contain_ocr || [];
+    if (opts.forceOcr && !ocrClaims.length) {
+      console.log(`  ${C.d}·  ${run.doc.id.padEnd(42)} skipped — no OCR ground truth (text-layer claims are not checkable here)${C.x}`);
+      continue;
+    }
+    const claims = opts.forceOcr ? ocrClaims : (run.doc.pdf_text_must_contain || []);
+    const misses = claims.filter((c) => !hay.includes(normalizeLoose(c)));
+    checked += claims.length;
+    const imageOnly = run.doc.image_only
+      ? (opts.forceOcr
+        ? `${C.d} [image-only: OCR]${C.x}`
+        : `${C.y} [image-only: ${run.doc.text_layer_chars} chars is all production reads — run --force-ocr]${C.x}`)
+      : '';
+    if (misses.length) {
+      bad += misses.length;
+      console.log(`  ${C.r}✗${C.x} ${run.doc.id.padEnd(42)} ${C.d}${route}, ${text.length} chars${C.x}${imageOnly}`);
+      for (const m of misses) console.log(`      ${C.r}not in the text:${C.x} ${JSON.stringify(m)}`);
+    } else {
+      console.log(`  ${C.g}✓${C.x} ${run.doc.id.padEnd(42)} ${C.d}${route}, ${text.length} chars, ${claims.length} claim(s)${C.x}${imageOnly}`);
+    }
+  }
+  const label = opts.forceOcr ? ' (--force-ocr: image-only pages only)' : '';
+  console.log(`\n${bad ? C.r : C.g}${checked - bad}/${checked}${C.x} text claims found${label}.`);
+  if (bad) {
+    console.log(`${C.d}A claim that is not in the text the model sees is not ground truth. Either the`);
+    console.log(`manifest is wrong, or the text path stopped producing what it used to.${C.x}`);
+  }
+  return bad ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Report
+// ---------------------------------------------------------------------------
+
+const pct = (v) => (v === null || v === undefined ? '  —  ' : `${(v * 100).toFixed(1)}%`.padStart(6));
+
+function report(summary, documents, meta, corpus) {
+  const o = summary.overall;
+  console.log(`${C.b}Real-document extraction${C.x} ${C.d}— ${summary.documents} documents, ` +
+    `${o.present_n + o.absent_n} graded fields${C.x}`);
+  console.log(`${C.d}model: ${meta.served_models.join(', ') || 'unknown'} · routes: ${meta.routes.join(', ')} · ${meta.elapsed}${C.x}\n`);
+
+  console.log(`${C.b}OVERALL${C.x}`);
+  console.log(`  value accuracy (fields that HAVE an answer)  ${C.b}${pct(o.value_accuracy)}${C.x}  ${C.d}${o.counts.correct}/${o.present_n}  (wrong ${o.counts.wrong_value}, missed ${o.counts.missed})${C.x}`);
+  console.log(`  null accuracy  (fields whose answer is NONE) ${C.b}${pct(o.null_accuracy)}${C.x}  ${C.d}${o.counts.correct_null}/${o.absent_n}${C.x}`);
+  console.log(`  ${C.r}fabricated${C.x}                                   ${C.b}${o.fabricated}${C.x}  ${C.d}(${o.counts.fabricated_misfiled} misfiled from the page, ${o.counts.fabricated_invented} invented outright)${C.x}`);
+  console.log(`  document_type correct                        ${C.b}${summary.document_type.correct}/${summary.document_type.of}${C.x}\n`);
+
+  // The split that matters here and does not exist in the synthetic corpus:
+  // documents whose correct answer is "no type in this catalog fits".
+  const typed = documents.filter((d) => !d.document_type.expected_none);
+  const untyped = documents.filter((d) => d.document_type.expected_none);
+  const okOf = (list) => list.filter((d) => d.document_type.ok).length;
+  console.log(`${C.b}DOCUMENT TYPE, BY WHETHER THE CATALOG HAS ONE${C.x}`);
+  console.log(`  a type in the FSQA pack fits        ${C.b}${okOf(typed)}/${typed.length}${C.x}`);
+  console.log(`  nothing in the pack fits ("none")   ${C.b}${okOf(untyped)}/${untyped.length}${C.x}  ${C.d}correct = left unresolved for a human${C.x}\n`);
+
+  console.log(`${C.b}PER DOCUMENT${C.x}`);
+  const head = `  ${'document'.padEnd(42)} ${'type'.padEnd(6)} ${'ok'.padStart(3)} ${'wr'.padStart(3)} ${'ms'.padStart(3)} ${'0ok'.padStart(3)} ${'fab'.padStart(3)}  route`;
+  console.log(`${C.d}${head}${C.x}`);
+  for (const d of documents) {
+    const c = d.counts || {};
+    const t = d.document_type.ok ? `${C.g}  ok  ${C.x}` : `${C.r} MISS ${C.x}`;
+    console.log(`  ${d.id.padEnd(42)} ${t} ${String(c.correct ?? 0).padStart(3)} ${String(c.wrong_value ?? 0).padStart(3)} ` +
+      `${String(c.missed ?? 0).padStart(3)} ${String(c.correct_null ?? 0).padStart(3)} ` +
+      `${(c.fabricated_misfiled ?? 0) + (c.fabricated_invented ?? 0) ? C.r : ''}${String((c.fabricated_misfiled ?? 0) + (c.fabricated_invented ?? 0)).padStart(3)}${C.x}  ${C.d}${d.route}${C.x}`);
+  }
+
+  const fabrications = [];
+  const errors = [];
+  for (const d of documents) {
+    for (const r of d.rows) {
+      if (r.bucket.startsWith('fabricated')) fabrications.push({ d, r });
+      else if (r.bucket === 'wrong_value' || r.bucket === 'missed') errors.push({ d, r });
+    }
+  }
+  if (fabrications.length) {
+    console.log(`\n${C.r}${C.b}EVERY FABRICATION${C.x} ${C.d}(ground truth null, model emitted a value)${C.x}`);
+    for (const { d, r } of fabrications) {
+      const tag = r.bucket === 'fabricated_invented' ? `${C.r}INVENTED${C.x}` : `${C.y}misfiled${C.x}`;
+      console.log(`  ${tag} ${C.b}${d.id}${C.x} ${r.field} = ${JSON.stringify(r.emitted)} ${C.d}(as ${r.emitted_key}; ${r.detail})${C.x}`);
+      if (r.why) console.log(`      ${C.d}${r.why}${C.x}`);
+    }
+  }
+  if (errors.length) {
+    console.log(`\n${C.y}${C.b}WRONG OR MISSED${C.x}`);
+    for (const { d, r } of errors) {
+      console.log(`  ${r.bucket === 'missed' ? 'missed  ' : 'wrong   '} ${C.b}${d.id}${C.x} ${r.field}: expected ${JSON.stringify(r.truth)}, got ${JSON.stringify(r.emitted)}${r.emitted_key ? C.d + ` (as ${r.emitted_key})` + C.x : ''}`);
+    }
+  }
+
+  const badType = documents.filter((d) => !d.document_type.ok);
+  if (badType.length) {
+    console.log(`\n${C.y}${C.b}DOCUMENT TYPE MISREAD${C.x}`);
+    for (const d of badType) {
+      const expect = d.document_type.expected_none
+        ? `expected NONE (nothing in the 27-type pack fits)`
+        : `expected one of ${JSON.stringify(d.document_type.accept.slice(0, 3))}`;
+      console.log(`  ${C.b}${d.id}${C.x} guessed ${JSON.stringify(d.document_type.guess)}, ${expect}`);
+    }
+  }
+
+  // The packet finding, restated with this run's own numbers.
+  const whole = documents.find((d) => d.id === 'packet-fdlw-2026');
+  const parts = documents.filter((d) => d.part_of === 'packet-fdlw-2026');
+  if (whole && parts.length) {
+    const pc = parts.filter((d) => d.document_type.ok).length;
+    console.log(`\n${C.b}THE PACKET, BOTH WAYS${C.x}`);
+    console.log(`  as ONE upload (what dox does today)   type ${whole.document_type.ok ? `${C.g}ok${C.x}` : `${C.r}${JSON.stringify(whole.document_type.guess)}${C.x}`}` +
+      `, ${whole.counts.correct}/${(whole.counts.correct + whole.counts.wrong_value + whole.counts.missed)} value fields`);
+    console.log(`  split on its own index (${parts.length} parts)  type ${C.b}${pc}/${parts.length}${C.x} correct`);
+    const src = corpus.documents.find((d) => d.id === 'packet-fdlw-2026');
+    if (src && src.contains) {
+      console.log(`  ${C.d}${src.contains} documents, one file. One classification, one document_type_id, one renewal date.${C.x}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(3, 71).join('\n').replace(/^ ?\*\/?/gm, ''));
+    return 0;
+  }
+
+  const corpus = loadCorpus();
+  const scorer = await import(pathToFileURL(SCORER).href);
+  const note = opts.json ? console.error : console.log;
+
+  const inSet = (d) => {
+    if (!opts.set) return true;
+    if (opts.set === 'specs') return d.id.startsWith('spec-');
+    if (opts.set === 'packet') return d.id === 'packet-fdlw-2026' || d.part_of === 'packet-fdlw-2026';
+    if (opts.set === 'packet-parts') return d.part_of === 'packet-fdlw-2026';
+    if (opts.set === 'packet-whole') return d.id === 'packet-fdlw-2026';
+    console.error(`unknown --set: ${opts.set} (specs | packet | packet-parts | packet-whole)`);
+    process.exit(2);
+    return false;
+  };
+  const selected = corpus.documents.filter((d) => (!opts.doc || d.id === opts.doc) && inSet(d));
+  if (!selected.length) { console.error('nothing selected'); return 2; }
+
+  // Page-split every part up front, with the product's own splitter.
+  const pageScope = bundle('functions/lib/kinds/coaPageScope.ts', 'pageScope.cjs');
+  const runs = [];
+  for (const doc of selected) {
+    const m = await materialize(doc, pageScope);
+    if (doc.pages && !m.scoped) {
+      console.error(`${C.r}page split FAILED for ${doc.id}: ${m.reason} — scoring it would measure the wrong bytes${C.x}`);
+      return 2;
+    }
+    runs.push({ doc, pdf: m.pdf, scoped: m.scoped, key: doc.id });
+  }
+
+  if (opts.verify) {
+    note(`${C.d}verifying ${runs.length} document(s) against the text the model would see — no model calls${C.x}\n`);
+    return verify(corpus, runs, opts);
+  }
+
+  let extractions;
+  const started = Date.now();
+
+  if (opts.rescore) {
+    const saved = JSON.parse(fs.readFileSync(path.resolve(ROOT, opts.rescore), 'utf8'));
+    extractions = new Map(saved.runs.map((r) => [r.key, r]));
+    note(`${C.d}re-scoring ${extractions.size} saved extractions from ${opts.rescore} — no model calls${C.x}\n`);
+  } else {
+    // THE CHAIN GUARD. Do this before esbuild, before the first PDF, before
+    // anything that looks like progress: a run over an empty chain scores
+    // whatever did not throw and prints it as a number.
+    const env = {
+      QWEN_URL: process.env.QWEN_URL || 'https://qwen.cush.rocks',
+      QWEN_SECRET: resolveSecret(),
+      ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('QWEN_MODEL_'))),
+    };
+    const tags = opts.classifyOnly
+      ? (opts.classifyModel === 'off' ? [] : [opts.classifyModel])
+      : ['best', ...(opts.classifyModel === 'off' ? [] : [opts.classifyModel])];
+    if (tags.length) {
+      const chains = await checkChains([...new Set(tags)], env, { force: true });
+      const text = renderChains(chains, { quiet: true });
+      if (chains.results.some((r) => r.status === 'empty' || r.status === 'unknown_tag')) {
+        console.error(text);
+        console.error(`\n${C.r}${C.b}Refusing to run.${C.x} ${C.d}Nothing was scored. Wake the fleet and re-run — or`);
+        console.error(`re-score a saved run offline with --rescore, or check the fixtures with --verify.${C.x}`);
+        return 3;
+      }
+      note(`${C.d}chains ok: ${chains.results.map((r) => `${r.tag}=${r.live[0]}`).join(', ')}${C.x}`);
+    }
+
+    const { extractFields, classifyDocumentType } = bundle('functions/lib/llm.ts', 'llm.cjs');
+    const candidates = loadCandidates();
+    note(`${C.d}extracting ${runs.length} document(s) via ${env.QWEN_URL} (concurrency ${opts.concurrency})…${C.x}`);
+
+    extractions = new Map();
+    let done = 0;
+    const queue = runs.slice();
+    const workers = Array.from({ length: opts.concurrency }, async () => {
+      for (;;) {
+        const run = queue.shift();
+        if (!run) return;
+        const t0 = Date.now();
+        const { text, route } = await extractPdfText(run.pdf, { forceOcr: opts.forceOcr });
+        const llmText = text.substring(0, 6000);
+
+        // The FILENAME is withheld, as in production and as in the doctype
+        // harness. Here it would also be the answer key: the packet parts are
+        // named packet-p11-kosher-alouette.pdf.
+        let classification = null;
+        let classifySeconds = 0;
+        if (opts.classifyModel !== 'off') {
+          const c0 = Date.now();
+          try {
+            classification = await classifyDocumentType(llmText, candidates, env, { modelTag: opts.classifyModel });
+          } catch (err) {
+            classification = { documentType: null, candidate: null, rawGuess: null, confidence: 'low', evidence: null, error: err.message };
+          }
+          classifySeconds = +((Date.now() - c0) / 1000).toFixed(1);
+        }
+
+        let result = null;
+        let error = null;
+        for (let attempt = 1; attempt <= 2 && !result && !opts.classifyOnly; attempt++) {
+          try {
+            result = await extractFields(llmText, env, {
+              fileName: path.basename(run.pdf),
+              documentType: classification ? classification.documentType : null,
+            });
+          } catch (err) {
+            error = err.message;
+            if (attempt === 2) break;
+          }
+        }
+        extractions.set(run.key, {
+          key: run.key, doc_id: run.doc.id, route, scoped: run.scoped,
+          text_chars: text.length, truncated: text.length > 6000,
+          text: llmText, extraction: result, error,
+          classification, classify_model: opts.classifyModel, classify_seconds: classifySeconds,
+          seconds: +((Date.now() - t0) / 1000).toFixed(1),
+        });
+        done++;
+        if (opts.classifyOnly) {
+          const g = classification && classification.documentType;
+          note(`  ${g ? C.g + '✓' + C.x : C.y + '·' + C.x} ${String(done).padStart(2)}/${runs.length} ${run.key.padEnd(42)} ` +
+            `${C.d}${route}, ${classifySeconds}s → ${JSON.stringify(classification && classification.rawGuess)}${C.x}`);
+          continue;
+        }
+        note(`  ${result ? C.g + '✓' + C.x : C.r + '✗' + C.x} ${String(done).padStart(2)}/${runs.length} ${run.key.padEnd(42)} ` +
+          `${C.d}${route}, ${text.length} chars, ${((Date.now() - t0) / 1000).toFixed(1)}s` +
+          `${result ? `, ${Object.keys(result.fields || {}).length} fields` : `, ${error}`}${C.x}`);
+      }
+    });
+    await Promise.all(workers);
+    note('');
+  }
+
+  if (opts.classifyOnly) {
+    const rows = runs.map((run) => {
+      const e = extractions.get(run.key);
+      const guess = e && e.classification ? e.classification.documentType : null;
+      const expectNone = run.doc.document_type_expected_none === true;
+      const accept = run.doc.document_type_accept || [];
+      const g = scorer.normalize(guess);
+      const matched = !!g && accept.some((a) => {
+        const n = scorer.normalize(a);
+        return g === n || g.includes(n) || n.includes(g);
+      });
+      return {
+        key: run.key, expectNone, guess, ok: expectNone ? (!g || matched) : matched,
+        raw: e && e.classification ? e.classification.rawGuess : null,
+        seconds: e ? e.classify_seconds : null,
+      };
+    });
+    const times = rows.map((r) => r.seconds).filter((v) => typeof v === 'number').sort((a, b) => a - b);
+    const typed = rows.filter((r) => !r.expectNone);
+    const none = rows.filter((r) => r.expectNone);
+    console.log(`${C.b}Document-type classification${C.x} ${C.d}— tag "${opts.classifyModel}", ${rows.length} documents${C.x}\n`);
+    console.log(`  correct overall                     ${C.b}${rows.filter((r) => r.ok).length}/${rows.length}${C.x}`);
+    console.log(`  a type in the FSQA pack fits        ${C.b}${typed.filter((r) => r.ok).length}/${typed.length}${C.x}`);
+    console.log(`  nothing fits — "none" is correct    ${C.b}${none.filter((r) => r.ok).length}/${none.length}${C.x}`);
+    console.log(`  median seconds                      ${times.length ? times[Math.floor(times.length / 2)] : '—'}`);
+    console.log(`  total seconds                       ${times.reduce((a, b) => a + b, 0).toFixed(1)}\n`);
+    for (const r of rows.filter((x) => !x.ok)) {
+      console.log(`  ${C.y}miss${C.x} ${r.key.padEnd(42)} said ${JSON.stringify(r.raw)}${r.expectNone ? `${C.d} (correct answer: none)${C.x}` : ''}`);
+    }
+    return 0;
+  }
+
+  const scored = [];
+  for (const run of runs) {
+    const e = extractions.get(run.key);
+    if (!e || !e.extraction) continue;
+    const extraction = e.classification
+      ? { ...e.extraction, documentType: e.classification.documentType }
+      : e.extraction;
+    const s = scorer.scoreDocument(run.doc, corpus.key_groups, extraction, e.text);
+    s.route = e.route;
+    s.seconds = e.seconds;
+    s.part_of = run.doc.part_of || null;
+    s.counts = scorer.emptyCounts();
+    for (const r of s.rows) scorer.addRow(s.counts, r);
+    scored.push(s);
+  }
+  const summary = scorer.summarize(scored);
+
+  const meta = {
+    corpus: 'tests/fixtures/real-corpus',
+    elapsed: `${((Date.now() - started) / 1000 / 60).toFixed(1)} min`,
+    routes: [...new Set(scored.map((s) => s.route))],
+    served_models: [...new Set(scored.map((s) => s.served_model).filter(Boolean))],
+    failed: runs.filter((r) => { const e = extractions.get(r.key); return !e || !e.extraction; }).map((r) => r.key),
+  };
+
+  if (opts.out) {
+    const outPath = path.resolve(ROOT, opts.out);
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify({ generated_at: new Date().toISOString(), meta, summary, documents: scored, runs: [...extractions.values()] }, null, 2));
+    note(`${C.d}saved raw run to ${opts.out} (re-score it with --rescore)${C.x}\n`);
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify({ meta, summary, documents: scored }, null, 2));
+    return 0;
+  }
+
+  report(summary, scored, meta, corpus);
+  if (meta.failed.length) console.log(`\n${C.r}${meta.failed.length} extraction(s) failed outright and are excluded: ${meta.failed.join(', ')}${C.x}`);
+  return 0;
+}
+
+main().then(
+  (code) => process.exit(code),
+  (err) => { console.error(err); process.exit(2); }
+);

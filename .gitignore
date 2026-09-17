@@ -62,3 +62,11 @@ tests/fixtures/spec-corpus/pdf/
 tests/fixtures/doctype-corpus/pdf/
 tests/fixtures/doctype-corpus/.build/
 tests/fixtures/doctype-corpus/runs/
+
+# real-corpus: NOTE THE PDFs ARE NOT IGNORED HERE, unlike the two corpora
+# above. Those hold BUILD OUTPUT rebuilt from html/ by bin/render-*-corpus; a
+# real supplier PDF has no source to rebuild from, so the PDF IS the source and
+# is tracked. Only the bundles, the carved-out page ranges and saved runs are
+# generated. Rebuild/re-measure with bin/eval-aj-docs.
+tests/fixtures/real-corpus/.build/
+tests/fixtures/real-corpus/runs/

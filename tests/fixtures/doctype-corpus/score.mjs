@@ -301,10 +301,26 @@ export function scoreDocument(doc, keyGroups, extraction, docText) {
   const guess = extraction.documentType || null;
   const accept = doc.document_type_accept || [];
   const g = normalize(guess);
-  const docTypeOk = !!g && accept.some((a) => {
+  const matched = !!g && accept.some((a) => {
     const n = normalize(a);
     return g === n || g.includes(n) || n.includes(g);
   });
+  // `document_type_expected_none` says the correct answer is that NOTHING in
+  // this tenant's catalog fits, so leaving the type unresolved for a human is
+  // right and any confident answer is wrong. The synthetic corpus never needed
+  // it — every fixture there was written against a type in the FSQA pack — but
+  // eighteen of the real corpus's documents (tests/fixtures/real-corpus) are
+  // supplier statements with no matching type, and scoring "none" as a miss
+  // would report the classifier's correct behaviour as its failure.
+  //
+  // A document may carry the flag AND an accept list, and then either answer
+  // counts. That is for the two cases where the pack holds an adjacent-but-not-
+  // equal type (a Bioengineered STATEMENT against "Non-GMO Certificate") and
+  // the disagreement is worth recording rather than resolving.
+  //
+  // Absent the flag this is byte-identical to what it was.
+  const expectedNone = doc.document_type_expected_none === true;
+  const docTypeOk = expectedNone ? (!g || matched) : matched;
 
   const cells = [];
   for (const t of extraction.tables || []) {
@@ -323,7 +339,8 @@ export function scoreDocument(doc, keyGroups, extraction, docText) {
     type_slug: doc.type_slug,
     tier: doc.tier,
     rows,
-    document_type: { guess, ok: docTypeOk, accept },
+    document_type: { guess, ok: docTypeOk, accept, expected_none: expectedNone },
+    part_of: doc.part_of || null,
     tables: { claims: tableClaims, table_count: (extraction.tables || []).length },
     field_count: Object.keys(extraction.fields || {}).length,
     confidence: extraction.confidence || null,

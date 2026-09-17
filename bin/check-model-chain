@@ -1,0 +1,194 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/check-model-chain — is there actually a model behind the tag?
+ *
+ * WHY THIS EXISTS. The extraction fleet is two machines at the owner's house.
+ * They sleep. When they do, GET /v1/models returns `{"data":[]}` — a 200, a
+ * well-formed body, and nothing in it. Everything downstream then fails in a
+ * way that does not say so:
+ *
+ *   * `resolveModel()` throws "No available model for tag X" PER ITEM, so the
+ *     queue drains into per-document errors rather than one loud stop;
+ *   * a measurement harness scores whatever extractions did not throw, and
+ *     reports a number over a corpus it did not finish;
+ *   * `--rescore` of that run then reproduces the same wrong number offline,
+ *     with no trace of the reason.
+ *
+ * This has now cost two sessions. The fix is cheap: ask the router once, up
+ * front, and refuse to start with a message that names the chain.
+ *
+ * WHAT IT CHECKS. For each requested tag, the ORDERED chain from
+ * bin/lib/models.js (the worker's copy, mirrored from functions/lib/models.ts)
+ * against the ids the router advertises. A tag is:
+ *
+ *   ok        — its preferred model is live
+ *   degraded  — a fallback is live but the preferred one is not (exit 0; a
+ *               degraded chain is a working chain, and failing here would stop
+ *               work that would have succeeded)
+ *   EMPTY     — no entry in the chain is live. Exit 1.
+ *   pinned    — QWEN_MODEL_<TAG> is set, which bypasses chain resolution
+ *               entirely. Reported, and still checked against the router.
+ *
+ * An unreachable router is NOT an empty chain and does not fail: models.js
+ * treats a failed probe as "attempt the chain anyway (availability wins)", and
+ * this script must not be stricter than the code it is guarding. It says so and
+ * exits 0.
+ *
+ * READ-ONLY. One GET to the router. No dox API, no D1, no R2.
+ *
+ * Usage:
+ *   bin/check-model-chain                    # best + fast (what extraction needs)
+ *   bin/check-model-chain --tag best         # one tag
+ *   bin/check-model-chain --tag best,fast,vision
+ *   bin/check-model-chain --quiet            # print only on failure
+ *   bin/check-model-chain --json
+ *
+ * Exit: 0 all requested chains have a live entry (or the router is unreachable)
+ *       1 at least one chain is EMPTY
+ *       2 bad usage
+ *
+ * Env:
+ *   QWEN_URL     model router (default https://qwen.cush.rocks)
+ *   QWEN_SECRET  bearer token. If unset, read from
+ *                /etc/systemd/system/dox-process-worker.service, the same
+ *                credential bin/process-worker runs with. Never printed.
+ */
+
+const fs = require('node:fs');
+const { chainFor, healthyModels, invalidateModelCache } = require('./lib/models');
+
+const WORKER_UNIT = '/etc/systemd/system/dox-process-worker.service';
+const DEFAULT_URL = 'https://qwen.cush.rocks';
+
+const C = process.stdout.isTTY
+  ? { g: '\x1b[32m', r: '\x1b[31m', y: '\x1b[33m', d: '\x1b[2m', b: '\x1b[1m', x: '\x1b[0m' }
+  : { g: '', r: '', y: '', d: '', b: '', x: '' };
+
+function parseArgs(argv) {
+  const o = { tags: ['best', 'fast'], quiet: false, json: false, help: false };
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
+      case '--tag': o.tags = argv[++i].split(',').map((s) => s.trim()).filter(Boolean); break;
+      case '--quiet': o.quiet = true; break;
+      case '--json': o.json = true; break;
+      case '-h': case '--help': o.help = true; break;
+      default: console.error(`unknown flag: ${argv[i]}`); process.exit(2);
+    }
+  }
+  return o;
+}
+
+/** The bearer, from the environment or from the worker's own unit file. Never logged. */
+function resolveSecret() {
+  if (process.env.QWEN_SECRET) return process.env.QWEN_SECRET;
+  try {
+    const m = fs.readFileSync(WORKER_UNIT, 'utf8').match(/^Environment=QWEN_SECRET=(.*)$/m);
+    if (m) return m[1].trim();
+  } catch { /* fall through */ }
+  return '';
+}
+
+/**
+ * Resolve every requested tag against one router probe.
+ *
+ * Exported so bin/eval-aj-docs and bin/process-worker can run the same check
+ * in-process instead of shelling out and re-probing.
+ */
+async function checkChains(tags, env, opts = {}) {
+  if (opts.force) invalidateModelCache(env);
+  const available = await healthyModels(env, { force: !!opts.force });
+  const results = tags.map((tag) => {
+    let chain;
+    try {
+      chain = chainFor(tag, env);
+    } catch {
+      return { tag, status: 'unknown_tag', chain: [], live: [], preferred: null, pinned: false };
+    }
+    const pinned = !!(env[`QWEN_MODEL_${tag.toUpperCase()}`] || '').trim();
+    const preferred = chain[0] || null;
+    if (available === null) {
+      return { tag, status: 'unverified', chain, live: [], preferred, pinned };
+    }
+    const live = chain.filter((m) => available.includes(m));
+    const status = live.length === 0 ? 'empty' : live[0] === preferred ? 'ok' : 'degraded';
+    return { tag, status, chain, live, preferred, pinned };
+  });
+  return { available, results, router: (env.QWEN_URL || DEFAULT_URL).replace(/\/+$/, '') };
+}
+
+/** One line per tag, plus the standing advice when something is empty. */
+function render(report, { quiet = false } = {}) {
+  const bad = report.results.filter((r) => r.status === 'empty' || r.status === 'unknown_tag');
+  const out = [];
+  if (!quiet || bad.length) {
+    out.push(`${C.b}model chains${C.x} ${C.d}— router ${report.router}${C.x}`);
+    if (report.available === null) {
+      out.push(`  ${C.y}router unreachable${C.x} ${C.d}— not treated as a failure: models.js attempts the chain anyway (availability wins)${C.x}`);
+    } else {
+      out.push(`  ${C.d}advertises: ${report.available.join(', ') || '(none)'}${C.x}`);
+    }
+    for (const r of report.results) {
+      const badge = {
+        ok: `${C.g}ok      ${C.x}`,
+        degraded: `${C.y}degraded${C.x}`,
+        empty: `${C.r}EMPTY   ${C.x}`,
+        unverified: `${C.d}unknown ${C.x}`,
+        unknown_tag: `${C.r}NO SUCH ${C.x}`,
+      }[r.status];
+      const detail = r.status === 'unknown_tag'
+        ? 'not a tag in MODEL_CHAINS'
+        : r.status === 'unverified'
+          ? `chain: ${r.chain.join(' > ')}`
+          : r.status === 'empty'
+            ? `nothing live in: ${r.chain.join(' > ')}`
+            : `serving ${r.live[0]}${r.status === 'degraded' ? ` (wanted ${r.preferred})` : ''}`;
+      out.push(`  ${badge} ${r.tag.padEnd(7)} ${C.d}${detail}${r.pinned ? ' [pinned via QWEN_MODEL_' + r.tag.toUpperCase() + ']' : ''}${C.x}`);
+    }
+  }
+  if (bad.length) {
+    const empties = bad.filter((r) => r.status === 'empty');
+    if (empties.length) {
+      out.push('');
+      out.push(`${C.r}${C.b}No model is serving ${empties.map((r) => `"${r.tag}"`).join(' or ')}.${C.x}`);
+      for (const r of empties) {
+        out.push(`  ${C.b}${r.tag}${C.x} needs one of: ${r.chain.join(', ')}`);
+      }
+      out.push(`${C.d}Wake the extraction hosts (the DGX Spark and the Mac mini), or pin a model that IS`);
+      out.push(`advertised with QWEN_MODEL_${empties[0].tag.toUpperCase()}=<id>. Running anyway produces per-item`);
+      out.push(`failures and a score over a corpus that never finished.${C.x}`);
+    }
+  }
+  return out.join('\n');
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(3, 62).join('\n').replace(/^ ?\*\/?/gm, ''));
+    return 0;
+  }
+  const env = {
+    QWEN_URL: process.env.QWEN_URL || DEFAULT_URL,
+    QWEN_SECRET: resolveSecret(),
+    ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('QWEN_MODEL_'))),
+  };
+  const report = await checkChains(opts.tags, env, { force: true });
+
+  if (opts.json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    const text = render(report, { quiet: opts.quiet });
+    if (text) console.log(text);
+  }
+  return report.results.some((r) => r.status === 'empty' || r.status === 'unknown_tag') ? 1 : 0;
+}
+
+module.exports = { checkChains, render, resolveSecret };
+
+if (require.main === module) {
+  main().then(
+    (code) => process.exit(code),
+    (err) => { console.error(err); process.exit(2); }
+  );
+}

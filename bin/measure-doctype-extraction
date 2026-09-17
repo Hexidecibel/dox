@@ -80,7 +80,6 @@
  */
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
@@ -163,92 +162,13 @@ function buildLlmBundle() {
 }
 
 // ---------------------------------------------------------------------------
-// Text extraction — the same sequence bin/process-worker runs, in the same order
+// Text extraction — the same sequence bin/process-worker runs, in the same order.
+// Lives in bin/lib/corpusText.js so bin/eval-aj-docs measures the SAME path; a
+// second inline copy is how two harnesses end up reporting a "model" delta that
+// is really a text delta.
 // ---------------------------------------------------------------------------
 
-const {
-  serializePages: serializePdfPages,
-  shouldUseSerializedPages,
-  looksLikeBrokenEncoding,
-  countLetters,
-} = require('./lib/shared/pdfTextSerializer');
-
-/** bin/process-worker#isTextGarbled, verbatim. */
-function isTextGarbled(text) {
-  if (!text || text.length < 100) return false;
-  const words = text.split(/\s+/).filter((w) => w.length > 0);
-  if (words.length === 0) return false;
-  const avgWordLen = words.reduce((s, w) => s + w.length, 0) / words.length;
-  const whitespaceRatio = (text.match(/\s/g) || []).length / text.length;
-  return avgWordLen > 15 || whitespaceRatio < 0.08;
-}
-
-/** bin/process-worker#ocrPdf, minus the temp-dir bookkeeping. */
-function ocrPdf(pdfPath) {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doctype-ocr-'));
-  try {
-    execFileSync('pdftoppm', ['-gray', '-r', '300', pdfPath, path.join(tmpDir, 'page')], { timeout: 60_000, stdio: 'pipe' });
-    const pages = fs.readdirSync(tmpDir).filter((f) => /^page.*\.(pgm|ppm)$/.test(f)).sort();
-    const texts = [];
-    for (const p of pages) {
-      const res = execFileSync('tesseract', [path.join(tmpDir, p), 'stdout', '--psm', '1'], { timeout: 120_000, stdio: ['pipe', 'pipe', 'pipe'] });
-      texts.push(res.toString('utf-8'));
-    }
-    const combined = texts.join('\n\n').trim();
-    return combined.length > 0 ? combined : null;
-  } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
-  }
-}
-
-async function extractPdfText(pdfPath) {
-  const buf = fs.readFileSync(pdfPath);
-  const geomBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-  let text = null;
-  let pages = [];
-  let route = 'text-layer';
-
-  try {
-    const { extractText } = await import('unpdf');
-    const result = await extractText(new Uint8Array(buf), { mergePages: false });
-    const rawPages = Array.isArray(result.text) ? result.text.map((p) => (p == null ? '' : String(p))) : (result.text ? [String(result.text)] : []);
-    if (rawPages.length && rawPages.some((p) => p.trim().length > 0)) {
-      pages = rawPages;
-      text = rawPages.join('\n').replace(/\s+/g, ' ').substring(0, 100000);
-    }
-  } catch { /* falls through to OCR */ }
-
-  if (text && isTextGarbled(text)) { text = null; pages = []; }
-  if (!text || !text.trim()) {
-    route = 'ocr';
-    const ocr = ocrPdf(pdfPath);
-    if (ocr) { text = ocr.substring(0, 100000); pages = [text]; }
-  }
-
-  // Geometry pass LAST, exactly as in the worker: the OCR routing above is
-  // decided on the original text, and this is a no-op when the guard declines.
-  try {
-    const { getDocumentProxy } = await import('unpdf');
-    const doc = await getDocumentProxy(new Uint8Array(geomBuffer));
-    const items = [];
-    for (let p = 1; p <= doc.numPages; p++) {
-      const page = await doc.getPage(p);
-      const tc = await page.getTextContent();
-      items.push((tc && tc.items) || []);
-    }
-    const serialized = serializePdfPages(items);
-    if (shouldUseSerializedPages(serialized)) {
-      pages = serialized;
-      text = serialized.join('\n').substring(0, 100000);
-      route = route === 'ocr' ? 'ocr' : 'geometry';
-    } else if (route !== 'ocr') {
-      const joined = serialized.join('\n');
-      route = looksLikeBrokenEncoding(joined) ? `text-layer (serializer declined: broken encoding, ${countLetters(joined)} letters)` : route;
-    }
-  } catch { /* keep what we have */ }
-
-  return { text: text || '', pages, route };
-}
+const { extractPdfText } = require('./lib/corpusText');
 
 // ---------------------------------------------------------------------------
 // Report

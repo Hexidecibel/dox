@@ -4,7 +4,104 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-15 (latest): v2.20.0 ON PROD — take the documents with you (migration 0115).**
+**2026-09-16 (latest): AJ's first two document sets are in, measured, and in a new regression corpus.
+Three findings, and one of them is a bug.**
+
+*Nothing was deployed and nothing touched prod or staging D1. Local commit on master only.*
+
+**What arrived.** Sets 1 and 2 of three. **Set 3 — Medosweet's own packet plus AJ's manual — is still to
+come.** Everything is now in `tests/fixtures/real-corpus/` (PDFs **tracked**, unlike the other two corpora,
+because a real supplier PDF has no `html/` source to rebuild from). 31 documents, 176 graded fields, ground
+truth written from the page before the model saw it. `tests/fixtures/real-corpus/README.md` is the long
+version of everything below.
+
+* **Set 1, `packet-fdlw-2026.pdf`** — Savencia Cheese / Fleur de Lait West's 2026 annual supplier packet.
+  **36 pages, 25 documents, one file**, with its own table of contents on page 2 naming every one of them
+  and its page range. Letter of Guarantee, facility contacts, FDA bioterrorism registration, an SQF
+  certificate, two OU kosher letters, two IFANCA halal certificates, an allergen statement, a country of
+  origin statement, an 8-page HACCP plan, and fourteen one-page corporate statements (BSE, BPA, Prop 65,
+  rBST, bioengineered, vegetarian, PHO, rennet, yellow prussiate, food defense, environmental, heavy
+  metal, irradiation, PFAS).
+* **Set 2** — four specification sheets, three suppliers, three templates: Country Morning Farms Light
+  Cream 23% and 14% Ice Cream Mix, Smith Brothers Heavy Whipping Cream (item 13106), Andersen Dairy Heavy
+  Whip Cream half gallon. **All four print micro limits.**
+
+**Measured** 2026-09-16 on `Qwen3.6-35B-A3B-UD-Q8_K_XL` (Spark), baseline prompt, no supplier or
+document-type instructions configured: value accuracy **70.4%** (81/115), null accuracy **98.4%** (60/61),
+**one** invented value, document type **27/31**. Run saved to `tests/fixtures/real-corpus/runs/`
+(gitignored) — re-score it offline with `bin/eval-aj-docs --rescore`.
+
+**FINDING 1 — one file is not one document, and the packet proves it expensively.** dox classifies an
+upload once. On the whole packet the classifier answered **"Letter of Guarantee" in 4 of 5 runs** — that is
+page 3 answering for the other 24 documents — and extraction then produced `document_expires_on =
+2027-01-02`, **a date that appears nowhere in the file**. It is the Letter of Guarantee's own "valid for no
+more than one year from the date hereof" clause, read correctly off page 3 and applied to a 36-page packet
+that actually contains an SQF certificate expiring 2026-04-23, two kosher letters expiring 2026-06-30, a
+halal certificate expiring 2026-10-31 and an FDA registration expiring 2026-12-31. Split on its own index,
+the same pass gets **22/26** types right. **Recommendation is in todo.md** — short version: the splitter
+already exists (`functions/lib/kinds/coaPageScope.ts#extractRecordPdf`, which carved all 26 parts here
+without a single fallback), so the work is detection plus a review-queue affordance, not new machinery.
+
+**FINDING 2 — THE BUG. The OCR fallback never fires on an inserted certificate image.** Packet pages 6, 13,
+14, 15, 16 are pasted pictures: the SQF certificate and all four kosher/halal certificates. **They are the
+five documents in the packet that carry real expiry dates.** They are not blank — each has a few characters
+of genuine text over it (the "C2" confidentiality banner, a typed caption, a page number): **5, 83, 72, 70
+and 34 characters.** `bin/process-worker` routes to OCR only when the text layer is *empty or garbled*, and
+that is neither, so tesseract never runs. `shared/pdfTextSerializer.ts`'s guard does not catch it either —
+it declines >200 chars with almost no letters, and these are short, not letterless. Forced OCR reads
+1097–1587 characters off the same pages. **Cost, measured: those five pages are 25 of the corpus's 34 value
+errors and scored 0 of 25 fields.** Four of the five still classified correctly, and only because somebody
+typed a caption above the image; page 6's caption is blank and it is the one part in the corpus that came
+back `none` when a type did fit. **This is not specific to AJ's packet** — "scan of a certificate pasted
+into Word, under a header" is how supplier packets are assembled everywhere.
+
+**FINDING 3 — the FSQA starter pack has nowhere to put two thirds of a clean packet.** **17 of the 26 parts
+have no matching type** in the pack's 27. There is no Bioterrorism Statement, BSE, BPA, Prop 65, rBST,
+Vegetarian, PHO, Rennet, Yellow Prussiate, Heavy Metal, Irradiation, PFAS or Environmental Program type, and
+none for a contact table or a packet cover. The classifier handles this **correctly** — 15/18 answered
+`none` and parked for a human rather than forcing the nearest name. The three that slipped are the
+interesting ones: PHO → "Allergen Statement", Yellow Prussiate → "Allergen Statement", Environmental
+Program → "Sanitation Program". **This is a wizard/config question for AJ, not a model problem.**
+
+**Also worth telling AJ:** the packet's index calls page 6 a "Global Standard for Food Safety Certificate"
+(that is BRCGS's product name) and the certificate on the page is **SQF, issued by NSF**; its index entry 12
+says "Smithfield and Alouette" and the page is Smithfield only; and the Yellow Prussiate statement on page
+22 is dated **January 2, 2025** while every other statement in the 2026 packet is dated January 2, 2026.
+All three are recorded as ground truth, because ground truth is what the page says.
+
+**Schema gap, not a model gap.** `shelf_life` was missed on **all four** spec sheets and `document_number`
+on both Country Morning sheets — neither is a canonical field in `llm.ts` rule 1. A shelf life is the input
+`shared/renewalPeriod.ts` most wants that nothing currently extracts. Also: every CFU limit on the three
+sheets that print a unit prints it **per mL** on fluid dairy (migration 0093's case exactly), and Andersen's
+four limits have **no unit at all and two scopes** ("Fresh" / "48 Hr Stress" — a test condition, not a
+product), which `spec_limits` cannot express. That is why `spec_limits_printed` in the manifest is a
+description of the page, not an importable config.
+
+**New commands.**
+
+* `bin/eval-aj-docs` — one command, classification + extraction + scoring over the real corpus.
+  `--verify` runs **no model calls** and asserts every ground-truth string is in the text the model would
+  see. `--classify-only` is ~2.5 s a document. `--force-ocr` is the finding-2 probe and is **not** the
+  production path. `--set specs|packet|packet-parts|packet-whole`, `--rescore`.
+* `bin/check-model-chain` — **the long-standing "alert when a model chain goes empty" todo, detection half
+  done.** Asks the router once and exits non-zero naming the models a chain needs. A degraded chain passes;
+  an unreachable router passes (models.js attempts the chain anyway, and this must not be stricter than the
+  code it guards). `bin/eval-aj-docs` calls it first and **exits 3 rather than scoring a partial corpus** —
+  that is what bit twice.
+* `bin/process-worker` now preflights **`fast`** as well as `best`/`vision`. It was the real hole: `fast`
+  is what classification runs on, classification failure is caught as non-critical, so a `fast`-only outage
+  produced **no error anywhere** — every document extracted untyped and the 0098 instruction layer applied
+  to nothing. It **warns loudly and still starts** (runtime behaviour deliberately unchanged).
+
+**Gates.** typecheck ratchet **27, at baseline**. `realCorpus.test.ts` 14 new tests; the 7 files touching
+changed code pass (233 tests). `score.mjs` gained `document_type_expected_none`, and it is **proven inert**:
+re-scoring all five saved doctype-corpus runs through the before and after scorer gives **byte-identical**
+summaries. `bin/measure-doctype-extraction` was refactored to share `bin/lib/corpusText.js` with the new
+harness (one text path, not two) and re-verified live. `npm run build` not run — `src/` untouched.
+
+---
+
+**2026-09-15: v2.20.0 ON PROD — take the documents with you (migration 0115).**
 Two branches merged into master: `worktree-agent-a4e8b54c043828bc7` (docs/CI/classification/GraphQL, merge
 baa118d, NO conflicts) and `worktree-agent-a074bf8b415c0c27a` (search export, merge f1d0e68). SCHEMA.md
 f49eff9, release 1cf9a7f (tag v2.20.0 pushed). Pages deploy `968bf7be`, staging `158c228d`. Both worktrees

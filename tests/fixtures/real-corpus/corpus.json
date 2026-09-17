@@ -1,0 +1,2720 @@
+{
+  "_readme": "Real documents from real suppliers, sent by the client SME (AJ Conner) 2026-09-16 for wizard-config testing. Ground truth was written from the page text, not read back out of an extraction. See README.md.",
+  "_provenance": {
+    "received": "2026-09-16",
+    "from": "AJ Conner (client SME)",
+    "sets": {
+      "1": "the COMPREHENSIVE set — one supplier who assembles a full clean packet (packet-fdlw-2026, 36 pages, 25 documents)",
+      "2": "the MESSIER set — four unrelated specification sheets from three suppliers, three different templates",
+      "3": "NOT YET ARRIVED — Medosweet's own packet plus AJ's manual"
+    },
+    "why_real_pdfs_are_committed": "The doctype-corpus and spec-corpus PDFs are gitignored because they are BUILD OUTPUT rebuilt from html/ by bin/render-*-corpus. These are not: a real supplier PDF has no source to rebuild from, so the PDF IS the source and is tracked. 2.1 MB for five files."
+  },
+  "_document_type_expected_none_why": "Eighteen of the packet's twenty-six parts have no matching type in the FSQA starter pack, and for those the CORRECT classifier answer is \"none\" — which parks the item for a human instead of forcing it onto the nearest name. The synthetic corpus never needed to say that, because every fixture there was written to match a type in the pack. `document_type_expected_none: true` says it. A document may carry BOTH that flag and a `document_type_accept` list, and then either answer counts: that combination is used exactly twice, where the pack has an adjacent-but-not-equal type and the disagreement is worth recording rather than resolving.",
+  "extends_key_groups": "../doctype-corpus/corpus.json",
+  "key_groups": {
+    "shelf_life": [
+      "shelf_life",
+      "shelf_life_days",
+      "shelflife",
+      "best_by",
+      "product_shelf_life",
+      "storage_life"
+    ],
+    "document_number": [
+      "document_number",
+      "document_no",
+      "doc_number",
+      "spec_number",
+      "specification_number",
+      "document_id",
+      "form_number"
+    ],
+    "plant_number": [
+      "plant_number",
+      "plant_code",
+      "usda_number",
+      "facility_number",
+      "establishment_number"
+    ]
+  },
+  "documents": [
+    {
+      "id": "packet-fdlw-2026",
+      "type": "Supplier facility packet (25 documents in one PDF)",
+      "type_slug": "packet",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": null,
+      "multi_document": true,
+      "contains": 25,
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "THE WHOLE POINT OF THIS ENTRY. 36 pages, 25 separately-dated documents, one upload. The classifier reads CLASSIFIER_TEXT_BUDGET = 3000 characters, which on this file is the cover letter and the table of contents and the first sentence of the Letter of Guarantee. Any confident single answer is wrong, because no single answer exists: whichever type it lands on becomes the type of all 25, and whichever date it lands on becomes the renewal date of all 25. Unresolved is the only correct answer until the packet is split.",
+      "pdf_text_must_contain": [
+        "2026 SUPPLIER INFORMATION FOR SAVENCIA CHEESE FLEUR DE",
+        "1. Letter of Guarantee | Page 3",
+        "25. Food Safety/HACCP Master Plan | Pages 28-35"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia",
+            "Savencia Cheese Fleur de Lait West",
+            "Fleur de Lait West"
+          ],
+          "why": "the one field a packet CAN answer — every document in it is from the same supplier"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-04-23",
+            "Apr 23, 2026",
+            "6/30/2026",
+            "2026-06-30",
+            "October 31, 2026",
+            "2026-10-31",
+            "December 31, 2026",
+            "2026-12-31"
+          ],
+          "why": "FOUR different real expiry dates live inside this file — SQF 2026-04-23, both OU kosher letters 2026-06-30, the alouette IFANCA halal 2026-10-31, the FDA registration 2026-12-31 — and none of them is the packet's. Picking any one silently sets the renewal date for the other 24 documents"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "accept": [
+            "2026-01-13"
+          ],
+          "why": "twenty of the twenty-five documents are dated January 2, 2026; the PDF itself was produced 2026-01-13, which is accepted as the same event"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "46026",
+            "5137.5676.11250060",
+            "5137.5676.11250058",
+            "06-13573",
+            "42-100"
+          ],
+          "why": "a packet has no certificate number; three real ones and two USDA plant numbers are inside it"
+        }
+      ],
+      "note": "Page 36 is blank. Pages 6 and 13-16 are inserted certificate IMAGES with no text layer — in the whole-file text layer they contribute only the \"C2\" banner and a page number, so five of the packet's most renewal-relevant documents are invisible to a text-layer read of the whole file."
+    },
+    {
+      "id": "packet-p00-cover",
+      "type": "Packet cover letter and index",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        1,
+        2
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "(not in the index)",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "A cover letter and a table of contents. Not a document type, and the index it carries is the machine-readable split plan for the other 25.",
+      "pdf_text_must_contain": [
+        "2026 SUPPLIER INFORMATION FOR SAVENCIA CHEESE FLEUR DE",
+        "1. Letter of Guarantee | Page 3"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese Fleur de Lait West",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia",
+            "Fleur de Lait West",
+            "Savencia Cheese"
+          ],
+          "why": "the cover names the facility the packet is about"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [],
+          "why": "nothing on the cover expires"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": []
+        }
+      ]
+    },
+    {
+      "id": "packet-p01-letter-of-guarantee",
+      "type": "Letter of Guarantee",
+      "type_slug": "log",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        3
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "1. Letter of Guarantee | Page 3",
+      "document_type_accept": [
+        "letter of guarantee",
+        "continuing guaranty",
+        "guarantee letter"
+      ],
+      "pdf_text_must_contain": [
+        "LETTER OF GUARANTEE",
+        "January 2, 2026",
+        "Savencia USA LLC guarantees",
+        "Louise Newswanger"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia USA LLC",
+          "accept": [
+            "Savencia Cheese USA LLC",
+            "Savencia Cheese USA",
+            "Savencia"
+          ],
+          "why": "the guarantor. The page says \"Savencia USA LLC guarantees\" in the first line and \"Savencia Cheese USA LLC\" in the second paragraph and the signature block — both are the guarantor and both are accepted"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "null_equivalents": [
+            "2027-01-02",
+            "01/02/2027",
+            "2027-01-01",
+            "one year",
+            "one year from the date hereof"
+          ],
+          "distractors": [
+            "January 2, 2026",
+            "2026-01-02"
+          ],
+          "why": "THE DELIBERATE SOFT CASE. The page prints NO expiry date; it prints a rule — \"valid for no more than one year from the date hereof\". Ground truth is null because nothing is printed, but a model that computes 2027-01-02 has read the page correctly, so that answer is declared null-equivalent rather than scored as an invention. Copying the LETTER date into the expiry field is still a misfile"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "January 2, 2026",
+            "2026-01-02"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "packet-p02-facility-contacts",
+      "type": "Facility Contact Information",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        4
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "2. Facility Contact Information | Page 4",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\". It is also not really a document — it is a contact table, the kind of thing a tenant keeps in owner_routes (0091), not in the document registry.",
+      "pdf_text_must_contain": [
+        "FACILITY CONTACT INFORMATION",
+        "Abigail Valencia",
+        "Fleur de",
+        "24 Hour Emergency Contact"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia",
+            "Fleur de Lait West"
+          ],
+          "why": "derivable only from the @savencia.com addresses and the facility column; the corporate name is not printed on this page as a heading"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": []
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": null,
+          "distractors": [],
+          "why": "GENUINELY UNDATED — the only page in the packet with no date on it at all"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": []
+        }
+      ],
+      "tables_must_contain": [
+        "Abigail Valencia",
+        "Plant Manager"
+      ]
+    },
+    {
+      "id": "packet-p03-bioterrorism",
+      "type": "FDA Bioterrorism Act registration statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        5
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "3. FDA Bioterrorism Statement | Page 5",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "FDA BIOTERRORISM STATEMENT",
+        "December 31, 2026",
+        "06-13573",
+        "Bioterrorism Act/BTA"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2026-12-31",
+          "why": "THE ONE STATEMENT IN THE PACKET THAT DOES STATE ITS OWN EXPIRY: \"This document is effective until December 31, 2026.\" That is exactly the `document_expires_on` clause of the renewal model — a document that expires because the document says so"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "December 31, 2026",
+            "2026-12-31",
+            "January 2, 2026",
+            "2026-01-02"
+          ],
+          "why": "the registration expiry is the DOCUMENT's, not a product shelf life, and the two must not both carry it"
+        },
+        {
+          "name": "plant_number",
+          "keys": [
+            "plant_number",
+            "plant_code",
+            "usda_number",
+            "facility_number"
+          ],
+          "match": "text",
+          "truth": "06-13573",
+          "why": "the Fleur de Lait West plant number; 42-100 (New Holland) and 17-555 (Lena) are the other facilities on the same table"
+        }
+      ],
+      "tables_must_contain": [
+        "06-13573"
+      ]
+    },
+    {
+      "id": "packet-p04-sqf-certificate",
+      "type": "3rd Party Audit Certificate (SQF, issued by NSF)",
+      "type_slug": "audit",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        6
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "4. Global Standard for Food Safety Certificate | Page 6",
+      "document_type_accept": [
+        "3rd party audit certificate",
+        "certificate of conformity",
+        "3rd party food safety audit report",
+        "audit certificate",
+        "sqf certificate"
+      ],
+      "document_type_note": "The INDEX CALLS IT SOMETHING IT IS NOT. \"Global Standard for Food Safety\" is BRCGS's product name; the certificate on the page is SQF (SQF Food Safety Code: Food Manufacturing, SQF Quality Code, Edition 9) issued by NSF Certification, LLC. A tenant that trusted the index would file a BRCGS certificate it does not hold. Both audit types in the starter pack are accepted because Certificate-vs-Report is the same fine distinction the synthetic corpus leaves standing.",
+      "pdf_text_must_contain": [],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC-Fleur de Lait West",
+          "accept": [
+            "Savencia Cheese USA LLC",
+            "Fleur de Lait West",
+            "Savencia Cheese USA"
+          ],
+          "why": "the CERTIFIED SITE, not NSF who issued it"
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "text",
+          "truth": "NSF Certification, LLC",
+          "accept": [
+            "NSF Certification",
+            "NSF"
+          ],
+          "why": "the certification body. SQF is the SCHEME, not the issuer"
+        },
+        {
+          "name": "scheme",
+          "keys_ref": "scheme",
+          "match": "tokens",
+          "truth": "SQF Food Safety Code: Food Manufacturing, SQF Quality Code, Edition 9",
+          "tokens_any": [
+            "sqf"
+          ],
+          "tokens_none": [
+            "brc",
+            "global standard"
+          ],
+          "why": "must NOT come back as BRCGS / Global Standard, which is what the packet index calls this page"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "46026"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2026-04-23",
+          "why": "Certificate Expiry Date Apr 23, 2026. Three other dates sit beside it: audit date Feb 06 2025, next re-certification audit Feb 07 2026, date of decision Mar 01 2025"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2025-03-01",
+          "accept": [
+            "2025-02-06"
+          ],
+          "why": "Date of Decision Mar 01, 2025 is when the certificate came into force; the audit date Feb 06 2025 is accepted as the same event"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "Apr 23, 2026",
+            "2026-04-23",
+            "Feb 07, 2026",
+            "2026-02-07",
+            "Mar 01, 2025",
+            "2025-03-01"
+          ]
+        }
+      ],
+      "image_only": true,
+      "text_layer_chars": 5,
+      "pdf_text_must_contain_ocr": [
+        "Certificate Expiry Date",
+        "Apr 23, 2026",
+        "46026",
+        "NSF Certification, LLC",
+        "SQF Food Safety Code: Food",
+        "Savencia Cheese USA LLC-Fleur de"
+      ],
+      "note": "INSERTED CERTIFICATE IMAGE, AND THE OCR FALLBACK NEVER FIRES ON IT. The page is a pasted picture under a few characters of REAL text — the \"C2\" confidentiality banner, a typed caption, a page number. bin/process-worker routes to OCR only when the text layer is EMPTY or garbled, and 5-83 characters is neither, so the certificate is never rasterised and the model is handed the caption. The ground truth below is what tesseract reads under bin/eval-aj-docs --force-ocr; the production route reads almost none of it, and `text_layer_chars` is how much it does read."
+    },
+    {
+      "id": "packet-p05-bse",
+      "type": "Bovine Spongiform Encephalopathy (BSE/FMD) statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        7
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "5. Bovine Spongiform Encephalopathy Statement | Page 7",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "BOVINE SPONGIFORM ENCEPHALOPATHY STATEMENT",
+        "January 2, 2026",
+        "do not import any raw dairy ingredients"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p06-bpa",
+      "type": "Bisphenol A (BPA) statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        8
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "6. Bisphenol A (BPA) Statement | Page 8",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "BISPHENOL A (BPA) STATEMENT",
+        "do not contain Bisphenol A (BPA)"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p07-prop65",
+      "type": "California Proposition 65 statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        9
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "7. Prop 65 Drinking Water and Toxic Enforcement Statement | Page 9",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "PROP 65 DRINKING WATER and TOXIC ENFORCEMENT ACT STATEMENT",
+        "Proposition 65"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p08-rbst",
+      "type": "rBST-free statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        10
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "8. rBST Free Statement | Page 10",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "rBST STATEMENT",
+        "cows not treated with rBST"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p09-bioengineered",
+      "type": "Bioengineered (BE) disclosure statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        11
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "9. Bioengineered Statement | Page 11",
+      "document_type_accept": [
+        "non-gmo certificate"
+      ],
+      "document_type_expected_none": true,
+      "document_type_note": "The pack's nearest type is \"Non-GMO Certificate\", but this is a self-declared statement, not a certificate from a certifier. Both answers are counted correct and the disagreement is recorded rather than resolved.",
+      "pdf_text_must_contain": [
+        "BIOENGINEERED STATEMENT",
+        "National Bioengineered Food Disclosure Law",
+        "do not appear on the Bioengineered Food List"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p10-vegetarian",
+      "type": "Vegetarian / vegan / ovo-lacto statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        12
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "10. Vegetarian/Vegan Statement/Ovo-Lacto Vegetarian | Page 12",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "VEGETARIAN/VEGAN/OVO-LACTO VEGETARIAN STATEMENT",
+        "NOT ACCEPTABLE",
+        "Fleur de Lait West"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p11-kosher-alouette",
+      "type": "Kosher Certificate (OU) — alouette Professional",
+      "type_slug": "kosher",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        13
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "11. Kosher Certification alouette Professional | Page 13",
+      "document_type_accept": [
+        "kosher certificate",
+        "letter of kosher certification",
+        "kosher certification"
+      ],
+      "pdf_text_must_contain": [],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA, LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese USA LLC",
+            "Fleur de Lait-West-City of Industry"
+          ],
+          "why": "the CERTIFIED company; the Orthodox Union is the certifier"
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "tokens",
+          "truth": "Orthodox Union",
+          "tokens_any": [
+            "orthodox union",
+            "ou kosher",
+            "union of orthodox jewish congregations"
+          ],
+          "why": "the certifier. OCR renders the header \"ORTHODOX UNION / UNION OF ORTHODOX JEWISH CONGREGATIONS OF AMERICA\""
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2026-06-30",
+          "why": "\"This certification is valid through 6/30/2026\". The letter date January 09, 2026 is the decoy"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-09"
+        },
+        {
+          "name": "kosher_status",
+          "keys_ref": "kosher_status",
+          "match": "tokens",
+          "truth": "Dairy",
+          "tokens_any": [
+            "dairy",
+            "ou-d",
+            "oud"
+          ],
+          "why": "every product line reads \"Dairy\" with an OU-D symbol requirement"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "6/30/2026",
+            "2026-06-30",
+            "January 09, 2026",
+            "2026-01-09"
+          ],
+          "why": "a kosher letter carries no shelf life for the alouette Professional cream cheese and neufchatel lines"
+        }
+      ],
+      "image_only": true,
+      "text_layer_chars": 83,
+      "pdf_text_must_contain_ocr": [
+        "ORTHODOX UNION",
+        "January 09, 2026",
+        "This certification is valid through 6/30/2026",
+        "Savencia Cheese USA, LLC"
+      ],
+      "note": "INSERTED CERTIFICATE IMAGE, AND THE OCR FALLBACK NEVER FIRES ON IT. The page is a pasted picture under a few characters of REAL text — the \"C2\" confidentiality banner, a typed caption, a page number. bin/process-worker routes to OCR only when the text layer is EMPTY or garbled, and 5-83 characters is neither, so the certificate is never rasterised and the model is handed the caption. The ground truth below is what tesseract reads under bin/eval-aj-docs --force-ocr; the production route reads almost none of it, and `text_layer_chars` is how much it does read."
+    },
+    {
+      "id": "packet-p12-kosher-smithfield",
+      "type": "Kosher Certificate (OU) — Smithfield",
+      "type_slug": "kosher",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        14
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "12. Kosher Certification Smithfield and Alouette | Page 14",
+      "document_type_accept": [
+        "kosher certificate",
+        "letter of kosher certification",
+        "kosher certification"
+      ],
+      "document_type_note": "The index says \"Smithfield and Alouette\"; the page is titled \"Smithfield Cream and Neufchatel Cheese Kosher Certified Products\" and every product line is Smithfield. The index is wrong, the page is right.",
+      "pdf_text_must_contain": [],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA, LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese USA LLC",
+            "Fleur de Lait-West-City of Industry"
+          ],
+          "why": "the CERTIFIED company; the Orthodox Union is the certifier"
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "tokens",
+          "truth": "Orthodox Union",
+          "tokens_any": [
+            "orthodox union",
+            "ou kosher",
+            "union of orthodox jewish congregations"
+          ],
+          "why": "the certifier. OCR renders the header \"ORTHODOX UNION / UNION OF ORTHODOX JEWISH CONGREGATIONS OF AMERICA\""
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2026-06-30",
+          "why": "\"This certification is valid through 6/30/2026\". The letter date January 09, 2026 is the decoy"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-09"
+        },
+        {
+          "name": "kosher_status",
+          "keys_ref": "kosher_status",
+          "match": "tokens",
+          "truth": "Dairy",
+          "tokens_any": [
+            "dairy",
+            "ou-d",
+            "oud"
+          ],
+          "why": "every product line reads \"Dairy\" with an OU-D symbol requirement"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "6/30/2026",
+            "2026-06-30",
+            "January 09, 2026",
+            "2026-01-09"
+          ],
+          "why": "a kosher letter carries no shelf life for the Smithfield cream cheese and neufchatel bars"
+        }
+      ],
+      "image_only": true,
+      "text_layer_chars": 72,
+      "pdf_text_must_contain_ocr": [
+        "Smithfield Cream and Neufchatel Cheese Kosher Certified Products",
+        "January 09, 2026",
+        "valid through 6/30/2026",
+        "Savencia Cheese USA, LLC"
+      ],
+      "note": "INSERTED CERTIFICATE IMAGE, AND THE OCR FALLBACK NEVER FIRES ON IT. The page is a pasted picture under a few characters of REAL text — the \"C2\" confidentiality banner, a typed caption, a page number. bin/process-worker routes to OCR only when the text layer is EMPTY or garbled, and 5-83 characters is neither, so the certificate is never rasterised and the model is handed the caption. The ground truth below is what tesseract reads under bin/eval-aj-docs --force-ocr; the production route reads almost none of it, and `text_layer_chars` is how much it does read."
+    },
+    {
+      "id": "packet-p13-halal-smithfield",
+      "type": "Halal Certificate (IFANCA) — Smithfield",
+      "type_slug": "halal",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        15
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "13. Halal Certification Smithfield 3 lb and 30 lb Bars | Page 15",
+      "document_type_accept": [
+        "halal certificate",
+        "halal product certificate",
+        "ifanca halal product certificate"
+      ],
+      "pdf_text_must_contain": [],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA, LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese USA LLC",
+            "FDL - West"
+          ],
+          "why": "the certified company; IFANCA is the certifier"
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "tokens",
+          "truth": "Islamic Food and Nutrition Council of America (IFANCA)",
+          "tokens_any": [
+            "ifanca",
+            "islamic food and nutrition council"
+          ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2025-12-17",
+          "why": "\"Date: December 17, 2025\" — note it is the only document in the packet issued in the PREVIOUS year"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "5137.5676.11250060",
+          "accept": [
+            "5137567611250060"
+          ],
+          "why": "the \"Document #\" on the certificate. Each product line also carries its own HC-25... product certificate number; the document number is the one that identifies the certificate"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "December 17, 2025",
+            "2025-12-17"
+          ],
+          "why": "THE ASYMMETRY THAT MATTERS. The alouette IFANCA certificate on the next page prints \"valid until October 31, 2026\"; THIS one, from the same certifier on the same day, prints no validity line at all. A reviewer skimming two near-identical certificates will assume both expire together. Ground truth is null — the page does not say — and October 31 2026 borrowed from the sibling page is an invention, because it is nowhere in THIS page's text"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "December 17, 2025",
+            "2025-12-17",
+            "October 31, 2026",
+            "2026-10-31"
+          ]
+        }
+      ],
+      "image_only": true,
+      "text_layer_chars": 70,
+      "pdf_text_must_contain_ocr": [
+        "IFANCA HALAL PRODUCT CERTIFICATE",
+        "December 17, 2025",
+        "5137.5676.11250060"
+      ],
+      "note": "INSERTED CERTIFICATE IMAGE, AND THE OCR FALLBACK NEVER FIRES ON IT. The page is a pasted picture under a few characters of REAL text — the \"C2\" confidentiality banner, a typed caption, a page number. bin/process-worker routes to OCR only when the text layer is EMPTY or garbled, and 5-83 characters is neither, so the certificate is never rasterised and the model is handed the caption. The ground truth below is what tesseract reads under bin/eval-aj-docs --force-ocr; the production route reads almost none of it, and `text_layer_chars` is how much it does read."
+    },
+    {
+      "id": "packet-p14-halal-alouette",
+      "type": "Halal Certificate (IFANCA) — alouette",
+      "type_slug": "halal",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        16
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "14. Halal Certification alouette products | Page 16",
+      "document_type_accept": [
+        "halal certificate",
+        "halal product certificate",
+        "ifanca halal product certificate"
+      ],
+      "pdf_text_must_contain": [],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA, LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese USA LLC",
+            "FDL - West"
+          ],
+          "why": "the certified company; IFANCA is the certifier"
+        },
+        {
+          "name": "issuing_body",
+          "keys_ref": "issuing_body",
+          "match": "tokens",
+          "truth": "Islamic Food and Nutrition Council of America (IFANCA)",
+          "tokens_any": [
+            "ifanca",
+            "islamic food and nutrition council"
+          ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2025-12-17",
+          "why": "\"Date: December 17, 2025\" — note it is the only document in the packet issued in the PREVIOUS year"
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": "5137.5676.11250058",
+          "accept": [
+            "5137567611250058"
+          ],
+          "why": "the \"Document #\" on the certificate. Each product line also carries its own HC-25... product certificate number; the document number is the one that identifies the certificate"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": "2026-10-31",
+          "why": "\"This Certificate is valid until October 31, 2026 and subject to renewal at that time.\""
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "December 17, 2025",
+            "2025-12-17",
+            "October 31, 2026",
+            "2026-10-31"
+          ]
+        }
+      ],
+      "image_only": true,
+      "text_layer_chars": 34,
+      "pdf_text_must_contain_ocr": [
+        "IFANCA HALAL PRODUCT CERTIFICATE",
+        "December 17, 2025",
+        "5137.5676.11250058",
+        "This Certificate is valid until October 31, 2026"
+      ],
+      "note": "INSERTED CERTIFICATE IMAGE, AND THE OCR FALLBACK NEVER FIRES ON IT. The page is a pasted picture under a few characters of REAL text — the \"C2\" confidentiality banner, a typed caption, a page number. bin/process-worker routes to OCR only when the text layer is EMPTY or garbled, and 5-83 characters is neither, so the certificate is never rasterised and the model is handed the caption. The ground truth below is what tesseract reads under bin/eval-aj-docs --force-ocr; the production route reads almost none of it, and `text_layer_chars` is how much it does read."
+    },
+    {
+      "id": "packet-p15-allergen",
+      "type": "Allergen Statement",
+      "type_slug": "allergen",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        17,
+        18
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "15. Allergen Control Statement | Pages 17-18",
+      "document_type_accept": [
+        "allergen statement",
+        "allergen control statement",
+        "allergen declaration"
+      ],
+      "pdf_text_must_contain": [
+        "ALLERGEN STATEMENT",
+        "DAIRY MILK | YES | YES | YES",
+        "PEANUT | NO | NO | NO",
+        "MONOSODIUM"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ]
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger"
+        },
+        {
+          "name": "allergens",
+          "keys_ref": "allergens",
+          "match": "tokens",
+          "truth": "Dairy milk",
+          "tokens_any": [
+            "milk",
+            "dairy"
+          ],
+          "tokens_none": [
+            "peanut",
+            "soy",
+            "wheat",
+            "egg"
+          ],
+          "why": "DAIRY MILK is the only YES row. The other eight FDA allergens are all NO across all three columns, and the trap is a model that lists the table's row labels instead of its answers. Wheat, soy and celery DO appear on the page, in the footnote about a separate e-commerce warehouse, which is not this facility's allergen profile"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "January 2, 2026",
+            "2026-01-02"
+          ]
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "January 2, 2026",
+            "2026-01-02"
+          ]
+        }
+      ],
+      "tables_must_contain": [
+        "DAIRY MILK",
+        "SESAME"
+      ]
+    },
+    {
+      "id": "packet-p16-pho",
+      "type": "Partially hydrogenated oils statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        19
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "16. Partially Hydrogenated Oils | Page 19",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "PARTIALLY HYDROGENATED OILS",
+        "partially hydrogenated oils"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p17-rennet",
+      "type": "Rennet / enzyme statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        20
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "17. Rennet-Enzyme Statement | Page 20",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "RENNET/ENZYME STATEMENT",
+        "do not contain any rennet or enzymes"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p18-country-of-origin",
+      "type": "Country of Origin Statement",
+      "type_slug": "coo",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        21
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "18. Country of Origin Statement | Page 21",
+      "document_type_accept": [
+        "country of origin statement",
+        "country of origin",
+        "coo statement"
+      ],
+      "document_type_note": "The page's own heading is misspelled \"COUNTRY OF ORGIN\". That is what the classifier sees.",
+      "pdf_text_must_contain": [
+        "COUNTRY OF ORGIN",
+        "United States law",
+        "New Holland, PA, Lena, IL, and City of Industry, CA USA"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese-USA",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia",
+            "Savencia Cheese USA"
+          ]
+        },
+        {
+          "name": "country_of_origin",
+          "keys_ref": "country_of_origin",
+          "match": "tokens",
+          "truth": "USA",
+          "tokens_any": [
+            "usa",
+            "united states",
+            "u.s."
+          ],
+          "why": "the three plants named are New Holland PA, Lena IL and City of Industry CA"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "January 2, 2026",
+            "2026-01-02"
+          ]
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "January 2, 2026",
+            "2026-01-02"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "packet-p19-yellow-prussiate",
+      "type": "Yellow Prussiate of Soda statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        22
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "19. Yellow Prussiate of Soda Statement | Page 22",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "YELLOW PRUSSIATE of SODA STATEMENT",
+        "January 2, 2025",
+        "anticaking agent"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2025-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "January 2, 2025",
+            "2025-01-02"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "January 2, 2025",
+            "2025-01-02"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ],
+      "note": "THE STALE PAGE. Every other statement in this 2026 packet is dated January 2, 2026; this one is dated January 2, 2025 — a year old, almost certainly a supplier typo, and exactly what a renewal dashboard is for. Ground truth is what the page says, not what the packet implies."
+    },
+    {
+      "id": "packet-p20-food-defense",
+      "type": "Food defense program statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        23
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "20. Food Defense Statement | Page 23",
+      "document_type_accept": [
+        "food defense plan"
+      ],
+      "document_type_expected_none": true,
+      "document_type_note": "The pack HAS \"Food Defense Plan\", and this page is a one-paragraph statement that such a plan exists — not the plan. Either answer is defensible, so both are counted correct and the disagreement is recorded rather than resolved.",
+      "pdf_text_must_contain": [
+        "FOOD DEFENSE PROGRAM",
+        "Food Defense and Food Fraud Program"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p21-environmental",
+      "type": "Environmental monitoring program statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        24
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "21. Environmental Statement | Page 24",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "ENVIRONMENTAL PROGRAM",
+        "Listeria spp.",
+        "Hand Swabbing"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p22-heavy-metal-pesticide",
+      "type": "Heavy metal and pesticide statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        25
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "22. Heavy Metal and Pesticide Statement | Page 25",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "HEAVY METAL AND PESTICIDE STATEMENT",
+        "Pesticide and Heavy Metal Program"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p23-irradiation",
+      "type": "Irradiation statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        26
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "23. Irradiation Statement | Page 26",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "IRRADIATION STATEMENT",
+        "does not use irradiation"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p24-pfas",
+      "type": "PFAS statement",
+      "type_slug": "statement",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        27
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "24. Poly-fluoroalkyl substances (PFAS) Statement | Page 27",
+      "document_type_accept": [],
+      "document_type_expected_none": true,
+      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "pdf_text_must_contain": [
+        "P0LY-FLUROAKLYL SUBSTANCES (PFAS) STATEMENT",
+        "poly-fluoroalkyl"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Savencia Cheese USA LLC",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia"
+          ],
+          "why": "the guarantor/declarant; every statement in the packet is signed by the corporate entity, not by the Fleur de Lait West plant that the packet is ABOUT"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": "2026-01-02",
+          "why": "the letter date, which is the anchor shared/renewalPeriod.ts counts an annual period from"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Louise Newswanger",
+          "why": "signed by the Corporate Quality Assurance Manager"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "a dated statement prints no expiry. The renewal period for this TYPE is a configuration decision (0096/0097), not something to read off the page — and the letter date is right there to be misfiled as one"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "2026-01-02",
+            "January 2, 2026"
+          ],
+          "why": "no PRODUCT shelf life on a corporate statement; expiration_date is the shelf-life field and must stay empty (CLAUDE.md: reading it as a renewal date mailed every COA owner)"
+        }
+      ]
+    },
+    {
+      "id": "packet-p25-haccp",
+      "type": "Food Safety / HACCP master plan overview",
+      "type_slug": "haccp",
+      "tier": "real",
+      "pdf": "pdf/packet-fdlw-2026.pdf",
+      "pages": [
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35
+      ],
+      "part_of": "packet-fdlw-2026",
+      "toc_label": "25. Food Safety/HACCP Master Plan | Pages 28-35",
+      "document_type_accept": [
+        "haccp plan",
+        "food safety plan",
+        "haccp",
+        "food safety/haccp plan"
+      ],
+      "document_type_note": "Both \"HACCP Plan\" and \"Food Safety Plan\" are in the starter pack and the document calls itself both (\"Savencia has a Food safety/HACCP plan that is compliant with both GFSI and FDA requirements\"). Either is correct.",
+      "pdf_text_must_contain": [
+        "FDLW HACCP/ HARPC OVERVIEW",
+        "HTST pasteurization, Antibiotic testing of raw milk, and foreign material detection are the 3",
+        "Supplier Approval Program"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "FDLW, a division of Savencia Cheese USA",
+          "accept": [
+            "Savencia Cheese USA",
+            "Savencia Cheese",
+            "Savencia USA LLC",
+            "Savencia",
+            "FDLW",
+            "Fleur de Lait West"
+          ]
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "null_equivalents": [
+            "annual",
+            "yearly",
+            "annually"
+          ],
+          "distractors": [],
+          "why": "the plan states a REVIEW CADENCE (\"review and update on a yearly basis\"), not an expiry date. This is the case migration 0096/0097 exist for: the period is a property of the type, configured once, not a date to be read off a page that does not print one"
+        },
+        {
+          "name": "effective_date",
+          "keys_ref": "effective_date",
+          "match": "date",
+          "truth": null,
+          "distractors": [],
+          "why": "the eight-page plan carries NO date anywhere — unusually, for a controlled document. A date here would have to come from the packet around it, which the model is not given"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": []
+        },
+        {
+          "name": "plant_number",
+          "keys": [
+            "plant_number",
+            "plant_code",
+            "usda_number",
+            "facility_number"
+          ],
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "3",
+            "55"
+          ],
+          "why": "no plant number is printed on the HACCP overview; \"3 critical control points\" and \"55 full time employees\" are the number-shaped strings available to invent from"
+        }
+      ],
+      "tables_must_contain": [
+        "ALLERGEN"
+      ]
+    },
+    {
+      "id": "spec-cmf-light-cream-23",
+      "type": "Specification Sheet",
+      "type_slug": "spec",
+      "tier": "real",
+      "pdf": "pdf/spec-cmf-light-cream-23.pdf",
+      "pages": null,
+      "supplier": "Country Morning Farms",
+      "document_type_accept": [
+        "specification sheet",
+        "product specification",
+        "product specifications",
+        "spec sheet",
+        "product specification sheet"
+      ],
+      "pdf_text_must_contain": [
+        "LIGHT CREAM 23%",
+        "countrymorningfarms.com",
+        "Shelf Life: 21 days",
+        "≤20,000 cfu/mL",
+        "53-140-383 | SQF 2.3.2.9 | Latest Rev: 2 Mar 2026 JAG"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Country Morning Farms",
+          "accept": [
+            "countrymorningfarms.com",
+            "Country Morning Farms, Inc.",
+            "countrymorningfarms"
+          ],
+          "why": "THE COMPANY NAME IS NEVER PRINTED. The header carries an address, a phone number and a domain, and the only way to the name is the domain. A model that answers \"countrymorningfarms.com\" has done the job"
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Light Cream 23%",
+          "accept": [
+            "LIGHT CREAM 23%",
+            "23% Light Cream",
+            "Cream - Light 23%",
+            "Light Cream"
+          ]
+        },
+        {
+          "name": "document_number",
+          "keys": [
+            "document_number",
+            "document_no",
+            "doc_number",
+            "spec_number",
+            "specification_number",
+            "document_id"
+          ],
+          "match": "text",
+          "truth": "53-140-383"
+        },
+        {
+          "name": "revision_date",
+          "keys_ref": "revision_date",
+          "match": "date",
+          "truth": "2026-03-02",
+          "why": "\"Latest Rev: 2 Mar 2026 JAG\" in the footer of all three pages"
+        },
+        {
+          "name": "shelf_life",
+          "keys_ref": "shelf_life",
+          "match": "tokens",
+          "truth": "21 days",
+          "tokens_all": [
+            "21"
+          ],
+          "tokens_any": [
+            "day"
+          ],
+          "why": "a PERIOD, not a date — the distinction migration 0097 turns on"
+        },
+        {
+          "name": "country_of_origin",
+          "keys_ref": "country_of_origin",
+          "match": "tokens",
+          "truth": "USA",
+          "tokens_any": [
+            "usa",
+            "united states"
+          ]
+        },
+        {
+          "name": "allergens",
+          "keys_ref": "allergens",
+          "match": "tokens",
+          "truth": "Milk",
+          "tokens_any": [
+            "milk"
+          ],
+          "tokens_none": [
+            "peanut"
+          ],
+          "why": "\"Contains Milk.\" Peanuts are YES in the third column (present in the facility) and are the trap — a facility-presence row is not a declared allergen"
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2 Mar 2026",
+            "2026-03-02"
+          ],
+          "why": "a spec sheet has a revision date, not an expiry. Its renewal period is three years by type (0096), never read off the page"
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "21 days",
+            "2 Mar 2026",
+            "2026-03-02"
+          ],
+          "why": "the shelf life is a period; there is no shelf-life DATE on a specification sheet"
+        }
+      ],
+      "tables_must_contain": [
+        "Aerobic Count",
+        "Coliform Count"
+      ],
+      "spec_limits_printed": [
+        {
+          "analyte": "Aerobic Plate Count",
+          "printed": "≤20,000 cfu/mL",
+          "operator": "lte",
+          "value": 20000,
+          "unit": "cfu/mL"
+        },
+        {
+          "analyte": "Coliform Count",
+          "printed": "≤10 cfu/mL",
+          "operator": "lte",
+          "value": 10,
+          "unit": "cfu/mL"
+        }
+      ],
+      "note": "cfu/mL on a fluid dairy product — the exact case migration 0093 (tenant spec_volume_mass_equivalent) exists for."
+    },
+    {
+      "id": "spec-cmf-ice-cream-mix-14",
+      "type": "Specification Sheet",
+      "type_slug": "spec",
+      "tier": "real",
+      "pdf": "pdf/spec-cmf-ice-cream-mix-14.pdf",
+      "pages": null,
+      "supplier": "Country Morning Farms",
+      "document_type_accept": [
+        "specification sheet",
+        "product specification",
+        "product specifications",
+        "spec sheet",
+        "product specification sheet"
+      ],
+      "pdf_text_must_contain": [
+        "14% ICE CREAM MIX",
+        "countrymorningfarms.com",
+        "Shelf Life: 1 year frozen, 21 days refrigerated",
+        "≤50,000 cfu/mL",
+        "53-140-389 | SQF 2.3.2.9 | Latest Rev: 27 Jul 2026 JAG"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Country Morning Farms",
+          "accept": [
+            "countrymorningfarms.com",
+            "Country Morning Farms, Inc.",
+            "countrymorningfarms"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "14% Ice Cream Mix",
+          "accept": [
+            "Ice Cream Mix 14%",
+            "Ice Cream Mix",
+            "14% Ice Cream Base Mix"
+          ]
+        },
+        {
+          "name": "document_number",
+          "keys": [
+            "document_number",
+            "document_no",
+            "doc_number",
+            "spec_number",
+            "specification_number",
+            "document_id"
+          ],
+          "match": "text",
+          "truth": "53-140-389"
+        },
+        {
+          "name": "revision_date",
+          "keys_ref": "revision_date",
+          "match": "date",
+          "truth": "2026-07-27"
+        },
+        {
+          "name": "shelf_life",
+          "keys_ref": "shelf_life",
+          "match": "tokens",
+          "truth": "1 year frozen, 21 days refrigerated",
+          "tokens_any": [
+            "1 year",
+            "one year",
+            "21 day"
+          ],
+          "why": "TWO shelf lives on one line, conditional on storage state. Either is accepted; what must not happen is a date"
+        },
+        {
+          "name": "country_of_origin",
+          "keys_ref": "country_of_origin",
+          "match": "tokens",
+          "truth": "USA",
+          "tokens_any": [
+            "usa",
+            "united states"
+          ]
+        },
+        {
+          "name": "allergens",
+          "keys_ref": "allergens",
+          "match": "tokens",
+          "truth": "Milk",
+          "tokens_any": [
+            "milk"
+          ],
+          "tokens_none": [
+            "peanut"
+          ]
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "27 Jul 2026",
+            "2026-07-27"
+          ]
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "21 days",
+            "1 year",
+            "27 Jul 2026",
+            "2026-07-27"
+          ]
+        }
+      ],
+      "tables_must_contain": [
+        "Aerobic Count",
+        "Coliform Count"
+      ],
+      "spec_limits_printed": [
+        {
+          "analyte": "Aerobic Plate Count",
+          "printed": "≤50,000 cfu/mL",
+          "operator": "lte",
+          "value": 50000,
+          "unit": "cfu/mL"
+        },
+        {
+          "analyte": "Coliform Count",
+          "printed": "≤10 cfu/mL",
+          "operator": "lte",
+          "value": 10,
+          "unit": "cfu/mL"
+        }
+      ],
+      "note": "Same supplier and same template as spec-cmf-light-cream-23 with a five-times-looser aerobic limit — the case for scoping a spec limit to a product rather than a tenant."
+    },
+    {
+      "id": "spec-smithbrothers-heavy-whipping-cream-13106",
+      "type": "Specification Sheet",
+      "type_slug": "spec",
+      "tier": "real",
+      "pdf": "pdf/spec-smithbrothers-heavy-whipping-cream-13106.pdf",
+      "pages": null,
+      "supplier": "Smith Brothers Farms",
+      "document_type_accept": [
+        "specification sheet",
+        "product specification",
+        "product specifications",
+        "spec sheet",
+        "product specification sheet"
+      ],
+      "pdf_text_must_contain": [
+        "Smith Brothers Holdings, Inc. and Subsidiaries",
+        "Fluid Milk & Cream Product Specification Sheet",
+        "Product: Heavy Whipping Cream",
+        "Item #: 13106",
+        "Revision Date: 2/9/2024",
+        "≤20,000 CFU/ml"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Smith Brothers Holdings, Inc. and Subsidiaries",
+          "accept": [
+            "Smith Brothers Holdings",
+            "Smith Brothers Farms",
+            "Smith Brothers"
+          ],
+          "why": "the letterhead is the holding company; \"Smith Brothers Farms\" is printed as the LABEL. Both are accepted — which one a tenant files under is a supplier-dedupe question, not an extraction question"
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Heavy Whipping Cream"
+        },
+        {
+          "name": "product_code",
+          "keys_ref": "product_code",
+          "match": "text",
+          "truth": "13106",
+          "why": "\"Item #: 13106\". The UPC 3453896632 is the decoy"
+        },
+        {
+          "name": "revision_date",
+          "keys_ref": "revision_date",
+          "match": "date",
+          "truth": "2024-02-09",
+          "why": "\"Revision Date: 2/9/2024\". The footer also carries a bare \"12/2/2022\", which is the template's own date and must not win"
+        },
+        {
+          "name": "shelf_life",
+          "keys_ref": "shelf_life",
+          "match": "tokens",
+          "truth": "21 days at ≤40°F",
+          "tokens_all": [
+            "21"
+          ],
+          "tokens_any": [
+            "day"
+          ]
+        },
+        {
+          "name": "allergens",
+          "keys_ref": "allergens",
+          "match": "tokens",
+          "truth": "CONTAINS MILK",
+          "tokens_any": [
+            "milk"
+          ]
+        },
+        {
+          "name": "kosher_status",
+          "keys_ref": "kosher_status",
+          "match": "tokens",
+          "truth": "KD (Seattle Va'ad)",
+          "tokens_any": [
+            "kd",
+            "kosher",
+            "va'ad",
+            "vaad"
+          ]
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "2/9/2024",
+            "2024-02-09",
+            "12/2/2022",
+            "2022-12-02"
+          ]
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "21 days",
+            "2/9/2024",
+            "2024-02-09",
+            "12/2/2022",
+            "2022-12-02"
+          ]
+        },
+        {
+          "name": "certificate_number",
+          "keys_ref": "cert_number",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "13106",
+            "3453896632",
+            "53-13",
+            "41-41",
+            "6.040",
+            "7.071"
+          ],
+          "why": "a spec sheet is not a certificate. Six number-shaped strings are on the page, including two Standard Methods references"
+        }
+      ],
+      "tables_must_contain": [
+        "Aerobic Plate Count",
+        "Coliform Count"
+      ],
+      "spec_limits_printed": [
+        {
+          "analyte": "Aerobic Plate Count",
+          "printed": "≤20,000 CFU/ml",
+          "operator": "lte",
+          "value": 20000,
+          "unit": "CFU/ml",
+          "method": "Standard Methods (6.040)"
+        },
+        {
+          "analyte": "Coliform Count",
+          "printed": "≤10 CFU/ml",
+          "operator": "lte",
+          "value": 10,
+          "unit": "CFU/ml",
+          "method": "Standard Methods (7.071)"
+        }
+      ],
+      "note": "The Product Analysis block is padded with literal \"0\" cells, so a table read of this page produces rows that are entirely zeros. They are not results and must not be judged."
+    },
+    {
+      "id": "spec-andersen-heavy-whip-cream-half-gallon",
+      "type": "Specification Sheet",
+      "type_slug": "spec",
+      "tier": "real",
+      "pdf": "pdf/spec-andersen-heavy-whip-cream-half-gallon.pdf",
+      "pages": null,
+      "supplier": "Andersen Dairy Inc.",
+      "document_type_accept": [
+        "specification sheet",
+        "product specification",
+        "product specifications",
+        "spec sheet",
+        "product specification sheet"
+      ],
+      "pdf_text_must_contain": [
+        "Andersen Dairy Inc.",
+        "Heavy Whip Cream Half Gallon Product",
+        "FINISHED PRODUCT CRITICAL ANALYSIS",
+        "Shelf life | 22 days",
+        "Plant code | 53-02",
+        "Product Statement_Heavy Whip Half Gal.msw 5/5/’24"
+      ],
+      "fields": [
+        {
+          "name": "supplier_name",
+          "keys_ref": "supplier",
+          "match": "text",
+          "truth": "Andersen Dairy Inc.",
+          "accept": [
+            "Andersen Dairy"
+          ]
+        },
+        {
+          "name": "product_name",
+          "keys_ref": "product",
+          "match": "text",
+          "truth": "Heavy Whip Cream Half Gallon",
+          "accept": [
+            "Heavy Whip Cream",
+            "40% Supreme Cream Half Gallon"
+          ]
+        },
+        {
+          "name": "plant_number",
+          "keys": [
+            "plant_number",
+            "plant_code",
+            "usda_number",
+            "facility_number"
+          ],
+          "match": "text",
+          "truth": "53-02",
+          "why": "\"Plant code | 53-02\". \"#33-19\" at the top of the letterhead is the document's own form number and is the decoy"
+        },
+        {
+          "name": "shelf_life",
+          "keys_ref": "shelf_life",
+          "match": "tokens",
+          "truth": "22 days",
+          "tokens_all": [
+            "22"
+          ],
+          "tokens_any": [
+            "day"
+          ],
+          "why": "stated inside the FINISHED PRODUCT CRITICAL ANALYSIS grid, in a row that has TARGET/LOW/HIGH columns it does not use"
+        },
+        {
+          "name": "revision_date",
+          "keys_ref": "revision_date",
+          "match": "date",
+          "truth": "2025-11-20",
+          "accept": [
+            "2024-05-05"
+          ],
+          "why": "TWO apostrophe-year dates in the footer: the source document \"5/5/’24\" and the QA approval \"11/20/’25\". The approval is the later revision; the source date is accepted because which one is \"the\" revision is genuinely arguable"
+        },
+        {
+          "name": "signatory",
+          "keys_ref": "signatory",
+          "match": "text",
+          "truth": "Shawn B",
+          "accept": [
+            "QA Shawn B",
+            "Shawn"
+          ],
+          "why": "\"Approved by QA Shawn B\""
+        },
+        {
+          "name": "document_expires_on",
+          "keys_ref": "doc_expiry",
+          "match": "date",
+          "truth": null,
+          "distractors": [
+            "5/5/24",
+            "2024-05-05",
+            "11/20/25",
+            "2025-11-20"
+          ]
+        },
+        {
+          "name": "expiration_date",
+          "keys_ref": "product_expiry",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "22 days",
+            "5/5/24",
+            "2024-05-05",
+            "11/20/25",
+            "2025-11-20"
+          ]
+        }
+      ],
+      "tables_must_contain": [
+        "Aerobic",
+        "Coliform"
+      ],
+      "spec_limits_printed": [
+        {
+          "analyte": "Aerobic Plate Count",
+          "printed": "< 300",
+          "operator": "lt",
+          "value": 300,
+          "unit": null,
+          "scope": "Fresh"
+        },
+        {
+          "analyte": "Coliform Count",
+          "printed": "< 1",
+          "operator": "lt",
+          "value": 1,
+          "unit": null,
+          "scope": "Fresh"
+        },
+        {
+          "analyte": "Aerobic Plate Count",
+          "printed": "<1,000",
+          "operator": "lt",
+          "value": 1000,
+          "unit": null,
+          "scope": "48 Hr Stress"
+        },
+        {
+          "analyte": "Coliform Count",
+          "printed": "<10",
+          "operator": "lt",
+          "value": 10,
+          "unit": null,
+          "scope": "48 Hr Stress"
+        }
+      ],
+      "note": "FOUR micro limits, NO UNITS, and TWO SCOPES — \"Fresh\" and \"48 Hr Stress\" — for the same two analytes. This is the hardest of the four for shared/specCheck.ts: a unitless limit and a scope that is a test condition rather than a product. It is the reason spec_limits_printed here is a description of the page, not an importable config."
+    }
+  ]
+}
