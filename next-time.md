@@ -4,7 +4,73 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-17 (latest): v2.22.0 IS LIVE. Per-page OCR shipped, migration 0117 applied to staging and
+**2026-09-17 (latest): v2.23.0 IS LIVE. Shelf life and document number are extracted. NO MIGRATION.
+THE SAME SUDO STEP AS LAST TIME IS OUTSTANDING AND IT MATTERS MORE HERE — see the box at the end of
+this entry BEFORE you conclude anything from a prod document.**
+
+*Prod deploy `f5d0c808` (https://supdox.com), tag `v2.23.0`, master pushed (`d1fa3cf..2509eb5`).
+Staging `7998e277`. `/releases/index.json` reads `current: 2.23.0`, title "What the page already
+said".*
+
+**WHAT SHIPPED.** Extraction gained the two fields printed on nearly every specification sheet that
+the schema had nowhere to put: `shelf_life` and `document_number`. Shelf life is kept **verbatim as
+printed, condition and all** — "1 year frozen, 21 days refrigerated" stays whole rather than being
+collapsed to a number somebody would have had to choose. A document number is told apart from a lot,
+a PO, an item code and a revision, and on a certificate the certificate's own number wins. The
+schema, the field aliases and all three mirrored prompt copies (`functions/lib/llm.ts` BASE_PROMPT
+plus the text and VLM prompts in `bin/process-worker`) moved together; the mirror test pins them.
+
+**THE NUMBERS.** Real corpus value accuracy **89.4% → 96.5%**. **Like-for-like on the fields that
+were already being graded: 94.4% → 96.3%**, with a fabricated expiry date removed — that figure is
+the honest one to quote, since the headline also benefits from the two new fields being gradeable at
+all. Doctype corpus **38/40**, value accuracy **95.7%**.
+
+**THE GUARD THAT MATTERS.** `shelf_life` is deliberately NOT an input to `shared/renewalPeriod.ts`
+and NOT in `DATE_KEYS` in `shared/extractionInvariants.ts`. It is a PERIOD, and the period tiers
+would read "21 days" as a proposal to re-collect a specification sheet three weeks after issue — when
+a spec sheet renews at three years *because of what it is*. Pinned by
+`tests/unit/shelfLifeNotRenewal.test.ts` and `tests/unit/shelfLifeAndDocumentNumberFields.test.ts`,
+with the reasoning written into both source headers. Do not "improve" this.
+
+**GATES.** vitest **291 files / 3971 tests passed** (twice: once on the merged tree, once inside
+`bin/deploy`), `bin/typecheck-ratchet` **27, at baseline**, `npm run build:packs:check` up to date,
+build clean, `bin/deploy`'s e2e gate **7 passed / 1 skipped**. No flakes this time.
+
+**ONE EXTRA COMMIT.** `bin/lib/shared/extractionInvariants.js` was regenerated (`npm run
+build:worker-shared`) so the worker's copy carries the same "shelf_life is not a date key" comment as
+the source. Comment-only.
+
+**CLEANUP DONE.** Worktree `.claude/worktrees/agent-ad9ab8b331b040649` removed and branch
+`worktree-agent-ad9ab8b331b040649` deleted (`git worktree prune` run; list is just master). No
+symlinks pointed into the main checkout; `.dev.vars` (415 B), `.wrangler/state` (32M) and
+`node_modules` (273 entries) all verified intact afterwards.
+
+> ### THIS RELEASE IS A PROMPT CHANGE. IT REACHES NO DOCUMENT UNTIL THE WORKER IS RESTARTED.
+>
+> **A GREEN DEPLOY AND A CORRECT `/releases/index.json` MEAN NOTHING FOR THIS ONE.** `bin/process-worker`
+> runs under systemd on this box and is NOT part of the Pages deploy. Until someone runs, with sudo,
+> by hand:
+>
+> ```
+> sudo systemctl restart dox-process-worker.service
+> ```
+>
+> **PROD KEEPS EXTRACTING WITH THE OLD PROMPT AND NO DOCUMENT WILL HAVE A `shelf_life` OR A
+> `document_number`.** Only documents extracted AFTER that restart get the new fields.
+> **CLAUDE CANNOT DO THIS (IT NEEDS SUDO) AND MUST NOT BE ASKED TO — THE USER RUNS IT.**
+>
+> ### AND THE 182-DOCUMENT BACKLOG NOW RUNNING IS ON THE OLD PROMPT.
+>
+> A re-extraction of **182 documents** was in flight on the shared GPU throughout this deploy (left
+> running deliberately; it was never touched). It started before this release and therefore uses the
+> OLD prompt, so **every one of those 182 documents will come back WITHOUT shelf life and WITHOUT a
+> document number.** If we want those two fields on that backlog, **it has to be re-run after the
+> restart above.** Decide that consciously — it is another full pass on the shared GPU, and the
+> alternative (leaving them without the fields until they are next touched) may well be fine.
+
+---
+
+**2026-09-17: v2.22.0 IS LIVE. Per-page OCR shipped, migration 0117 applied to staging and
 prod. ONE THING IS STILL OUTSTANDING AND IT IS NOT SOMETHING CLAUDE CAN DO — see the bottom of this
 entry.**
 
