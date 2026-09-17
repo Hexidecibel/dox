@@ -421,6 +421,38 @@ describe('a reviewer who clears the field means "no renewal"', () => {
     expect(nobodyLooked.rule).toBe('system_default_annual');
   });
 
+  it('an UNRESOLVABLE document nobody ruled on is still to be decided, not "does not renew"', () => {
+    // The approve-path defect, read from the dashboard's end. A document with a
+    // period but no anchor produces no date either way; what must stay
+    // different is WHY. No decision → `unresolvable`, which says "we could not
+    // work this out" and leaves the question open. A recorded decision →
+    // `no_renewal_period`, which says a person answered and closes it.
+    const nobodyRuled = resolveRenewalExpiry(input({ renewal_decision: null }));
+    expect(nobodyRuled.due_date).toBeNull();
+    expect(nobodyRuled.rule).toBe('unresolvable');
+    expect(nobodyRuled.period_months).toBe(12);
+    expect(nobodyRuled.reason).toMatch(/no effective date|could not be read/i);
+
+    const someoneRuled = resolveRenewalExpiry(input({ renewal_decision: 'cleared' }));
+    expect(someoneRuled.due_date).toBeNull();
+    expect(someoneRuled.rule).toBe('no_renewal_period');
+    expect(someoneRuled.rule).not.toBe(nobodyRuled.rule);
+
+    // And the dashboard row carries that difference through.
+    const open = computeStatus(input({ renewal_decision: null }) as RenewalInput, '2026-07-22', 60);
+    const closed = computeStatus(
+      input({ renewal_decision: 'cleared' }) as RenewalInput,
+      '2026-07-22',
+      60,
+    );
+    expect(open.rule).toBe('unresolvable');
+    expect(closed.rule).toBe('no_renewal_period');
+    // Neither is DUE — an undated record cannot be chased — but only one of
+    // them has been answered.
+    expect(open.status).toBeNull();
+    expect(closed.status).toBeNull();
+  });
+
   it('a confirmed date is read back as the canonical date, not re-derived', () => {
     const r = resolveRenewalExpiry(
       input({

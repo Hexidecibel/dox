@@ -69,6 +69,7 @@ import { api } from '../lib/api';
 import type { ProcessingQueueItem, ApiDocumentType, TemplateFieldMapping, ExtractedTable } from '../lib/types';
 import { renameTableHeader as renameTableHeaderPure } from './reviewTableActions';
 import { renewalRuleLabel } from '../../shared/renewalPeriod';
+import { renewalAnswered, renewalAnswerPayload, renewalBoxValue } from '../lib/renewalAnswer';
 import {
   shouldShowDualCompare,
   readTextPayload,
@@ -776,7 +777,17 @@ export default function ReviewQueue() {
    * the answer "this document does not renew".
    */
   const renewalValueFor = (item: ProcessingQueueItem): string =>
-    renewalEdits[item.id] ?? (item.renewal_proposal?.due_date ?? '');
+    renewalBoxValue(item.renewal_proposal, renewalEdits[item.id]);
+
+  /**
+   * Did the reviewer ANSWER the renewal question on this item? The rule and the
+   * reasoning live in src/lib/renewalAnswer.ts, which is where they are tested:
+   * an `unresolvable` proposal on an untouched box is OUR failure to work out a
+   * date, not a reviewer saying the document does not renew, and recording it
+   * as a decision silences the document permanently.
+   */
+  const renewalIsAnswered = (item: ProcessingQueueItem): boolean =>
+    renewalAnswered(item.renewal_proposal, renewalEdits[item.id]);
 
   /**
    * A supplier-portal item whose arrival is decidable is waiting on the
@@ -895,11 +906,12 @@ export default function ReviewQueue() {
 
       // The renewal answer. Sent on BOTH branches and sent even when empty:
       // `{ due_date: null }` is the reviewer saying "this does not renew",
-      // which the server records as a decision. Omitting the key would mean
-      // nobody answered — a different thing, and not what happened here,
-      // because the field was on screen in front of them.
+      // which the server records as a decision. Omitting the key means nobody
+      // answered — a different thing, and the right thing for exactly one case:
+      // a proposal we could not resolve, on a box the reviewer never touched.
+      // See `renewalAnswered`.
       const renewalPayload = item
-        ? { renewal: { due_date: renewalValueFor(item) || null } }
+        ? renewalAnswerPayload(item.renewal_proposal, renewalEdits[id])
         : {};
 
       const arrivalDecision = arrivalDecisionFor(arrivalDrafts[id]);
@@ -3106,7 +3118,11 @@ export default function ReviewQueue() {
                         editable, with the rule that produced it stated in plain
                         words. Whatever is in the box when Approve is pressed is
                         what gets stored and frozen on the document — including
-                        an empty box, which means "this does not renew". */}
+                        an empty box, which means "this does not renew".
+                        The ONE exception is a proposal we could not resolve at
+                        all: there the empty box is our failure, not a decision,
+                        and an untouched one records nothing. See
+                        `renewalAnswered`. */}
                     <Paper variant="outlined" sx={{ p: 1.5, mt: 2 }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
                         <Typography variant="subtitle2">Renewal</Typography>
@@ -3129,7 +3145,9 @@ export default function ReviewQueue() {
                           <Typography variant="caption" color="text.secondary">
                             {renewalValueFor(item)
                               ? `Suggested: ${renewalRuleLabel(item.renewal_proposal)}`
-                              : 'Empty — recorded as "does not renew".'}
+                              : renewalIsAnswered(item)
+                                ? 'Empty — recorded as "does not renew".'
+                                : 'We could not work out a due date — leave it blank to decide later, or enter one now.'}
                           </Typography>
                         )}
                       </Box>

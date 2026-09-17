@@ -139,6 +139,13 @@ export function buildRenewalProposal(
  * nullable field. A bare `renewal_due_date: null` on the request body is
  * indistinguishable from a client that never sent one, and those two mean
  * opposite things.
+ *
+ * THE CONTRACT IS LOAD-BEARING, NOT DECORATIVE. A client that sends this object
+ * unconditionally converts "the reviewer did not answer" into "the reviewer
+ * said no date", which is permanent (tier 2). The Review Queue therefore OMITS
+ * it when the proposal was `unresolvable` and the reviewer never touched the
+ * box — the one case where an empty box on screen is not an answer, because we
+ * put nothing in it to accept or reject.
  */
 export interface RenewalDecisionInput {
   /** The date the reviewer confirmed, or null for "this does not renew". */
@@ -183,8 +190,26 @@ export function resolveRenewalDecision(
   // 'accepted' covers accepting a date AND accepting a proposal of "does not
   // renew" (both sides null). 'cleared' is reserved for a reviewer deleting a
   // date we did propose — the case worth being able to find later.
+  //
+  // EXCEPT UNDER 'unresolvable', WHERE THERE WAS NOTHING TO ACCEPT. That rule
+  // does not mean "this does not renew"; it means "a period applies and we
+  // could not find a date to count it from". Both sides being null therefore
+  // is not agreement — the naive `confirmed === proposal.due_date` read it as
+  // agreement and stored 'accepted', which tier 2 of `resolveRenewalExpiry`
+  // (keyed on the decision EXISTING, correctly) then honours forever as "a
+  // reviewer confirmed this has no renewal date". A certificate whose expiry we
+  // simply failed to extract went silent for good.
+  //
+  // An empty answer here is still a real answer — the reviewer looked at a box
+  // we told them we could not fill and left it empty on purpose — so it is
+  // recorded as 'cleared', the word that already means "a human said no date".
+  // What must NEVER reach this function in that state is an UNTOUCHED box: the
+  // caller omits the `renewal` key entirely then, and nothing is written. See
+  // `RenewalDecisionInput` above — present means answered, absent means nobody
+  // did, and the Review Queue honours that distinction for this rule.
   let decision: RenewalDecision;
-  if (confirmed === proposal.due_date) decision = 'accepted';
+  if (confirmed === null && proposal.rule === 'unresolvable') decision = 'cleared';
+  else if (confirmed === proposal.due_date) decision = 'accepted';
   else if (confirmed === null) decision = 'cleared';
   else decision = 'overridden';
 
