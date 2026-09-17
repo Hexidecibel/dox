@@ -5453,9 +5453,12 @@ export interface RequestLinkView {
  * Deliberately absent: every internal id (request, tenant, supplier, line,
  * requirement, user), the routing record in any form, `assigned_to`,
  * `internal_notes`, `recipient`, `origin`/`origin_ref` (which would tell a
- * supplier they were auto-generated), the version chain, `amendment_reason`,
- * and the line-level review state — a supplier being told an item is
- * `under_review` is being told about our internal process.
+ * supplier they were auto-generated), the version chain and `amendment_reason`.
+ *
+ * NOT absent: the line-level `status`. An earlier draft withheld it on the
+ * grounds that `under_review` describes our process; that was reversed and the
+ * five states are published as-is. See `SupplierRequestItem.status` below for
+ * the reasoning that replaced it.
  */
 export interface SupplierRequestView {
   /** The organization asking. Already known to the recipient. */
