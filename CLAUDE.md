@@ -327,6 +327,42 @@ When cutting a release, use `bin/release` (NOT a hand-edited
   `FEATURES.md` index. The footer chip + What's-new toast pick up the
   new version on next page load.
 
+### Every bullet says WHO IT REACHES (mandatory)
+
+AJ Conner, reviewing v2.7.0-v2.20.0: *"Mark in each release which changes reach
+existing tenants and which only land on new ones. The GFSI change is right ...
+but it applies to newly set-up orgs only, so our config keeps the old rule.
+That is the first product default to drift from our tenant and it will not be
+the last."* Three kinds of change ship under one heading and read identically —
+and a reader who cannot tell them apart either waits for something that never
+arrives or believes their configuration matches a default it has quietly
+diverged from. So each bullet opens with one token:
+
+| token | means |
+|---|---|
+| `[existing]` | **Reaches every organisation now.** Live on deploy; nobody does anything. |
+| `[new-orgs]` | **New organisations only.** A changed default applied at setup; existing configuration is NOT rewritten and will no longer match. |
+| `[config]` | **Needs configuration.** Shipped but inert until an admin sets it up. |
+
+    - [existing] **Every result now shows one of five states:** ...
+    - [config]   **A supplier can be put on watch.** ...
+    - [new-orgs] **The GFSI claim now requires the audit certificate** ...
+
+A token on a paragraph of its own claims the whole section under it.
+Vocabulary + matcher: **`shared/releaseReach.ts`**, one place — the in-app
+renderer (`src/components/ReleaseNotesModal.tsx`) imports the source and turns
+each token into a chip with a tooltip; `bin/release` reads the esbuild mirror
+(`bin/lib/shared/releaseReach.js`, so re-run `npm run build:worker-shared`
+after editing it) and **refuses to cut a release whose notes carry no marker** —
+prompting [e]dit / [c]ontinue / [a]bort interactively, failing with the
+explanation when stdin is not a tty. The bar is one marker anywhere, on
+purpose: a script arguing with prose a human is still writing gets a skip flag
+added to it. An unmarked bullet still renders exactly as before, which is what
+made it safe to adopt on notes written earlier. v2.8.0-v2.20.0 were classified
+retroactively by `bin/lib/backfill-release-reach.js` (idempotent, `--check`);
+`tests/unit/releaseReach.test.ts` pins that every release from v2.8.0 answers
+the question in BOTH the authored file and the public mirror the app fetches.
+
 ## Task Management
 
 Use `TaskCreate` for concrete work items to track progress:
