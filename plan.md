@@ -79,8 +79,64 @@ forwarding to a salesperson, hence "on behalf of".
   `src/components/search/ExportSelection.test.tsx` (10).
 
 **Deferred:** the same selection from the Requests / supplier side (kept to
-search deliberately); a "sent documents" admin screen listing and revoking live
-export links; per-version pinning (bundles already do that).
+search deliberately); per-version pinning (bundles already do that).
+
+#### Follow-up: Documents you sent, and Revoke — **DONE** (migration 0116)
+
+AJ Conner, reviewing v2.7.0-v2.20.0: "the link is the credential, so a
+forwarded mail hands the set to whoever holds the URL." 0115 shipped
+`revoked_at` with no reachable revoker.
+
+- `/documents/sent` ("Sent documents", nav under Documents, module `library`,
+  `CONTRIBUTOR` — the page tier IS the send tier). Per send: when, by whom, on
+  whose behalf, recipients, document count + first titles, open/download
+  counts, and a resolved `active` / `expired` / `revoked` state (revoked beats
+  expired — the question is whether a PERSON stopped it).
+- `GET /api/document-exports/links` — an admin sees the organization's sends,
+  everybody else their own; `scope` is a request and the response reports the
+  scope it ACTUALLY answered in. **The token is never returned.**
+- `POST /api/document-exports/links/:id/revoke` — immediate on all three
+  recipient routes, which already resolved through the one gate
+  `loadUsableExportLink`; verified by test rather than assumed. Sender or
+  admin; another tenant is a 404; a second press does not move the first
+  timestamp. Audits `document_export.revoked` with the recipients, the ids and
+  the counts at that moment.
+- **No Extend, deliberately** — it would change the terms of a mail already
+  sent. Send again instead.
+- The open counts are counts of REQUESTS against the link, not of people, and
+  the page says so beside them: the URL is a bearer credential and travels.
+- Found on the way in: `POST /api/document-exports/send` had **no role check**.
+  The ZIP having none is documented and defensible; mailing an unauthenticated
+  URL to 50 documents at 10 external addresses is publishing. Now `user`+.
+- Migration 0116 `document_export_links.revoked_by` (nullable, no backfill).
+- Tests: `tests/api/document-exports.test.ts` (29, +8).
+
+### Release notes say which organisations a change reaches (AJ, review of v2.7.0-v2.20.0)
+
+**Status:** done
+
+AJ: "Mark in each release which changes reach existing tenants and which only
+land on new ones. The GFSI change is right ... but it applies to newly set-up
+orgs only, so our config keeps the old rule. That is the first product default
+to drift from our tenant and it will not be the last."
+
+- Convention: a leading `[existing]` / `[new-orgs]` / `[config]` token on a
+  bullet (or on a paragraph, claiming the section under it). Vocabulary and
+  matcher in `shared/releaseReach.ts`; `ReleaseNotesModal` renders each as a
+  chip with a tooltip; an unmarked bullet is untouched.
+- `bin/release` refuses to continue when the notes carry no marker
+  ([e]dit/[c]ontinue/[a]bort, or a clear failure when stdin is not a tty),
+  reading the esbuild mirror `bin/lib/shared/releaseReach.js`. The bar is one
+  marker anywhere on purpose. The generated draft carries the three tokens as
+  an HTML comment, and `hasReachMarker` strips comments so the guard cannot be
+  satisfied by its own instructions.
+- Backfilled v2.8.0-v2.20.0 (14 releases, both copies) by
+  `bin/lib/backfill-release-reach.js` — idempotent, `--check`. `[config]`:
+  module visibility, document-type requirements, supplier watch, declared lot
+  formats, renewal lead time, supplier-list import and packets. `[new-orgs]`:
+  the GFSI claim rule. Everything else `[existing]`.
+- Tests: `tests/unit/releaseReach.test.ts`,
+  `src/components/ReleaseNotesModal.test.tsx`.
 
 ### Any-field COA retrieval (AJ 2026-09-08) + Walkthrough 2 follow-ups
 
