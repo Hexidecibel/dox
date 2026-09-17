@@ -176,6 +176,25 @@ describe('draftsToLineInputs', () => {
     expect(input.owner).toBeNull();
   });
 
+  /**
+   * "One document per file" (migration 0119) is the CHEAP half of the packet
+   * problem: the expensive half is detecting a 36-page, 25-document PDF after
+   * it arrives and asking one of our own people to carve it up. It travels as
+   * a flag rather than as a sentence in `acceptable_formats` so the ask is
+   * countable, and it is OFF unless somebody ticked it — a demand in every
+   * issued request that nobody decided to make is noise.
+   */
+  it('one document per file is off unless asked for, and travels as a flag', () => {
+    const [off] = draftsToLineInputs([draftFromRequirement(VOCAB[0])]);
+    expect(off.one_document_per_file).toBe(false);
+    const [on] = draftsToLineInputs([
+      draftFromRequirement(VOCAB[0], { one_document_per_file: true }),
+    ]);
+    expect(on.one_document_per_file).toBe(true);
+    // ...and it is NOT smuggled into the formats prose, which stays about formats.
+    expect(on.acceptable_formats).toBeNull();
+  });
+
   it('numbers sort_order by position so the packet arrives in the composed order', () => {
     const inputs = draftsToLineInputs([
       draftFromRequirement(VOCAB[1]),
@@ -208,6 +227,7 @@ describe('diffLineDrafts — what editing a draft actually writes', () => {
       acceptable_formats: null,
       criteria: null,
       owner: null,
+      one_document_per_file: false,
       tier: 'required',
       sort_order: 0,
     },
@@ -220,10 +240,21 @@ describe('diffLineDrafts — what editing a draft actually writes', () => {
       acceptable_formats: null,
       criteria: null,
       owner: null,
+      one_document_per_file: false,
       tier: 'recommended',
       sort_order: 1,
     },
   ];
+
+  it('ticking "one document per file" is an edit to what was asked for', () => {
+    const drafts = draftsFromLines(existing).map((d, i) =>
+      i === 0 ? { ...d, one_document_per_file: true } : d,
+    );
+    const diff = diffLineDrafts(existing, drafts);
+    expect(diff.add).toEqual([]);
+    expect(diff.remove).toEqual([]);
+    expect(diff.update).toEqual([{ id: 'line_1', patch: { one_document_per_file: true } }]);
+  });
 
   it('an untouched round trip writes nothing at all', () => {
     expect(diffLineDrafts(existing, draftsFromLines(existing))).toEqual({

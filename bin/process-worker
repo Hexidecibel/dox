@@ -71,6 +71,11 @@ const {
 // pages that qualify; the rules it applies are pure and live in
 // shared/pdfPageOcr.ts. See processPdfPerPageOcr() below.
 const { applyPerPageOcr } = require('./lib/pdfPageOcr');
+// Packet detection: is this ONE upload actually SEVERAL documents? It runs on
+// the per-page text and per-page image measurement the pass above already
+// produced, so it costs no second read of the file. It only ever PROPOSES —
+// see detectPacketFor() below and shared/packetDetect.ts.
+const { detectPacket } = require('./lib/shared/packetDetect');
 
 // Increase headers timeout for slow LLM inference (default is 300s, we need 15min)
 const llmDispatcher = new Agent({
@@ -1248,7 +1253,7 @@ async function serializePdfGeometry(fileBuffer, fileName) {
  */
 async function applyPdfPerPageOcr({ text, pages, wentToOcrWhole, pdfBuffer, factsBuffer, fileName, verbose }) {
   if (wentToOcrWhole || !Array.isArray(pages) || pages.length === 0) {
-    return { text, pages, pageSources: null };
+    return { text, pages, pageSources: null, facts: null };
   }
   try {
     const res = await applyPerPageOcr({
@@ -1257,13 +1262,70 @@ async function applyPdfPerPageOcr({ text, pages, wentToOcrWhole, pdfBuffer, fact
       pages,
       log: verbose ? (m) => console.log(m) : null,
     });
-    if (!res.applied) return { text, pages, pageSources: null };
+    // `facts` rides out whether or not any page was OCR'd: packet detection
+    // wants the same per-page image measurement this pass routes on, and
+    // reading the operator list a second time would be a second answer to one
+    // question. See detectPacketFor().
+    if (!res.applied) return { text, pages, pageSources: null, facts: res.facts };
     console.log(`  Per-page OCR read ${res.ocrPages.length} image page(s) of ${fileName}: page ${res.ocrPages.join(', ')} (${(res.ms / 1000).toFixed(1)}s)`);
-    return { text: res.text, pages: res.pages, pageSources: res.provenance };
+    return { text: res.text, pages: res.pages, pageSources: res.provenance, facts: res.facts };
   } catch (err) {
     // A page that could not be OCR'd is the status quo, never a failed item.
     console.warn(`  Per-page OCR failed for ${fileName}: ${err.message} (keeping the text layer)`);
-    return { text, pages, pageSources: null };
+    return { text, pages, pageSources: null, facts: null };
+  }
+}
+
+// =============================================================================
+// Packet detection — one upload, several documents
+// =============================================================================
+
+/**
+ * Ask shared/packetDetect.ts whether this file holds several documents.
+ *
+ * Returns the proposal, or null when the file reads as one document. The
+ * caller decides when to attach it to the queue row — see processCoaItem,
+ * which attaches it to the extraction results on the happy path AND to the
+ * error post on the unhappy one. That second case is not an afterthought: the
+ * 36-page packet this feature exists for is also the file whose extraction
+ * fails intermittently, and an error card with no explanation is exactly where
+ * a reviewer most needs to be told "this is 25 documents in one PDF".
+ *
+ * NULL is the answer for an ordinary upload, and NULL is what the column then
+ * holds — the same discipline as text_page_sources. A row on every card saying
+ * "this is one document" is noise, and noise on every card is how a reviewer
+ * learns to ignore the one card that matters.
+ *
+ * Never throws. Detection failing must leave the item exactly as it would have
+ * been without it.
+ *
+ * NOT RUN ON THE ORDER/SHIPMENT PATH. Those items arrive through a configured
+ * source that declared what they are, and an order confirmation is not the
+ * shape this detects. A packet card on them would be noise on the one queue
+ * whose items are the least ambiguous.
+ */
+function detectPacketFor(item, { pages, facts, coaRecordCount }) {
+  try {
+    if (item.mime_type !== 'application/pdf') return null;
+    if (!Array.isArray(pages) || pages.length === 0) return null;
+    const proposal = detectPacket({
+      isPdf: true,
+      coaRecordCount: coaRecordCount || 0,
+      pages: pages.map((text, i) => ({
+        page: i + 1,
+        text: String(text || ''),
+        imageCoverage: facts && facts[i] ? facts[i].imageCoverage : 0,
+      })),
+    });
+    if (!proposal.looksLikePacket) return null;
+    console.log(
+      `  Packet detected in ${item.file_name}: ${proposal.parts.length} documents in ${proposal.page_count} pages ` +
+      `(${proposal.method}, ${proposal.confidence_band} confidence). NOT split — a reviewer decides.`
+    );
+    return proposal;
+  } catch (err) {
+    console.warn(`  Packet detection failed for ${item.file_name}: ${err.message} (continuing)`);
+    return null;
   }
 }
 
@@ -2091,6 +2153,11 @@ async function processCoaItem(item) {
   const startTime = Date.now();
   console.log(`Processing ${item.file_name} (${item.id})...`);
 
+  // Declared OUTSIDE the try so the error path can still tell a reviewer that
+  // the file that failed to extract is 25 documents in one PDF. See
+  // detectPacketFor().
+  let packetProposal = null;
+
   try {
     // Mark as processing
     await postResults(item.id, { processing_status: 'processing' });
@@ -2211,6 +2278,14 @@ async function processCoaItem(item) {
       text = perPage.text;
       pages = perPage.pages;
       pageSources = perPage.pageSources;
+
+      // IS THIS ONE FILE, OR SEVERAL DOCUMENTS IN ONE FILE? Asked here, on the
+      // text we just produced and the per-page image measurement the pass above
+      // already made, so it costs no second read of the PDF. It only proposes;
+      // where the proposal is attached is decided further down, and whether it
+      // is attached at all depends on whether this turns out to be a multi-lot
+      // COA (which produceCoaRecords splits better, because it knows the lots).
+      packetProposal = detectPacketFor(item, { pages, facts: perPage.facts });
     } else if (
       item.mime_type === 'text/plain' ||
       item.mime_type === 'text/csv' ||
@@ -2998,6 +3073,21 @@ async function processCoaItem(item) {
       }
     }
 
+    // THE PACKET PROPOSAL, and the one thing that can retract it.
+    //
+    // A multi-LOT COA is several records in one file too, and it is ALREADY
+    // split — by produceCoaRecords, which cuts it per lot and knows which lot
+    // each page belongs to. Two engines proposing two different splits of one
+    // file is worse than one, so if this document turned out to carry >= 2
+    // records the packet proposal is dropped on the floor here rather than
+    // being written and then argued with in the UI. Migration 0118's column
+    // stays NULL, which is what "nothing unusual" means everywhere else.
+    if (packetProposal && !resultBody.ai_records) {
+      resultBody.packet_proposal = JSON.stringify(packetProposal);
+    } else if (packetProposal) {
+      console.log('  Packet proposal withdrawn: this is a multi-record COA, which already splits per lot');
+    }
+
     await postResults(item.id, resultBody);
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -3007,6 +3097,11 @@ async function processCoaItem(item) {
     await postResults(item.id, {
       processing_status: 'error',
       error_message: err.message,
+      // A 36-page packet is also the file most likely to fail extraction
+      // outright. The reviewer gets an error card either way; this is the
+      // difference between an error card and an error card that says the file
+      // is twenty-five documents.
+      ...(packetProposal ? { packet_proposal: JSON.stringify(packetProposal) } : {}),
     }).catch(() => {});
   }
 }

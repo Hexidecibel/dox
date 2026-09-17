@@ -85,6 +85,10 @@ async function extractPdfText(pdfPath, opts = {}) {
   let pages = [];
   let route = 'text-layer';
   let pageSources = null;
+  // Per-page { page, chars, imageCoverage, imageCount } from the per-page OCR
+  // pass, handed back so a caller (bin/packet-detect) can run packet detection
+  // on the same measurement instead of reading the operator list again.
+  let pageFacts = null;
 
   if (opts.forceOcr) {
     const ocr = ocrPdf(pdfPath);
@@ -136,6 +140,7 @@ async function extractPdfText(pdfPath, opts = {}) {
   // nothing before this point can see it. See shared/pdfPageOcr.ts.
   if (route !== 'ocr' && Array.isArray(pages) && pages.length > 0) {
     const perPage = await applyPerPageOcr({ pdfBuffer: buf, factsBuffer, pages, log: null });
+    pageFacts = perPage.facts;
     if (perPage.applied) {
       pages = perPage.pages;
       text = perPage.text;
@@ -144,7 +149,7 @@ async function extractPdfText(pdfPath, opts = {}) {
     }
   }
 
-  return { text: text || '', pages, route, pageSources };
+  return { text: text || '', pages, route, pageSources, pageFacts };
 }
 
 module.exports = { extractPdfText, ocrPdf, isTextGarbled };

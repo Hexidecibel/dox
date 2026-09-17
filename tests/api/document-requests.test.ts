@@ -975,6 +975,7 @@ describe('GET /api/document-requests/:id/external', () => {
         'criteria',
         'explanation',
         'name',
+        'one_document_per_file',
         'received_count',
         'ref',
         'status',
@@ -1008,6 +1009,32 @@ describe('GET /api/document-requests/:id/external', () => {
     ]) {
       expect(serialized).not.toContain(secret);
     }
+  });
+
+  /**
+   * "One document per file" (migration 0119) is the cheap half of the packet
+   * problem — the expensive half is detecting a 36-page, 25-document PDF after
+   * it arrives and asking one of our own people to carve it up. It is IN the
+   * allow-list on purpose: it is an instruction TO the supplier, and asking for
+   * something without saying so is not an ask.
+   */
+  it('tells the supplier when an item must arrive as its own file', async () => {
+    const { status, body: composed } = await compose({
+      supplier_id: supplierB,
+      title: 'Onboarding packet',
+      lines: [
+        { requirement_id: reqAllergen, one_document_per_file: true },
+        { requirement_id: reqNutrition },
+      ],
+    });
+    expect(status).toBe(201);
+    await issue(composed.request.id as string);
+    const { body } = await external(composed.request.id as string);
+    expect(body.view.items[0].one_document_per_file).toBe(true);
+    // ...and OFF unless somebody ticked it. Putting the demand on every line
+    // by default is noise on the lines where a single document was obviously
+    // what was asked for.
+    expect(body.view.items[1].one_document_per_file).toBe(false);
   });
 
   it('marks an amendment as amended without saying why', async () => {

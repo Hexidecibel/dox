@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 139 tables, 2 views, 232 indexes, 36 triggers.
+Objects: 139 tables, 2 views, 233 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -660,9 +660,20 @@ Indexes: `idx_extraction_templates_lookup`
   rejection_note TEXT
   file_retain_until TEXT
   text_page_sources TEXT
+  packet_proposal TEXT
+  packet_dismissed_at TEXT
+  packet_dismissed_by TEXT REFERENCES users(id)
+  packet_split_at TEXT
+  packet_split_by TEXT REFERENCES users(id)
+  packet_split_method TEXT
+  packet_part_count INTEGER
+  packet_parent_id TEXT REFERENCES processing_queue(id) ON DELETE SET NULL
+  packet_pages TEXT
+  packet_part_index INTEGER
+  packet_part_label TEXT
 ```
 
-Indexes: `idx_pq_output_kind`, `idx_processing_queue_file_retain`, `idx_processing_queue_processing_status`, `idx_processing_queue_rejection`, `idx_processing_queue_status`, `idx_processing_queue_tenant_checksum`
+Indexes: `idx_pq_output_kind`, `idx_pq_packet_parent`, `idx_processing_queue_file_retain`, `idx_processing_queue_processing_status`, `idx_processing_queue_rejection`, `idx_processing_queue_status`, `idx_processing_queue_tenant_checksum`
 
 ### `reviewer_field_dismissals`
 
@@ -1768,6 +1779,7 @@ Indexes: `idx_renewal_alert_state_doc`
   updated_by TEXT
   attention_reason TEXT
   accepted_document_id TEXT REFERENCES documents(id) ON DELETE SET NULL
+  one_document_per_file INTEGER NOT NULL DEFAULT 0
   CHECK ( (line_kind = 'requirement' AND requirement_id IS NOT NULL) OR (line_kind = 'free_text' AND requirement_id IS NULL) )
 ```
 
@@ -1827,6 +1839,7 @@ Indexes: `idx_request_routing_issued_by`, `idx_request_routing_tenant`
   sort_order INTEGER NOT NULL DEFAULT 0
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
   created_by TEXT
+  one_document_per_file INTEGER NOT NULL DEFAULT 0
   CHECK ( (line_kind = 'requirement' AND requirement_id IS NOT NULL) OR (line_kind = 'free_text' AND requirement_id IS NULL) )
 ```
 
