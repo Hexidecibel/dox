@@ -212,7 +212,7 @@ can read a limit off a real page, which is this corpus's question.
 
 ## The measured numbers
 
-31 documents, 176 graded fields, `Qwen3.6-35B-A3B-UD-Q8_K_XL` on the Spark,
+31 documents, 177 graded fields, `Qwen3.6-35B-A3B-UD-Q8_K_XL` on the Spark,
 baseline prompt, no supplier or document-type instructions configured. The only
 thing that changed between the two columns is the TEXT PATH — per-page OCR
 routing (finding 3 above). Same model, same prompt, same scorer; six documents'
@@ -250,12 +250,60 @@ Read carefully before comparing this to the doctype corpus's 92.8%:
   — which is the likeliest reason the column has never been populated once
   across 601 production documents.
 
-Of the nine remaining misses, six are a **schema gap** rather than a model gap:
+Of the nine remaining misses, six were a **schema gap** rather than a model gap:
 `shelf_life` missed on **all four** spec sheets and `document_number` on both
-Country Morning sheets. Neither is a canonical field in `llm.ts` rule 1 — the
+Country Morning sheets. Neither was a canonical field in `llm.ts` rule 1 — the
 same "there was nowhere to put the answer" the doctype corpus's BY SCHEMA SLOT
-table separates out — and a shelf life is the input `shared/renewalPeriod.ts`
-most wants that nothing currently extracts.
+table separates out.
+
+### 4. The two fields the schema had no slot for — CLOSED 2026-09-17
+
+`shelf_life` and `document_number` are canonical fields in all three prompt
+copies as of 2026-09-17. Measured here, same model, only the prompt changed:
+
+| | before | after |
+|---|---|---|
+| value accuracy | 89.4% (101/113) | **96.5% (109/113)** |
+| the four printed shelf lives | 0 | **4** |
+| the two printed document numbers | 0 | **2** |
+| the same fields as before, on their own | 101/107 (94.4%) | 103/107 (**96.3%**) |
+| fabrications on those same fields | 1 | **0** |
+
+(113 rather than 115 because the 36-page packet's own extraction failed outright
+in both runs and is excluded from both; it is a 36-page file and it fails
+intermittently.)
+
+**`shelf_life` is ONE VERBATIM STRING, and that is a decision, not laziness.**
+The CMF ice-cream-mix sheet prints "1 year frozen, 21 days refrigerated" — two
+lives, each true only under its own storage condition. A parsed
+`{days, basis, condition}` has to invent something there: a number, a dropped
+condition, or a silent pick of one half. The field therefore carries what the
+page printed, condition included, and the model returns it intact
+("21 days at ≤40°F", "1 year frozen, 21 days refrigerated").
+
+**It is NOT a renewal date and must never become one.** It is the PRODUCT's
+life, exactly as `expiration_date` is, and it is deliberately not an input to
+`shared/renewalPeriod.ts` — the sharper version of the temptation migration 0097
+exists to prevent, because this one is ALREADY a period and the ladder's tiers
+5-7 are periods: "21 days" would slot straight in and propose re-collecting a
+specification sheet three weeks after it was issued, when a spec sheet renews at
+three years by type. Pinned by `tests/unit/shelfLifeNotRenewal.test.ts`.
+
+Two things the corpus caught within an hour of the field existing, both now
+guarded in the prompt and both still graded here:
+
+* **Both IFANCA halal certificates label their own number `Document #:`**, and
+  print a per-product `Product Certificate #` column beside it. The new field's
+  own label list pulled the document-level number out of `certificate_number`
+  and the model backfilled that field from a table cell — turning two documents
+  that had been right into two that were wrong. The carve-out ("this field is
+  for a document that is NOT a certificate") had to sit WITH the label list; a
+  sentence appended at the end of the line did not hold.
+* **Smith Brothers' sheet prints no document number**, and the model reached for
+  the Windows file path in its footer. That is now a null-truth row here, so the
+  misfile is visible rather than uncounted; it is still misfiled as of the
+  2026-09-17 run, and it is a misfile (a value printed on the page) rather than
+  an invention.
 
 ## Adding a case
 

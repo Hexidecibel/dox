@@ -192,6 +192,28 @@ recovers two thirds of them (66.7%) by naming them there.
 Note that this table is NOT comparable to the 09-02 one: nine fields moved from
 the second row to the first, which was the point.
 
+### 2026-09-17: `shelf_life` + `document_number`, and a warning about the scanned tier
+
+Two more fields moved out of that second row, for the same reason and found the
+same way — `tests/fixtures/real-corpus` measured both as MISSED on every real
+document that prints them (see that corpus's finding 4). They are graded here on
+three spec fixtures plus the scanned variant: `shelf_life` on all four
+(`spec-clean` "12 months from date of manufacture in unopened original
+packaging", `spec-moderate`'s prose "best if used within 45 days of the pack
+date", `spec-nasty`'s fine print "24 months from manufacture when stored below
+27 C") and `document_number` on three (`RB-SPEC-4410`, which sits one
+character-group from the product code `RB-4410`, and `FSQ-SPEC-0442`, which this
+manifest already graded as NOT a product code). **7 of 7 correct** on the
+2026-09-17 run, OCR'd scan included.
+
+**The `scanned` tier is not comparable across a re-render.** `makeScan` applies
+`+noise Gaussian` with no `-seed`, so every `bin/render-doctype-corpus` produces
+a different image and a different OCR read of it. The 09-17 run lost three
+`coi-clean#scanned` rows against the 09-03 run — a supplier/customer swap and
+`COI` read as `COl` — with no change to that document's text path or to the
+rules that govern those fields. Compare the scanned tier only against a run made
+from the SAME rendered PDFs, or seed the noise.
+
 ## Adding a case
 
 1. Add or edit a document in `html/`. Keep it plausible — real letterhead, real

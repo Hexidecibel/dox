@@ -67,6 +67,14 @@ export const CANONICAL_FIELDS = new Set([
   // that used to be called `issue_date` are this field renamed — the schema
   // slot they were measuring the absence of now exists.
   'effective_date',
+  // Added to rule 1 on 2026-09-17, for the same reason and found the same way:
+  // the real-document corpus measured both as missed on EVERY document that
+  // prints them (all four specification sheets print a shelf life; the two
+  // Country Morning sheets print a document number), because neither had a slot
+  // in the schema. Same caveat as the 2026-09-02 batch — the rows move from the
+  // "no field in schema" line to the "canonical field" line, so that split is
+  // not comparable across the change.
+  'shelf_life', 'document_number',
 ]);
 
 /** Case-fold, dash-fold, quote-fold, strip surrounding punctuation, collapse whitespace. */
