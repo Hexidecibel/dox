@@ -70,7 +70,24 @@ Measured 2026-09-16, `Qwen3.6-35B-A3B-UD-Q8_K_XL` on the Spark:
 |---|---|
 | whole packet, classified as one file | **"Letter of Guarantee"**, 4 runs out of 5 |
 | whole packet, `document_expires_on` | **`2027-01-02`** — invented, appears nowhere in the file |
-| split on its own index, 26 parts | 22/26 types correct |
+| split on its own index, 26 parts | 22/26 types correct (2026-09-16); **23/26** on the 2026-09-17 re-run |
+
+**DETECTION SHIPPED 2026-09-17** (`shared/packetDetect.ts`, migration 0118).
+`bin/packet-detect` proposes the split with no model in the loop and gets
+**26/26 ranges EXACT** against the parts recorded here, on the file's own index
+page, at high confidence — and reports page 36 (a near-blank back cover) as
+covered by no part rather than bolting it onto the eight-page HACCP plan. It
+raises **zero false alarms** across the four real specification sheets, the
+forty synthetic doctype fixtures, and the packet's own multi-page parts
+(including the HACCP plan, which is one document with the same running header on
+all eight pages). Nothing splits without a person confirming it.
+
+Measured after a confirmed split (2026-09-17, same model, `--set packet`):
+**23/26 part types correct**, 9/9 where a type in the pack fits, and — the point
+of the whole exercise — **zero fabrications on any of the twenty-six parts**.
+The run's only fabrication is the whole-file entry's `2027-01-02`, which is what
+that entry exists to record. All four printed expiry dates land on their own
+parts.
 
 Both of those are the Letter of Guarantee on **page 3** answering for the other
 24 documents. The invented date is the letter's own "valid for no more than one

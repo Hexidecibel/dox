@@ -99,12 +99,24 @@ in a compliance file. Detection proposes; a reviewer confirms, adjusts, or says
    as a flag rather than as prose in `acceptable_formats`, rendered on the
    supplier portal and in the request detail, in the allow-list projection.
 
-**Measured** (`bin/packet-detect`, no model calls): **26/26 ranges exact**
-against the parts recorded in `corpus.json`; page 36 (a near-blank back cover)
-reported as covered by no part rather than bolted onto the HACCP plan; **zero
-false alarms** across 4 real specification sheets, 40 doctype fixtures and the
-packet's own 8-page HACCP master plan; the COA guard stands down when the file
-is declared a multi-record certificate.
+**Measured, detection** (`bin/packet-detect`, no model calls): **26/26 ranges
+exact** against the parts recorded in `corpus.json`; page 36 (a near-blank back
+cover) reported as covered by no part rather than bolted onto the HACCP plan;
+**zero false alarms** across 4 real specification sheets, 40 doctype fixtures and
+the packet's own 8-page HACCP master plan; the COA guard stands down when the
+file is declared a multi-record certificate.
+
+**Measured, after a confirmed split** (`bin/eval-aj-docs --set packet`,
+2026-09-17, `Qwen3.6-35B-A3B-UD-Q8_K_XL`; the detected ranges are byte-identical
+to the recorded ones, so this IS the post-split number): **23/26 part types
+correct** (the recorded 2026-09-16 figure was 22/26), **9/9** where a type in the
+FSQA pack fits, value accuracy 95.5% (84/88) over parts + whole, and **zero
+fabrications on any of the twenty-six parts** — the run's only fabrication is the
+whole-file entry's `2027-01-02`, which is what that entry exists to record. All
+four printed expiry dates land on their own parts. The three type misses are the
+"nothing in the pack fits" family the README already tracks (PHO and Yellow
+Prussiate pulled to "Allergen Statement", Environmental Program to "Sanitation
+Program") — a configuration question, not a split question.
 
 **Deliberately uncertain.** Existing queue items carry no proposal (detection
 runs in the worker; no backfill sweep). Only the index method is measured on a
