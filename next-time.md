@@ -4,7 +4,88 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-17 (latest): v2.21.0 shipped. Migration 0116 on staging + prod. AJ Clean's renewal
+**2026-09-17 (latest): per-page OCR merged to master and MEASURED. NOT SHIPPED — the Cloudflare
+token expired mid-run. Pick up at staging.**
+
+*Three local commits on master, unpushed on purpose (`ecf9ec0` merge, `9577084` SCHEMA.md,
+`ad1090f` bin/eval-results-json). Remote master still equals what is deployed.*
+
+**WHAT IS BLOCKING.** `CLOUDFLARE_API_TOKEN` expired at **2026-09-17T08:17:10Z** (token id
+`83e709b1…`). `/user/tokens/verify` returns `status: "expired"`, so every `wrangler` call fails
+with 9109. **`bin/inject` does not help — Infisical (`inf://dev/doc-upload-site/…`) holds the same
+expired value**, so rolling it means minting a new token AND writing it back to the backend, not
+just to `.env`. Nothing touched staging or prod: no migration applied, no deploy, no release cut,
+no backup taken.
+
+**WHAT IS DONE, AND VERIFIED.**
+
+* `worktree-agent-a4b876b631da4f0d8` merged `--no-ff`. Its migration collided with master's 0116
+  and is renumbered **0117_queue_text_page_sources.sql** (`processing_queue.text_page_sources`,
+  additive nullable TEXT). Applied LOCAL only, via `./bin/migrate --only` — the plain `./bin/migrate`
+  aborts on 0077's drift, exactly as CLAUDE.md warns. SCHEMA.md regenerated: a one-line diff, no drift.
+* Conflicts resolved as unions: `package.json` `build:worker-shared` keeps master's `renewalPeriod`
+  and `releaseReach` steps with the branch's `pdfPageOcr` step spliced in after `pdfTextSerializer`
+  (confirmed correct — a rebuild reproduces every committed bundle byte for byte), `CLAUDE.md`
+  keeps both migration rows.
+* Gates: vitest **289 files / 3943 tests passed**, `bin/typecheck-ratchet` **27, at baseline**,
+  `npm run build` clean, `npm run build:packs:check` up to date.
+
+**THE NUMBERS, RE-MEASURED ON MERGED CODE** (`Qwen3.6-35B-A3B-UD-Q8_K_XL`, 6.4 min, 31 documents /
+176 graded fields):
+
+| | before | after |
+|---|---|---|
+| value accuracy | 70.4% | **89.6%** (103/115, wrong 3, missed 9) |
+| the five image documents | 0/25 | **23/25** (implementer measured 22; one better this run) |
+| `document_expires_on` | 0 | **5/5** — four on the OCR'd certificate pages, one on a text page |
+| null accuracy | — | 96.7% (59/61), 2 fabrications |
+| document_type | — | 26/31 |
+
+`bin/eval-aj-docs --verify` passes **103/103** text claims on the production route.
+
+**The doctype corpus came back 37/40, against the published 38/40 baseline — this is NOT a
+regression from this change and should not be chased as one.** All three misses are one type
+family (`audit-clean`, `audit-clean#scanned`, `audit-moderate` all guessing "3rd Party Food Safety
+Audit Report" where the accept-list wants "3rd party audit certificate"), and **per-page OCR never
+fired on that corpus at all** — 0 `page-ocr` routes, the same 30 geometry / 10 whole-file-OCR split
+as before — so the text the model saw is unchanged by construction. It is classifier sampling
+variance on a borderline name. If it matters, widen that accept-list; do not touch the OCR routing.
+
+**New: `bin/eval-results-json`** turns an `--out` run file into one row per graded field (expected
+/ actual / verdict, plus which pages were OCR'd, with part page numbers mapped back to pages of the
+original PDF). No model calls. Built because a percentage is not checkable and AJ's question is
+always "which document". Latest output is in the session scratchpad; regenerate any time with
+`./bin/eval-results-json <run.json> --out <path>`.
+
+**PICK UP HERE** (steps 5-10 of the original plan, unchanged):
+
+1. Roll the Cloudflare token, write it to Infisical AND `.env`, confirm `npx wrangler whoami`.
+2. Staging: `bin/migrate-prod-one --staging migrations/0117_*.sql` dry-run then real, verify the
+   column, `bin/deploy-staging`.
+3. Prod: `bin/backup` (keep the bookmark), `bin/migrate-prod-one migrations/0117_*.sql` dry-run then
+   real, verify the stamp and the column, and check `processing_queue` row count is unchanged with
+   `text_page_sources` NULL on every existing row.
+4. `bin/release --minor` → v2.22.0. **Notes must carry reach markers or `bin/release` refuses.**
+   Draft bullets are ready in the agent report; all three are `[existing]`.
+5. `bin/deploy`, `git push && git push --tags`, verify `/releases/index.json` reads 2.22.0.
+6. Then clean up: remove the worktree `.claude/worktrees/agent-a4b876b631da4f0d8` and delete the
+   branch. **Both are still in place deliberately** — cleanup is the last step, and until this ships
+   the branch is the rollback reference.
+
+**AFTER DEPLOYING, THE WORKER MUST BE RESTARTED.** The new text path lives in `bin/process-worker`,
+which runs under systemd on this box and is NOT part of the Pages deploy — prod will keep extracting
+with the old whole-file OCR decision until someone runs, **with sudo, by hand**:
+
+```
+sudo systemctl restart dox-process-worker.service
+```
+
+Claude cannot do this (needs sudo) and must not be asked to. Until it happens, a green deploy and a
+correct `/releases/index.json` still mean image pages are being skipped.
+
+---
+
+**2026-09-17: v2.21.0 shipped. Migration 0116 on staging + prod. AJ Clean's renewal
 defaults repaired on prod. Release notes now have to say who a change reaches.**
 
 *Deployed to prod (`2d7f8a28`) and staging. Prod D1 written twice, both deliberate and both verified.*
