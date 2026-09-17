@@ -70,6 +70,7 @@ function queueItem(over: Partial<ProcessingQueueItem> = {}): ProcessingQueueItem
     vlm_duration_ms: null,
     vlm_extracted_at: null,
     text_model: null,
+    text_page_sources: null,
     learned_field_hints: null,
     uncertainty: null,
     ...over,

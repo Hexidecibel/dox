@@ -41,6 +41,15 @@ export async function extractText(
     // Note: Scanned/image-based PDFs will return null here since OCR (tesseract)
     // can't run in the Cloudflare Workers edge runtime. The local process-worker
     // (bin/process-worker) has an OCR fallback for these cases.
+    //
+    // This is also why the PER-PAGE OCR routing (shared/pdfPageOcr.ts) is not
+    // applied here: a page that is a pasted certificate image with a caption
+    // over it returns the caption, and at the edge there is nothing better to
+    // return. What this function feeds is the search index and the
+    // extracted_text column, not the extraction prompt — the model's text comes
+    // from the worker, which does run the per-page pass. Adding the DECISION
+    // here without the OCR that answers it would only let us report a gap we
+    // cannot close.
     if (mimeType === 'application/pdf') {
       try {
         const buffer = file instanceof ArrayBuffer ? file : file.buffer;

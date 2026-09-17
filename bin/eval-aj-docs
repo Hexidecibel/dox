@@ -22,7 +22,10 @@
  *   * FIVE PAGES HAVE NO TEXT LAYER. The SQF, both kosher and both halal
  *     certificates are inserted images — which is to say the five documents in
  *     the packet that actually carry expiry dates are exactly the five a
- *     text-layer read cannot see.
+ *     text-layer read cannot see. They ARE read now (per-page OCR routing,
+ *     shared/pdfPageOcr.ts, which this corpus is what measured), and --verify
+ *     asserts their OCR ground truth on the PRODUCTION route with no model in
+ *     the loop — so a regression in that routing fails here first.
  *
  * WHAT IS MEASURED. The production text path via bin/lib/corpusText.js (the
  * same module bin/measure-doctype-extraction uses), then
@@ -53,9 +56,10 @@
  *                                         #   in the text the model would see
  *   bin/eval-aj-docs --classify-only      # the classification pass alone (~3s/doc)
  *   bin/eval-aj-docs --force-ocr          # NOT the production path — rasterise and
- *                                         #   OCR every page, to see what is on the
- *                                         #   five inserted certificate IMAGES that
- *                                         #   the text-layer route never reads
+ *                                         #   OCR EVERY page. Production now OCRs the
+ *                                         #   picture pages on their own; this keeps
+ *                                         #   their ground truth independently
+ *                                         #   checkable and the two routes comparable
  *   bin/eval-aj-docs --set specs          # specs | packet | packet-parts | packet-whole
  *   bin/eval-aj-docs --doc packet-p04-sqf-certificate
  *   bin/eval-aj-docs --concurrency 3
@@ -179,27 +183,34 @@ async function verify(corpus, runs, opts) {
   for (const run of runs) {
     const { text, route } = await extractPdfText(run.pdf, { forceOcr: opts.forceOcr });
     const hay = normalizeLoose(text);
-    // An image-only page's claims are what OCR reads off it, so they are only
-    // checkable under --force-ocr. Under the production route the same page
-    // yields a caption and a page number, which is the finding, not a failure.
+    // An image-only page's claims are what OCR reads off it. They USED to be
+    // checkable only under --force-ocr, because the production route handed the
+    // model a caption and a page number and nothing else — that gap was the
+    // finding. Per-page OCR routing (shared/pdfPageOcr.ts) closed it, so the
+    // production route now reads those pages too and the OCR claims are checked
+    // HERE, with no flag. That makes this the regression test for the routing
+    // rule: if a picture page stops reaching tesseract, --verify fails with no
+    // model in the loop.
     //
-    // The inverse also holds and is why --force-ocr checks NOTHING ELSE: the
+    // --force-ocr still checks NOTHING ELSE, for the original reason: the
     // text-layer claims are written against the geometry serializer's output,
-    // pipe-delimited columns and all, and OCR does not produce that. Asserting
-    // them against a rasterised page would fail on the difference between two
+    // pipe-delimited columns and all, and a rasterised page does not produce
+    // that. Asserting them there would fail on the difference between two
     // correct reads of the same document.
     const ocrClaims = run.doc.pdf_text_must_contain_ocr || [];
     if (opts.forceOcr && !ocrClaims.length) {
       console.log(`  ${C.d}·  ${run.doc.id.padEnd(42)} skipped — no OCR ground truth (text-layer claims are not checkable here)${C.x}`);
       continue;
     }
-    const claims = opts.forceOcr ? ocrClaims : (run.doc.pdf_text_must_contain || []);
+    const claims = opts.forceOcr
+      ? ocrClaims
+      : [...(run.doc.pdf_text_must_contain || []), ...(run.doc.image_only ? ocrClaims : [])];
     const misses = claims.filter((c) => !hay.includes(normalizeLoose(c)));
     checked += claims.length;
     const imageOnly = run.doc.image_only
       ? (opts.forceOcr
         ? `${C.d} [image-only: OCR]${C.x}`
-        : `${C.y} [image-only: ${run.doc.text_layer_chars} chars is all production reads — run --force-ocr]${C.x}`)
+        : `${C.c} [image-only: ${run.doc.text_layer_chars} chars in the text layer, read by per-page OCR]${C.x}`)
       : '';
     if (misses.length) {
       bad += misses.length;

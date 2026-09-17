@@ -1,0 +1,32 @@
+-- WHICH PAGES OF A DOCUMENT THE MODEL ACTUALLY READ, AND FROM WHERE.
+--
+-- Extraction routed to OCR on a whole-document question: is the text layer
+-- empty, is it garbled, is it letterless? A page that is a PASTED PICTURE of a
+-- certificate with a typed caption and a page number over it answers "no" to
+-- all three, so tesseract never ran on it. On the client's own 36-page annual
+-- packet that is pages 6 and 13-16 -- the SQF certificate, two kosher letters
+-- and two halal certificates, 4 to 81 characters of text each over a full-page
+-- image -- and they are the only five documents in the file that carry expiry
+-- dates. They scored 0 of 25 graded fields; OCR reads 1097-1587 characters off
+-- the same pages.
+--
+-- The fix decides page by page (shared/pdfPageOcr.ts), which means one
+-- document's text can now come from two different reads. That is exactly the
+-- kind of fact a reviewer must be able to see: an OCR'd page is a page whose
+-- values were guessed from glyph shapes, and "the certificate number is
+-- 0M3LK1D" deserves a second look when it came off a rasterised image, whereas
+-- the same string off a text layer is the document's own characters.
+--
+-- One JSON array, one row per PAGE: page, source ('text-layer' / 'ocr' /
+-- 'text-layer+ocr'), the characters each read produced, the page's largest
+-- drawn image as a fraction of the page, and the routing/merge reason. A TEXT
+-- column holding JSON, like ai_fields / learned_field_hints / uncertainty
+-- before it -- nothing queries inside it, the review UI renders it.
+--
+-- NULL means NOTHING UNUSUAL HAPPENED, not "unknown": the worker posts this
+-- column only when at least one page was read by OCR, so every existing row
+-- and every ordinary text document stays NULL and the review card stays
+-- exactly as it was. A row per page on every item would be noise, and noise on
+-- every card is how a reviewer learns to ignore the one card that matters.
+-- Additive and nullable; rows extracted before this migration stay NULL.
+ALTER TABLE processing_queue ADD COLUMN text_page_sources TEXT;

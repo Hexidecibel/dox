@@ -1874,6 +1874,17 @@ export interface ProcessingQueueItem {
    * parity run trustworthy.
    */
   text_model: string | null;
+  /**
+   * Which pages the model read from the file's own text layer and which from
+   * OCR (migration 0116). JSON-stringified `PageTextProvenance[]`, one row per
+   * page, in page order.
+   *
+   * NULL means nothing unusual happened — the worker posts this only when at
+   * least one page was read by OCR, because a row per page on every item would
+   * be noise on every card. See shared/pdfPageOcr.ts for the routing rule and
+   * why a page that is a pasted certificate image needs its own decision.
+   */
+  text_page_sources: string | null;
   // Phase 3: per-field pre-fill hints derived from past reviewer picks.
   // JSON-stringified Record<field_key, LearnedFieldHint>; null when no signal.
   learned_field_hints: string | null;

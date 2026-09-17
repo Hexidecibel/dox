@@ -105,6 +105,7 @@ import { EmptyState } from '../components/EmptyState';
 import { helpContent } from '../lib/helpContent';
 import { formatDateTime } from '../utils/format';
 import { IntakeHistoryAlerts, IntakeHistoryChips, ReceivedAgainList } from '../components/IntakeDuplicateNotes';
+import { PageSourceNote, PageSourceTable } from '../components/PageTextSources';
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -1965,11 +1966,23 @@ export default function ReviewQueue() {
                         {item.extracted_text && (
                           <Accordion variant="outlined" sx={{ mb: 2 }}>
                             <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                              <Typography variant="body2" color="text.secondary">
-                                Extracted text
-                              </Typography>
+                              <Box sx={{ minWidth: 0 }}>
+                                <Typography variant="body2" color="text.secondary">
+                                  Extracted text
+                                </Typography>
+                                {/* Per-page provenance (migration 0116). A page
+                                    that is a pasted certificate IMAGE is now
+                                    OCR'd on its own, so one document's text can
+                                    come from two different reads — and a value
+                                    guessed from glyph shapes deserves a second
+                                    look that the same value off a text layer
+                                    does not. Absent when every page came from
+                                    the file's own text layer. */}
+                                <PageSourceNote raw={item.text_page_sources} />
+                              </Box>
                             </AccordionSummary>
                             <AccordionDetails>
+                              <PageSourceTable raw={item.text_page_sources} />
                               <Typography
                                 variant="body2"
                                 sx={{

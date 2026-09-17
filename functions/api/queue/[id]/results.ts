@@ -55,6 +55,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       // worker logs, which is how a grading pass got scored against the
       // wrong quantization after a silent failover.
       text_model?: string | null;
+      // Which pages the model read from the file's own text layer and which
+      // from OCR (migration 0116). JSON array, one row per page. The worker
+      // posts it ONLY when at least one page was read by OCR, so an ordinary
+      // text document leaves the column NULL and the review card unchanged.
+      text_page_sources?: string | null;
       // Phase 3 sidecars
       learned_field_hints?: string | null;
       uncertainty?: string | null;
@@ -217,6 +222,15 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.text_model !== undefined) {
       updates.push('text_model = ?');
       params.push(body.text_model);
+    }
+
+    // Per-page text provenance (migration 0116). Same accept-and-store
+    // contract: a reviewer must be able to tell a page whose values came off a
+    // rasterised image from a page whose values are the document's own
+    // characters.
+    if (body.text_page_sources !== undefined) {
+      updates.push('text_page_sources = ?');
+      params.push(body.text_page_sources);
     }
 
     if (body.learned_field_hints !== undefined) {

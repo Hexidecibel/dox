@@ -63,6 +63,14 @@ const {
   looksLikeBrokenEncoding,
   countLetters,
 } = require('./lib/shared/pdfTextSerializer');
+// Per-page OCR routing. The document-level guards above (empty text,
+// isTextGarbled, the serializer's broken-encoding check) all ask ONE question
+// of the WHOLE file, and a supplier packet's pasted certificate images — a
+// picture with a typed caption over it — answer "not empty, not garbled" to
+// every one of them. applyPerPageOcr decides page by page and OCRs only the
+// pages that qualify; the rules it applies are pure and live in
+// shared/pdfPageOcr.ts. See processPdfPerPageOcr() below.
+const { applyPerPageOcr } = require('./lib/pdfPageOcr');
 
 // Increase headers timeout for slow LLM inference (default is 300s, we need 15min)
 const llmDispatcher = new Agent({
@@ -1211,6 +1219,54 @@ async function serializePdfGeometry(fileBuffer, fileName) {
   }
 }
 
+/**
+ * PER-PAGE OCR, applied after everything else and to both PDF paths.
+ *
+ * WHY IT EXISTS: every OCR decision before this one is asked of the WHOLE file
+ * — is the text layer empty, is it garbled, is it letterless? A page that is a
+ * pasted PICTURE of a certificate with a typed caption and a page number over
+ * it says "no" to all three, so tesseract never ran on it and the model was
+ * handed the caption. On the client's own 36-page packet that is pages 6 and
+ * 13-16: the SQF certificate, two kosher letters and two halal certificates,
+ * 4-81 characters each over a full-page image, and the only five documents in
+ * the file that carry expiry dates. They scored 0 of 25 graded fields.
+ *
+ * WHY IT RUNS LAST, like the geometry pass: the document-level routing above is
+ * still decided on the original text, byte for byte. This only ever ADDS pages
+ * that were previously unread, and only when `pages` is still a real per-page
+ * array (a document that already went to OCR whole is skipped — `route === 'ocr'`
+ * collapses it to a single blob and there are no per-page decisions left to make).
+ *
+ * The rule and the merge are pure and live in shared/pdfPageOcr.ts; the Node
+ * half (operator list, poppler, tesseract) is bin/lib/pdfPageOcr.js, shared
+ * verbatim with bin/lib/corpusText.js so the measurement harness cannot measure
+ * a text path the product does not have.
+ *
+ * Returns `{ text, pages, pageSources }` — `pageSources` is one row per page and
+ * is posted to the queue item so a reviewer can tell an OCR'd page from a text
+ * page. Null when nothing was OCR'd: "nothing unusual happened" needs no record.
+ */
+async function applyPdfPerPageOcr({ text, pages, wentToOcrWhole, pdfBuffer, factsBuffer, fileName, verbose }) {
+  if (wentToOcrWhole || !Array.isArray(pages) || pages.length === 0) {
+    return { text, pages, pageSources: null };
+  }
+  try {
+    const res = await applyPerPageOcr({
+      pdfBuffer,
+      factsBuffer,
+      pages,
+      log: verbose ? (m) => console.log(m) : null,
+    });
+    if (!res.applied) return { text, pages, pageSources: null };
+    console.log(`  Per-page OCR read ${res.ocrPages.length} image page(s) of ${fileName}: page ${res.ocrPages.join(', ')} (${(res.ms / 1000).toFixed(1)}s)`);
+    return { text: res.text, pages: res.pages, pageSources: res.provenance };
+  } catch (err) {
+    // A page that could not be OCR'd is the status quo, never a failed item.
+    console.warn(`  Per-page OCR failed for ${fileName}: ${err.message} (keeping the text layer)`);
+    return { text, pages, pageSources: null };
+  }
+}
+
 // =============================================================================
 // Shared text/format extraction (order + shipment paths)
 // =============================================================================
@@ -1229,11 +1285,15 @@ async function serializePdfGeometry(fileBuffer, fileName) {
 async function extractTextAndPages(item, fileBuffer, fileBufferCopy) {
   let text = null;
   let pages = [];
+  let pageSources = null;
 
   if (item.mime_type === 'application/pdf') {
     // Copy the bytes BEFORE unpdf touches them — extractText detaches the
-    // ArrayBuffer it is given, and the geometry pass needs its own view.
+    // ArrayBuffer it is given, and the geometry and per-page passes each need
+    // their own view.
     const geomBuffer = fileBuffer.slice(0);
+    const factsBuffer = fileBuffer.slice(0);
+    let wentToOcrWhole = false;
     try {
       const { extractText } = await import('unpdf');
       const result = await extractText(new Uint8Array(fileBuffer), { mergePages: false });
@@ -1256,6 +1316,7 @@ async function extractTextAndPages(item, fileBuffer, fileBufferCopy) {
       if (ocrText) {
         text = ocrText.substring(0, 100000);
         pages = [text];
+        wentToOcrWhole = true;
       }
     }
 
@@ -1267,6 +1328,15 @@ async function extractTextAndPages(item, fileBuffer, fileBufferCopy) {
       text = geom.text;
       pages = geom.pages;
     }
+
+    // ...and then the per-page pass, which is the only step that can see a page
+    // that is a picture with a caption over it. See applyPdfPerPageOcr().
+    const perPage = await applyPdfPerPageOcr({
+      text, pages, wentToOcrWhole, pdfBuffer: fileBufferCopy, factsBuffer, fileName: item.file_name,
+    });
+    text = perPage.text;
+    pages = perPage.pages;
+    pageSources = perPage.pageSources;
   } else if (
     item.mime_type === 'text/plain' ||
     item.mime_type === 'text/csv' ||
@@ -1317,7 +1387,7 @@ async function extractTextAndPages(item, fileBuffer, fileBufferCopy) {
     }
   }
 
-  return { text, pages };
+  return { text, pages, pageSources };
 }
 
 // =============================================================================
@@ -1633,6 +1703,8 @@ async function processOrderItem(item) {
     let orders = null;
     let customers = null;
     let extractedText = '';
+    // Per-page text provenance from the PDF path (null unless a page was OCR'd).
+    let pageSources = null;
     let parseMethod = 'qwen';
 
     if (haveMappings && isCsvItem(item)) {
@@ -1751,7 +1823,8 @@ async function processOrderItem(item) {
       } else {
         // Non-XLSX: PDF / CSV-without-mappings / DOCX / image. Single text
         // stream through the chunker, exactly as before.
-        const { text, pages } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
+        const { text, pages, pageSources: ps } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
+        pageSources = ps || null;
         if (!text || text.trim().length === 0) {
           await postResults(item.id, {
             processing_status: 'error',
@@ -1795,6 +1868,9 @@ async function processOrderItem(item) {
       // Which text model actually served this run (null when the deterministic
       // CSV mapping path handled it and no LLM call was made).
       text_model: lastServedTextModel,
+      // Per-page text provenance (migration 0116) — posted only when a page
+      // was read by OCR. See applyPdfPerPageOcr().
+      ...(pageSources ? { text_page_sources: JSON.stringify(pageSources) } : {}),
     });
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -1863,6 +1939,8 @@ async function processShipmentItem(item) {
     const shipments = [];
     let confidence = null;
     let extractedText = '';
+    // Per-page text provenance from the PDF path (null unless a page was OCR'd).
+    let pageSources = null;
 
     // Drain one Qwen response's shipments[] into the accumulator, applying the
     // same required-field validation regardless of which input path produced
@@ -1923,7 +2001,8 @@ async function processShipmentItem(item) {
       extractedText = textBlocks.join('\n').substring(0, 100000);
     } else {
       const fileBufferCopy = fileBuffer.slice(0);
-      const { text, pages } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
+      const { text, pages, pageSources: ps } = await extractTextAndPages(item, fileBuffer, fileBufferCopy);
+      pageSources = ps || null;
       if (!text || text.trim().length === 0) {
         await postResults(item.id, {
           processing_status: 'error',
@@ -1949,6 +2028,9 @@ async function processShipmentItem(item) {
       summary: `Extracted ${shipments.length} shipment line(s)`,
       // Which text model actually served this run (see text_model above).
       text_model: lastServedTextModel,
+      // Per-page text provenance (migration 0116) — posted only when a page
+      // was read by OCR. See applyPdfPerPageOcr().
+      ...(pageSources ? { text_page_sources: JSON.stringify(pageSources) } : {}),
     });
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -2042,6 +2124,10 @@ async function processCoaItem(item) {
     //         them as a one-chunk doc identical to today's behavior.
     let text = null;
     let pages = [];
+    // Per-page text provenance (which pages the model read from the text layer
+    // and which from OCR). Null when nothing unusual happened. See
+    // applyPdfPerPageOcr().
+    let pageSources = null;
 
     // Keep a copy of fileBuffer for OCR fallback (unpdf may detach the ArrayBuffer)
     const fileBufferCopy = fileBuffer.slice(0);
@@ -2051,8 +2137,11 @@ async function processCoaItem(item) {
 
     if (item.mime_type === 'application/pdf') {
       // Copy the bytes BEFORE unpdf touches them — extractText detaches the
-      // ArrayBuffer it is given, and the geometry pass needs its own view.
+      // ArrayBuffer it is given, and the geometry and per-page passes each need
+      // their own view.
       const geomBuffer = fileBuffer.slice(0);
+      const factsBuffer = fileBuffer.slice(0);
+      let wentToOcrWhole = false;
       try {
         const { extractText } = await import('unpdf');
         // mergePages: false → array of per-page strings so the chunker can
@@ -2096,6 +2185,7 @@ async function processCoaItem(item) {
           console.log(`  OCR extracted ${ocrText.length} chars`);
           text = ocrText.substring(0, 100000);
           pages = [text];
+          wentToOcrWhole = true;
         }
       }
 
@@ -2112,6 +2202,15 @@ async function processCoaItem(item) {
         text = geom.text;
         pages = geom.pages;
       }
+
+      // ...and then the per-page pass, the only step that can see a page which
+      // is a pasted image with a caption over it. See applyPdfPerPageOcr().
+      const perPage = await applyPdfPerPageOcr({
+        text, pages, wentToOcrWhole, pdfBuffer: fileBufferCopy, factsBuffer, fileName: item.file_name,
+      });
+      text = perPage.text;
+      pages = perPage.pages;
+      pageSources = perPage.pageSources;
     } else if (
       item.mime_type === 'text/plain' ||
       item.mime_type === 'text/csv' ||
@@ -2769,6 +2868,14 @@ async function processCoaItem(item) {
     // extraction must be self-describing for later grading / parity runs.
     if (servedTextModel) {
       resultBody.text_model = servedTextModel;
+    }
+
+    // Per-page text provenance (migration 0116). Posted only when a page was
+    // read by OCR — for a document whose every page came from its own text
+    // layer there is nothing for a reviewer to be told, and a row per page on
+    // every item would be noise. See applyPdfPerPageOcr().
+    if (pageSources) {
+      resultBody.text_page_sources = JSON.stringify(pageSources);
     }
 
     // Attach VLM columns when VLM ran (success or failure).
