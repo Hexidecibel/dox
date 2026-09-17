@@ -31,7 +31,12 @@
 
 import { zipSync } from 'fflate';
 import { generateId } from './db';
-import type { DocumentExportItem, DocumentExportLandingView } from '../../shared/types';
+import type {
+  DocumentExportItem,
+  DocumentExportLandingView,
+  DocumentExportLinkState,
+  DocumentExportLinkSummary,
+} from '../../shared/types';
 
 /**
  * Hard ceilings on one export.
@@ -409,6 +414,8 @@ export interface DocumentExportLinkRow {
   created_at: string;
   expires_at: string;
   revoked_at: string | null;
+  /** Who pulled it back (migration 0116). NULL on rows revoked before that. */
+  revoked_by?: string | null;
   view_count: number;
   last_viewed_at: string | null;
   download_count: number;
@@ -469,12 +476,148 @@ export async function mintExportLink(
   return { id, token, expires_at: expiresAt };
 }
 
-/** Shut a link off — used when the email it was minted for failed to send. */
-export async function revokeExportLink(db: D1Database, id: string): Promise<void> {
-  await db
-    .prepare("UPDATE document_export_links SET revoked_at = datetime('now') WHERE id = ?")
-    .bind(id)
+/**
+ * Shut a link off.
+ *
+ * Two callers with one behaviour: the send path uses it when the email it was
+ * minted for failed (no actor — nobody decided anything, the send simply did
+ * not happen), and a person pressing Revoke on "Documents you sent" passes
+ * their own id.
+ *
+ * `revoked_at IS NULL` in the WHERE is not decoration: revoking twice must not
+ * move the first revocation's timestamp, because "when did this stop working"
+ * is exactly the question the row is kept to answer. A second press is a no-op
+ * that reports zero rows changed.
+ */
+export async function revokeExportLink(
+  db: D1Database,
+  id: string,
+  revokedBy?: string | null,
+): Promise<boolean> {
+  const res = await db
+    .prepare(
+      `UPDATE document_export_links
+          SET revoked_at = datetime('now'), revoked_by = ?
+        WHERE id = ? AND revoked_at IS NULL`,
+    )
+    .bind(revokedBy ?? null, id)
     .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Which of the three states a link is in, as of `now`.
+ *
+ * REVOKED BEATS EXPIRED when both are true. A reader of this list is asking
+ * whether somebody pulled the link back; collapsing that into "expired"
+ * because thirty days have since passed would erase the only fact worth
+ * recording about it.
+ */
+export function exportLinkState(
+  row: Pick<DocumentExportLinkRow, 'revoked_at' | 'expires_at'>,
+  now: Date = new Date(),
+): DocumentExportLinkState {
+  if (row.revoked_at) return 'revoked';
+  if (!row.expires_at) return 'expired';
+  return new Date(row.expires_at).getTime() <= now.getTime() ? 'expired' : 'active';
+}
+
+/**
+ * How many document titles one row carries into the list. A send is capped at
+ * 50 documents; printing all of them would turn a twenty-row screen into a
+ * thousand-line one, so the list names the first few and says there are more.
+ * The count is always exact — it comes from the frozen id list, not from this.
+ */
+export const EXPORT_LINK_TITLE_PREVIEW = 6;
+
+export interface ExportLinkListRow extends DocumentExportLinkRow {
+  sent_by_name: string | null;
+  sent_by_email: string | null;
+  revoked_by_name: string | null;
+}
+
+/**
+ * Project one stored link into the internal list shape.
+ *
+ * THE TOKEN IS NOT IN THE OUTPUT, deliberately. This screen exists so a person
+ * can see and withdraw what they sent; handing every tenant user the live
+ * bearer URL for every export ever sent would make the accountability surface
+ * the largest hole in the feature. Anyone who needs the link again has the
+ * email, and the honest answer for anyone who does not is a new send.
+ */
+export function buildExportLinkSummary(
+  row: ExportLinkListRow,
+  titlesById: Map<string, string>,
+  canRevoke: boolean,
+  now: Date = new Date(),
+): DocumentExportLinkSummary {
+  const ids = parseStringList(row.document_ids);
+  const titles = ids
+    .slice(0, EXPORT_LINK_TITLE_PREVIEW)
+    // A document deleted since the send has no title left to print. Saying so
+    // is better than dropping the row and leaving the count unexplained.
+    .map((id) => titlesById.get(id) ?? 'Document no longer in the portal');
+  return {
+    id: row.id,
+    state: exportLinkState(row, now),
+    created_at: row.created_at,
+    expires_at: row.expires_at,
+    revoked_at: row.revoked_at,
+    revoked_by_name: row.revoked_by_name ?? null,
+    sent_by_id: row.created_by,
+    sent_by_name: row.sent_by_name ?? null,
+    sent_by_email: row.sent_by_email ?? null,
+    on_behalf_of: row.on_behalf_of,
+    message: row.message,
+    recipients: parseStringList(row.recipients),
+    document_count: ids.length,
+    document_titles: titles,
+    documents_truncated: ids.length > titles.length,
+    view_count: Number(row.view_count) || 0,
+    last_viewed_at: row.last_viewed_at,
+    download_count: Number(row.download_count) || 0,
+    last_downloaded_at: row.last_downloaded_at,
+    can_revoke: canRevoke,
+  };
+}
+
+/**
+ * Titles for every document named by these links, tenant scoped.
+ *
+ * Deleted documents are simply absent — the caller prints a placeholder. The
+ * tenant filter is here rather than at the call site for the same reason it is
+ * in `loadExportDocuments`: a link's frozen id list is data, and data is never
+ * trusted to stay inside its own tenant just because it started there.
+ */
+export async function loadExportLinkTitles(
+  db: D1Database,
+  tenantId: string,
+  links: Pick<DocumentExportLinkRow, 'document_ids'>[],
+): Promise<Map<string, string>> {
+  const ids = new Set<string>();
+  for (const l of links) {
+    for (const id of parseStringList(l.document_ids).slice(0, EXPORT_LINK_TITLE_PREVIEW)) {
+      ids.add(id);
+    }
+  }
+  const out = new Map<string, string>();
+  const list = [...ids];
+  if (list.length === 0) return out;
+  // D1 caps bound parameters per statement; chunking keeps a page of links
+  // with six titles each comfortably inside it whatever the page size becomes.
+  const CHUNK = 90;
+  for (let i = 0; i < list.length; i += CHUNK) {
+    const slice = list.slice(i, i + CHUNK);
+    const res = await db
+      .prepare(
+        `SELECT id, title FROM documents
+          WHERE tenant_id = ? AND id IN (${slice.map(() => '?').join(', ')})`,
+      )
+      .bind(tenantId, ...slice)
+      .all<{ id: string; title: string }>();
+    for (const r of res.results ?? []) out.set(r.id, r.title);
+  }
+  return out;
 }
 
 /** The URL an email should point at. Null when either half is missing. */

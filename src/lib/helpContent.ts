@@ -1551,6 +1551,19 @@ export const helpContent = {
   activity,
   audit,
   search,
+  /**
+   * "Documents you sent" — the export-link register. Written as a plain object
+   * rather than a ModuleHelpExpanded because the surface has one screen and no
+   * detail view; the well text is the whole of what it needs to say, and the
+   * honest reading of the open counts is the part that must not be lost.
+   */
+  sentDocuments: {
+    headline: 'Documents you sent',
+    well:
+      'Every set of documents that left here as an emailed link: when, by whom, to which addresses, how many documents, and whether the link still opens. ' +
+      'The link is the credential — anyone holding the URL can open it, including anyone the mail was forwarded to — so the open and download counts are counts of requests, not of people, and the portal cannot say which recipient made them. ' +
+      'Revoke kills a link at once for everybody; it cannot recall a file already downloaded. There is no extend: a link keeps the expiry its email promised, and sending again is the honest way to give someone more time.',
+  },
   tenants,
   users,
   api_keys: apiKeys,

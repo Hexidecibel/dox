@@ -60,12 +60,14 @@ import {
   ErrorOutline as OutOfSpecIcon,
   ContactMail as CustomersIcon,
   ForwardToInbox as RequestsIcon,
+  Outbox as SentDocumentsIcon,
   TableView as RecordsIcon,
   Settings as SettingsIcon,
 } from '@mui/icons-material';
 
 import { Dashboard } from '../pages/Dashboard';
 import { Documents } from '../pages/Documents';
+import { SentDocuments } from '../pages/SentDocuments';
 import { DocumentDetail } from '../pages/DocumentDetail';
 import { DocumentCreate } from '../pages/DocumentCreate';
 import { Search } from '../pages/Search';
@@ -190,6 +192,24 @@ export const SURFACES: Surface[] = [
   // Creating a document is a write; reading the list is not. This split
   // predates the refactor and is preserved exactly.
   { path: '/documents/new', element: <DocumentCreate />, module: 'library', roles: CONTRIBUTOR },
+  {
+    // What has left the building by link (migrations 0115 + 0116). Declared
+    // BEFORE `/documents/:id` so "sent" is never read as a document id — the
+    // same rule `/requests/arrivals` follows.
+    //
+    // THE PAGE TIER IS THE SEND TIER. `POST /api/document-exports/send` is
+    // gated to `user` and above (minting an unauthenticated URL to fifty
+    // documents is publishing, not reading), so a `reader` can never have a
+    // row on this screen and is not shown a page that would always be empty.
+    // Within that tier the API narrows what each role SEES — an admin gets the
+    // organization's sends, everybody else their own — rather than hiding the
+    // page from the people who have something on it.
+    path: '/documents/sent',
+    element: <SentDocuments />,
+    module: 'library',
+    roles: CONTRIBUTOR,
+    nav: { label: 'Sent documents', icon: <SentDocumentsIcon />, order: 15 },
+  },
   { path: '/documents/:id', element: <DocumentDetail />, module: 'library' },
   {
     // DRIFT FIX. Nav said `user`+, the route was ungated — so a `reader` could

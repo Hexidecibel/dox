@@ -28,8 +28,15 @@ import { onRequestPost as exportSend } from '../../functions/api/document-export
 import { onRequestGet as exportLanding } from '../../functions/api/document-exports/public/[token]';
 import { onRequestGet as exportLandingZip } from '../../functions/api/document-exports/public/[token]/download';
 import { onRequestGet as exportLandingFile } from '../../functions/api/document-exports/public/[token]/file/[index]';
+import { onRequestGet as listLinks } from '../../functions/api/document-exports/links/index';
+import { onRequestPost as revokeLink } from '../../functions/api/document-exports/links/[id]/revoke';
 import { EXPORT_LINK_TTL_DAYS, EXPORT_MAX_TOTAL_BYTES } from '../../functions/lib/document-export';
-import type { DocumentExportLandingView, DocumentExportSendResponse } from '../../shared/types';
+import type {
+  DocumentExportLandingView,
+  DocumentExportLinkListResponse,
+  DocumentExportRevokeResponse,
+  DocumentExportSendResponse,
+} from '../../shared/types';
 
 const db = env.DB;
 let seed: Awaited<ReturnType<typeof seedTestData>>;
@@ -39,14 +46,19 @@ let docTypeId = '';
 /** Sits in the database next to everything the landing page reads. */
 const INTERNAL_OWNER = 'INTERNAL-owner-Priya-in-QA-do-not-share';
 
-function user(role: 'org_admin' | 'reader', tenantId: string, id: string): TestUser {
-  return {
-    id,
-    email: role === 'reader' ? 'reader@test.com' : 'orgadmin@test.com',
-    name: role === 'reader' ? 'Reader User' : 'Org Admin',
-    role,
-    tenant_id: tenantId,
-  };
+const USER_FIXTURES: Record<string, { email: string; name: string }> = {
+  reader: { email: 'reader@test.com', name: 'Reader User' },
+  user: { email: 'user@test.com', name: 'Regular User' },
+  org_admin: { email: 'orgadmin@test.com', name: 'Org Admin' },
+};
+
+function user(
+  role: 'org_admin' | 'reader' | 'user',
+  tenantId: string,
+  id: string,
+): TestUser {
+  const f = USER_FIXTURES[role];
+  return { id, email: f.email, name: f.name, role, tenant_id: tenantId };
 }
 
 interface MadeDoc {
@@ -354,6 +366,31 @@ async function sendExport(
 }
 
 describe('POST /api/document-exports/send', () => {
+  it('refuses a reader: taking documents out is reading, mailing them is not', async () => {
+    const sent = stubMail();
+    const doc = await makeDocument({ title: 'Not a reader to mail out' });
+    const res = await exportSend(
+      fnContext('http://localhost/api/document-exports/send', {
+        method: 'POST',
+        body: JSON.stringify({
+          document_ids: [doc.id],
+          recipients: ['buyer@customer.example'],
+        }),
+        user: user('reader', seed.tenantId, seed.readerId),
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(sent.length).toBe(0);
+    // And no link was minted for an email that never went.
+    const link = await db
+      .prepare(
+        "SELECT id FROM document_export_links WHERE document_ids LIKE ?",
+      )
+      .bind(`%${doc.id}%`)
+      .first();
+    expect(link).toBeNull();
+  });
+
   it('sends a link (never attachments) from the portal, reply-to the sender', async () => {
     const sent = stubMail();
     const doc = await makeDocument({ title: 'Cream COA for Marco' });
@@ -610,5 +647,189 @@ describe('the recipient download routes', () => {
 
     expect((await exportLandingZip(landingCtx(token))).status).toBe(404);
     expect((await exportLandingFile(landingCtx(token, { index: '0' }))).status).toBe(404);
+  });
+});
+
+// ===========================================================================
+// "Documents you sent" — the register and the kill switch (migration 0116)
+// ===========================================================================
+//
+// 0115 shipped `revoked_at` with no reachable revoker and no list of what had
+// been sent. What is pinned here is what makes the pair defensible:
+//
+//   1. A REVOKE REACHES ALL THREE RECIPIENT ROUTES, through the one gate.
+//   2. THE LIST NEVER CARRIES THE TOKEN — it is an accountability screen, not
+//      a second way to open every export ever sent.
+//   3. AN ADMIN SEES THE ORGANIZATION, EVERYBODY ELSE THEIR OWN, and the
+//      response names the scope it actually answered in.
+//   4. EVERY REVOKE WRITES AN AUDIT ROW, and a second press does not move the
+//      first revocation's timestamp.
+
+function linksCtx(
+  as: TestUser,
+  query = '',
+): ReturnType<typeof fnContext> {
+  return fnContext(`http://localhost/api/document-exports/links${query}`, { user: as });
+}
+
+function revokeCtx(id: string, as: TestUser): ReturnType<typeof fnContext> {
+  return fnContext(`http://localhost/api/document-exports/links/${id}/revoke`, {
+    method: 'POST',
+    params: { id },
+    user: as,
+  });
+}
+
+async function newestLinkId(): Promise<string> {
+  const row = await db
+    .prepare('SELECT id FROM document_export_links ORDER BY rowid DESC')
+    .first<{ id: string }>();
+  return row!.id;
+}
+
+const orgAdmin = () => user('org_admin', seed.tenantId, seed.orgAdminId);
+const plainUser = () => user('user', seed.tenantId, seed.userId);
+
+describe('GET /api/document-exports/links', () => {
+  it('lists a send with its recipients, counts and state — and never the token', async () => {
+    const doc = await makeDocument({ title: 'Listed certificate' });
+    const token = await mintedTokenFor([doc.id]);
+
+    const res = await listLinks(linksCtx(orgAdmin()));
+    expect(res.status).toBe(200);
+    const body = (await readJson(res)) as DocumentExportLinkListResponse;
+
+    const row = body.links.find((l) => l.document_titles.includes('Listed certificate'));
+    expect(row).toBeTruthy();
+    expect(row!.state).toBe('active');
+    expect(row!.document_count).toBe(1);
+    expect(row!.recipients).toEqual(['buyer@customer.example']);
+    expect(row!.view_count).toBe(0);
+    expect(row!.can_revoke).toBe(true);
+    // The register must not hand out the credential it exists to police.
+    expect(JSON.stringify(body)).not.toContain(token);
+  });
+
+  it('counts opens as requests against the link, which is all it can honestly do', async () => {
+    const doc = await makeDocument({ title: 'Opened twice' });
+    const token = await mintedTokenFor([doc.id]);
+    await exportLanding(landingCtx(token));
+    await exportLanding(landingCtx(token));
+    await exportLandingFile(landingCtx(token, { index: '0' }));
+
+    const body = (await readJson(
+      await listLinks(linksCtx(orgAdmin())),
+    )) as DocumentExportLinkListResponse;
+    const row = body.links.find((l) => l.document_titles.includes('Opened twice'))!;
+    expect(row.view_count).toBe(2);
+    expect(row.download_count).toBe(1);
+    expect(row.last_viewed_at).toBeTruthy();
+  });
+
+  it('gives a non-admin only their own sends, whatever scope they ask for', async () => {
+    const doc = await makeDocument({ title: 'Admin send' });
+    await mintedTokenFor([doc.id]);
+
+    const res = await listLinks(linksCtx(plainUser(), '?scope=tenant'));
+    const body = (await readJson(res)) as DocumentExportLinkListResponse;
+    expect(body.can_see_tenant).toBe(false);
+    // Answered in the scope it was allowed to answer in, not the one asked for.
+    expect(body.scope).toBe('mine');
+    expect(body.links.every((l) => l.sent_by_id === seed.userId)).toBe(true);
+    expect(body.links.some((l) => l.document_titles.includes('Admin send'))).toBe(false);
+  });
+
+  it('never reaches another tenant, and reports an expired link as expired', async () => {
+    const doc = await makeDocument({ title: 'Expires on its own' });
+    await mintedTokenFor([doc.id]);
+    const id = await newestLinkId();
+    await db
+      .prepare("UPDATE document_export_links SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?")
+      .bind(id)
+      .run();
+
+    const body = (await readJson(
+      await listLinks(linksCtx(orgAdmin())),
+    )) as DocumentExportLinkListResponse;
+    expect(body.links.find((l) => l.id === id)!.state).toBe('expired');
+    expect(body.links.every((l) => l.recipients.length > 0 || l.document_count >= 0)).toBe(true);
+
+    const other = await listLinks(
+      linksCtx(user('org_admin', 'test-tenant-002', 'user-org-admin-2')),
+    );
+    const otherBody = (await readJson(other)) as DocumentExportLinkListResponse;
+    expect(otherBody.links.some((l) => l.id === id)).toBe(false);
+  });
+});
+
+describe('POST /api/document-exports/links/:id/revoke', () => {
+  it('shuts every recipient route at once and audits who did it', async () => {
+    const doc = await makeDocument({ title: 'Mailed to the wrong address' });
+    const token = await mintedTokenFor([doc.id]);
+    const id = await newestLinkId();
+
+    // Live before.
+    expect((await exportLanding(landingCtx(token))).status).toBe(200);
+
+    const res = await revokeLink(revokeCtx(id, orgAdmin()));
+    expect(res.status).toBe(200);
+    const body = (await readJson(res)) as DocumentExportRevokeResponse;
+    expect(body.link.state).toBe('revoked');
+    expect(body.link.revoked_at).toBeTruthy();
+    expect(body.link.revoked_by_name).toBe('Org Admin');
+
+    // All three recipient routes, not just the landing page.
+    expect((await exportLanding(landingCtx(token))).status).toBe(404);
+    expect((await exportLandingZip(landingCtx(token))).status).toBe(404);
+    expect((await exportLandingFile(landingCtx(token, { index: '0' }))).status).toBe(404);
+
+    const rows = await auditRows('document_export.revoked');
+    expect(rows.length).toBeGreaterThan(0);
+    const details = JSON.parse(rows[0].details) as {
+      recipients: string[];
+      document_ids: string[];
+      view_count: number;
+    };
+    expect(details.recipients).toEqual(['buyer@customer.example']);
+    expect(details.document_ids).toEqual([doc.id]);
+    expect(rows[0].user_id).toBe(seed.orgAdminId);
+  });
+
+  it('a second press does not move the first revocation timestamp', async () => {
+    const doc = await makeDocument({ title: 'Revoked twice' });
+    await mintedTokenFor([doc.id]);
+    const id = await newestLinkId();
+
+    const first = (await readJson(
+      await revokeLink(revokeCtx(id, orgAdmin())),
+    )) as DocumentExportRevokeResponse;
+    const second = (await readJson(
+      await revokeLink(revokeCtx(id, orgAdmin())),
+    )) as DocumentExportRevokeResponse;
+
+    expect(second.link.revoked_at).toBe(first.link.revoked_at);
+    const audits = await auditRows('document_export.revoked');
+    expect(audits.filter((a) => JSON.parse(a.details).sent_by === seed.orgAdminId).length)
+      .toBeGreaterThan(0);
+  });
+
+  it("refuses a non-admin somebody else's link, and 404s another tenant's", async () => {
+    const doc = await makeDocument({ title: 'Not theirs to revoke' });
+    await mintedTokenFor([doc.id]);
+    const id = await newestLinkId();
+
+    const denied = await revokeLink(revokeCtx(id, plainUser()));
+    expect(denied.status).toBe(403);
+
+    const crossTenant = await revokeLink(
+      revokeCtx(id, user('org_admin', 'test-tenant-002', 'user-org-admin-2')),
+    );
+    expect(crossTenant.status).toBe(404);
+
+    const still = await db
+      .prepare('SELECT revoked_at FROM document_export_links WHERE id = ?')
+      .bind(id)
+      .first<{ revoked_at: string | null }>();
+    expect(still!.revoked_at).toBeNull();
   });
 });

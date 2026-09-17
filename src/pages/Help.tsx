@@ -45,6 +45,7 @@ const MODULE_LABEL: Record<HelpModuleKey, string> = {
   activity: 'Activity',
   audit: 'Audit Log',
   search: 'Search',
+  sentDocuments: 'Documents you sent',
   tenants: 'Tenants',
   users: 'Users',
   api_keys: 'API Keys',
@@ -58,6 +59,7 @@ const MODULE_LABEL: Record<HelpModuleKey, string> = {
 const MODULE_ORDER: HelpModuleKey[] = [
   'documents',
   'search',
+  'sentDocuments',
   'import',
   'review_queue',
   'ingest_history',

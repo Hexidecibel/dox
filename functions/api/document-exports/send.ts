@@ -17,9 +17,22 @@
  *
  * THE LINK IS MINTED BEFORE THE SEND AND REVOKED IF THE SEND FAILS, so there
  * is never a live unauthenticated link to documents nobody was told about.
+ *
+ * WHY THIS ONE TAKES A ROLE CHECK AND THE ZIP DOES NOT. Downloading a ZIP is
+ * the same act a `reader` can already perform one file at a time, so ./zip.ts
+ * deliberately has no role gate. SENDING is a different act: it mints an
+ * unauthenticated URL to as many as 50 documents, mails it to as many as 10
+ * addresses outside the organization, and may be repeated 30 times an hour.
+ * That is publishing, not reading, and the read-only role is named for what it
+ * is. `user` and above, matching every other outbound surface.
  */
 import { logAudit, getClientIp } from '../../lib/db';
-import { requireTenantAccess, errorToResponse, BadRequestError } from '../../lib/permissions';
+import {
+  requireRole,
+  requireTenantAccess,
+  errorToResponse,
+  BadRequestError,
+} from '../../lib/permissions';
 import { checkRateLimit, recordAttempt } from '../../lib/ratelimit';
 import { validateEmail } from '../../lib/validation';
 import { sendEmail, buildDocumentExportEmail } from '../../lib/email';
@@ -82,6 +95,9 @@ function normalizeRecipients(raw: unknown): { ok: string[]; bad: string[] } {
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const user = context.data.user as User;
+    // See the module header: a reader may take documents out for themselves,
+    // not publish them to addresses outside the organization.
+    requireRole(user, 'super_admin', 'org_admin', 'user');
     const body = (await context.request.json()) as {
       document_ids?: unknown;
       recipients?: unknown;
