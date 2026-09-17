@@ -574,6 +574,47 @@ export function defaultRenewalPolicyForTypeName(name: string): TypeRenewalPolicy
 }
 
 /**
+ * The renewal POLICY and PERIOD a newly created document type starts life with,
+ * as one pair.
+ *
+ * THIS IS THE ONE HELPER EVERY CREATE PATH CALLS. The two functions above are
+ * the halves; calling them separately is how the halves drift apart, and they
+ * cannot be allowed to: `parseTypeRenewalSetting` (functions/lib/registry.ts)
+ * enforces the invariant that a non-NULL `renewal_interval_months` exists only
+ * under a `period` policy, and a caller that reached for the months function
+ * alone would write 36 months under `inherit`, where nothing reads it.
+ *
+ * It exists because the create paths had already drifted. `POST
+ * /api/document-types` applied both defaults; the starter pack — which is how a
+ * real tenant actually gets its 27 types — named neither column, so every row
+ * it wrote took the migration defaults (`inherit` / NULL). The 0096 and 0097
+ * backfills ran once, at migration time, against the rows that existed then, so
+ * a tenant created afterwards got a Certificate of Analysis that renews
+ * annually: the exact "mail every COA owner about a certificate that does not
+ * renew" failure the renewal design exists to prevent.
+ *
+ * Still a PROPOSAL, not a verdict: it writes a starting value into a column an
+ * admin can see and change on the Document Types screen, and it is never
+ * re-derived at read time.
+ */
+export interface TypeRenewalDefault {
+  policy: TypeRenewalPolicy;
+  /** Only ever non-null under `policy === 'period'`. */
+  interval_months: number | null;
+}
+
+export function defaultRenewalSettingForTypeName(name: string): TypeRenewalDefault {
+  const policy = defaultRenewalPolicyForTypeName(name);
+  return {
+    policy,
+    // The months column is read ONLY under 'period' (see resolveRenewalPeriodMonths),
+    // so anything stored beside another policy would be a number nothing reads
+    // and the screen would contradict itself.
+    interval_months: policy === 'period' ? defaultRenewalMonthsForTypeName(name) : null,
+  };
+}
+
+/**
  * Human label for a type's renewal setting. Takes the policy as well as the
  * months because the months alone cannot say "never" — which is the whole
  * reason `renewal_policy` exists.

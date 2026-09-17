@@ -3,8 +3,7 @@ import { logAudit, getClientIp } from '../../lib/db';
 import { requireRole, errorToResponse } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import {
-  defaultRenewalMonthsForTypeName,
-  defaultRenewalPolicyForTypeName,
+  defaultRenewalSettingForTypeName,
   type TypeRenewalPolicy,
 } from '../../../shared/renewalPeriod';
 import { parseRenewalIntervalMonths, parseTypeRenewalSetting } from '../../lib/registry';
@@ -240,8 +239,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       // 'none' — it does not renew — and a spec sheet at three years. Same
       // contract as before: a guess written once into a setting an admin can
       // see and change, never re-derived on read.
-      renewalIntervalMonths = defaultRenewalMonthsForTypeName(body.name);
-      renewalPolicy = defaultRenewalPolicyForTypeName(body.name);
+      //
+      // ONE helper, shared with every other path that inserts a document type
+      // (the starter pack, in the portal and in the CLI). They diverged once
+      // already and a tenant seeded by the pack got an annually-renewing COA.
+      const proposed = defaultRenewalSettingForTypeName(body.name);
+      renewalIntervalMonths = proposed.interval_months;
+      renewalPolicy = proposed.policy;
     }
 
     // Renewal alert lead time override (0111). Absent or null = inherit the

@@ -174,6 +174,42 @@ describe('resolveRenewalDecision — accept, override, clear, or never asked', (
     expect(snapshotOf(w!.snapshot).proposed_due_date).not.toBe('2026-09-15');
   });
 
+  it('an empty answer under an UNRESOLVABLE proposal is a CLEAR, never an accept', () => {
+    // The defect this guards: `unresolvable` means "a period applies and we
+    // could not find a date to count it from", so both sides being null is not
+    // agreement — nothing was proposed to agree with. Recording it as
+    // 'accepted' made tier 2 of resolveRenewalExpiry read it forever as "a
+    // reviewer confirmed this document has no renewal date", so a certificate
+    // whose expiry we failed to extract went silent on one careless Approve.
+    const w = resolveRenewalDecision({ due_date: null }, {}, ANNUAL_TYPE, USER, NOW);
+    expect(w).not.toBeNull();
+    expect(snapshotOf(w!.snapshot).rule).toBe('unresolvable');
+    expect(w!.decision).toBe('cleared');
+    expect(w!.due_date).toBeNull();
+  });
+
+  it('a date supplied against an unresolvable proposal is an OVERRIDE', () => {
+    const w = resolveRenewalDecision(
+      { due_date: '2027-04-01' },
+      {},
+      ANNUAL_TYPE,
+      USER,
+      NOW,
+    );
+    expect(w!.decision).toBe('overridden');
+    expect(w!.due_date).toBe('2027-04-01');
+    expect(snapshotOf(w!.snapshot).proposed_due_date).toBeNull();
+    expect(snapshotOf(w!.snapshot).rule).toBe('unresolvable');
+  });
+
+  it('an unresolvable proposal nobody answered writes NOTHING', () => {
+    // The other half of the fix, and the one that matters most: the client
+    // omits the key when the box was never touched, and an omitted key is not
+    // a decision at any rule.
+    expect(resolveRenewalDecision(undefined, {}, ANNUAL_TYPE, USER, NOW)).toBeNull();
+    expect(resolveRenewalDecision(null, {}, ANNUAL_TYPE, USER, NOW)).toBeNull();
+  });
+
   it('strips a time component off whatever the client sent', () => {
     const w = resolveRenewalDecision(
       { due_date: '2027-01-15T00:00:00Z' },

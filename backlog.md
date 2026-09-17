@@ -2,6 +2,62 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## IDEA: Renewals on a FIXED CALENDAR WINDOW, not a period from an anchor (2026-09-17)
+
+**Not built, deliberately.** The SME named three renewals the current model cannot
+express, and the honest interim answer for all three is the same one the ladder already
+gives: extraction of the expiry PRINTED on the document (`document_expires_on`, tier 4),
+which beats every default and is the only correct source for any of them.
+
+What today's model can say: `document_types.renewal_interval_months` (0096) is a PERIOD,
+and `resolveRenewalExpiry` counts it from ONE anchor, `primary_metadata.effective_date`.
+Everything is "N months after this document took effect".
+
+What it cannot say:
+
+- **FDA food facility registration** — biennial on a FIXED window: renewal opens
+  1 October and closes 31 December of every EVEN-numbered year, for everybody, whatever
+  date the registration was filed. It is not "24 months after"; it is a date on a
+  calendar. (Note: **this type does not exist in the catalog on any prod tenant** — the
+  fsqa pack does not ship it, and only the local `bin/seed-medosweet-demo` fixture
+  creates an 'FDA Registration Number' type. So there is nothing on prod to get wrong
+  yet, and adding the type is the first step whenever this is picked up.)
+- **Certificate of insurance** — the POLICY PERIOD, which is a stated from/to on the
+  certificate itself and unrelated to when we filed it. Already handled correctly IF the
+  expiry is extracted; a period default would be wrong on every COI whose policy year
+  does not start the day we received it.
+- **SQF / BRC certification** — the AUDIT ANNIVERSARY, with a scheme-defined window
+  around it (SQF's recertification audit window opens some weeks before the anniversary
+  of the original certification date). The anchor is the audit date, not the effective
+  date, and the window matters as much as the date.
+
+**What it would take.** A fourth tier between the type period and the stated expiry, most
+of which is vocabulary rather than code:
+
+1. A schedule KIND on `document_types`, not just months: `period` (today) vs
+   `fixed_window` (a recurring calendar window: month/day open, month/day close, a period
+   in years, and a parity/phase so "even years only" is expressible) vs `anniversary`
+   (period counted from a NAMED anchor field rather than `effective_date`).
+2. A per-type ANCHOR FIELD name for the anniversary kind (`audit_date`,
+   `certification_date`), which also means those fields have to be extracted and named in
+   the prompt stack — that is the real work, not the arithmetic.
+3. `resolveRenewalExpiry` gains one branch per kind and keeps returning ONE
+   `ResolvedRenewal` with a `rule` and a plain-words `reason`, so the Review Queue
+   proposal and the dashboard explain themselves exactly as they do now. The existing
+   `RenewalRule` union gets `fixed_window` / `anniversary` members.
+4. The window itself has to reach the alert side: a fixed window has an OPENS date as
+   well as a due date, and "you may renew from 1 Oct" is a different email from "this
+   lapses on 31 Dec". `renewal_alert_lead_days` (0111) measures backwards from one date
+   and cannot express a window that opens.
+5. A migration restating the type-level columns, plus the frozen `renewal_snapshot`
+   (0097) carrying the kind — a schedule is re-tuned like a threshold and a decision must
+   stay re-explainable.
+
+**Do not start it on a guess.** Each of the three has a scheme-defined rule with real
+dates in it; getting FDA's biennial parity or SQF's window wrong produces SILENCE, the
+expensive direction. Ask AJ for the exact windows first, and keep extraction of the
+printed expiry as the authority in the meantime.
+
 ## GATED: SharePoint / Microsoft Graph storage provider (customer-tenant custody) (2026-07-29)
 
 **Blocked on the customer, not on us:** whether Medosweet IT grants scoped

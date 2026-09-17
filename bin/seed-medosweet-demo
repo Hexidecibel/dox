@@ -220,14 +220,20 @@ INSERT INTO suppliers (id, tenant_id, name, slug, aliases) VALUES
 ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, aliases=excluded.aliases;
 
 -- ---- Document types (the category taxonomy; verbatim names) ----
-INSERT INTO document_types (id, tenant_id, name, slug, description) VALUES
-  ('${DT_FDA}',          '${TENANT_ID}', 'FDA Registration Number',              'fda-registration-number',              'FDA food facility registration'),
-  ('${DT_AUDIT_REPORT}', '${TENANT_ID}', '3rd Party Food Safety Audit Report',   '3rd-party-food-safety-audit-report',   'Third-party food safety audit report'),
-  ('${DT_AUDIT_CERT}',   '${TENANT_ID}', '3rd Party Audit Certificate',          '3rd-party-audit-certificate',          'Third-party audit certificate'),
-  ('${DT_BIZLIC}',       '${TENANT_ID}', 'Business License',                     'business-license',                     'Business license'),
-  ('${DT_ORGANIC}',      '${TENANT_ID}', 'Organic Certificate',                  'organic-certificate',                  'Organic handler certificate'),
-  ('${DT_COI}',          '${TENANT_ID}', 'Certificate of Liability Insurance',   'certificate-of-liability-insurance',   'Certificate of liability insurance'),
-  ('${DT_SPEC}',         '${TENANT_ID}', 'Specification Sheet',                  'specification-sheet',                  'Product specification sheet')
+-- renewal_policy / renewal_interval_months (0096/0097) are NAMED here rather
+-- than left to the column defaults: 'Specification Sheet' is three years, the
+-- rest inherit the annual default. The authority is
+-- defaultRenewalSettingForTypeName in shared/renewalPeriod.ts — SQL in a shell
+-- heredoc cannot call it, so the values are literal and
+-- bin/fix-starter-pack-renewal-policy reports any row that disagrees with it.
+INSERT INTO document_types (id, tenant_id, name, slug, description, renewal_policy, renewal_interval_months) VALUES
+  ('${DT_FDA}',          '${TENANT_ID}', 'FDA Registration Number',              'fda-registration-number',              'FDA food facility registration',      'inherit', NULL),
+  ('${DT_AUDIT_REPORT}', '${TENANT_ID}', '3rd Party Food Safety Audit Report',   '3rd-party-food-safety-audit-report',   'Third-party food safety audit report', 'inherit', NULL),
+  ('${DT_AUDIT_CERT}',   '${TENANT_ID}', '3rd Party Audit Certificate',          '3rd-party-audit-certificate',          'Third-party audit certificate',        'inherit', NULL),
+  ('${DT_BIZLIC}',       '${TENANT_ID}', 'Business License',                     'business-license',                     'Business license',                     'inherit', NULL),
+  ('${DT_ORGANIC}',      '${TENANT_ID}', 'Organic Certificate',                  'organic-certificate',                  'Organic handler certificate',          'inherit', NULL),
+  ('${DT_COI}',          '${TENANT_ID}', 'Certificate of Liability Insurance',   'certificate-of-liability-insurance',   'Certificate of liability insurance',   'inherit', NULL),
+  ('${DT_SPEC}',         '${TENANT_ID}', 'Specification Sheet',                  'specification-sheet',                  'Product specification sheet',          'period',  36)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, description=excluded.description;
 
 -- ---- Product (for the spec sheet brand-vs-producer bridge) ----

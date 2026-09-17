@@ -76,6 +76,23 @@
  *                           `document_types.naming_format` has zero readers.
  */
 
+/**
+ * The ONE renewal-default helper, reached through the compiled mirror.
+ *
+ * THE EXCEPTION TO "DEPENDENCY-FREE", AND WHY. Everything else this file needs
+ * from `shared/` is restated here and pinned by a test (see SPEC_OPERATORS
+ * below). That trade is fine for a validation rule: a drifted copy rejects a
+ * limit somebody has to fix anyway. It is NOT fine here. This is the name match
+ * that decides whether a Certificate of Analysis renews at all, and a drifted
+ * copy produces SILENCE — the CLI seeds a tenant whose COA type renews
+ * annually, mails its owner about a certificate that does not renew, and
+ * nothing fails. So the CLI calls the same function the API and the in-portal
+ * applier call, via `bin/lib/shared/renewalPeriod.js` — the same generated
+ * mirror `bin/process-worker` already uses for `shared/specCheck.ts`, rebuilt
+ * by `npm run build:worker-shared`.
+ */
+import { defaultRenewalSettingForTypeName } from './shared/renewalPeriod.js';
+
 /** Grains a claim_types.subject_grain may declare (mirrors functions/lib/registry.ts). */
 export const SUBJECT_GRAINS = ['any', 'tenant', 'product', 'supplier', 'facility'];
 
@@ -741,11 +758,16 @@ export function packToStatements(rawPack, { tenantId, tenantSlug, moduleKeys } =
   }
 
   for (const dt of pack.document_types) {
+    // The renewal setting (0096/0097) is NAMED, not left to the column
+    // defaults — see the import of `defaultRenewalSettingForTypeName` at the
+    // top of this file for why, and why it is the SAME function the API and
+    // the in-portal applier call rather than a third copy of the name match.
+    const renewal = defaultRenewalSettingForTypeName(dt.name);
     statements.push(
-      `INSERT OR IGNORE INTO document_types (id, tenant_id, name, slug, description, default_owner) VALUES (` +
+      `INSERT OR IGNORE INTO document_types (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months) VALUES (` +
         `${sqlQuote(packRowId('dt', tenantSlug, dt.slug))}, ${sqlQuote(tenantId)}, ` +
         `${sqlQuote(dt.name)}, ${sqlQuote(dt.slug)}, ${sqlQuote(dt.description)}, ` +
-        `${sqlQuote(dt.owner)});`,
+        `${sqlQuote(dt.owner)}, ${sqlQuote(renewal.policy)}, ${sqlNum(renewal.interval_months)});`,
     );
   }
 

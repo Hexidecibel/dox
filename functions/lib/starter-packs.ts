@@ -37,6 +37,7 @@
  */
 
 import type { StarterPack } from './starterPacks.generated';
+import { defaultRenewalSettingForTypeName } from '../../shared/renewalPeriod';
 
 /** Same slug rule as `slugify` in bin/lib/starter-packs.mjs and the vocabulary APIs. */
 export function slugify(text: string): string {
@@ -192,13 +193,20 @@ export function starterPackStatements(
   }
 
   for (const dt of pack.document_types) {
+    // The renewal setting (0096/0097) is NAMED, not left to the column
+    // defaults. Omitting it wrote every type as `inherit`/NULL — annual — and
+    // the 0096/0097 backfills only ever ran against the rows that existed at
+    // migration time, so a tenant seeded afterwards got a Certificate of
+    // Analysis proposed an annual renewal. Same helper as POST
+    // /api/document-types and as the CLI compiler.
+    const renewal = defaultRenewalSettingForTypeName(dt.name);
     push(
       'document_types',
       db
         .prepare(
           `INSERT OR IGNORE INTO document_types
-             (id, tenant_id, name, slug, description, default_owner)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+             (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           packRowId('dt', tenantSlug, dt.slug),
@@ -207,6 +215,8 @@ export function starterPackStatements(
           dt.slug,
           dt.description,
           dt.owner,
+          renewal.policy,
+          renewal.interval_months,
         ),
     );
   }
