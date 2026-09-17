@@ -4,8 +4,65 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-17 (latest): per-page OCR merged to master and MEASURED. NOT SHIPPED — the Cloudflare
-token expired mid-run. Pick up at staging.**
+**2026-09-17 (latest): v2.22.0 IS LIVE. Per-page OCR shipped, migration 0117 applied to staging and
+prod. ONE THING IS STILL OUTSTANDING AND IT IS NOT SOMETHING CLAUDE CAN DO — see the bottom of this
+entry.**
+
+*Prod deploy `38cad6af` (https://supdox.com), tag `v2.22.0`, master pushed (`d7e3eda..a2763d9`).
+`/releases/index.json` reads `current: 2.22.0`, title "The page that is a picture".*
+
+**WHAT SHIPPED.** Extraction now decides about OCR **page by page** instead of once for the whole
+document. A page that is a pasted-in or scanned picture of a certificate — a full-page image with a
+caption and a page number over it — used to answer "no" to every whole-document OCR test and was
+read as if nearly blank. Those are precisely the pages carrying expiry dates. Routing lives in
+`shared/pdfPageOcr.ts`; a page with a real text layer is never replaced.
+
+**MIGRATION 0117** (`processing_queue.text_page_sources`, additive nullable TEXT — one JSON array,
+one row per page: source, characters per read, largest image fraction, routing reason):
+
+* **Staging**: applied (staging has no `d1_migrations`, so nothing to stamp); column verified
+  present as TEXT; `bin/deploy-staging` green (`b9731a58`).
+* **Prod**: `bin/backup` bookmark taken first —
+  `0000172c-0000000c-000050e9-159e0e757a6ed9bec1d7e4554dffbd0a`, recorded at
+  `~/drops/dox-backups/doc-upload-db-20260917T184103Z.timetravel.json`. Dry-run then real via
+  `bin/migrate-prod-one`; **stamped** in `d1_migrations` as `0117_queue_text_page_sources.sql`;
+  column present; `processing_queue` **803 rows before, 803 after, `text_page_sources` NULL on all
+  803**. Prod is now at 0117.
+
+**GATES ON THE SHIPPED TREE.** vitest **289 files / 3943 tests passed**, `bin/typecheck-ratchet`
+**27, at baseline**, `bin/deploy`'s own e2e gate 7 passed / 1 skipped, build clean. *One flake seen
+and cleared: `src/pages/setup/StepTeach.test.tsx` failed once under full-suite load (a `Closes 0 of
+5` counter that had not settled), then passed alone and passed in a clean full re-run. If it shows
+up again it is a timing assertion, not this change.*
+
+**THE NUMBERS AS SHIPPED** (measured post-merge, unchanged by the release): value accuracy
+**89.6%**, the five image documents **23/25** graded fields, `document_expires_on` **5/5**, doctype
+corpus **37/40** with per-page OCR confirmed *not* to fire on that corpus at all (so the 37 vs the
+published 38 is classifier sampling variance on one borderline type name, not a regression here).
+
+**CLEANUP DONE.** Worktree `.claude/worktrees/agent-a4b876b631da4f0d8` removed and branch
+`worktree-agent-a4b876b631da4f0d8` deleted (`git worktree prune` run, list is now just master). No
+symlinks pointed into the main checkout; the main `.dev.vars`, `.wrangler/state` (32M) and
+`node_modules` (273 entries, 690M) are all intact.
+
+> ### THE WORKER HAS NOT BEEN RESTARTED — PROD IS STILL EXTRACTING WITH THE OLD CODE.
+>
+> **`bin/process-worker` RUNS UNDER SYSTEMD ON THIS BOX AND IS NOT PART OF THE PAGES DEPLOY.**
+> UNTIL SOMEONE RUNS, WITH SUDO, BY HAND:
+>
+> ```
+> sudo systemctl restart dox-process-worker.service
+> ```
+>
+> **PROD KEEPS MAKING THE OLD WHOLE-FILE OCR DECISION AND IMAGE PAGES ARE STILL BEING SKIPPED.**
+> A green deploy and a correct `/releases/index.json` DO NOT MEAN THE NEW TEXT PATH IS RUNNING.
+> **CLAUDE CANNOT DO THIS (IT NEEDS SUDO) AND MUST NOT BE ASKED TO — THE USER RUNS IT.**
+
+---
+
+**2026-09-17 (SUPERSEDED by the entry above — this release shipped as v2.22.0; the token block and
+the "PICK UP HERE" list below are done. Kept for the measurement detail): per-page OCR merged to
+master and MEASURED.**
 
 *Three local commits on master, unpushed on purpose (`ecf9ec0` merge, `9577084` SCHEMA.md,
 `ad1090f` bin/eval-results-json). Remote master still equals what is deployed.*
