@@ -1,6 +1,11 @@
 {
-  "current": "2.22.0",
+  "current": "2.23.0",
   "versions": [
+    {
+      "version": "2.23.0",
+      "date": "2026-09-17",
+      "title": "What the page already said"
+    },
     {
       "version": "2.22.0",
       "date": "2026-09-17",
