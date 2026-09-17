@@ -4,7 +4,64 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-16 (latest): AJ's first two document sets are in, measured, and in a new regression corpus.
+**2026-09-17 (latest): v2.21.0 shipped. Migration 0116 on staging + prod. AJ Clean's renewal
+defaults repaired on prod. Release notes now have to say who a change reaches.**
+
+*Deployed to prod (`2d7f8a28`) and staging. Prod D1 written twice, both deliberate and both verified.*
+
+**Shipped in v2.21.0** — two agent branches merged into master (`--no-ff`), conflicts in `CLAUDE.md` and
+`package.json` resolved as unions:
+
+* **Sent documents** (`/documents/sent`, `GET /api/document-exports/links`) — every emailed set of
+  documents, its recipients, its open/download counts, its resolved `active`/`expired`/`revoked` state,
+  and a revoke button. **Migration 0116** adds `document_export_links.revoked_by` (nullable, no backfill):
+  0115 shipped the `revoked_at` kill switch with no reachable revoker. `POST /api/document-exports/send`
+  now needs `user`+ — minting an unauthenticated URL to fifty documents and mailing it out is publishing,
+  not downloading. Prod had **0 rows** in `document_export_links` before and after the migration, so
+  nothing existing was reinterpreted.
+* **Spec-limit rationale** — a supplier-scoped limit is required to say why it was set, bound to the
+  existing `spec_limits.notes` (no new column), shown next to the limit and frozen into `limit_snapshot`
+  as `rationale`.
+* **Renewal fixes** — `defaultRenewalSettingForTypeName` in `shared/renewalPeriod.ts` is now the one
+  source for a type's starting renewal policy (API create path + both starter-pack appliers, via the new
+  generated `bin/lib/shared/renewalPeriod.js` mirror). And an `unresolvable` proposal approved untouched
+  no longer stores `accepted` with a null date — which tier 2 reads, forever, as "a reviewer confirmed
+  this does not renew".
+
+**THE REACH-MARKER CONVENTION — read this before writing the next release notes.** AJ, reviewing
+v2.7.0-v2.20.0, asked for each change to say whether it reaches existing organisations or only new ones.
+Every bullet now carries a leading token: `[existing]`, `[new-orgs]`, or `[config]`. Vocabulary lives
+only in `shared/releaseReach.ts`; the in-app chip reads it directly and `bin/release` reads the esbuild
+mirror, so the guard and the chip can never disagree. **`bin/release` refuses to cut a release whose
+notes carry no marker, and when stdin is not a tty it fails outright rather than prompting** — so a
+scripted release must write the markers into the notes itself. 14 past releases were backfilled.
+
+**AJ Clean renewal repair — APPLIED TO PROD.** `bin/fix-starter-pack-renewal-policy --all --remote`
+found exactly **2** rows across all six tenants, both on `tenant_aj_clean`, both still holding the bare
+0096/0097 migration defaults with no human decision on record:
+
+* `dt_aj-clean_certificate-of-analysis` — `inherit`/NULL -> **`none`/NULL** (a COA does not renew)
+* `dt_aj-clean_specification-sheet` — `inherit`/NULL -> **`period`/36**
+
+Applied with `--tenant tenant_aj_clean --remote --apply` (the script deliberately refuses `--apply` with
+`--all` — it is a reporting mode). Both rows read back correct and the re-run reports 0 everywhere.
+Time Travel bookmark taken first: `doc-upload-db-20260917T075411Z.timetravel.json`.
+
+**Two prod follow-ups, neither of them ours to close:**
+
+1. **No supplier-scoped spec limit on prod carries a rationale yet.** The field is required going
+   forward, but nothing was backfilled — writing a reason for somebody else's threshold would be a
+   fabrication on a compliance record. **AJ's to fill in.**
+2. **Two visible notes are open questions for Chris** on the Listeria / Salmonella presence tests — the
+   limits are written but the analyte semantics of a presence/absence test have not been settled.
+
+Also fixed in passing: `bin/release` had a backtick inside a JS comment inside a double-quoted
+`node -e "..."`, so every release ran `hasReachMarker` as a shell command and printed
+"command not found".
+
+---
+
+**2026-09-16: AJ's first two document sets are in, measured, and in a new regression corpus.
 Three findings, and one of them is a bug.**
 
 *Nothing was deployed and nothing touched prod or staging D1. Local commit on master only.*
