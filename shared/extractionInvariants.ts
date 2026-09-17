@@ -72,6 +72,13 @@ const DATE_KEYS = [
   'packaging_date',
   'test_date',
   'buffer_exp',
+  // `shelf_life` (2026-09-17) is deliberately NOT in this list and must not be
+  // added to it. Every other entry here is a DATE, and this list hands each one
+  // to a parser that reads it as a calendar date and then compares it with the
+  // others. A shelf life is a PERIOD printed in the page's own words ("21 days
+  // at 40 F", "1 year frozen, 21 days refrigerated"); parsed as a date it is
+  // either unparseable noise or, worse, a plausible wrong day. The same reason
+  // it is not an input to shared/renewalPeriod.ts.
 ];
 /** Dates that must not precede the production date. */
 const PRODUCTION_KEYS = ['production_date', 'mfg_date', 'packaging_date'];

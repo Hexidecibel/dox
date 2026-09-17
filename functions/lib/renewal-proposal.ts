@@ -93,6 +93,12 @@ export async function loadTypeRenewalConfig(
  * `document_expires_on` ONLY. `expiration_date` is the PRODUCT's shelf life and
  * is deliberately not consulted — reading it here is precisely the defect this
  * whole change exists to remove. See the header of shared/renewalPeriod.ts.
+ *
+ * `shelf_life` (the same fact as a PERIOD: "21 days", "1 year frozen, 21 days
+ * refrigerated") is not consulted either, and must never be added as a third
+ * key or quietly turned into a period below. A specification sheet renews at
+ * three years because that is what a specification sheet IS; the cream on it
+ * keeps for 21 days. Pinned by tests/unit/shelfLifeNotRenewal.test.ts.
  */
 export function renewalDatesFromFields(
   fields: Record<string, unknown> | null | undefined

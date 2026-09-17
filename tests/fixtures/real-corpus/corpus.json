@@ -12,24 +12,8 @@
   },
   "_document_type_expected_none_why": "Eighteen of the packet's twenty-six parts have no matching type in the FSQA starter pack, and for those the CORRECT classifier answer is \"none\" — which parks the item for a human instead of forcing it onto the nearest name. The synthetic corpus never needed to say that, because every fixture there was written to match a type in the pack. `document_type_expected_none: true` says it. A document may carry BOTH that flag and a `document_type_accept` list, and then either answer counts: that combination is used exactly twice, where the pack has an adjacent-but-not-equal type and the disagreement is worth recording rather than resolving.",
   "extends_key_groups": "../doctype-corpus/corpus.json",
+  "_key_groups_moved": "`shelf_life` and `document_number` were defined HERE while neither was a field the extractor had — they were the watch lists proving the answers went nowhere. Both became canonical fields on 2026-09-17, so their key groups moved to ../doctype-corpus/corpus.json, which this file extends: one definition, shared by both corpora, instead of two that can drift.",
   "key_groups": {
-    "shelf_life": [
-      "shelf_life",
-      "shelf_life_days",
-      "shelflife",
-      "best_by",
-      "product_shelf_life",
-      "storage_life"
-    ],
-    "document_number": [
-      "document_number",
-      "document_no",
-      "doc_number",
-      "spec_number",
-      "specification_number",
-      "document_id",
-      "form_number"
-    ],
     "plant_number": [
       "plant_number",
       "plant_code",
@@ -2164,16 +2148,10 @@
         },
         {
           "name": "document_number",
-          "keys": [
-            "document_number",
-            "document_no",
-            "doc_number",
-            "spec_number",
-            "specification_number",
-            "document_id"
-          ],
+          "keys_ref": "document_number",
           "match": "text",
-          "truth": "53-140-383"
+          "truth": "53-140-383",
+          "why": "the footer line \"53-140-383 | SQF 2.3.2.9 | Latest Rev: 2 Mar 2026 JAG\" — a controlled-document footer, carrying the document number, the SQF clause it satisfies and the revision, and NOT labelled \"Document No.\" anywhere on the page"
         },
         {
           "name": "revision_date",
@@ -2311,16 +2289,10 @@
         },
         {
           "name": "document_number",
-          "keys": [
-            "document_number",
-            "document_no",
-            "doc_number",
-            "spec_number",
-            "specification_number",
-            "document_id"
-          ],
+          "keys_ref": "document_number",
           "match": "text",
-          "truth": "53-140-389"
+          "truth": "53-140-389",
+          "why": "the footer line \"53-140-389 | SQF 2.3.2.9 | Latest Rev: 27 Jul 2026 JAG\" — a controlled-document footer, carrying the document number, the SQF clause it satisfies and the revision, and NOT labelled \"Document No.\" anywhere on the page"
         },
         {
           "name": "revision_date",
@@ -2428,6 +2400,7 @@
         "Product: Heavy Whipping Cream",
         "Item #: 13106",
         "Revision Date: 2/9/2024",
+        "Shelf Life: | 21 days at \u226440\u00b0F",
         "≤20,000 CFU/ml"
       ],
       "fields": [
@@ -2455,6 +2428,24 @@
           "match": "text",
           "truth": "13106",
           "why": "\"Item #: 13106\". The UPC 3453896632 is the decoy"
+        },
+        {
+          "name": "document_number",
+          "keys_ref": "document_number",
+          "match": "text",
+          "truth": null,
+          "distractors": [
+            "13106",
+            "3453896632",
+            "53-13",
+            "41-41"
+          ],
+          "null_equivalents": [
+            "none",
+            "n/a",
+            "not applicable"
+          ],
+          "why": "THE COUNTER-CASE to the two Country Morning sheets. This template prints a revision date and no number of its own: the item number, the UPC and two IMS site codes are the decoys, and the footer is a Windows file path (O:\\SOP's\\...), which is where the document lives and not what it is called"
         },
         {
           "name": "revision_date",
@@ -2614,7 +2605,7 @@
           ],
           "match": "text",
           "truth": "53-02",
-          "why": "\"Plant code | 53-02\". \"#33-19\" at the top of the letterhead is the document's own form number and is the decoy"
+          "why": "\"Plant code | 53-02\". \"#33-19\" at the top of the letterhead is the document's own form number and is the decoy. It is deliberately NOT graded as document_number: the manifest asserts what it is from its position alone, the page never labels it, and a ground truth that rests on our own reading of an unlabelled number would be marking the model against a guess. An answer of \"33-19\" under document_number therefore costs nothing here, and is not credited either"
         },
         {
           "name": "shelf_life",

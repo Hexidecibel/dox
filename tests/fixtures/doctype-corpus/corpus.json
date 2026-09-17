@@ -194,6 +194,27 @@
       "inception_date",
       "document_date",
       "date"
+    ],
+    "shelf_life": [
+      "shelf_life",
+      "shelf_life_days",
+      "shelflife",
+      "product_shelf_life",
+      "product_life",
+      "storage_life",
+      "best_by"
+    ],
+    "document_number": [
+      "document_number",
+      "document_no",
+      "doc_number",
+      "doc_no",
+      "spec_number",
+      "spec_no",
+      "specification_number",
+      "document_id",
+      "form_number",
+      "sop_number"
     ]
   },
   "documents": [
@@ -984,6 +1005,29 @@
           "truth": "RB-4410"
         },
         {
+          "name": "document_number",
+          "keys_ref": "document_number",
+          "match": "text",
+          "truth": "RB-SPEC-4410",
+          "accept": [
+            "Specification RB-SPEC-4410"
+          ],
+          "why": "\"Specification RB-SPEC-4410\" in the header. The product code RB-4410 is one character-group away from it and is the decoy — the paper's number and the product's number are different facts"
+        },
+        {
+          "name": "shelf_life",
+          "keys_ref": "shelf_life",
+          "match": "tokens",
+          "truth": "12 months from date of manufacture in unopened original packaging",
+          "tokens_all": [
+            "12"
+          ],
+          "tokens_any": [
+            "month"
+          ],
+          "why": "a PERIOD with a condition attached. The same row is already the distractor for expiration_date below, which is the point: it must land in one field and not the other"
+        },
+        {
           "name": "expiration_date",
           "keys_ref": "product_expiry",
           "match": "text",
@@ -1075,6 +1119,19 @@
           "keys_ref": "product_code",
           "match": "text",
           "truth": "HL-2270"
+        },
+        {
+          "name": "shelf_life",
+          "keys_ref": "shelf_life",
+          "match": "tokens",
+          "truth": "45 days from the pack date",
+          "tokens_all": [
+            "45"
+          ],
+          "tokens_any": [
+            "day"
+          ],
+          "why": "\"Best if used within 45 days of the pack date printed on the closure\" — a shelf life stated WITHOUT the words \"shelf life\", inside a prose block. The page states a product life and this is the field for it"
         },
         {
           "name": "document_expires_on",
@@ -1184,6 +1241,29 @@
             "not applicable"
           ],
           "why": "GENUINELY ABSENT; a document number, a plant code and the CUSTOMER's own item number are all printed, and the page says the last is not a product code"
+        },
+        {
+          "name": "document_number",
+          "keys_ref": "document_number",
+          "match": "text",
+          "truth": "FSQ-SPEC-0442",
+          "accept": [
+            "FSQ-SPEC-0442 rev 9"
+          ],
+          "why": "the header prints \"FSQ-SPEC-0442 rev 9\". The revision belongs to the number, not in place of it, and the product_code row above already grades this string as NOT a product code — now there is a field it does belong in"
+        },
+        {
+          "name": "shelf_life",
+          "keys_ref": "shelf_life",
+          "match": "tokens",
+          "truth": "24 months from manufacture when stored below 27°C at less than 65% RH",
+          "tokens_all": [
+            "24"
+          ],
+          "tokens_any": [
+            "month"
+          ],
+          "why": "buried in a fine-print paragraph that ALSO says \"This document does not itself expire\" — so the same sentence block carries a product period and a document non-expiry, and they must not swap places"
         },
         {
           "name": "document_expires_on",

@@ -80,6 +80,21 @@
  * it. If you are about to add `expiration_date` back into this file, read the
  * paragraph above again.
  *
+ * AND THE SAME GOES FOR `shelf_life`, WHICH IS THE SAME MISTAKE IN A PERIOD'S
+ * CLOTHING. Extraction gained a `shelf_life` field on 2026-09-17 because all
+ * four specification sheets in `tests/fixtures/real-corpus` print one ("21
+ * days", "22 days", "1 year frozen, 21 days refrigerated") and nothing had
+ * anywhere to put it. It is the PRODUCT's life, exactly as `expiration_date` is
+ * the PRODUCT's date, and it is deliberately NOT an input to this function —
+ * not as a tier, not as a period, and not as an anchor. The temptation is
+ * sharper than `expiration_date`'s, because this one already IS a period and
+ * tiers 5-7 are periods: "21 days" would slot straight into
+ * `resolveRenewalPeriodMonths` and propose re-collecting a specification sheet
+ * three weeks after it was issued, when a spec sheet renews at THREE YEARS by
+ * type (rule 2). A shelf life is a fact about cream. How long the paperwork is
+ * good for is a fact about the paperwork, and the two never meet here.
+ * Pinned by tests/unit/shelfLifeNotRenewal.test.ts.
+ *
  * ---------------------------------------------------------------------------
  * WHAT RENEWS AT ALL — the third document-type state
  * ---------------------------------------------------------------------------
@@ -251,8 +266,10 @@ export interface RenewalPeriodInput {
    * primary_metadata.$.document_expires_on — the date THE DOCUMENT stops being
    * valid, as printed on it.
    *
-   * NOT `primary_metadata.$.expiration_date`, which is the PRODUCT's shelf life
-   * and is deliberately not an input to this function. See the header block.
+   * NOT `primary_metadata.$.expiration_date`, which is the PRODUCT's shelf-life
+   * DATE, and NOT `primary_metadata.$.shelf_life`, which is the same fact as a
+   * PERIOD ("21 days") and would drop straight into the period tiers. Neither
+   * is an input to this function. See the header block.
    */
   meta_document_expires_on: string | null;
   /** primary_metadata.$.effective_date — the anchor a period counts from. */
