@@ -659,6 +659,7 @@ Indexes: `idx_extraction_templates_lookup`
   rejection_reason TEXT
   rejection_note TEXT
   file_retain_until TEXT
+  text_page_sources TEXT
 ```
 
 Indexes: `idx_pq_output_kind`, `idx_processing_queue_file_retain`, `idx_processing_queue_processing_status`, `idx_processing_queue_rejection`, `idx_processing_queue_status`, `idx_processing_queue_tenant_checksum`
