@@ -48,6 +48,7 @@ import CallMergeIcon from '@mui/icons-material/CallMerge';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import { api } from '../lib/api';
+import { AUTH_TOKEN_KEY } from '../lib/types';
 import type { PacketPart, QueuePacketView } from '../../shared/types';
 
 /** A row in the Adjust editor. Kept separate from PacketPart so an in-progress edit is never mistaken for a proposal. */
@@ -60,6 +61,20 @@ interface EditRow {
 
 function rangeText(from: number, to: number): string {
   return from === to ? `page ${from}` : `pages ${from}-${to}`;
+}
+
+/** Open the queue item's own file in a tab. Best-effort: a failure is silent. */
+async function openFile(queueId: string): Promise<void> {
+  try {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    const res = await fetch(`/api/queue/${queueId}/file`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) return;
+    window.open(URL.createObjectURL(await res.blob()), '_blank');
+  } catch {
+    // The card's inline preview is still there; this is a convenience.
+  }
 }
 
 function toRows(parts: PacketPart[]): EditRow[] {
@@ -372,12 +387,11 @@ export function PacketSplitCard({
           Not a packet
         </Button>
         <Box sx={{ flexGrow: 1 }} />
-        <Link
-          component="button"
-          type="button"
-          variant="caption"
-          onClick={() => window.open(`/api/queue/${queueId}/file`, '_blank')}
-        >
+        {/* The queue file endpoint takes a bearer token, so a bare window.open
+            on it is a 401. Fetch it and hand the tab a blob, the same way the
+            card's inline preview does — a reviewer checking 26 boundaries wants
+            the real pages open beside them. */}
+        <Link component="button" type="button" variant="caption" onClick={() => void openFile(queueId)}>
           Open the file
         </Link>
       </Stack>
