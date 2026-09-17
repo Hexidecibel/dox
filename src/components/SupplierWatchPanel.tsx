@@ -93,9 +93,19 @@ function limitText(l: ApiSpecLimit): string {
 }
 
 /** One watch row: a supplier limit or a required analyte, same columns. */
+/**
+ * `rationale` is the WHY beside the rule, and it is on both kinds because both
+ * have always had somewhere to put it: a required analyte has carried `reason`
+ * since 0109, and a limit has carried `notes` since 0084 — the second having
+ * never been read by anything in the app until now.
+ *
+ * AJ Conner, reviewing v2.7.0-v2.20.0: "tightening past what a supplier
+ * certifies against is a decision purchasing and the supplier will ask about,
+ * and it is hard to defend a year later with no recorded rationale."
+ */
 type WatchRow =
-  | { kind: 'limit'; id: string; supplierId: string; analyte: string; detail: string; reviewBy: string | null; limit: ApiSpecLimit }
-  | { kind: 'required'; id: string; supplierId: string; analyte: string; detail: string; reviewBy: string | null; required: ApiRequiredAnalyte };
+  | { kind: 'limit'; id: string; supplierId: string; analyte: string; detail: string; rationale: string | null; reviewBy: string | null; limit: ApiSpecLimit }
+  | { kind: 'required'; id: string; supplierId: string; analyte: string; detail: string; rationale: string | null; reviewBy: string | null; required: ApiRequiredAnalyte };
 
 /** The review-by cell: the date, and the ended flag once it has passed. */
 export function ReviewByCell({ reviewBy, asOf }: { reviewBy: string | null; asOf: string }) {
@@ -191,6 +201,7 @@ export function SupplierWatchPanel({
         supplierId: l.supplier_id,
         analyte: l.test_name || 'Analyte',
         detail: `Limit ${limitText(l)}${l.document_type_name ? ` on ${l.document_type_name}` : ''}`,
+        rationale: l.notes ?? null,
         reviewBy: l.review_by ?? null,
         limit: l,
       });
@@ -201,7 +212,11 @@ export function SupplierWatchPanel({
         id: r.id,
         supplierId: r.supplier_id,
         analyte: r.test_name || 'Analyte',
-        detail: `Must be reported on ${r.document_type_name || 'this document type'}${r.effective_from ? ` from ${r.effective_from}` : ''}${r.reason ? ` — ${r.reason}` : ''}`,
+        // The reason moves OUT of `detail` and into its own column: buried at
+        // the end of a sentence about document types it read as a footnote,
+        // and the whole point is that it is the part somebody has to defend.
+        detail: `Must be reported on ${r.document_type_name || 'this document type'}${r.effective_from ? ` from ${r.effective_from}` : ''}`,
+        rationale: r.reason ?? null,
         reviewBy: r.review_by,
         required: r,
       });
@@ -354,6 +369,14 @@ export function SupplierWatchPanel({
                     <TableRow>
                       <TableCell sx={{ fontWeight: 600 }}>Analyte</TableCell>
                       <TableCell sx={{ fontWeight: 600 }}>Rule</TableCell>
+                      <TableCell sx={{ fontWeight: 600 }}>
+                        <Tooltip
+                          arrow
+                          title="Why this supplier is held to something other than the company default. Recorded when the watch is set, shown here, and frozen onto every result a supplier limit judges."
+                        >
+                          <span>Why</span>
+                        </Tooltip>
+                      </TableCell>
                       <TableCell sx={{ fontWeight: 600 }}>Review</TableCell>
                       {canEdit && <TableCell align="right" />}
                     </TableRow>
@@ -368,6 +391,18 @@ export function SupplierWatchPanel({
                           </Typography>
                         </TableCell>
                         <TableCell>{row.detail}</TableCell>
+                        <TableCell sx={{ maxWidth: 320 }}>
+                          {row.rationale ? (
+                            <Typography variant="body2">{row.rationale}</Typography>
+                          ) : (
+                            // Never blank. A watch with no recorded reason is
+                            // the exact row somebody will be asked about and
+                            // unable to answer, so the gap is the finding.
+                            <Typography variant="caption" color="warning.main">
+                              No reason recorded
+                            </Typography>
+                          )}
+                        </TableCell>
                         <TableCell>
                           <ReviewByCell reviewBy={row.reviewBy} asOf={asOf} />
                         </TableCell>
@@ -462,18 +497,35 @@ export function SupplierWatchPanel({
               fullWidth
             />
           </Stack>
+          {/* The same question the limit dialog asks, worded the same way and
+              sitting beside the same review-by: why, and when to look again.
+              Required here too — a requirement nobody recorded a reason for is
+              one the supplier will query and nobody can answer. */}
           <TextField
-            label="Why"
+            label="Why this supplier must report it"
             value={addReason}
             onChange={(e) => setAddReason(e.target.value)}
             fullWidth
             margin="normal"
+            multiline
+            minRows={2}
+            required
+            error={!addReason.trim()}
             placeholder="Sanitation watch after the August coliform finding"
+            helperText={
+              addReason.trim()
+                ? 'Shown beside the rule wherever this watch appears.'
+                : 'Needed: asking one supplier for more than the others is a decision somebody will be asked to defend.'
+            }
           />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setAddOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveAdd} disabled={saving || !addSupplier || !addDocType || !addTest}>
+          <Button
+            variant="contained"
+            onClick={saveAdd}
+            disabled={saving || !addSupplier || !addDocType || !addTest || !addReason.trim()}
+          >
             Save
           </Button>
         </DialogActions>

@@ -1994,6 +1994,17 @@ export interface ConfiguredLimit {
    * applying and the verdict is flagged instead. See `watchStatus`.
    */
   review_by?: string | null;
+  /**
+   * WHY this limit is written the way it is (migration 0084's `notes` column,
+   * surfaced at last). Never a verdict input: it is carried here only so
+   * `buildLimitSnapshot` can freeze the rationale of a SUPPLIER-SCOPED limit
+   * alongside its numbers.
+   *
+   * AJ Conner, reviewing v2.7.0-v2.20.0: "tightening past what a supplier
+   * certifies against is a decision purchasing and the supplier will ask
+   * about, and it is hard to defend a year later with no recorded rationale."
+   */
+  notes?: string | null;
 }
 
 /**

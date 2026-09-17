@@ -140,7 +140,16 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       if ('error' in criticality) return badRequest(criticality.error);
       push('criticality = ?', criticality.criticality);
     }
-    if (body.notes !== undefined) push('notes = ?', body.notes ? sanitizeString(body.notes) : null);
+    // The rationale (0084's `notes`, now asked for on every supplier watch).
+    // Resolved like the unit — what the row WILL hold — so the audit row below
+    // can state the before and the after rather than the submitted field.
+    const notes =
+      body.notes !== undefined
+        ? body.notes
+          ? sanitizeString(body.notes)
+          : null
+        : (limit.notes as string | null);
+    if (body.notes !== undefined) push('notes = ?', notes);
     if (body.active !== undefined) push('active = ?', body.active ? 1 : 0);
     if (body.supplier_id !== undefined) push('supplier_id = ?', body.supplier_id || null);
     if (body.document_type_id !== undefined) push('document_type_id = ?', body.document_type_id || null);
@@ -181,6 +190,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           unit: limit.unit ?? null,
           criticality: limit.criticality,
           review_by: limit.review_by ?? null,
+          // Editing a rationale is exactly the change a reader a year from now
+          // needs to be able to see, so both sides are named.
+          notes: (limit.notes as string | null) ?? null,
           version: limit.version ?? null,
         },
         after: {
@@ -190,6 +202,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           unit,
           criticality: body.criticality !== undefined ? body.criticality : limit.criticality,
           review_by: reviewBy ? reviewBy.review_by : (limit.review_by ?? null),
+          notes,
           version: thresholdMoved ? Number(limit.version ?? 1) + 1 : (limit.version ?? null),
         },
         // Said out loud so the audit row answers "was this a new version of the

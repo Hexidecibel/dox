@@ -259,6 +259,7 @@ describe('spec_limits.review_by — a supplier watch only', () => {
   });
 });
 
+
 async function makeDocument(title: string): Promise<string> {
   const id = generateTestId();
   await db
@@ -388,5 +389,65 @@ describe('approval writes what was not judged, and tells the owner once', () => 
       { supplier_id: supplierId, document_type_id: docTypeId, product_ids: [] }
     );
     expect(emails()).toHaveLength(0);
+  });
+});
+
+
+describe('the rationale for a watch — why, beside when to look again', () => {
+  const URL_L = 'http://localhost/api/spec-limits';
+
+  it('records a reason on create, audits it, and loads it for the snapshot', async () => {
+    const why =
+      'Three coliform excursions in Q2 2026; agreed with Andersen on 14 Aug pending corrective action.';
+    const created = await call(
+      createLimit,
+      ctx(orgAdmin, URL_L, 'POST', {
+        spec_test_id: spcId,
+        supplier_id: supplierId,
+        operator: '<=',
+        value_max: 5000,
+        unit: 'CFU/g',
+        review_by: '2026-12-01',
+        notes: why,
+      })
+    );
+    expect(created.status).toBe(201);
+    const id = created.body.specLimit.id as string;
+    expect(created.body.specLimit.notes).toBe(why);
+
+    // The audit row is the only copy nobody can edit afterwards, which is the
+    // half AJ actually asked for: numbers were always recoverable from the
+    // log, reasons never were.
+    const audit = await db
+      .prepare(
+        "SELECT details FROM audit_log WHERE action = 'spec_limit.created' AND resource_id = ?"
+      )
+      .bind(id)
+      .first<{ details: string }>();
+    expect(JSON.parse(audit!.details).notes).toBe(why);
+
+    // And it reaches the engine, so `buildLimitSnapshot` can freeze it.
+    const config = await loadSpecConfig(db, seed.tenantId);
+    expect(config.limits.find((l) => l.id === id)?.notes).toBe(why);
+
+    // Editing it names both sides: a rationale that changed is exactly the
+    // change a reader a year from now has to be able to see.
+    const edited = await call(
+      updateLimit,
+      ctx(orgAdmin, `${URL_L}/${id}`, 'PUT', { notes: 'Corrective action verified 2 Sep; watch held one more quarter.' }, { id })
+    );
+    expect(edited.status).toBe(200);
+    const after = await db
+      .prepare(
+        "SELECT details FROM audit_log WHERE action = 'spec_limit.updated' AND resource_id = ? ORDER BY id DESC"
+      )
+      .bind(id)
+      .first<{ details: string }>();
+    const d = JSON.parse(after!.details) as { before: { notes: string }; after: { notes: string }; version_bumped: boolean };
+    expect(d.before.notes).toBe(why);
+    expect(d.after.notes).toMatch(/Corrective action verified/);
+    // A rationale is not a threshold: rewriting it does not make a new version
+    // of the limit.
+    expect(d.version_bumped).toBe(false);
   });
 });

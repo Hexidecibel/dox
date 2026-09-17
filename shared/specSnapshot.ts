@@ -164,5 +164,24 @@ export function buildLimitSnapshot(
     ...(verdict.watch
       ? { supplier_id: l.supplier_id, review_by: verdict.watch.review_by, review_overdue: verdict.watch.review_overdue }
       : {}),
+    // THE RATIONALE OF A SUPPLIER-SCOPED LIMIT, frozen for the same reason the
+    // review-by beside it is (AJ Conner, reviewing v2.7.0-v2.20.0):
+    // "tightening past what a supplier certifies against is a decision
+    // purchasing and the supplier will ask about, and it is hard to defend a
+    // year later with no recorded rationale." The note is editable and
+    // deletable, and the question a year from now is not what it says today —
+    // it is what it said when this result was judged.
+    //
+    // SUPPLIER-SCOPED ONLY, and that narrowing is the whole of the argument
+    // for putting commentary in a snapshot at all. A tenant-wide limit's note
+    // is genuine commentary about the company standard; copying it onto every
+    // verdict would fill the register with prose that answers no question a
+    // register row is asked. What a supplier watch's note answers is
+    // specifically "why was THIS supplier held tighter than what they certify
+    // against", which is the defence the frozen row exists to mount.
+    //
+    // Named `rationale`, not `notes`: the snapshot records what the limit was
+    // FOR, not which column happened to hold it.
+    ...(l.supplier_id && l.notes ? { rationale: l.notes } : {}),
   });
 }
