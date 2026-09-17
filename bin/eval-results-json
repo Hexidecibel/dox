@@ -1,0 +1,279 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/eval-results-json — turn a `bin/eval-aj-docs --out` run file into the
+ * flat, per-document, per-FIELD JSON a results page renders.
+ *
+ * WHY THIS EXISTS. `bin/eval-aj-docs` prints a percentage and saves a run
+ * file, and a percentage is exactly the thing nobody should be asked to
+ * trust. "89.6%" is an average over 115 fields on 31 documents; the question
+ * a reviewer actually has is "which field, on which document, and what did it
+ * say instead" — and, since per-page OCR routing landed, "was that value read
+ * off the page's own characters or guessed from a picture of them".
+ *
+ * So this emits one row per GRADED FIELD with its expected value, its actual
+ * value and a verdict, joined to the two facts the run file keeps in separate
+ * places: which corpus set and page range the document is, and which pages of
+ * it were read by OCR.
+ *
+ * NO MODEL CALLS. This is a pure re-shaping of a saved run plus the corpus
+ * manifest. Re-running it cannot change a number; to change a number you must
+ * re-run `bin/eval-aj-docs`.
+ *
+ * VERDICTS are the scorer's buckets, renamed to the five words a reader needs:
+ *   correct       the field has an answer and the model gave it
+ *   wrong         the field has an answer and the model gave a different one
+ *   missed        the field has an answer and the model gave null
+ *   correct-null  the field has NO answer and the model gave null
+ *   invented      the field has NO answer and the model gave one anyway
+ * `invented` keeps a `fabrication_kind` of 'invented' (appears nowhere on the
+ * page) or 'misfiled' (a real string off the page, filed under the wrong
+ * key). Collapsing those two into one word is fine for a headline and wrong
+ * for a diagnosis, so both survive.
+ *
+ * OCR PAGES. The run file records a route like `geometry+page-ocr(6,13,14)`.
+ * For a packet PART the numbers inside the parens are pages of the EXTRACTED
+ * part, not of the original file, so they are mapped back through the
+ * manifest's page list — `page-ocr(1)` on a part whose `pages` is [6] is
+ * reported as document page 1, source page 6. A reader looking at the
+ * original PDF needs the second number.
+ *
+ * Usage:
+ *   bin/eval-results-json <run.json> [--out results.json]
+ *   bin/eval-results-json runs/2026-09-17.json --out /tmp/eval-results.json
+ *
+ * Exit: 0 wrote   2 bad usage   1 run file unreadable / shape unrecognised
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+const ROOT = path.resolve(__dirname, '..');
+const CORPUS = path.join(ROOT, 'tests/fixtures/real-corpus/corpus.json');
+
+const VERDICT = {
+  correct: 'correct',
+  wrong_value: 'wrong',
+  missed: 'missed',
+  correct_null: 'correct-null',
+  fabricated_invented: 'invented',
+  fabricated_misfiled: 'invented',
+};
+
+function usage(code) {
+  console.error('usage: bin/eval-results-json <run.json> [--out results.json]');
+  process.exit(code);
+}
+
+function parseArgs(argv) {
+  const o = { run: null, out: null };
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--out') o.out = argv[++i];
+    else if (argv[i] === '-h' || argv[i] === '--help') usage(0);
+    else if (!o.run) o.run = argv[i];
+    else usage(2);
+  }
+  if (!o.run) usage(2);
+  return o;
+}
+
+/** Which corpus set a document belongs to. */
+function setOf(doc, manifest) {
+  if (manifest && manifest.multi_document) return 'packet-whole';
+  if (manifest && manifest.part_of) return 'packet-parts';
+  return 'specs';
+}
+
+/**
+ * Pull the OCR'd page numbers out of a route string and map them back to
+ * pages of the ORIGINAL pdf. Returns [] when the route used no OCR.
+ */
+function ocrPages(route, manifestPages) {
+  const m = /page-ocr\(([\d,\s]+)\)/.exec(route || '');
+  if (!m) return [];
+  return m[1]
+    .split(',')
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isFinite(n))
+    .map((n) => ({
+      page_in_read: n,
+      // A part is extracted to its own PDF, so the route counts from 1 inside
+      // the part; the manifest says which page of the original that was.
+      source_page: Array.isArray(manifestPages) && manifestPages[n - 1] != null
+        ? manifestPages[n - 1]
+        : n,
+    }));
+}
+
+function gitSha() {
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+
+  let run;
+  try {
+    run = JSON.parse(fs.readFileSync(opts.run, 'utf8'));
+  } catch (e) {
+    console.error(`cannot read run file ${opts.run}: ${e.message}`);
+    process.exit(1);
+  }
+  if (!run || !Array.isArray(run.documents) || !run.summary) {
+    console.error(`${opts.run} is not a bin/eval-aj-docs --out run file`);
+    process.exit(1);
+  }
+
+  const corpus = JSON.parse(fs.readFileSync(CORPUS, 'utf8'));
+  const byId = new Map(corpus.documents.map((d) => [d.id, d]));
+
+  const documents = run.documents.map((d) => {
+    const man = byId.get(d.id) || null;
+    const pages = man && Array.isArray(man.pages) ? man.pages : null;
+    const ocr = ocrPages(d.route, pages);
+
+    const fields = (d.rows || []).map((r) => {
+      const verdict = VERDICT[r.bucket] || r.bucket;
+      const row = {
+        field: r.field,
+        expected: r.truth,
+        actual: r.emitted,
+        verdict,
+      };
+      if (r.emitted_key && r.emitted_key !== r.field) row.emitted_under_key = r.emitted_key;
+      if (verdict === 'invented') {
+        row.fabrication_kind = r.bucket === 'fabricated_misfiled' ? 'misfiled' : 'invented';
+      }
+      if (r.detail) row.detail = r.detail;
+      if (r.why) row.why = r.why;
+      return row;
+    });
+
+    return {
+      id: d.id,
+      name: d.type,
+      set: setOf(d, man),
+      part_of: (man && man.part_of) || null,
+      pages,
+      page_range: pages ? (pages.length === 1 ? `${pages[0]}` : `${pages[0]}-${pages[pages.length - 1]}`) : null,
+      source_pdf: (man && man.pdf) || null,
+      image_only: Boolean(man && man.image_only),
+      text_layer_chars: (man && man.text_layer_chars) != null ? man.text_layer_chars : null,
+      document_type: {
+        expected: man && man.document_type_expected_none ? null : d.type,
+        expected_none: Boolean(d.document_type && d.document_type.expected_none),
+        also_accepted: (man && man.document_type_accept) || [],
+        actual: (d.document_type && d.document_type.guess) || null,
+        matched: Boolean(d.document_type && d.document_type.ok),
+      },
+      route: d.route,
+      ocr_pages: ocr,
+      seconds: d.seconds,
+      confidence: d.confidence,
+      counts: d.counts,
+      fields,
+    };
+  });
+
+  // Headline numbers, recomputed from the rows rather than copied, so the
+  // file cannot disagree with itself.
+  const tally = (docs) => {
+    const t = { correct: 0, wrong: 0, missed: 0, 'correct-null': 0, invented: 0 };
+    for (const d of docs) for (const f of d.fields) t[f.verdict] = (t[f.verdict] || 0) + 1;
+    return t;
+  };
+  const all = tally(documents);
+  const graded_present = all.correct + all.wrong + all.missed;
+  const graded_absent = all['correct-null'] + all.invented;
+
+  const imageDocs = documents.filter((d) => d.image_only);
+  const imgT = tally(imageDocs);
+  const imgPresent = imgT.correct + imgT.wrong + imgT.missed;
+
+  const expiryRows = [];
+  for (const d of documents) {
+    for (const f of d.fields) {
+      if (f.field === 'document_expires_on' && f.expected != null) {
+        expiryRows.push({ document: d.id, expected: f.expected, actual: f.actual, verdict: f.verdict });
+      }
+    }
+  }
+
+  const out = {
+    generated_at: new Date().toISOString(),
+    run: {
+      file: path.resolve(opts.run),
+      generated_at: run.generated_at || null,
+      model: (run.meta && run.meta.served_models) || [],
+      routes: (run.meta && run.meta.routes) || [],
+      elapsed: (run.meta && run.meta.elapsed) || null,
+      corpus: (run.meta && run.meta.corpus) || null,
+      git_sha: gitSha(),
+    },
+    summary: {
+      documents: documents.length,
+      graded_fields: graded_present + graded_absent,
+      value_accuracy: {
+        correct: all.correct,
+        of: graded_present,
+        pct: graded_present ? Number(((all.correct / graded_present) * 100).toFixed(1)) : null,
+        wrong: all.wrong,
+        missed: all.missed,
+      },
+      null_accuracy: {
+        correct: all['correct-null'],
+        of: graded_absent,
+        pct: graded_absent ? Number(((all['correct-null'] / graded_absent) * 100).toFixed(1)) : null,
+      },
+      invented: all.invented,
+      document_type: {
+        correct: documents.filter((d) => d.document_type.matched).length,
+        of: documents.length,
+      },
+      image_documents: {
+        ids: imageDocs.map((d) => d.id),
+        correct: imgT.correct,
+        of: imgPresent,
+        wrong: imgT.wrong,
+        missed: imgT.missed,
+      },
+      document_expires_on: {
+        correct: expiryRows.filter((r) => r.verdict === 'correct').length,
+        of: expiryRows.length,
+        rows: expiryRows,
+      },
+      by_set: ['packet-whole', 'packet-parts', 'specs'].map((s) => {
+        const ds = documents.filter((d) => d.set === s);
+        const t = tally(ds);
+        const p = t.correct + t.wrong + t.missed;
+        return {
+          set: s,
+          documents: ds.length,
+          value_correct: t.correct,
+          value_of: p,
+          wrong: t.wrong,
+          missed: t.missed,
+          correct_null: t['correct-null'],
+          invented: t.invented,
+        };
+      }),
+    },
+    documents,
+  };
+
+  const json = JSON.stringify(out, null, 2);
+  if (opts.out) {
+    fs.mkdirSync(path.dirname(path.resolve(opts.out)), { recursive: true });
+    fs.writeFileSync(opts.out, json);
+    console.error(`wrote ${opts.out} — ${documents.length} documents, ${out.summary.graded_fields} graded fields`);
+  } else {
+    process.stdout.write(json);
+  }
+}
+
+main();
