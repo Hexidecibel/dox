@@ -297,8 +297,13 @@ INSERT INTO suppliers (id, tenant_id, name, slug, lot_scheme) VALUES
 ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, lot_scheme=excluded.lot_scheme;
 
 -- ---- COA document type ----
-INSERT INTO document_types (id, tenant_id, name, slug, description)
-VALUES ('${DT_ID}', '${TENANT_ID}', 'Certificate of Analysis', 'coa', 'COA')
+-- renewal_policy 'none' (0097): a COA does not renew, it is superseded by the
+-- next lot's certificate. The authority is defaultRenewalSettingForTypeName in
+-- shared/renewalPeriod.ts; this is SQL in a shell heredoc and cannot call it,
+-- so the value is written literally and bin/fix-starter-pack-renewal-policy
+-- reports any row that disagrees with the helper.
+INSERT INTO document_types (id, tenant_id, name, slug, description, renewal_policy)
+VALUES ('${DT_ID}', '${TENANT_ID}', 'Certificate of Analysis', 'coa', 'COA', 'none')
 ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug;
 
 -- ---- CMF (supplier-scoped) products — names match the COA records ----

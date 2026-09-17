@@ -14,6 +14,7 @@ import { packToStatements, packSummary } from '../../bin/lib/starter-packs.mjs';
 import fsqaRaw from '../../starter-packs/fsqa.json?raw';
 import financeRaw from '../../starter-packs/finance.json?raw';
 import { requirementsOpenedByClaims } from '../../functions/lib/registry';
+import { defaultRenewalSettingForTypeName } from '../../shared/renewalPeriod';
 
 const db = env.DB;
 const fsqa = JSON.parse(fsqaRaw);
@@ -83,6 +84,33 @@ describe('starter pack seeding — fsqa', () => {
       .bind(`req_${FSQA_TENANT.slug}_spec-sheet`)
       .first<any>();
     expect(row!.name).toBe('Renamed By The QA Manager');
+  });
+
+  it('seeds the renewal setting each type NEEDS, not the column defaults', async () => {
+    // The production defect: the pack named neither renewal column, so every
+    // seeded type sat at 'inherit' / NULL — annual — and a tenant created after
+    // the 0096/0097 backfills had a Certificate of Analysis being proposed an
+    // annual renewal. Asserted against the same helper the API create path
+    // uses, so the three paths cannot drift apart silently.
+    const rows = await db
+      .prepare(
+        `SELECT name, renewal_policy, renewal_interval_months
+           FROM document_types WHERE tenant_id = ? ORDER BY name`,
+      )
+      .bind(FSQA_TENANT.id)
+      .all<{ name: string; renewal_policy: string; renewal_interval_months: number | null }>();
+    expect(rows.results.length).toBeGreaterThan(0);
+    for (const row of rows.results) {
+      const want = defaultRenewalSettingForTypeName(row.name);
+      expect(row.renewal_policy, row.name).toBe(want.policy);
+      expect(row.renewal_interval_months ?? null, row.name).toBe(want.interval_months);
+    }
+    // And the two that carry the whole point, named outright.
+    const coa = rows.results.find((r) => r.name === 'Certificate of Analysis');
+    expect(coa?.renewal_policy).toBe('none');
+    const spec = rows.results.find((r) => r.name === 'Specification Sheet');
+    expect(spec?.renewal_policy).toBe('period');
+    expect(spec?.renewal_interval_months).toBe(36);
   });
 
   it('seeds the audit REPORT and the audit CERTIFICATE as two distinct document types', async () => {

@@ -254,8 +254,12 @@ INSERT INTO suppliers (id,tenant_id,name,slug,lot_scheme) VALUES
   ('${SUP_CMF}','${TENANT_ID}','Country Morning Farms','country-morning-farms','date_code')
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,lot_scheme=excluded.lot_scheme;
 
-INSERT INTO document_types (id,tenant_id,name,slug,description) VALUES
-  ('${DT_ID}','${TENANT_ID}','Certificate of Analysis','coa','COA')
+-- renewal_policy 'none' (0097): a COA does not renew. Authority is
+-- defaultRenewalSettingForTypeName in shared/renewalPeriod.ts; SQL in a shell
+-- heredoc cannot call it, so the value is literal here and
+-- bin/fix-starter-pack-renewal-policy reports any row that disagrees.
+INSERT INTO document_types (id,tenant_id,name,slug,description,renewal_policy) VALUES
+  ('${DT_ID}','${TENANT_ID}','Certificate of Analysis','coa','COA','none')
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug;
 
 -- CMF (supplier-scoped) COA-side products (bridge "from" side, provenance).
