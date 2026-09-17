@@ -117,7 +117,7 @@ git log "$RANGE" --pretty=format:"%H%x09%s%x09%b%x1e" --no-merges \
     // on the page; the guard below refuses to cut a release without it.
     //
     // HTML comments do not render in the in-app notes, so this reminder is
-    // safe to leave in the file — and `hasReachMarker` strips comments before
+    // safe to leave in the file — and hasReachMarker() strips comments before
     // looking, so it can never satisfy its own guard.
     out += '<!--\n';
     out += '  Mark each bullet with who it reaches. Put the token FIRST:\n';
