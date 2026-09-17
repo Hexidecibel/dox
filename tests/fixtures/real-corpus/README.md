@@ -116,7 +116,7 @@ combination makes a document un-failable on type, so the pair is pinned by name
 in `tests/unit/realCorpus.test.ts` — it has to stay rare and deliberate rather
 than becoming the way an awkward case gets silenced.
 
-### 3. The OCR fallback never fires on an inserted certificate image
+### 3. The OCR fallback never fired on an inserted certificate image — FIXED 2026-09-17
 
 Pages 6, 13, 14, 15 and 16 are pasted pictures: the SQF certificate, two OU
 kosher letters, two IFANCA halal certificates. **They are the five documents in
@@ -125,33 +125,59 @@ the packet that carry real expiry dates.**
 They are not blank pages. Each one has a few characters of genuine text over
 it — the "C2" confidentiality banner, a typed caption, a page number:
 
-| page | document | text layer | what OCR reads |
-|---|---|---|---|
-| 6 | SQF certificate, expires 2026-04-23 | **5 chars** | 1097 chars |
-| 13 | OU kosher, valid through 6/30/2026 | 83 chars | 1505 chars |
-| 14 | OU kosher, valid through 6/30/2026 | 72 chars | 1587 chars |
-| 15 | IFANCA halal | 70 chars | 1384 chars |
-| 16 | IFANCA halal, valid until 2026-10-31 | 34 chars | 1409 chars |
+| page | document | text layer | largest drawn image | what OCR reads |
+|---|---|---|---|---|
+| 6 | SQF certificate, expires 2026-04-23 | **5 chars** | 53.8% of the page | 1097 chars |
+| 13 | OU kosher, valid through 6/30/2026 | 83 chars | 38.6% | 1505 chars |
+| 14 | OU kosher, valid through 6/30/2026 | 72 chars | 40.7% | 1587 chars |
+| 15 | IFANCA halal | 70 chars | 38.0% | 1384 chars |
+| 16 | IFANCA halal, valid until 2026-10-31 | 34 chars | 34.8% | 1409 chars |
 
-`bin/process-worker` routes to OCR only when the text layer is **empty** or
-**garbled**. Five to eighty-three characters is neither, so tesseract never runs
-and the model is handed the caption. `shared/pdfTextSerializer.ts`'s guard does
-not catch it either: it declines a serialization of **>200 characters with
-almost no letters**, and these pages are short, not letterless.
+**What was wrong.** `bin/process-worker` routed to OCR only when the text layer
+was **empty** or **garbled**. Five to eighty-three characters is neither, so
+tesseract never ran and the model was handed the caption.
+`shared/pdfTextSerializer.ts`'s guard did not catch it either: it declines a
+serialization of **>200 characters with almost no letters**, and these pages are
+short, not letterless. Every guard in the path asked ONE question of the WHOLE
+file.
 
-The measured cost, on the split parts: **25 of the corpus's 34 value errors are
+The measured cost, on the split parts: **25 of the corpus's 34 value errors were
 these five pages, and they got 0 of 25 graded fields right.** Every certificate
-number, every issuing body and every expiry date on them is a miss — and all
-five of the corpus's *wrong* values (as against absent ones) are here, because
-the caption is the only thing to read, so the model answers `Smithfield` or
+number, every issuing body and every expiry date on them was a miss — and all
+five of the corpus's *wrong* values (as against absent ones) were here, because
+the caption was the only thing to read, so the model answered `Smithfield` or
 `Alouette` for the supplier. Four of the five still *classified* correctly, but
 only because somebody typed "alouette Halal Certificate" above the image. Page
-6's caption is blank, and page 6 is the only part in the corpus that classified
+6's caption is blank, and page 6 was the only part in the corpus that classified
 to `none` when a type did fit.
 
-`--force-ocr` is how you read them. It is **not** the production path and must
-never become the default; it exists so the ground truth on those five pages is
-checkable, and so the gap between the two routes is a number.
+**The fix: decide OCR one page at a time** (`shared/pdfPageOcr.ts`, applied by
+`bin/lib/pdfPageOcr.js` in both `bin/process-worker` PDF branches and in
+`bin/lib/corpusText.js`). A page is OCR'd when **one drawn image covers ≥25% of
+it AND its text layer is under 300 characters**. Both halves are required, and
+this corpus is why: page 36 is a near-blank back cover (5 chars, no picture) and
+must not become an OCR bill, while the Smith Brothers spec sheet is drawn on a
+background image covering 100% of the page and carries 1957 characters of real
+text that must never be replaced by a worse read of the same words. Both
+thresholds sit inside measured holes — image coverage 0.124 → 0.348, characters
+81 → 396. OCR is **appended** to the page's own text, never substituted for it.
+
+Measured, same model and prompt, only the text path changed:
+
+| | before | after |
+|---|---|---|
+| value accuracy, whole corpus | 70.4% (81/115) | **89.6% (103/115)** |
+| the five image documents' 25 graded fields | **0** | **22** |
+| documents where a type in the pack fits, classified correctly | 12/13 | **13/13** |
+| `document_expires_on` on the four certificates that print one | 0 | **4** |
+| text-path time, whole 36-page packet | 1.7 s | 44 s (five pages of OCR) |
+| text-path time, a document with no picture page | unchanged | +~9 ms per page (the operator-list read) |
+
+`bin/eval-aj-docs --verify` now checks the `pdf_text_must_contain_ocr` claims on
+the production route as well, which makes it the no-model regression test for
+the routing rule: 103/103 claims found. `--force-ocr` is still **not** the
+production path — it rasterises every page of every document, and it exists so
+the ground truth on these five pages stays independently checkable.
 
 ## Set 2: what the four specification sheets are
 
@@ -184,39 +210,52 @@ an already-extracted `tables` structure; these four documents carry no results
 to judge — they are the limits themselves. What they test is whether extraction
 can read a limit off a real page, which is this corpus's question.
 
-## The measured baseline
+## The measured numbers
 
-2026-09-16, 31 documents, 176 graded fields, `Qwen3.6-35B-A3B-UD-Q8_K_XL` on the
-Spark, baseline prompt, no supplier or document-type instructions configured:
+31 documents, 176 graded fields, `Qwen3.6-35B-A3B-UD-Q8_K_XL` on the Spark,
+baseline prompt, no supplier or document-type instructions configured. The only
+thing that changed between the two columns is the TEXT PATH — per-page OCR
+routing (finding 3 above). Same model, same prompt, same scorer; six documents'
+text changed and twenty-five are byte-identical.
 
-| | |
-|---|---|
-| value accuracy | **70.4%** (81/115) — wrong 5, missed 29 |
-| null accuracy | **98.4%** (60/61) |
-| fabricated | **1**, invented — the packet's `2027-01-02` |
-| document type | 27/31 · 12/13 where a type fits · 15/18 where none does |
+| | 2026-09-16, before | 2026-09-17, after |
+|---|---|---|
+| value accuracy | 70.4% (81/115) — wrong 5, missed 29 | **89.6%** (103/115) — wrong 3, missed 9 |
+| null accuracy | 98.4% (60/61) | 96.7% (59/61) |
+| fabricated | 1, invented — the packet's `2027-01-02` | 2 — the same one, plus one misfiled |
+| document type | 27/31 · 12/13 where a type fits · 15/18 where none does | 27/31 · **13/13** where a type fits · 14/18 where none does |
+| the five image documents' 25 fields | 0 correct | **22 correct** |
 
-Two things to read carefully before comparing this to the doctype corpus's
-92.8%:
+Read carefully before comparing this to the doctype corpus's 92.8%:
 
-* **25 of the 34 errors are the five image pages**, which scored 0 of 25.
-  Excluding them the corpus is **81/90 = 90.0%**, with **zero wrong values** —
-  every remaining error is an honest silence — on documents nobody wrote to be
-  extractable. The image pages are not a model result; they are a routing bug,
-  and folding them into one figure would report it as a quality problem.
-* **Null accuracy is 98.4% with exactly one invented value across 61 chances**,
-  and the corpus is stuffed with date-shaped decoys — every statement prints a
+* **The whole improvement is the five image pages.** They scored 0 of 25 and now
+  score 22 of 25. Excluding them the corpus was 81/90 = 90.0% and is 81/90 =
+  90.0% still: not one of the twenty-five documents whose text did not change
+  moved a graded field. That was the point — the image pages were never a model
+  result, they were a routing bug, and folding them into one figure reported it
+  as a quality problem.
+* **The two movements that are NOT the fix are run-to-run variance on
+  byte-identical text**: the Andersen spec sheet's `revision_date` and a
+  misfiled `expiration_date` ("22 days"), and the whole packet classifying as
+  "Letter of Guarantee" (the README's own measurement says it answers that 4
+  runs in 5; the 2026-09-16 run was the fifth). Neither document's text differs
+  by a byte between the runs.
+* **Null accuracy is still ~97% with one invented value across 61 chances**, and
+  the corpus is stuffed with date-shaped decoys — every statement prints a
   letter date next to an empty expiry field. The discipline that
-  `document_expires_on` is not `expiration_date` is holding on real documents.
+  `document_expires_on` is not `expiration_date` is holding on real documents,
+  including now on the four certificates that genuinely print an expiry:
+  SQF `2026-04-23`, both OU kosher letters `2026-06-30`, the alouette IFANCA
+  halal `2026-10-31`. Before the fix, `document_expires_on` was null on all five
+  — which is the likeliest reason the column has never been populated once
+  across 601 production documents.
 
-Of the nine non-image misses, six are a **schema gap** rather than a model gap:
+Of the nine remaining misses, six are a **schema gap** rather than a model gap:
 `shelf_life` missed on **all four** spec sheets and `document_number` on both
 Country Morning sheets. Neither is a canonical field in `llm.ts` rule 1 — the
 same "there was nowhere to put the answer" the doctype corpus's BY SCHEMA SLOT
 table separates out — and a shelf life is the input `shared/renewalPeriod.ts`
-most wants that nothing currently extracts. The other three are ordinary
-silences: `plant_number` on the bioterrorism statement, `allergens` on one spec
-sheet, `effective_date` on the food-defense statement.
+most wants that nothing currently extracts.
 
 ## Adding a case
 

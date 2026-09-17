@@ -14,9 +14,12 @@
 //     -> tesseract OCR fallback when the text layer is empty or garbled
 //     -> geometry-aware re-serialization LAST, so the OCR routing decision is
 //        still made on the OLD text, byte for byte
+//     -> PER-PAGE OCR for pages that are a picture with a caption over them,
+//        which no document-level guard above can see (bin/lib/pdfPageOcr.js)
 //
 // The geometry pass is a no-op when shouldUseSerializedPages declines — see
-// shared/pdfTextSerializer.ts for why declining is always the status quo.
+// shared/pdfTextSerializer.ts for why declining is always the status quo. The
+// per-page pass is a no-op unless a page qualifies, for the same reason.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -29,6 +32,9 @@ const {
   looksLikeBrokenEncoding,
   countLetters,
 } = require('./shared/pdfTextSerializer');
+// Per-page OCR routing — the SAME module bin/process-worker runs, so the
+// harness cannot measure a text path the product does not have.
+const { applyPerPageOcr } = require('./pdfPageOcr');
 
 /** bin/process-worker#isTextGarbled, verbatim. */
 function isTextGarbled(text) {
@@ -74,9 +80,11 @@ function ocrPdf(pdfPath) {
 async function extractPdfText(pdfPath, opts = {}) {
   const buf = fs.readFileSync(pdfPath);
   const geomBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  const factsBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
   let text = null;
   let pages = [];
   let route = 'text-layer';
+  let pageSources = null;
 
   if (opts.forceOcr) {
     const ocr = ocrPdf(pdfPath);
@@ -122,7 +130,21 @@ async function extractPdfText(pdfPath, opts = {}) {
     }
   } catch { /* keep what we have */ }
 
-  return { text: text || '', pages, route };
+  // PER-PAGE OCR, last of all and only when the document still holds a per-page
+  // text array (i.e. it did NOT go to OCR whole above). A page that is a pasted
+  // certificate image with a caption over it is neither empty nor garbled, so
+  // nothing before this point can see it. See shared/pdfPageOcr.ts.
+  if (route !== 'ocr' && Array.isArray(pages) && pages.length > 0) {
+    const perPage = await applyPerPageOcr({ pdfBuffer: buf, factsBuffer, pages, log: null });
+    if (perPage.applied) {
+      pages = perPage.pages;
+      text = perPage.text;
+      pageSources = perPage.provenance;
+      route = `${route}+page-ocr(${perPage.ocrPages.join(',')})`;
+    }
+  }
+
+  return { text: text || '', pages, route, pageSources };
 }
 
 module.exports = { extractPdfText, ocrPdf, isTextGarbled };
