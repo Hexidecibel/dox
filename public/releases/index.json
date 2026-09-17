@@ -1,6 +1,11 @@
 {
-  "current": "2.21.0",
+  "current": "2.22.0",
   "versions": [
+    {
+      "version": "2.22.0",
+      "date": "2026-09-17",
+      "title": "The page that is a picture"
+    },
     {
       "version": "2.21.0",
       "date": "2026-09-17",
