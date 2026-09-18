@@ -4,6 +4,109 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-18 (SESSION WRAP — read this first; it supersedes the restart warning below).**
+
+**THE RESTART IS DONE.** `sudo systemctl restart dox-process-worker.service` ran at 19:16 PDT on
+2026-09-17 and again after v2.24.0; the worker came up with `best`+`fast` both resolving to
+`Qwen3-6-35B-A3B-spark-q8`. Everything through v2.24.0 is actually running, not merely deployed.
+Ignore the "ONE SUDO RESTART IS OUTSTANDING" box in the entry below — it was true when written.
+
+**WHAT THE WHOLE PROD BACKLOG LOOKS LIKE ON THE NEW PIPELINE.** All 184 pending review-queue items
+were re-extracted twice: once after the OCR release, once after the prompt release (the first pass
+was on the old prompt, which is why it needed doing again — a lesson: a prompt change and a worker
+restart are the same event, plan them together). Final state, 183 ready / 1 pre-existing error:
+
+  shelf_life extracted ....... 66 of 179
+  document_number extracted .. 27 of 179
+  pages read by OCR ........... 0
+  packets detected ............ 0
+
+**The two zeroes are the correct answer, not a disappointment, and I got this wrong out loud once.**
+Cush Co's backlog is Country Morning and Andersen COAs and spec sheets: text PDFs, one document per
+file. Both new paths declined to fire, which is exactly the behaviour they were built to have. The
+picture-page and packet cases are Savencia-shaped and that supplier's documents are not in the queue
+at all — they exist only in `tests/fixtures/real-corpus/`. **Before proposing another mass
+re-extraction, look at what is actually IN the queue first.** The first pass cost an hour of GPU to
+learn this.
+
+**66 documents now carry a shelf life we were not reading before.** That matters beyond the number:
+AJ was about to supply per-product shelf life by hand, and a third of the corpus states it on the
+page.
+
+**THE ARC OF THIS SESSION, AND WHY IT WENT THIS WAY.** It started as "check in before a meeting" and
+became eleven releases (v2.11.0 → v2.24.0) plus a v2.10 backfill. The through-line worth keeping:
+**every accuracy claim in this session came from a scorer over real client documents, never from
+reading output and feeling good about it.** `tests/fixtures/real-corpus/` (31 documents, 176 graded
+fields, ground truth read off the pages by hand) is the most valuable artifact created here. It found
+the OCR gap, the schema gap and the packet problem — none of which were on any todo list — and each
+fix was measured against it before shipping. Guard that corpus. If a future change moves those
+numbers, the number is right and the intuition is wrong.
+
+**THE FINDINGS NOBODY ASKED FOR, IN ROUGH ORDER OF VALUE.**
+- **Image certificates were being read as blank pages.** OCR only fired when text was empty or
+  garbled, so a pasted certificate with a typed caption above it (5-83 chars over a full-page image)
+  slipped through both checks. Those five pages scored 0/25 fields and are why
+  `document_expires_on` had NEVER been populated across 601 prod documents. Fixed in v2.22.0;
+  5/5 expiry dates now land.
+- **The starter pack seeded every document type as "renews annually",** including COA, on tenants
+  created after the 0096/0097 backfill ran. AJ Clean had 27 types wrong. Repaired on prod (2 rows).
+- **An unresolvable renewal proposal, approved untouched, was recorded as a human ruling of
+  "does not renew"** — permanently, ahead of every default. Zero documents were affected; fixed
+  before it bit.
+- **9 of 20 prod spec limits carried notes nobody could read** (the column existed, the API returned
+  it, no screen showed it), including two open questions addressed to Chris about presence tests.
+- **`POST /api/document-exports/send` had no role check** — a reader could email 50 documents to 10
+  outside addresses. Fixed in v2.21.0.
+- **A stale compiled mirror** (`bin/lib/shared/*`) shipped in v2.23.0 — comment-only that time, but
+  it is the class of bug where the worker runs different code from the tests. `npm run
+  build:worker-shared` before every ship; two agents caught it by running it.
+
+**JUDGEMENT CALLS MADE, SO A FUTURE SESSION DOES NOT RE-LITIGATE THEM.**
+- **Nothing auto-splits a packet.** A wrong split turns one wrong document into twenty-five.
+- **Shelf life is stored as the printed phrase**, not a parsed number — "1 year frozen, 21 days
+  refrigerated" has two lives and any parse invents something. It is also walled off from renewal
+  with a test; a product shelf life is not a document due date (the 0097 confusion, again).
+- **A lot match is always a suggestion.** The 7 old auto-links on prod were reverted to suggestions.
+- **The export link is a bearer credential** and the UI says so: opens count requests, not people.
+- **A decoded lot date, or a production date recovered from an older document'"'"'s code-date field, is
+  "likely — confirm", never a match.**
+- **Page 36 of the packet (near-blank back cover) is reported as covered by no part** rather than
+  bolted onto the last document.
+
+**WHAT IS STILL SOFT, AND SHOULD BE SAID OUT LOUD RATHER THAN DISCOVERED.**
+- **Only the index-page packet detection is measured on a real file.** 26/26 came from parsing the
+  supplier'"'"'s own table of contents. The letterhead path reproduces the same packet with the index
+  removed, but no other real multi-document PDF has been through it. The next packet without a TOC is
+  the test that matters.
+- **A memory spike killed a background watcher during the OCR re-run** (box recovered; 62 GB total).
+  OCR rasterises a page at a time; worth understanding before a larger corpus goes through it.
+- **Three packet parts still misclassify** because the catalog lacks the types (PHO, Yellow
+  Prussiate, Environmental Program) — configuration, not a bug, and it is AJ'"'"'s call.
+- **The scanned corpus tier re-renders with unseeded noise**, so that tier is not reproducible across
+  renders. A `-seed` would fix it.
+- **The Cloudflare token rolled four times in this session** (the user rolls it manually). Check it
+  BEFORE starting a long ship; a deploy that dies at the upload step leaves a tagged release
+  unpushed. `cush-tools/bin/secure-entry <name> --save-to-secrets inf://dev/doc-upload-site/CLOUDFLARE_API_TOKEN --bg`.
+
+**FOR THE CLIENT.** Two documents are drafted and UNSENT in `~/drops/`:
+`reply-to-aj-retrieval.md` (answers his five review questions, both leak tests, the renewal bugs, the
+OCR finding, three defects in his own packet) and `for-aj-pack-claims-and-answers.md` (the starter
+pack as mark-up tables, the 12 claim rules with a blank column, the answered-questions list). A live
+scorecard of every graded field is published at https://claude.ai/artifact/5Mvvy5T5XGHSaVtifAe2nw —
+he can see which fields are wrong rather than trusting a percentage.
+
+**WHAT I WOULD DO NEXT, IN ORDER.**
+1. **Send AJ the two documents.** Nearly everything else is blocked on his answers.
+2. **Put his packet on prod (AJ Clean) and let it come through the normal pipeline**, so the split
+   card is demonstrable on the real file rather than in a test corpus.
+3. **The letterhead detection path needs a second real packet** before anyone trusts it.
+4. **Decide the open prod data questions**: archive the 74 duplicate documents, apply the 2 lot-key
+   repairs, apply the classification backfill (550 classified / 29 needs-review), remove the stale
+   "Code dates may use Julian format" line from Cush Co and Q8 extraction context.
+5. **Drop `supplier_product_map`** — 0113 left it unread for one release and that release has shipped.
+
+---
+
 **2026-09-18 (latest): v2.24.0 IS LIVE. Packet detection shipped, migrations 0118 + 0119 applied to
 staging and prod. ONE SUDO RESTART IS OUTSTANDING AND IT NOW COVERS TWO RELEASES — see the box at
 the end of this entry BEFORE you conclude anything from a prod document.**
