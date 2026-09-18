@@ -4,7 +4,90 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
-**2026-09-17 (latest): v2.23.0 IS LIVE. Shelf life and document number are extracted. NO MIGRATION.
+**2026-09-18 (latest): v2.24.0 IS LIVE. Packet detection shipped, migrations 0118 + 0119 applied to
+staging and prod. ONE SUDO RESTART IS OUTSTANDING AND IT NOW COVERS TWO RELEASES — see the box at
+the end of this entry BEFORE you conclude anything from a prod document.**
+
+*Prod deploy `d4f1ce78` (https://supdox.com), tag `v2.24.0`, master pushed (`7de867d..8337cbd`).
+Staging `bb125be7`. `/releases/index.json` reads `current: 2.24.0`, title "One file is not one
+document". Prod D1 Time Travel bookmark taken before the migrations:
+`0000172d-000009ff-000050ea-2097f7d1d823e9fc6ded36394341e49d`
+(`~/drops/dox-backups/doc-upload-db-20260918T001448Z.timetravel.json`).*
+
+**WHAT SHIPPED.** One uploaded file is no longer assumed to be one document. The client's supplier
+sends a **36-page PDF holding 25 separate documents**; dox read it as one, classified it as a Letter
+of Guarantee (page 3 answering for all 25) and produced `document_expires_on = 2027-01-02` — **a date
+printed nowhere in the file**, page 3's "valid one year from the date hereof" clause applied to a
+packet containing an SQF certificate that lapsed 2026-04-23. `shared/packetDetect.ts` (pure, fed by
+the per-page text and image-coverage facts the OCR pass already computed, so no second read of the
+file) now proposes page ranges, and the Review Queue card sits **above** the extracted fields with
+**Split into N** / **Adjust** / **Not a packet**. **NOTHING AUTO-SPLITS — that is the whole design**:
+a wrong split turns one wrong document into twenty-five. Carving reuses the existing
+`extractRecordPdf`; children inherit the supplier and deliberately NOT the type; the parent becomes a
+container whose approve path is refused while reject stays open. 0119 is the cheap half: a request
+line can now say **"one document per file"** as a queryable flag rather than as prose, mirrored onto
+template lines and shown on the supplier portal.
+
+**THE NUMBERS (measured with `bin/packet-detect`, no model calls).** **26/26 page ranges exact** on
+the real packet, page 36 (the near-blank back cover) reported as covered by no part rather than
+bolted onto the last document. **Zero false positives across 44 single-document files**, including an
+8-page HACCP master plan with the same header on every page. Post-split: **23/26 types correct,
+95.5% value accuracy, zero fabrications** on the parts.
+
+**GATES.** vitest **294 files / 4037 tests passed** (twice: once on the merged tree, once inside
+`bin/deploy`), `bin/typecheck-ratchet` **27, at baseline**, `npm run build` clean,
+`npm run build:packs:check` up to date, `npm run build:worker-shared` produced **no diff** (the
+`packetDetect.js` mirror was already current — it is wired into the script, check it stays that way),
+`bin/deploy`'s e2e gate **7 passed / 1 skipped / 0 failed**. No flakes.
+
+**MIGRATIONS.** `0118_packet_split.sql` (11 nullable columns on `processing_queue` + the partial
+index `idx_pq_packet_parent ... WHERE packet_parent_id IS NOT NULL`) and
+`0119_request_one_document_per_file.sql` (`one_document_per_file INTEGER NOT NULL DEFAULT 0` on
+`request_lines` and `request_template_lines`). Applied one at a time, dry-run then real, to staging
+then prod; both **stamped in `d1_migrations`** (last stamped is now 0119). **Prod row counts
+unchanged either side**: `processing_queue` 805 → 805, `request_lines` 11 → 11,
+`request_template_lines` 0 → 0, with **every new packet column NULL on all 805 rows** and
+`one_document_per_file = 0` on all 11 request lines. `SCHEMA.md` regenerated in the main checkout
+after applying locally: **no diff** (the worktree's copy already matched).
+
+**CLEANUP DONE.** Worktree `.claude/worktrees/agent-a31a50b4db4caa0bf` removed and branch
+`worktree-agent-a31a50b4db4caa0bf` deleted (`git worktree prune` run; list is just master). No
+symlinks pointed into the main checkout; `.dev.vars` (415 B), `.wrangler/state` (8 sqlite files) and
+`node_modules` (273 entries) all verified intact afterwards.
+
+**THE IMPLEMENTER'S CAVEAT — READ THIS BEFORE TRUSTING A PROPOSAL.** Only the **index-page detection
+method** has been measured on a real file, because the one real packet we have declares its own
+structure on page 1 and that declaration is used verbatim. **The letterhead path is UNPROVEN on any
+packet without a table of contents.** The 26/26 number says nothing about it. When a packet with no
+index turns up, treat the first proposal as a measurement, not as a result.
+
+> ### PACKET DETECTION RUNS IN `bin/process-worker`. IT REACHES NO DOCUMENT UNTIL THE WORKER IS RESTARTED.
+>
+> **A GREEN DEPLOY AND A CORRECT `/releases/index.json` MEAN NOTHING FOR THIS ONE.** The API routes,
+> the migrations and the Review Queue card are live on Pages, but **nothing will ever populate
+> `packet_proposal`** — so no card will ever appear — until someone runs, with sudo, by hand:
+>
+> ```
+> sudo systemctl restart dox-process-worker.service
+> ```
+>
+> **CLAUDE CANNOT DO THIS (IT NEEDS SUDO) AND MUST NOT BE ASKED TO — THE USER RUNS IT.**
+>
+> ### THE SAME RESTART IS STILL PENDING FROM v2.23.0, SO ONE RESTART NOW COVERS BOTH.
+>
+> v2.23.0's shelf-life / document-number prompt change was never picked up either (see the entry
+> below). **The single restart above delivers both releases at once.** Until it happens, prod keeps
+> extracting with the old prompt AND never proposes a split.
+>
+> ### THE PROD RE-EXTRACTION BACKLOG WAS LEFT ALONE, DELIBERATELY.
+>
+> It may still have been draining on the shared GPU throughout this deploy; it was never touched and
+> must not be restarted by Claude. Anything it produced is on the **old** prompt and was **never
+> offered a packet proposal**.
+
+---
+
+**2026-09-17: v2.23.0 IS LIVE. Shelf life and document number are extracted. NO MIGRATION.
 THE SAME SUDO STEP AS LAST TIME IS OUTSTANDING AND IT MATTERS MORE HERE — see the box at the end of
 this entry BEFORE you conclude anything from a prod document.**
 
