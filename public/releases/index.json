@@ -1,6 +1,11 @@
 {
-  "current": "2.23.0",
+  "current": "2.24.0",
   "versions": [
+    {
+      "version": "2.24.0",
+      "date": "2026-09-17",
+      "title": "One file is not one document"
+    },
     {
       "version": "2.23.0",
       "date": "2026-09-17",

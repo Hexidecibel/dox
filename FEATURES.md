@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.24.0](releases/v2.24.0.md) — 2026-09-17 — One file is not one document
 - [v2.23.0](releases/v2.23.0.md) — 2026-09-17 — What the page already said
 - [v2.22.0](releases/v2.22.0.md) — 2026-09-17 — The page that is a picture
 - [v2.21.0](releases/v2.21.0.md) — 2026-09-17 — Sent documents, and why a limit was set
