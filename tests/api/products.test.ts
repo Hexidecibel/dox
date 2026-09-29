@@ -174,3 +174,105 @@ describe('Products - Update', () => {
     expect(p!.active).toBe(0);
   });
 });
+
+describe('Products - POST from a supplier context (Supplier > Products tab)', () => {
+  const orgAdmin = () => ({ id: seed.orgAdminId, role: 'org_admin' as const, tenant_id: seed.tenantId });
+  const post = (body: Record<string, unknown>) =>
+    productsPost({
+      request: new Request('http://localhost/api/products', {
+        method: 'POST',
+        body: JSON.stringify(body),
+        headers: { 'Content-Type': 'application/json' },
+      }),
+      env,
+      data: { user: orgAdmin() },
+      params: {},
+    } as any);
+  const makeSupplier = async (name: string) => {
+    const id = generateTestId();
+    await db
+      .prepare('INSERT INTO suppliers (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)')
+      .bind(id, seed.tenantId, name, `sup-${id.slice(0, 8)}`)
+      .run();
+    return id;
+  };
+  const listedUnder = async (supplierId: string) =>
+    (await db
+      .prepare(
+        `SELECT id FROM products WHERE tenant_id = ? AND active = 1
+           AND (products.supplier_id = ? OR products.id IN (SELECT product_id FROM product_suppliers WHERE supplier_id = ?))`
+      )
+      .bind(seed.tenantId, supplierId, supplierId)
+      .all<{ id: string }>()).results.map((r) => r.id);
+
+  it('creates the product linked to the supplier: legacy column AND product_suppliers row', async () => {
+    const supplierId = await makeSupplier('Country Morning Test');
+    const res = await post({ name: `Half and Half ${generateTestId()}`, supplier_id: supplierId });
+    expect(res.status).toBe(201);
+    const { product } = (await res.json()) as any;
+    expect(product.supplier_id).toBe(supplierId);
+    const link = await db
+      .prepare('SELECT tenant_id FROM product_suppliers WHERE product_id = ? AND supplier_id = ?')
+      .bind(product.id, supplierId)
+      .first<{ tenant_id: string }>();
+    expect(link?.tenant_id).toBe(seed.tenantId);
+    expect(await listedUnder(supplierId)).toContain(product.id);
+  });
+
+  it('a same-name create from a supplier links the existing product instead of a bare 409', async () => {
+    const supA = await makeSupplier('Supplier A');
+    const supB = await makeSupplier('Supplier B');
+    const name = `Heavy Cream ${generateTestId()}`;
+
+    // The orphan AJ hit: created with no supplier at all.
+    const first = await post({ name });
+    expect(first.status).toBe(201);
+    const orphan = ((await first.json()) as any).product;
+    expect(orphan.supplier_id).toBeNull();
+
+    const retry = await post({ name, supplier_id: supA });
+    expect(retry.status).toBe(200);
+    const body = (await retry.json()) as any;
+    expect(body.linked_existing).toBe(true);
+    expect(body.already_linked).toBe(false);
+    expect(body.product.id).toBe(orphan.id);
+    expect(body.product.supplier_id).toBe(supA); // NULL legacy column backfilled
+    expect(body.message).toMatch(/linked to Supplier A/);
+    expect(await listedUnder(supA)).toContain(orphan.id);
+
+    // A second supplier gets the provenance link; the legacy column is not overwritten.
+    const other = await post({ name, supplier_id: supB });
+    expect(other.status).toBe(200);
+    const otherBody = (await other.json()) as any;
+    expect(otherBody.product.supplier_id).toBe(supA);
+    expect(await listedUnder(supB)).toContain(orphan.id);
+
+    // Once more for A: already linked, nothing new written, still not an error.
+    const again = await post({ name, supplier_id: supA });
+    expect(again.status).toBe(200);
+    expect(((await again.json()) as any).already_linked).toBe(true);
+    const n = await db
+      .prepare('SELECT COUNT(*) AS n FROM product_suppliers WHERE product_id = ?')
+      .bind(orphan.id)
+      .first<{ n: number }>();
+    expect(n?.n).toBe(2);
+    const audits = await db
+      .prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'product.supplier_linked' AND resource_id = ?")
+      .bind(orphan.id)
+      .first<{ n: number }>();
+    expect(audits?.n).toBe(2);
+  });
+
+  it('without a supplier, a duplicate name is still a 409 that names the product', async () => {
+    const name = `Duplicate ${generateTestId()}`;
+    expect((await post({ name })).status).toBe(201);
+    const res = await post({ name });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as any).error).toContain(name);
+  });
+
+  it('refuses a supplier from another tenant', async () => {
+    const res = await post({ name: `X ${generateTestId()}`, supplier_id: 'no-such-supplier' });
+    expect(res.status).toBe(404);
+  });
+});
