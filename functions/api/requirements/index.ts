@@ -13,6 +13,11 @@ import { generateId, logAudit, getClientIp } from '../../lib/db';
 import { requireRole, errorToResponse } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import { slugifyVocab, resolveWriteTenant } from '../../lib/registry-vocab';
+import {
+  DEFAULT_REQUIREMENT_SCOPE,
+  REQUIREMENT_SCOPES,
+  isRequirementScope,
+} from '../../../shared/requirementScope';
 import type { Env, User } from '../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -141,11 +146,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       checklist?: string;
       sort_order?: number;
       tenant_id?: string;
+      /** 0123: 'supplier' (default) / 'product' / 'lot'. */
+      scope?: string;
     };
 
     if (!body.name || !body.name.trim()) {
       return json({ error: 'name is required' }, 400);
     }
+
+    if (body.scope !== undefined && !isRequirementScope(body.scope)) {
+      return json({ error: `scope must be one of: ${REQUIREMENT_SCOPES.join(', ')}` }, 400);
+    }
+    const scope = body.scope ?? DEFAULT_REQUIREMENT_SCOPE;
 
     const tenantId = resolveWriteTenant(user, body.tenant_id);
 
@@ -172,10 +184,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const sortOrder = Number.isFinite(Number(body.sort_order)) ? Number(body.sort_order) : 0;
 
     await context.env.DB.prepare(
-      `INSERT INTO requirements (id, tenant_id, slug, name, description, checklist, sort_order, active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+      `INSERT INTO requirements (id, tenant_id, slug, name, description, checklist, sort_order, active, scope)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
     )
-      .bind(id, tenantId, slug, name, description, checklist, sortOrder)
+      .bind(id, tenantId, slug, name, description, checklist, sortOrder, scope)
       .run();
 
     await logAudit(
@@ -185,7 +197,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'requirement_created',
       'requirement',
       id,
-      JSON.stringify({ name, slug, checklist }),
+      JSON.stringify({ name, slug, checklist, scope }),
       getClientIp(context.request),
     );
 

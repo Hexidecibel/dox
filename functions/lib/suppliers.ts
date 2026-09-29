@@ -353,7 +353,8 @@ export interface MergeSuppliersResult {
  *     documents, products, lots, processing_queue, connectors
  *   Unique-constrained (UPDATE OR IGNORE then DELETE leftovers):
  *     product_suppliers, extraction_templates, supplier_extraction_instructions,
- *     reviewer_field_picks, reviewer_field_dismissals, reviewer_table_edits
+ *     reviewer_field_picks, reviewer_field_dismissals, reviewer_table_edits,
+ *     product_requirements (0123)
  *
  * The suppliers_fts AFTER DELETE trigger cleans the search index automatically.
  */
@@ -385,6 +386,7 @@ export async function mergeSuppliers(
     'reviewer_field_picks',
     'reviewer_field_dismissals',
     'reviewer_table_edits',
+    'product_requirements',
   ];
 
   const reassigned: Record<string, number> = {};

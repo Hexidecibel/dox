@@ -45,6 +45,7 @@ import {
   type SupplierListInputRow,
 } from '../../shared/supplierListTemplate';
 import { normalizeCode, normalizeName } from '../../shared/productVocabulary';
+import { linkProductToSupplier } from './entities/products';
 import type {
   SupplierListFlaggedLine,
   SupplierListImportCounts,
@@ -311,6 +312,15 @@ export async function runSupplierListImport(
           outcome.product_id = pm.product_id;
           outcome.product_name_matched = catalog.names.get(pm.product_id) ?? null;
           counts.products_matched++;
+          // The verified list says this supplier ships this product (0123):
+          // record the link, stamped 'import', so per-product requirements
+          // judge it. Same posture as findOrCreateSupplier above -- a dry run
+          // writes nothing, and an existing link keeps what it already says.
+          if (!input.dryRun && supplierId) {
+            await linkProductToSupplier(db, input.tenantId, pm.product_id, supplierId, {
+              source: 'import',
+            });
+          }
         } else {
           counts.products_unmatched++;
           unmatched.push({ line: r.line, kind: 'product', value: label, reason: pm.reason! });

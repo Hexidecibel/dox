@@ -31,6 +31,7 @@
 
 import { expiredOnArrival } from '../../shared/expiredOnArrival';
 import { generateId, logAudit } from './db';
+import { loadConfirmedClosures } from './requirement-gaps';
 import {
   computeItemRefs,
   loadCoSatisfaction,
@@ -456,38 +457,19 @@ export async function loadClosures(
   const out = new Map<string, RequestLineClosure[]>();
   if (requirementIds.length === 0) return out;
 
-  const placeholders = requirementIds.map(() => '?').join(', ');
-  const rows = await db
-    .prepare(
-      `SELECT dr.requirement_id, dr.confirmed_at,
-              d.id AS document_id, d.title AS document_title,
-              CASE WHEN json_valid(d.primary_metadata)
-                   THEN json_extract(d.primary_metadata, '$.document_expires_on') END AS expires_on,
-              d.arrived_at, d.created_at
-         FROM document_requirements dr
-         JOIN documents d ON d.id = dr.document_id
-        WHERE d.tenant_id = ?
-          AND d.supplier_id = ?
-          AND d.status = 'active'
-          AND dr.status = 'confirmed'
-          AND dr.requirement_id IN (${placeholders})
-        ORDER BY dr.confirmed_at DESC`,
-    )
-    .bind(tenantId, supplierId, ...requirementIds)
-    .all<{
-      requirement_id: string;
-      confirmed_at: string | null;
-      document_id: string;
-      document_title: string;
-      expires_on: string | null;
-      arrived_at: string | null;
-      created_at: string | null;
-    }>();
+  // The ONE closure read, shared with the gap engine
+  // (functions/lib/requirement-gaps.ts#loadConfirmedClosures), so the composer
+  // and the gap report cannot disagree about what closed what.
+  const rows = await loadConfirmedClosures(db, tenantId, { supplierId, requirementIds });
 
-  for (const r of rows.results ?? []) {
+  for (const r of rows) {
     // Same rule as the gap engine (G4): a certificate already expired when it
     // arrived closes nothing, so it is not offered as closing this ask either.
     if (expiredOnArrival(r)) continue;
+    // Same rule as the gap engine (0123): a PRODUCT-scope requirement is closed
+    // only by a document linked to a product. A document naming no product
+    // closes nothing, so it is not offered as closing this ask.
+    if (r.scope === 'product' && !r.has_product_link) continue;
     const key = String(r.requirement_id);
     const list = out.get(key) ?? [];
     list.push({
