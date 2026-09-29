@@ -227,8 +227,8 @@ export function starterPackStatements(
       db
         .prepare(
           `INSERT OR IGNORE INTO requirements
-             (id, tenant_id, slug, name, description, checklist, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             (id, tenant_id, slug, name, description, checklist, sort_order, scope)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           packRowId('req', tenantSlug, req.slug),
@@ -238,6 +238,9 @@ export function starterPackStatements(
           req.description,
           req.checklist,
           req.sort_order,
+          // 0123. INSERT OR IGNORE: an existing tenant's requirement keeps the
+          // scope it has -- this reaches new organisations only.
+          req.scope,
         ),
     );
   }

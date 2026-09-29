@@ -97,6 +97,14 @@ import { defaultRenewalSettingForTypeName } from './shared/renewalPeriod.js';
 export const SUBJECT_GRAINS = ['any', 'tenant', 'product', 'supplier', 'facility'];
 
 /**
+ * What a requirement is owed PER (`requirements.scope`, migration 0123). A
+ * MIRROR of `REQUIREMENT_SCOPES` in shared/requirementScope.ts -- this
+ * dependency-free .mjs cannot import it; tests/unit/starter-packs.test.ts pins
+ * the two equal. A requirement that names no scope is 'supplier'.
+ */
+export const REQUIREMENT_SCOPES = ['supplier', 'product', 'lot'];
+
+/**
  * The `spec_limits.operator` CHECK from migration 0084, restated.
  *
  * A pack is compiled by a dependency-free .mjs that cannot import
@@ -221,10 +229,19 @@ export function normalizePack(pack, options = {}) {
   };
 
   const documentTypes = normalize(pack.document_types, 'document_types');
-  const requirements = normalize(pack.requirements, 'requirements').map((r) => ({
-    ...r,
-    checklist: r.checklist ? String(r.checklist) : null,
-  }));
+  const requirements = normalize(pack.requirements, 'requirements').map((r, i) => {
+    const scope = r.scope ?? 'supplier';
+    if (!REQUIREMENT_SCOPES.includes(scope)) {
+      throw new Error(
+        `requirements[${i}] ("${r.name}"): scope "${scope}" must be one of ${REQUIREMENT_SCOPES.join(', ')}`,
+      );
+    }
+    return {
+      ...r,
+      checklist: r.checklist ? String(r.checklist) : null,
+      scope,
+    };
+  });
   const claimTypes = normalize(pack.claim_types, 'claim_types').map((c, i) => {
     const grain = c.subject_grain || 'any';
     if (!SUBJECT_GRAINS.includes(grain)) {
@@ -773,10 +790,10 @@ export function packToStatements(rawPack, { tenantId, tenantSlug, moduleKeys } =
 
   for (const req of pack.requirements) {
     statements.push(
-      `INSERT OR IGNORE INTO requirements (id, tenant_id, slug, name, description, checklist, sort_order) VALUES (` +
+      `INSERT OR IGNORE INTO requirements (id, tenant_id, slug, name, description, checklist, sort_order, scope) VALUES (` +
         `${sqlQuote(packRowId('req', tenantSlug, req.slug))}, ${sqlQuote(tenantId)}, ` +
         `${sqlQuote(req.slug)}, ${sqlQuote(req.name)}, ${sqlQuote(req.description)}, ` +
-        `${sqlQuote(req.checklist)}, ${req.sort_order});`,
+        `${sqlQuote(req.checklist)}, ${req.sort_order}, ${sqlQuote(req.scope)});`,
     );
   }
 
