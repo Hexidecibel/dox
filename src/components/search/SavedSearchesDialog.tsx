@@ -35,6 +35,12 @@ export interface SavedSearchesDialogProps {
   onClose: () => void;
   /** The current SearchState — used as the body of "Save current". */
   currentState: SearchState;
+  /**
+   * What "Save current" will store, as a URL-style preview. A caller on the
+   * one query model (shared/searchQuery.ts) passes its encoded query here;
+   * otherwise the legacy state is encoded.
+   */
+  currentPreview?: string;
   /** Existing saved-search rows. */
   saved: SavedSearch[];
   /** Save the current state under a name. Throws on UNIQUE collision. */
@@ -48,6 +54,7 @@ export function SavedSearchesDialog({
   open,
   onClose,
   currentState,
+  currentPreview,
   saved,
   onSave,
   onLoad,
@@ -57,7 +64,7 @@ export function SavedSearchesDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const currentUrlPreview = encodeSearchState(currentState).toString();
+  const currentUrlPreview = currentPreview ?? encodeSearchState(currentState).toString();
 
   const handleSave = async () => {
     if (!name.trim()) return;

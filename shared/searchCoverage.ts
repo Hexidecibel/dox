@@ -55,6 +55,15 @@ import { normalizeLotNumber, normalizeSubLotCode } from './lotNormalize';
 import { decodeLot, lotDecodeProvenance, type LotSchemeSpec } from './lotScheme';
 import { checkProductIdentity } from './productIdentity';
 import { checkOrder } from './orderCoverage';
+import {
+  identifierKeys,
+  IDENTIFIER_KEY_KINDS,
+  KEY_KIND_LABELS,
+  normalizeKeyValue,
+  stripKeyword,
+  type IdentifierKeyKind,
+} from './searchKeys';
+import type { SearchKeyKind, SearchOrderEvidence } from './types';
 
 // ===========================================================================
 // Field vocabulary
@@ -72,7 +81,7 @@ export const DATE_ROLE_FIELDS: Record<Exclude<SearchDateRole, 'any' | 'uploaded'
   ],
   code: ['code_date'],
   expiration: [
-    'expiration_date', 'exp_date', 'best_by', 'best_before', 'use_by', 'sell_by',
+    'expiration_date', 'exp_date', 'best_by', 'best_by_date', 'best_before', 'use_by', 'sell_by',
     'document_expires_on',
   ],
   ship: ['ship_date', 'shipping_date', 'date_shipped'],
@@ -98,6 +107,7 @@ const FIELD_LABELS: Record<string, string> = {
   expiration_date: 'expiration date',
   exp_date: 'expiration date',
   best_by: 'best-by date',
+  best_by_date: 'best-by date',
   best_before: 'best-before date',
   use_by: 'use-by date',
   sell_by: 'sell-by date',
@@ -463,6 +473,28 @@ export function makeLotConstraint(
 }
 
 /**
+ * "lot 104": every lot that STARTS with 104. A short lot typed after the word
+ * "lot" is a lot question, never free text — as text, "104" matched every
+ * Darigold certificate because it is their plant code and also sits in the
+ * plant's street address. Covering on the rows whose lot starts with it.
+ */
+export function makeLotPrefixConstraint(id: string, raw: string, source: SearchConstraint['source'], note?: string | null): SearchConstraint {
+  const prefix = normalizeLotNumber(raw.replace(/^lot\s*#?\s*/i, ''));
+  return {
+    id,
+    kind: 'lot',
+    label: `lot starting ${prefix}`,
+    raw,
+    value: prefix,
+    fields: ['lot'],
+    lot_parts: null,
+    match: 'prefix',
+    source,
+    note: note ?? `Every lot that starts with ${prefix}; a document covers it on the lot row(s) that do.`,
+  };
+}
+
+/**
  * A lot given as two separate inputs (AJ A3). The base and the sublot are
  * matched as parts; `value` carries their concatenation only so the prefix and
  * near-sublot rules keep working. Returns null when the base normalizes to
@@ -560,6 +592,21 @@ export function checkLot(c: SearchConstraint, s: CoverageSubject): SearchConstra
   }
   const n = c.value;
   const many = ids.length > 1 ? ` (one of ${ids.length} lots on this document)` : '';
+  if (c.match === 'prefix') {
+    const hits = ids.filter((id) => (id.base + id.sub).startsWith(n) || id.key.startsWith(n));
+    if (hits.length > 0) {
+      const shown = hits.map((h) => h.display).join(', ');
+      return {
+        ...base, outcome: 'match', value: shown, provenance: hits[0].provenance,
+        message: `Lot ${shown} ${hits.length === 1 ? 'starts' : 'start'} with ${n}${hits.length === 1 ? many : ''}.`,
+      };
+    }
+    const shown = ids.map((i) => i.display).join(', ');
+    return {
+      ...base, outcome: 'mismatch', value: shown, provenance: ids[0].provenance,
+      message: ids.length === 1 ? `Lot on this document is ${shown}, which does not start with ${n}.` : `Lots on this document are ${shown} — none starts with ${n}.`,
+    };
+  }
   let best: SearchConstraintCheck | null = null;
   const parts = c.lot_parts ?? null;
   for (const id of ids) {
@@ -969,8 +1016,152 @@ export function checkText(c: SearchConstraint, s: CoverageSubject): SearchConstr
     : { ...base, outcome: 'mismatch', message: `This document doesn't mention "${c.raw}".` };
 }
 
+// ---------------------------------------------------------------------------
+// PO, invoice and any-kind identifiers (search redesign Phase 1, migration 0122)
+// ---------------------------------------------------------------------------
+
+/**
+ * A PO searched for. Two namespaces (prod, 2026-09-29): the PO PRINTED on a
+ * supplier's paper is our purchase order to them, and covers on its own; the
+ * customer's PO lives on a WMS order and is followed like the order itself.
+ * They never share a value, so neither is assumed to imply the other.
+ */
+export function makePoConstraint(id: string, raw: string, orders: SearchOrderEvidence[], source: SearchConstraint['source']): SearchConstraint {
+  const value = stripKeyword(raw, 'po');
+  const orderNote = orders.length > 0
+    ? ` It is also the customer's PO on ${orders.length === 1 ? `WMS order ${orders[0].order_number}` : `${orders.length} WMS orders (${orders.map((o) => o.order_number).join(', ')})`}, followed through the order's lines to the lots they shipped; a certificate covers that only where a person accepted the match or a lot row is exactly the shipped lot.`
+    : '';
+  return {
+    id,
+    kind: 'po',
+    label: `PO ${value}`,
+    raw,
+    value,
+    fields: ['supplier_po', 'customer_po', ...(orders.length ? ['orders.po_number'] : [])],
+    key_kinds: ['supplier_po', 'customer_po'],
+    orders,
+    source,
+    note: `Checked against the PO printed on each document (our purchase order to the supplier).${orderNote}`,
+  };
+}
+
+/**
+ * An invoice number: the document's OWN printed invoice number only. Whether a
+ * WMS order number is an invoice number is not settled (SME question), so an
+ * order with this number is named in the note and NOT followed.
+ */
+export function makeInvoiceConstraint(id: string, raw: string, orderWithNumber: string | null, source: SearchConstraint['source']): SearchConstraint {
+  const value = stripKeyword(raw, 'invoice');
+  return {
+    id,
+    kind: 'invoice',
+    label: `invoice ${value}`,
+    raw,
+    value,
+    fields: ['invoice_number'],
+    key_kinds: ['invoice_number'],
+    source,
+    note: orderWithNumber
+      ? `Checked against the invoice number printed on each document. WMS order ${orderWithNumber} has this number, but an order number is not known to be an invoice number, so the order is not followed — search it as an order to follow it.`
+      : 'Checked against the invoice number printed on each document.',
+  };
+}
+
+/**
+ * A number on file as more than one kind of identifier (a PO on one document,
+ * an order number on another). Nothing is picked: ANY kind answers, and each
+ * check names the kind that did.
+ */
+export function makeIdentifierConstraint(
+  id: string,
+  raw: string,
+  opts: { kinds?: SearchKeyKind[]; orders?: SearchOrderEvidence[]; hitKinds?: string[] },
+  source: SearchConstraint['source'],
+): SearchConstraint {
+  const value = raw.trim();
+  const kinds = (opts.kinds ?? IDENTIFIER_KEY_KINDS).filter((k): k is IdentifierKeyKind => (IDENTIFIER_KEY_KINDS as string[]).includes(k));
+  const hit = opts.hitKinds && opts.hitKinds.length ? ` On file as: ${opts.hitKinds.join(', ')}.` : '';
+  return {
+    id,
+    kind: 'identifier',
+    label: `identifier ${value}`,
+    raw,
+    value,
+    fields: [...kinds, 'lot', ...((opts.orders ?? []).length ? ['orders'] : [])],
+    key_kinds: kinds,
+    orders: opts.orders ?? [],
+    source,
+    note: `Any identifier printed on a document (PO, invoice, order, document, certificate, item or shipment number), a lot, or a WMS order with this number answers.${hit}`,
+  };
+}
+
+function keyCheck(c: SearchConstraint, s: CoverageSubject, kinds: IdentifierKeyKind[]): SearchConstraintCheck {
+  const want = normalizeKeyValue(c.value);
+  const keys = identifierKeys(s.metadata, kinds);
+  const nameOf = (k: SearchKeyKind) => KEY_KIND_LABELS[k];
+  const kindWords = [...new Set(kinds.map(nameOf))].join(' or ');
+  const base = { constraint_id: c.id } as const;
+  const hit = keys.find((k) => k.value_norm === want);
+  if (hit) {
+    return {
+      ...base, outcome: 'match', field: hit.source_field, field_label: nameOf(hit.kind), value: hit.value_raw, provenance: 'extracted',
+      message: `The ${nameOf(hit.kind)} printed on this document is ${hit.value_raw}.`,
+    };
+  }
+  if (keys.length === 0) {
+    return { ...base, outcome: 'missing', field: kinds[0] ?? null, field_label: kindWords, value: null, provenance: null, message: `No ${kindWords} is recorded on this document.` };
+  }
+  const shown = keys.slice(0, 4).map((k) => `${nameOf(k.kind)} ${k.value_raw}`).join(', ');
+  return {
+    ...base, outcome: 'mismatch', field: keys[0].source_field, field_label: nameOf(keys[0].kind), value: keys[0].value_raw, provenance: 'extracted',
+    message: `This document's ${shown}${keys.length > 4 ? ', …' : ''} — not ${c.value}.`,
+  };
+}
+
+function orderChecks(c: SearchConstraint, s: CoverageSubject, how: (o: SearchOrderEvidence) => string): SearchConstraintCheck[] {
+  return (c.orders ?? []).map((o) => {
+    const ch = checkOrder({ ...c, kind: 'order', order: o }, s);
+    return { ...ch, message: `${how(o)} ${ch.message}` };
+  });
+}
+
+function bestOf(checks: SearchConstraintCheck[]): SearchConstraintCheck {
+  let best: SearchConstraintCheck | null = null;
+  for (const ch of checks) best = better(best, ch);
+  return best!;
+}
+
+export function checkPo(c: SearchConstraint, s: CoverageSubject): SearchConstraintCheck {
+  const own = keyCheck(c, s, ['supplier_po', 'customer_po']);
+  const viaOrders = orderChecks(c, s, (o) => `Customer PO ${c.value} is on WMS order ${o.order_number}.`)
+    // A certificate the order does not reach at all says nothing about the PO.
+    .filter((ch) => !(ch.outcome === 'mismatch' && ch.provenance === null));
+  return bestOf([own, ...viaOrders]);
+}
+
+export function checkInvoice(c: SearchConstraint, s: CoverageSubject): SearchConstraintCheck {
+  return keyCheck(c, s, ['invoice_number']);
+}
+
+export function checkIdentifier(c: SearchConstraint, s: CoverageSubject): SearchConstraintCheck {
+  const kinds = (c.key_kinds ?? IDENTIFIER_KEY_KINDS).filter((k): k is IdentifierKeyKind => (IDENTIFIER_KEY_KINDS as string[]).includes(k));
+  const own = keyCheck(c, s, kinds);
+  const candidates: SearchConstraintCheck[] = [own];
+  const lot = checkLot({ ...c, kind: 'lot', value: normalizeLotNumber(c.value), lot_parts: null }, s);
+  // Only an exact lot answers an identifier; a partial lot is a lot question.
+  if (lot.outcome === 'match') candidates.push(lot);
+  candidates.push(...orderChecks(c, s, (o) => (normalizeKeyValue(o.order_number) === normalizeKeyValue(c.value)
+    ? `${c.value} is WMS order ${o.order_number}.`
+    : `${c.value} is the customer's PO on WMS order ${o.order_number}.`))
+    .filter((ch) => !(ch.outcome === 'mismatch' && ch.provenance === null)));
+  return bestOf(candidates);
+}
+
 export function checkConstraint(c: SearchConstraint, s: CoverageSubject, order: DateOrder | null): SearchConstraintCheck {
   switch (c.kind) {
+    case 'po': return checkPo(c, s);
+    case 'invoice': return checkInvoice(c, s);
+    case 'identifier': return checkIdentifier(c, s);
     case 'lot': return checkLot(c, s);
     case 'date': return checkDate(c, s, order);
     case 'supplier': return checkSupplier(c, s);
@@ -1016,7 +1207,9 @@ const RELEVANT: ReadonlySet<SearchCheckOutcome> = new Set([
  * ("10286 produced 9/2" lists the 10286 certificates from other days, labelled).
  */
 export function isIdentifying(c: SearchConstraint): boolean {
-  return c.kind === 'lot' || c.kind === 'date' || c.kind === 'order' || (c.kind === 'product' && !!c.product_resolution);
+  return c.kind === 'lot' || c.kind === 'date' || c.kind === 'order'
+    || c.kind === 'po' || c.kind === 'invoice' || c.kind === 'identifier'
+    || (c.kind === 'product' && !!c.product_resolution);
 }
 
 const STATUS_RANK: Record<SubjectVerdict['status'], number> = {
@@ -1138,6 +1331,21 @@ export function matchedLotOf(v: SubjectVerdict, s: CoverageSubject): SearchMatch
     quantity: single ? metaString(s.metadata.quantity) : null,
     net_weight: single ? metaString(s.metadata.net_weight) : null,
   };
+}
+
+/**
+ * The lot rows of a multi-lot document on which the answer holds with the
+ * given status — every row, not just the best one, so a page can highlight
+ * each row a lot prefix (or a date) matched.
+ */
+export function answeringLotRows(
+  s: CoverageSubject,
+  constraints: SearchConstraint[],
+  dropped: SearchDroppedConstraint[],
+  status: SubjectVerdict['status'],
+): SubjectLot[] {
+  if (s.lots.length < 2 || s.row_scoped) return [];
+  return s.lots.filter((lot) => evaluateSubject({ ...s, lots: [lot], row_scoped: true }, constraints, dropped).status === status);
 }
 
 /** A product constraint whose phrase could mean several products. */

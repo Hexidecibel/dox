@@ -210,6 +210,8 @@ export async function drainSearchReindexQueue(
       `SELECT id, tenant_id, entity_kind, entity_id, attempts, max_attempts
          FROM search_reindex_jobs
         WHERE status = 'pending'
+          -- 0122 key rebuilds have their own drainer (functions/lib/search/keys.ts).
+          AND entity_kind != 'document_keys'
         ORDER BY created_at
         LIMIT ?`,
     )

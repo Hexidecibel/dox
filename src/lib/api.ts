@@ -55,6 +55,8 @@ import type {
   ProcessingQueueItem,
   QueuedResponse,
   NaturalSearchResponse,
+  SearchQueryRequest,
+  SearchQueryResponse,
   ApiSupplier,
   SupplierListResponse,
   SupplierLookupOrCreateResponse,
@@ -3422,6 +3424,19 @@ export const api = {
       if (params.limit_per_type !== undefined) query.set('limit_per_type', String(params.limit_per_type));
       return fetchApi<UniversalSearchResponse>(`/search?${query.toString()}`);
     },
+
+    /**
+     * POST /api/search/query — the one executor (search redesign Phase 1).
+     * Every clause runs: scope clauses as hard filters with sticky facets,
+     * identifying clauses through the coverage judge. `signal` lets the
+     * caller abandon a request the person has already typed past.
+     */
+    query: (body: SearchQueryRequest, signal?: AbortSignal): Promise<SearchQueryResponse> =>
+      fetchApi<SearchQueryResponse>('/search/query', {
+        method: 'POST',
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {}),
+      }),
 
     /**
      * POST /api/documents/search/natural — the AI-parsed question, answered

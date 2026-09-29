@@ -2425,7 +2425,18 @@ export type SearchConstraintKind =
   | 'metadata'
   | 'text'
   /** A WMS order number (A7): followed order_items -> lots -> documents. */
-  | 'order';
+  | 'order'
+  /**
+   * A PO number (search redesign Phase 1). Two namespaces that never overlap on
+   * prod: the PO PRINTED on a supplier's paper (our purchase order to them,
+   * `K134273`) and the CUSTOMER's PO on a WMS order. Either answers; each check
+   * says which one it was.
+   */
+  | 'po'
+  /** An invoice number printed on the document itself. Never followed through orders. */
+  | 'invoice'
+  /** A number that is on file as more than one kind of identifier: any kind answers. */
+  | 'identifier';
 
 export interface SearchConstraint {
   id: string;
@@ -2444,8 +2455,12 @@ export interface SearchConstraint {
   date_to?: string | null;
   /** Set for a year-less date ("9/2"): matches that month/day in any year. */
   month_day?: { month: number; day: number } | null;
-  /** For metadata constraints: exact (normalized) or substring comparison. */
-  match?: 'equals' | 'contains';
+  /**
+   * For metadata constraints: exact (normalized) or substring comparison.
+   * 'prefix' (lot constraints only): "lot 104" asks for every lot that STARTS
+   * with 104 — covering on the rows that do, never demoted to free text.
+   */
+  match?: 'equals' | 'contains' | 'prefix';
   /**
    * A lot typed as TWO inputs (base + sublot, AJ A3). Matched part against part,
    * never by concatenating them — base-lot width is supplier-specific (R2).
@@ -2464,7 +2479,42 @@ export interface SearchConstraint {
   product_resolution?: SearchProductResolution | null;
   /** Set on an `order` constraint: the order and what links each line to a certificate. */
   order?: SearchOrderEvidence | null;
+  /**
+   * `po` / `invoice` / `identifier`: which document_search_keys kinds (migration
+   * 0122) the document's OWN printed identifiers are compared on.
+   */
+  key_kinds?: SearchKeyKind[] | null;
+  /**
+   * `po` / `identifier`: WMS orders carrying this number (as the customer's PO,
+   * or as the order number for `identifier`), each judged exactly like an
+   * `order` constraint — covering only through a person's accepted match or an
+   * exact lot row.
+   */
+  orders?: SearchOrderEvidence[] | null;
 }
+
+/**
+ * Kinds of `document_search_keys` row (migration 0122): the identifiers and
+ * dates a document states, derived by `shared/searchKeys.ts#deriveSearchKeys`
+ * so a PO, an invoice or a code date is an index SEEK instead of a scan.
+ */
+export type SearchKeyKind =
+  | 'supplier_po'
+  | 'customer_po'
+  | 'invoice_number'
+  | 'order_number'
+  | 'document_number'
+  | 'certificate_number'
+  | 'customer_item_number'
+  | 'product_code'
+  | 'shipment_number'
+  | 'lot'
+  | 'production_date'
+  | 'code_date'
+  | 'best_by'
+  | 'expiration_date'
+  | 'document_expires_on'
+  | 'ship_date';
 
 /** Kinds of product identifier (migration 0107). */
 export type ProductIdentifierKind = 'our_sku' | 'supplier_item' | 'supplier_name' | 'alias' | 'gtin' | 'pack';
@@ -2705,6 +2755,13 @@ export interface SearchMatchedLot {
 export interface SearchResultCoverage {
   match_status?: SearchMatchStatus;
   matched_lot?: SearchMatchedLot | null;
+  /**
+   * Every lot row on the document the answer holds for (a lot prefix can match
+   * several rows of one certificate), so the page highlights those rows rather
+   * than every lot on it equally. Set by POST /api/search/query when more than
+   * one row of a multi-lot document answers.
+   */
+  matched_lots?: SearchMatchedLot[] | null;
   match_checks?: SearchConstraintCheck[];
   /** The failing checks' messages joined — null when covering. */
   match_reason?: string | null;
@@ -4507,10 +4564,13 @@ export interface UniversalSearchParams {
 export type SearchSort = 'relevance' | 'newest' | 'oldest' | 'name';
 export type SearchDateBucket =
   | 'any'
+  /** The old /api/documents/search buckets; kept so an old URL still decodes. */
+  | 'last_24h'
   | 'last_7d'
   | 'last_30d'
   | 'last_90d'
-  | 'last_365d';
+  | 'last_365d'
+  | 'older';
 
 export type UniversalSearchType =
   | 'all'
@@ -4551,6 +4611,62 @@ export interface FacetCount {
   /** Number of matches with this option *without* the option's own filter
    * applied (sticky-filter semantics — see Phase 1.7 in the plan). */
   count: number;
+}
+
+// === Search redesign Phase 1 — POST /api/search/query ===
+//
+// One typed query (shared/searchQuery.ts) run by one executor
+// (functions/lib/search/execute.ts). Scope clauses are hard filters with
+// sticky-exclusion facets; identifying clauses are judged by the unchanged
+// coverage engine, so the SearchCoverageFields here mean exactly what they mean
+// on /api/search.
+
+export interface SearchQueryRequest {
+  query: import('./searchQuery').SearchQuery;
+  /** super_admin only; everyone else is pinned to their own tenant. */
+  tenant_id?: string;
+  limit?: number;
+  offset?: number;
+  /** Include facet counts (default true). */
+  facets?: boolean;
+  /**
+   * Read identifying clauses out of `query.text` (dates with a role, lots, a
+   * PO / invoice / order / identifier on file). Detected clauses come back in
+   * `interpreted` and are NOT written into the query: the text stays text.
+   */
+  interpret?: boolean;
+}
+
+export interface SearchQueryClauseSummary {
+  id: string;
+  field: import('./searchFields').FieldKey;
+  class: import('./searchFields').FieldClass;
+  source: import('./searchQuery').ClauseSource;
+  /** The clause in words ("Supplier: Darigold or West Point"). */
+  label: string;
+}
+
+export interface SearchQueryResponse extends SearchCoverageFields {
+  documents: UniversalSearchDocument[];
+  total: number;
+  limit: number;
+  offset: number;
+  facets?: Partial<Record<import('./searchFields').FacetField, FacetCount[]>>;
+  /** Every clause that ran — the query's own and any read out of its text. */
+  clauses: SearchQueryClauseSummary[];
+  interpreted?: { clauses: import('./searchQuery').Clause[]; residual: string };
+  /** Display names for the ids the query names (suppliers, types, products). */
+  labels: Record<string, string>;
+  /** The scope in words, when any scope clause narrowed the set. */
+  scope_summary: string | null;
+  /**
+   * Documents whose search keys (migration 0122) were still being brought up
+   * to date when this answered. Non-zero means a PO / invoice / date seek also
+   * fell back to judging the scoped document set, and says so.
+   */
+  keys_pending?: number;
+  /** What the answer cost: D1 statements prepared, round trips, subjects judged. */
+  stats: { statements: number; round_trips: number; candidates: number; scan_fallback: boolean };
 }
 
 // === Admin — Processing Status health page ===

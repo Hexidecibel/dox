@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 140 tables, 2 views, 236 indexes, 36 triggers.
+Objects: 141 tables, 2 views, 245 indexes, 42 triggers.
 
 ## Core documents & versions
 
@@ -109,9 +109,9 @@ Triggers: `trg_document_versions_ai_fts`, `trg_document_versions_au_fts`
   arrived_at TEXT
 ```
 
-Indexes: `idx_documents_category`, `idx_documents_classification_status`, `idx_documents_document_type`, `idx_documents_lot_number`, `idx_documents_po_number`, `idx_documents_renewal_due_date`, `idx_documents_renewal_type`, `idx_documents_status`, `idx_documents_tenant`, `idx_documents_tenant_external_ref`
+Indexes: `idx_documents_category`, `idx_documents_classification_status`, `idx_documents_document_type`, `idx_documents_lot_number`, `idx_documents_po_number`, `idx_documents_renewal_due_date`, `idx_documents_renewal_type`, `idx_documents_status`, `idx_documents_tenant`, `idx_documents_tenant_external_ref`, `idx_documents_tenant_owner`, `idx_documents_tenant_status_created`, `idx_documents_tenant_status_renewal`, `idx_documents_tenant_status_supplier`, `idx_documents_tenant_status_type`
 
-Triggers: `trg_documents_ad_fts`, `trg_documents_ai_fts`, `trg_documents_au_fts`
+Triggers: `trg_documents_ad_fts`, `trg_documents_ad_search_keys`, `trg_documents_ai_fts`, `trg_documents_ai_search_keys`, `trg_documents_au_fts`, `trg_documents_au_search_keys`
 
 ## Taxonomy & registry
 
@@ -178,7 +178,7 @@ Supply-chain entities documents attach to. All links are optional per document.
 
 Indexes: `idx_document_lots_doc`, `idx_document_lots_lot`
 
-Triggers: `trg_document_lots_ad_fts`, `trg_document_lots_ai_fts`
+Triggers: `trg_document_lots_ad_fts`, `trg_document_lots_ad_search_keys`, `trg_document_lots_ai_fts`, `trg_document_lots_ai_search_keys`
 
 ### `document_products`
 
@@ -224,7 +224,7 @@ Triggers: `trg_document_products_ad_fts`, `trg_document_products_ai_fts`
 
 Indexes: `idx_lots_identity`, `idx_lots_lotkey`, `idx_lots_production_date`, `idx_lots_supplier`
 
-Triggers: `trg_lots_au_fts`
+Triggers: `trg_lots_au_fts`, `trg_lots_au_search_keys`
 
 ### `product_identifiers`
 
@@ -873,7 +873,7 @@ Triggers: `trg_order_items_ad_fts`, `trg_order_items_ai_fts`, `trg_order_items_a
   UNIQUE(tenant_id, order_number)
 ```
 
-Indexes: `idx_orders_connector`, `idx_orders_connector_run_staged`, `idx_orders_customer`, `idx_orders_extended_metadata`, `idx_orders_primary_metadata`, `idx_orders_staged`, `idx_orders_tenant_status`
+Indexes: `idx_orders_connector`, `idx_orders_connector_run_staged`, `idx_orders_customer`, `idx_orders_extended_metadata`, `idx_orders_primary_metadata`, `idx_orders_staged`, `idx_orders_tenant_po`, `idx_orders_tenant_status`
 
 Triggers: `trg_orders_ad_fts`, `trg_orders_ai_fts`, `trg_orders_au_fts`
 
@@ -1569,6 +1569,24 @@ Indexes: `idx_document_requests_assigned`, `idx_document_requests_due`, `idx_doc
 ```
 
 Indexes: `idx_document_requirements_document`, `idx_document_requirements_requirement`
+
+### `document_search_keys`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL
+  document_id TEXT NOT NULL
+  lot_id TEXT
+  kind TEXT NOT NULL
+  value_raw TEXT NOT NULL
+  value_norm TEXT NOT NULL
+  value_date TEXT
+  provenance TEXT NOT NULL DEFAULT 'stated' CHECK (provenance IN ('stated', 'ambiguous'))
+  source_field TEXT
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+```
+
+Indexes: `idx_document_search_keys_date`, `idx_document_search_keys_document`, `idx_document_search_keys_value`
 
 ### `document_spec_checks`
 

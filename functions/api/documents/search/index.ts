@@ -19,6 +19,15 @@
  *   sort               — relevance (default) | newest | oldest | name
  *   facets=1           — include faceted counts on the response
  *
+ * Search redesign Phase 1 STOPGAP (the /documents screen now calls
+ * POST /api/search/query; this contract stays honest while other callers move):
+ *   supplier_id, document_type_id, product_id, status — may REPEAT (or be
+ *   comma-separated); values inside one filter OR together, filters AND.
+ *   product_id matches a document_products link OR a linked lot row's product.
+ *   status defaults to active; 'deleted' is never searchable.
+ *   date_from / date_to — bounds on created_at (they used to be ignored).
+ *   Facets go out in ONE batch, each leaving out only its own filter.
+ *
  * Response shape:
  *   {
  *     documents: Array<DocumentRow & { snippet?: string }>,
@@ -93,13 +102,18 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const q = url.searchParams.get('q') ?? '';
     let tenantId = url.searchParams.get('tenant_id');
     const category = url.searchParams.get('category');
-    const documentTypeId = url.searchParams.get('document_type_id');
     // Multi-category aware filter (migration 0076 document_categories): a
     // doctype id that matches ANY of a doc's category mappings, not just the
     // denormalized primary document_type_id. Enables "show all Allergen docs"
     // across docs mapped to multiple categories.
     const categoryId = url.searchParams.get('category_id');
-    const supplierId = url.searchParams.get('supplier_id');
+    const multi = (key: string) => [...new Set(url.searchParams.getAll(key).flatMap((v) => v.split(',')).map((v) => v.trim()).filter(Boolean))].slice(0, 90);
+    const supplierIds = multi('supplier_id');
+    const documentTypeIds = multi('document_type_id');
+    const productIds = multi('product_id');
+    const statuses = multi('status').filter((v) => v === 'active' || v === 'archived');
+    const dateFrom = url.searchParams.get('date_from');
+    const dateTo = url.searchParams.get('date_to');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
     const sort = parseSort(url.searchParams.get('sort'));
@@ -130,13 +144,30 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const filters: Record<string, Predicate> = {};
 
     filters.tenant = { sql: 'd.tenant_id = ?', params: [tenantId] };
-    filters.status = { sql: "d.status = 'active'", params: [] };
+    filters.status = statuses.length
+      ? { sql: `d.status IN (${statuses.map(() => '?').join(',')})`, params: statuses }
+      : { sql: "d.status = 'active'", params: [] };
 
     if (category) {
       filters.category = { sql: 'd.category = ?', params: [category] };
     }
-    if (documentTypeId) {
-      filters.doc_type = { sql: 'd.document_type_id = ?', params: [documentTypeId] };
+    if (documentTypeIds.length) {
+      filters.doc_type = { sql: `d.document_type_id IN (${documentTypeIds.map(() => '?').join(',')})`, params: documentTypeIds };
+    }
+    if (productIds.length) {
+      const p = productIds.map(() => '?').join(',');
+      filters.product = {
+        sql: `(EXISTS (SELECT 1 FROM document_products dpf WHERE dpf.document_id = d.id AND dpf.product_id IN (${p}))
+           OR EXISTS (SELECT 1 FROM document_lots dlf JOIN lots lf ON lf.id = dlf.lot_id WHERE dlf.document_id = d.id AND lf.product_id IN (${p})))`,
+        params: [...productIds, ...productIds],
+      };
+    }
+    if (dateFrom || dateTo) {
+      const parts: string[] = [];
+      const params: string[] = [];
+      if (dateFrom) { parts.push('d.created_at >= ?'); params.push(dateFrom); }
+      if (dateTo) { parts.push('d.created_at <= ?'); params.push(dateTo); }
+      filters.date = { sql: parts.join(' AND '), params };
     }
     if (categoryId) {
       // EXISTS against the multi-category junction — matches docs mapped to
@@ -146,8 +177,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         params: [categoryId],
       };
     }
-    if (supplierId) {
-      filters.supplier = { sql: 'd.supplier_id = ?', params: [supplierId] };
+    if (supplierIds.length) {
+      filters.supplier = { sql: `d.supplier_id IN (${supplierIds.map(() => '?').join(',')})`, params: supplierIds };
     }
 
     // ----------------------------------------------------------------
@@ -213,7 +244,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // `documents` table side only needs status + category + doc_type +
     // supplier. We KEEP the tenant filter on `d` as well — defense in
     // depth — but it's a no-op join filter.
-    for (const k of ['status', 'tenant', 'category', 'category_multi', 'doc_type', 'supplier']) {
+    for (const k of ['status', 'tenant', 'category', 'category_multi', 'doc_type', 'supplier', 'product', 'date']) {
       const f = filters[k];
       if (!f) continue;
       whereParts.push(f.sql);
@@ -315,28 +346,25 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     let facets: Record<string, FacetEntry[]> | undefined;
 
     if (wantFacets) {
-      facets = {
-        supplier: await runFacet('supplier', context.env, {
-          matchExpr,
-          tenantId: tenantId!,
-          filters,
+      // One batch, one round trip; each facet leaves out only its own filter.
+      const kinds: FacetKind[] = ['supplier', 'doc_type', 'product', 'status', 'date_bucket'];
+      const ctx: FacetCtx = { matchExpr, tenantId: tenantId!, filters };
+      const results = await context.env.DB.batch(
+        kinds.map((k) => {
+          const f = buildFacet(k, ctx);
+          return context.env.DB.prepare(f.sql).bind(...f.params);
         }),
-        doc_type: await runFacet('doc_type', context.env, {
-          matchExpr,
-          tenantId: tenantId!,
-          filters,
-        }),
-        product: await runFacet('product', context.env, {
-          matchExpr,
-          tenantId: tenantId!,
-          filters,
-        }),
-        date_bucket: await runFacet('date_bucket', context.env, {
-          matchExpr,
-          tenantId: tenantId!,
-          filters,
-        }),
-      };
+      );
+      facets = {};
+      kinds.forEach((k, i) => {
+        facets![k] = ((results[i]?.results ?? []) as Array<{ value: string | null; label: string | null; count: number }>)
+          .filter((r) => r.value !== null)
+          .map((r) => ({
+            value: String(r.value),
+            label: r.label !== null ? String(r.label) : String(r.value),
+            count: Number(r.count ?? 0),
+          }));
+      });
     }
 
     const responseBody: Record<string, unknown> = {
@@ -364,7 +392,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 // surface is small and reuse-friendly.
 // =====================================================================
 
-type FacetKind = 'supplier' | 'doc_type' | 'product' | 'date_bucket';
+type FacetKind = 'supplier' | 'doc_type' | 'product' | 'status' | 'date_bucket';
 
 interface FacetCtx {
   matchExpr: string | null;
@@ -372,24 +400,28 @@ interface FacetCtx {
   filters: Record<string, { sql: string; params: (string | number)[] }>;
 }
 
-async function runFacet(
+function buildFacet(
   kind: FacetKind,
-  envBindings: Env,
   ctx: FacetCtx,
-): Promise<FacetEntry[]> {
+): { sql: string; params: (string | number)[] } {
   // Pick which filter to drop for the sticky-filter rule.
   const facetOwnFilterKey: Record<FacetKind, string | null> = {
     supplier: 'supplier',
     doc_type: 'doc_type',
-    product: null, // products are joined; no cross-facet conflict
-    date_bucket: null,
+    product: 'product',
+    status: 'status',
+    date_bucket: 'date',
   };
   const dropKey = facetOwnFilterKey[kind];
 
   const whereParts: string[] = [];
   const whereParams: (string | number)[] = [];
   for (const [k, f] of Object.entries(ctx.filters)) {
-    if (k === dropKey) continue;
+    if (k === dropKey) {
+      // The status facet counts every searchable status, never 'deleted'.
+      if (k === 'status') whereParts.push("d.status IN ('active', 'archived')");
+      continue;
+    }
     whereParts.push(f.sql);
     whereParams.push(...f.params);
   }
@@ -412,10 +444,17 @@ async function runFacet(
     case 'product':
       groupCol = 'p.id';
       labelCol = 'p.name';
+      // A split COA is linked to its product only through its lot row.
       extraJoins = `
-        LEFT JOIN document_products dp ON dp.document_id = d.id
-        LEFT JOIN products p ON p.id = dp.product_id
+        LEFT JOIN (SELECT dp.document_id, dp.product_id FROM document_products dp
+                   UNION SELECT dl.document_id, l.product_id FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
+                    WHERE l.product_id IS NOT NULL) dpx ON dpx.document_id = d.id
+        LEFT JOIN products p ON p.id = dpx.product_id
       `;
+      break;
+    case 'status':
+      groupCol = 'd.status';
+      labelCol = 'd.status';
       break;
     case 'date_bucket': {
       // Coarse buckets: today / 7d / 30d / 90d / older
@@ -446,7 +485,7 @@ async function runFacet(
         FROM documents_fts f
         WHERE f.tenant_id = ? AND documents_fts MATCH ?
       )
-      SELECT ${groupCol} AS value, ${labelCol} AS label, COUNT(*) AS count
+      SELECT ${groupCol} AS value, ${labelCol} AS label, COUNT(DISTINCT d.id) AS count
       FROM matches m
       JOIN documents d ON d.id = m.doc_id
       ${standardJoins}
@@ -460,7 +499,7 @@ async function runFacet(
     params.push(ctx.tenantId, ctx.matchExpr, ...whereParams);
   } else {
     sql = `
-      SELECT ${groupCol} AS value, ${labelCol} AS label, COUNT(*) AS count
+      SELECT ${groupCol} AS value, ${labelCol} AS label, COUNT(DISTINCT d.id) AS count
       FROM documents d
       ${standardJoins}
       ${extraJoins}
@@ -473,15 +512,5 @@ async function runFacet(
     params.push(...whereParams);
   }
 
-  const result = await envBindings.DB.prepare(sql)
-    .bind(...params)
-    .all<{ value: string | null; label: string | null; count: number }>();
-
-  return (result.results ?? [])
-    .filter((r) => r.value !== null)
-    .map((r) => ({
-      value: String(r.value),
-      label: r.label !== null ? String(r.label) : String(r.value),
-      count: Number(r.count ?? 0),
-    }));
+  return { sql, params };
 }

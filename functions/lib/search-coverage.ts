@@ -81,6 +81,7 @@ export interface QueueGroup {
   file_name: string;
   supplier: string | null;
   created_at: string | null;
+  document_type_id?: string | null;
   records: Array<{ label: string | null; subject: CoverageSubject }>;
 }
 
@@ -116,7 +117,7 @@ function parseJsonArray(raw: unknown): string[] {
 const FIELD_SEP = '\u001f';
 const PART_SEP = '\u001e';
 
-interface DocScanRow {
+export interface DocScanRow {
   id: string;
   supplier_id: string | null;
   product_ids: string | null;
@@ -134,7 +135,7 @@ interface DocScanRow {
   lot_scheme_spec: string | null;
 }
 
-interface QueueScanRow {
+export interface QueueScanRow {
   id: string;
   file_name: string;
   supplier: string | null;
@@ -143,10 +144,20 @@ interface QueueScanRow {
   ai_records: string | null;
   document_type_slug: string | null;
   document_type_name: string | null;
+  document_type_id?: string | null;
 }
 
 function normAlnum(s: unknown): string {
   return String(s ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+/**
+ * The narrow per-document projection the judge reads, with room for extra
+ * columns (the search executor adds the scope attributes). `WHERE` is appended
+ * by the caller.
+ */
+export function docSubjectSelect(extraColumns = ''): string {
+  return DOC_SUBJECT_SELECT.replace('SELECT d.id,', `SELECT ${extraColumns ? `${extraColumns},` : ''} d.id,`);
 }
 
 /** The narrow per-document projection the judge reads. `WHERE` is appended by the caller. */
@@ -197,7 +208,7 @@ function parseLotRows(raw: string | null): SubjectLot[] {
 
 /** A stored declaration, validated once per distinct JSON. Only a structured one is kept. */
 const schemeCache = new Map<string, LotSchemeSpec | null>();
-function structuredScheme(raw: string | null): LotSchemeSpec | null {
+export function structuredScheme(raw: string | null): LotSchemeSpec | null {
   if (!raw) return null;
   if (schemeCache.has(raw)) return schemeCache.get(raw) ?? null;
   let spec: LotSchemeSpec | null = null;
@@ -212,7 +223,7 @@ function structuredScheme(raw: string | null): LotSchemeSpec | null {
   return spec;
 }
 
-function addDocRow(corpus: Pick<CoverageCorpus, 'docs' | 'updatedAt' | 'otherIdentifiers'>, r: DocScanRow): void {
+export function addDocRow(corpus: Pick<CoverageCorpus, 'docs' | 'updatedAt' | 'otherIdentifiers'>, r: DocScanRow): void {
   const metadata = { ...parseJsonObject(r.extended_lite), ...parseJsonObject(r.primary_metadata) };
   for (const k of ['po_number', 'order_number', 'product_code', 'customer_po', 'shipment_number', 'customer_item_number']) {
     const v = normAlnum(metadata[k]);
@@ -259,54 +270,58 @@ export async function loadCoverageCorpus(db: D1Database, tenantId: string): Prom
   for (const r of rows.slice(0, DOC_SCAN_CAP)) addDocRow({ docs, updatedAt, otherIdentifiers }, r);
 
   const queueRes = await db
-    .prepare(
-      `SELECT q.id, q.file_name, q.supplier, q.created_at, q.ai_fields, q.ai_records,
-              dt.slug AS document_type_slug, dt.name AS document_type_name
+    .prepare(QUEUE_SCAN_SQL)
+    .bind(tenantId, QUEUE_SCAN_CAP)
+    .all<QueueScanRow>();
+
+  const queue: QueueGroup[] = (queueRes.results ?? []).map(queueGroupFromRow);
+
+  return { docs, updatedAt, queue, truncated, otherIdentifiers };
+}
+
+/** The pending Review Queue files a coverage search judges (newest first). */
+export const QUEUE_SCAN_SQL = `SELECT q.id, q.file_name, q.supplier, q.created_at, q.ai_fields, q.ai_records,
+              dt.slug AS document_type_slug, dt.name AS document_type_name, q.document_type_id
          FROM processing_queue q
          LEFT JOIN document_types dt ON dt.id = q.document_type_id
         WHERE q.tenant_id = ? AND q.status = 'pending' AND q.processing_status = 'ready'
         ORDER BY q.created_at DESC
-        LIMIT ?`,
-    )
-    .bind(tenantId, QUEUE_SCAN_CAP)
-    .all<QueueScanRow>();
+        LIMIT ?`;
 
-  const queue: QueueGroup[] = (queueRes.results ?? []).map((q) => {
-    const fields = parseJsonObject(q.ai_fields);
-    const recordsDoc = parseJsonObject(q.ai_records);
-    const pageMeta = (recordsDoc.page_metadata && typeof recordsDoc.page_metadata === 'object')
-      ? (recordsDoc.page_metadata as Record<string, unknown>)
-      : {};
-    const recs = Array.isArray(recordsDoc.records) ? (recordsDoc.records as Array<Record<string, unknown>>) : [];
-    const mk = (metadata: Record<string, unknown>, idx: number): CoverageSubject => ({
-      id: `${q.id}#${idx}`,
-      supplier_name: q.supplier ?? (typeof metadata.supplier_name === 'string' ? metadata.supplier_name : null),
-      supplier_aliases: [],
-      document_type_slug: q.document_type_slug,
-      document_type_name: q.document_type_name,
-      product_names: [],
-      metadata,
-      lots: [],
-      created_at: q.created_at,
-      renewal_due_date: null,
-      text_match: null,
-    });
-    // A record's own fields over the page's shared fields — never ai_fields,
-    // which on a multi-record certificate is the FIRST record's values and
-    // would lend record 1's lot to record 4.
-    const records = recs.length > 0
-      ? recs.map((rec, i) => {
-        const recFields = rec.fields && typeof rec.fields === 'object' ? (rec.fields as Record<string, unknown>) : {};
-        return {
-          label: recs.length > 1 ? `record ${i + 1} of ${recs.length}` : null,
-          subject: mk({ ...pageMeta, ...recFields }, i),
-        };
-      })
-      : [{ label: null, subject: mk(fields, 0) }];
-    return { queue_id: q.id, file_name: q.file_name, supplier: q.supplier, created_at: q.created_at, records };
+/** One pending queue file as the records a coverage search judges. */
+export function queueGroupFromRow(q: QueueScanRow): QueueGroup {
+  const fields = parseJsonObject(q.ai_fields);
+  const recordsDoc = parseJsonObject(q.ai_records);
+  const pageMeta = (recordsDoc.page_metadata && typeof recordsDoc.page_metadata === 'object')
+    ? (recordsDoc.page_metadata as Record<string, unknown>)
+    : {};
+  const recs = Array.isArray(recordsDoc.records) ? (recordsDoc.records as Array<Record<string, unknown>>) : [];
+  const mk = (metadata: Record<string, unknown>, idx: number): CoverageSubject => ({
+    id: `${q.id}#${idx}`,
+    supplier_name: q.supplier ?? (typeof metadata.supplier_name === 'string' ? metadata.supplier_name : null),
+    supplier_aliases: [],
+    document_type_slug: q.document_type_slug,
+    document_type_name: q.document_type_name,
+    product_names: [],
+    metadata,
+    lots: [],
+    created_at: q.created_at,
+    renewal_due_date: null,
+    text_match: null,
   });
-
-  return { docs, updatedAt, queue, truncated, otherIdentifiers };
+  // A record's own fields over the page's shared fields — never ai_fields,
+  // which on a multi-record certificate is the FIRST record's values and
+  // would lend record 1's lot to record 4.
+  const records = recs.length > 0
+    ? recs.map((rec, i) => {
+      const recFields = rec.fields && typeof rec.fields === 'object' ? (rec.fields as Record<string, unknown>) : {};
+      return {
+        label: recs.length > 1 ? `record ${i + 1} of ${recs.length}` : null,
+        subject: mk({ ...pageMeta, ...recFields }, i),
+      };
+    })
+    : [{ label: null, subject: mk(fields, 0) }];
+  return { queue_id: q.id, file_name: q.file_name, supplier: q.supplier, created_at: q.created_at, document_type_id: q.document_type_id ?? null, records };
 }
 
 function addDaysIso(iso: string, n: number): string {
@@ -452,7 +467,7 @@ async function lotCodeImpliedDocumentIds(
 }
 
 /** "???26212" — the lot shape a declared format gives a day, unknown segments as '?'. */
-function impliedLotExample(spec: LotSchemeSpec, iso: string): string {
+export function impliedLotExample(spec: LotSchemeSpec, iso: string): string {
   const [y, m, d] = iso.split('-').map(Number);
   const start = Date.UTC(y, 0, 1);
   const julian = Math.round((Date.UTC(y, m - 1, d) - start) / 86_400_000) + 1;
@@ -587,6 +602,9 @@ export async function findOrdersInQuery(db: D1Database, tenantId: string, q: str
   return hits;
 }
 
+export interface OrderItemRow { id: string; order_id?: string; product_code: string | null; product_name: string | null; lot_number: string | null; coa_document_id: string | null; coa_match_status: string | null }
+export interface OrderSuggestionRow { order_item_id: string; document_id: string; status: string | null; match_basis: string | null; match_confidence: number | null }
+
 async function loadOrderEvidence(
   db: D1Database,
   o: { id: string; order_number: string; customer_name: string | null },
@@ -607,14 +625,27 @@ async function loadOrderEvidence(
     )
     .bind(o.id)
     .all<{ order_item_id: string; document_id: string; status: string | null; match_basis: string | null; match_confidence: number | null }>();
-  type SuggRow = { order_item_id: string; document_id: string; status: string | null; match_basis: string | null; match_confidence: number | null };
-  const byItem = new Map<string, SuggRow[]>();
-  for (const r of sugg.results ?? []) byItem.set(r.order_item_id, [...(byItem.get(r.order_item_id) ?? []), r]);
+  return orderEvidenceFromRows(o, items.results ?? [], sugg.results ?? [], catalog);
+}
+
+/**
+ * An order's lines, and what links each to a certificate, from rows already
+ * read (the search executor reads every order's items and suggestions in one
+ * batch). Nothing here writes a link.
+ */
+export function orderEvidenceFromRows(
+  o: { id: string; order_number: string; customer_name: string | null },
+  itemRows: OrderItemRow[],
+  suggestionRows: OrderSuggestionRow[],
+  catalog: PreparedCatalog | null,
+): SearchOrderEvidence {
+  const byItem = new Map<string, OrderSuggestionRow[]>();
+  for (const r of suggestionRows) byItem.set(r.order_item_id, [...(byItem.get(r.order_item_id) ?? []), r]);
   return {
     order_id: o.id,
     order_number: o.order_number,
     customer_name: o.customer_name,
-    lines: (items.results ?? []).map((it) => {
+    lines: itemRows.map((it) => {
       const rows = byItem.get(it.id) ?? [];
       const accepted = rows.filter((r) => r.status === 'accepted').map((r) => r.document_id);
       const legacy = it.coa_document_id && it.coa_match_status === 'matched' && !accepted.includes(it.coa_document_id)
@@ -825,11 +856,11 @@ export interface PoolHit {
   snippet_supplier: string | null;
 }
 
-export async function ftsPool(db: D1Database, tenantId: string, text: string, limit = 500): Promise<Map<string, PoolHit>> {
+/** The FTS hit set for `text`, as one statement (null when the text has no searchable term). */
+export function ftsPoolStatement(db: D1Database, tenantId: string, text: string, limit = 500): D1PreparedStatement | null {
   const expr = buildMatchExprWithLot(text);
-  const out = new Map<string, PoolHit>();
-  if (!expr) return out;
-  const res = await db
+  if (!expr) return null;
+  return db
     .prepare(
       `WITH matches AS (
          SELECT f.doc_id,
@@ -845,18 +876,28 @@ export async function ftsPool(db: D1Database, tenantId: string, text: string, li
         ORDER BY m.rank
         LIMIT ?`,
     )
-    .bind(tenantId, expr, limit)
-    .all<{ doc_id: string } & PoolHit>();
-  for (const r of res.results ?? []) {
+    .bind(tenantId, expr, limit);
+}
+
+export function poolFromRows(rows: Array<{ doc_id: string } & PoolHit>): Map<string, PoolHit> {
+  const out = new Map<string, PoolHit>();
+  for (const r of rows) {
     out.set(r.doc_id, { rank: r.rank, snippet: r.snippet, snippet_extracted: r.snippet_extracted, snippet_supplier: r.snippet_supplier });
   }
   return out;
 }
 
-/** Queue items whose file name, supplier or extracted text holds every word. */
-async function queueTextHits(db: D1Database, tenantId: string, text: string): Promise<Set<string>> {
+export async function ftsPool(db: D1Database, tenantId: string, text: string, limit = 500): Promise<Map<string, PoolHit>> {
+  const stmt = ftsPoolStatement(db, tenantId, text, limit);
+  if (!stmt) return new Map();
+  const res = await stmt.all<{ doc_id: string } & PoolHit>();
+  return poolFromRows(res.results ?? []);
+}
+
+/** Queue items whose file name, supplier or extracted text holds every word (null = no words). */
+export function queueTextStatement(db: D1Database, tenantId: string, text: string): D1PreparedStatement | null {
   const words = text.split(/\s+/).map((w) => w.toLowerCase().replace(/[^a-z0-9\-./#%]/g, '')).filter((w) => w.length > 0).slice(0, 6);
-  if (words.length === 0) return new Set();
+  if (words.length === 0) return null;
   const conds: string[] = [];
   const params: string[] = [];
   for (const w of words) {
@@ -865,14 +906,19 @@ async function queueTextHits(db: D1Database, tenantId: string, text: string): Pr
     conds.push(`LOWER(COALESCE(q.file_name, '') || ' ' || COALESCE(q.supplier, '') || ' ' || COALESCE(q.extracted_text, '')) LIKE ?`);
     params.push(`%${stem}%`);
   }
-  const res = await db
+  return db
     .prepare(
       `SELECT q.id FROM processing_queue q
         WHERE q.tenant_id = ? AND q.status = 'pending' AND q.processing_status = 'ready' AND ${conds.join(' AND ')}
         ORDER BY q.created_at DESC LIMIT ?`,
     )
-    .bind(tenantId, ...params, QUEUE_SCAN_CAP)
-    .all<{ id: string }>();
+    .bind(tenantId, ...params, QUEUE_SCAN_CAP);
+}
+
+async function queueTextHits(db: D1Database, tenantId: string, text: string): Promise<Set<string>> {
+  const stmt = queueTextStatement(db, tenantId, text);
+  if (!stmt) return new Set();
+  const res = await stmt.all<{ id: string }>();
   return new Set((res.results ?? []).map((r) => r.id));
 }
 

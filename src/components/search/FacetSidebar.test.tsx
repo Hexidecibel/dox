@@ -3,22 +3,25 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { FacetSidebar } from './FacetSidebar';
 import type { FacetCount } from '../../../shared/types';
+import type { SearchQuery } from '../../../shared/searchQuery';
 
 const SUPPLIERS: FacetCount[] = [
   { value: 's1', label: 'Acme', count: 5 },
   { value: 's2', label: 'Beta', count: 3 },
 ];
 
+const q = (clauses: SearchQuery['clauses'] = [], text = 'foo'): SearchQuery => ({ v: 1, text, clauses, view: { entity: 'documents' } });
+
 describe('FacetSidebar', () => {
   it('renders an empty hint when no facets are present', () => {
-    render(<FacetSidebar state={{ q: 'foo' }} facets={{}} onChange={() => {}} />);
+    render(<FacetSidebar query={q()} facets={{}} onChange={() => {}} />);
     expect(screen.getByText('Run a search to see filter options.')).toBeInTheDocument();
   });
 
   it('renders facets in a stable order', () => {
     render(
       <FacetSidebar
-        state={{ q: 'foo' }}
+        query={q()}
         facets={{ supplier: SUPPLIERS, status: [{ value: 'active', label: 'Active', count: 8 }] }}
         onChange={() => {}}
       />,
@@ -27,69 +30,79 @@ describe('FacetSidebar', () => {
     expect(screen.getByText('Status')).toBeInTheDocument();
   });
 
-  it('forwards multi-facet selection changes as a patch', async () => {
+  it('ticking a second supplier extends that clause and leaves every other clause alone', async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
     render(
       <FacetSidebar
-        state={{ q: 'foo', supplier: ['s1'] }}
+        query={q([
+          { id: 'c1', field: 'supplier', op: 'in', values: ['s1'], source: 'facet' },
+          { id: 'c2', field: 'product', op: 'in', values: ['butter'], source: 'facet' },
+        ])}
         facets={{ supplier: SUPPLIERS }}
         onChange={onChange}
       />,
     );
     await user.click(screen.getByText('Beta'));
-    expect(onChange).toHaveBeenCalledWith({ supplier: ['s1', 's2'] });
+    const next: SearchQuery = onChange.mock.calls[0][0];
+    expect(next.clauses.map((c) => [c.field, c.values])).toEqual([['supplier', ['s1', 's2']], ['product', ['butter']]]);
+    expect(next.text).toBe('foo');
   });
 
-  it('emits `undefined` when the last selection is cleared', async () => {
+  it('unticking the last value removes the clause, not the others', async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
     render(
       <FacetSidebar
-        state={{ q: 'foo', supplier: ['s1'] }}
+        query={q([
+          { id: 'c1', field: 'supplier', op: 'in', values: ['s1'], source: 'facet' },
+          { id: 'c2', field: 'document_type', op: 'in', values: ['t1'], source: 'facet' },
+        ])}
         facets={{ supplier: SUPPLIERS }}
         onChange={onChange}
       />,
     );
     await user.click(screen.getByText('Acme'));
-    expect(onChange).toHaveBeenCalledWith({ supplier: undefined });
+    const next: SearchQuery = onChange.mock.calls[0][0];
+    expect(next.clauses.map((c) => c.field)).toEqual(['document_type']);
   });
 
-  it('Clear button emits a sweeping facet-clear patch', async () => {
+  it('Clear drops every scope clause but keeps identifying ones and the text', async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
     render(
       <FacetSidebar
-        state={{ q: 'foo', supplier: ['s1'], doc_type: ['t1'] }}
+        query={q([
+          { id: 'c1', field: 'supplier', op: 'in', values: ['s1'], source: 'facet' },
+          { id: 'c2', field: 'lot', op: 'is', values: ['10426203'], source: 'builder' },
+        ])}
         facets={{ supplier: SUPPLIERS }}
         onChange={onChange}
       />,
     );
     await user.click(screen.getByRole('button', { name: 'Clear' }));
-    const patch = onChange.mock.calls[0][0];
-    expect(patch.supplier).toBeUndefined();
-    expect(patch.doc_type).toBeUndefined();
-    expect(patch.product).toBeUndefined();
-    expect(patch.status).toBeUndefined();
-    expect(patch.date).toBeUndefined();
+    const next: SearchQuery = onChange.mock.calls[0][0];
+    expect(next.clauses.map((c) => c.field)).toEqual(['lot']);
+    expect(next.text).toBe('foo');
   });
 
-  it('treats date as a single-select bucket', async () => {
+  it('uploaded is single-select, and the value it sends IS the clause', async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
     render(
       <FacetSidebar
-        state={{ q: 'foo' }}
+        query={q([{ id: 'c1', field: 'uploaded', op: 'within', values: ['7'], source: 'facet' }])}
         facets={{
-          date: [
-            { value: 'last_7d', label: 'Last 7 days', count: 4 },
-            { value: 'last_30d', label: 'Last 30 days', count: 12 },
+          uploaded: [
+            { value: 'within:7', label: 'Last 7 days', count: 4 },
+            { value: 'within:30', label: 'Last 30 days', count: 12 },
           ],
         }}
         onChange={onChange}
       />,
     );
     await user.click(screen.getByText('Last 30 days'));
-    expect(onChange).toHaveBeenCalledWith({ date: 'last_30d' });
+    const next: SearchQuery = onChange.mock.calls[0][0];
+    expect(next.clauses).toEqual([{ id: 'c1', field: 'uploaded', op: 'within', values: ['30'], source: 'facet' }]);
   });
 });

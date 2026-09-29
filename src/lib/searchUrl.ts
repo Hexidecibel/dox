@@ -20,14 +20,33 @@ import type {
   SearchState,
   UniversalSearchType,
 } from '../../shared/types';
+import { decodeQuery, encodeQuery, type SearchQuery } from '../../shared/searchQuery';
+
+/**
+ * The documents screen's URL is the one query model now (search redesign
+ * Phase 1): `?q=butter&f=supplier.in:S1,S2&f=uploaded.within:30`. Old URLs and
+ * bookmarks (`supplier=…&doc_type=…&date=last_30d`) decode to the same clauses,
+ * including the product / status filters and the date buckets the old codec
+ * and server dropped. The codec itself lives in shared/searchQuery.ts so the
+ * server, saved searches and this page cannot drift apart.
+ */
+export function decodeDocumentsQuery(input: URLSearchParams | string): SearchQuery {
+  return decodeQuery(input);
+}
+
+export function encodeDocumentsQuery(q: SearchQuery): URLSearchParams {
+  return encodeQuery(q);
+}
 
 const SORT_VALUES: SearchSort[] = ['relevance', 'newest', 'oldest', 'name'];
 const DATE_VALUES: SearchDateBucket[] = [
   'any',
+  'last_24h',
   'last_7d',
   'last_30d',
   'last_90d',
   'last_365d',
+  'older',
 ];
 const TYPE_VALUES: UniversalSearchType[] = [
   'all',
