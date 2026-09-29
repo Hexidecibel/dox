@@ -41,6 +41,7 @@ import {
   EXPORT_MAX_RECIPIENTS,
   EXPORT_LINK_TTL_DAYS,
   exportLinkUrl,
+  externalDocumentTitle,
   exportSizeRefusal,
   loadExportDocuments,
   mintExportLink,
@@ -212,7 +213,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       onBehalfOf,
       message,
       documents: rows.map((r) => ({
-        title: r.title,
+        title: externalDocumentTitle(r),
         supplier_name: r.supplier_name,
         document_type_name: r.document_type_name,
         lot_label: r.lot_label,

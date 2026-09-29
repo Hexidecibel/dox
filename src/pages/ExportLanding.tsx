@@ -20,6 +20,7 @@ import {
   Button,
   CircularProgress,
   Divider,
+  Link,
   Stack,
   Table,
   TableBody,
@@ -45,6 +46,25 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
+}
+
+/**
+ * Who sent this, by name AND address (AJ, rules table H3, 2026-09-20: the
+ * recipient should know who sent it). The address is also the email's
+ * reply-to, so it is a mailto link. Either half may be missing on an old user
+ * row; the page never invents one.
+ */
+export function SenderLine({ name, email }: { name: string | null; email: string | null }) {
+  const mail = email ? <Link href={`mailto:${email}`}>{email}</Link> : null;
+  if (name && mail) {
+    return (
+      <>
+        {name} ({mail})
+      </>
+    );
+  }
+  if (mail) return mail;
+  return <>{name ?? 'Someone'}</>;
 }
 
 export function ExportLanding() {
@@ -110,7 +130,6 @@ export function ExportLanding() {
     );
   }
 
-  const sentBy = view.sent_by_name ?? view.sent_by_email ?? 'Someone';
   const zipUrl = `/api/document-exports/public/${encodeURIComponent(token ?? '')}/download`;
 
   return (
@@ -122,7 +141,7 @@ export function ExportLanding() {
         {view.documents.length} document{view.documents.length === 1 ? '' : 's'}
       </Typography>
       <Typography variant="body2" color="text.secondary">
-        Sent by {sentBy}
+        Sent by <SenderLine name={view.sent_by_name} email={view.sent_by_email} />
         {view.on_behalf_of ? ` on behalf of ${view.on_behalf_of}` : ''}. This link works until{' '}
         {formatDate(view.expires_at)}.
       </Typography>
@@ -201,7 +220,7 @@ export function ExportLanding() {
       </Table>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 3 }}>
-        Shared through SupDox. Reply to the email that brought you here to reach {sentBy}.
+        Shared through SupDox. Reply to the email that brought you here to reach {view.sent_by_name ?? view.sent_by_email ?? 'the sender'}.
       </Typography>
     </Box>
   );

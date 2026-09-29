@@ -85,15 +85,49 @@ export async function findOrCreateProduct(
 
   // 3. Upsert the provenance link when a supplier is known.
   if (supplierId) {
-    await db
-      .prepare(
-        `INSERT INTO product_suppliers (id, tenant_id, product_id, supplier_id, supplier_sku)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(product_id, supplier_id) DO NOTHING`
-      )
-      .bind(generateId(), tenantId, productId, supplierId, supplierSku)
-      .run();
+    await linkProductToSupplier(db, tenantId, productId, supplierId, { supplierSku });
   }
 
   return { id: productId };
+}
+
+export interface LinkProductToSupplierResult {
+  /** A new product_suppliers row was written (false = the link already existed). */
+  linked: boolean;
+  /** products.supplier_id was NULL and now names this supplier. */
+  legacyBackfilled: boolean;
+}
+
+/**
+ * Record that `supplierId` supplies `productId`: a `product_suppliers` row
+ * (Model B, the graph every supplier-scoped read joins through) plus the
+ * legacy `products.supplier_id` column when -- and only when -- it is NULL.
+ * Idempotent; never overwrites a legacy association that names another
+ * supplier. The one write path for "this supplier ships this product", used
+ * by intake (`findOrCreateProduct`), POST /api/products from a supplier's
+ * Products tab, and `bin/link-supplier-products`.
+ */
+export async function linkProductToSupplier(
+  db: D1Database,
+  tenantId: string,
+  productId: string,
+  supplierId: string,
+  opts: { supplierSku?: string | null } = {}
+): Promise<LinkProductToSupplierResult> {
+  const ins = await db
+    .prepare(
+      `INSERT INTO product_suppliers (id, tenant_id, product_id, supplier_id, supplier_sku)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(product_id, supplier_id) DO NOTHING`
+    )
+    .bind(generateId(), tenantId, productId, supplierId, opts.supplierSku ?? null)
+    .run();
+  const upd = await db
+    .prepare('UPDATE products SET supplier_id = ? WHERE id = ? AND tenant_id = ? AND supplier_id IS NULL')
+    .bind(supplierId, productId, tenantId)
+    .run();
+  return {
+    linked: (ins.meta?.changes ?? 0) > 0,
+    legacyBackfilled: (upd.meta?.changes ?? 0) > 0,
+  };
 }

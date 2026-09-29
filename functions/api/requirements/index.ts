@@ -28,9 +28,12 @@ function json(body: unknown, status = 200): Response {
  * own tenant; super_admin may pass ?tenant_id=. ?active=0|1 (default: active
  * only), ?checklist= narrows to one checklist grouping.
  *
- * Each row carries `document_count` (confirmed documents closing it) and
- * `claim_type_count` (claims that open it) so the admin UI can show what a row
- * is actually doing before someone deactivates it.
+ * Each row carries `document_count` (APPROVED documents whose link to it is
+ * CONFIRMED -- a suggestion a person has not ticked does not count),
+ * `claim_type_count` (claims that open it) and `closed_by_types` (the document
+ * types whose approval PROPOSES it, migration 0100 -- the "which documents can
+ * satisfy this" answer, AJ 2026-09-20) so the admin UI can show what a row is
+ * actually doing before someone deactivates it.
  */
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -80,7 +83,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
               (SELECT COUNT(*) FROM document_requirements dr
                 WHERE dr.requirement_id = r.id AND dr.status = 'confirmed') AS document_count,
               (SELECT COUNT(*) FROM claim_type_requirements ctr
-                WHERE ctr.requirement_id = r.id) AS claim_type_count
+                WHERE ctr.requirement_id = r.id) AS claim_type_count,
+              -- char(31) (unit separator) because a type name may hold a comma.
+              (SELECT GROUP_CONCAT(dt.name, char(31)) FROM (
+                  SELECT dt2.name FROM document_type_requirements dtr
+                    JOIN document_types dt2 ON dt2.id = dtr.document_type_id
+                   WHERE dtr.requirement_id = r.id AND dt2.active = 1
+                   ORDER BY dt2.name) dt) AS closed_by_types_raw
          FROM requirements r
          LEFT JOIN tenants t ON t.id = r.tenant_id
          ${whereClause}
@@ -90,8 +99,18 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .bind(...params, limit, offset)
       .all();
 
+    const requirements = (results.results as Array<Record<string, unknown>>).map(
+      ({ closed_by_types_raw, ...row }) => ({
+        ...row,
+        closed_by_types:
+          typeof closed_by_types_raw === 'string' && closed_by_types_raw
+            ? closed_by_types_raw.split(String.fromCharCode(31))
+            : [],
+      }),
+    );
+
     return json({
-      requirements: results.results,
+      requirements,
       total: countResult?.total || 0,
       limit,
       offset,

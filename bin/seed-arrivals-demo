@@ -8,11 +8,17 @@
  * WHAT IT CREATES (idempotent: a re-run reuses everything it finds)
  *
  *   Supplier   Northfield Creamery Ingredients, Inc.  (find-or-create)
- *   Requirements, by slug, created only if the tenant has none by that slug or
- *   name: Certificate of Insurance, Specification Sheet, Allergen Statement,
- *   Country of Origin Statement.
+ *   Requirements, by the FSQA starter pack's REQUIREMENT slugs
+ *   (certificate-of-insurance, spec-sheet, allergen-matrix, country-of-origin),
+ *   reused when the tenant has that slug and created -- with the pack's name --
+ *   only when it has not. It once used the DOCUMENT-TYPE slugs
+ *   (specification-sheet, allergen-statement, country-of-origin-statement),
+ *   which on a pack-seeded tenant listed each concept twice on the
+ *   Requirements screen (AJ, 2026-09-20). A requirement is what has to be
+ *   proven, not the document that proves it (rules table F4); the leftovers
+ *   are folded back by bin/retire-duplicate-requirements.
  *   Request A  "Arrivals demo: annual supplier documentation" (issued)
- *              lines: COI, Spec Sheet, Allergen Statement, Country of Origin
+ *              lines: COI, Spec Sheet, Allergen Matrix, Country of Origin
  *   Request B  "Arrivals demo: new item, Sour Cream Powder (NCI-3105)" (issued)
  *              lines: Spec Sheet
  *   Arrivals, uploaded THROUGH EACH REQUEST'S PUBLIC SUPPLIER LINK (the exact
@@ -80,11 +86,22 @@ const SUPPLIER_NAME = 'Northfield Creamery Ingredients, Inc.';
 const REQ_A_TITLE = 'Arrivals demo: annual supplier documentation';
 const REQ_B_TITLE = 'Arrivals demo: new item, Sour Cream Powder (NCI-3105)';
 
+// Requirement slugs from the FSQA starter pack's `requirements` list -- NOT its
+// document-type slugs. Names come from the pack so a created row reads exactly
+// like the one the pack would have seeded.
+const PACK_REQUIREMENTS = JSON.parse(
+  fs.readFileSync(path.join(__dirname, '..', 'starter-packs', 'fsqa.json'), 'utf8'),
+).requirements;
+function packRequirement(slug) {
+  const r = PACK_REQUIREMENTS.find((x) => x.slug === slug);
+  if (!r) throw new Error(`starter-packs/fsqa.json has no requirement "${slug}"`);
+  return { slug: r.slug, name: r.name, checklist: r.checklist ?? null };
+}
 const REQUIREMENTS = {
-  coi: { slug: 'certificate-of-insurance', name: 'Certificate of Insurance' },
-  spec: { slug: 'specification-sheet', name: 'Specification Sheet' },
-  allergen: { slug: 'allergen-statement', name: 'Allergen Statement' },
-  coo: { slug: 'country-of-origin-statement', name: 'Country of Origin Statement' },
+  coi: packRequirement('certificate-of-insurance'),
+  spec: packRequirement('spec-sheet'),
+  allergen: packRequirement('allergen-matrix'),
+  coo: packRequirement('country-of-origin'),
 };
 
 const FILES = [
@@ -300,9 +317,13 @@ function ensureLocalTenantAndLogin(tenantId) {
 const norm = (s) => String(s || '').trim().toLowerCase();
 
 async function ensureRequirement(api, tenantId, existing, def) {
-  const hit = existing.find((r) => r.slug === def.slug || norm(r.name) === norm(def.name));
+  // Slug first: a tenant may have renamed the pack's row ("Specification Sheet
+  // on file" -> "Specification Sheet"), and that is still the same requirement.
+  const hit = existing.find((r) => r.slug === def.slug) || existing.find((r) => norm(r.name) === norm(def.name));
   if (hit) return { id: hit.id, name: hit.name, created: false };
-  const res = await api.call('POST', '/api/requirements', { tenant_id: tenantId, name: def.name, slug: def.slug });
+  const res = await api.call('POST', '/api/requirements', {
+    tenant_id: tenantId, name: def.name, slug: def.slug, checklist: def.checklist,
+  });
   return { id: res.requirement.id, name: res.requirement.name, created: true };
 }
 

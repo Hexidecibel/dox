@@ -865,175 +865,175 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "name": "Specification Sheet on file",
         "slug": "spec-sheet",
         "description": "A current product specification is on file.",
-        "checklist": "SOP 102.2",
+        "checklist": "Product Specification",
         "sort_order": 10
       },
       {
         "name": "Microbiological Limits",
         "slug": "micro-limits",
         "description": "Micro limits stated for the product.",
-        "checklist": "SOP 102.2",
+        "checklist": "Product Specification",
         "sort_order": 20
       },
       {
         "name": "Pack Size / Case Configuration",
         "slug": "pack-size",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Product Specification",
         "sort_order": 30
       },
       {
         "name": "100g Nutritionals",
         "slug": "nutritionals-100g",
         "description": "Nutrition values per 100g.",
-        "checklist": "SOP 102.2",
+        "checklist": "Allergens, Labeling & Nutrition",
         "sort_order": 40
       },
       {
         "name": "Allergen Matrix",
         "slug": "allergen-matrix",
         "description": "Allergen declaration covering the big-9.",
-        "checklist": "SOP 102.2",
+        "checklist": "Allergens, Labeling & Nutrition",
         "sort_order": 50
       },
       {
         "name": "Country of Origin",
         "slug": "country-of-origin",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Product Specification",
         "sort_order": 60
       },
       {
         "name": "GTIN / UPC",
         "slug": "gtin",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Product Specification",
         "sort_order": 70
       },
       {
         "name": "Shelf Life & Storage",
         "slug": "shelf-life",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Product Specification",
         "sort_order": 80
       },
       {
         "name": "Ingredient Statement",
         "slug": "ingredient-statement",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Allergens, Labeling & Nutrition",
         "sort_order": 90
       },
       {
         "name": "Certificate of Analysis on file",
         "slug": "coa-on-file",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Certificates of Analysis",
         "sort_order": 100
       },
       {
         "name": "Safety Data Sheet on file",
         "slug": "sds-on-file",
         "description": "Required for chemicals and sanitation products.",
-        "checklist": "SOP 102.2",
+        "checklist": "Regulatory Registrations & Statements",
         "sort_order": 110
       },
       {
         "name": "Letter of Guarantee on file",
         "slug": "letter-of-guarantee",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Commercial & Legal",
         "sort_order": 120
       },
       {
         "name": "Certificate of Insurance on file",
         "slug": "certificate-of-insurance",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Commercial & Legal",
         "sort_order": 130
       },
       {
         "name": "W-9 on file",
         "slug": "w9-on-file",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Commercial & Legal",
         "sort_order": 140
       },
       {
         "name": "3rd Party Audit REPORT on file",
         "slug": "third-party-audit-report",
         "description": "The full audit report. Separate line item from the certificate — a supplier can send one without the other, and only having the certificate hides the findings.",
-        "checklist": "SOP 102.2",
+        "checklist": "Audit & Certification",
         "sort_order": 150
       },
       {
         "name": "3rd Party Audit CERTIFICATE on file",
         "slug": "third-party-audit-certificate",
         "description": "The valid-through certificate. Separate line item from the report, and the one that drives expiry tracking.",
-        "checklist": "SOP 102.2",
+        "checklist": "Audit & Certification",
         "sort_order": 160
       },
       {
         "name": "HACCP Plan on file",
         "slug": "haccp-plan",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Food Safety Plans & Programs",
         "sort_order": 170
       },
       {
         "name": "Food Safety Plan on file",
         "slug": "food-safety-plan",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Food Safety Plans & Programs",
         "sort_order": 180
       },
       {
         "name": "Food Defense Plan on file",
         "slug": "food-defense-plan",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Food Safety Plans & Programs",
         "sort_order": 190
       },
       {
         "name": "Recall Program on file",
         "slug": "recall-program",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Food Safety Plans & Programs",
         "sort_order": 200
       },
       {
         "name": "Pest Control Program on file",
         "slug": "pest-control-program",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Food Safety Plans & Programs",
         "sort_order": 210
       },
       {
         "name": "Sanitation Program on file",
         "slug": "sanitation-program",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Food Safety Plans & Programs",
         "sort_order": 220
       },
       {
         "name": "GMP Self Audit on file",
         "slug": "gmp-self-audit",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Audit & Certification",
         "sort_order": 230
       },
       {
         "name": "Process Flow Diagram on file",
         "slug": "process-flow-diagram",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Food Safety Plans & Programs",
         "sort_order": 240
       },
       {
         "name": "Product Label on file",
         "slug": "product-label",
         "description": null,
-        "checklist": "SOP 102.2",
+        "checklist": "Allergens, Labeling & Nutrition",
         "sort_order": 250
       },
       {
@@ -1321,7 +1321,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
       {
         "name": "Ingredient Supplier",
         "slug": "ingredient-supplier",
-        "description": "A supplier of a food ingredient we put into product. The heaviest packet, and the one that makes a supplier's requirements look like the SOP.",
+        "description": "A supplier of a food ingredient we put into product. The heaviest packet: nearly the whole supplier-approval checklist.",
         "default": false,
         "requirements": [
           "spec-sheet",

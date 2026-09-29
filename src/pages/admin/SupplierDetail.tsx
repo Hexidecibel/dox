@@ -263,6 +263,7 @@ export function SupplierDetail() {
   const [products, setProducts] = useState<ApiProduct[]>([]);
   const [productsLoading, setProductsLoading] = useState(false);
   const [productDialogOpen, setProductDialogOpen] = useState(false);
+  const [productNotice, setProductNotice] = useState('');
   const [productName, setProductName] = useState('');
   const [productDescription, setProductDescription] = useState('');
   const [savingProduct, setSavingProduct] = useState(false);
@@ -556,11 +557,16 @@ export function SupplierDetail() {
     if (!supplier) return;
     setSavingProduct(true);
     try {
-      await api.products.create({
+      // supplier_id is what makes the product THIS supplier's: without it the
+      // product was created unlinked, never appeared on this tab, and the
+      // retry failed on the name it had already taken.
+      const result = await api.products.create({
         name: productName.trim(),
         description: productDescription.trim() || undefined,
         tenant_id: supplier.tenant_id,
+        supplier_id: supplier.id,
       });
+      setProductNotice(result.message ?? '');
       setProductDialogOpen(false);
       setProductName('');
       setProductDescription('');
@@ -674,6 +680,11 @@ export function SupplierDetail() {
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
+        </Alert>
+      )}
+      {productNotice && (
+        <Alert severity="info" sx={{ mb: 2 }} onClose={() => setProductNotice('')}>
+          {productNotice}
         </Alert>
       )}
 

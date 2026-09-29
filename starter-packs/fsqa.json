@@ -426,134 +426,134 @@
     {
       "name": "Specification Sheet on file",
       "slug": "spec-sheet",
-      "checklist": "SOP 102.2",
+      "checklist": "Product Specification",
       "description": "A current product specification is on file."
     },
     {
       "name": "Microbiological Limits",
       "slug": "micro-limits",
-      "checklist": "SOP 102.2",
+      "checklist": "Product Specification",
       "description": "Micro limits stated for the product."
     },
     {
       "name": "Pack Size / Case Configuration",
       "slug": "pack-size",
-      "checklist": "SOP 102.2"
+      "checklist": "Product Specification"
     },
     {
       "name": "100g Nutritionals",
       "slug": "nutritionals-100g",
-      "checklist": "SOP 102.2",
+      "checklist": "Allergens, Labeling & Nutrition",
       "description": "Nutrition values per 100g."
     },
     {
       "name": "Allergen Matrix",
       "slug": "allergen-matrix",
-      "checklist": "SOP 102.2",
+      "checklist": "Allergens, Labeling & Nutrition",
       "description": "Allergen declaration covering the big-9."
     },
     {
       "name": "Country of Origin",
       "slug": "country-of-origin",
-      "checklist": "SOP 102.2"
+      "checklist": "Product Specification"
     },
     {
       "name": "GTIN / UPC",
       "slug": "gtin",
-      "checklist": "SOP 102.2"
+      "checklist": "Product Specification"
     },
     {
       "name": "Shelf Life & Storage",
       "slug": "shelf-life",
-      "checklist": "SOP 102.2"
+      "checklist": "Product Specification"
     },
     {
       "name": "Ingredient Statement",
       "slug": "ingredient-statement",
-      "checklist": "SOP 102.2"
+      "checklist": "Allergens, Labeling & Nutrition"
     },
     {
       "name": "Certificate of Analysis on file",
       "slug": "coa-on-file",
-      "checklist": "SOP 102.2"
+      "checklist": "Certificates of Analysis"
     },
     {
       "name": "Safety Data Sheet on file",
       "slug": "sds-on-file",
-      "checklist": "SOP 102.2",
+      "checklist": "Regulatory Registrations & Statements",
       "description": "Required for chemicals and sanitation products."
     },
     {
       "name": "Letter of Guarantee on file",
       "slug": "letter-of-guarantee",
-      "checklist": "SOP 102.2"
+      "checklist": "Commercial & Legal"
     },
     {
       "name": "Certificate of Insurance on file",
       "slug": "certificate-of-insurance",
-      "checklist": "SOP 102.2"
+      "checklist": "Commercial & Legal"
     },
     {
       "name": "W-9 on file",
       "slug": "w9-on-file",
-      "checklist": "SOP 102.2"
+      "checklist": "Commercial & Legal"
     },
     {
       "name": "3rd Party Audit REPORT on file",
       "slug": "third-party-audit-report",
-      "checklist": "SOP 102.2",
+      "checklist": "Audit & Certification",
       "description": "The full audit report. Separate line item from the certificate — a supplier can send one without the other, and only having the certificate hides the findings."
     },
     {
       "name": "3rd Party Audit CERTIFICATE on file",
       "slug": "third-party-audit-certificate",
-      "checklist": "SOP 102.2",
+      "checklist": "Audit & Certification",
       "description": "The valid-through certificate. Separate line item from the report, and the one that drives expiry tracking."
     },
     {
       "name": "HACCP Plan on file",
       "slug": "haccp-plan",
-      "checklist": "SOP 102.2"
+      "checklist": "Food Safety Plans & Programs"
     },
     {
       "name": "Food Safety Plan on file",
       "slug": "food-safety-plan",
-      "checklist": "SOP 102.2"
+      "checklist": "Food Safety Plans & Programs"
     },
     {
       "name": "Food Defense Plan on file",
       "slug": "food-defense-plan",
-      "checklist": "SOP 102.2"
+      "checklist": "Food Safety Plans & Programs"
     },
     {
       "name": "Recall Program on file",
       "slug": "recall-program",
-      "checklist": "SOP 102.2"
+      "checklist": "Food Safety Plans & Programs"
     },
     {
       "name": "Pest Control Program on file",
       "slug": "pest-control-program",
-      "checklist": "SOP 102.2"
+      "checklist": "Food Safety Plans & Programs"
     },
     {
       "name": "Sanitation Program on file",
       "slug": "sanitation-program",
-      "checklist": "SOP 102.2"
+      "checklist": "Food Safety Plans & Programs"
     },
     {
       "name": "GMP Self Audit on file",
       "slug": "gmp-self-audit",
-      "checklist": "SOP 102.2"
+      "checklist": "Audit & Certification"
     },
     {
       "name": "Process Flow Diagram on file",
       "slug": "process-flow-diagram",
-      "checklist": "SOP 102.2"
+      "checklist": "Food Safety Plans & Programs"
     },
     {
       "name": "Product Label on file",
       "slug": "product-label",
-      "checklist": "SOP 102.2"
+      "checklist": "Allergens, Labeling & Nutrition"
     },
     {
       "name": "Organic Certificate on file",
@@ -759,7 +759,7 @@
     {
       "name": "Ingredient Supplier",
       "slug": "ingredient-supplier",
-      "description": "A supplier of a food ingredient we put into product. The heaviest packet, and the one that makes a supplier's requirements look like the SOP.",
+      "description": "A supplier of a food ingredient we put into product. The heaviest packet: nearly the whole supplier-approval checklist.",
       "requirements": [
         "spec-sheet",
         "micro-limits",

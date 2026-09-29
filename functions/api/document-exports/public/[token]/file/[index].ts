@@ -12,6 +12,7 @@
 import { logAudit, getClientIp } from '../../../../../lib/db';
 import { checkRateLimit, recordAttempt } from '../../../../../lib/ratelimit';
 import {
+  exportFileNames,
   loadExportLinkDocuments,
   loadUsableExportLink,
   recordExportLinkView,
@@ -59,6 +60,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const rows = await loadExportLinkDocuments(context.env.DB, link);
     const row = rows[index];
     if (!row || !row.r2_key) return notFound();
+    // The name the file travels under (H4) -- the same one the zip and the
+    // recipient page use. The uploaded name stays in the audit row only.
+    const exportedAs = exportFileNames(rows)[index];
 
     const obj = await context.env.FILES.get(row.r2_key);
     if (!obj) return notFound();
@@ -71,14 +75,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       'document_export_link.file',
       'document_export_link',
       link.id,
-      JSON.stringify({ document_id: row.document_id, file_name: row.file_name, index, ip }),
+      JSON.stringify({ document_id: row.document_id, file_name: row.file_name, exported_as: exportedAs, index, ip }),
       ip,
     );
 
     return new Response(obj.body, {
       headers: {
         'Content-Type': row.mime_type || 'application/octet-stream',
-        'Content-Disposition': `attachment; filename="${row.file_name.replace(/"/g, '')}"`,
+        'Content-Disposition': `attachment; filename="${exportedAs}"`,
         'Cache-Control': 'no-store',
       },
     });

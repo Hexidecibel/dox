@@ -2,6 +2,7 @@ import { generateId } from '../../lib/db';
 import { logAudit, getClientIp } from '../../lib/db';
 import { requireRole, requireTenantAccess, errorToResponse } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
+import { linkProductToSupplier } from '../../lib/entities/products';
 import type { Env, User } from '../../lib/types';
 
 function slugify(text: string): string {
@@ -163,17 +164,86 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
 
+    // A supplier context (Supplier > Products tab) must name a supplier of
+    // THIS tenant: the link it writes is what the tab lists by.
+    const supplierId = body.supplier_id || null;
+    let supplierName: string | null = null;
+    if (supplierId) {
+      const sup = await context.env.DB.prepare(
+        'SELECT id, name FROM suppliers WHERE id = ? AND tenant_id = ?'
+      )
+        .bind(supplierId, tenantId)
+        .first<{ id: string; name: string }>();
+      if (!sup) {
+        return new Response(
+          JSON.stringify({ error: 'Supplier not found' }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      supplierName = sup.name;
+    }
+
     // Check slug uniqueness within tenant
     const existing = await context.env.DB.prepare(
-      'SELECT id FROM products WHERE slug = ? AND tenant_id = ?'
+      'SELECT id, name, active FROM products WHERE slug = ? AND tenant_id = ?'
     )
       .bind(slug, tenantId)
-      .first();
+      .first<{ id: string; name: string; active: number }>();
 
     if (existing) {
+      if (!supplierId) {
+        return new Response(
+          JSON.stringify({
+            error: `A product named "${existing.name}" already exists in this organization`,
+            existing_product_id: existing.id,
+          }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // From a supplier's Products tab, "add a product this supplier ships"
+      // whose name the catalog already holds means: this supplier ships THAT
+      // product. Products are the tenant's own catalog, one row per product,
+      // so the answer is a link, never a second row and never a bare 409 the
+      // person cannot act on (AJ, 2026-09-20: the retry said "slug exists"
+      // for a product the tab never showed).
+      const link = await linkProductToSupplier(context.env.DB, tenantId, existing.id, supplierId);
+      if (link.linked || link.legacyBackfilled) {
+        await logAudit(
+          context.env.DB,
+          user.id,
+          tenantId,
+          'product.supplier_linked',
+          'product',
+          existing.id,
+          JSON.stringify({
+            product_name: existing.name,
+            supplier_id: supplierId,
+            supplier_name: supplierName,
+            via: 'product_create_existing_name',
+            legacy_supplier_id_set: link.legacyBackfilled,
+          }),
+          getClientIp(context.request)
+        );
+      }
+      const product = await context.env.DB.prepare('SELECT * FROM products WHERE id = ?')
+        .bind(existing.id)
+        .first();
+      const inactive = !existing.active;
+      const message = !link.linked
+        ? `"${existing.name}" is already listed under ${supplierName}.`
+        : `"${existing.name}" already existed in your product catalog, so it was linked to ${supplierName} instead of creating a duplicate.`;
       return new Response(
-        JSON.stringify({ error: 'A product with this slug already exists for this tenant' }),
-        { status: 409, headers: { 'Content-Type': 'application/json' } }
+        JSON.stringify({
+          product,
+          linked_existing: true,
+          already_linked: !link.linked,
+          inactive,
+          message: inactive
+            ? `${message} It is deactivated, so it will not show in active lists until it is reactivated on the Products page.`
+            : message,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
@@ -189,12 +259,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         body.name,
         slug,
         body.description || null,
-        body.supplier_id || null,
+        supplierId,
         body.brand_owner ? sanitizeString(body.brand_owner) : null,
         body.producer ? sanitizeString(body.producer) : null,
         body.plant_code ? sanitizeString(body.plant_code) : null,
       )
       .run();
+
+    // The provenance graph every supplier-scoped read joins through.
+    if (supplierId) {
+      await linkProductToSupplier(context.env.DB, tenantId, id, supplierId);
+    }
 
     await logAudit(
       context.env.DB,
@@ -203,7 +278,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'product_created',
       'product',
       id,
-      JSON.stringify({ name: body.name, slug, tenant_id: tenantId }),
+      JSON.stringify({ name: body.name, slug, tenant_id: tenantId, supplier_id: supplierId }),
       getClientIp(context.request)
     );
 

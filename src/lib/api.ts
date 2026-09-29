@@ -941,10 +941,12 @@ export const api = {
 
     /**
      * POST /api/products
-     * Returns: { product: ApiProduct }
+     * Returns: { product: ApiProduct } (201), or, when `supplier_id` is given
+     * and the name is already in the catalog, the existing product linked to
+     * that supplier with `linked_existing` + a `message` to show (200).
      */
     create: (data: { name: string; description?: string; tenant_id: string; supplier_id?: string; brand_owner?: string | null; producer?: string | null; plant_code?: string | null }) =>
-      fetchApi<{ product: ApiProduct }>('/products', {
+      fetchApi<{ product: ApiProduct; linked_existing?: boolean; already_linked?: boolean; inactive?: boolean; message?: string }>('/products', {
         method: 'POST',
         body: JSON.stringify(data),
       }),

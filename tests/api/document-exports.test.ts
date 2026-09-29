@@ -205,16 +205,24 @@ describe('POST /api/document-exports/zip', () => {
 
     const files = unzip(await res.arrayBuffer());
     expect(Object.keys(files)).toContain('manifest.csv');
-    expect(files[a.fileName]).toBe(a.body);
-    expect(files[b.fileName]).toBe(b.body);
+    // H4: files travel under a generated name, never the uploaded one.
+    const aName = 'Darigold-Inc_Certificate-of-Analysis_10426203-03_1.pdf';
+    expect(files[aName]).toBe(a.body);
+    const bName = Object.keys(files).find((n) => n.endsWith('_2.pdf'))!;
+    expect(bName).toMatch(/^Darigold-Inc_Certificate-of-Analysis_\d{4}-\d{2}-\d{2}_2\.pdf$/);
+    expect(files[bName]).toBe(b.body);
+    expect(Object.keys(files)).not.toContain(a.fileName);
+    expect(Object.keys(files)).not.toContain(b.fileName);
 
     const manifest = files['manifest.csv'];
+    expect(manifest).toContain(aName);
+    expect(manifest).not.toContain(a.fileName);
+    expect(manifest).not.toContain(b.fileName);
     expect(manifest).toContain('Darigold Cream COA');
     expect(manifest).toContain('Darigold, Inc.');
     expect(manifest).toContain('Certificate of Analysis');
     expect(manifest).toContain('10426203 / 03');
     expect(manifest).toContain('2026-07-22');
-    expect(manifest).toContain(a.fileName);
     // The manifest describes the export; it never carries an internal id.
     expect(manifest).not.toContain(a.id);
   });
@@ -615,7 +623,10 @@ describe('the recipient download routes', () => {
     const res = await exportLandingZip(landingCtx(token));
     expect(res.status).toBe(200);
     const files = unzip(await res.arrayBuffer());
-    expect(files[a.fileName]).toBe(a.body);
+    expect(files[a.fileName]).toBeUndefined();
+    const name = Object.keys(files).find((n) => n !== 'manifest.csv')!;
+    expect(name).toMatch(/^Darigold-Inc_Certificate-of-Analysis_.+_1\.pdf$/);
+    expect(files[name]).toBe(a.body);
     expect(files['manifest.csv']).toContain('Zipped for a customer');
 
     expect((await auditRows('document_export_link.download')).length).toBeGreaterThan(0);
@@ -628,6 +639,10 @@ describe('the recipient download routes', () => {
 
     const first = await exportLandingFile(landingCtx(token, { index: '0' }));
     expect(first.status).toBe(200);
+    // Same generated name as in the zip and on the page (H4).
+    const disposition = first.headers.get('Content-Disposition') ?? '';
+    expect(disposition).toMatch(/filename="Darigold-Inc_Certificate-of-Analysis_.+_1\.pdf"/);
+    expect(disposition).not.toContain(a.fileName);
     expect(await first.text()).toBe(a.body);
 
     const second = await exportLandingFile(landingCtx(token, { index: '1' }));
@@ -831,5 +846,50 @@ describe('POST /api/document-exports/links/:id/revoke', () => {
       .bind(id)
       .first<{ revoked_at: string | null }>();
     expect(still!.revoked_at).toBeNull();
+  });
+});
+
+// ===========================================================================
+// H4 -- the original file name never travels
+// ===========================================================================
+
+describe('exported files travel under a generated name (rules table H4)', () => {
+  it('the recipient page, zip and single file agree, and the uploaded name appears nowhere', async () => {
+    const a = await makeDocument({
+      title: 'Cream cert',
+      fileName: 'CMF COA - REJECTED lot, do not send.pdf',
+      lot: { number: '77701', sub: '02', production: '2026-05-01' },
+    });
+    const token = await mintedTokenFor([a.id]);
+
+    const view = (await readJson(await exportLanding(landingCtx(token)))) as DocumentExportLandingView;
+    const expected = 'Darigold-Inc_Certificate-of-Analysis_77701-02_1.pdf';
+    expect(view.documents[0].file_name).toBe(expected);
+    expect(JSON.stringify(view)).not.toContain('REJECTED');
+
+    const files = unzip(await (await exportLandingZip(landingCtx(token))).arrayBuffer());
+    expect(Object.keys(files).sort()).toEqual([expected, 'manifest.csv']);
+    expect(files['manifest.csv']).not.toContain('REJECTED');
+
+    const one = await exportLandingFile(landingCtx(token, { index: '0' }));
+    expect(one.headers.get('Content-Disposition')).toBe(`attachment; filename="${expected}"`);
+
+    // The original stays on the internal record.
+    const audit = await auditRows('document_export_link.file');
+    const mine = audit.map((r: any) => JSON.parse(r.details)).find((d: any) => d.exported_as === expected);
+    expect(mine.file_name).toBe('CMF COA - REJECTED lot, do not send.pdf');
+  });
+
+  it('a title that is just the uploaded file name is replaced for the recipient', async () => {
+    const a = await makeDocument({
+      title: 'CMF internal hold 0922',
+      fileName: 'CMF internal hold 0922.pdf',
+    });
+    const b = await makeDocument({ title: 'Heavy cream certificate', fileName: 'scan0001.pdf' });
+    const token = await mintedTokenFor([a.id, b.id]);
+    const view = (await readJson(await exportLanding(landingCtx(token)))) as DocumentExportLandingView;
+    expect(view.documents[0].title).toBe('Certificate of Analysis - Darigold, Inc.');
+    expect(view.documents[1].title).toBe('Heavy cream certificate'); // somebody wrote it
+    expect(JSON.stringify(view)).not.toContain('internal hold');
   });
 });

@@ -1,0 +1,250 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/link-supplier-products — link products to the supplier they were added
+ * under, for products the Supplier > Products tab created UNLINKED.
+ *
+ * THE DEFECT THIS REPAIRS
+ *
+ * "Add product" on a supplier's Products tab called POST /api/products without
+ * a supplier_id, so the product was stored with `products.supplier_id` NULL and
+ * no `product_suppliers` row. The tab lists products BY supplier, so the new
+ * product never appeared; adding it again failed with "slug already exists"
+ * (AJ, 2026-09-20, Country Morning Farms on AJ Clean). The endpoint is fixed;
+ * this links the orphans already written.
+ *
+ * WHAT IT WRITES (the runtime rule, functions/lib/entities/products.ts
+ * linkProductToSupplier):
+ *   - a `product_suppliers` row (product, supplier) unless one exists
+ *   - `products.supplier_id` only where it is NULL -- never overwritten
+ *   - one `product.supplier_linked` audit row per product changed
+ *
+ * WHICH PRODUCTS
+ *   --product ID       exactly these (repeatable); any product of the tenant
+ *   --created-after TS products created at/after TS (UTC, 'YYYY-MM-DD' or
+ *                      'YYYY-MM-DD HH:MM:SS') that are ORPHANS -- no legacy
+ *                      supplier and no product_suppliers row at all. A product
+ *                      that already belongs to some supplier is not guessed at.
+ * At least one of the two is required: the script never decides on its own
+ * which supplier a product came from.
+ *
+ * Usage:
+ *   bin/link-supplier-products --tenant <id> --supplier <id|name> --created-after 2026-09-20            # dry run, LOCAL
+ *   bin/link-supplier-products --tenant <id> --supplier <id|name> --product <pid> --remote              # dry run, PRODUCTION
+ *   bin/link-supplier-products --tenant <id> --supplier <id|name> --product <pid> --remote --apply      # prompts first
+ *
+ * Flags:
+ *   --tenant ID        tenant (required)
+ *   --supplier X       supplier id, or its exact name (case-insensitive) (required)
+ *   --product ID       product id (repeatable)
+ *   --created-after TS orphan products created at/after TS
+ *   --apply            actually write. Without it this is a dry run.
+ *   --remote, -r       target PRODUCTION D1 (with --apply, asks you to type the tenant id)
+ *   --yes, -y          skip the production confirmation prompt
+ *   --json             emit the plan as JSON
+ *   -h, --help         this help
+ */
+
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { execFileSync } = require('child_process');
+
+const { query, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+const { planSupplierProductLinks, supplierProductLinksToSql } = require('./lib/supplierProductLinkPlan');
+
+const ID_RE = /^[A-Za-z0-9_-]+$/;
+const TS_RE = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$/;
+
+function parseArgs(argv) {
+  const opts = { tenant: null, supplier: null, products: [], createdAfter: null, apply: false, remote: false, yes: false, json: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenant = argv[++i]; break;
+      case '--supplier': opts.supplier = argv[++i]; break;
+      case '--product': opts.products.push(argv[++i]); break;
+      case '--created-after': opts.createdAfter = argv[++i]; break;
+      case '--apply': opts.apply = true; break;
+      case '--remote':
+      case '-r': opts.remote = true; break;
+      case '--yes':
+      case '-y': opts.yes = true; break;
+      case '--json': opts.json = true; break;
+      case '-h':
+      case '--help': printHelp(); process.exit(0); break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  const fail = (m) => { console.error(m); process.exit(2); };
+  if (!opts.tenant || !ID_RE.test(opts.tenant)) fail('--tenant <id> is required (letters, digits, dashes, underscores).');
+  if (!opts.supplier) fail('--supplier <id|name> is required.');
+  if (opts.products.length === 0 && !opts.createdAfter) fail('Name the products: --product <id> (repeatable) and/or --created-after <timestamp>.');
+  for (const p of opts.products) if (!p || !ID_RE.test(p)) fail(`--product must be an id, got "${p}".`);
+  if (opts.createdAfter && !TS_RE.test(opts.createdAfter)) fail("--created-after must be 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM[:SS]' (UTC).");
+  return opts;
+}
+
+function printHelp() {
+  const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+  const end = lines.findIndex((l, i) => i > 2 && l.trim() === '*/');
+  console.log(lines.slice(3, end).join('\n').replace(/^ \* ?/gm, ''));
+}
+
+function sqlStr(v) {
+  if (v === null || v === undefined) return 'NULL';
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
+
+function execSql(statements, remote) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-link-supplier-products-'));
+  const file = path.join(dir, 'link.sql');
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  try {
+    execFileSync(
+      'npx',
+      ['wrangler', 'd1', 'execute', DEFAULT_DB, remote ? '--remote' : '--local', `--file=${file}`],
+      { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 },
+    );
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString() : '';
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${stderr || err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function promptSync(question) {
+  process.stdout.write(question);
+  let fd;
+  try {
+    fd = fs.openSync('/dev/tty', 'rs');
+  } catch {
+    console.error('\nNo terminal to confirm on. Re-run interactively, or pass --yes.');
+    process.exit(1);
+  }
+  const buf = Buffer.alloc(256);
+  let out = '';
+  for (;;) {
+    const n = fs.readSync(fd, buf, 0, buf.length, null);
+    if (n === 0) break;
+    out += buf.toString('utf8', 0, n);
+    if (out.includes('\n')) break;
+  }
+  fs.closeSync(fd);
+  return out.split('\n')[0];
+}
+
+function resolveSupplier(tenantId, key, remote) {
+  const rows = query(
+    `SELECT id, name FROM suppliers WHERE tenant_id = ${sqlStr(tenantId)}
+       AND (id = ${sqlStr(key)} OR LOWER(name) = LOWER(${sqlStr(key)}))`,
+    { remote },
+  );
+  if (rows.length === 0) throw new Error(`No supplier "${key}" in tenant ${tenantId}.`);
+  if (rows.length > 1) {
+    throw new Error(`"${key}" names ${rows.length} suppliers (${rows.map((r) => r.id).join(', ')}); pass the id.`);
+  }
+  return rows[0];
+}
+
+function loadCandidates(opts) {
+  const where = [];
+  if (opts.products.length) where.push(`p.id IN (${opts.products.map(sqlStr).join(',')})`);
+  if (opts.createdAfter) {
+    where.push(
+      `(p.tenant_id = ${sqlStr(opts.tenant)} AND p.created_at >= ${sqlStr(opts.createdAfter)}
+        AND p.supplier_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM product_suppliers x WHERE x.product_id = p.id))`,
+    );
+  }
+  const rows = query(
+    `SELECT p.id, p.name, p.tenant_id, p.supplier_id, p.active, p.created_at,
+            (SELECT GROUP_CONCAT(ps.supplier_id) FROM product_suppliers ps WHERE ps.product_id = p.id) AS linked
+       FROM products p
+      WHERE ${where.join(' OR ')}
+      ORDER BY p.created_at, p.name`,
+    { remote: opts.remote },
+  );
+  return rows.map((r) => ({ ...r, linked_supplier_ids: r.linked ? String(r.linked).split(',') : [] }));
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const target = opts.remote ? 'PRODUCTION' : 'local';
+
+  const tenant = query(`SELECT id, name FROM tenants WHERE id = ${sqlStr(opts.tenant)}`, { remote: opts.remote })[0];
+  if (!tenant) throw new Error(`No tenant "${opts.tenant}" in ${target} D1.`);
+  const supplier = resolveSupplier(opts.tenant, opts.supplier, opts.remote);
+  const products = loadCandidates(opts);
+  const plan = planSupplierProductLinks({ supplier, products, tenantId: opts.tenant, requestedIds: opts.products });
+
+  if (opts.json) {
+    console.log(JSON.stringify({ target, applied: opts.apply, tenant, supplier, ...plan }, null, 2));
+  } else {
+    console.log('');
+    console.log(`Link products to a supplier — ${tenant.name} (${tenant.id}), ${target}`);
+    console.log(`  supplier:  ${supplier.name} (${supplier.id})`);
+    if (opts.createdAfter) console.log(`  selection: orphan products created at/after ${opts.createdAfter} UTC`);
+    if (opts.products.length) console.log(`  selection: ${opts.products.length} named product id(s)`);
+    console.log(`  would link: ${plan.links.length}    already linked: ${plan.unchanged.length}`);
+    console.log('');
+    for (const l of plan.links) {
+      const what = [
+        l.insert_link ? 'product_suppliers row' : null,
+        l.set_legacy_supplier_id ? 'products.supplier_id (was NULL)' : `products.supplier_id kept (${l.legacy_supplier_id})`,
+      ].filter(Boolean).join(' + ');
+      console.log(`  LINK  ${l.name}`);
+      console.log(`        id ${l.product_id}, created ${l.created_at}${l.active ? '' : ', INACTIVE'}`);
+      console.log(`        writes ${what}${l.other_suppliers.length ? `; also supplied by ${l.other_suppliers.join(', ')}` : ''}`);
+    }
+    for (const u of plan.unchanged) console.log(`  SKIP  ${u.name} (${u.id}) — ${u.reason}`);
+    for (const e of plan.errors) console.log(`  ERROR ${e}`);
+    console.log('');
+  }
+
+  if (plan.errors.length) {
+    console.error('Refusing to continue while a named product does not resolve. Nothing was written.');
+    process.exit(1);
+  }
+
+  const statements = supplierProductLinksToSql(opts.tenant, supplier, plan.links, sqlStr, () => crypto.randomUUID().replace(/-/g, ''));
+  if (!opts.apply) {
+    if (!opts.json) {
+      console.log(plan.links.length === 0
+        ? 'DRY RUN — nothing to link.'
+        : `DRY RUN — ${plan.links.length} product(s) not linked. Re-run with --apply to write.`);
+      console.log('');
+    }
+    return;
+  }
+  if (plan.links.length === 0) {
+    console.log('Nothing to do.');
+    return;
+  }
+  if (opts.remote && !opts.yes) {
+    const answer = promptSync(
+      `\nAbout to WRITE to PRODUCTION D1 for tenant ${opts.tenant}:\n` +
+      `  link ${plan.links.length} product(s) to ${supplier.name}\n` +
+      'Type the tenant id to continue: ',
+    );
+    if (answer.trim() !== opts.tenant) {
+      console.error('That did not match. Nothing was written.');
+      process.exit(1);
+    }
+  }
+  execSql(statements, opts.remote);
+  console.log(`Linked ${plan.links.length} product(s) to ${supplier.name} in ${target} D1.`);
+  console.log('Re-run without --apply to confirm it now reports nothing to link.');
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+}
