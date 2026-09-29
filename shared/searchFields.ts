@@ -153,6 +153,13 @@ export function uploadedBucketOf(c: Pick<Clause, 'op' | 'values'>): string | nul
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH_DAY = /^--(\d{2})-(\d{2})$/;
 
+/** "--04-17": a valid month/day in some year (Feb 29 included). */
+export function isMonthDay(v: string): boolean {
+  const md = MONTH_DAY.exec(v);
+  if (!md) return false;
+  return isIsoDay(`2024-${md[1]}-${md[2]}`);
+}
+
 export function isIsoDay(v: string): boolean {
   if (!ISO.test(v)) return false;
   const t = Date.parse(`${v}T00:00:00Z`);
@@ -185,12 +192,16 @@ export function validateClause(c: Clause): string | null {
       if (!Number.isInteger(n) || n < 1 || n > 36500) return `${def.label}: "${values[0]}" is not a number of days.`;
     } else if (c.op === 'between') {
       if (values.length !== 2) return `${def.label} between needs two dates.`;
-      if (!values.every(isIsoDay)) return `${def.label}: dates are YYYY-MM-DD.`;
-      if (values[0] > values[1]) return `${def.label}: the first date is after the second.`;
+      // Two year-less days ("--04-01", "--04-30") are a span in ANY year; the
+      // first after the second wraps the year end (Dec 15 – Jan 15).
+      const yearlessSpan = def.class === 'identifying' && values.every(isMonthDay);
+      if (!yearlessSpan && !values.every(isIsoDay)) {
+        return `${def.label}: dates are YYYY-MM-DD${def.class === 'identifying' ? ', or --MM-DD for both ends in any year' : ''}.`;
+      }
+      if (!yearlessSpan && values[0] > values[1]) return `${def.label}: the first date is after the second.`;
     } else {
       const v = values[0];
-      const md = MONTH_DAY.exec(v);
-      const yearless = c.op === 'on' && def.class === 'identifying' && md;
+      const yearless = c.op === 'on' && def.class === 'identifying' && isMonthDay(v);
       if (!isIsoDay(v) && !yearless) return `${def.label}: "${v}" is not a date (YYYY-MM-DD${def.class === 'identifying' && c.op === 'on' ? ', or --MM-DD for any year' : ''}).`;
     }
   }
@@ -256,6 +267,19 @@ export function clauseToConstraint(
         };
       }
       if (c.op === 'on') return { constraint: withNote(makeDateConstraint(id, role, { kind: 'day', iso: v, raw: c.raw ?? v, note: null }, source)) };
+      const md2 = MONTH_DAY.exec(String(c.values[1] ?? ''));
+      if (c.op === 'between' && md && md2) {
+        const from = { month: Number(md[1]), day: Number(md[2]) };
+        const to = { month: Number(md2[1]), day: Number(md2[2]) };
+        const wraps = v > String(c.values[1]);
+        return {
+          constraint: withNote(makeDateConstraint(id, role, {
+            kind: 'month_range', from, to, raw: c.raw ?? `${v}..${c.values[1]}`,
+            // A detected clause carries its own reading's note already.
+            note: c.note ? null : wraps ? 'No year given — the span runs across the year end, in any year.' : 'No year given — matches those days in any year.',
+          }, source)),
+        };
+      }
       if (c.op === 'between') return { constraint: withNote(makeDateRangeConstraint(id, role, v, String(c.values[1]), c.raw ?? `${v}..${c.values[1]}`, source)) };
       if (c.op === 'before') return { constraint: withNote(makeDateRangeConstraint(id, role, null, addDays(v, -1), c.raw ?? `before ${v}`, source)) };
       return { constraint: withNote(makeDateRangeConstraint(id, role, addDays(v, 1), null, c.raw ?? `after ${v}`, source)) };

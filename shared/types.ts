@@ -2456,6 +2456,12 @@ export interface SearchConstraint {
   /** Set for a year-less date ("9/2"): matches that month/day in any year. */
   month_day?: { month: number; day: number } | null;
   /**
+   * Set for a year-less span ("produced in April", "early May", "Dec 15 to
+   * Jan 15"): matches those month/days in ANY year. `from` after `to` wraps
+   * the year end. Both inclusive.
+   */
+  month_day_range?: { from: { month: number; day: number }; to: { month: number; day: number } } | null;
+  /**
    * For metadata constraints: exact (normalized) or substring comparison.
    * 'prefix' (lot constraints only): "lot 104" asks for every lot that STARTS
    * with 104 — covering on the rows that do, never demoted to free text.

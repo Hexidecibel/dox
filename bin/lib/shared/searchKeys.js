@@ -188,6 +188,8 @@ function inferDocumentDateOrder(values) {
   if (dmy && !mdy) return "dmy";
   return null;
 }
+var MON = `\\b(${MONTH_ALT})\\b\\.?`;
+var MON_FREE = `(?<!\\d[-\\s.]?)${MON}`;
 
 // shared/lotNormalize.ts
 function normalizeLotNumber(raw) {

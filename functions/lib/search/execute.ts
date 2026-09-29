@@ -97,10 +97,10 @@ import {
   type QueueGroup,
   type QueueScanRow,
 } from '../search-coverage';
-import { loadProductCatalog } from '../product-identifiers';
+import { catalogFromRows, loadProductCatalog, productCatalogStatement, type CatalogRow } from '../product-identifiers';
 import { compileScope, scopeHolds, scopeWhere, uploadedBounds, type CompiledScope, type ScopeAttrs } from './compileScope';
 import { drainDocumentKeyJobs } from './keys';
-import { lotPrefixNote, resolveDetections, scanHasCandidates, scanNorms, scanOrderValues, scanText, type DetectionHits } from './interpret';
+import { detectProduct, lotPrefixNote, resolveDetections, scanHasCandidates, scanNorms, scanOrderValues, scanResidualWords, scanText, type DetectionHits } from './interpret';
 import type { LotSchemeSpec } from '../../../shared/lotScheme';
 
 /** Pending key rebuilds a search drains before it reads keys. */
@@ -492,7 +492,15 @@ function addDaysIso(iso: string, n: number): string {
 }
 
 /** The day window a date constraint's candidates are sought in (± the nearby window for a single day). */
-function dateWindow(c: SearchConstraint): { from: string; to: string } | { monthDays: string[] } | null {
+type DateWindow = { from: string; to: string } | { monthDays: string[] } | { mdFrom: string; mdTo: string };
+
+function dateWindow(c: SearchConstraint): DateWindow | null {
+  // A year-less span ("produced in April"): its month/days in any year. No
+  // nearby widening — a span is judged in or out, never "near".
+  if (c.month_day_range) {
+    const md = (x: { month: number; day: number }) => `${String(x.month).padStart(2, '0')}-${String(x.day).padStart(2, '0')}`;
+    return { mdFrom: md(c.month_day_range.from), mdTo: md(c.month_day_range.to) };
+  }
   if (c.month_day) {
     const out: string[] = [];
     const center = `2024-${String(c.month_day.month).padStart(2, '0')}-${String(c.month_day.day).padStart(2, '0')}`;
@@ -583,6 +591,21 @@ async function runIdentifyingPath(args: {
   const orderLinked = new Set<string>();
   const ordersOf = (c: SearchConstraint): SearchOrderEvidence[] => [...(c.order ? [c.order] : []), ...(c.orders ?? [])];
 
+  const queueDecodes = (c: SearchConstraint) => {
+    for (const sup of args.schemes) {
+      const spec = structuredScheme(sup.spec);
+      if (!spec || spec.date_role !== 'production') continue;
+      decodeIdx.push({
+        idx: batch.add(db.prepare(
+          `SELECT l.lot_number, l.sub_lot_code, dl.document_id FROM lots l JOIN document_lots dl ON dl.lot_id = l.id
+            WHERE l.tenant_id = ? AND l.supplier_id = ? LIMIT 5000`,
+        ).bind(tenantId, sup.id)),
+        constraintId: c.id,
+        supplier: sup,
+      });
+    }
+  };
+
   for (const c of constraints) {
     if (c.kind === 'lot') {
       const prefix = c.match === 'prefix';
@@ -609,6 +632,21 @@ async function runIdentifyingPath(args: {
                     AND substr(value_date, 6) IN (${ph(w.monthDays.length)}) LIMIT ${SEEK_LIMIT}`, ...DATE_KEY_KINDS, ...w.monthDays);
         addSeek(`SELECT DISTINCT dl.document_id FROM lots l JOIN document_lots dl ON dl.lot_id = l.id
                   WHERE l.tenant_id = ? AND l.production_date IS NOT NULL AND substr(l.production_date, 6) IN (${ph(w.monthDays.length)}) LIMIT ${SEEK_LIMIT}`, ...w.monthDays);
+      } else if (w && 'mdFrom' in w) {
+        // Across the year end (Dec 15 – Jan 15) the span is two pieces.
+        const wraps = w.mdFrom > w.mdTo;
+        const cond = (col: string) => (wraps ? `(substr(${col}, 6, 5) >= ? OR substr(${col}, 6, 5) <= ?)` : `substr(${col}, 6, 5) BETWEEN ? AND ?`);
+        addSeek(`SELECT DISTINCT document_id FROM document_search_keys
+                  WHERE tenant_id = ? AND kind IN (${ph(DATE_KEY_KINDS.length)}) AND value_date IS NOT NULL
+                    AND ${cond('value_date')} LIMIT ${SEEK_LIMIT}`, ...DATE_KEY_KINDS, w.mdFrom, w.mdTo);
+        addSeek(`SELECT DISTINCT dl.document_id FROM lots l JOIN document_lots dl ON dl.lot_id = l.id
+                  WHERE l.tenant_id = ? AND l.production_date IS NOT NULL AND ${cond('l.production_date')} LIMIT ${SEEK_LIMIT}`, w.mdFrom, w.mdTo);
+        if (c.role === 'expiration') {
+          addSeek(`SELECT id AS document_id FROM documents
+                    WHERE tenant_id = ? AND status IN ('active', 'archived') AND renewal_due_date IS NOT NULL
+                      AND ${cond('renewal_due_date')} LIMIT ${SEEK_LIMIT}`, w.mdFrom, w.mdTo);
+        }
+        if (c.role === 'production' || c.role === 'any') queueDecodes(c);
       } else if (w) {
         addSeek(`SELECT DISTINCT document_id FROM document_search_keys
                   WHERE tenant_id = ? AND kind IN (${ph(DATE_KEY_KINDS.length)}) AND value_date BETWEEN ? AND ? LIMIT ${SEEK_LIMIT}`, ...DATE_KEY_KINDS, w.from, w.to);
@@ -620,20 +658,7 @@ async function runIdentifyingPath(args: {
         }
         // A declared production-date lot format (0110): the supplier's lots whose
         // CODE decodes into the window are judged too — likely at best.
-        if ((c.role === 'production' || c.role === 'any')) {
-          for (const sup of args.schemes) {
-            const spec = structuredScheme(sup.spec);
-            if (!spec || spec.date_role !== 'production') continue;
-            decodeIdx.push({
-              idx: batch.add(db.prepare(
-                `SELECT l.lot_number, l.sub_lot_code, dl.document_id FROM lots l JOIN document_lots dl ON dl.lot_id = l.id
-                  WHERE l.tenant_id = ? AND l.supplier_id = ? LIMIT 5000`,
-              ).bind(tenantId, sup.id)),
-              constraintId: c.id,
-              supplier: sup,
-            });
-          }
-        }
+        if ((c.role === 'production' || c.role === 'any')) queueDecodes(c);
       }
     }
     if (c.kind === 'po' || c.kind === 'invoice' || c.kind === 'identifier') {
@@ -702,7 +727,13 @@ async function runIdentifyingPath(args: {
     let exact = 0;
     for (const l of batch.rows<{ lot_number: string; sub_lot_code: string; document_id: string }>(d.idx)) {
       const dec = decodeLot(spec, l.lot_number, l.sub_lot_code);
-      if (!dec.fits || !dec.decoded_date || dec.decoded_date < w.from || dec.decoded_date > w.to) continue;
+      if (!dec.fits || !dec.decoded_date) continue;
+      if ('mdFrom' in w) {
+        const md = dec.decoded_date.slice(5, 10);
+        if (w.mdFrom <= w.mdTo ? md >= w.mdFrom && md <= w.mdTo : md >= w.mdFrom || md <= w.mdTo) candidateIds.add(l.document_id);
+        continue;
+      }
+      if (dec.decoded_date < w.from || dec.decoded_date > w.to) continue;
       candidateIds.add(l.document_id);
       if (c.date_from && c.date_to && dec.decoded_date >= c.date_from && dec.decoded_date <= c.date_to) exact++;
     }
@@ -906,7 +937,7 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
   const query = input.query;
   validateQuery(query);
   const now = input.now ?? new Date();
-  const scope = compileScope(query.clauses, now);
+  let scope = compileScope(query.clauses, now);
   // Only the BOX is read for lots, dates and numbers. A text clause is the
   // person's own words — kept as text on Enter, or a reading they rejected —
   // and re-reading it would silently re-apply a detection they took back
@@ -916,7 +947,7 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
   const text = [typedText, clauseText].filter(Boolean).join(' ');
   const explicitIdent = query.clauses.filter((c) => SEARCH_FIELDS[c.field].class === 'identifying');
 
-  const scan = input.interpret && typedText ? scanText(typedText) : null;
+  const scan = input.interpret && typedText ? scanText(typedText, { now }) : null;
   const detecting = !!scan && scanHasCandidates(scan);
 
   // Nothing identifying anywhere: the scope / text path, one round trip.
@@ -999,6 +1030,11 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
   }
   const lblStmt = labelStatement(db, tenantId, scope);
   const labelIdx = lblStmt ? r0.add(lblStmt) : null;
+  // Words beside the typed candidates may name a product ("butter produced in
+  // April") — asked in the same batch, only when a product is not already chosen.
+  const catalogIdx = scan && detecting && scanResidualWords(scan) && !query.clauses.some((c) => c.field === 'product')
+    ? r0.add(productCatalogStatement(db, tenantId))
+    : null;
   await r0.run(db);
 
   // --- read-repair -------------------------------------------------------------
@@ -1055,13 +1091,22 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
       s.add(r.kind as SearchKeyKind);
       hits.keys.set(r.value_norm, s);
     }
-    const det = resolveDetections(scan, hits);
+    const read = resolveDetections(scan, hits);
+    const product = detectProduct(read, catalogIdx !== null ? catalogFromRows(r0.rows<CatalogRow>(catalogIdx)) : null, {
+      otherConstraints: read.clauses.length > 0 || explicitIdent.length > 0,
+    });
+    const det = product.detection;
+    Object.assign(labels, product.labels);
     interpreted = { clauses: det.clauses, residual: det.residual };
     residual = [det.residual, clauseText].filter(Boolean).join(' ');
   } else {
     residual = text;
   }
-  const identClauses = [...explicitWithNotes, ...(interpreted?.clauses ?? [])];
+  // A product read from the words is a SCOPE clause (the Ask-AI mapping's
+  // rule): it narrows what is judged, it never claims coverage itself.
+  const detectedScope = (interpreted?.clauses ?? []).filter((c) => SEARCH_FIELDS[c.field].class === 'scope');
+  if (detectedScope.length) scope = compileScope([...query.clauses, ...detectedScope], now);
+  const identClauses = [...explicitWithNotes, ...(interpreted?.clauses ?? []).filter((c) => SEARCH_FIELDS[c.field].class === 'identifying')];
 
   // The text read as nothing identifying after all: back to the scope/text path.
   if (identClauses.length === 0) {

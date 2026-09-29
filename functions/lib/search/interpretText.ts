@@ -8,7 +8,9 @@
  * detection questions: which of the typed numbers are on file as document keys,
  * which lot keys bear on the lot-shaped tokens, which WMS orders carry the
  * numbers as an order number or a customer PO, and — when a lot was typed after
- * the word "lot" — what the declared lot formats say a prefix is.
+ * the word "lot" — what the declared lot formats say a prefix is — and, when
+ * words are left beside those candidates, the product identifier catalog, so
+ * "butter produced in April" reads "butter" as a product (`detectProduct`).
  *
  * The reading is the SAME pure `resolveDetections` the search path runs, so a
  * chip previewed here is the chip the search will judge.
@@ -16,7 +18,9 @@
 
 import { describeClause } from '../../../shared/searchQuery';
 import {
+  detectProduct,
   resolveDetections,
+  scanResidualWords,
   scanHasCandidates,
   scanNorms,
   scanOrderValues,
@@ -28,6 +32,7 @@ import { normalizeLotNumber } from '../../../shared/lotNormalize';
 import type { LotSchemeSpec } from '../../../shared/lotScheme';
 import type { SearchInterpretResponse, SearchKeyKind } from '../../../shared/types';
 import { structuredScheme } from '../search-coverage';
+import { catalogFromRows, productCatalogStatement, type CatalogRow } from '../product-identifiers';
 
 /** The longest text read; a paste of a whole email is not a search. */
 export const INTERPRET_MAX_CHARS = 500;
@@ -39,11 +44,11 @@ function ph(n: number): string {
 export async function interpretQueryText(db: D1Database, tenantId: string, rawText: string): Promise<SearchInterpretResponse> {
   const text = rawText.replace(/\s+/g, ' ').trim().slice(0, INTERPRET_MAX_CHARS);
   if (!text) return { clauses: [], residual: '', labels: {} };
-  const scan = scanText(text);
+  const scan = scanText(text, { now: new Date() });
   if (!scanHasCandidates(scan)) return { clauses: [], residual: text, labels: {} };
 
   const stmts: D1PreparedStatement[] = [];
-  const idx: Partial<Record<'keys' | 'lots' | 'schemes' | 'orders', number>> = {};
+  const idx: Partial<Record<'keys' | 'lots' | 'schemes' | 'orders' | 'catalog', number>> = {};
   const add = (k: keyof typeof idx, st: D1PreparedStatement) => {
     idx[k] = stmts.push(st) - 1;
   };
@@ -90,6 +95,9 @@ export async function interpretQueryText(db: D1Database, tenantId: string, rawTe
     ).bind(tenantId, ...ov, ...pov));
   }
 
+  // Words beside the candidates may name a product ("butter produced in April").
+  if (scanResidualWords(scan)) add('catalog', productCatalogStatement(db, tenantId));
+
   const results = stmts.length ? await db.batch(stmts) : [];
   const rows = <T>(k: keyof typeof idx): T[] => (idx[k] === undefined ? [] : ((results[idx[k]!]?.results ?? []) as T[]));
 
@@ -114,8 +122,10 @@ export async function interpretQueryText(db: D1Database, tenantId: string, rawTe
     set.add(r.kind as SearchKeyKind);
     hits.keys.set(r.value_norm, set);
   }
-  const det = resolveDetections(scan, hits);
+  const read = resolveDetections(scan, hits);
+  const product = detectProduct(read, catalogFromRows(rows<CatalogRow>('catalog')), { otherConstraints: read.clauses.length > 0 });
+  const det = product.detection;
   const labels: Record<string, string> = {};
-  for (const c of det.clauses) labels[c.id] = describeClause(c);
+  for (const c of det.clauses) labels[c.id] = describeClause(c, product.labels);
   return { clauses: det.clauses, residual: det.residual, labels };
 }

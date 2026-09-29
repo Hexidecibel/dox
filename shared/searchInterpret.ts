@@ -29,6 +29,8 @@ import type { FieldKey } from './searchFields';
 import { parseQueryText, residualText, type LotToken } from './searchCoverage';
 import { foldCustomerPo, normalizeKeyValue, KEY_KIND_LABELS } from './searchKeys';
 import { normalizeLotNumber } from './lotNormalize';
+import { monthDayValue, type QueryDate } from './searchDates';
+import { resolveProductPhrase, type PreparedCatalog } from './productIdentity';
 import { lotSchemeLabel, type LotSchemeSpec } from './lotScheme';
 import type { SearchKeyKind } from './types';
 
@@ -61,8 +63,8 @@ function overlaps(a: [number, number], spans: Array<[number, number]>): boolean 
   return spans.some(([s, e]) => a[0] < e && a[1] > s);
 }
 
-export function scanText(text: string): TextScan {
-  const parsed = parseQueryText(text);
+export function scanText(text: string, opts: { now?: Date } = {}): TextScan {
+  const parsed = parseQueryText(text, opts);
   const dateSpans: Array<[number, number]> = parsed.dates.flatMap((d) => [[d.start, d.end] as [number, number], ...(d.roleSpan ? [d.roleSpan] : [])]);
   const re = /[A-Za-z0-9][A-Za-z0-9\-.#]*/g;
   const words: Array<{ raw: string; start: number; end: number }> = [];
@@ -181,6 +183,27 @@ const DATE_FIELD: Record<SearchDateRole, FieldKey> = {
   uploaded: 'date',
 };
 
+function addDays(iso: string, n: number): string {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * A read date as the clause that asks for it: a day is `on`; a span is
+ * `between` its two ends (year-less ends as `--MM-DD`, any year); an open span
+ * is `after` / `before` the day outside it (both strict, as the builder's are).
+ */
+export function dateClauseShape(date: QueryDate): { op: 'on' | 'between' | 'before' | 'after'; values: string[] } {
+  switch (date.kind) {
+    case 'day': return { op: 'on', values: [date.iso] };
+    case 'month_day': return { op: 'on', values: [monthDayValue(date)] };
+    case 'month_range': return { op: 'between', values: [monthDayValue(date.from), monthDayValue(date.to)] };
+    case 'range':
+      if (date.from && date.to) return date.from === date.to ? { op: 'on', values: [date.from] } : { op: 'between', values: [date.from, date.to] };
+      if (date.from) return { op: 'after', values: [addDays(date.from, -1)] };
+      return { op: 'before', values: [addDays(date.to as string, 1)] };
+  }
+}
+
 export interface Detection {
   clauses: Clause[];
   /** Text left once every detected phrase is cut out ('' = none). */
@@ -219,12 +242,10 @@ export function resolveDetections(scan: TextScan, hits: DetectionHits): Detectio
 
   for (const d of scan.dates) {
     const field = DATE_FIELD[d.role];
-    const value = d.date.kind === 'day'
-      ? d.date.iso
-      : `--${String(d.date.month).padStart(2, '0')}-${String(d.date.day).padStart(2, '0')}`;
+    const { op, values } = dateClauseShape(d.date);
     const raw = scan.text.slice(d.roleSpan ? Math.min(d.roleSpan[0], d.start) : d.start, Math.max(d.end, d.roleSpan?.[1] ?? d.end)).trim();
     push({
-      field, op: 'on', values: [value], source: 'detected', raw,
+      field, op, values, source: 'detected', raw,
       ...(field === 'date' ? { role: d.role === 'uploaded' ? 'any' : d.role } : {}),
       note: d.date.note,
     });
@@ -305,6 +326,51 @@ export function resolveDetections(scan: TextScan, hits: DetectionHits): Detectio
   return { clauses, residual: residualText(scan.text, spans) };
 }
 
+/**
+ * The words a scan leaves once every CANDIDATE phrase (date, lot, number) is
+ * cut out — an upper bound on what `resolveDetections` will leave. The server
+ * reads the product catalog only when this is non-empty, in the same batch.
+ */
+export function scanResidualWords(s: TextScan): string {
+  const spans: Array<[number, number]> = [
+    ...s.dates.flatMap((d) => [[d.start, d.end] as [number, number], ...(d.roleSpan ? [d.roleSpan] : [])]),
+    ...s.lotTokens.map((t) => [t.start, t.end] as [number, number]),
+    ...s.idTokens.flatMap((t) => [[t.start, t.end] as [number, number], ...(t.keywordSpan ? [t.keywordSpan] : [])]),
+  ];
+  return residualText(s.text, spans);
+}
+
+/**
+ * Product words next to another constraint ("butter produced in April"): the
+ * words left over are resolved through the product identifier graph (0107).
+ * The rule is Phase 3's, unchanged: words alone apply ONLY next to another
+ * constraint ("butter" by itself stays a browse); every word must be accounted
+ * for; a phrase that fits several products becomes one clause listing every
+ * candidate with `ambiguous: true` — nothing is picked; a phrase that fits
+ * nothing stays text. `labels` names each product for its chip.
+ */
+export function detectProduct(
+  det: Detection,
+  catalog: PreparedCatalog | null,
+  opts: { otherConstraints: boolean },
+): { detection: Detection; labels: Record<string, string> } {
+  const phrase = det.residual.trim();
+  if (!catalog || !phrase || !opts.otherConstraints) return { detection: det, labels: {} };
+  const resolved = resolveProductPhrase(phrase, catalog);
+  if (!resolved || resolved.resolution.candidates.length === 0) return { detection: det, labels: {} };
+  const cands = resolved.resolution.candidates;
+  const labels: Record<string, string> = {};
+  for (const k of cands) labels[k.product_id] = k.product_name;
+  const clause: Clause = cands.length === 1
+    ? { id: '', field: 'product', op: 'in', values: [cands[0].product_id], source: 'detected', raw: phrase, note: cands[0].explanation }
+    : {
+      id: '', field: 'product', op: 'in', values: cands.map((k) => k.product_id), source: 'detected', raw: phrase, ambiguous: true,
+      note: `"${phrase}" could mean ${cands.length} products. Nothing was picked — the answer is shown for each; choose one.`,
+    };
+  clause.id = `d${det.clauses.length + 1}`;
+  return { detection: { clauses: [...det.clauses, clause], residual: '' }, labels };
+}
+
 /** Nothing on file: what the browser knows before the server has answered. */
 export const NO_HITS: DetectionHits = { keys: new Map(), lotKeys: [], orders: [] };
 
@@ -316,10 +382,10 @@ export const NO_HITS: DetectionHits = { keys: new Map(), lotKeys: [], orders: []
  * say what it is — so an optimistic chip is never a reading the server will
  * take back for want of data the browser does not have.
  */
-export function detectOptimistic(text: string): Detection {
+export function detectOptimistic(text: string, opts: { now?: Date } = {}): Detection {
   const trimmed = text.trim();
   if (!trimmed) return { clauses: [], residual: '' };
-  const scan = scanText(trimmed);
+  const scan = scanText(trimmed, opts);
   if (!scanHasCandidates(scan)) return { clauses: [], residual: trimmed };
   return resolveDetections(scan, NO_HITS);
 }

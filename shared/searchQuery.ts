@@ -32,7 +32,7 @@ import {
   type FieldKey,
   type SearchEntity,
 } from './searchFields';
-import { formatIsoHuman, formatMonthDay } from './searchDates';
+import { describeSpanValues, formatIsoHuman, formatMonthDay, sinceWords } from './searchDates';
 
 export type ClauseSource = 'typed' | 'detected' | 'ai' | 'facet' | 'builder' | 'saved';
 
@@ -503,9 +503,13 @@ export function describeClause(c: Clause, labels: Record<string, string> = {}): 
   const [a, b] = c.values;
   switch (c.op) {
     case 'on': return `${label} ${humanDate(a)}`;
-    case 'between': return `${label} between ${humanDate(a)} and ${humanDate(b ?? a)}`;
+    case 'between': {
+      const span = b ? describeSpanValues(a, b) : null;
+      if (span) return `${label} ${span.text}${span.anyYear ? ' (any year)' : ''}`;
+      return `${label} between ${humanDate(a)} and ${humanDate(b ?? a)}`;
+    }
     case 'before': return `${label} before ${humanDate(a)}`;
-    case 'after': return `${label} after ${humanDate(a)}`;
+    case 'after': return `${label} ${sinceWords(a) ?? `after ${humanDate(a)}`}`;
     default: return `${label} ${c.values.join(', ')}`;
   }
 }

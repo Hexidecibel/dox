@@ -42,9 +42,13 @@ import type {
 } from './types';
 import {
   daysBetween,
+  describeDaySpan,
   findQueryDates,
+  findQueryPeriods,
   formatIsoHuman,
-  formatMonthDay,
+  formatQueryDateWords,
+  inMonthDayRange,
+  monthDayValue,
   inferDocumentDateOrder,
   readStoredDates,
   type DateOrder,
@@ -258,7 +262,7 @@ export interface QueryTextParse {
  * Find role-dated phrases and lot-shaped tokens in a typed query. Pure and
  * cheap — it decides whether the query needs the constraint path at all.
  */
-export function parseQueryText(q: string): QueryTextParse {
+export function parseQueryText(q: string, opts: { now?: Date } = {}): QueryTextParse {
   const text = q;
   const roleWindowBefore = (idx: number): { role: SearchDateRole; start: number } | null => {
     const windowStart = Math.max(0, idx - 40);
@@ -270,12 +274,17 @@ export function parseQueryText(q: string): QueryTextParse {
     return null;
   };
 
-  const hits = findQueryDates(text, {
-    allowYearless: (idx) => {
-      const r = roleWindowBefore(idx);
-      return r !== null && r.role !== 'any';
-    },
-  });
+  const hasRole = (idx: number) => {
+    const r = roleWindowBefore(idx);
+    return r !== null && r.role !== 'any';
+  };
+  // Months and ranges first ("produced in April", "Apr 1-15"), so a day
+  // reading never takes a piece of a range ("Apr 1" out of "Apr 1-15").
+  const periods = findQueryPeriods(text, { now: opts.now, roleBefore: hasRole });
+  const hits = [
+    ...periods,
+    ...findQueryDates(text, { allowYearless: hasRole, taken: periods.map((p) => [p.index, p.index + p.length] as [number, number]) }),
+  ].sort((a, b) => a.index - b.index);
 
   const dates: QueryTextParse['dates'] = [];
   for (const h of hits) {
@@ -357,7 +366,7 @@ export function parseQueryText(q: string): QueryTextParse {
  * inventing a constraint from an abbreviation.
  */
 const STOP_WORDS = new Set([
-  'a', 'an', 'the', 'for', 'of', 'on', 'with', 'and', 'or', 'in', 'to', 'from',
+  'a', 'an', 'the', 'for', 'of', 'on', 'with', 'and', 'or', 'in', 'to', 'from', 'that', 'any',
   'date', 'dated', 'lot', 'lot#', 'batch', 'sublot', 'please', 'find', 'show', 'me', 'get',
   'need', 'send', 'coa', 'coas',
 ]);
@@ -386,13 +395,13 @@ export function residualText(q: string, spans: Array<[number, number]>): string 
 
 export function dateConstraintLabel(role: SearchDateRole, date: QueryDate | { from: string | null; to: string | null }): string {
   const roleLabel = ROLE_LABELS[role];
-  if ('kind' in date) {
-    return date.kind === 'day'
-      ? `${roleLabel} ${formatIsoHuman(date.iso)}`
-      : `${roleLabel} ${formatMonthDay(date.month, date.day)} (any year)`;
-  }
+  if ('kind' in date) return `${roleLabel} ${formatQueryDateWords(date)}`;
   if (date.from && date.to && date.from === date.to) return `${roleLabel} ${formatIsoHuman(date.from)}`;
-  if (date.from && date.to) return `${roleLabel} between ${formatIsoHuman(date.from)} and ${formatIsoHuman(date.to)}`;
+  if (date.from && date.to) {
+    // One calendar month reads as itself ("April 2026", "Apr 1–15, 2026").
+    if (date.from.slice(0, 7) === date.to.slice(0, 7)) return `${roleLabel} ${describeDaySpan(date.from, date.to)}`;
+    return `${roleLabel} between ${formatIsoHuman(date.from)} and ${formatIsoHuman(date.to)}`;
+  }
   if (date.from) return `${roleLabel} on or after ${formatIsoHuman(date.from)}`;
   if (date.to) return `${roleLabel} on or before ${formatIsoHuman(date.to)}`;
   return roleLabel;
@@ -409,17 +418,25 @@ export function makeDateConstraint(
     ? 'No date role was given, so this matches any date printed on a document (production, code, expiration, ship). Say "production date" or "expiry" to narrow it.'
     : null;
   const note = [date.note, noAnyRoleNote].filter(Boolean).join(' ') || null;
+  const shape = (() => {
+    switch (date.kind) {
+      case 'day': return { value: date.iso, date_from: date.iso, date_to: date.iso };
+      case 'month_day': return { value: monthDayValue(date), month_day: { month: date.month, day: date.day } };
+      case 'range': return { value: `${date.from ?? ''}..${date.to ?? ''}`, date_from: date.from, date_to: date.to };
+      case 'month_range': return { value: `${monthDayValue(date.from)}..${monthDayValue(date.to)}`, month_day_range: { from: date.from, to: date.to } };
+    }
+  })();
   return {
     id,
     kind: 'date',
     label: dateConstraintLabel(role, date),
     raw: date.raw,
-    value: date.kind === 'day' ? date.iso : `--${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`,
     fields,
     role,
-    date_from: date.kind === 'day' ? date.iso : null,
-    date_to: date.kind === 'day' ? date.iso : null,
-    month_day: date.kind === 'month_day' ? { month: date.month, day: date.day } : null,
+    date_from: null,
+    date_to: null,
+    month_day: null,
+    ...shape,
     source,
     note,
   };
@@ -770,6 +787,7 @@ function subjectDateValues(s: CoverageSubject, fields: string[]): DateValue[] {
 }
 
 function inConstraint(c: SearchConstraint, isoDate: string): boolean {
+  if (c.month_day_range) return inMonthDayRange(isoDate.slice(5, 10), c.month_day_range.from, c.month_day_range.to);
   if (c.month_day) {
     return parseInt(isoDate.slice(5, 7), 10) === c.month_day.month && parseInt(isoDate.slice(8, 10), 10) === c.month_day.day;
   }
@@ -1584,12 +1602,16 @@ export function constraintsFromParsedQuery(
         && parseInt(sameRole.date_from.slice(5, 7), 10) === tc.month_day.month
         && parseInt(sameRole.date_from.slice(8, 10), 10) === tc.month_day.day)
       || (!!tc.date_from && sameRole.date_from === tc.date_from && sameRole.date_to === tc.date_to)
+      // "produced in April" and the model's Apr 1..Apr 30 of some year.
+      || (!!tc.month_day_range && !!sameRole.date_from && !!sameRole.date_to
+        && sameRole.date_from.slice(5) === monthDayValue(tc.month_day_range.from).slice(2)
+        && sameRole.date_to.slice(5) === monthDayValue(tc.month_day_range.to).slice(2))
     );
     if (agrees) {
       // The model resolved a year the person did not type; the typed reading
       // (any year) is what was asked, so keep the model's only if it agrees
       // exactly on a full date.
-      if (tc.month_day) {
+      if (tc.month_day || tc.month_day_range) {
         const idx = constraints.indexOf(sameRole!);
         constraints[idx] = { ...tc, id: sameRole!.id };
       }
