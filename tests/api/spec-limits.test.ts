@@ -20,6 +20,7 @@ import { onRequestGet as listTests, onRequestPost as createTest } from '../../fu
 import { onRequestPut as updateTest, onRequestDelete as deleteTest } from '../../functions/api/spec-tests/[id]';
 import { onRequestGet as listLimits, onRequestPost as createLimit } from '../../functions/api/spec-limits/index';
 import { onRequestPut as updateLimit, onRequestDelete as deleteLimit } from '../../functions/api/spec-limits/[id]';
+import { loadSpecConfig, specResultsWithConfig } from '../../functions/lib/spec-warnings';
 
 const db = env.DB;
 let seed: Awaited<ReturnType<typeof seedTestData>>;
@@ -480,5 +481,97 @@ describe('spec-limits — version moves only when the threshold does', () => {
     const parsed = JSON.parse(loud!.details);
     expect(parsed.version_bumped).toBe(true);
     expect(parsed.after.version).toBe(2);
+  });
+});
+
+// D3 (rules table, 2026-09-27; migration 0120): the analyte carries a category
+// and, for a regulatory ceiling, the legal line itself. Validated like a tier:
+// an unknown category is refused, never defaulted.
+describe('spec-tests: D3 category + regulatory ceiling', () => {
+  it('creates a regulatory-ceiling analyte and bands a result by it', async () => {
+    const created = await call(
+      createTest,
+      ctx('http://localhost/api/spec-tests', 'POST', orgAdmin, {
+        name: 'Aflatoxin M1',
+        default_unit: 'ppb',
+        category: 'regulatory_ceiling',
+        regulatory_ceiling_value: 0.5,
+        regulatory_ceiling_unit: 'ppb',
+        regulatory_ceiling_source: 'FDA action level, CPG Sec. 527.400',
+      })
+    );
+    expect(created.status).toBe(201);
+    expect(created.body.specTest).toMatchObject({
+      category: 'regulatory_ceiling',
+      regulatory_ceiling_value: 0.5,
+      regulatory_ceiling_unit: 'ppb',
+    });
+
+    const limit = await call(
+      createLimit,
+      ctx('http://localhost/api/spec-limits', 'POST', orgAdmin, {
+        spec_test_id: created.body.specTest.id,
+        operator: '<=',
+        value_max: 0.25,
+        unit: 'ppb',
+      })
+    );
+    expect(limit.status).toBe(201);
+
+    const config = await loadSpecConfig(db, seed.tenantId);
+    const { results } = specResultsWithConfig(
+      {
+        tables: JSON.stringify([
+          { name: 'tox', headers: ['test', 'result', 'units'], rows: [['Aflatoxin M1', '<1.0', 'ppb']] },
+        ]),
+      },
+      config,
+      {}
+    );
+    const v = results.find((r) => r.spec_test_id === created.body.specTest.id)!;
+    expect(v.verdict).toBe('not_checked');
+    expect(v.band?.band).toBe('call');
+  });
+
+  it('refuses an unknown category and a non-positive ceiling', async () => {
+    const bad = await call(
+      createTest,
+      ctx('http://localhost/api/spec-tests', 'POST', orgAdmin, { name: 'Listeria', category: 'pathogen' })
+    );
+    expect(bad.status).toBe(400);
+    const zero = await call(
+      createTest,
+      ctx('http://localhost/api/spec-tests', 'POST', orgAdmin, {
+        name: 'Lead',
+        category: 'regulatory_ceiling',
+        regulatory_ceiling_value: 0,
+      })
+    );
+    expect(zero.status).toBe(400);
+  });
+
+  it('updates and clears a category, recording both sides in the audit row', async () => {
+    const t = await call(createTest, ctx('http://localhost/api/spec-tests', 'POST', orgAdmin, { name: 'E. coli O157 (D3)' }));
+    const id = t.body.specTest.id;
+    const set = await call(
+      updateTest,
+      ctx(`http://localhost/api/spec-tests/${id}`, 'PUT', orgAdmin, { category: 'zero_tolerance' }, { id })
+    );
+    expect(set.status).toBe(200);
+    expect(set.body.specTest.category).toBe('zero_tolerance');
+    const cleared = await call(
+      updateTest,
+      ctx(`http://localhost/api/spec-tests/${id}`, 'PUT', orgAdmin, { category: null }, { id })
+    );
+    expect(cleared.body.specTest.category).toBeNull();
+    const audit = await db
+      .prepare(
+        `SELECT details FROM audit_log WHERE action = 'spec_test.updated' AND resource_id = ? ORDER BY rowid DESC LIMIT 1`
+      )
+      .bind(id)
+      .first<{ details: string }>();
+    const details = JSON.parse(audit!.details);
+    expect(details.category_before.category).toBe('zero_tolerance');
+    expect(details.category_after).toEqual({ category: null });
   });
 });

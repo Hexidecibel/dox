@@ -381,6 +381,18 @@ import type {
   UpdateModuleVisibilityRequest,
 } from '../../shared/types';
 
+/** D3 category + regulatory ceiling on an analyte (migration 0120). */
+type SpecTestCategoryFields = Partial<
+  Pick<
+    ApiSpecTest,
+    | 'category'
+    | 'regulatory_ceiling_value'
+    | 'regulatory_ceiling_unit'
+    | 'regulatory_ceiling_source'
+    | 'regulatory_band_factor'
+  >
+>;
+
 export const api = {
   auth: {
     /**
@@ -1248,7 +1260,7 @@ export const api = {
       default_unit?: string | null;
       notes?: string | null;
       tenant_id?: string;
-    }) =>
+    } & SpecTestCategoryFields) =>
       fetchApi<{ specTest: ApiSpecTest }>('/spec-tests', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -1256,7 +1268,7 @@ export const api = {
 
     update: (
       id: string,
-      data: { name?: string; aliases?: string[]; default_unit?: string | null; notes?: string | null }
+      data: { name?: string; aliases?: string[]; default_unit?: string | null; notes?: string | null } & SpecTestCategoryFields
     ) =>
       fetchApi<{ specTest: ApiSpecTest }>(`/spec-tests/${id}`, {
         method: 'PUT',

@@ -14,6 +14,7 @@ import { decideArrival, preflightArrivalDecision } from '../../lib/request-arriv
 import { LOT_SCHEME_SELECT, invariantWarningsFor, withInvariantWarnings } from '../../lib/queue-warnings';
 import { loadSpecConfig, withSpecConfig, specResultsWithConfig } from '../../lib/spec-warnings';
 import { registerAndNotifyForApproval } from '../../lib/spec-register';
+import { recordArrivalAndCheckExpiry } from '../../lib/expired-on-arrival';
 import {
   REJECTION_REASONS,
   type RejectionReason,
@@ -888,6 +889,9 @@ async function handleApprove(
     // extraction is what was approved.
     null
   );
+  await checkArrivalForApproval(context, user, item, result.supplierId, supplierOverride?.supplierName ?? null, [
+    result.documentId,
+  ]);
 
   // Upsert extraction template if requested
   if (saveTemplate && result.supplierId && item.document_type_id) {
@@ -1021,6 +1025,14 @@ async function handleMultiProductApprove(
     // together here because a verdict cannot be attributed to one product's
     // document more precisely than the reviewer's own split already did.
     (products ?? []).flatMap((p) => p.tables ?? [])
+  );
+  await checkArrivalForApproval(
+    context,
+    user,
+    item,
+    result.supplierId,
+    supplierOverride?.supplierName ?? null,
+    result.documents.map((d) => d.documentId)
   );
 
   return new Response(
@@ -1343,6 +1355,41 @@ async function registerFlatApproveSpecChecks(
       err instanceof Error ? err.message : String(err)
     );
   }
+}
+
+/**
+ * G4 (rules table, 2026-09-27): stamp when these documents ARRIVED and notify
+ * the QA lane about any certificate that was already expired on that day. See
+ * functions/lib/expired-on-arrival.ts. Best-effort: the approval stands.
+ *
+ * Flat paths only. A COA does not carry `document_expires_on` (its type does
+ * not renew, and the prompt forbids copying a shelf life into it), so the
+ * records path has nothing this could find.
+ */
+async function checkArrivalForApproval(
+  context: EventContext<Env, string, Record<string, unknown>>,
+  user: User,
+  item: QueueItem & { tenant_name?: string | null; created_at?: string | null },
+  supplierId: string | null,
+  supplierName: string | null,
+  documentIds: string[]
+): Promise<void> {
+  await recordArrivalAndCheckExpiry(
+    context.env.DB,
+    context.env.RESEND_API_KEY,
+    {
+      tenantId: String(item.tenant_id),
+      tenantName: String(item.tenant_name ?? ''),
+      queueItemId: item.id,
+      arrivedAt: item.created_at ?? null,
+      supplierId,
+      supplierName,
+      documentTypeId: item.document_type_id == null ? null : String(item.document_type_id),
+      actorUserId: user.id,
+      appUrl: new URL(context.request.url).origin,
+    },
+    documentIds
+  );
 }
 
 async function handleCoaRecordsApprove(

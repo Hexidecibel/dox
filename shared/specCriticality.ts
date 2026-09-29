@@ -23,12 +23,12 @@
  * email someone while routing is being set up, or a critical one to stay
  * in-app.
  *
- * ── OPEN QUESTION: THE WORDS ARE NOT SETTLED ──────────────────────────────
- * AJ has not chosen between `low`/`medium`/`high` and
- * `essential`/`warn`/`ignore`. low/medium/high is what ships, for one concrete
- * reason beyond taste: `severity` on the same table already stores the literal
- * 'warn', and two columns using one word for two different things is a trap for
- * whoever reads a frozen `limit_snapshot` in a year.
+ * ── THE WORDS (rules table B1, ruled 2026-09-27) ──────────────────────────
+ * A person reads critical / major / minor. The database keeps high / medium /
+ * low, for one concrete reason beyond taste: frozen `limit_snapshot`s already
+ * hold those values, and `severity` on the same table stores the literal
+ * 'warn', so the stored words stay the ones that cannot collide. The hover
+ * copy below is a draft held for AJ's wording.
  *
  * RENAMING IS A SINGLE-SITE EDIT — this file (values, default, labels, help,
  * chip colours) plus a NEW migration restating the CHECK constraint from 0095,
@@ -93,17 +93,53 @@ export function compareSpecCriticality(a: unknown, b: unknown): number {
  * What a person is told each tier means. The words are deliberately about
  * CONSEQUENCE, not about the number — the tier is a business judgement, and
  * "high/medium/low" on its own would leave every tenant guessing at ours.
+ *
+ * DISPLAY ONLY (rules table B1, ruled 2026-09-27). The words a person reads are
+ * critical / major / minor; the STORED values stay high / medium / low, because
+ * every frozen `limit_snapshot` since 0095 already carries them and a register
+ * that re-labelled old rows would be answering a different question. Renaming
+ * what is displayed is this map; renaming what is stored would be a migration.
  */
 export const SPEC_CRITICALITY_LABELS: Record<SpecCriticality, string> = {
   high: 'Critical',
-  medium: 'Tracked',
-  low: 'Informational',
+  medium: 'Major',
+  low: 'Minor',
 };
 
+/**
+ * Labels this vocabulary has SHIPPED under before, still accepted as input.
+ * A limits workbook filled in against the old screen says "Tracked"; failing
+ * that import now would punish someone for reading what we showed them.
+ * Input only — nothing renders these.
+ */
+export const SPEC_CRITICALITY_FORMER_LABELS: Record<SpecCriticality, readonly string[]> = {
+  high: [],
+  medium: ['Tracked'],
+  low: ['Informational'],
+};
+
+/**
+ * The hover explainer, one per tier, rendered wherever a tier chip or label is
+ * (rules table B1: "a warehouse or purchasing reader can act on a result
+ * without first learning the vocabulary").
+ *
+ * DRAFT COPY — B1's wording was drafted by AI and is held for AJ's approval.
+ * Edit it HERE; every surface reads this map.
+ *
+ * ONE DELIBERATE DEPARTURE from B1's draft: B1 says a critical result "can't
+ * ship until QA resolves it". dox has no hold — nothing stops a shipment yet —
+ * so the shipped sentence says that too. A tooltip that promises a hold the
+ * product does not enforce is the most dangerous kind of wrong, because the
+ * reader stops watching.
+ */
 export const SPEC_CRITICALITY_HELP: Record<SpecCriticality, string> = {
-  high: 'Would stop a load. Show it first and loudest.',
-  medium: 'Watched batch to batch. Flagged, but it is not a hold.',
-  low: 'Recorded for the file. Rarely acted on.',
+  high:
+    "This result stops the shipment. It can't ship until QA resolves it. " +
+    '(Holds are not enforced yet — today this flags and alerts.)',
+  medium:
+    "This result missed target and is being tracked. On its own it doesn't stop anything, " +
+    'but repeated misses can move the supplier onto watch.',
+  low: "This result is recorded for the file. It doesn't affect whether the shipment ships.",
 };
 
 /**

@@ -1,0 +1,24 @@
+-- WHEN A DOCUMENT REACHED US -- so "expired on arrival" can be told apart from
+-- "expired since".
+--
+-- Rules table G4 (AJ, 2026-09-27): a certificate that was already expired when
+-- it arrived says so at review, counts as a GAP rather than as satisfying its
+-- requirement, and notifies the QA lane. Accepting an expired certificate is
+-- the finding an auditor writes first; three of four in one recent packet were.
+--
+-- The arrival day already exists, on the queue item (processing_queue.created_at),
+-- but nothing links a document back to the queue item it came from, and
+-- documents.created_at is the APPROVAL day -- which can be days or weeks later.
+-- Judging "expired on arrival" against the approval day would blame the
+-- supplier for a certificate that lapsed while it sat in our own queue.
+--
+-- documents.arrived_at is the queue item's created_at, copied at approval.
+-- NULLABLE, NO DEFAULT, NO BACKFILL: nothing recorded the arrival of a document
+-- approved before this, and inventing one would assert a fact nobody has. A
+-- reader (shared/expiredOnArrival.ts) falls back to created_at and SAYS it did
+-- (`arrival_basis: 'created_at'`). A document uploaded directly, not through the
+-- queue, arrived when it was created, so the fallback is exact there.
+--
+-- Plain-ASCII header (the 0110 D1 import finding).
+
+ALTER TABLE documents ADD COLUMN arrived_at TEXT;

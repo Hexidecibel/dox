@@ -125,6 +125,10 @@ export function buildLimitSnapshot(
   const equated = {
     ...(verdict.unit_equivalence_applied ? { unit_equivalence: 'volume_mass' } : {}),
     ...(verdict.conversion ? { conversion: verdict.conversion } : {}),
+    // WHY it could not be judged, when that reason notifies (E1/E2). Frozen
+    // with the row so the alert landing page and a later reader can tell a
+    // method mismatch someone was TOLD about from a quiet could-not-check.
+    ...(verdict.not_checked_category ? { not_checked_category: verdict.not_checked_category } : {}),
   };
   if (verdict.source !== 'limit' || !verdict.limit_id) {
     // A printed-spec verdict's "limit" is the document's own text, which is

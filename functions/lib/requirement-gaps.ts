@@ -172,7 +172,13 @@ export async function computeGapsForSuppliers(
   const closureRows = await db
     .prepare(
       `SELECT d.supplier_id, dr.requirement_id, dr.confirmed_at,
-              d.id AS document_id, d.title AS document_title
+              d.id AS document_id, d.title AS document_title,
+              -- G4: a certificate already expired when it arrived closes
+              -- nothing. The printed expiry, never expiration_date (a shelf life).
+              CASE WHEN json_valid(d.primary_metadata)
+                   THEN json_extract(d.primary_metadata, '$.document_expires_on') END AS expires_on,
+              d.arrived_at AS arrived_at,
+              d.created_at AS created_at
          FROM document_requirements dr
          JOIN documents d ON d.id = dr.document_id
         WHERE d.tenant_id = ?
@@ -233,6 +239,9 @@ export async function computeGapsForSuppliers(
       document_id: str(r.document_id),
       document_title: str(r.document_title),
       confirmed_at: nullableStr(r.confirmed_at),
+      expires_on: nullableStr(r.expires_on),
+      arrived_at: nullableStr(r.arrived_at),
+      created_at: nullableStr(r.created_at),
     });
   }
 

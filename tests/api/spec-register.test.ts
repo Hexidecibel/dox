@@ -22,6 +22,7 @@ import {
   registerAndNotifyForApproval,
 } from '../../functions/lib/spec-register';
 import type { SpecVerdict, ConfiguredLimit } from '../../shared/specCheck';
+import { buildAlertLandingView } from '../../functions/lib/alert-links';
 
 const db = env.DB;
 let seed: Awaited<ReturnType<typeof seedTestData>>;
@@ -405,6 +406,113 @@ describe('registerAndNotifyForApproval', () => {
         .bind(doc)
         .first<{ n: number }>();
       expect(notified!.n).toBe(3);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  // Rules table E1/E2 (2026-09-27): a method mismatch or a smaller P/A sample
+  // is never judged, and always notified — in the same one email, as its own
+  // list, worded as notify-only. Every other could-not-check stays quiet.
+  it('notifies a method mismatch even with no failure, and stays quiet about a plain could-not-check', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ id: 'email_nj' }), { status: 200 })
+    );
+    try {
+      const doc = await makeDocument('MPN COA');
+      await registerAndNotifyForApproval(
+        db,
+        're_test_key',
+        {
+          tenantId: seed.tenantId,
+          tenantName: 'Test Corp',
+          queueItemId: 'q-nj',
+          supplierId,
+          supplierName: 'Andersen Dairy',
+          documentTypeId: docTypeId,
+          approvedBy: seed.orgAdminId,
+        },
+        [
+          verdict({
+            test_name_raw: 'E. coli',
+            value_raw: '3',
+            unit_raw: 'MPN/g',
+            verdict: 'not_checked',
+            reason: 'result is in MPN/g but the limit is in CFU/g — not comparable (different counting methods)',
+            not_checked_category: 'method_mismatch',
+          }),
+          verdict({ test_name_raw: 'Coliform', value_raw: '<50', verdict: 'not_checked', reason: 'straddles', target: atRow(1) }),
+        ],
+        [LIMIT],
+        [{ documentId: doc, title: 'MPN COA', recordIndex: null }]
+      );
+
+      const emailCalls = fetchSpy.mock.calls.filter((c) => String(c[0]).includes('resend.com'));
+      expect(emailCalls).toHaveLength(1);
+      const body = JSON.parse(String((emailCalls[0][1] as RequestInit).body));
+      expect(body.subject).toMatch(/E\. coli not judged/);
+      expect(body.subject).not.toMatch(/out-of-spec/);
+      expect(body.html).toMatch(/method mismatch, please resolve with the supplier/);
+      // The straddled coliform is a could-not-check nobody is mailed about.
+      expect(body.html).not.toContain('Coliform');
+
+      const rows = await db
+        .prepare(
+          `SELECT test_name_raw, notified_at, limit_snapshot FROM document_spec_checks
+            WHERE document_id = ? ORDER BY test_name_raw`
+        )
+        .bind(doc)
+        .all<{ test_name_raw: string; notified_at: string | null; limit_snapshot: string | null }>();
+      const byName = Object.fromEntries(rows.results.map((r) => [r.test_name_raw, r]));
+      expect(byName['E. coli'].notified_at).not.toBeNull();
+      expect(JSON.parse(byName['E. coli'].limit_snapshot!).not_checked_category).toBe('method_mismatch');
+      expect(byName['Coliform'].notified_at).toBeNull();
+
+      // The no-login landing page lists it apart from failures, with the same words.
+      const view = await buildAlertLandingView(db, {
+        tenant_id: seed.tenantId,
+        kind: 'spec_alert',
+        document_id: doc,
+        subject_ids: null,
+        expires_at: '2099-01-01T00:00:00Z',
+      } as unknown as Parameters<typeof buildAlertLandingView>[1]);
+      expect(view!.failures).toEqual([]);
+      expect(view!.not_judged).toEqual([
+        {
+          test: 'E. coli',
+          value: '3',
+          unit: 'MPN/g',
+          note: "not judged — method mismatch, please resolve with the supplier's lab",
+        },
+      ]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('sends nothing for a document whose only could-not-check is an ordinary one', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ id: 'email_none' }), { status: 200 })
+    );
+    try {
+      const doc = await makeDocument('Censored COA');
+      await registerAndNotifyForApproval(
+        db,
+        're_test_key',
+        {
+          tenantId: seed.tenantId,
+          tenantName: 'Test Corp',
+          queueItemId: 'q-cens',
+          supplierId,
+          supplierName: null,
+          documentTypeId: docTypeId,
+          approvedBy: seed.orgAdminId,
+        },
+        [verdict({ value_raw: '<50', verdict: 'not_checked', reason: 'straddles' })],
+        [LIMIT],
+        [{ documentId: doc, title: 'Censored COA', recordIndex: null }]
+      );
+      expect(fetchSpy.mock.calls.filter((c) => String(c[0]).includes('resend.com'))).toHaveLength(0);
     } finally {
       fetchSpy.mockRestore();
     }

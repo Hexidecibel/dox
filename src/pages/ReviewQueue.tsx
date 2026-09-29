@@ -70,6 +70,7 @@ import type { ProcessingQueueItem, ApiDocumentType, TemplateFieldMapping, Extrac
 import { renameTableHeader as renameTableHeaderPure } from './reviewTableActions';
 import { renewalRuleLabel } from '../../shared/renewalPeriod';
 import { renewalAnswered, renewalAnswerPayload, renewalBoxValue } from '../lib/renewalAnswer';
+import { expiredOnArrival, expiredOnArrivalSentence } from '../../shared/expiredOnArrival';
 import {
   shouldShowDualCompare,
   readTextPayload,
@@ -3152,6 +3153,31 @@ export default function ReviewQueue() {
                         all: there the empty box is our failure, not a decision,
                         and an untouched one records nothing. See
                         `renewalAnswered`. */}
+                    {/* G4 (rules table, 2026-09-27): a certificate that was
+                        already expired the day it reached us says so HERE,
+                        before approval, off the expiry as it currently reads
+                        (the reviewer may be correcting it). Approving still
+                        works — it files the document, does NOT let it satisfy
+                        its requirement, and notifies the QA lane. */}
+                    {(() => {
+                      const eoa = expiredOnArrival({
+                        expires_on: editedFields[item.id]?.document_expires_on,
+                        arrived_at: item.created_at,
+                      });
+                      if (!eoa) return null;
+                      return (
+                        <Alert severity="error" sx={{ mt: 2 }} data-testid="expired-on-arrival">
+                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                            {expiredOnArrivalSentence(eoa)}.
+                          </Typography>
+                          <Typography variant="caption" sx={{ display: 'block' }}>
+                            Approving files it, but it will not count as satisfying its requirement,
+                            and the QA owner is notified. Ask the supplier for a current certificate.
+                          </Typography>
+                        </Alert>
+                      );
+                    })()}
+
                     <Paper variant="outlined" sx={{ p: 1.5, mt: 2 }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
                         <Typography variant="subtitle2">Renewal</Typography>

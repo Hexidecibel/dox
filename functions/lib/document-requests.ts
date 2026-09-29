@@ -29,6 +29,7 @@
  * never "delete the sensitive keys" from a wider object.
  */
 
+import { expiredOnArrival } from '../../shared/expiredOnArrival';
 import { generateId, logAudit } from './db';
 import {
   computeItemRefs,
@@ -459,7 +460,10 @@ export async function loadClosures(
   const rows = await db
     .prepare(
       `SELECT dr.requirement_id, dr.confirmed_at,
-              d.id AS document_id, d.title AS document_title
+              d.id AS document_id, d.title AS document_title,
+              CASE WHEN json_valid(d.primary_metadata)
+                   THEN json_extract(d.primary_metadata, '$.document_expires_on') END AS expires_on,
+              d.arrived_at, d.created_at
          FROM document_requirements dr
          JOIN documents d ON d.id = dr.document_id
         WHERE d.tenant_id = ?
@@ -475,9 +479,15 @@ export async function loadClosures(
       confirmed_at: string | null;
       document_id: string;
       document_title: string;
+      expires_on: string | null;
+      arrived_at: string | null;
+      created_at: string | null;
     }>();
 
   for (const r of rows.results ?? []) {
+    // Same rule as the gap engine (G4): a certificate already expired when it
+    // arrived closes nothing, so it is not offered as closing this ask either.
+    if (expiredOnArrival(r)) continue;
     const key = String(r.requirement_id);
     const list = out.get(key) ?? [];
     list.push({

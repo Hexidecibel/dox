@@ -21,6 +21,8 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var specCheck_exports = {};
 __export(specCheck_exports, {
   LIMIT_THRESHOLD_FIELDS: () => LIMIT_THRESHOLD_FIELDS,
+  NOTIFYING_NOT_CHECKED_CATEGORIES: () => NOTIFYING_NOT_CHECKED_CATEGORIES,
+  NOT_CHECKED_CATEGORY_NOTE: () => NOT_CHECKED_CATEGORY_NOTE,
   NO_LIMIT_CONFIGURED_LABEL: () => NO_LIMIT_CONFIGURED_LABEL,
   STRICT_UNIT_POLICY: () => STRICT_UNIT_POLICY,
   checkConfiguredLimits: () => checkConfiguredLimits,
@@ -35,6 +37,7 @@ __export(specCheck_exports, {
   formatLimit: () => formatLimit,
   formatUnitConversion: () => formatUnitConversion,
   isControlRowLabel: () => isControlRowLabel,
+  isNotifyOnlyVerdict: () => isNotifyOnlyVerdict,
   isoDay: () => isoDay,
   limitThresholdChanged: () => limitThresholdChanged,
   matchSpecTest: () => matchSpecTest,
@@ -55,6 +58,7 @@ __export(specCheck_exports, {
   unitEquivalenceNote: () => unitEquivalenceNote,
   unitFactor: () => unitFactor,
   unitInferenceNote: () => unitInferenceNote,
+  unitRefusalCategory: () => unitRefusalCategory,
   unitRefusalNote: () => unitRefusalNote,
   validateLimitShape: () => validateLimitShape,
   watchEndedLabel: () => watchEndedLabel,
@@ -75,6 +79,17 @@ function parseSpecCriticality(value) {
 }
 
 // shared/specCheck.ts
+var NOTIFYING_NOT_CHECKED_CATEGORIES = [
+  "method_mismatch",
+  "sample_basis_mismatch"
+];
+function isNotifyOnlyVerdict(v) {
+  return v.verdict === "not_checked" && !!v.not_checked_category && NOTIFYING_NOT_CHECKED_CATEGORIES.includes(v.not_checked_category);
+}
+var NOT_CHECKED_CATEGORY_NOTE = {
+  method_mismatch: "not judged \u2014 method mismatch, please resolve with the supplier's lab",
+  sample_basis_mismatch: "not judged \u2014 sample size smaller than the limit requires, please resolve with the supplier's lab"
+};
 function specResultKey(scope, target) {
   const where = target.kind === "table" ? `t${target.table_index}r${target.row_index}${target.col_index === void 0 ? "" : `c${target.col_index}`}` : `g${target.group}/${target.cell}`;
   return `${scope}::${where}`;
@@ -314,6 +329,19 @@ function unitRefusalNote(from, to) {
   }
   return "";
 }
+function unitRefusalCategory(from, to) {
+  const method = (family) => {
+    const parts = family.split(":");
+    if (parts[0] === "log") return { scale: "log", method: parts[1] ?? "" };
+    return { scale: "linear", method: parts[0] };
+  };
+  const f = method(from.family);
+  const t = method(to.family);
+  if (!f || !t || f.scale !== t.scale) return null;
+  const enumerations = /* @__PURE__ */ new Set(["cfu", "mpn"]);
+  if (!enumerations.has(f.method) || !enumerations.has(t.method)) return null;
+  return f.method !== t.method ? "method_mismatch" : null;
+}
 function isKnownUnit(raw) {
   const u = normalizeUnit(raw);
   return u.family !== "unknown" && !u.family.startsWith("other:");
@@ -544,7 +572,8 @@ function compareToLimit(value, limit, policy = STRICT_UNIT_POLICY) {
           return {
             verdict: "not_checked",
             reason: `tested absent in ${vb} g but the limit requires absence in ${limit.basis_grams} g \u2014 a smaller sample is a weaker test`,
-            value_num: null
+            value_num: null,
+            not_checked_category: "sample_basis_mismatch"
           };
         }
         return { verdict: "in_spec", reason: "reported absent", value_num: null };
@@ -579,10 +608,12 @@ function compareToLimit(value, limit, policy = STRICT_UNIT_POLICY) {
   const lu = normalizeUnit(limit.unit);
   const match = resolveUnits(vu, lu, policy);
   if (match === null) {
+    const category = unitRefusalCategory(vu, lu);
     return {
       verdict: "not_checked",
       reason: `result is in ${vu.canonical || "an unknown unit"} but the limit is in ${lu.canonical || "another unit"} \u2014 not comparable${unitRefusalNote(vu, lu)}`,
-      value_num: null
+      value_num: null,
+      ...category ? { not_checked_category: category } : {}
     };
   }
   const v = exact(value.value * match.factor);
@@ -793,6 +824,7 @@ function judgePrinted(scope, target, row, policy = STRICT_UNIT_POLICY) {
     return {
       ...base,
       ...equated,
+      ...cmp.not_checked_category ? { not_checked_category: cmp.not_checked_category } : {},
       verdict: "not_checked",
       limit_text: limitText,
       reason: cmp.reason,
@@ -993,7 +1025,11 @@ function toSpecLimit(l, test) {
     raw: "",
     limit_id: l.id,
     spec_test_id: l.spec_test_id,
-    basis_grams: null
+    // An absence limit configured "per 25 g" states its sample size in the unit
+    // box; reading it is what lets E2's sample-size mismatch ("absent in 10 g")
+    // be caught against OUR limit and not only against a printed one. A limit
+    // whose unit names no gram amount keeps no basis, exactly as before.
+    basis_grams: l.operator === "absent" ? basisGrams(l.unit || test.default_unit || "") : null
   };
 }
 var NO_LIMIT_CONFIGURED_LABEL = "No limit configured";
@@ -1232,6 +1268,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
     } else if (cmp.verdict === "not_checked") {
       verdicts.push({
         ...base,
+        ...cmp.not_checked_category ? { not_checked_category: cmp.not_checked_category } : {},
         verdict: "not_checked",
         message: `${test.name} could not be judged against our limit of ${limitText} \u2014 ${reason}.`
       });
@@ -1606,6 +1643,8 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   LIMIT_THRESHOLD_FIELDS,
+  NOTIFYING_NOT_CHECKED_CATEGORIES,
+  NOT_CHECKED_CATEGORY_NOTE,
   NO_LIMIT_CONFIGURED_LABEL,
   STRICT_UNIT_POLICY,
   checkConfiguredLimits,
@@ -1620,6 +1659,7 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   formatLimit,
   formatUnitConversion,
   isControlRowLabel,
+  isNotifyOnlyVerdict,
   isoDay,
   limitThresholdChanged,
   matchSpecTest,
@@ -1640,6 +1680,7 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   unitEquivalenceNote,
   unitFactor,
   unitInferenceNote,
+  unitRefusalCategory,
   unitRefusalNote,
   validateLimitShape,
   watchEndedLabel,

@@ -22,6 +22,7 @@ var specCriticality_exports = {};
 __export(specCriticality_exports, {
   DEFAULT_SPEC_CRITICALITY: () => DEFAULT_SPEC_CRITICALITY,
   SPEC_CRITICALITY_COLOR: () => SPEC_CRITICALITY_COLOR,
+  SPEC_CRITICALITY_FORMER_LABELS: () => SPEC_CRITICALITY_FORMER_LABELS,
   SPEC_CRITICALITY_HELP: () => SPEC_CRITICALITY_HELP,
   SPEC_CRITICALITY_LABELS: () => SPEC_CRITICALITY_LABELS,
   SPEC_CRITICALITY_VALUES: () => SPEC_CRITICALITY_VALUES,
@@ -47,13 +48,18 @@ function compareSpecCriticality(a, b) {
 }
 var SPEC_CRITICALITY_LABELS = {
   high: "Critical",
-  medium: "Tracked",
-  low: "Informational"
+  medium: "Major",
+  low: "Minor"
+};
+var SPEC_CRITICALITY_FORMER_LABELS = {
+  high: [],
+  medium: ["Tracked"],
+  low: ["Informational"]
 };
 var SPEC_CRITICALITY_HELP = {
-  high: "Would stop a load. Show it first and loudest.",
-  medium: "Watched batch to batch. Flagged, but it is not a hold.",
-  low: "Recorded for the file. Rarely acted on."
+  high: "This result stops the shipment. It can't ship until QA resolves it. (Holds are not enforced yet \u2014 today this flags and alerts.)",
+  medium: "This result missed target and is being tracked. On its own it doesn't stop anything, but repeated misses can move the supplier onto watch.",
+  low: "This result is recorded for the file. It doesn't affect whether the shipment ships."
 };
 var SPEC_CRITICALITY_COLOR = {
   high: "error",
@@ -64,6 +70,7 @@ var SPEC_CRITICALITY_COLOR = {
 0 && (module.exports = {
   DEFAULT_SPEC_CRITICALITY,
   SPEC_CRITICALITY_COLOR,
+  SPEC_CRITICALITY_FORMER_LABELS,
   SPEC_CRITICALITY_HELP,
   SPEC_CRITICALITY_LABELS,
   SPEC_CRITICALITY_VALUES,

@@ -38,6 +38,7 @@ const { limitThresholdChanged } = require('./shared/specCheck');
 const {
   SPEC_CRITICALITY_VALUES,
   SPEC_CRITICALITY_LABELS,
+  SPEC_CRITICALITY_FORMER_LABELS,
   DEFAULT_SPEC_CRITICALITY,
 } = require('./shared/specCriticality');
 
@@ -164,6 +165,8 @@ const CRITICALITY_WORDS = new Map();
 for (const tier of SPEC_CRITICALITY_VALUES) {
   CRITICALITY_WORDS.set(ciKey(tier), tier);
   CRITICALITY_WORDS.set(ciKey(SPEC_CRITICALITY_LABELS[tier]), tier);
+  // A workbook filled in against an earlier screen ("Tracked") still imports.
+  for (const former of SPEC_CRITICALITY_FORMER_LABELS[tier] || []) CRITICALITY_WORDS.set(ciKey(former), tier);
 }
 
 /** The words a row may use, for the error message, in tier order. */

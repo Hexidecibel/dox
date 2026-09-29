@@ -34,7 +34,14 @@
 
 import { generateId } from './db';
 import { computeExpirations, LEAD_TIME_WINDOW, isAlertStatus } from './expirations';
-import type { AlertLandingView, AlertLandingSpecFailure, AlertLinkKind } from '../../shared/types';
+import type {
+  AlertLandingView,
+  AlertLandingSpecFailure,
+  AlertLandingNotJudged,
+  AlertLinkKind,
+} from '../../shared/types';
+import { NOT_CHECKED_CATEGORY_NOTE } from '../../shared/specCheck';
+import type { NotCheckedCategory } from '../../shared/specCheck';
 
 /**
  * Default lifetime of an alert link.
@@ -280,6 +287,7 @@ export async function buildAlertLandingView(
         received_date: doc.received_date,
       },
       failures,
+      not_judged: await notJudgedFor(db, link),
       renewals: [],
     };
   }
@@ -304,7 +312,44 @@ export async function buildAlertLandingView(
       status: r.status as string,
     }));
 
-  return { ...base, document: null, failures: [], renewals };
+  return { ...base, document: null, failures: [], not_judged: [], renewals };
+}
+
+/**
+ * The notify-only could-not-check rows of the alerted document (E1/E2), read
+ * off the category frozen into each row's snapshot. Best-effort: an unreadable
+ * snapshot is skipped rather than guessed at.
+ */
+async function notJudgedFor(db: D1Database, link: AlertLinkRow): Promise<AlertLandingNotJudged[]> {
+  const res = await db
+    .prepare(
+      `SELECT test_name_raw, value_raw, unit_raw, limit_snapshot
+         FROM document_spec_checks
+        WHERE document_id = ? AND tenant_id = ? AND verdict = 'not_checked'
+          AND limit_snapshot LIKE '%not_checked_category%'
+        ORDER BY created_at ASC`
+    )
+    .bind(link.document_id, link.tenant_id)
+    .all<{ test_name_raw: string; value_raw: string | null; unit_raw: string | null; limit_snapshot: string | null }>();
+  const out: AlertLandingNotJudged[] = [];
+  for (const r of res.results ?? []) {
+    let category: NotCheckedCategory | null = null;
+    try {
+      const parsed = JSON.parse(r.limit_snapshot ?? '{}') as { not_checked_category?: unknown };
+      const c = parsed.not_checked_category;
+      if (typeof c === 'string' && c in NOT_CHECKED_CATEGORY_NOTE) category = c as NotCheckedCategory;
+    } catch {
+      /* skipped */
+    }
+    if (!category) continue;
+    out.push({
+      test: r.test_name_raw,
+      value: r.value_raw ?? null,
+      unit: r.unit_raw ?? null,
+      note: NOT_CHECKED_CATEGORY_NOTE[category],
+    });
+  }
+  return out;
 }
 
 /**

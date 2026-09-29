@@ -17,6 +17,13 @@
  *     is one event, not twelve. Alert fatigue is how a safety signal stops being
  *     read at all.
  *
+ * WHAT MAILS. An out-of-spec result, a missing required analyte (0109), and —
+ * since the 2026-09-27 rules table (E1/E2) — a could-not-check whose reason is
+ * a METHOD mismatch (MPN against CFU) or a smaller presence/absence SAMPLE than
+ * the limit requires. Those two are never judged (D1) but must always reach a
+ * person, worded as notify-only. Every other could-not-check stays in the
+ * review queue and the register, exactly as before. Nothing here holds a lot.
+ *
  * NEVER BLOCKS, NEVER THROWS UPWARD. Registering a result and notifying about it
  * are strictly best-effort: an approval that already succeeded must not fail
  * because an email bounced.
@@ -35,12 +42,14 @@ import type {
   UnjudgedResult,
   MissingRequiredAnalyte,
 } from '../../shared/specCheck';
+import { isNotifyOnlyVerdict, NOT_CHECKED_CATEGORY_NOTE } from '../../shared/specCheck';
 import {
   buildLimitSnapshot,
   registerIdentity,
   uniqueByRegisterIdentity,
 } from '../../shared/specSnapshot';
 import { compareSpecCriticality } from '../../shared/specCriticality';
+import { SPEC_BAND_LABELS, specBandRank } from '../../shared/specBand';
 
 export interface RegisterContext {
   tenantId: string;
@@ -73,7 +82,7 @@ export async function registerSpecChecks(
   ctx: RegisterContext,
   verdicts: SpecVerdict[],
   limits: ConfiguredLimit[]
-): Promise<{ written: number; failures: SpecVerdict[] }> {
+): Promise<{ written: number; failures: SpecVerdict[]; notifyOnly: SpecVerdict[] }> {
   // One row per place on the page per source (0105). Identity, never value: two
   // lots printing the same number are two results and both are written.
   const { kept, dropped } = uniqueByRegisterIdentity(verdicts);
@@ -84,7 +93,9 @@ export async function registerSpecChecks(
   }
   verdicts = kept;
   const failures = verdicts.filter((v) => v.verdict === 'out_of_spec');
-  if (verdicts.length === 0) return { written: 0, failures };
+  // Not judged, and never will be — but a person must hear about it (E1/E2).
+  const notifyOnly = verdicts.filter(isNotifyOnlyVerdict);
+  if (verdicts.length === 0) return { written: 0, failures, notifyOnly };
 
   try {
     await db
@@ -158,13 +169,13 @@ export async function registerSpecChecks(
       );
       await db.batch(rowValues.map((values) => legacy.bind(...values)));
     }
-    return { written: verdicts.length, failures };
+    return { written: verdicts.length, failures, notifyOnly };
   } catch (err) {
     console.error(
       '[spec-register] writing spec checks failed:',
       err instanceof Error ? err.message : String(err)
     );
-    return { written: 0, failures };
+    return { written: 0, failures, notifyOnly };
   }
 }
 
@@ -345,9 +356,17 @@ export async function notifySpecFailures(
    * wrote for this supplier on purpose (a watch), so a certificate missing it is
    * an event for the owner. Absent or empty changes nothing about today's send.
    */
-  missingRequired: MissingRequiredAnalyte[] = []
+  missingRequired: MissingRequiredAnalyte[] = [],
+  /**
+   * Could-not-check results that must be notified (E1/E2 — see
+   * `isNotifyOnlyVerdict`). Same one email, their own list, worded as
+   * notify-only; they can open the email on their own. A verdict passed here
+   * that is not notify-only is ignored, so a caller cannot widen the rule.
+   */
+  notifyOnly: SpecVerdict[] = []
 ): Promise<number> {
-  if (failures.length === 0 && missingRequired.length === 0) return 0;
+  notifyOnly = notifyOnly.filter(isNotifyOnlyVerdict);
+  if (failures.length === 0 && missingRequired.length === 0 && notifyOnly.length === 0) return 0;
   if (!apiKey) return 0;
 
   // MODULE FILTER — compute and store, but do not send.
@@ -392,8 +411,12 @@ export async function notifySpecFailures(
     // parameters the plant tracks and rarely acts on. Ordering is the only
     // lever criticality is allowed to pull here; WHICH failures are reported
     // stays exactly what the engine judged.
-    const ranked = [...failures].sort((a, b) =>
-      compareSpecCriticality(a.criticality, b.criticality)
+    //
+    // Within a tier, the D3 band (0120) orders next: a coliform ten times over
+    // reads before one just past. Same rule — order and wording only.
+    const ranked = [...failures].sort(
+      (a, b) =>
+        compareSpecCriticality(a.criticality, b.criticality) || specBandRank(a.band) - specBandRank(b.band)
     );
 
     const { subject, html } = buildSpecAlertEmail({
@@ -406,7 +429,18 @@ export async function notifySpecFailures(
         value: f.value_raw,
         limit: f.limit_text,
         source: f.source,
+        criticality: f.criticality ?? null,
+        band: f.band ? `${SPEC_BAND_LABELS[f.band.band]}: ${f.band.reason}` : null,
       })),
+      notJudged: [...notifyOnly]
+        .sort((a, b) => specBandRank(a.band) - specBandRank(b.band))
+        .map((v) => ({
+          test: v.test_name_raw,
+          value: v.value_raw || null,
+          note:
+            (v.not_checked_category ? NOT_CHECKED_CATEGORY_NOTE[v.not_checked_category] : v.reason) +
+            (v.band ? ` (${SPEC_BAND_LABELS[v.band.band]}: ${v.band.reason})` : ''),
+        })),
       missingRequired: [...new Map(missingRequired.map((m) => [m.spec_test_id, m])).values()].map((m) => ({
         analyte: m.analyte_name,
         why: m.why,
@@ -430,6 +464,19 @@ export async function notifySpecFailures(
       )
       .bind(ctx.documentId)
       .run();
+    if (notifyOnly.length > 0) {
+      // Only the rows that were in the email: the category is frozen into the
+      // snapshot, so a quiet could-not-check on the same document stays unstamped.
+      await db
+        .prepare(
+          `UPDATE document_spec_checks
+              SET notified_at = datetime('now')
+            WHERE document_id = ? AND verdict = 'not_checked' AND notified_at IS NULL
+              AND limit_snapshot LIKE '%not_checked_category%'`
+        )
+        .bind(ctx.documentId)
+        .run();
+    }
     if (missingRequired.length > 0) {
       try {
         await db
@@ -534,7 +581,7 @@ export async function registerAndNotifyForApproval(
         { tenantId: base.tenantId, documentId: doc.documentId, versionNumber: 1, queueItemId: base.queueItemId },
         { unjudged: docUnjudged, missing_required: docMissing }
       );
-      const { failures } = await registerSpecChecks(
+      const { failures, notifyOnly } = await registerSpecChecks(
         db,
         {
           tenantId: base.tenantId,
@@ -559,7 +606,7 @@ export async function registerAndNotifyForApproval(
         supplierName: base.supplierName,
         documentTypeId: base.documentTypeId,
         appUrl: base.appUrl,
-      }, failures, docMissing);
+      }, failures, docMissing, notifyOnly);
     }
   } catch (err) {
     console.error(

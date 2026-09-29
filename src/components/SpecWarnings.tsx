@@ -15,12 +15,19 @@ import type {
 } from '../lib/types';
 import {
   SPEC_CRITICALITY_COLOR,
+  SPEC_CRITICALITY_HELP,
   SPEC_CRITICALITY_LABELS,
   compareSpecCriticality,
   parseSpecCriticality,
 } from '../../shared/specCriticality';
 import type { SpecCriticality } from '../../shared/specCriticality';
-import { formatUnitConversion, NO_LIMIT_CONFIGURED_LABEL, watchEndedLabel } from '../../shared/specCheck';
+import { SPEC_BAND_LABELS, specBandRank } from '../../shared/specBand';
+import {
+  formatUnitConversion,
+  NO_LIMIT_CONFIGURED_LABEL,
+  NOT_CHECKED_CATEGORY_NOTE,
+  watchEndedLabel,
+} from '../../shared/specCheck';
 import type { UnitConversion } from '../../shared/specCheck';
 
 /**
@@ -86,8 +93,11 @@ export function liveSpecVerdicts(verdicts: SpecVerdict[] | undefined): SpecVerdi
     .filter((v) => v.verdict !== 'in_spec')
     .sort((a, b) => {
       const weight = (v: SpecVerdict) => (v.verdict === 'out_of_spec' ? 0 : 1);
+      // The D3 band (0120) breaks a tie inside a tier: ORDER only, as above.
       return (
-        weight(a) - weight(b) || compareSpecCriticality(specCriticalityOf(a), specCriticalityOf(b))
+        weight(a) - weight(b) ||
+        compareSpecCriticality(specCriticalityOf(a), specCriticalityOf(b)) ||
+        specBandRank(a.band) - specBandRank(b.band)
       );
     });
 }
@@ -250,7 +260,11 @@ export function SpecRowMarker({
                   while scanning a results table. A result we could not check
                   says "verify" on the line, so it is never read as a failure
                   (AJ, 2026-09-14). */}
-              {critical && <strong>{SPEC_CRITICALITY_LABELS.high}: </strong>}
+              {critical && (
+                <Tooltip arrow title={SPEC_CRITICALITY_HELP.high}>
+                  <strong>{SPEC_CRITICALITY_LABELS.high}: </strong>
+                </Tooltip>
+              )}
               {!bad && <strong>{COULD_NOT_CHECK_LABEL}: </strong>}
               {v.message}
               <ConversionChip conversion={v.conversion} />
@@ -369,6 +383,24 @@ export const trackedDeviationRowSx = {
 } as const;
 
 /**
+ * The D3 band (migration 0120) beside a result: how far out, in the terms of
+ * the analyte's category. Absent when the analyte has no category.
+ */
+function BandChip({ band }: { band: SpecVerdict['band'] }) {
+  if (!band) return null;
+  return (
+    <Tooltip arrow title={band.reason}>
+      <Chip
+        size="small"
+        variant="outlined"
+        label={SPEC_BAND_LABELS[band.band]}
+        sx={{ ml: 0.5, height: 18, fontSize: 11 }}
+      />
+    </Tooltip>
+  );
+}
+
+/**
  * Row tint for whatever verdicts a table row carries: red for a critical
  * failure, amber for a tracked one, nothing otherwise. Both remain unmissable —
  * the distinction is what stops fourteen amber rows from making the one red row
@@ -446,8 +478,8 @@ export function SpecWarningBanner({
             : `This COA fails ${criticalOutOfSpec} critical limits`
           : outOfSpec > 0
             ? outOfSpec === 1
-              ? 'This COA has an out-of-spec result on a tracked parameter'
-              : `This COA has ${outOfSpec} out-of-spec results on tracked parameters`
+              ? 'This COA has an out-of-spec result on a non-critical parameter'
+              : `This COA has ${outOfSpec} out-of-spec results on non-critical parameters`
             : missingByAnalyte.length > 0
               ? `This COA is incomplete — ${missingByAnalyte.length} required ${missingByAnalyte.length === 1 ? 'analyte is' : 'analytes are'} not reported`
               : notChecked > 0
@@ -457,7 +489,7 @@ export function SpecWarningBanner({
       {criticalOutOfSpec > 0 && trackedFailures > 0 && (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
           {trackedFailures} further {trackedFailures === 1 ? 'result is' : 'results are'} outside a
-          tracked limit — listed below, under the critical ones.
+          major or minor limit — listed below, under the critical ones.
         </Typography>
       )}
       {failures.length > 0 && (
@@ -467,14 +499,17 @@ export function SpecWarningBanner({
               by position alone. */}
           {failures.map((v, i) => (
             <Typography component="li" variant="caption" key={i} sx={{ display: 'list-item' }}>
-              <Box
-                component="span"
-                sx={{ fontWeight: 700, color: verdictColor(v), mr: 0.5 }}
-              >
-                {SPEC_CRITICALITY_LABELS[specCriticalityOf(v)]}:
-              </Box>
+              <Tooltip arrow title={SPEC_CRITICALITY_HELP[specCriticalityOf(v)]}>
+                <Box
+                  component="span"
+                  sx={{ fontWeight: 700, color: verdictColor(v), mr: 0.5 }}
+                >
+                  {SPEC_CRITICALITY_LABELS[specCriticalityOf(v)]}:
+                </Box>
+              </Tooltip>
               {v.message}
               <ConversionChip conversion={v.conversion} />
+              <BandChip band={v.band} />
             </Typography>
           ))}
         </Box>
@@ -513,6 +548,14 @@ export function SpecWarningBanner({
               >
                 {v.message}
                 <ConversionChip conversion={v.conversion} />
+                <BandChip band={v.band} />
+                {/* E1/E2: never judged, always told. Said here so the reviewer
+                    knows approving does not bury it. */}
+                {v.not_checked_category && (
+                  <Box component="span" sx={{ fontWeight: 600, color: 'info.main' }}>
+                    {' '}The owner is notified on approval — {NOT_CHECKED_CATEGORY_NOTE[v.not_checked_category]}.
+                  </Box>
+                )}
               </Typography>
             ))}
           </Box>
@@ -554,7 +597,7 @@ export function SpecWarningBanner({
         Compared against the limits on file and the one printed on this COA — no
         AI, no guessing. This does not block approval; it asks for your eyes. A
         result listed as &quot;could not be judged&quot; was <strong>not</strong>
-        checked, and is not a pass. Critical / tracked comes from how each limit
+        checked, and is not a pass. Critical / major / minor comes from how each limit
         is ranked in Settings › Spec Limits, and changes nothing about the
         result — every judged result is shown either way.
       </Typography>
