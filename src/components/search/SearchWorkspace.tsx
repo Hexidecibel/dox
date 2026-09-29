@@ -9,6 +9,7 @@ import {
   Popover,
   Snackbar,
   Stack,
+  Tooltip,
   Typography,
   useMediaQuery,
 } from '@mui/material';
@@ -33,6 +34,7 @@ import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { useRecentSearches } from '../../hooks/useRecentSearches';
 import { useSavedSearches } from '../../hooks/useSavedSearches';
 import { useSearchRun } from '../../hooks/useSearchRun';
+import { useSearchExamples } from '../../hooks/useSearchExamples';
 import { api } from '../../lib/api';
 import { isTypingTarget, modKeyLabel } from '../../lib/platform';
 import {
@@ -91,7 +93,8 @@ export interface SearchWorkspaceProps {
   exportSender?: { name: string; email: string };
 }
 
-const EXAMPLES = ['lot 10426203-03', 'butter produced Sep 2', 'PO K134273', 'lot 104', 'invoice 261149'];
+/** Shown only when the tenant's own examples are unavailable (empty tenant, no organization chosen). */
+const FALLBACK_EXAMPLES = ['lot 10426203-03', 'butter produced Sep 2', 'PO K134273', 'lot 104', 'invoice 261149'];
 
 export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId, enableExport = false, exportSender }: SearchWorkspaceProps) {
   const theme = useTheme();
@@ -131,6 +134,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
   // is not something to show a person.
   const auth = useOptionalAuth();
   const needsTenant = auth?.user?.role === 'super_admin' && !tenantId;
+  const tried = useSearchExamples(tenantId, !needsTenant, FALLBACK_EXAMPLES);
   const run = useSearchRun({
     query: sent,
     tenantId,
@@ -510,21 +514,44 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
             : null
         }
         empties={
-          <Stack direction="row" spacing={0.75} useFlexGap sx={{ mt: 1.5, flexWrap: 'wrap' }} alignItems="center">
-            <Typography variant="caption" color="text.secondary" sx={{ mr: 0.5 }}>
-              {recent.recent.length ? 'Recent' : 'Try'}
-            </Typography>
-            {(recent.recent.length ? recent.recent.slice(0, 5) : EXAMPLES).map((ex) => (
-              <Button
-                key={ex}
-                size="small"
-                variant="outlined"
-                onClick={() => setQuery({ ...EMPTY_QUERY, view: query.view, text: ex })}
-                sx={{ textTransform: 'none', borderRadius: 999, py: 0.1, borderColor: 'divider', color: 'text.primary' }}
-              >
-                {ex}
-              </Button>
-            ))}
+          <Stack spacing={0.75} sx={{ mt: 1.5 }}>
+            {recent.recent.length > 0 && (
+              <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: 'wrap' }} alignItems="center">
+                <Typography variant="caption" color="text.secondary" sx={{ mr: 0.5 }}>Recent</Typography>
+                {recent.recent.slice(0, 5).map((ex) => (
+                  <Button
+                    key={ex}
+                    size="small"
+                    variant="outlined"
+                    onClick={() => setQuery({ ...EMPTY_QUERY, view: query.view, text: ex })}
+                    sx={{ textTransform: 'none', borderRadius: 999, py: 0.1, borderColor: 'divider', color: 'text.primary' }}
+                  >
+                    {ex}
+                  </Button>
+                ))}
+              </Stack>
+            )}
+            {tried.examples.length > 0 && (tried.fromTenant || recent.recent.length === 0) && (
+              <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: 'wrap' }} alignItems="center" data-testid="search-examples">
+                <Typography variant="caption" color="text.secondary" sx={{ mr: 0.5 }}>Try</Typography>
+                {tried.examples.map((ex) => (
+                  <Tooltip key={ex.text} title={ex.label ?? ''} disableHoverListener={!ex.label}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      data-teaching={ex.teaching ? 'true' : undefined}
+                      onClick={() => setQuery({ ...EMPTY_QUERY, view: query.view, text: ex.text })}
+                      sx={{
+                        textTransform: 'none', borderRadius: 999, py: 0.1, borderColor: 'divider', color: 'text.primary',
+                        ...(ex.teaching ? { borderStyle: 'dashed', color: 'text.secondary' } : {}),
+                      }}
+                    >
+                      {ex.text}{ex.teaching ? ' — nothing on file' : ''}
+                    </Button>
+                  </Tooltip>
+                ))}
+              </Stack>
+            )}
           </Stack>
         }
       />
@@ -611,6 +638,11 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
         aiBusy={aiBusy}
         busy={run.loading}
         modKey={modKey}
+        placeholder={
+          tried.fromTenant
+            ? tried.examples.filter((e) => !e.teaching).slice(0, 3).map((e) => e.text).join(' · ') || undefined
+            : undefined
+        }
       />
 
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.5, mb: 2, flexWrap: 'wrap' }} useFlexGap>

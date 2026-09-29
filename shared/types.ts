@@ -4673,6 +4673,27 @@ export interface SearchInterpretRequest {
   tenant_id?: string;
 }
 
+/**
+ * GET /api/search/examples — "Try" chips built from THIS tenant's approved
+ * documents, each one run through the executor before it is offered: a real
+ * example answers covering, and the one teaching example (`teaching: true`)
+ * answers "no document on file covers" with its neighbour shown as nearby.
+ */
+export interface SearchExample {
+  /** What goes in the box, as a person would type it. */
+  text: string;
+  kind: import('./searchProbes').ProbeKind;
+  /** One line under the chip, when the example needs one ("every lot from plant 104"). */
+  label?: string | null;
+  teaching?: boolean;
+}
+
+export interface SearchExamplesResponse {
+  examples: SearchExample[];
+  /** The day the set was built for; it stays the same all day. */
+  as_of: string;
+}
+
 export interface SearchInterpretResponse {
   /** Detected clauses (`source: 'detected'`), in the order they were typed. */
   clauses: import('./searchQuery').Clause[];
