@@ -4,6 +4,10 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-29 (later): v2.26.0 IS LIVE ("Type it the way you would say it") — search Phase 2 + a persistent header.** Prod `b4dd0fe0`. No migrations. **Lesson:** the first `bin/deploy` failed with 223 "Workers runtime failed to start" errors while a local `wrangler pages dev` + build ran alongside it; re-run alone it passed 316/4272. Never run a dev server or second test run during `bin/deploy`, and do not push the tag until the deploy log says exit=0. AJ's reply is POSTED in #ai-briefs (thread holds the 21 decisions + 3 attachments). Next: search Phase 3 (Advanced mode), product-scope Phase 2-3 (waits on AJ Q7-Q12).
+
+---
+
 **2026-09-29: v2.25.0 IS LIVE ("Ask it any way, and it says what it found"). Migrations 0120-0123 on prod, stamped. NO worker restart needed (nothing the worker loads changed).**
 
 *Prod deploy `595ccc59`, tag `v2.25.0`, master pushed (`da98220..19f2adf`). Staging `07350403`. Prod bookmark before migrations: `00001769-00000146-000050f5-f03415438adb8e762f0d0423251b8531` (`~/drops/dox-backups/doc-upload-db-20260929T180009Z.timetravel.json`). Gates: 314 files / 4244 tests, ratchet 27, e2e 7/1 skipped.*
