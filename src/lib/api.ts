@@ -342,8 +342,9 @@ import type {
   SupplierRequestView,
   UpdateRequestLineRequest,
 } from '../../shared/types';
-import type { SupplierGapListResponse } from '../../shared/requirementGap';
-import type { ProductIdentifier, ProductIdentifierKind } from '../../shared/types';
+import type { SupplierGapListResponse, SupplierGapStatus } from '../../shared/requirementGap';
+import type { ProductIdentifier, ProductIdentifierKind, ApiProductRequirement, RequirementScopePreview } from '../../shared/types';
+import type { RequirementScope } from '../../shared/requirementScope';
 import type { SupplierLotSchemeResponse } from '../../shared/types';
 import type { LotSchemeSpec } from '../../shared/lotScheme';
 import type {
@@ -1488,6 +1489,7 @@ export const api = {
       checklist?: string;
       sort_order?: number;
       tenant_id?: string;
+      scope?: RequirementScope;
     }) =>
       fetchApi<{ requirement: ApiRequirement }>('/requirements', {
         method: 'POST',
@@ -1504,6 +1506,7 @@ export const api = {
         checklist?: string | null;
         sort_order?: number;
         active?: number;
+        scope?: RequirementScope;
       },
     ) =>
       fetchApi<{ requirement: ApiRequirement }>(`/requirements/${id}`, {
@@ -1513,6 +1516,66 @@ export const api = {
 
     /** DELETE /api/requirements/:id — soft-delete (active = 0) */
     delete: (id: string) => fetchApi<{ success: boolean }>(`/requirements/${id}`, { method: 'DELETE' }),
+
+    /**
+     * GET /api/requirements/:id/scope-preview?scope= (0123) — what changing
+     * this requirement's scope would do to every supplier. Read-only.
+     */
+    scopePreview: (id: string, scope: RequirementScope) =>
+      fetchApi<RequirementScopePreview>(
+        `/requirements/${id}/scope-preview?scope=${encodeURIComponent(scope)}`,
+      ),
+  },
+
+  /**
+   * Per-product exceptions to a per-product requirement (migration 0123):
+   * `exempt` one product (reason required) or `add` one to one product.
+   */
+  productRequirements: {
+    list: (params: { supplier_id?: string; product_id?: string; requirement_id?: string }) => {
+      const query = new URLSearchParams();
+      if (params.supplier_id) query.set('supplier_id', params.supplier_id);
+      if (params.product_id) query.set('product_id', params.product_id);
+      if (params.requirement_id) query.set('requirement_id', params.requirement_id);
+      return fetchApi<{ product_requirements: ApiProductRequirement[] }>(
+        `/product-requirements?${query.toString()}`,
+      );
+    },
+    create: (data: {
+      supplier_id: string;
+      product_id: string;
+      requirement_id: string;
+      mode: 'add' | 'exempt';
+      tier?: 'required' | 'recommended';
+      reason?: string | null;
+    }) =>
+      fetchApi<{ product_requirement: ApiProductRequirement }>('/product-requirements', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: string, data: { mode?: 'add' | 'exempt'; tier?: 'required' | 'recommended'; reason?: string | null }) =>
+      fetchApi<{ product_requirement: ApiProductRequirement }>(`/product-requirements/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    delete: (id: string) =>
+      fetchApi<{ success: boolean }>(`/product-requirements/${id}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * PUT /api/suppliers/:id/products/:productId (0123) — "no longer supplied"
+   * and "nothing owed per product" (reason required; null clears).
+   */
+  supplierProducts: {
+    update: (
+      supplierId: string,
+      productId: string,
+      data: { discontinued?: boolean; nothing_owed_reason?: string | null },
+    ) =>
+      fetchApi<{ link: Record<string, unknown> }>(`/suppliers/${supplierId}/products/${productId}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
   },
 
   /**
@@ -3499,7 +3562,7 @@ export const api = {
       supplier_id?: string;
       tenant_id?: string;
       include_recommended?: boolean;
-      status?: 'open' | 'satisfied' | 'not_configured';
+      status?: SupplierGapStatus;
       limit?: number;
       offset?: number;
     }) => {

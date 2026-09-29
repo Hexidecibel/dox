@@ -12,6 +12,14 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import {
+  REQUIREMENT_SCOPES,
+  REQUIREMENT_SCOPE_LABELS,
+  REQUIREMENT_SCOPE_SHORT,
+  normalizeRequirementScope,
+  type RequirementScope,
+} from '../../../shared/requirementScope';
+import type { RequirementScopePreview } from '../../../shared/types';
+import {
   Alert,
   Box,
   Button,
@@ -89,6 +97,9 @@ export function Requirements() {
   const [formChecklist, setFormChecklist] = useState('');
   const [formDescription, setFormDescription] = useState('');
   const [formTenantId, setFormTenantId] = useState('');
+  const [formScope, setFormScope] = useState<RequirementScope>('supplier');
+  const [scopePreview, setScopePreview] = useState<RequirementScopePreview | null>(null);
+  const [scopePreviewError, setScopePreviewError] = useState('');
   const [saving, setSaving] = useState(false);
 
   const activeTenantId = isSuperAdmin
@@ -130,6 +141,7 @@ export function Requirements() {
     setFormChecklist(checklistFilter || checklists[0] || '');
     setFormDescription('');
     setFormTenantId(isSuperAdmin ? tenantFilter || selectedTenantId || '' : user?.tenant_id || '');
+    setFormScope('supplier');
     setDialogOpen(true);
   };
 
@@ -139,8 +151,30 @@ export function Requirements() {
     setFormChecklist(req.checklist || '');
     setFormDescription(req.description || '');
     setFormTenantId(req.tenant_id);
+    setFormScope(normalizeRequirementScope(req.scope));
     setDialogOpen(true);
   };
+
+  // Changing an existing requirement's scope moves every supplier it is
+  // attached to, so the impact is read BEFORE saving (0123). Read-only.
+  const scopeChanged = !!editing && normalizeRequirementScope(editing.scope) !== formScope;
+  useEffect(() => {
+    setScopePreview(null);
+    setScopePreviewError('');
+    if (!editing || !scopeChanged) return;
+    let cancelled = false;
+    api.requirements
+      .scopePreview(editing.id, formScope)
+      .then((res) => {
+        if (!cancelled) setScopePreview(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setScopePreviewError(err instanceof Error ? err.message : 'Preview failed');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editing, formScope, scopeChanged]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -151,6 +185,7 @@ export function Requirements() {
           name: formName.trim(),
           checklist: formChecklist.trim() || null,
           description: formDescription.trim() || null,
+          ...(scopeChanged ? { scope: formScope } : {}),
         });
       } else {
         const tenantId = isSuperAdmin ? formTenantId : user?.tenant_id;
@@ -164,6 +199,7 @@ export function Requirements() {
           checklist: formChecklist.trim() || undefined,
           description: formDescription.trim() || undefined,
           tenant_id: tenantId,
+          scope: formScope,
         });
       }
       setDialogOpen(false);
@@ -349,6 +385,14 @@ export function Requirements() {
                   <TableCell>
                     <Typography variant="body2" fontWeight={500}>
                       {req.name}
+                      {normalizeRequirementScope(req.scope) !== 'supplier' && (
+                        <Chip
+                          size="small"
+                          variant="outlined"
+                          label={REQUIREMENT_SCOPE_SHORT[normalizeRequirementScope(req.scope)]}
+                          sx={{ ml: 1 }}
+                        />
+                      )}
                     </Typography>
                     {req.description && (
                       <Typography variant="caption" color="text.secondary">
@@ -454,6 +498,64 @@ export function Requirements() {
             helperText="Requirements with the same group name are listed together."
             sx={{ mb: 2 }}
           />
+          <FormControl fullWidth sx={{ mb: 2 }}>
+            <InputLabel>Owed</InputLabel>
+            <Select
+              value={formScope}
+              label="Owed"
+              onChange={(e) => setFormScope(e.target.value as RequirementScope)}
+              disabled={saving}
+            >
+              {REQUIREMENT_SCOPES.map((sc) => (
+                <MenuItem key={sc} value={sc}>
+                  {REQUIREMENT_SCOPE_LABELS[sc]}
+                </MenuItem>
+              ))}
+            </Select>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+              {formScope === 'product'
+                ? 'Owed by every active product of each supplier it is attached to. A document closes it only for the products it is linked to; one linked to no product closes nothing.'
+                : formScope === 'lot'
+                  ? 'Owed per lot. Per-lot checking has not shipped yet, so for now it is judged once per supplier, and the gap report says so.'
+                  : 'Closed once per supplier by any confirmed document.'}
+            </Typography>
+          </FormControl>
+          {scopeChanged && (
+            <Alert severity={scopePreview && scopePreview.suppliers_changing > 0 ? 'warning' : 'info'} sx={{ mb: 2 }}>
+              {scopePreviewError ? (
+                `Could not preview the change: ${scopePreviewError}`
+              ) : !scopePreview ? (
+                'Working out what this changes…'
+              ) : (
+                <>
+                  {scopePreview.suppliers_considered === 0
+                    ? 'No supplier has this requirement, so nothing changes today.'
+                    : `${scopePreview.suppliers_changing} of ${scopePreview.suppliers_considered} supplier${
+                        scopePreview.suppliers_considered === 1 ? '' : 's'
+                      } change status${
+                        Object.keys(scopePreview.transitions).length
+                          ? ` (${Object.entries(scopePreview.transitions)
+                              .map(([k, n]) => `${n} ${k.replace('->', ' → ').replace(/_/g, ' ')}`)
+                              .join(', ')})`
+                          : ''
+                      }.`}
+                  {formScope === 'product' && scopePreview.suppliers_considered > 0 && (
+                    <>
+                      {' '}
+                      {scopePreview.product_obligations} product obligation
+                      {scopePreview.product_obligations === 1 ? '' : 's'} created,{' '}
+                      {scopePreview.product_obligations_satisfied} already closed.
+                      {scopePreview.unattributed_documents > 0 &&
+                        ` ${scopePreview.unattributed_documents} confirmed document${
+                          scopePreview.unattributed_documents === 1 ? ' names' : 's name'
+                        } no product and would stop counting.`}
+                    </>
+                  )}
+                  {scopePreview.lot_scope_note && <> {scopePreview.lot_scope_note}</>}
+                </>
+              )}
+            </Alert>
+          )}
           <TextField
             label="Notes"
             fullWidth

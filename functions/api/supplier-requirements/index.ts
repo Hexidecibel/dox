@@ -142,6 +142,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       `SELECT sr.*,
               r.name AS requirement_name, r.slug AS requirement_slug,
               r.checklist AS requirement_checklist, r.active AS requirement_active,
+              r.scope AS requirement_scope,
               s.name AS supplier_name, s.slug AS supplier_slug
          FROM supplier_requirements sr
          JOIN requirements r ON r.id = sr.requirement_id

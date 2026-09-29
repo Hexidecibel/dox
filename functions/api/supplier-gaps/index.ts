@@ -95,11 +95,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 200);
     const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10) || 0, 0);
 
-    if (statusFilter && !['open', 'satisfied', 'not_configured'].includes(statusFilter)) {
-      return json(
-        { error: 'status must be one of: open, satisfied, not_configured' },
-        400,
-      );
+    const STATUSES = ['open', 'satisfied', 'not_configured', 'products_not_configured'];
+    if (statusFilter && !STATUSES.includes(statusFilter)) {
+      return json({ error: `status must be one of: ${STATUSES.join(', ')}` }, 400);
     }
 
     const tenantId = await resolveReadTenant(

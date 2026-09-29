@@ -727,6 +727,11 @@ export interface RequirementRow {
   active: number; // 0 or 1
   created_at: string;
   updated_at: string;
+  /**
+   * What it is owed PER (migration 0123): 'supplier' | 'product' | 'lot'.
+   * Vocabulary in shared/requirementScope.ts; an unknown value reads 'supplier'.
+   */
+  scope: string;
 }
 
 /**
@@ -898,6 +903,8 @@ export interface ApiSupplierRequirement extends SupplierRequirementRow {
   requirement_slug?: string;
   requirement_checklist?: string | null;
   requirement_active?: number;
+  /** `requirements.scope` (0123): 'supplier' | 'product' | 'lot'. */
+  requirement_scope?: string;
   supplier_name?: string;
   supplier_slug?: string;
 }
@@ -1219,7 +1226,61 @@ export interface AuditEntryRow {
 
 // === API Response Types (what endpoints actually return) ===
 
-export interface ApiProduct extends ProductRow {}
+export interface ApiProduct extends ProductRow {
+  /**
+   * Present on GET /api/products?supplier_id= only (migration 0123): that
+   * supplier's link facts. NULL on a legacy-only link.
+   */
+  link_source?: string | null;
+  link_discontinued_at?: string | null;
+  link_nothing_owed_reason?: string | null;
+}
+
+/** One `product_requirements` row (0123) with names joined. */
+export interface ApiProductRequirement {
+  id: string;
+  tenant_id: string;
+  supplier_id: string;
+  product_id: string;
+  requirement_id: string;
+  mode: 'add' | 'exempt';
+  tier: 'required' | 'recommended';
+  reason: string | null;
+  source: string | null;
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+  requirement_name: string;
+  requirement_slug: string;
+  requirement_scope: string;
+  product_name: string;
+  supplier_name: string;
+}
+
+/** GET /api/requirements/:id/scope-preview (0123). */
+export interface RequirementScopePreview {
+  requirement: { id: string; name: string; scope: string };
+  proposed_scope: string;
+  unchanged: boolean;
+  suppliers_considered: number;
+  suppliers_changing: number;
+  /** "satisfied->open": 3 */
+  transitions: Record<string, number>;
+  product_obligations: number;
+  product_obligations_satisfied: number;
+  unattributed_documents: number;
+  lot_scope_note: string | null;
+  suppliers: Array<{
+    supplier_id: string;
+    supplier_name: string;
+    status_before: string;
+    status_after: string;
+    product_obligations: number;
+    product_obligations_satisfied: number;
+    unattributed_documents: number;
+  }>;
+}
 
 export interface ApiDocumentType extends DocumentTypeRow {
   tenant_name?: string;

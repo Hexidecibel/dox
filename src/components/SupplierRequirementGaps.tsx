@@ -25,6 +25,14 @@
  *                   because a document nobody has classified cannot close
  *                   anything and therefore quietly shrinks the satisfied side.
  *
+ * PER PRODUCT (migration 0123). A requirement set "per product" is owed by every
+ * active product of the supplier, so its row reads "9 of 12 products", and a
+ * Per product section lists each product's own state. A product with nothing
+ * set up is AMBER, in the same words as the supplier-level warning, and the
+ * supplier cannot read green while one exists (`products_not_configured`).
+ * Documents that close a per-product requirement but name no product are
+ * listed on their own: they close nothing until someone says what they cover.
+ *
  * WHY ITS OWN FETCH. `src/lib/api.ts`'s `fetchApi` is module-private, so this
  * component carries the same three lines `src/lib/recordsApi.ts` and
  * `src/pages/admin/LearningDashboard.tsx` already carry. If a gap client is
@@ -52,8 +60,14 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import { Link as RouterLink } from 'react-router-dom';
 import { AUTH_TOKEN_KEY } from '../lib/types';
-import type { GapRequirement, SupplierGap, SupplierGapListResponse } from '../lib/types';
+import type {
+  GapRequirement,
+  ProductGap,
+  SupplierGap,
+  SupplierGapListResponse,
+} from '../lib/types';
 
 async function fetchGap(
   supplierId: string,
@@ -124,6 +138,53 @@ function TierChip({ tier }: { tier: GapRequirement['tier'] }) {
   );
 }
 
+/** "per product" / "per lot" beside the tier. Supplier scope shows nothing: it is the default. */
+function ScopeChip({ item }: { item: GapRequirement }) {
+  if (item.scope === 'product') {
+    return <Chip size="small" variant="outlined" label="per product" sx={{ ml: 0.5 }} />;
+  }
+  if (item.scope === 'lot') {
+    return (
+      <Tooltip title="Set per lot. Per-lot checking has not shipped yet, so this is judged once for the supplier: any confirmed document counts, whichever lot it covers.">
+        <Chip size="small" variant="outlined" label="per lot (judged once)" sx={{ ml: 0.5 }} />
+      </Tooltip>
+    );
+  }
+  return null;
+}
+
+/** One product's own state. Amber for "nothing set up" — never green. */
+export function ProductStatusChip({ product }: { product: ProductGap }) {
+  switch (product.status) {
+    case 'not_checked':
+      return (
+        <Tooltip title="No per-product requirement applies to this supplier, so products are not checked one by one.">
+          <Chip size="small" variant="outlined" label="not checked per product" />
+        </Tooltip>
+      );
+    case 'not_configured':
+      return (
+        <Tooltip title="Per-product requirements are in use for this supplier, but nothing applies to this product and nobody declared it owes nothing. This is not the same as compliant.">
+          <Chip size="small" color="warning" label="Nothing set up" />
+        </Tooltip>
+      );
+    case 'open':
+      return <Chip size="small" color="error" variant="outlined" label={`${product.open} open`} />;
+    case 'satisfied':
+      return product.nothing_owed && product.requirements.length === 0 ? (
+        <Tooltip title={`Declared: nothing owed per product — ${product.nothing_owed.reason}`}>
+          <Chip size="small" color="success" variant="outlined" label="nothing owed" />
+        </Tooltip>
+      ) : (
+        <Chip size="small" color="success" variant="outlined" label="satisfied" />
+      );
+    default: {
+      const exhaustive: never = product.status;
+      return <>{String(exhaustive)}</>;
+    }
+  }
+}
+
 /** Why a line item applies at all — configured, triggered by a claim, or both. */
 function OriginCell({ item }: { item: GapRequirement }) {
   if (item.origins.includes('claim')) {
@@ -142,6 +203,13 @@ function OriginCell({ item }: { item: GapRequirement }) {
           label={item.origins.includes('applicability') ? `configured + ${label}` : label}
         />
       </Tooltip>
+    );
+  }
+  if (item.origins.includes('product') && !item.origins.includes('applicability')) {
+    return (
+      <Typography variant="body2" color="text.secondary">
+        added to one product
+      </Typography>
     );
   }
   return (
@@ -263,6 +331,17 @@ export default function SupplierRequirementGaps({
               </Button>
             </Box>
           ) : null}
+        </Alert>
+      ) : gap.status === 'products_not_configured' ? (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          <AlertTitle>Some products have nothing set up</AlertTitle>
+          Every {gap.tiers_counted.join(' + ')} requirement on file is closed, but per-product
+          requirements are in use for this supplier and{' '}
+          {gap.products.filter((p) => p.status === 'not_configured').length} active product
+          {gap.products.filter((p) => p.status === 'not_configured').length === 1 ? ' has' : 's have'}{' '}
+          nothing applying to{' '}
+          {gap.products.filter((p) => p.status === 'not_configured').length === 1 ? 'it' : 'them'}.
+          This is <strong>not</strong> the same as compliant — see Per product below.
         </Alert>
       ) : gap.status === 'satisfied' ? (
         <Alert severity={unreviewed > 0 ? 'info' : 'success'} sx={{ mb: 2 }}>
@@ -391,12 +470,26 @@ export default function SupplierRequirementGaps({
                         </TableCell>
                         <TableCell>
                           <TierChip tier={item.tier} />
+                          <ScopeChip item={item} />
                         </TableCell>
                         <TableCell>
                           <OriginCell item={item} />
                         </TableCell>
                         <TableCell>
-                          {item.satisfied ? (
+                          {item.scope === 'product' ? (
+                            <Tooltip title={item.summary}>
+                              <Chip
+                                size="small"
+                                color={item.satisfied ? 'success' : 'error'}
+                                variant="outlined"
+                                label={
+                                  item.gap_reason === 'no_products'
+                                    ? 'open — no active products'
+                                    : `${item.subjects_satisfied ?? 0} of ${item.subjects_total ?? 0} products`
+                                }
+                              />
+                            </Tooltip>
+                          ) : item.satisfied ? (
                             <Tooltip
                               title={item.satisfied_by.map((d) => d.document_title).join('; ')}
                             >
@@ -429,6 +522,138 @@ export default function SupplierRequirementGaps({
             </TableContainer>
         </>
       ) : null}
+
+      <PerProductSection gap={gap} />
     </Paper>
+  );
+}
+
+/**
+ * Per product (0123): each active product's own state, and the documents that
+ * close a per-product requirement but name no product. Shown only once a
+ * per-product requirement applies to this supplier — before that, products are
+ * not checked one by one and a grid of "not checked" would be noise.
+ */
+function PerProductSection({ gap }: { gap: SupplierGap }) {
+  const inUse = gap.products.some((p) => p.status !== 'not_checked');
+  const unattributed = new Map<string, { title: string; requirements: string[] }>();
+  for (const item of gap.applicable) {
+    for (const d of item.unattributed ?? []) {
+      const hit = unattributed.get(d.document_id) ?? { title: d.document_title, requirements: [] };
+      hit.requirements.push(item.name);
+      unattributed.set(d.document_id, hit);
+    }
+  }
+  if (!inUse && unattributed.size === 0) return null;
+  const notSetUp = gap.products.filter((p) => p.status === 'not_configured');
+  return (
+    <Box sx={{ mt: 3 }}>
+      <Typography variant="body2" fontWeight={600} sx={{ mb: 1 }}>
+        Per product ({gap.products.length} active)
+      </Typography>
+      {notSetUp.length > 0 ? (
+        <Alert severity="warning" sx={{ mb: 1.5 }}>
+          {notSetUp.length} product{notSetUp.length === 1 ? ' has' : 's have'} nothing set up:{' '}
+          {notSetUp.map((p, i) => (
+            <span key={p.product_id}>
+              {i > 0 ? ', ' : ''}
+              <Link component={RouterLink} to={`/admin/products/${p.product_id}`} underline="hover">
+                {p.name}
+              </Link>
+            </span>
+          ))}
+          . Attach a per-product requirement, exempt it, or declare it owes nothing — this is not
+          the same as compliant.
+        </Alert>
+      ) : null}
+      {gap.products.length > 0 ? (
+        <TableContainer component={Paper} variant="outlined">
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Product</TableCell>
+                <TableCell>State</TableCell>
+                <TableCell>Per-product requirements</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {gap.products.map((p) => (
+                <TableRow key={p.product_id} hover>
+                  <TableCell>
+                    <Link component={RouterLink} to={`/admin/products/${p.product_id}`} underline="hover">
+                      {p.name}
+                    </Link>
+                    {p.possible_duplicate ? (
+                      <Tooltip title="Created from a certificate's product name and never confirmed by an identifier — it may be a second name for one of your own SKUs.">
+                        <Chip size="small" variant="outlined" color="warning" label="from a certificate" sx={{ ml: 1 }} />
+                      </Tooltip>
+                    ) : null}
+                  </TableCell>
+                  <TableCell>
+                    <ProductStatusChip product={p} />
+                  </TableCell>
+                  <TableCell>
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                      {p.requirements.map((r) => (
+                        <Tooltip
+                          key={r.requirement_id}
+                          title={
+                            r.satisfied
+                              ? `Closed by ${r.satisfied_by.map((d) => d.document_title).join('; ')}`
+                              : r.origin === 'claim'
+                                ? 'Open — a claim about this product opened it'
+                                : r.origin === 'product'
+                                  ? 'Open — added to this product only'
+                                  : 'Open'
+                          }
+                        >
+                          <Chip
+                            size="small"
+                            variant="outlined"
+                            color={r.satisfied ? 'success' : r.tier === 'required' ? 'error' : 'default'}
+                            label={r.name}
+                          />
+                        </Tooltip>
+                      ))}
+                      {p.exempt.map((e) => (
+                        <Tooltip key={e.requirement_id} title={`Exempt: ${e.reason ?? 'no reason recorded'}`}>
+                          <Chip size="small" variant="outlined" label={`${e.name} — exempt`} sx={{ textDecoration: 'line-through' }} />
+                        </Tooltip>
+                      ))}
+                    </Box>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      ) : (
+        <Typography variant="body2" color="text.secondary">
+          No active products are linked to this supplier.
+        </Typography>
+      )}
+      {unattributed.size > 0 ? (
+        <Box sx={{ mt: 2 }}>
+          <Typography variant="body2" fontWeight={600}>
+            Confirmed, but for which product? ({unattributed.size})
+          </Typography>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+            These close a per-product requirement but are linked to no product, so they close
+            nothing. Open each one and say which products it covers.
+          </Typography>
+          {[...unattributed.entries()].map(([id, d]) => (
+            <Typography key={id} variant="body2">
+              •{' '}
+              <Link component={RouterLink} to={`/documents/${id}`} underline="hover">
+                {d.title}
+              </Link>{' '}
+              <Typography component="span" variant="caption" color="text.secondary">
+                ({d.requirements.join(', ')})
+              </Typography>
+            </Typography>
+          ))}
+        </Box>
+      ) : null}
+    </Box>
   );
 }

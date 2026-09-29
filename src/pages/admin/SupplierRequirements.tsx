@@ -104,6 +104,41 @@ export function SupplierRequirements() {
     load();
   }, [load]);
 
+  /**
+   * Suppliers whose requirements are all closed but whose PRODUCTS have
+   * nothing set up (migration 0123, `products_not_configured`) -> how many.
+   * An addition to the list, so it never blocks the page: a failed read just
+   * leaves the amber off. The gap status is derived, not stored, so the server
+   * filters page by page; every page is walked.
+   */
+  const [productAmber, setProductAmber] = useState<Map<string, number>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const found = new Map<string, number>();
+      try {
+        for (let offset = 0, total = 1; offset < total; offset += 200) {
+          const res = await api.supplierGaps.list({
+            tenant_id: tenantId,
+            status: 'products_not_configured',
+            limit: 200,
+            offset,
+          });
+          total = res.total;
+          for (const g of res.gaps) {
+            found.set(g.supplier_id, g.products.filter((p) => p.status === 'not_configured').length);
+          }
+        }
+      } catch {
+        // Leave the amber off rather than fail the page.
+      }
+      if (!cancelled) setProductAmber(found);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId, rows]);
+
   /** supplier_id -> its attached rows. Absent key means nobody configured it. */
   const bySupplier = useMemo(() => {
     const map = new Map<string, ApiSupplierRequirement[]>();
@@ -261,11 +296,15 @@ export function SupplierRequirements() {
                 (r) => r.source === null || r.source === undefined || !!r.review_flag,
               ).length;
               const open = openId === supplier.id;
+              const productsNotSetUp = productAmber.get(supplier.id) ?? 0;
               return (
                 <Paper
                   key={supplier.id}
                   variant="outlined"
-                  sx={{ p: 2, borderColor: unconfigured ? 'warning.main' : undefined }}
+                  sx={{
+                    p: 2,
+                    borderColor: unconfigured || productsNotSetUp > 0 ? 'warning.main' : undefined,
+                  }}
                 >
                   <Box
                     sx={{
@@ -321,6 +360,13 @@ export function SupplierRequirements() {
                               color="warning"
                               variant="outlined"
                               label={`${unconfirmed} need review`}
+                            />
+                          )}
+                          {productsNotSetUp > 0 && (
+                            <Chip
+                              size="small"
+                              color="warning"
+                              label={`${productsNotSetUp} product${productsNotSetUp === 1 ? '' : 's'} with nothing set up`}
                             />
                           )}
                         </Box>
