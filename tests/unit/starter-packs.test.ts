@@ -921,3 +921,33 @@ describe('starter packs — the CLI and the in-portal applier agree', () => {
     }
   });
 });
+
+/**
+ * Rules table F5 (AJ Conner, 2026-09-20): requirement groups are
+ * INDUSTRY-NEUTRAL. The pack used to file 25 requirements under "SOP 102.2",
+ * one customer's own procedure number, which reads wrongly at every other
+ * customer. The groups are the ones AJ set on his own tenant that day, and
+ * every pack requirement sits in the group his tenant places it in.
+ */
+describe('fsqa pack — neutral requirement groups (F5)', () => {
+  const GROUPS = [
+    'Product Specification',
+    'Allergens, Labeling & Nutrition',
+    'Certificates of Analysis',
+    'Audit & Certification',
+    'Food Safety Plans & Programs',
+    'Commercial & Legal',
+    'Regulatory Registrations & Statements',
+    'Claim Substantiation',
+  ];
+
+  it('files every requirement under one of the neutral groups', () => {
+    for (const r of fsqa.requirements) {
+      expect(GROUPS, `${r.slug} is filed under "${r.checklist}"`).toContain(r.checklist);
+    }
+  });
+
+  it('names no customer document anywhere in the pack', () => {
+    expect(fsqaRaw).not.toMatch(/SOP\s*\d|102\.2|Medosweet/i);
+  });
+});

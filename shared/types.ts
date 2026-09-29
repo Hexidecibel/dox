@@ -714,7 +714,7 @@ export type ClaimSubjectGrain = ClaimSubjectType | 'any';
 /**
  * Layer 2 vocabulary — one checklist line item ("Allergen Matrix", "100g
  * Nutritionals"). A document CLOSES these; a claim OPENS them.
- * `checklist` is an optional grouping label (e.g. 'SOP 102.2').
+ * `checklist` is an optional grouping label (e.g. 'Product Specification').
  */
 export interface RequirementRow {
   id: string;

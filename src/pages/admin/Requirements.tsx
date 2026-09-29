@@ -446,7 +446,7 @@ export function Requirements() {
           />
           <TextField
             label="Group (optional)"
-            placeholder="e.g. SOP 102.2"
+            placeholder="e.g. Product Specification"
             fullWidth
             value={formChecklist}
             onChange={(e) => setFormChecklist(e.target.value)}
