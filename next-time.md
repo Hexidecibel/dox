@@ -4,6 +4,10 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-29 (end): v2.26.1 LIVE ("Ask for a month"). HELD, unshipped, local master only (not pushed): tenant-grounded search examples (`GET /api/search/examples`), the search golden corpus (`tests/api/search-golden.test.ts`, 90 pass / 6 skipped) and `bin/eval-search`.** Chris said hold - do not deploy or push these without asking. The 6 skipped golden rows are product words ALONE ("unsalted butter", SKU "4417", "5 gallon bag"): the reader only chips product words next to another constraint; a code or pack should chip on its own (Phase 3 rule) - small follow-up, rows switch on automatically. Local eval on the Cush Co copy: 98.4% overall, negatives 50/50.
+
+---
+
 **2026-09-29 (later): v2.26.0 IS LIVE ("Type it the way you would say it") — search Phase 2 + a persistent header.** Prod `b4dd0fe0`. No migrations. **Lesson:** the first `bin/deploy` failed with 223 "Workers runtime failed to start" errors while a local `wrangler pages dev` + build ran alongside it; re-run alone it passed 316/4272. Never run a dev server or second test run during `bin/deploy`, and do not push the tag until the deploy log says exit=0. AJ's reply is POSTED in #ai-briefs (thread holds the 21 decisions + 3 attachments). Next: search Phase 3 (Advanced mode), product-scope Phase 2-3 (waits on AJ Q7-Q12).
 
 ---
