@@ -1,12 +1,15 @@
+import { useState } from 'react';
 import {
   Alert,
   AlertTitle,
   Box,
   Button,
+  ButtonBase,
   Card,
   CardActionArea,
   CardContent,
   Chip,
+  Collapse,
   Stack,
   Tooltip,
   Typography,
@@ -14,6 +17,8 @@ import {
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ReportProblemIcon from '@mui/icons-material/ReportProblem';
 import HourglassTopIcon from '@mui/icons-material/HourglassTop';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import { LotStrip } from './LotStrip';
 import { Link as RouterLink } from 'react-router-dom';
 import { ResultCardDocument } from './ResultCardDocument';
 import { SelectableResult } from './SelectableResult';
@@ -60,6 +65,16 @@ export interface CoverageResultsProps extends SearchCoverageFields {
    * component rendered before there was an export path at all.
    */
   selection?: SearchSelection;
+  /**
+   * The workspace presentation (search redesign Phase 2): no banners (the
+   * AnswerCard leads instead), band headings, the nearby band collapsed,
+   * every lot on a certificate shown with the answering rows marked.
+   */
+  bands?: boolean;
+  /** Clicking or focusing a row previews it (instead of opening the page). */
+  onActivate?: (doc: UniversalSearchDocument, how: 'click' | 'focus') => void;
+  /** The row currently previewed. */
+  activeId?: string | null;
 }
 
 const PROVENANCE_LABEL: Record<SearchFieldProvenance, string> = {
@@ -204,6 +219,71 @@ function UnreviewedCard({ u }: { u: SearchUnreviewedCandidate }) {
   );
 }
 
+/**
+ * One result row. In the workspace (`onActivate`) a row is a keyboard stop:
+ * focusing or clicking it previews the document, and the workspace's arrow
+ * keys move between rows. The checkbox / Include anyway gate is
+ * `SelectableResult`'s, unchanged.
+ */
+function ResultRow({
+  doc,
+  selection,
+  mode,
+  tone,
+  footer,
+  onActivate,
+  active,
+}: {
+  doc: UniversalSearchDocument;
+  selection?: SearchSelection;
+  mode: 'covering' | 'plain' | 'opt_in';
+  tone?: 'default' | 'covering' | 'candidate';
+  footer?: React.ReactNode;
+  onActivate?: (doc: UniversalSearchDocument, how: 'click' | 'focus') => void;
+  active?: boolean;
+}) {
+  const card = <ResultCardDocument doc={doc} tone={tone} footer={footer} onOpen={onActivate ? (d) => onActivate(d, 'click') : undefined} active={active} />;
+  if (!onActivate) {
+    return (
+      <SelectableResult doc={doc} selection={selection} mode={mode}>
+        {card}
+      </SelectableResult>
+    );
+  }
+  return (
+    <Box
+      data-nav-row
+      data-doc-id={doc.id}
+      tabIndex={0}
+      onFocus={(e) => {
+        if (e.target === e.currentTarget) onActivate(doc, 'focus');
+      }}
+      sx={{ outline: 'none', borderRadius: 1.5, '&:focus-visible .MuiCard-root': { boxShadow: (t) => `0 0 0 3px ${t.palette.primary.main}33` } }}
+    >
+      <SelectableResult doc={doc} selection={selection} mode={mode}>
+        {card}
+      </SelectableResult>
+    </Box>
+  );
+}
+
+function BandHeading({ title, count, note, action, testId }: { title: string; count: number; note?: string; action?: React.ReactNode; testId?: string }) {
+  return (
+    <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1, flexWrap: 'wrap' }} useFlexGap data-testid={testId}>
+      <Typography variant="subtitle2" sx={{ fontWeight: 700, letterSpacing: '0.01em' }}>{title}</Typography>
+      <Box
+        component="span"
+        sx={{ fontSize: '0.72rem', fontWeight: 600, px: 0.75, borderRadius: 999, bgcolor: 'action.selected', color: 'text.secondary', fontVariantNumeric: 'tabular-nums' }}
+      >
+        {count}
+      </Box>
+      <Box sx={{ flex: 1, minWidth: 24, height: '1px', bgcolor: 'divider' }} />
+      {note && <Typography variant="caption" color="text.secondary">{note}</Typography>}
+      {action}
+    </Stack>
+  );
+}
+
 export function CoverageResults({
   documents,
   coverage,
@@ -213,21 +293,25 @@ export function CoverageResults({
   unreviewed_candidates = [],
   coverage_scan_truncated,
   selection,
+  bands = false,
+  onActivate,
+  activeId = null,
 }: CoverageResultsProps) {
   const covering = documents.filter((d) => d.match_status === 'covering');
   const likely = documents.filter((d) => d.match_status === 'likely_covering');
   const candidates = documents.filter((d) => d.match_status === 'candidate_not_matching');
+  const [nearbyOpen, setNearbyOpen] = useState(false);
+
+  const row = (d: UniversalSearchDocument, mode: 'covering' | 'plain' | 'opt_in', tone?: 'default' | 'covering' | 'candidate', footer?: React.ReactNode) => (
+    <ResultRow key={d.id} doc={d} selection={selection} mode={mode} tone={tone} footer={footer} onActivate={onActivate} active={activeId === d.id} />
+  );
 
   if (!coverage || coverage === 'unconstrained') {
     // Nothing was stated to verify, so nothing is labelled: a plain list.
     return (
       <Box data-testid="coverage-results">
-        {documents.map((d) => (
-          <SelectableResult key={d.id} doc={d} selection={selection} mode="plain">
-            <ResultCardDocument doc={d} />
-          </SelectableResult>
-        ))}
-        {documents.length === 0 && unreviewed_candidates.length === 0 && (
+        {documents.map((d) => row(d, 'plain'))}
+        {documents.length === 0 && unreviewed_candidates.length === 0 && !bands && (
           <Typography variant="body2" color="text.secondary">No documents found.</Typography>
         )}
         <Box sx={{ mt: documents.length ? 2 : 0 }}>
@@ -237,9 +321,17 @@ export function CoverageResults({
     );
   }
 
+  const footerFor = (d: UniversalSearchDocument, kind: 'covering' | 'candidate') => (
+    <>
+      <LotRow lot={d.matched_lot} />
+      {bands && <LotStrip doc={d} />}
+      <Evidence checks={d.match_checks ?? []} kind={kind} />
+    </>
+  );
+
   return (
     <Box data-testid="coverage-results">
-      {constraints.length > 0 && (
+      {constraints.length > 0 && !bands && (
         <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mb: 1.5, flexWrap: 'wrap' }} useFlexGap>
           <Typography variant="caption" color="text.secondary">
             Searching for a document that covers:
@@ -256,6 +348,166 @@ export function CoverageResults({
         <ProductResolutionNote key={`res-${c.id}`} constraint={c} />
       ))}
 
+      {!bands && (
+        <AnswerBanners
+          coverage={coverage}
+          coverage_summary={coverage_summary}
+          dropped_constraints={dropped_constraints}
+          coverage_scan_truncated={coverage_scan_truncated}
+          likelyCount={likely.length}
+          candidateCount={candidates.length}
+        />
+      )}
+
+      {covering.length > 0 && (
+        <Box sx={{ mb: 3 }} data-testid="covering-section">
+          {bands ? (
+            <BandHeading
+              title="Covering"
+              count={covering.length}
+              note={selection ? 'select to download or send' : undefined}
+              action={selection && covering.length > 1 ? (
+                <Button size="small" onClick={() => selection.onSelectMany(covering)} sx={{ textTransform: 'none' }} data-testid="select-all-covering">
+                  Select all {covering.length}
+                </Button>
+              ) : undefined}
+            />
+          ) : (
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1, flexWrap: 'wrap' }} useFlexGap>
+              <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                Covering documents ({covering.length})
+              </Typography>
+              {selection && (
+                <Button
+                  size="small"
+                  onClick={() => selection.onSelectMany(covering)}
+                  sx={{ textTransform: 'none' }}
+                  data-testid="select-all-covering"
+                >
+                  Select all {covering.length}
+                </Button>
+              )}
+            </Stack>
+          )}
+          {covering.map((d) => row(d, 'covering', 'covering', footerFor(d, 'covering')))}
+        </Box>
+      )}
+
+      {likely.length > 0 && (
+        <Box sx={{ mb: 3 }} data-testid="likely-section">
+          {bands ? (
+            <BandHeading title="Likely · confirm" count={likely.length} note="include only after you have checked it" />
+          ) : (
+            <>
+              <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                Likely covering — confirm ({likely.length})
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                Each of these would cover your search on evidence no person has confirmed — the reason is under each one. Open it and check before using it.
+              </Typography>
+            </>
+          )}
+          {likely.map((d) => row(d, 'opt_in', 'candidate', footerFor(d, 'candidate')))}
+        </Box>
+      )}
+
+      {candidates.length > 0 && (
+        <Box sx={{ mb: 3 }} data-testid="candidates-section">
+          {bands ? (
+            <>
+              <ButtonBase
+                onClick={() => setNearbyOpen((v) => !v)}
+                aria-expanded={nearbyOpen}
+                data-testid="nearby-toggle"
+                sx={{
+                  width: '100%',
+                  justifyContent: 'flex-start',
+                  gap: 1,
+                  px: 1.5,
+                  py: 1,
+                  mb: nearbyOpen ? 1 : 0,
+                  borderRadius: 2,
+                  border: '1px dashed',
+                  borderColor: 'divider',
+                  textAlign: 'left',
+                  flexWrap: 'wrap',
+                  '&:hover': { bgcolor: 'action.hover' },
+                }}
+              >
+                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Nearby, does not cover</Typography>
+                <Box component="span" sx={{ fontSize: '0.72rem', fontWeight: 600, px: 0.75, borderRadius: 999, bgcolor: 'action.selected', color: 'text.secondary' }}>
+                  {candidates.length}
+                </Box>
+                <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+                  Close to what you asked — each fails at least one part of it. Never counted as an answer.
+                </Typography>
+                <ExpandMoreIcon fontSize="small" sx={{ color: 'text.secondary', transform: nearbyOpen ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }} />
+              </ButtonBase>
+              <Collapse in={nearbyOpen} unmountOnExit>
+                <Box sx={{ opacity: 0.92 }}>
+                  {candidates.map((d) => row(d, 'opt_in', 'candidate', footerFor(d, 'candidate')))}
+                </Box>
+              </Collapse>
+            </>
+          ) : (
+            <>
+              <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                Nearby — does not match ({candidates.length})
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                These are close to what you asked for. Each one fails at least one part of your search.
+              </Typography>
+              {candidates.map((d) => row(d, 'opt_in', 'candidate', footerFor(d, 'candidate')))}
+            </>
+          )}
+        </Box>
+      )}
+
+      {unreviewed_candidates.length > 0 && (
+        <Box sx={{ mb: 3 }} data-testid="unreviewed-section">
+          {bands ? (
+            <BandHeading title="Still in Review Queue" count={unreviewed_candidates.length} note="not on file until someone approves it" />
+          ) : (
+            <>
+              <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                In the Review Queue — not on file yet ({unreviewed_candidates.length})
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                A file here is never a covering document until someone approves it.
+              </Typography>
+            </>
+          )}
+          {unreviewed_candidates.map((u) => (
+            <UnreviewedCard key={u.queue_id} u={u} />
+          ))}
+        </Box>
+      )}
+
+    </Box>
+  );
+}
+
+/**
+ * The classic answer banners (CoverageResults without `bands`). The workspace
+ * leads with `AnswerCard` instead; these stay for every other embed.
+ */
+function AnswerBanners({
+  coverage,
+  coverage_summary,
+  dropped_constraints = [],
+  coverage_scan_truncated,
+  likelyCount,
+  candidateCount,
+}: {
+  coverage: SearchCoverageFields['coverage'];
+  coverage_summary?: string | null;
+  dropped_constraints?: SearchCoverageFields['dropped_constraints'];
+  coverage_scan_truncated?: boolean;
+  likelyCount: number;
+  candidateCount: number;
+}) {
+  return (
+    <>
       {dropped_constraints.length > 0 && (
         <Alert severity="info" sx={{ mb: 2 }}>
           <AlertTitle>Part of your search could not be applied</AlertTitle>
@@ -272,7 +524,7 @@ export function CoverageResults({
 
       {coverage === 'likely' && (
         <Alert severity="warning" icon={<HelpOutlineIcon />} sx={{ mb: 2 }} data-testid="likely-coverage-banner">
-          <AlertTitle>No confirmed covering document — {likely.length} likely</AlertTitle>
+          <AlertTitle>No confirmed covering document — {likelyCount} likely</AlertTitle>
           {coverage_summary}
         </Alert>
       )}
@@ -281,7 +533,7 @@ export function CoverageResults({
         <Alert severity="warning" icon={<ReportProblemIcon />} sx={{ mb: 2 }} data-testid="no-coverage-banner">
           <AlertTitle>No covering document on file</AlertTitle>
           {coverage_summary}
-          {candidates.length > 0 && ' The documents below are nearby, but none of them matches — check the reason on each before using one.'}
+          {candidateCount > 0 && ' The documents below are nearby, but none of them matches — check the reason on each before using one.'}
         </Alert>
       )}
 
@@ -302,91 +554,7 @@ export function CoverageResults({
           This workspace has more documents than one coverage check reads, so the oldest were not checked.
         </Alert>
       )}
-
-      {covering.length > 0 && (
-        <Box sx={{ mb: 3 }}>
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1, flexWrap: 'wrap' }} useFlexGap>
-            <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-              Covering documents ({covering.length})
-            </Typography>
-            {selection && (
-              <Button
-                size="small"
-                onClick={() => selection.onSelectMany(covering)}
-                sx={{ textTransform: 'none' }}
-                data-testid="select-all-covering"
-              >
-                Select all {covering.length}
-              </Button>
-            )}
-          </Stack>
-          {covering.map((d) => (
-            <SelectableResult key={d.id} doc={d} selection={selection} mode="covering">
-              <ResultCardDocument
-                doc={d}
-                tone="covering"
-                footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="covering" /></>}
-              />
-            </SelectableResult>
-          ))}
-        </Box>
-      )}
-
-      {likely.length > 0 && (
-        <Box sx={{ mb: 3 }} data-testid="likely-section">
-          <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-            Likely covering — confirm ({likely.length})
-          </Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-            Each of these would cover your search on evidence no person has confirmed — the reason is under each one. Open it and check before using it.
-          </Typography>
-          {likely.map((d) => (
-            <SelectableResult key={d.id} doc={d} selection={selection} mode="opt_in">
-              <ResultCardDocument
-                doc={d}
-                tone="candidate"
-                footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="candidate" /></>}
-              />
-            </SelectableResult>
-          ))}
-        </Box>
-      )}
-
-      {candidates.length > 0 && (
-        <Box sx={{ mb: 3 }} data-testid="candidates-section">
-          <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-            Nearby — does not match ({candidates.length})
-          </Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-            These are close to what you asked for. Each one fails at least one part of your search.
-          </Typography>
-          {candidates.map((d) => (
-            <SelectableResult key={d.id} doc={d} selection={selection} mode="opt_in">
-              <ResultCardDocument
-                doc={d}
-                tone="candidate"
-                footer={<><LotRow lot={d.matched_lot} /><Evidence checks={d.match_checks ?? []} kind="candidate" /></>}
-              />
-            </SelectableResult>
-          ))}
-        </Box>
-      )}
-
-      {unreviewed_candidates.length > 0 && (
-        <Box sx={{ mb: 3 }} data-testid="unreviewed-section">
-          <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-            In the Review Queue — not on file yet ({unreviewed_candidates.length})
-          </Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-            A file here is never a covering document until someone approves it.
-          </Typography>
-          {unreviewed_candidates.map((u) => (
-            <UnreviewedCard key={u.queue_id} u={u} />
-          ))}
-        </Box>
-      )}
-
-    </Box>
+    </>
   );
 }
 

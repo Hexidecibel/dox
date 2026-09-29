@@ -37,6 +37,7 @@ import { applyNaturalProductAndOrder, loadCoverageCorpus, runCoverageSearch, unr
 import { constraintsFromParsedQuery } from '../../../../shared/searchCoverage';
 import type { Env, User } from '../../../lib/types';
 import type { NaturalSearchResponse } from '../../../../shared/types';
+import { constraintsToAiClauses } from '../../../lib/search/naturalClauses';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -46,6 +47,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = (await context.request.json()) as {
       query?: string;
       tenant_id?: string;
+      /**
+       * Return the reading only — `clauses` (source 'ai') and `ai_dropped` —
+       * without judging the corpus. The search workspace runs the clauses
+       * through POST /api/search/query itself (search redesign Phase 2).
+       */
+      clauses_only?: boolean;
     };
 
     if (!body.query || !body.query.trim()) {
@@ -66,10 +73,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // Fetch tenant context for the LLM prompt — same as before.
     const docTypesResult = await context.env.DB.prepare(
-      'SELECT slug, name FROM document_types WHERE tenant_id = ? AND active = 1',
+      'SELECT id, slug, name FROM document_types WHERE tenant_id = ? AND active = 1',
     )
       .bind(tenantId)
-      .all<{ slug: string; name: string }>();
+      .all<{ id: string; slug: string; name: string }>();
     const docTypes = docTypesResult.results || [];
 
     const productsResult = await context.env.DB.prepare(
@@ -80,11 +87,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const products = productsResult.results || [];
 
     const suppliersResult = await context.env.DB.prepare(
-      'SELECT DISTINCT name FROM suppliers WHERE tenant_id = ? AND active = 1',
+      'SELECT id, name FROM suppliers WHERE tenant_id = ? AND active = 1',
     )
       .bind(tenantId)
-      .all<{ name: string }>();
-    const suppliers = suppliersResult.results || [];
+      .all<{ id: string; name: string }>();
+    const supplierRows = suppliersResult.results || [];
+    const suppliers = [...new Set(supplierRows.map((s) => s.name))].map((name) => ({ name }));
 
     // Parse natural language query via LLM — preserved from prior impl.
     let parsedQuery;
@@ -133,6 +141,23 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const constraints = await applyNaturalProductAndOrder(
       context.env.DB, tenantId, parsedConstraints.constraints, parsedQuery, body.query,
     );
+    // The same reading as clauses of the one query model, each marked as the
+    // AI's, so the workspace can show it as chips a person edits or rejects.
+    const ai = constraintsToAiClauses(constraints, dropped, { suppliers: supplierRows, documentTypes: docTypes });
+    const aiFields = { clauses: ai.clauses, ai_dropped: ai.dropped };
+    if (body.clauses_only) {
+      const readingOnly: NaturalSearchResponse = {
+        parsed_query: parsedQuery,
+        ...aiFields,
+        results: [],
+        total: 0,
+        coverage: 'unconstrained',
+        constraints,
+        dropped_constraints: dropped,
+        coverage_summary: null,
+      };
+      return new Response(JSON.stringify(readingOnly), { headers: { 'Content-Type': 'application/json' } });
+    }
 
     if (constraints.length > 0 || dropped.length > 0) {
       const corpus = await loadCoverageCorpus(context.env.DB, tenantId);
@@ -146,6 +171,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       });
       const responseBody: NaturalSearchResponse = {
         parsed_query: parsedQuery,
+        ...aiFields,
         results: run.rows as unknown as NaturalSearchResponse['results'],
         total: run.total,
         coverage: run.coverage,
@@ -250,6 +276,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const responseBody: NaturalSearchResponse = {
       parsed_query: parsedQuery,
+      ...aiFields,
       results: results as unknown as NaturalSearchResponse['results'],
       total,
       coverage: 'unconstrained',

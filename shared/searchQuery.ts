@@ -52,6 +52,12 @@ export interface Clause {
   raw?: string;
   /** Anything the reader should know about how it was read. */
   note?: string | null;
+  /**
+   * A product clause read from a phrase that fits several products ("5 gal
+   * bag"): every candidate is listed and NOTHING IS PICKED. The answer is
+   * shown per product until the person chooses one (search redesign Phase 2).
+   */
+  ambiguous?: boolean;
 }
 
 export interface SearchView {
@@ -111,6 +117,10 @@ export function encodeClause(c: Clause): string {
   if (c.role) opts.push(`role=${c.role}`);
   if (c.sublot) opts.push(`sub=${encodeURIComponent(c.sublot)}`);
   if (c.source && c.source !== 'builder') opts.push(`src=${c.source}`);
+  // What the person typed travels with the clause, so "treat it as text" can
+  // hand their own words back after a reload or a shared link.
+  if (c.raw && c.raw.trim()) opts.push(`raw=${encodeURIComponent(c.raw.trim())}`);
+  if (c.ambiguous) opts.push('amb=1');
   return `${c.exclude ? '!' : ''}${c.field}.${c.op}${opts.map((o) => `;${o}`).join('')}:${c.values.map(escValue).join(',')}`;
 }
 
@@ -139,6 +149,13 @@ export function decodeClause(s: string, id: string): Clause | null {
     if (k === 'role' && (ROLES as string[]).includes(v)) c.role = v as SearchDateRole;
     else if (k === 'sub' && v) c.sublot = decodeURIComponent(v);
     else if (k === 'src' && (SOURCES as string[]).includes(v)) c.source = v as ClauseSource;
+    else if (k === 'raw' && v) {
+      try {
+        c.raw = decodeURIComponent(v);
+      } catch {
+        // a malformed escape is dropped, never guessed at
+      }
+    } else if (k === 'amb' && v === '1') c.ambiguous = true;
   }
   return c;
 }
@@ -316,6 +333,108 @@ export function withoutValue(q: SearchQuery, id: string, value: string): SearchQ
 /** The same query with only scope and text clauses (what a Clear filters leaves). */
 export function withoutScope(q: SearchQuery): SearchQuery {
   return { ...q, clauses: renumber(q.clauses.filter((c) => SEARCH_FIELDS[c.field].class !== 'scope')), view: { ...q.view, page: undefined } };
+}
+
+// ---------------------------------------------------------------------------
+// The omnibox (search redesign Phase 2): typed text -> chips, and back
+// ---------------------------------------------------------------------------
+
+/** The ids a committed batch of clauses received (in order). */
+export interface CommitResult {
+  query: SearchQuery;
+  ids: string[];
+}
+
+/**
+ * Keep what the omnibox read (Enter): every detected clause joins the query as
+ * its own chip, whatever was left over becomes a `mentions` chip, and the box
+ * empties. The detected clauses are written EXACTLY as they were shown — the
+ * person saw them as live chips before pressing Enter — and nothing else is
+ * re-read: the leftover text is a text clause, which the server never scans
+ * for lots, dates or numbers again.
+ *
+ * `rejectIndex` (optional): the detection at that position is kept as the
+ * person's own words instead (the live chip's ×) — see `clauseAsText`.
+ */
+export function commitInterpretation(
+  q: SearchQuery,
+  detected: Clause[],
+  residual: string,
+  rejectIndex?: number,
+): CommitResult {
+  const base = q.clauses.length;
+  const added: Clause[] = detected.map((c, i) => {
+    const kept: Clause = { ...c, id: '', source: c.source === 'ai' ? 'ai' : 'detected' };
+    return i === rejectIndex ? asTextClause(kept) : kept;
+  });
+  const rest = residual.replace(/\s+/g, ' ').trim();
+  if (rest) added.push({ id: '', field: 'text', op: 'contains', values: [rest], source: 'typed' });
+  const clauses = renumber([...q.clauses, ...added]);
+  return {
+    query: { ...q, text: '', clauses, view: { ...q.view, page: undefined } },
+    ids: clauses.slice(base).map((c) => c.id),
+  };
+}
+
+/** Words a clause was read from, for putting them back as text. */
+export function clauseWords(c: Clause, labels: Record<string, string> = {}): string {
+  if (c.raw && c.raw.trim()) return c.raw.trim();
+  if (c.field === 'text') return c.values.join(' ');
+  return describeClause(c, labels);
+}
+
+function asTextClause(c: Clause, labels: Record<string, string> = {}): Clause {
+  const words = clauseWords(c, labels);
+  const def = fieldDef(c.field);
+  return {
+    id: c.id,
+    field: 'text',
+    op: 'contains',
+    values: [words],
+    // 'typed': the person's own words, which the server matches as text and
+    // never re-reads — so a rejected detection cannot come back by itself.
+    source: 'typed',
+    raw: words,
+    note: def && c.field !== 'text' ? `Kept as your words — not read as ${def.label.toLowerCase()}.` : null,
+  };
+}
+
+/**
+ * Reject a reading: the clause becomes the words it was read from, matched as
+ * text. It is never silently re-applied — a text clause is not interpreted.
+ */
+export function clauseAsText(q: SearchQuery, id: string, labels: Record<string, string> = {}): SearchQuery {
+  const clauses = q.clauses.map((c) => (c.id === id ? asTextClause(c, labels) : c));
+  return { ...q, clauses: renumber(clauses), view: { ...q.view, page: undefined } };
+}
+
+/** Replace one clause in place (an edit from the clause editor). */
+export function replaceClause(q: SearchQuery, id: string, next: Clause): SearchQuery {
+  const clauses = q.clauses.map((c) => (c.id === id ? { ...next, id } : c));
+  return { ...q, clauses: renumber(clauses), view: { ...q.view, page: undefined } };
+}
+
+/** Add one clause at the end (a facet pick, a jump-row filter). */
+export function withClause(q: SearchQuery, c: Omit<Clause, 'id'>): SearchQuery {
+  return { ...q, clauses: renumber([...q.clauses, { ...c, id: '' }]), view: { ...q.view, page: undefined } };
+}
+
+/**
+ * An AI reading replaces what the text was read as before — detected chips,
+ * the person's text chips and any earlier AI reading — and keeps what they
+ * chose deliberately (facets, builder rows, a saved search). Every clause it
+ * adds carries `source: 'ai'`, so its chip says so.
+ */
+export function withAiReading(q: SearchQuery, ai: Clause[]): SearchQuery {
+  const kept = q.clauses.filter((c) => c.source === 'facet' || c.source === 'builder' || c.source === 'saved');
+  const added = ai.map((c) => ({ ...c, id: '', source: 'ai' as const }));
+  return { ...q, text: '', clauses: renumber([...kept, ...added]), view: { ...q.view, page: undefined } };
+}
+
+/** The words Ask AI is given: the box, plus every text chip. */
+export function questionText(q: SearchQuery): string {
+  return [q.text, ...q.clauses.filter((c) => c.field === 'text').flatMap((c) => c.values)]
+    .join(' ').replace(/\s+/g, ' ').trim();
 }
 
 // ---------------------------------------------------------------------------

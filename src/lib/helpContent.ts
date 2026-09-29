@@ -565,10 +565,10 @@ const documents: ModuleHelpExpanded = {
   list: {
     headline: 'Documents',
     well:
-      "Your tenant's document library. Each card shows a doc — title, type (COA, Spec, SDS), supplier, and the products it covers. Filter by status, document type, or use the AI search box to ask in natural language.",
+      "Your tenant's document library, on the same search as the Search page. Everything is listed until you ask for something; the Filters rail narrows by supplier, type, product, status and upload date. Type a lot, a production date, a PO or an invoice and the page answers whether a document on file covers it. Press Ctrl K (⌘K on a Mac) from anywhere to search.",
     emptyTitle: 'No documents yet',
     emptyDescription:
-      "Documents land here once you import them (Import page), an email connector ingests one, or an API call posts one. Hit the AI search if you've imported some but they aren't turning up — natural-language queries like \"COAs for butter from March\" use a different path than the keyword filters.",
+      "Documents land here once you import them (Import page), an email connector ingests one, or an API call posts one. If you have imported some but they are not turning up, press ✦ Ask AI: it reads a question like \"COAs for butter from March\" into filters you can see and change.",
     columnTooltips: {
       title: 'The document title — extracted from the file or set during ingest. Used as the primary display name everywhere.',
       type:
@@ -793,10 +793,11 @@ const search: ModuleHelpExpanded = {
   list: {
     headline: 'Search',
     well:
-      "Search over your tenant's documents, orders, customers and bundles. Type a lot (1042620303) or a dated phrase (production date 7/31/2026) and search checks each document's own fields: covering documents come first, nearby documents that do not match are listed separately with the reason, and files still in the Review Queue are shown as not on file yet. When nothing covers the search, it says so. The AI button takes a question in plain words and answers it the same way. Results can be selected and taken with you: download them as a ZIP with a manifest, or send them to someone as a link that expires.",
+      "Type the way you would say it — a lot (lot 10426203-03), a dated phrase (produced Sep 2), a PO or an invoice. What dox reads out of your words appears as chips under the box; click a chip to change how it was read, or turn it back into plain words. The answer leads: Covered, Likely · confirm, Nothing covers, or Could mean several products. Below it, covering documents come first, then likely ones, then nearby documents that do not cover it (folded away), then files still in the Review Queue. ✦ Ask AI reads a whole question into chips marked as the AI's. Results can be selected and taken with you as a ZIP or a link that expires. Ctrl K (⌘K on a Mac) opens search from anywhere.",
     columnTooltips: {
-      aiToggle: "Switch between keyword search (exact match) and natural-language search (LLM parses your query into filters). Keyword is faster; AI is more forgiving when you don't know the exact words used.",
-      lotSublot: "Type a lot and a sublot as two separate inputs when the certificate prints them apart. Each part is matched against the lot row's own part — a sublot never matches against the base number.",
+      aiToggle: "✦ Ask AI sends your words to the language model and brings its reading back as chips, each marked ✦ with the reason it was read that way. It only runs when you press it (or Ctrl/⌘ + Enter), never by itself.",
+      lotSublot: "Type a lot and its sublot together (10426203-03, 10426203 03) or click the lot chip and give the sublot its own box. Each part is matched against the lot row's own part — a sublot never matches against the base number.",
+      chips: "Each chip is one part of your search, in words: what it was read as, and why. Click it to change it — a production date into a code date, an exact lot into \"starts with\", a number into a PO or an order — or press \"Treat as text\" to take the reading back. A reading you take back stays plain words and is never re-read.",
       exportSelection: "Tick the documents you want to take with you. Covering results have a checkbox (and a Select all); a nearby result has to be added with Include anyway, so a near miss is never swept into an export by a default. The bar at the top of the results shows how many are selected and offers Download ZIP or Send by email.",
     },
   },
@@ -805,7 +806,17 @@ const search: ModuleHelpExpanded = {
       {
         heading: 'What Search does',
         body:
-          "One box for everything on file: documents, orders, customers and bundles. The All tab shows the top few of each; the Documents, Orders, Customers and Bundles tabs show the full list for one kind. Use it when you have a lot number, a date, a supplier or a product and do not want to go to a list page first.",
+          "One box for everything on file. As you type, dox reads the lot, the date (and which date: production, code, best-by), the PO, the invoice or the order out of your words and shows each as a chip; the words it could not read stay as a \"mentions\" chip. Press Enter to keep the chips and type the next thing. Suppliers, products, orders, customers and bundles your words name appear in a thin Jump to row above the results. The Documents page is the same search, opened as a list of everything with the Filters rail showing.",
+      },
+      {
+        heading: 'Chips: seeing and changing how your words were read',
+        body:
+          "A dashed chip is how the words still in the box read right now; a solid chip is part of the search. Click any chip to change it: read a date as a production date, a code date or a best-by date, and on, before, after or between; match a lot exactly or everything that starts with it (lot 104 means every lot starting 104, and the supplier's declared lot format says what 104 is); say whether a number is a PO, an invoice, an order or any of them. \"Treat as text\" takes a reading back: your words become a plain \"mentions\" chip and are never read again. Filters (supplier, type, product, status) can also be excluded. Backspace in an empty box removes the last chip.",
+      },
+      {
+        heading: 'The answer, first',
+        body:
+          "Before any list, a card says what the search found: Covered (with the lot row that answers it), Likely · confirm (covers only on evidence nobody has confirmed — the reason is shown), Nothing covers (said plainly; the nearest document is named as nearby and not the answer), or Could mean several products (nothing is picked; each product shows its own count, and one click chooses). The certificate opens beside the results with the answering lot row named and the other lots on it dimmed.",
       },
       {
         heading: 'Reading document results',
@@ -827,10 +838,14 @@ const search: ModuleHelpExpanded = {
           "Type a WMS order number (1797062) to see the certificates for its lots. A certificate counts as covering only when a person accepted the lot match or one of its lot rows is exactly the shipped lot. A suggested match shows as \"confirm\".",
       },
       {
-        heading: 'Keyword vs. AI mode',
+        heading: 'Ask AI',
         body:
-          "Keyword search is fast and matches the words you type. Plurals and common unit spellings (gal / gallon) match each other. " +
-          "AI mode takes a question in plain words (\"COA for lot 1042620303 produced 7/31/2026\"), works out what you are asking for, and checks each document against it the same way. If part of your question could not be applied, it is listed above the results instead of being quietly dropped — the results are then broader than what you asked.",
+          "Typing is fast and reads only what it can be sure of. ✦ Ask AI (or Ctrl/⌘ + Enter) sends a question in plain words (\"Darigold certificates from early September that aren't approved yet\") to the language model and turns its reading into chips, each marked ✦ with why it was read that way — edit or remove any of them like any other chip. It never runs by itself. If part of the question could not become a filter, that is said above the results instead of being quietly dropped.",
+      },
+      {
+        heading: 'Keyboard',
+        body:
+          "/ puts the cursor in the search box. ↑ ↓ (or j k) move through the results and show each in the preview; Space selects the one you are on (only where a checkbox is offered); Enter opens it. E downloads the selection as a ZIP and S sends it. Ctrl/⌘ + Enter asks the AI, Ctrl/⌘ + K opens search from any page, and Esc closes whatever is open.",
       },
       {
         heading: 'Scope',
@@ -841,7 +856,7 @@ const search: ModuleHelpExpanded = {
       {
         heading: 'Taking results with you',
         body:
-          "Tick the results you want and a bar appears at the top of the list showing how many are selected. Covering results have a checkbox, and Select all N takes the whole covering group; a document under Nearby — does not match has to be added with Include anyway first, so a near miss is never exported by accident. The selection survives your next search, so you can gather documents from several queries before sending them. " +
+          "Tick the results you want and a bar appears showing how many are selected. Covering results have a checkbox, and Select all N takes the whole covering group; a document under Likely · confirm or Nearby, does not cover has to be added with Include anyway first, so a near miss is never exported by accident. The selection survives your next search, so you can gather documents from several queries before sending them. " +
           "Download ZIP gives you the current version of each selected document plus a manifest.csv listing, per file, the document, supplier, document type, lot and production date. Over 50 documents or 40 MB the export is refused with the limit in the message — it is never quietly cut short. " +
           "Send by email sends a link, not attachments. The recipient gets the list of documents and one page where they can download the whole set or one file at a time; the link expires in 30 days. The mail comes from the portal with your address as the reply-to, so a reply comes back to you, and \"on behalf of\" is printed as context when you are sending for someone else. Any role that can download a document can export, readers included. " +
           "Every export is recorded in the audit log: what was downloaded, what was sent and to whom, and when a recipient opened the link or pulled a file.",
@@ -849,8 +864,9 @@ const search: ModuleHelpExpanded = {
       {
         heading: 'Common questions',
         body:
-          "AI search returned nothing? The parser couldn\'t pull structured filters from your query. Try keyword mode or simplify the wording. " +
-          "Search returned more than expected? Keyword search ORs across fields by default — a query that matches a tag won\'t exclude docs that don\'t. Add a lot, a date or a product to turn the query into a constraint.",
+          "Ask AI came back with no chips? The model found nothing in the question it could turn into a filter. Simplify the wording, or type the lot, date or PO directly. " +
+          "A chip read your words wrong? Click it and change it, or press Treat as text. " +
+          "Search returned more than expected? Words alone match anywhere in the title, file name and text. Add a lot, a date or a PO to turn the search into a question a document either covers or does not.",
       },
     ],
   },

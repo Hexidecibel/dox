@@ -30,9 +30,11 @@ export interface ResultCardDocumentProps {
   footer?: React.ReactNode;
   /** Visual treatment for a coverage label; `candidate` mutes the card. */
   tone?: 'default' | 'covering' | 'candidate';
+  /** The row the workspace is previewing. */
+  active?: boolean;
 }
 
-export function ResultCardDocument({ doc, onOpen, footer, tone = 'default' }: ResultCardDocumentProps) {
+export function ResultCardDocument({ doc, onOpen, footer, tone = 'default', active = false }: ResultCardDocumentProps) {
   const navigate = useNavigate();
   const open = () =>
     onOpen ? onOpen(doc) : navigate(`/documents/${doc.id}`);
@@ -49,7 +51,8 @@ export function ResultCardDocument({ doc, onOpen, footer, tone = 'default' }: Re
         cursor: 'pointer',
         ...(tone === 'covering' ? { borderLeft: '4px solid', borderLeftColor: 'success.main' } : {}),
         ...(tone === 'candidate' ? { borderLeft: '4px solid', borderLeftColor: 'warning.main', bgcolor: 'action.hover' } : {}),
-        transition: 'border-color 0.15s, box-shadow 0.15s',
+        transition: 'border-color 0.15s, box-shadow 0.15s, background-color 0.15s',
+        ...(active ? { borderColor: 'primary.main', boxShadow: '0 1px 2px rgba(15,26,46,.05), 0 10px 28px -14px rgba(15,26,46,.25)' } : {}),
         '&:hover': { borderColor: 'primary.light' },
       }}
       onClick={open}

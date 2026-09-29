@@ -42,6 +42,7 @@ import type {
   SearchDroppedConstraint,
   SearchOrderEvidence,
   SearchKeyKind,
+  SearchDocLot,
   SearchQueryResponse,
   SearchUnreviewedCandidate,
   UniversalSearchDocument,
@@ -823,6 +824,9 @@ async function runIdentifyingPath(args: {
       ...(rowsAnswering.length > 1 ? { matched_lots: rowsAnswering.map((lot) => matchedLotOf({ ...p.verdict, lot }, p.l.subject)) } : {}),
       match_checks: p.verdict.checks,
       match_reason: p.verdict.reason,
+      // Every lot row on the certificate, so the result can mark the rows
+      // that answer and dim the others (search redesign Phase 2).
+      doc_lots: docLotsOf(p.l.subject),
     } as unknown as UniversalSearchDocument);
   }
 
@@ -903,10 +907,16 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
   validateQuery(query);
   const now = input.now ?? new Date();
   const scope = compileScope(query.clauses, now);
-  const text = [query.text, ...query.clauses.filter((c) => c.field === 'text').flatMap((c) => c.values)].join(' ').replace(/\s+/g, ' ').trim();
+  // Only the BOX is read for lots, dates and numbers. A text clause is the
+  // person's own words — kept as text on Enter, or a reading they rejected —
+  // and re-reading it would silently re-apply a detection they took back
+  // (search redesign Phase 2).
+  const typedText = query.text.replace(/\s+/g, ' ').trim();
+  const clauseText = query.clauses.filter((c) => c.field === 'text').flatMap((c) => c.values).join(' ').replace(/\s+/g, ' ').trim();
+  const text = [typedText, clauseText].filter(Boolean).join(' ');
   const explicitIdent = query.clauses.filter((c) => SEARCH_FIELDS[c.field].class === 'identifying');
 
-  const scan = input.interpret && text ? scanText(text) : null;
+  const scan = input.interpret && typedText ? scanText(typedText) : null;
   const detecting = !!scan && scanHasCandidates(scan);
 
   // Nothing identifying anywhere: the scope / text path, one round trip.
@@ -1047,7 +1057,7 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
     }
     const det = resolveDetections(scan, hits);
     interpreted = { clauses: det.clauses, residual: det.residual };
-    residual = det.residual;
+    residual = [det.residual, clauseText].filter(Boolean).join(' ');
   } else {
     residual = text;
   }
@@ -1068,6 +1078,28 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
   });
   const own = query.clauses.map((c) => explicitWithNotes.find((x) => x.id === c.id) ?? c);
   return withClauseSummaries(res, own, interpreted?.clauses ?? [], stats);
+}
+
+const DOC_LOTS_CAP = 24;
+
+/** The lot rows a document carries, for the result row and the preview pane. */
+function docLotsOf(subject: CoverageSubject): SearchDocLot[] {
+  const seen = new Set<string>();
+  const out: SearchDocLot[] = [];
+  for (const l of subject.lots) {
+    const key = `${l.lot_number}|${l.sub_lot_code}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      lot_number: l.lot_number,
+      sub_lot_code: l.sub_lot_code,
+      lot_key: l.lot_key,
+      production_date: l.production_date ?? null,
+      production_date_source: l.production_date_source ?? null,
+    });
+    if (out.length >= DOC_LOTS_CAP) break;
+  }
+  return out;
 }
 
 function withClauseSummaries(res: SearchQueryResponse, own: Clause[], detected: Clause[], stats: StatementStats): SearchQueryResponse {
