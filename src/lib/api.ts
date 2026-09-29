@@ -57,6 +57,8 @@ import type {
   NaturalSearchResponse,
   SearchQueryRequest,
   SearchQueryResponse,
+  SearchInterpretRequest,
+  SearchInterpretResponse,
   ApiSupplier,
   SupplierListResponse,
   SupplierLookupOrCreateResponse,
@@ -3413,7 +3415,7 @@ export const api = {
      * super_admin callers are pinned to their own tenant; the
      * `tenant_id` param is only honored for super_admin.
      */
-    universal: (params: UniversalSearchParams): Promise<UniversalSearchResponse> => {
+    universal: (params: UniversalSearchParams, signal?: AbortSignal): Promise<UniversalSearchResponse> => {
       const query = new URLSearchParams();
       query.set('q', params.q);
       if (params.tenant_id) query.set('tenant_id', params.tenant_id);
@@ -3422,8 +3424,19 @@ export const api = {
       if (params.limit !== undefined) query.set('limit', String(params.limit));
       if (params.offset !== undefined) query.set('offset', String(params.offset));
       if (params.limit_per_type !== undefined) query.set('limit_per_type', String(params.limit_per_type));
-      return fetchApi<UniversalSearchResponse>(`/search?${query.toString()}`);
+      return fetchApi<UniversalSearchResponse>(`/search?${query.toString()}`, signal ? { signal } : undefined);
     },
+
+    /**
+     * POST /api/search/interpret — how typed text reads (search redesign
+     * Phase 2): detected clauses + the leftover words, never applied.
+     */
+    interpret: (body: SearchInterpretRequest, signal?: AbortSignal): Promise<SearchInterpretResponse> =>
+      fetchApi<SearchInterpretResponse>('/search/interpret', {
+        method: 'POST',
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {}),
+      }),
 
     /**
      * POST /api/search/query — the one executor (search redesign Phase 1).
@@ -3443,10 +3456,15 @@ export const api = {
      * with coverage (covering documents, labelled non-matching candidates,
      * unreviewed queue files, and anything that could not be applied).
      */
-    natural: (query: string, tenantId?: string): Promise<NaturalSearchResponse> =>
+    natural: (
+      query: string,
+      tenantId?: string,
+      options?: { clausesOnly?: boolean; signal?: AbortSignal },
+    ): Promise<NaturalSearchResponse> =>
       fetchApi<NaturalSearchResponse>('/documents/search/natural', {
         method: 'POST',
-        body: JSON.stringify({ query, tenant_id: tenantId }),
+        body: JSON.stringify({ query, tenant_id: tenantId, ...(options?.clausesOnly ? { clauses_only: true } : {}) }),
+        ...(options?.signal ? { signal: options.signal } : {}),
       }),
 
     /**

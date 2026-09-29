@@ -1,5 +1,5 @@
 import { Box, Typography } from '@mui/material';
-import { UniversalSearchPanel } from '../components/search/UniversalSearchPanel';
+import { SearchWorkspace } from '../components/search/SearchWorkspace';
 import { useTenant } from '../contexts/TenantContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useModuleAccess } from '../contexts/ModuleAccessContext';
@@ -7,19 +7,9 @@ import { HelpWell } from '../components/HelpWell';
 import { helpContent } from '../lib/helpContent';
 
 /**
- * Search page — Phase 6b of the Document Search v2 migration.
- *
- * The page is now a thin shell over <UniversalSearchPanel>. The panel
- * owns the search input (with recent/saved popover + AI toggle), the
- * type tabs (All | Documents | Orders | Customers | Bundles), the
- * cross-entity result rendering, and URL sync — all backed by the new
- * `/api/search` universal FTS5 endpoint.
- *
- * The legacy two-tab Documents/Orders form, the manual category +
- * date-range filters, the CSV/JSON export controls, and the direct
- * calls to `api.documents.search()` / `api.orders.list()` /
- * `api.orders.naturalSearch()` have all been removed in favor of the
- * unified panel.
+ * Search — a thin shell over the one search workspace (search redesign
+ * Phase 2). /documents renders the same workspace; this page starts from a
+ * quiet, empty answer with the facet rail folded away.
  */
 export function Search() {
   const { selectedTenantId } = useTenant();
@@ -34,35 +24,35 @@ export function Search() {
 
   return (
     <Box>
-      <Box
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          mb: 3,
-          flexWrap: 'wrap',
-          gap: 1,
-        }}
-      >
-        <Typography variant="h4" fontWeight={700}>
-          Search
+      <Box sx={{ mb: 2.5 }}>
+        <Typography
+          component="h1"
+          sx={{
+            fontFamily: "'Newsreader', Georgia, 'Times New Roman', serif",
+            fontWeight: 500,
+            fontSize: { xs: '1.9rem', sm: '2.3rem' },
+            lineHeight: 1.15,
+            letterSpacing: '-0.015em',
+            color: 'text.primary',
+          }}
+        >
+          Find the paper <Box component="em" sx={{ color: 'primary.main' }}>that proves it.</Box>
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75, maxWidth: 680 }}>
+          Ask the way you would say it. dox reads the lot, date, PO and product out of your words, then tells you whether a document on file actually covers it.
         </Typography>
       </Box>
 
-      <HelpWell
-        id="search.list"
-        title={helpContent.search.list?.headline ?? 'Search'}
-      >
+      <HelpWell id="search.list" title={helpContent.search.list?.headline ?? 'Search'}>
         {helpContent.search.list?.well ?? helpContent.search.well}
       </HelpWell>
 
-      <UniversalSearchPanel
+      <SearchWorkspace
+        surface="search"
         syncToUrl
         tenantId={selectedTenantId || undefined}
         enableExport={canExport}
-        exportSender={
-          user ? { name: user.name || user.email, email: user.email } : undefined
-        }
+        exportSender={user ? { name: user.name || user.email, email: user.email } : undefined}
       />
     </Box>
   );

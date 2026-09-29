@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import {
   Box,
@@ -31,7 +31,10 @@ import {
   Person as PersonIcon,
   FilterList as FilterIcon,
   HelpOutline as HelpIcon,
+  Search as SearchIcon,
 } from '@mui/icons-material';
+import { CommandPalette } from './search/CommandPalette';
+import { modKeyLabel } from '../lib/platform';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 import { useModuleAccess } from '../contexts/ModuleAccessContext';
@@ -78,6 +81,19 @@ export function Layout() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
   const [mobileOpen, setMobileOpen] = useState(false);
+  // ⌘K / Ctrl-K from anywhere: the search omnibox as an overlay.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const modKey = modKeyLabel();
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   const handleNavClick = (path: string) => {
     navigate(path);
@@ -282,6 +298,11 @@ export function Layout() {
             </IconButton>
             <img src="/logo.svg" alt="Dox" height={24} style={{ flex: 0 }} />
             <Box sx={{ flex: 1 }} />
+            <Tooltip title="Search anything">
+              <IconButton onClick={() => setPaletteOpen(true)} aria-label="Search anything">
+                <SearchIcon />
+              </IconButton>
+            </Tooltip>
             <NotificationsBell />
             <Tooltip title="Help">
               <IconButton onClick={() => handleNavClick('/help')} sx={{ mr: 1 }}>
@@ -319,6 +340,31 @@ export function Layout() {
             gap: 0.5,
           }}
         >
+          <Button
+            onClick={() => setPaletteOpen(true)}
+            startIcon={<SearchIcon sx={{ fontSize: 18 }} />}
+            data-testid="open-command-palette"
+            sx={{
+              textTransform: 'none',
+              color: 'text.secondary',
+              bgcolor: 'background.paper',
+              border: '1px solid',
+              borderColor: 'divider',
+              borderRadius: 999,
+              px: 1.5,
+              mr: 0.5,
+              fontWeight: 500,
+              '&:hover': { borderColor: 'primary.light', bgcolor: 'background.paper' },
+            }}
+          >
+            Search anything
+            <Box
+              component="kbd"
+              sx={{ ml: 1.25, fontFamily: '"JetBrains Mono", ui-monospace, monospace', fontSize: '0.7rem', px: 0.6, borderRadius: 0.75, border: '1px solid', borderColor: 'divider', borderBottomWidth: 2 }}
+            >
+              {modKey}K
+            </Box>
+          </Button>
           <NotificationsBell />
           <Tooltip title="Help">
             <IconButton onClick={() => navigate('/help')}>
@@ -363,6 +409,12 @@ export function Layout() {
         <SetupBanner />
         <Outlet />
       </Box>
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        tenantId={selectedTenantId || undefined}
+        modKey={modKey}
+      />
     </Box>
   );
 }
