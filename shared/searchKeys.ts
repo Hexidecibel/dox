@@ -137,6 +137,25 @@ export function stripKeyword(raw: string, kind: 'po' | 'invoice'): string {
   return raw.trim().replace(re, '').trim();
 }
 
+/**
+ * A CUSTOMER's PO (orders.po_number) as compared: a leading "PO", "PO-",
+ * "PO#" or "PO " (any case) is folded away and the rest kept exactly, so
+ * "90001" = "PO-90001" = "po#90001" but "9000" != "90001". Only for the WMS
+ * namespace: our PO on a supplier's paper ("K134273") is never folded.
+ */
+export function foldCustomerPo(raw: unknown): string {
+  return String(raw ?? '').trim().replace(/^po(?:\s*[-#]\s*|\s+|(?=\d))/i, '').trim();
+}
+
+/** The spellings a customer PO may be stored under, for an index IN-list. */
+export function customerPoSpellings(raw: string): string[] {
+  const f = foldCustomerPo(raw);
+  if (!f) return [];
+  const out = new Set<string>([f]);
+  for (const p of ['PO', 'po', 'Po']) for (const sep of ['-', ' ', '#', '', '# ', ' - ']) out.add(`${p}${sep}${f}`);
+  return [...out];
+}
+
 function scalar(v: unknown): string | null {
   if (v == null) return null;
   if (typeof v === 'string') return v.trim() || null;

@@ -30,7 +30,7 @@ import {
 } from './searchCoverage';
 import { makeOrderConstraint } from './orderCoverage';
 import { normalizeLotNumber } from './lotNormalize';
-import { normalizeKeyValue, stripKeyword } from './searchKeys';
+import { foldCustomerPo, normalizeKeyValue, stripKeyword } from './searchKeys';
 
 export type FieldKey =
   | 'supplier'
@@ -215,7 +215,7 @@ function addDays(iso: string, n: number): string {
 export interface ConstraintContext {
   /** WMS orders by normalized order number (order / identifier clauses). */
   ordersByNumber?: Map<string, SearchOrderEvidence>;
-  /** WMS orders by normalized customer PO (po / identifier clauses). */
+  /** WMS orders by FOLDED customer PO (`foldCustomerPo`; po / identifier clauses). */
   ordersByPo?: Map<string, SearchOrderEvidence[]>;
   /** Kinds of document key a number hit (identifier chip wording). */
   hitKinds?: Map<string, string[]>;
@@ -266,7 +266,7 @@ export function clauseToConstraint(
       return { constraint: withNote({ ...makeOrderConstraint(id, ev, c.raw ?? v), source }) };
     }
     case 'po':
-      return { constraint: withNote(makePoConstraint(id, v, ctx.ordersByPo?.get(normalizeKeyValue(stripKeyword(v, 'po'))) ?? [], source)) };
+      return { constraint: withNote(makePoConstraint(id, v, ctx.ordersByPo?.get(foldCustomerPo(v)) ?? [], source)) };
     case 'invoice': {
       const bare = stripKeyword(v, 'invoice');
       return { constraint: withNote(makeInvoiceConstraint(id, v, ctx.ordersByNumber?.get(normalizeKeyValue(bare))?.order_number ?? null, source)) };
@@ -275,7 +275,7 @@ export function clauseToConstraint(
       const norm = normalizeKeyValue(v);
       const orders = [
         ...(ctx.ordersByNumber?.get(norm) ? [ctx.ordersByNumber.get(norm)!] : []),
-        ...(ctx.ordersByPo?.get(norm) ?? []),
+        ...(ctx.ordersByPo?.get(foldCustomerPo(v)) ?? []),
       ].filter((o, i, all) => all.findIndex((x) => x.order_id === o.order_id) === i);
       return { constraint: withNote(makeIdentifierConstraint(id, v, { orders, hitKinds: ctx.hitKinds?.get(norm) }, source)) };
     }

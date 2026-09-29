@@ -26,7 +26,9 @@ __export(searchKeys_exports, {
   IDENTIFIER_KEY_KINDS: () => IDENTIFIER_KEY_KINDS,
   KEY_KIND_LABELS: () => KEY_KIND_LABELS,
   MAX_KEYS_PER_DOCUMENT: () => MAX_KEYS_PER_DOCUMENT,
+  customerPoSpellings: () => customerPoSpellings,
   deriveSearchKeys: () => deriveSearchKeys,
+  foldCustomerPo: () => foldCustomerPo,
   identifierKeys: () => identifierKeys,
   normalizeKeyValue: () => normalizeKeyValue,
   stripKeyword: () => stripKeyword
@@ -262,6 +264,16 @@ function stripKeyword(raw, kind) {
   const re = kind === "po" ? /^p\.?o\.?(?:\s*[#:]\s*|\s+)/i : /^inv(?:oice)?\.?(?:\s*[#:]\s*|\s+)/i;
   return raw.trim().replace(re, "").trim();
 }
+function foldCustomerPo(raw) {
+  return String(raw ?? "").trim().replace(/^po(?:\s*[-#]\s*|\s+|(?=\d))/i, "").trim();
+}
+function customerPoSpellings(raw) {
+  const f = foldCustomerPo(raw);
+  if (!f) return [];
+  const out = /* @__PURE__ */ new Set([f]);
+  for (const p of ["PO", "po", "Po"]) for (const sep of ["-", " ", "#", "", "# ", " - "]) out.add(`${p}${sep}${f}`);
+  return [...out];
+}
 function scalar(v) {
   if (v == null) return null;
   if (typeof v === "string") return v.trim() || null;
@@ -338,7 +350,9 @@ function deriveSearchKeys(metadata, lots = []) {
   IDENTIFIER_KEY_KINDS,
   KEY_KIND_LABELS,
   MAX_KEYS_PER_DOCUMENT,
+  customerPoSpellings,
   deriveSearchKeys,
+  foldCustomerPo,
   identifierKeys,
   normalizeKeyValue,
   stripKeyword

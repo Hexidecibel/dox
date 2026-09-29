@@ -145,6 +145,26 @@ describe('PO', () => {
     expect(pending.coverage_summary).toMatch(/No document on file is confirmed to cover PO PO-90001/);
   });
 
+  it("a customer PO matches with or without its PO prefix; the rest must be exact", async () => {
+    for (const typed of ['90002', 'po#90002', 'PO 90002', 'Po90002']) {
+      const body = await run([clause('po', typed)]);
+      expect(withStatus(body, 'covering')).toEqual([DOC.accepted]);
+    }
+    const shorter = await run([clause('po', '9000')]);
+    expect(withStatus(shorter, 'covering')).toEqual([]);
+    expect(withStatus(shorter, 'likely_covering')).toEqual([]);
+    // Typed without a keyword, the folded number is still read as a PO.
+    const typed = await run([], '90002', true);
+    expect(typed.interpreted.clauses).toMatchObject([{ field: 'po' }]);
+    expect(withStatus(typed, 'covering')).toEqual([DOC.accepted]);
+  });
+
+  it('our PO to the supplier is never folded: a K-number without its K is not it', async () => {
+    const body = await run([clause('po', '134273')]);
+    expect(withStatus(body, 'covering')).toEqual([]);
+    expect(body.coverage).toBe('none');
+  });
+
   it('I3: a PO nothing covers says so, and no nearest document stands in the covering band', async () => {
     const body = await run([clause('po', 'K555000')]);
     expect(body.coverage).toBe('none');

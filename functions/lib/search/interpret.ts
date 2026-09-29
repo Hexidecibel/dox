@@ -27,7 +27,7 @@ import type { SearchDateRole } from '../../../shared/types';
 import type { Clause } from '../../../shared/searchQuery';
 import type { FieldKey } from '../../../shared/searchFields';
 import { parseQueryText, residualText, type LotToken } from '../../../shared/searchCoverage';
-import { normalizeKeyValue, KEY_KIND_LABELS } from '../../../shared/searchKeys';
+import { foldCustomerPo, normalizeKeyValue, KEY_KIND_LABELS } from '../../../shared/searchKeys';
 import { normalizeLotNumber } from '../../../shared/lotNormalize';
 import { lotSchemeLabel, type LotSchemeSpec } from '../../../shared/lotScheme';
 import type { SearchKeyKind } from '../../../shared/types';
@@ -232,15 +232,16 @@ export function resolveDetections(scan: TextScan, hits: DetectionHits): Detectio
     if (d.roleSpan) spans.push(d.roleSpan);
   }
 
-  const wmsKinds = (norm: string): Array<'wms_order' | 'wms_po'> => {
+  const wmsKinds = (norm: string, raw: string): Array<'wms_order' | 'wms_po'> => {
     const out: Array<'wms_order' | 'wms_po'> = [];
     if (hits.orders.some((o) => normalizeKeyValue(o.order_number) === norm)) out.push('wms_order');
-    if (hits.orders.some((o) => o.po_number && normalizeKeyValue(o.po_number) === norm)) out.push('wms_po');
+    // A customer's PO compares folded ("90001" = "PO-90001"); ours never does.
+    if (hits.orders.some((o) => o.po_number && foldCustomerPo(o.po_number) === foldCustomerPo(raw))) out.push('wms_po');
     return out;
   };
-  const kindsOf = (norm: string) => [
+  const kindsOf = (norm: string, raw: string) => [
     ...[...(hits.keys.get(norm) ?? [])],
-    ...wmsKinds(norm),
+    ...wmsKinds(norm, raw),
     ...(lotOnFile(norm, hits.lotKeys) && !hits.keys.get(norm)?.has('lot') ? ['lot' as const] : []),
   ];
 
@@ -251,7 +252,7 @@ export function resolveDetections(scan: TextScan, hits: DetectionHits): Detectio
   for (const t of scan.lotTokens) {
     if (!t.explicit && declared.some((d) => d.start < t.end && d.end > t.start)) continue;
     const norm = normalizeLotNumber(t.norm);
-    const kinds = kindsOf(normalizeKeyValue(t.norm));
+    const kinds = kindsOf(normalizeKeyValue(t.norm), t.raw);
     const other = kinds.filter((k) => k !== 'lot');
     const isLot = t.explicit
       || (other.length === 0 && (kinds.includes('lot') || /^\d{8,}$/.test(norm)));
@@ -278,7 +279,7 @@ export function resolveDetections(scan: TextScan, hits: DetectionHits): Detectio
     else if (t.declared === 'invoice') field = 'invoice';
     else if (t.declared === 'order') field = 'order';
     else {
-      const kinds = kindsOf(t.norm);
+      const kinds = kindsOf(t.norm, t.raw);
       const fields = [...new Set(kinds.map(fieldForKind))];
       if (fields.length === 1) {
         field = fields[0];

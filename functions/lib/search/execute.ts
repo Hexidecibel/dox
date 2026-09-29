@@ -68,7 +68,7 @@ import {
   type CoverageSubject,
   type SubjectVerdict,
 } from '../../../shared/searchCoverage';
-import { DATE_KEY_KINDS, IDENTIFIER_KEY_KINDS, normalizeKeyValue, stripKeyword } from '../../../shared/searchKeys';
+import { customerPoSpellings, DATE_KEY_KINDS, foldCustomerPo, IDENTIFIER_KEY_KINDS, normalizeKeyValue, stripKeyword } from '../../../shared/searchKeys';
 import { normalizeLotNumber } from '../../../shared/lotNormalize';
 import { decodeLot, formatLotIso, lotSchemeLabel } from '../../../shared/lotScheme';
 import { BadRequestError } from '../permissions';
@@ -541,7 +541,7 @@ async function runIdentifyingPath(args: {
       const ev = orderEvidenceFromRows(o, args.items.filter((i) => i.order_id === o.id), args.suggestions.filter((s) => args.items.some((i) => i.id === s.order_item_id && i.order_id === o.id)), catalog);
       byNumber.set(normalizeKeyValue(o.order_number), ev);
       if (o.po_number) {
-        const k = normalizeKeyValue(o.po_number);
+        const k = foldCustomerPo(o.po_number);
         byPo.set(k, [...(byPo.get(k) ?? []), ev]);
       }
     }
@@ -965,22 +965,27 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
       for (const x of [v, v.toUpperCase(), bare, bare.toUpperCase()]) orderValues.add(x);
     }
   }
-  const ov = [...orderValues].slice(0, 40);
+  const ov = [...orderValues].slice(0, 30);
+  // A customer PO is compared folded ("90001" = "PO-90001"): look up every
+  // spelling it may be stored under, so the index still serves the seek.
+  const pov = [...new Set([...orderValues].map(foldCustomerPo).filter(Boolean))]
+    .slice(0, 3).flatMap(customerPoSpellings).slice(0, 60);
   let ordersIdx: number | null = null;
   let itemsIdx: number | null = null;
   let suggIdx: number | null = null;
   if (ov.length) {
-    const where = `o.tenant_id = ? AND o.staged_at IS NULL AND (o.order_number IN (${ph(ov.length)}) OR o.po_number IN (${ph(ov.length)}))`;
-    ordersIdx = r0.add(db.prepare(`SELECT o.id, o.order_number, o.po_number, o.customer_name FROM orders o WHERE ${where} LIMIT 20`).bind(tenantId, ...ov, ...ov));
+    const where = `o.tenant_id = ? AND o.staged_at IS NULL AND (o.order_number IN (${ph(ov.length)})${pov.length ? ` OR o.po_number IN (${ph(pov.length)})` : ''})`;
+    const binds = [tenantId, ...ov, ...pov];
+    ordersIdx = r0.add(db.prepare(`SELECT o.id, o.order_number, o.po_number, o.customer_name FROM orders o WHERE ${where} LIMIT 20`).bind(...binds));
     itemsIdx = r0.add(db.prepare(
       `SELECT oi.id, oi.order_id, oi.product_code, oi.product_name, oi.lot_number, oi.coa_document_id, oi.coa_match_status
          FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE ${where} ORDER BY oi.created_at, oi.id LIMIT 500`,
-    ).bind(tenantId, ...ov, ...ov));
+    ).bind(...binds));
     suggIdx = r0.add(db.prepare(
       `SELECT lms.order_item_id, lms.document_id, lms.status, lms.match_basis, lms.match_confidence
          FROM lot_match_suggestions lms JOIN order_items oi ON oi.id = lms.order_item_id JOIN orders o ON o.id = oi.order_id
         WHERE ${where} LIMIT 2000`,
-    ).bind(tenantId, ...ov, ...ov));
+    ).bind(...binds));
   }
   const lblStmt = labelStatement(db, tenantId, scope);
   const labelIdx = lblStmt ? r0.add(lblStmt) : null;

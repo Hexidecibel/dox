@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { DATE_KEY_FIELDS, deriveSearchKeys, identifierKeys, normalizeKeyValue, stripKeyword } from '../../shared/searchKeys';
+import { customerPoSpellings, DATE_KEY_FIELDS, deriveSearchKeys, foldCustomerPo, identifierKeys, normalizeKeyValue, stripKeyword } from '../../shared/searchKeys';
 import { DATE_ROLE_FIELDS } from '../../shared/searchCoverage';
 
 describe('normalization', () => {
@@ -20,6 +20,21 @@ describe('normalization', () => {
     expect(stripKeyword('PO-90001', 'po')).toBe('PO-90001');
     expect(stripKeyword('invoice: 261149', 'invoice')).toBe('261149');
     expect(stripKeyword('INV-7', 'invoice')).toBe('INV-7');
+  });
+});
+
+describe('customer PO fold (WMS namespace only)', () => {
+  it('folds a leading PO / PO- / PO# / "PO " in any case and keeps the rest exact', () => {
+    for (const v of ['90001', 'PO-90001', 'po#90001', 'PO 90001', 'Po90001', 'PO - 90001']) expect(foldCustomerPo(v)).toBe('90001');
+    expect(foldCustomerPo('PO-00006364-1')).toBe('00006364-1');
+    expect(foldCustomerPo('9000')).not.toBe(foldCustomerPo('PO-90001'));
+    // A word that merely starts with "po" is not a prefix.
+    expect(foldCustomerPo('POLAR7')).toBe('POLAR7');
+  });
+
+  it('offers every stored spelling for the index seek', () => {
+    const s = customerPoSpellings('90001');
+    for (const v of ['90001', 'PO-90001', 'po#90001', 'PO 90001', 'PO90001']) expect(s).toContain(v);
   });
 });
 
