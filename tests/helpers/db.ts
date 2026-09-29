@@ -116,6 +116,8 @@ import m0116 from '../../migrations/0116_document_export_link_revocation.sql?raw
 import m0117 from '../../migrations/0117_queue_text_page_sources.sql?raw';
 import m0118 from '../../migrations/0118_packet_split.sql?raw';
 import m0119 from '../../migrations/0119_request_one_document_per_file.sql?raw';
+// 0120 (spec_test_category) and 0121 (documents.arrived_at) land from a parallel branch; this one is 0122.
+import m0122 from '../../migrations/0122_document_search_keys.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -130,7 +132,7 @@ const migrations: string[] = [
   m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094, m0095,
   m0096, m0097, m0098, m0099, m0100, m0101, m0102, m0103, m0104,
   m0105, m0106, m0107, m0108, m0109, m0110, m0111, m0112, m0113, m0114,
-  m0115, m0116, m0117, m0118, m0119,
+  m0115, m0116, m0117, m0118, m0119, m0122,
 ];
 
 /** The ordered migration SQL, for a test that stops the chain part-way (e.g. the 0110 lots rebuild). */
@@ -438,6 +440,10 @@ export async function cleanTables(db: D1Database): Promise<void> {
     'supplier_lot_schemes',
     // 0107/0113 product identifiers FK products + suppliers + users + tenants.
     'product_identifiers',
+    // 0122 search keys are derived rows with no FK; the reindex jobs FK tenants
+    // (0055) and every document insert now enqueues one, so both clear before
+    // tenants.
+    'document_search_keys', 'search_reindex_jobs',
     'password_resets', 'rate_limits', 'users', 'lots', 'products',
     'supplier_product_map', 'product_suppliers', 'tenant_products', 'suppliers', 'tenants', 'site_settings',
   ];
