@@ -12,6 +12,8 @@ import {
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import { normalizeAliases } from './index';
+import { parseCategoryFields } from '../../lib/spec-test-category';
+import type { CategoryBody } from '../../lib/spec-test-category';
 import type { Env, User } from '../../lib/types';
 
 async function loadTest(db: D1Database, id: string) {
@@ -34,10 +36,20 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       aliases?: unknown;
       default_unit?: string | null;
       notes?: string | null;
-    };
+    } & CategoryBody;
 
     const updates: string[] = [];
-    const params: (string | null)[] = [];
+    const params: (string | number | null)[] = [];
+
+    // D3 category + regulatory ceiling (0120). Validated before anything else
+    // is written, so a bad value fails the whole save.
+    const category = parseCategoryFields(body);
+    if ('error' in category) {
+      return new Response(JSON.stringify({ error: category.error }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
 
     if (body.name !== undefined) {
       const name = sanitizeString(body.name).trim();
@@ -74,6 +86,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       params.push(body.notes ? sanitizeString(body.notes) : null);
     }
 
+    for (const [column, value] of category.columns) {
+      updates.push(`${column} = ?`);
+      params.push(value);
+    }
+
     if (updates.length === 0) {
       return new Response(JSON.stringify({ error: 'No fields to update' }), {
         status: 400,
@@ -95,7 +112,21 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       'spec_test.updated',
       'spec_tests',
       specTest.id as string,
-      JSON.stringify({ fields: updates.length }),
+      JSON.stringify({
+        fields: updates.length,
+        // The band is how loud a miss is read; who moved it is worth keeping.
+        ...(category.columns.length > 0
+          ? {
+              category_before: {
+                category: specTest.category ?? null,
+                regulatory_ceiling_value: specTest.regulatory_ceiling_value ?? null,
+                regulatory_ceiling_unit: specTest.regulatory_ceiling_unit ?? null,
+                regulatory_band_factor: specTest.regulatory_band_factor ?? null,
+              },
+              category_after: Object.fromEntries(category.columns),
+            }
+          : {}),
+      }),
       getClientIp(context.request)
     );
 

@@ -116,6 +116,7 @@ import m0116 from '../../migrations/0116_document_export_link_revocation.sql?raw
 import m0117 from '../../migrations/0117_queue_text_page_sources.sql?raw';
 import m0118 from '../../migrations/0118_packet_split.sql?raw';
 import m0119 from '../../migrations/0119_request_one_document_per_file.sql?raw';
+import m0120 from '../../migrations/0120_spec_test_category.sql?raw';
 import m0121 from '../../migrations/0121_document_arrived_at.sql?raw';
 
 const migrations: string[] = [
@@ -131,7 +132,7 @@ const migrations: string[] = [
   m0086, m0087, m0088, m0089, m0090, m0091, m0092, m0093, m0094, m0095,
   m0096, m0097, m0098, m0099, m0100, m0101, m0102, m0103, m0104,
   m0105, m0106, m0107, m0108, m0109, m0110, m0111, m0112, m0113, m0114,
-  m0115, m0116, m0117, m0118, m0119, m0121,
+  m0115, m0116, m0117, m0118, m0119, m0120, m0121,
 ];
 
 /** The ordered migration SQL, for a test that stops the chain part-way (e.g. the 0110 lots rebuild). */

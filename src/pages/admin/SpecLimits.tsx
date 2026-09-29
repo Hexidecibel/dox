@@ -96,6 +96,14 @@ import {
   compareSpecCriticality,
   parseSpecCriticality,
 } from '../../../shared/specCriticality';
+import {
+  DEFAULT_REGULATORY_BAND_FACTOR,
+  SPEC_TEST_CATEGORIES,
+  SPEC_TEST_CATEGORY_HELP,
+  SPEC_TEST_CATEGORY_LABELS,
+  knownRegulatoryCeiling,
+} from '../../../shared/specBand';
+import type { SpecTestCategory } from '../../../shared/specBand';
 import type { SpecCriticality } from '../../../shared/specCriticality';
 import type { ApiSpecTest, ApiSpecLimit, ApiSupplier, ApiDocumentType } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
@@ -313,6 +321,20 @@ export function SpecLimits() {
   const [testName, setTestName] = useState('');
   const [testAliases, setTestAliases] = useState('');
   const [testUnit, setTestUnit] = useState('');
+  // D3 (0120): what shape a miss has, and the legal ceiling a regulatory one is
+  // banded around. Kept as strings while editing; parsed on save.
+  const [testCategory, setTestCategory] = useState<SpecTestCategory | ''>('');
+  const [testCeiling, setTestCeiling] = useState('');
+  const [testCeilingUnit, setTestCeilingUnit] = useState('');
+  const [testCeilingSource, setTestCeilingSource] = useState('');
+  const [testBandFactor, setTestBandFactor] = useState('');
+  const resetCategoryFields = (t?: ApiSpecTest | null) => {
+    setTestCategory(t?.category ?? '');
+    setTestCeiling(t?.regulatory_ceiling_value == null ? '' : String(t.regulatory_ceiling_value));
+    setTestCeilingUnit(t?.regulatory_ceiling_unit ?? '');
+    setTestCeilingSource(t?.regulatory_ceiling_source ?? '');
+    setTestBandFactor(t?.regulatory_band_factor == null ? '' : String(t.regulatory_band_factor));
+  };
 
   // Limit dialog
   const [limitDialog, setLimitDialog] = useState(false);
@@ -438,6 +460,7 @@ export function SpecLimits() {
     setTestName('');
     setTestAliases('');
     setTestUnit('');
+    resetCategoryFields(null);
     setTestDialog(true);
   };
 
@@ -453,6 +476,7 @@ export function SpecLimits() {
     setTestName(group.name);
     setTestAliases(group.spellings.map((s) => s.name).join(', '));
     setTestUnit(group.example?.unit_raw || '');
+    resetCategoryFields(null);
     setTestDialog(true);
   };
 
@@ -461,6 +485,7 @@ export function SpecLimits() {
     setTestName(t.name);
     setTestAliases((t.aliases || []).join(', '));
     setTestUnit(t.default_unit || '');
+    resetCategoryFields(t);
     setTestDialog(true);
   };
 
@@ -472,11 +497,22 @@ export function SpecLimits() {
         .split(',')
         .map((a) => a.trim())
         .filter(Boolean);
+      const regulatory = testCategory === 'regulatory_ceiling';
+      const categoryFields = {
+        category: testCategory || null,
+        // Only a regulatory ceiling carries a ceiling; switching category away
+        // clears it rather than leaving a number nothing reads.
+        regulatory_ceiling_value: regulatory && testCeiling.trim() ? Number(testCeiling) : null,
+        regulatory_ceiling_unit: regulatory ? testCeilingUnit.trim() || null : null,
+        regulatory_ceiling_source: regulatory ? testCeilingSource.trim() || null : null,
+        regulatory_band_factor: regulatory && testBandFactor.trim() ? Number(testBandFactor) : null,
+      };
       if (editingTest) {
         await api.specTests.update(editingTest.id, {
           name: testName.trim(),
           aliases,
           default_unit: testUnit.trim() || null,
+          ...categoryFields,
         });
       } else {
         await api.specTests.create({
@@ -484,6 +520,7 @@ export function SpecLimits() {
           aliases,
           default_unit: testUnit.trim() || null,
           tenant_id: isSuperAdmin ? activeTenantId : undefined,
+          ...categoryFields,
         });
       }
       setTestDialog(false);
@@ -871,6 +908,80 @@ export function SpecLimits() {
             placeholder="CFU/g"
             helperText="Used when a limit doesn't state its own. A result in a different unit family (CFU/mL, MPN/g) is reported as not checked, never converted."
           />
+          <FormControl fullWidth margin="normal">
+            <InputLabel>Category</InputLabel>
+            <Select
+              label="Category"
+              value={testCategory}
+              onChange={(e) => {
+                const next = e.target.value as SpecTestCategory | '';
+                setTestCategory(next);
+                // Offer the well-known ceiling (D3's shipped default) when the
+                // name is one we know and nothing is filled in yet.
+                const known = next === 'regulatory_ceiling' ? knownRegulatoryCeiling(testName) : null;
+                if (known && !testCeiling.trim()) {
+                  setTestCeiling(String(known.value));
+                  setTestCeilingUnit(known.unit);
+                  setTestCeilingSource(known.source);
+                }
+              }}
+            >
+              <MenuItem value="">
+                <em>Uncategorized — no band</em>
+              </MenuItem>
+              {SPEC_TEST_CATEGORIES.map((c) => (
+                <MenuItem key={c} value={c}>
+                  {SPEC_TEST_CATEGORY_LABELS[c]} — {SPEC_TEST_CATEGORY_HELP[c]}
+                </MenuItem>
+              ))}
+            </Select>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+              Decides what "how far out" means for a result that misses: the band orders the
+              warnings and words the alert. It never changes whether a result passes, and
+              nothing is held.
+            </Typography>
+          </FormControl>
+          {testCategory === 'regulatory_ceiling' && (
+            <Stack spacing={0} sx={{ pl: 1, borderLeft: 2, borderColor: 'divider' }}>
+              <Stack direction="row" spacing={1}>
+                <TextField
+                  label="Regulatory ceiling"
+                  value={testCeiling}
+                  onChange={(e) => setTestCeiling(e.target.value)}
+                  margin="normal"
+                  type="number"
+                  placeholder="0.5"
+                  sx={{ flex: 1 }}
+                />
+                <TextField
+                  label="Ceiling unit"
+                  value={testCeilingUnit}
+                  onChange={(e) => setTestCeilingUnit(e.target.value)}
+                  margin="normal"
+                  placeholder="ppb"
+                  sx={{ flex: 1 }}
+                />
+                <TextField
+                  label="Band (x ceiling)"
+                  value={testBandFactor}
+                  onChange={(e) => setTestBandFactor(e.target.value)}
+                  margin="normal"
+                  type="number"
+                  placeholder={String(DEFAULT_REGULATORY_BAND_FACTOR)}
+                  sx={{ flex: 1 }}
+                />
+              </Stack>
+              <TextField
+                label="Where the ceiling comes from"
+                value={testCeilingSource}
+                onChange={(e) => setTestCeilingSource(e.target.value)}
+                fullWidth
+                margin="normal"
+                placeholder="FDA action level, CPG Sec. 527.400"
+                helperText={`The legal line itself, not your limit. A could-not-check result whose reported bound is over it is called, up to the band (default ${DEFAULT_REGULATORY_BAND_FACTOR}x); beyond that, or a measured result over it, is a violation. Left empty, a well-known ceiling is used where one exists (aflatoxin M1: 0.5 ppb), else your limit.`}
+              />
+            </Stack>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setTestDialog(false)}>Cancel</Button>

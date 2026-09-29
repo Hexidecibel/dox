@@ -21,6 +21,7 @@ import {
   parseSpecCriticality,
 } from '../../shared/specCriticality';
 import type { SpecCriticality } from '../../shared/specCriticality';
+import { SPEC_BAND_LABELS, specBandRank } from '../../shared/specBand';
 import {
   formatUnitConversion,
   NO_LIMIT_CONFIGURED_LABEL,
@@ -92,8 +93,11 @@ export function liveSpecVerdicts(verdicts: SpecVerdict[] | undefined): SpecVerdi
     .filter((v) => v.verdict !== 'in_spec')
     .sort((a, b) => {
       const weight = (v: SpecVerdict) => (v.verdict === 'out_of_spec' ? 0 : 1);
+      // The D3 band (0120) breaks a tie inside a tier: ORDER only, as above.
       return (
-        weight(a) - weight(b) || compareSpecCriticality(specCriticalityOf(a), specCriticalityOf(b))
+        weight(a) - weight(b) ||
+        compareSpecCriticality(specCriticalityOf(a), specCriticalityOf(b)) ||
+        specBandRank(a.band) - specBandRank(b.band)
       );
     });
 }
@@ -379,6 +383,24 @@ export const trackedDeviationRowSx = {
 } as const;
 
 /**
+ * The D3 band (migration 0120) beside a result: how far out, in the terms of
+ * the analyte's category. Absent when the analyte has no category.
+ */
+function BandChip({ band }: { band: SpecVerdict['band'] }) {
+  if (!band) return null;
+  return (
+    <Tooltip arrow title={band.reason}>
+      <Chip
+        size="small"
+        variant="outlined"
+        label={SPEC_BAND_LABELS[band.band]}
+        sx={{ ml: 0.5, height: 18, fontSize: 11 }}
+      />
+    </Tooltip>
+  );
+}
+
+/**
  * Row tint for whatever verdicts a table row carries: red for a critical
  * failure, amber for a tracked one, nothing otherwise. Both remain unmissable —
  * the distinction is what stops fourteen amber rows from making the one red row
@@ -487,6 +509,7 @@ export function SpecWarningBanner({
               </Tooltip>
               {v.message}
               <ConversionChip conversion={v.conversion} />
+              <BandChip band={v.band} />
             </Typography>
           ))}
         </Box>
@@ -525,6 +548,7 @@ export function SpecWarningBanner({
               >
                 {v.message}
                 <ConversionChip conversion={v.conversion} />
+                <BandChip band={v.band} />
                 {/* E1/E2: never judged, always told. Said here so the reviewer
                     knows approving does not bury it. */}
                 {v.not_checked_category && (

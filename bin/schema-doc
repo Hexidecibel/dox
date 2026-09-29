@@ -10,6 +10,8 @@
 #   ./bin/schema-doc --remote           # PROD D1  -> SCHEMA.md
 #   ./bin/schema-doc --out /tmp/s.md    # custom output path
 #   ./bin/schema-doc --stdout           # print instead of writing
+#   ./bin/schema-doc --persist-to DIR   # local D1 state under DIR (a git
+#                                       # worktree has no .wrangler of its own)
 #
 # How it works:
 #   - Reads sqlite_master (tables, views, indexes, triggers) from the target
@@ -27,6 +29,7 @@ cd "$(dirname "$0")/.."
 
 DB="doc-upload-db"
 REMOTE=""            # "" = local, "--remote" = prod
+PERSIST=""           # "--local --persist-to=DIR" for a worktree
 OUT="SCHEMA.md"
 TO_STDOUT=0
 
@@ -35,7 +38,8 @@ while [ $# -gt 0 ]; do
     --remote|-r) REMOTE="--remote" ;;
     --out) OUT="$2"; shift ;;
     --stdout) TO_STDOUT=1 ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    --persist-to) PERSIST="--local --persist-to=$2"; shift ;;
+    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
@@ -45,7 +49,7 @@ TARGET="LOCAL"; [ -n "$REMOTE" ] && TARGET="PROD (--remote)"
 echo "Target: $TARGET" >&2
 
 # One query for every schema object. `type` distinguishes table/view/index/trigger.
-SCHEMA_JSON="$(npx wrangler d1 execute "$DB" $REMOTE --json --command \
+SCHEMA_JSON="$(npx wrangler d1 execute "$DB" $REMOTE $PERSIST --json --command \
   "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name;" 2>/dev/null || echo '[]')"
 
 if [ -z "$SCHEMA_JSON" ] || [ "$SCHEMA_JSON" = "[]" ]; then

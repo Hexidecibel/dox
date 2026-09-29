@@ -28,6 +28,7 @@ import {
   isoDay,
   STRICT_UNIT_POLICY,
 } from '../../shared/specCheck';
+import { attachSpecBands } from '../../shared/specBand';
 import { parseSpecCriticality } from '../../shared/specCriticality';
 import type {
   SpecSource,
@@ -283,15 +284,37 @@ async function loadLimitRows(
  * 500s because a spec table is absent would be a far worse outcome than one that
  * shows no spec warnings.
  */
+/**
+ * The analytes, with their D3 category columns (0120) when the database has
+ * them. A database that has not taken 0120 answers the pre-0120 columns rather
+ * than losing every spec check to a missing column — the band is the optional
+ * part, the checks are not.
+ */
+async function loadTestRows(db: D1Database, tenantId: string) {
+  try {
+    return await db
+      .prepare(
+        `SELECT id, name, aliases, default_unit, category, regulatory_ceiling_value,
+                regulatory_ceiling_unit, regulatory_ceiling_source, regulatory_band_factor
+           FROM spec_tests WHERE tenant_id = ?`
+      )
+      .bind(tenantId)
+      .all();
+  } catch (err) {
+    if (!/no such column/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    return db
+      .prepare('SELECT id, name, aliases, default_unit FROM spec_tests WHERE tenant_id = ?')
+      .bind(tenantId)
+      .all();
+  }
+}
+
 export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<SpecConfig> {
   const unitPolicy = await loadUnitPolicy(db, tenantId);
   const required = await loadRequiredAnalytes(db, tenantId);
   try {
     const [testRows, limitRows] = await Promise.all([
-      db
-        .prepare('SELECT id, name, aliases, default_unit FROM spec_tests WHERE tenant_id = ?')
-        .bind(tenantId)
-        .all(),
+      loadTestRows(db, tenantId),
       loadLimitRows(db, tenantId),
     ]);
 
@@ -309,6 +332,16 @@ export async function loadSpecConfig(db: D1Database, tenantId: string): Promise<
         name: String(row.name ?? ''),
         aliases,
         default_unit: row.default_unit == null ? null : String(row.default_unit),
+        // D3 (0120): band only, never a verdict input. Absent before 0120.
+        category: row.category == null ? null : String(row.category),
+        regulatory_ceiling_value:
+          row.regulatory_ceiling_value == null ? null : Number(row.regulatory_ceiling_value),
+        regulatory_ceiling_unit:
+          row.regulatory_ceiling_unit == null ? null : String(row.regulatory_ceiling_unit),
+        regulatory_ceiling_source:
+          row.regulatory_ceiling_source == null ? null : String(row.regulatory_ceiling_source),
+        regulatory_band_factor:
+          row.regulatory_band_factor == null ? null : Number(row.regulatory_band_factor),
       };
     });
 
@@ -446,7 +479,9 @@ export function specResultsWithConfig(
     });
     const missing = checkRequiredAnalytes(sources, config.tests, required, ctx, { asOf });
     const watchOverdue = overdueWatches(config.tests, config.limits, required, ctx, asOf);
-    const results = [...printed, ...configured.verdicts];
+    // D3 bands (0120) are attached after judging: they order and word what a
+    // person reads and cannot touch a verdict.
+    const results = attachSpecBands([...printed, ...configured.verdicts], config.tests, config.limits);
     return {
       results,
       unjudged: configured.unjudged,

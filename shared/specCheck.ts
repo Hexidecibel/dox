@@ -43,6 +43,7 @@
 import type { ExtractedTable } from './types';
 import { parseSpecCriticality } from './specCriticality';
 import type { SpecCriticality } from './specCriticality';
+import type { SpecBandResult } from './specBand';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -231,6 +232,12 @@ export interface SpecVerdict {
    * shown (E1/E2). See `NotCheckedCategory`. Absent on every other verdict.
    */
   not_checked_category?: NotCheckedCategory;
+  /**
+   * How far out, in the terms of the analyte's D3 category (migration 0120,
+   * `shared/specBand.ts`). Attached AFTER judging by `attachSpecBands`; orders
+   * and words, never decides. Absent when the analyte has no category.
+   */
+  band?: SpecBandResult;
   /**
    * How much the configured limit behind this verdict MATTERS (migration 0095).
    * Carried so the reviewer UI can rank a load-stopping failure above a tracked
@@ -2040,6 +2047,16 @@ export interface SpecTestDef {
   name: string;
   aliases: string[];
   default_unit?: string | null;
+  /**
+   * D3 category and regulatory ceiling (migration 0120). Read ONLY by
+   * `shared/specBand.ts` to band a result after it is judged — nothing in this
+   * file reads them, so they cannot move a verdict.
+   */
+  category?: string | null;
+  regulatory_ceiling_value?: number | null;
+  regulatory_ceiling_unit?: string | null;
+  regulatory_ceiling_source?: string | null;
+  regulatory_band_factor?: number | null;
 }
 
 /** A `spec_limits` row, joined to its analyte. */

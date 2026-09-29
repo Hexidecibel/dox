@@ -919,6 +919,15 @@ export interface ApiSpecTest {
   aliases: string[];
   default_unit: string | null;
   notes: string | null;
+  /**
+   * D3 category (migration 0120) — what shape a miss has. NULL = uncategorized:
+   * no band. Vocabulary in shared/specBand.ts. Absent before 0120.
+   */
+  category?: 'indicator' | 'compositional' | 'zero_tolerance' | 'regulatory_ceiling' | null;
+  regulatory_ceiling_value?: number | null;
+  regulatory_ceiling_unit?: string | null;
+  regulatory_ceiling_source?: string | null;
+  regulatory_band_factor?: number | null;
   created_at: string;
   updated_at: string;
   updated_by: string | null;

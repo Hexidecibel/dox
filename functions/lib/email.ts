@@ -654,6 +654,8 @@ export function buildSpecAlertEmail(params: {
     source: 'printed' | 'limit';
     /** The limit's tier (0095), named on the line with its B1 explainer. */
     criticality?: SpecCriticality | null;
+    /** The D3 band in words ("Violation band: the result is 40x the limit ..."). */
+    band?: string | null;
   }>;
   /**
    * Results that could NOT be judged but must be notified (rules table E1/E2:
@@ -717,7 +719,7 @@ export function buildSpecAlertEmail(params: {
                 f.criticality
                   ? `<br><span title="${escapeHtml(SPEC_CRITICALITY_HELP[parseSpecCriticality(f.criticality)])}" style="font-size:12px;font-weight:600;color:${parseSpecCriticality(f.criticality) === 'high' ? '#d32f2f' : '#666'};">${escapeHtml(tierLabel(f.criticality) ?? '')}</span>`
                   : ''
-              }</td>
+              }${f.band ? `<br><span style="font-size:12px;color:#666;">${escapeHtml(f.band)}</span>` : ''}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#d32f2f;font-weight:600;">${escapeHtml(f.value || '—')}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${limitCell(f)}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#666;font-size:13px;">${sourceLabel(f.source)}</td>
@@ -803,7 +805,7 @@ export function buildSpecAlertEmail(params: {
     (f) =>
       `- ${f.test}: ${f.value || '—'} (limit ${f.limit || '—'}, ${sourceLabel(f.source)})${
         f.criticality ? ` [${tierLabel(f.criticality)}]` : ''
-      }`
+      }${f.band ? ` — ${f.band}` : ''}`
   );
   const notJudgedLines = notJudged.map((x) => `- ${x.test}${x.value ? ` (${x.value})` : ''}: ${x.note}`);
   const missingLines = missing.map(

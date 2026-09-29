@@ -106,6 +106,7 @@ Triggers: `trg_document_versions_ai_fts`, `trg_document_versions_au_fts`
   renewal_snapshot TEXT
   renewal_decided_at TEXT
   renewal_decided_by TEXT
+  arrived_at TEXT
 ```
 
 Indexes: `idx_documents_category`, `idx_documents_classification_status`, `idx_documents_document_type`, `idx_documents_lot_number`, `idx_documents_po_number`, `idx_documents_renewal_due_date`, `idx_documents_renewal_type`, `idx_documents_status`, `idx_documents_tenant`, `idx_documents_tenant_external_ref`
@@ -1962,6 +1963,11 @@ Indexes: `idx_spec_limits_product`, `idx_spec_limits_scope`, `idx_spec_limits_su
   created_at TEXT DEFAULT (datetime('now'))
   updated_at TEXT DEFAULT (datetime('now'))
   updated_by TEXT REFERENCES users(id)
+  category TEXT CHECK (category IS NULL OR category IN ('indicator', 'compositional', 'zero_tolerance', 'regulatory_ceiling'))
+  regulatory_ceiling_value REAL CHECK (regulatory_ceiling_value IS NULL OR regulatory_ceiling_value > 0)
+  regulatory_ceiling_unit TEXT
+  regulatory_ceiling_source TEXT
+  regulatory_band_factor REAL CHECK (regulatory_band_factor IS NULL OR regulatory_band_factor > 1)
   UNIQUE (tenant_id, name)
 ```
 

@@ -13,6 +13,8 @@
 import { generateId, logAudit, getClientIp } from '../../lib/db';
 import { requireRole, errorToResponse } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
+import { parseCategoryFields } from '../../lib/spec-test-category';
+import type { CategoryBody } from '../../lib/spec-test-category';
 import type { Env, User } from '../../lib/types';
 
 /** Parse and clean an aliases payload into a JSON array string. */
@@ -106,7 +108,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       default_unit?: string | null;
       notes?: string | null;
       tenant_id?: string;
-    };
+    } & CategoryBody;
+
+    const category = parseCategoryFields(body);
+    if ('error' in category) {
+      return new Response(JSON.stringify({ error: category.error }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
 
     const name = sanitizeString(body.name || '').trim();
     if (!name) {
@@ -147,6 +157,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       )
       .run();
 
+    // D3 fields (0120) as a follow-up UPDATE, so the INSERT above stays the
+    // shape it has always been and a body without them writes nothing extra.
+    if (category.columns.length > 0) {
+      await context.env.DB.prepare(
+        `UPDATE spec_tests SET ${category.columns.map(([c]) => `${c} = ?`).join(', ')} WHERE id = ?`
+      )
+        .bind(...category.columns.map(([, v]) => v), id)
+        .run();
+    }
+
     await logAudit(
       context.env.DB,
       user.id,
@@ -154,7 +174,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'spec_test.created',
       'spec_tests',
       id,
-      JSON.stringify({ name }),
+      JSON.stringify({ name, ...(category.columns.length > 0 ? { category: Object.fromEntries(category.columns) } : {}) }),
       getClientIp(context.request)
     );
 

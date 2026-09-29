@@ -49,6 +49,7 @@ import {
   uniqueByRegisterIdentity,
 } from '../../shared/specSnapshot';
 import { compareSpecCriticality } from '../../shared/specCriticality';
+import { SPEC_BAND_LABELS, specBandRank } from '../../shared/specBand';
 
 export interface RegisterContext {
   tenantId: string;
@@ -410,8 +411,12 @@ export async function notifySpecFailures(
     // parameters the plant tracks and rarely acts on. Ordering is the only
     // lever criticality is allowed to pull here; WHICH failures are reported
     // stays exactly what the engine judged.
-    const ranked = [...failures].sort((a, b) =>
-      compareSpecCriticality(a.criticality, b.criticality)
+    //
+    // Within a tier, the D3 band (0120) orders next: a coliform ten times over
+    // reads before one just past. Same rule — order and wording only.
+    const ranked = [...failures].sort(
+      (a, b) =>
+        compareSpecCriticality(a.criticality, b.criticality) || specBandRank(a.band) - specBandRank(b.band)
     );
 
     const { subject, html } = buildSpecAlertEmail({
@@ -425,12 +430,17 @@ export async function notifySpecFailures(
         limit: f.limit_text,
         source: f.source,
         criticality: f.criticality ?? null,
+        band: f.band ? `${SPEC_BAND_LABELS[f.band.band]}: ${f.band.reason}` : null,
       })),
-      notJudged: notifyOnly.map((v) => ({
-        test: v.test_name_raw,
-        value: v.value_raw || null,
-        note: v.not_checked_category ? NOT_CHECKED_CATEGORY_NOTE[v.not_checked_category] : v.reason,
-      })),
+      notJudged: [...notifyOnly]
+        .sort((a, b) => specBandRank(a.band) - specBandRank(b.band))
+        .map((v) => ({
+          test: v.test_name_raw,
+          value: v.value_raw || null,
+          note:
+            (v.not_checked_category ? NOT_CHECKED_CATEGORY_NOTE[v.not_checked_category] : v.reason) +
+            (v.band ? ` (${SPEC_BAND_LABELS[v.band.band]}: ${v.band.reason})` : ''),
+        })),
       missingRequired: [...new Map(missingRequired.map((m) => [m.spec_test_id, m])).values()].map((m) => ({
         analyte: m.analyte_name,
         why: m.why,
