@@ -64,6 +64,8 @@ export type {
   QueuedResponse,
   ParsedQuery,
   NaturalSearchResponse,
+  SearchQueryRequest,
+  SearchQueryResponse,
   OrderNaturalSearchResponse,
   ApiSupplier,
   SupplierListResponse,

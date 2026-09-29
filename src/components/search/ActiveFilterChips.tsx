@@ -1,59 +1,48 @@
 import { Box, Chip, Stack } from '@mui/material';
-import type { SearchState, FacetCount, FacetKind } from '../../../shared/types';
+import type { FacetCount } from '../../../shared/types';
+import {
+  describeClause,
+  withoutClause,
+  withoutValue,
+  type SearchQuery,
+} from '../../../shared/searchQuery';
+import { SEARCH_FIELDS, type FacetField } from '../../../shared/searchFields';
 
 /**
- * Compact strip of selected-filter chips above the results grid.
+ * Compact strip of the query's clauses above the results.
  *
- * Each chip lets the user remove a single value without opening the
- * sidebar. Clicking a chip emits a patch that drops that one entry
- * (or unsets the date). The ID-only state arrays don't carry display
- * labels, so we look up labels from the current `facets` snapshot —
- * if a label isn't present (rare race) the chip falls back to the raw
- * id.
+ * A multi-value scope clause gets one chip per value (deleting it drops that
+ * value); any other clause is one chip in its own words (`describeClause`).
+ * Deleting a chip removes only what it names — every other clause stays.
+ * Id values (suppliers, types, products) are named from the server's `labels`,
+ * then from the current facets; a value neither knows falls back to the id.
  */
 export interface ActiveFilterChipsProps {
-  state: SearchState;
-  facets: Partial<Record<FacetKind, FacetCount[]>>;
-  onChange: (patch: Partial<SearchState>) => void;
+  query: SearchQuery;
+  facets: Partial<Record<FacetField, FacetCount[]>>;
+  labels?: Record<string, string>;
+  onChange: (next: SearchQuery) => void;
 }
 
-const KIND_PREFIX: Partial<Record<FacetKind, string>> = {
-  supplier: 'Supplier:',
-  doc_type: 'Type:',
-  product: 'Product:',
-  status: 'Status:',
-  date: 'Date:',
-};
+export function ActiveFilterChips({ query, facets, labels = {}, onChange }: ActiveFilterChipsProps) {
+  const named = (field: string, v: string): string =>
+    labels[v] ?? facets[field as FacetField]?.find((f) => f.value === v)?.label ?? v;
 
-function labelFor(kind: FacetKind, value: string, facets: ActiveFilterChipsProps['facets']): string {
-  const opt = facets[kind]?.find((f) => f.value === value);
-  return opt?.label ?? value;
-}
-
-export function ActiveFilterChips({ state, facets, onChange }: ActiveFilterChipsProps) {
   const chips: Array<{ key: string; label: string; onDelete: () => void }> = [];
-
-  for (const kind of ['supplier', 'doc_type', 'product', 'status'] as const) {
-    const values = state[kind];
-    if (!values || values.length === 0) continue;
-    for (const v of values) {
-      chips.push({
-        key: `${kind}:${v}`,
-        label: `${KIND_PREFIX[kind]} ${labelFor(kind, v, facets)}`,
-        onDelete: () => {
-          const next = values.filter((x) => x !== v);
-          onChange({ [kind]: next.length > 0 ? next : undefined } as Partial<SearchState>);
-        },
-      });
+  for (const c of query.clauses) {
+    const def = SEARCH_FIELDS[c.field];
+    if (def.class === 'scope' && def.multi) {
+      for (const v of c.values) {
+        const one = { ...c, values: [v] };
+        chips.push({
+          key: `${c.id}:${v}`,
+          label: describeClause(one, { [v]: named(c.field, v) }),
+          onDelete: () => onChange(withoutValue(query, c.id, v)),
+        });
+      }
+      continue;
     }
-  }
-
-  if (state.date && state.date !== 'any') {
-    chips.push({
-      key: `date:${state.date}`,
-      label: `${KIND_PREFIX.date} ${labelFor('date', state.date, facets)}`,
-      onDelete: () => onChange({ date: undefined }),
-    });
+    chips.push({ key: c.id, label: describeClause(c, labels), onDelete: () => onChange(withoutClause(query, c.id)) });
   }
 
   if (chips.length === 0) return null;
@@ -68,7 +57,7 @@ export function ActiveFilterChips({ state, facets, onChange }: ActiveFilterChips
             size="small"
             onDelete={chip.onDelete}
             variant="outlined"
-            sx={{ bgcolor: 'background.paper' }}
+            sx={{ bgcolor: 'background.paper', maxWidth: '100%' }}
           />
         ))}
       </Stack>

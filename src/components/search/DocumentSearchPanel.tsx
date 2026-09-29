@@ -1,38 +1,54 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Box, Stack } from '@mui/material';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Box, Stack } from '@mui/material';
 import { SearchBar } from './SearchBar';
 import { FacetSidebar } from './FacetSidebar';
 import { ActiveFilterChips } from './ActiveFilterChips';
 import { SortMenu } from './SortMenu';
 import { ResultsList } from './ResultsList';
 import { ResultCardDocument } from './ResultCardDocument';
+import { CoverageResults } from './CoverageResults';
 import { SavedSearchesDialog } from './SavedSearchesDialog';
-import { useSearchParamsState } from '../../hooks/useSearchParamsState';
+import { useSearchQueryState } from '../../hooks/useSearchQueryState';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { useRecentSearches } from '../../hooks/useRecentSearches';
 import { useSavedSearches } from '../../hooks/useSavedSearches';
 import { api } from '../../lib/api';
+import {
+  EMPTY_QUERY,
+  queryKey,
+  savedPayloadToQuery,
+  type SearchQuery,
+} from '../../../shared/searchQuery';
+import type { FacetField } from '../../../shared/searchFields';
 import type {
   FacetCount,
-  FacetKind,
+  SearchQueryResponse,
   SearchSort,
-  SearchState,
   UniversalSearchDocument,
 } from '../../../shared/types';
 
 /**
- * Documents-only search panel — composed from the atoms in 5b and the
- * hooks in 5a.
+ * The Documents search panel, on the one query model (search redesign
+ * Phase 1).
  *
- * `syncToUrl` (default true): two-way bind state to react-router. The
- * Documents page uses this so deep links share their filters. Embedded
- * uses (e.g. a picker dialog) can pass `syncToUrl={false}` and manage
- * state locally.
+ * EVERY clause reaches the server. The panel used to send only the first
+ * supplier and the first type, never the product or status, and the server
+ * ignored the date it did send — so supplier A → butter → COA → September
+ * narrowed on supplier A alone (AJ's I1). It now sends the whole query to
+ * POST /api/search/query, where supplier, type, product, status and upload
+ * date all compose, in any order, with facet counts over the narrowed set.
+ *
+ * And the screen answers the question it is asked (I3): typing a lot, a
+ * production date, a PO or an invoice here comes back as the coverage answer
+ * — covering, likely, nearby, "no document on file covers …" — rather than
+ * the nearest text hits with nothing saying none of them is the answer.
+ *
+ * `syncToUrl` (default true): the URL is the state, so deep links and the
+ * back button work; an embedded use can pass false and keep state locally.
  */
 const PAGE_SIZE = 20;
-
-const SUPPLIER_FACET_KEY = 'supplier';
-const DOC_TYPE_FACET_KEY = 'doc_type';
+/** Keystrokes inside this window are one search. */
+const DEBOUNCE_MS = 250;
 
 export interface DocumentSearchPanelProps {
   syncToUrl?: boolean;
@@ -45,234 +61,171 @@ export interface DocumentSearchPanelProps {
   onOpen?: (doc: UniversalSearchDocument) => void;
 }
 
-interface SearchSnapshot {
-  documents: UniversalSearchDocument[];
-  total: number;
-  facets: Partial<Record<FacetKind, FacetCount[]>>;
-}
+const EMPTY_RESPONSE: Pick<SearchQueryResponse, 'documents' | 'total' | 'labels'> & Partial<SearchQueryResponse> = {
+  documents: [],
+  total: 0,
+  labels: {},
+};
 
-const EMPTY_SNAPSHOT: SearchSnapshot = { documents: [], total: 0, facets: {} };
+export function DocumentSearchPanel({ syncToUrl = true, tenantId, onOpen }: DocumentSearchPanelProps) {
+  const urlBound = useSearchQueryState();
+  const [localQuery, setLocalQuery] = useState<SearchQuery>(EMPTY_QUERY);
 
-function dateBucketRange(bucket: NonNullable<SearchState['date']>): { from?: string; to?: string } {
-  if (bucket === 'any') return {};
-  const now = new Date();
-  const days =
-    bucket === 'last_7d'
-      ? 7
-      : bucket === 'last_30d'
-        ? 30
-        : bucket === 'last_90d'
-          ? 90
-          : 365;
-  const from = new Date(now);
-  from.setDate(from.getDate() - days);
-  return { from: from.toISOString() };
-}
-
-export function DocumentSearchPanel({
-  syncToUrl = true,
-  tenantId,
-  onOpen,
-}: DocumentSearchPanelProps) {
-  const urlBound = useSearchParamsState();
-  const [localState, setLocalState] = useState<SearchState>({ q: '' });
-
-  const state: SearchState = syncToUrl ? urlBound.state : localState;
-  const setStatePatch = useCallback(
-    (patch: Partial<SearchState>) => {
-      if (syncToUrl) urlBound.setState(patch);
-      else setLocalState((prev) => ({ ...prev, ...patch }));
+  const query: SearchQuery = syncToUrl ? urlBound.query : localQuery;
+  const setQuery = useCallback(
+    (next: SearchQuery, options?: { replace?: boolean }) => {
+      if (syncToUrl) urlBound.setQuery(next, options);
+      else setLocalQuery(next);
     },
     [syncToUrl, urlBound],
   );
 
-  const [snap, setSnap] = useState<SearchSnapshot>(EMPTY_SNAPSHOT);
+  const [snap, setSnap] = useState<typeof EMPTY_RESPONSE>(EMPTY_RESPONSE);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const debouncedQ = useDebouncedValue(state.q, 300);
+  const debouncedText = useDebouncedValue(query.text, DEBOUNCE_MS);
   const recent = useRecentSearches();
   const saved = useSavedSearches();
   const [savedOpen, setSavedOpen] = useState(false);
 
-  const page = state.page ?? 1;
-  const sort: SearchSort = state.sort ?? 'relevance';
+  const page = query.view.page ?? 1;
+  const sort: SearchSort = query.view.sort ?? 'relevance';
 
-  const supplierFilter = state.supplier?.[0];
-  const docTypeFilter = state.doc_type?.[0];
+  // The query as it is sent: the typed text debounced, everything else live.
+  const sent = useMemo<SearchQuery>(() => ({ ...query, text: debouncedText }), [query, debouncedText]);
+  const fetchKey = `${queryKey(sent)}|${tenantId ?? ''}`;
 
-  const fetchKey = useMemo(
-    () =>
-      JSON.stringify({
-        q: debouncedQ,
-        page,
-        sort,
-        tenantId,
-        supplier: state.supplier,
-        doc_type: state.doc_type,
-        date: state.date,
-      }),
-    [debouncedQ, page, sort, tenantId, state.supplier, state.doc_type, state.date],
-  );
+  // In flight: the key being fetched and the controller that can abandon it.
+  const inflight = useRef<{ key: string; controller: AbortController } | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const range = state.date ? dateBucketRange(state.date) : {};
-        const res = await api.documents.searchV2({
-          q: debouncedQ,
+    if (inflight.current?.key === fetchKey) return; // the same search is already on its way
+    inflight.current?.controller.abort();
+    const controller = new AbortController();
+    inflight.current = { key: fetchKey, controller };
+    setLoading(true);
+    setError(null);
+    api.search
+      .query(
+        {
+          query: { ...sent, view: { entity: 'documents', ...(sent.view.sort ? { sort: sent.view.sort } : {}) } },
           tenant_id: tenantId,
-          supplier_id: supplierFilter,
-          document_type_id: docTypeFilter,
-          date_from: range.from,
-          date_to: range.to,
-          sort,
           limit: PAGE_SIZE,
           offset: (page - 1) * PAGE_SIZE,
           facets: true,
-        });
-        if (cancelled) return;
-
-        // Server returns facets keyed by `date_bucket`; the FacetSidebar
-        // expects `date`. Translate here so the FacetKind enum stays
-        // canonical.
-        const serverFacets = res.facets ?? {};
-        const facets: Partial<Record<FacetKind, FacetCount[]>> = {
-          [SUPPLIER_FACET_KEY]: serverFacets.supplier ?? [],
-          [DOC_TYPE_FACET_KEY]: serverFacets.doc_type ?? [],
-          product: serverFacets.product ?? [],
-          status: serverFacets.status ?? [],
-          date: serverFacets.date_bucket ?? [],
-        };
-
-        setSnap({
-          documents: res.documents as unknown as UniversalSearchDocument[],
-          total: res.total,
-          facets,
-        });
-      } catch (e) {
-        if (cancelled) return;
+          interpret: true,
+        },
+        controller.signal,
+      )
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setSnap(res);
+      })
+      .catch((e: unknown) => {
+        if (controller.signal.aborted) return;
         setError(e instanceof Error ? e.message : 'Search failed');
-        setSnap(EMPTY_SNAPSHOT);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-    run();
-    return () => {
-      cancelled = true;
-    };
+        setSnap(EMPTY_RESPONSE);
+      })
+      .finally(() => {
+        if (inflight.current?.controller === controller) {
+          inflight.current = null;
+          setLoading(false);
+        }
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fetchKey is the canonical input
   }, [fetchKey]);
+
+  useEffect(() => () => inflight.current?.controller.abort(), []);
 
   const handleSubmit = useCallback(
     (q: string) => {
       const trimmed = q.trim();
       if (trimmed) recent.push(trimmed);
-      setStatePatch({ q: trimmed, page: undefined });
+      setQuery({ ...query, text: trimmed, view: { ...query.view, page: undefined } });
     },
-    [recent, setStatePatch],
+    [recent, setQuery, query],
   );
 
   const handleSaveCurrent = useCallback(
     async (name: string) => {
-      await saved.create({ name, query: state });
+      // The v1 AST is stored as is; old saved searches still load (savedPayloadToQuery).
+      await saved.create({ name, query: query as unknown as Record<string, unknown> });
     },
-    [saved, state],
+    [saved, query],
   );
 
   const handleLoadSaved = useCallback(
     (s: { query: Record<string, unknown> }) => {
-      // Reset to the saved query verbatim. Drop unknown keys defensively.
-      const next: SearchState = { q: '' };
-      const q = s.query.q;
-      if (typeof q === 'string') next.q = q;
-      for (const k of ['supplier', 'doc_type', 'product', 'status', 'customer'] as const) {
-        const v = s.query[k];
-        if (Array.isArray(v) && v.every((x) => typeof x === 'string')) {
-          next[k] = v as string[];
-        }
-      }
-      if (typeof s.query.date === 'string') next.date = s.query.date as SearchState['date'];
-      if (typeof s.query.sort === 'string') next.sort = s.query.sort as SearchSort;
-      if (typeof s.query.page === 'number') next.page = s.query.page;
-      if (typeof s.query.type === 'string') next.type = s.query.type as SearchState['type'];
-
-      if (syncToUrl) {
-        // Replace, not merge — saved searches are absolute.
-        urlBound.setState({
-          q: next.q,
-          supplier: next.supplier,
-          doc_type: next.doc_type,
-          product: next.product,
-          status: next.status,
-          customer: next.customer,
-          date: next.date,
-          sort: next.sort,
-          page: undefined,
-          type: next.type,
-        });
-      } else {
-        setLocalState(next);
-      }
+      // Saved searches are absolute: replace, never merge.
+      setQuery(savedPayloadToQuery(s.query));
     },
-    [syncToUrl, urlBound],
+    [setQuery],
   );
+
+  const facets = (snap.facets ?? {}) as Partial<Record<FacetField, FacetCount[]>>;
+  const coverageAnswer = !!snap.coverage && snap.coverage !== 'unconstrained';
 
   return (
     <Box>
       <SearchBar
-        value={state.q}
-        onChange={(q) => setStatePatch({ q, page: undefined })}
+        value={query.text}
+        onChange={(q) => setQuery({ ...query, text: q, view: { ...query.view, page: undefined } }, { replace: true })}
         onSubmit={handleSubmit}
         recent={recent.recent}
-        onRecentPick={(q) => {
-          setStatePatch({ q, page: undefined });
-        }}
+        onRecentPick={(q) => setQuery({ ...query, text: q, view: { ...query.view, page: undefined } })}
         onRecentRemove={recent.remove}
         onRecentClear={recent.clear}
         onSavedClick={() => setSavedOpen(true)}
       />
-      <ActiveFilterChips state={state} facets={snap.facets} onChange={setStatePatch} />
+      <ActiveFilterChips query={query} facets={facets} labels={snap.labels} onChange={setQuery} />
+      {!!snap.keys_pending && (
+        <Alert severity="info" sx={{ mb: 1.5 }}>
+          {snap.keys_pending} document{snap.keys_pending === 1 ? ' is' : 's are'} still being indexed for PO, invoice and date search, so
+          this answer also checked every document in the current filters directly.
+        </Alert>
+      )}
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="flex-start">
-        <FacetSidebar
-          state={state}
-          facets={snap.facets}
-          onChange={setStatePatch}
-          loading={loading}
-        />
+        <FacetSidebar query={query} facets={facets} onChange={setQuery} loading={loading} />
         <Box sx={{ flex: 1, minWidth: 0 }}>
-          <ResultsList
-            results={snap.documents}
-            total={snap.total}
-            page={page}
-            pageSize={PAGE_SIZE}
-            loading={loading}
-            error={error}
-            onPageChange={(p) => setStatePatch({ page: p > 1 ? p : undefined })}
-            header={
-              <SortMenu
-                value={sort}
-                onChange={(next) => setStatePatch({ sort: next, page: undefined })}
+          {coverageAnswer ? (
+            <Box data-testid="documents-coverage-answer">
+              <CoverageResults
+                documents={snap.documents ?? []}
+                coverage={snap.coverage}
+                constraints={snap.constraints}
+                dropped_constraints={snap.dropped_constraints}
+                coverage_summary={snap.coverage_summary}
+                unreviewed_candidates={snap.unreviewed_candidates}
+                coverage_scan_truncated={snap.coverage_scan_truncated}
               />
-            }
-            renderItem={(doc) => (
-              <ResultCardDocument
-                key={String(doc.id)}
-                doc={doc}
-                onOpen={onOpen}
-              />
-            )}
-          />
+            </Box>
+          ) : (
+            <ResultsList
+              results={snap.documents}
+              total={snap.total}
+              page={page}
+              pageSize={PAGE_SIZE}
+              loading={loading}
+              error={error}
+              onPageChange={(p) => setQuery({ ...query, view: { ...query.view, page: p > 1 ? p : undefined } })}
+              header={
+                <SortMenu
+                  value={sort}
+                  onChange={(next) => setQuery({ ...query, view: { ...query.view, sort: next === 'relevance' ? undefined : next, page: undefined } })}
+                />
+              }
+              renderItem={(doc) => <ResultCardDocument key={String(doc.id)} doc={doc} onOpen={onOpen} />}
+            />
+          )}
+          {coverageAnswer && error && <Alert severity="error">{error}</Alert>}
         </Box>
       </Stack>
       <SavedSearchesDialog
         open={savedOpen}
         onClose={() => setSavedOpen(false)}
-        currentState={state}
+        currentState={{ q: query.text }}
+        currentPreview={queryKey(query)}
         saved={saved.saved}
         onSave={handleSaveCurrent}
         onLoad={handleLoadSaved}
