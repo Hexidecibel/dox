@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.25.0](releases/v2.25.0.md) — 2026-09-29 — Ask it any way, and it says what it found
 - [v2.24.0](releases/v2.24.0.md) — 2026-09-17 — One file is not one document
 - [v2.23.0](releases/v2.23.0.md) — 2026-09-17 — What the page already said
 - [v2.22.0](releases/v2.22.0.md) — 2026-09-17 — The page that is a picture
