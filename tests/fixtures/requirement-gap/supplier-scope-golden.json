@@ -1,0 +1,947 @@
+{
+  "_note": "GENERATED once from the PRE-0123 engine (shared/requirementGap.ts at a5b8d7e) over supplier-scope-inputs.json. The post-0123 engine must reproduce these bytes (minus `products`). Do not regenerate from the current engine -- that would pin nothing.",
+  "nothing configured": {
+    "default": {
+      "supplier_id": "s-empty",
+      "supplier_name": "Empty Co",
+      "status": "not_configured",
+      "configured": false,
+      "tiers_counted": [
+        "required"
+      ],
+      "counts": {
+        "required": {
+          "applicable": 0,
+          "satisfied": 0,
+          "open": 0
+        },
+        "recommended": {
+          "applicable": 0,
+          "satisfied": 0,
+          "open": 0
+        }
+      },
+      "applicable": [],
+      "open": [],
+      "documents": {
+        "total": 0,
+        "classification": {
+          "unclassified": 0,
+          "needs_review": 0,
+          "classified": 0,
+          "unclassifiable": 0
+        }
+      },
+      "caveats": [
+        {
+          "code": "no_requirements_configured",
+          "message": "No requirements have been attached to this supplier, so nothing is being checked. This is not the same as compliant."
+        },
+        {
+          "code": "no_documents",
+          "message": "This supplier has no active documents, so nothing can close a requirement."
+        }
+      ]
+    },
+    "include_recommended": {
+      "supplier_id": "s-empty",
+      "supplier_name": "Empty Co",
+      "status": "not_configured",
+      "configured": false,
+      "tiers_counted": [
+        "required",
+        "recommended"
+      ],
+      "counts": {
+        "required": {
+          "applicable": 0,
+          "satisfied": 0,
+          "open": 0
+        },
+        "recommended": {
+          "applicable": 0,
+          "satisfied": 0,
+          "open": 0
+        }
+      },
+      "applicable": [],
+      "open": [],
+      "documents": {
+        "total": 0,
+        "classification": {
+          "unclassified": 0,
+          "needs_review": 0,
+          "classified": 0,
+          "unclassifiable": 0
+        }
+      },
+      "caveats": [
+        {
+          "code": "no_requirements_configured",
+          "message": "No requirements have been attached to this supplier, so nothing is being checked. This is not the same as compliant."
+        },
+        {
+          "code": "no_documents",
+          "message": "This supplier has no active documents, so nothing can close a requirement."
+        }
+      ]
+    }
+  },
+  "mixed open, satisfied, recommended, claim, expired on arrival": {
+    "default": {
+      "supplier_id": "s-mixed",
+      "supplier_name": "Country Morning Farms",
+      "status": "open",
+      "configured": true,
+      "tiers_counted": [
+        "required"
+      ],
+      "counts": {
+        "required": {
+          "applicable": 5,
+          "satisfied": 2,
+          "open": 3
+        },
+        "recommended": {
+          "applicable": 2,
+          "satisfied": 0,
+          "open": 2
+        }
+      },
+      "applicable": [
+        {
+          "requirement_id": "r-allergen",
+          "name": "Allergen Matrix",
+          "slug": "allergen-matrix",
+          "checklist": "Allergens",
+          "sort_order": 20,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Allergen Matrix (required) — open; no confirmed document from this supplier closes it"
+        },
+        {
+          "requirement_id": "r-organic",
+          "name": "Organic Certificate",
+          "slug": "organic-certificate",
+          "checklist": "Certifications",
+          "sort_order": 5,
+          "tier": "required",
+          "origins": [
+            "claim"
+          ],
+          "opened_by": [
+            {
+              "claim_type_id": "ct-org",
+              "claim_type_name": "Organic",
+              "document_id": "d-spec",
+              "document_title": "Spec Sheet - Whole Milk"
+            }
+          ],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Organic Certificate (required) — open; triggered by the \"Organic\" claim on this supplier's documents"
+        },
+        {
+          "requirement_id": "r-kosher",
+          "name": "Kosher Certificate",
+          "slug": "kosher-certificate",
+          "checklist": "Certifications",
+          "sort_order": 6,
+          "tier": "recommended",
+          "origins": [
+            "claim"
+          ],
+          "opened_by": [
+            {
+              "claim_type_id": "ct-kos",
+              "claim_type_name": "Kosher",
+              "document_id": "d-spec",
+              "document_title": "Spec Sheet - Whole Milk"
+            }
+          ],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Kosher Certificate (recommended) — open; triggered by the \"Kosher\" claim on this supplier's documents"
+        },
+        {
+          "requirement_id": "r-spec",
+          "name": "Specification Sheet",
+          "slug": "spec-sheet",
+          "checklist": "Product Specification",
+          "sort_order": 10,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": true,
+          "satisfied_by": [
+            {
+              "document_id": "d-spec",
+              "document_title": "Spec Sheet - Whole Milk",
+              "confirmed_at": "2026-08-01T00:00:00Z"
+            }
+          ],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Specification Sheet (required) — closed by 1 confirmed document"
+        },
+        {
+          "requirement_id": "r-coi",
+          "name": "Certificate of Insurance",
+          "slug": "certificate-of-insurance",
+          "checklist": "Supplier Approval",
+          "sort_order": 10,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [
+            {
+              "document_id": "d-coi",
+              "document_title": "COI 2025",
+              "confirmed_at": "2026-08-02T00:00:00Z",
+              "reason": "expired_on_arrival",
+              "expired_on_arrival": {
+                "expires_on": "2026-01-01",
+                "arrived_on": "2026-03-01",
+                "days_expired": 59,
+                "arrival_basis": "arrived_at"
+              }
+            }
+          ],
+          "gap_reason": "expired_on_arrival",
+          "summary": "Certificate of Insurance (required) — open; expired on arrival: COI 2025 expired 2026-01-01, before it arrived on 2026-03-01"
+        },
+        {
+          "requirement_id": "r-audit",
+          "name": "3rd Party Audit Certificate",
+          "slug": "third-party-audit-certificate",
+          "checklist": "Supplier Approval",
+          "sort_order": 20,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": true,
+          "satisfied_by": [
+            {
+              "document_id": "d-sqf",
+              "document_title": "SQF Certificate",
+              "confirmed_at": "2026-08-03T00:00:00Z"
+            }
+          ],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "3rd Party Audit Certificate (required) — closed by 1 confirmed document"
+        },
+        {
+          "requirement_id": "r-recall",
+          "name": "Recall Program",
+          "slug": "recall-program",
+          "checklist": "Supplier Approval",
+          "sort_order": 30,
+          "tier": "recommended",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Recall Program (recommended) — open; no confirmed document from this supplier closes it"
+        }
+      ],
+      "open": [
+        {
+          "requirement_id": "r-allergen",
+          "name": "Allergen Matrix",
+          "slug": "allergen-matrix",
+          "checklist": "Allergens",
+          "sort_order": 20,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Allergen Matrix (required) — open; no confirmed document from this supplier closes it"
+        },
+        {
+          "requirement_id": "r-organic",
+          "name": "Organic Certificate",
+          "slug": "organic-certificate",
+          "checklist": "Certifications",
+          "sort_order": 5,
+          "tier": "required",
+          "origins": [
+            "claim"
+          ],
+          "opened_by": [
+            {
+              "claim_type_id": "ct-org",
+              "claim_type_name": "Organic",
+              "document_id": "d-spec",
+              "document_title": "Spec Sheet - Whole Milk"
+            }
+          ],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Organic Certificate (required) — open; triggered by the \"Organic\" claim on this supplier's documents"
+        },
+        {
+          "requirement_id": "r-coi",
+          "name": "Certificate of Insurance",
+          "slug": "certificate-of-insurance",
+          "checklist": "Supplier Approval",
+          "sort_order": 10,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [
+            {
+              "document_id": "d-coi",
+              "document_title": "COI 2025",
+              "confirmed_at": "2026-08-02T00:00:00Z",
+              "reason": "expired_on_arrival",
+              "expired_on_arrival": {
+                "expires_on": "2026-01-01",
+                "arrived_on": "2026-03-01",
+                "days_expired": 59,
+                "arrival_basis": "arrived_at"
+              }
+            }
+          ],
+          "gap_reason": "expired_on_arrival",
+          "summary": "Certificate of Insurance (required) — open; expired on arrival: COI 2025 expired 2026-01-01, before it arrived on 2026-03-01"
+        }
+      ],
+      "documents": {
+        "total": 7,
+        "classification": {
+          "unclassified": 1,
+          "needs_review": 1,
+          "classified": 5,
+          "unclassifiable": 0
+        }
+      },
+      "caveats": [
+        {
+          "code": "unclassified_documents",
+          "count": 2,
+          "message": "2 of this supplier's documents have not been classified, so they cannot close anything yet. Open counts may be overstated."
+        },
+        {
+          "code": "expired_on_arrival",
+          "count": 1,
+          "message": "1 open requirement was answered with a certificate that had already expired when it arrived. It does not count; ask the supplier for a current one."
+        },
+        {
+          "code": "recommended_excluded",
+          "count": 2,
+          "message": "2 recommended items are also open but excluded from the counts by default."
+        }
+      ]
+    },
+    "include_recommended": {
+      "supplier_id": "s-mixed",
+      "supplier_name": "Country Morning Farms",
+      "status": "open",
+      "configured": true,
+      "tiers_counted": [
+        "required",
+        "recommended"
+      ],
+      "counts": {
+        "required": {
+          "applicable": 5,
+          "satisfied": 2,
+          "open": 3
+        },
+        "recommended": {
+          "applicable": 2,
+          "satisfied": 0,
+          "open": 2
+        }
+      },
+      "applicable": [
+        {
+          "requirement_id": "r-allergen",
+          "name": "Allergen Matrix",
+          "slug": "allergen-matrix",
+          "checklist": "Allergens",
+          "sort_order": 20,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Allergen Matrix (required) — open; no confirmed document from this supplier closes it"
+        },
+        {
+          "requirement_id": "r-organic",
+          "name": "Organic Certificate",
+          "slug": "organic-certificate",
+          "checklist": "Certifications",
+          "sort_order": 5,
+          "tier": "required",
+          "origins": [
+            "claim"
+          ],
+          "opened_by": [
+            {
+              "claim_type_id": "ct-org",
+              "claim_type_name": "Organic",
+              "document_id": "d-spec",
+              "document_title": "Spec Sheet - Whole Milk"
+            }
+          ],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Organic Certificate (required) — open; triggered by the \"Organic\" claim on this supplier's documents"
+        },
+        {
+          "requirement_id": "r-kosher",
+          "name": "Kosher Certificate",
+          "slug": "kosher-certificate",
+          "checklist": "Certifications",
+          "sort_order": 6,
+          "tier": "recommended",
+          "origins": [
+            "claim"
+          ],
+          "opened_by": [
+            {
+              "claim_type_id": "ct-kos",
+              "claim_type_name": "Kosher",
+              "document_id": "d-spec",
+              "document_title": "Spec Sheet - Whole Milk"
+            }
+          ],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Kosher Certificate (recommended) — open; triggered by the \"Kosher\" claim on this supplier's documents"
+        },
+        {
+          "requirement_id": "r-spec",
+          "name": "Specification Sheet",
+          "slug": "spec-sheet",
+          "checklist": "Product Specification",
+          "sort_order": 10,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": true,
+          "satisfied_by": [
+            {
+              "document_id": "d-spec",
+              "document_title": "Spec Sheet - Whole Milk",
+              "confirmed_at": "2026-08-01T00:00:00Z"
+            }
+          ],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Specification Sheet (required) — closed by 1 confirmed document"
+        },
+        {
+          "requirement_id": "r-coi",
+          "name": "Certificate of Insurance",
+          "slug": "certificate-of-insurance",
+          "checklist": "Supplier Approval",
+          "sort_order": 10,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [
+            {
+              "document_id": "d-coi",
+              "document_title": "COI 2025",
+              "confirmed_at": "2026-08-02T00:00:00Z",
+              "reason": "expired_on_arrival",
+              "expired_on_arrival": {
+                "expires_on": "2026-01-01",
+                "arrived_on": "2026-03-01",
+                "days_expired": 59,
+                "arrival_basis": "arrived_at"
+              }
+            }
+          ],
+          "gap_reason": "expired_on_arrival",
+          "summary": "Certificate of Insurance (required) — open; expired on arrival: COI 2025 expired 2026-01-01, before it arrived on 2026-03-01"
+        },
+        {
+          "requirement_id": "r-audit",
+          "name": "3rd Party Audit Certificate",
+          "slug": "third-party-audit-certificate",
+          "checklist": "Supplier Approval",
+          "sort_order": 20,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": true,
+          "satisfied_by": [
+            {
+              "document_id": "d-sqf",
+              "document_title": "SQF Certificate",
+              "confirmed_at": "2026-08-03T00:00:00Z"
+            }
+          ],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "3rd Party Audit Certificate (required) — closed by 1 confirmed document"
+        },
+        {
+          "requirement_id": "r-recall",
+          "name": "Recall Program",
+          "slug": "recall-program",
+          "checklist": "Supplier Approval",
+          "sort_order": 30,
+          "tier": "recommended",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Recall Program (recommended) — open; no confirmed document from this supplier closes it"
+        }
+      ],
+      "open": [
+        {
+          "requirement_id": "r-allergen",
+          "name": "Allergen Matrix",
+          "slug": "allergen-matrix",
+          "checklist": "Allergens",
+          "sort_order": 20,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Allergen Matrix (required) — open; no confirmed document from this supplier closes it"
+        },
+        {
+          "requirement_id": "r-organic",
+          "name": "Organic Certificate",
+          "slug": "organic-certificate",
+          "checklist": "Certifications",
+          "sort_order": 5,
+          "tier": "required",
+          "origins": [
+            "claim"
+          ],
+          "opened_by": [
+            {
+              "claim_type_id": "ct-org",
+              "claim_type_name": "Organic",
+              "document_id": "d-spec",
+              "document_title": "Spec Sheet - Whole Milk"
+            }
+          ],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Organic Certificate (required) — open; triggered by the \"Organic\" claim on this supplier's documents"
+        },
+        {
+          "requirement_id": "r-kosher",
+          "name": "Kosher Certificate",
+          "slug": "kosher-certificate",
+          "checklist": "Certifications",
+          "sort_order": 6,
+          "tier": "recommended",
+          "origins": [
+            "claim"
+          ],
+          "opened_by": [
+            {
+              "claim_type_id": "ct-kos",
+              "claim_type_name": "Kosher",
+              "document_id": "d-spec",
+              "document_title": "Spec Sheet - Whole Milk"
+            }
+          ],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Kosher Certificate (recommended) — open; triggered by the \"Kosher\" claim on this supplier's documents"
+        },
+        {
+          "requirement_id": "r-coi",
+          "name": "Certificate of Insurance",
+          "slug": "certificate-of-insurance",
+          "checklist": "Supplier Approval",
+          "sort_order": 10,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [
+            {
+              "document_id": "d-coi",
+              "document_title": "COI 2025",
+              "confirmed_at": "2026-08-02T00:00:00Z",
+              "reason": "expired_on_arrival",
+              "expired_on_arrival": {
+                "expires_on": "2026-01-01",
+                "arrived_on": "2026-03-01",
+                "days_expired": 59,
+                "arrival_basis": "arrived_at"
+              }
+            }
+          ],
+          "gap_reason": "expired_on_arrival",
+          "summary": "Certificate of Insurance (required) — open; expired on arrival: COI 2025 expired 2026-01-01, before it arrived on 2026-03-01"
+        },
+        {
+          "requirement_id": "r-recall",
+          "name": "Recall Program",
+          "slug": "recall-program",
+          "checklist": "Supplier Approval",
+          "sort_order": 30,
+          "tier": "recommended",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": false,
+          "satisfied_by": [],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Recall Program (recommended) — open; no confirmed document from this supplier closes it"
+        }
+      ],
+      "documents": {
+        "total": 7,
+        "classification": {
+          "unclassified": 1,
+          "needs_review": 1,
+          "classified": 5,
+          "unclassifiable": 0
+        }
+      },
+      "caveats": [
+        {
+          "code": "unclassified_documents",
+          "count": 2,
+          "message": "2 of this supplier's documents have not been classified, so they cannot close anything yet. Open counts may be overstated."
+        },
+        {
+          "code": "expired_on_arrival",
+          "count": 1,
+          "message": "1 open requirement was answered with a certificate that had already expired when it arrived. It does not count; ask the supplier for a current one."
+        }
+      ]
+    }
+  },
+  "claim-only applicability, satisfied": {
+    "default": {
+      "supplier_id": "s-claim",
+      "supplier_name": "Claim Only Ltd",
+      "status": "satisfied",
+      "configured": false,
+      "tiers_counted": [
+        "required"
+      ],
+      "counts": {
+        "required": {
+          "applicable": 1,
+          "satisfied": 1,
+          "open": 0
+        },
+        "recommended": {
+          "applicable": 0,
+          "satisfied": 0,
+          "open": 0
+        }
+      },
+      "applicable": [
+        {
+          "requirement_id": "r-halal",
+          "name": "Halal Certificate",
+          "slug": "halal-certificate",
+          "checklist": null,
+          "sort_order": 0,
+          "tier": "required",
+          "origins": [
+            "claim"
+          ],
+          "opened_by": [
+            {
+              "claim_type_id": "ct-hal",
+              "claim_type_name": "Halal",
+              "document_id": "d-h",
+              "document_title": "Halal letter"
+            }
+          ],
+          "satisfied": true,
+          "satisfied_by": [
+            {
+              "document_id": "d-h",
+              "document_title": "Halal letter",
+              "confirmed_at": "2026-07-01T00:00:00Z"
+            }
+          ],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Halal Certificate (required) — closed by 1 confirmed document"
+        }
+      ],
+      "open": [],
+      "documents": {
+        "total": 1,
+        "classification": {
+          "unclassified": 0,
+          "needs_review": 0,
+          "classified": 1,
+          "unclassifiable": 0
+        }
+      },
+      "caveats": [
+        {
+          "code": "no_requirements_configured",
+          "message": "No requirements are attached to this supplier; everything listed became applicable only because a confirmed claim triggered it."
+        }
+      ]
+    },
+    "include_recommended": {
+      "supplier_id": "s-claim",
+      "supplier_name": "Claim Only Ltd",
+      "status": "satisfied",
+      "configured": false,
+      "tiers_counted": [
+        "required",
+        "recommended"
+      ],
+      "counts": {
+        "required": {
+          "applicable": 1,
+          "satisfied": 1,
+          "open": 0
+        },
+        "recommended": {
+          "applicable": 0,
+          "satisfied": 0,
+          "open": 0
+        }
+      },
+      "applicable": [
+        {
+          "requirement_id": "r-halal",
+          "name": "Halal Certificate",
+          "slug": "halal-certificate",
+          "checklist": null,
+          "sort_order": 0,
+          "tier": "required",
+          "origins": [
+            "claim"
+          ],
+          "opened_by": [
+            {
+              "claim_type_id": "ct-hal",
+              "claim_type_name": "Halal",
+              "document_id": "d-h",
+              "document_title": "Halal letter"
+            }
+          ],
+          "satisfied": true,
+          "satisfied_by": [
+            {
+              "document_id": "d-h",
+              "document_title": "Halal letter",
+              "confirmed_at": "2026-07-01T00:00:00Z"
+            }
+          ],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Halal Certificate (required) — closed by 1 confirmed document"
+        }
+      ],
+      "open": [],
+      "documents": {
+        "total": 1,
+        "classification": {
+          "unclassified": 0,
+          "needs_review": 0,
+          "classified": 1,
+          "unclassifiable": 0
+        }
+      },
+      "caveats": [
+        {
+          "code": "no_requirements_configured",
+          "message": "No requirements are attached to this supplier; everything listed became applicable only because a confirmed claim triggered it."
+        }
+      ]
+    }
+  },
+  "everything satisfied": {
+    "default": {
+      "supplier_id": "s-clean",
+      "supplier_name": "Clean Dairy",
+      "status": "satisfied",
+      "configured": true,
+      "tiers_counted": [
+        "required"
+      ],
+      "counts": {
+        "required": {
+          "applicable": 1,
+          "satisfied": 1,
+          "open": 0
+        },
+        "recommended": {
+          "applicable": 0,
+          "satisfied": 0,
+          "open": 0
+        }
+      },
+      "applicable": [
+        {
+          "requirement_id": "r-coi",
+          "name": "Certificate of Insurance",
+          "slug": "certificate-of-insurance",
+          "checklist": null,
+          "sort_order": 0,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": true,
+          "satisfied_by": [
+            {
+              "document_id": "d-coi",
+              "document_title": "COI 2026",
+              "confirmed_at": "2026-09-01T00:00:00Z"
+            }
+          ],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Certificate of Insurance (required) — closed by 1 confirmed document"
+        }
+      ],
+      "open": [],
+      "documents": {
+        "total": 1,
+        "classification": {
+          "unclassified": 0,
+          "needs_review": 0,
+          "classified": 1,
+          "unclassifiable": 0
+        }
+      },
+      "caveats": []
+    },
+    "include_recommended": {
+      "supplier_id": "s-clean",
+      "supplier_name": "Clean Dairy",
+      "status": "satisfied",
+      "configured": true,
+      "tiers_counted": [
+        "required",
+        "recommended"
+      ],
+      "counts": {
+        "required": {
+          "applicable": 1,
+          "satisfied": 1,
+          "open": 0
+        },
+        "recommended": {
+          "applicable": 0,
+          "satisfied": 0,
+          "open": 0
+        }
+      },
+      "applicable": [
+        {
+          "requirement_id": "r-coi",
+          "name": "Certificate of Insurance",
+          "slug": "certificate-of-insurance",
+          "checklist": null,
+          "sort_order": 0,
+          "tier": "required",
+          "origins": [
+            "applicability"
+          ],
+          "opened_by": [],
+          "satisfied": true,
+          "satisfied_by": [
+            {
+              "document_id": "d-coi",
+              "document_title": "COI 2026",
+              "confirmed_at": "2026-09-01T00:00:00Z"
+            }
+          ],
+          "not_counted": [],
+          "gap_reason": null,
+          "summary": "Certificate of Insurance (required) — closed by 1 confirmed document"
+        }
+      ],
+      "open": [],
+      "documents": {
+        "total": 1,
+        "classification": {
+          "unclassified": 0,
+          "needs_review": 0,
+          "classified": 1,
+          "unclassifiable": 0
+        }
+      },
+      "caveats": []
+    }
+  }
+}

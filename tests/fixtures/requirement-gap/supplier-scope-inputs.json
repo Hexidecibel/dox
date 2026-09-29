@@ -1,0 +1,93 @@
+{
+  "_note": "Inputs for the 0123 byte-identical pin (tests/unit/requirementScopeGap.test.ts). Every requirement here is supplier scope (no `scope` key, or scope 'supplier'). supplier-scope-golden.json holds what the PRE-0123 engine returned for each case; the post-0123 engine must return the same bytes apart from the new `products` array, even when fed products, product links and stale product_requirements rows.",
+  "cases": [
+    {
+      "name": "nothing configured",
+      "input": {
+        "supplier_id": "s-empty",
+        "supplier_name": "Empty Co",
+        "applicability": [],
+        "claimOpened": [],
+        "closures": [],
+        "documentCount": 0,
+        "classification": { "unclassified": 0, "needs_review": 0, "classified": 0, "unclassifiable": 0 }
+      }
+    },
+    {
+      "name": "mixed open, satisfied, recommended, claim, expired on arrival",
+      "input": {
+        "supplier_id": "s-mixed",
+        "supplier_name": "Country Morning Farms",
+        "applicability": [
+          { "requirement_id": "r-coi", "name": "Certificate of Insurance", "slug": "certificate-of-insurance", "checklist": "Supplier Approval", "sort_order": 10, "tier": "required" },
+          { "requirement_id": "r-spec", "name": "Specification Sheet", "slug": "spec-sheet", "checklist": "Product Specification", "sort_order": 10, "tier": "required", "scope": "supplier" },
+          { "requirement_id": "r-allergen", "name": "Allergen Matrix", "slug": "allergen-matrix", "checklist": "Allergens", "sort_order": 20, "tier": "required" },
+          { "requirement_id": "r-audit", "name": "3rd Party Audit Certificate", "slug": "third-party-audit-certificate", "checklist": "Supplier Approval", "sort_order": 20, "tier": "required" },
+          { "requirement_id": "r-recall", "name": "Recall Program", "slug": "recall-program", "checklist": "Supplier Approval", "sort_order": 30, "tier": "recommended" }
+        ],
+        "claimOpened": [
+          { "requirement_id": "r-organic", "name": "Organic Certificate", "slug": "organic-certificate", "checklist": "Certifications", "sort_order": 5, "is_required": 1, "claim_type_id": "ct-org", "claim_type_name": "Organic", "document_id": "d-spec", "document_title": "Spec Sheet - Whole Milk", "subject_type": "product", "subject_id": "p-milk", "subject_grain": "product" },
+          { "requirement_id": "r-kosher", "name": "Kosher Certificate", "slug": "kosher-certificate", "checklist": "Certifications", "sort_order": 6, "is_required": 0, "claim_type_id": "ct-kos", "claim_type_name": "Kosher", "document_id": "d-spec", "document_title": "Spec Sheet - Whole Milk", "subject_type": "facility", "subject_id": null }
+        ],
+        "closures": [
+          { "requirement_id": "r-spec", "document_id": "d-spec", "document_title": "Spec Sheet - Whole Milk", "confirmed_at": "2026-08-01T00:00:00Z" },
+          { "requirement_id": "r-coi", "document_id": "d-coi", "document_title": "COI 2025", "confirmed_at": "2026-08-02T00:00:00Z", "expires_on": "2026-01-01", "arrived_at": "2026-03-01T10:00:00Z", "created_at": "2026-03-02T10:00:00Z" },
+          { "requirement_id": "r-audit", "document_id": "d-sqf", "document_title": "SQF Certificate", "confirmed_at": "2026-08-03T00:00:00Z", "expires_on": "2027-04-23", "arrived_at": "2026-05-01T00:00:00Z" },
+          { "requirement_id": "r-not-applicable", "document_id": "d-x", "document_title": "Stray", "confirmed_at": null }
+        ],
+        "documentCount": 7,
+        "classification": { "unclassified": 1, "needs_review": 1, "classified": 5, "unclassifiable": 0 }
+      }
+    },
+    {
+      "name": "claim-only applicability, satisfied",
+      "input": {
+        "supplier_id": "s-claim",
+        "supplier_name": "Claim Only Ltd",
+        "applicability": [],
+        "claimOpened": [
+          { "requirement_id": "r-halal", "name": "Halal Certificate", "slug": "halal-certificate", "checklist": null, "sort_order": 0, "is_required": 1, "claim_type_id": "ct-hal", "claim_type_name": "Halal", "document_id": "d-h", "document_title": "Halal letter" }
+        ],
+        "closures": [
+          { "requirement_id": "r-halal", "document_id": "d-h", "document_title": "Halal letter", "confirmed_at": "2026-07-01T00:00:00Z" }
+        ],
+        "documentCount": 1,
+        "classification": { "unclassified": 0, "needs_review": 0, "classified": 1, "unclassifiable": 0 }
+      }
+    },
+    {
+      "name": "everything satisfied",
+      "input": {
+        "supplier_id": "s-clean",
+        "supplier_name": "Clean Dairy",
+        "applicability": [
+          { "requirement_id": "r-coi", "name": "Certificate of Insurance", "slug": "certificate-of-insurance", "checklist": null, "sort_order": 0, "tier": "required" }
+        ],
+        "claimOpened": [],
+        "closures": [
+          { "requirement_id": "r-coi", "document_id": "d-coi", "document_title": "COI 2026", "confirmed_at": "2026-09-01T00:00:00Z", "expires_on": "2027-09-01", "arrived_at": "2026-09-01T00:00:00Z" },
+          { "requirement_id": "r-coi", "document_id": "d-coi", "document_title": "COI 2026", "confirmed_at": "2026-09-01T00:00:00Z" }
+        ],
+        "documentCount": 1,
+        "classification": { "unclassified": 0, "needs_review": 0, "classified": 1, "unclassifiable": 0 }
+      }
+    }
+  ],
+  "product_side": {
+    "_note": "Fed to the post-0123 engine alongside every case above. None of it may change a byte outside `products`: no requirement is product scope, so the supplier is not gated.",
+    "products": [
+      { "product_id": "p-milk", "name": "MS WHOLE 5 GL BAG", "source": "admin", "identified": true, "nothing_owed": null },
+      { "product_id": "p-cert", "name": "Milk - Whole", "source": "certificate", "identified": false, "nothing_owed": null }
+    ],
+    "excludedProducts": [
+      { "product_id": "p-old", "name": "Half-and-Half", "reason": "inactive" }
+    ],
+    "productOverrides": [
+      { "requirement_id": "r-spec", "name": "Specification Sheet", "slug": "spec-sheet", "checklist": null, "sort_order": 0, "scope": "supplier", "product_id": "p-milk", "mode": "exempt", "tier": "required", "reason": "stale row left after a scope change" },
+      { "requirement_id": "r-extra", "name": "Extra", "slug": "extra", "checklist": null, "sort_order": 0, "scope": "supplier", "product_id": "p-milk", "mode": "add", "tier": "required", "reason": null }
+    ],
+    "productLinks": [
+      { "document_id": "d-spec", "product_id": "p-milk" }
+    ]
+  }
+}
