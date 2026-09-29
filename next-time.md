@@ -4,6 +4,22 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-29: v2.25.0 IS LIVE ("Ask it any way, and it says what it found"). Migrations 0120-0123 on prod, stamped. NO worker restart needed (nothing the worker loads changed).**
+
+*Prod deploy `595ccc59`, tag `v2.25.0`, master pushed (`da98220..19f2adf`). Staging `07350403`. Prod bookmark before migrations: `00001769-00000146-000050f5-f03415438adb8e762f0d0423251b8531` (`~/drops/dox-backups/doc-upload-db-20260929T180009Z.timetravel.json`). Gates: 314 files / 4244 tests, ratchet 27, e2e 7/1 skipped.*
+
+**WHAT SHIPPED** (from AJ's 9/20 notes + 9/27 rules table): spec tiers read Critical/Major/Minor (display only; stored high/medium/low); E1/E2 method + sample-size mismatches notify (still never judged; no holds anywhere); G4 expired-on-arrival is a gap (`documents.arrived_at`, 0121); D3 analyte categories + bands (0120); search Phase 1 (one query model `shared/searchQuery.ts`, `POST /api/search/query`, composing facets = I1 fix, PO/invoice/lot-prefix, `document_search_keys` 0122 - backfilled on prod: 3,819 keys / 601 docs); requirement scope supplier/product/lot + product amber (0123, gated; byte-identical for supplier-scope tenants); supplier-tab Add Product fix; type->requirement editor; neutral starter-pack groups; generated export file names; sender name+email on export page.
+
+**PROD DATA WRITTEN (AJ Clean, authorized):** 2 orphaned CMF products linked; 3 seed-made duplicate requirements retired (4 request lines re-pointed). Bookmark `~/drops/dox-backups/*20260929T094752Z*`.
+
+**PO IS TWO NAMESPACES** (prod fact): documents' `po_number` = OUR K-number PO to the supplier (384 docs); `orders.po_number` = the customer's. Zero overlap. Never merge them.
+
+**FOR AJ - DRAFTED, NOT SENT:** `~/drops/aj-2026-09-29/reply-to-aj.md` (21 numbered decisions) + 17-types, claim table, brand answer. Blockers: what a HOLD is; facility/line source; B2 precedence; C2 vs 0093; H2 whole vs per-lot; H6 shelf life shape. GFSI on AJ Clean: ASK him (question 21), do not apply.
+
+**NEXT:** search Phase 2 (Easy omnibox/cmd-K/preview; mockup https://claude.ai/artifact/PwNXjWnDpicwLYn5wpeCZ2, design `scratchpad` copy lost with the session - regenerate from the Plan in this entry's commit history if needed); product-scope Phase 2 (product-level analytes) + Phase 3 (lot scope); complaint intake awaits AJ's go. out4: iOS ticket title clip fix committed `ec49796f` on `fix/ios-ticket-title-clip` (worktree `~/local/src/out4-wt-ticket-clip`), needs an iPhone build; out4's own TicketRender/FitText tests fail 15 on master pre-existing.
+
+---
+
 **2026-09-18 (SESSION WRAP — read this first; it supersedes the restart warning below).**
 
 **THE RESTART IS DONE.** `sudo systemctl restart dox-process-worker.service` ran at 19:16 PDT on
