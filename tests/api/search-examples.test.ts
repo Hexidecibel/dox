@@ -67,7 +67,7 @@ describe('GET /api/search/examples', () => {
     const byKind = Object.fromEntries(body.examples.map((e) => [e.kind, e]));
     expect(byKind.lot_dash.text).toMatch(/^lot \d{8}-\d{2}$/);
     expect(byKind.lot_prefix.text).toMatch(/^lot \d{3}$/);
-    expect(byKind.lot_prefix.label).toMatch(/Cascade Creamery Cooperative/);
+    expect(byKind.lot_prefix.label).toBe("every lot from Cascade Creamery Cooperative plant 207 (declared lot format)");
     expect(byKind.supplier_po.text).toMatch(/^PO /);
     expect(byKind.product_day.text).toMatch(/^[a-z ]+ produced [A-Z][a-z]{2} \d{1,2}$/);
     expect(byKind.product_day.text).not.toMatch(/btr|bulk|25kg|\d{4,}/i);

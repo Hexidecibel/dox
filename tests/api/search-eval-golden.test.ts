@@ -65,6 +65,38 @@ describe('GET /api/search/eval-sample', () => {
   });
 });
 
+describe('GET /api/search/eval-sample on a larger tenant', () => {
+  it('stays under D1\'s 100-parameter limit however many documents and lots it samples', async () => {
+    const T = 'eval-bulk';
+    const U = { id: 'eval-bulk-user', role: 'org_admin', tenant_id: T };
+    await db.prepare(`INSERT INTO tenants (id, name, slug, active) VALUES (?, 'Bulk', 'eval-bulk', 1)`).bind(T).run();
+    await db.prepare(
+      `INSERT INTO users (id, email, name, role, tenant_id, password_hash, active, force_password_change)
+       VALUES (?, 'bulk@test.com', 'Bulk', 'org_admin', ?, 'x', 1, 0)`,
+    ).bind(U.id, T).run();
+    await db.prepare(`INSERT INTO suppliers (id, tenant_id, name, slug, active) VALUES ('eb-sup', ?, 'Bulk Dairy', 'eb-sup', 1)`).bind(T).run();
+    await db.prepare(`INSERT INTO products (id, tenant_id, name, slug, active) VALUES ('eb-prod', ?, 'Butter', 'eb-prod', 1)`).bind(T).run();
+    for (let i = 0; i < 150; i++) {
+      const id = `eb-doc-${i}`;
+      await db.prepare(
+        `INSERT INTO documents (id, tenant_id, title, tags, current_version, status, created_by, supplier_id, primary_metadata, created_at, updated_at)
+         VALUES (?, ?, ?, '[]', 1, 'active', ?, 'eb-sup', ?, '2026-06-01', '2026-06-01')`,
+      ).bind(id, T, `Bulk ${i}`, U.id, JSON.stringify({ po_number: `K9${String(i).padStart(5, '0')}` })).run();
+      await db.prepare(`INSERT INTO document_products (id, document_id, product_id) VALUES (?, ?, 'eb-prod')`).bind(`${id}-dp`, id).run();
+      await db.prepare(
+        `INSERT INTO lots (id, tenant_id, supplier_id, product_id, lot_number, sub_lot_code, lot_key, production_date, production_date_source, production_date_status)
+         VALUES (?, ?, 'eb-sup', 'eb-prod', ?, '01', ?, '2026-05-01', 'extracted', 'resolved')`,
+      ).bind(`${id}-lot`, T, `30${String(i).padStart(6, '0')}`, `30${String(i).padStart(6, '0')}01`).run();
+      await db.prepare(`INSERT INTO document_lots (id, document_id, lot_id) VALUES (?, ?, ?)`).bind(`${id}-dl`, id, `${id}-lot`).run();
+    }
+    const { status, body } = await sample(U, '?n=150');
+    expect(status, body.error).toBe(200);
+    expect(body.docs).toHaveLength(150);
+    expect(body.docs.every((d) => d.products.length === 1 && d.lots.length === 1)).toBe(true);
+    expect(body.negatives.lots.length).toBe(150);
+  }, 120_000);
+});
+
 describe('the eval-search probes over the golden corpus', () => {
   it('every scorable probe passes (the scorecard is printed when one does not)', async () => {
     const { body } = await sample(GOLDEN_USER, '?n=200&seed=golden');

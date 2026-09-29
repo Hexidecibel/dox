@@ -77,7 +77,7 @@ export interface EvalSample {
   docs: SampleDoc[];
   negatives: SampleNegatives;
   /** Suppliers with a declared lot format whose code starts with a fixed digit segment. */
-  lot_prefixes: Array<{ doc_id: string; prefix: string; supplier_name: string }>;
+  lot_prefixes: Array<{ doc_id: string; prefix: string; supplier_name: string; /** The declared segment's name ("plant"). */ segment: string }>;
 }
 
 // ---------------------------------------------------------------------------

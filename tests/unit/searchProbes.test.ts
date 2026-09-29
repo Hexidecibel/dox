@@ -89,7 +89,7 @@ describe('sampleProbes', () => {
         lots: [{ doc_id: 'd1', lot: '10426203-98' }],
         wrong_supplier: [{ doc_id: 'd1', lot: '10426203-03', supplier_id: 's2', supplier_name: 'Other' }],
       },
-      lot_prefixes: [{ doc_id: 'd1', prefix: '104', supplier_name: 'Darigold, Inc.' }],
+      lot_prefixes: [{ doc_id: 'd1', prefix: '104', supplier_name: 'Darigold, Inc.', segment: 'plant' }],
     };
     const ps = sampleProbes(sample);
     const neg = ps.filter((p) => p.expect === 'none');

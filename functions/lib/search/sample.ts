@@ -20,7 +20,11 @@ import { structuredScheme } from '../search-coverage';
 
 /** Candidate documents one sample draws from (most recent first by id order is irrelevant: it is shuffled). */
 const POOL_CAP = 5000;
-const CHUNK = 80;
+/**
+ * IDs per IN list. D1 binds at most 100 parameters per statement, and the
+ * product statement binds a chunk twice plus the tenant.
+ */
+const CHUNK = 40;
 export const SAMPLE_MAX = 200;
 
 const KEY_KINDS: SearchKeyKind[] = ['supplier_po', 'invoice_number', 'document_number', 'certificate_number'];
@@ -134,7 +138,9 @@ async function negativesAndPrefixes(
 ): Promise<Pick<EvalSample, 'negatives' | 'lot_prefixes'>> {
   const withLot = docs.filter((d) => d.lots.length > 0);
   // Candidate absent lots: a sublot / suffix nobody printed.
-  const absentCandidates = withLot.map((d) => {
+  // Only a lot that reads as a lot (letters, digits, a dash) is perturbed: a
+  // "lot" an extraction filed as 7/4/26 plus a digit is a DATE to the reader.
+  const absentCandidates = withLot.filter((d) => /^[A-Za-z0-9-]+$/.test(d.lots[0].lot_number.trim())).map((d) => {
     const l = d.lots[0];
     const tries = l.sub_lot_code
       ? ['98', '97', '96'].map((s) => ({ text: `${l.lot_number}-${s}`, norm: normalizeLotNumber(`${l.lot_number}${s}`) }))
@@ -143,12 +149,14 @@ async function negativesAndPrefixes(
   });
   const lotNorms = [...new Set([...absentCandidates.flatMap((a) => a.tries.map((t) => t.norm)), ...withLot.map((d) => d.lots[0].lot_key)])].filter(Boolean);
 
-  const [held, keyHeld, prodDays, keyDays, suppliers, schemes] = await db.batch([
-    db.prepare(`SELECT lot_key, supplier_id FROM lots WHERE tenant_id = ? AND lot_key IN (${ph(lotNorms.length || 1)})`).bind(tenantId, ...(lotNorms.length ? lotNorms : [''])),
+  const heldStmts = chunks(lotNorms).flatMap((c) => [
+    db.prepare(`SELECT lot_key, supplier_id FROM lots WHERE tenant_id = ? AND lot_key IN (${ph(c.length)})`).bind(tenantId, ...c),
     db.prepare(
       `SELECT k.value_norm AS lot_key, d.supplier_id FROM document_search_keys k JOIN documents d ON d.id = k.document_id
-        WHERE k.tenant_id = ? AND k.kind = 'lot' AND k.value_norm IN (${ph(lotNorms.length || 1)})`,
-    ).bind(tenantId, ...(lotNorms.length ? lotNorms : [''])),
+        WHERE k.tenant_id = ? AND k.kind = 'lot' AND k.value_norm IN (${ph(c.length)})`,
+    ).bind(tenantId, ...c),
+  ]);
+  const res = await db.batch([
     db.prepare(`SELECT DISTINCT production_date AS day FROM lots WHERE tenant_id = ? AND production_date IS NOT NULL`).bind(tenantId),
     db.prepare(`SELECT DISTINCT value_date AS day FROM document_search_keys WHERE tenant_id = ? AND kind = 'production_date' AND value_date IS NOT NULL`).bind(tenantId),
     db.prepare(`SELECT id, name FROM suppliers WHERE tenant_id = ? AND active = 1 ORDER BY id LIMIT 500`).bind(tenantId),
@@ -156,10 +164,13 @@ async function negativesAndPrefixes(
       `SELECT sls.supplier_id, s.name AS supplier_name, sls.spec, sls.version FROM supplier_lot_schemes sls
          JOIN suppliers s ON s.id = sls.supplier_id WHERE sls.tenant_id = ? ORDER BY sls.version DESC`,
     ).bind(tenantId),
+    ...heldStmts,
   ]);
+  const [prodDays, keyDays, suppliers, schemes] = res;
+  const heldRows = res.slice(4).flatMap((r) => (r.results ?? []) as Array<{ lot_key: string; supplier_id: string | null }>);
 
   const holders = new Map<string, Set<string>>();
-  for (const r of [...(held.results ?? []), ...(keyHeld.results ?? [])] as Array<{ lot_key: string; supplier_id: string | null }>) {
+  for (const r of heldRows) {
     const s = holders.get(r.lot_key) ?? new Set<string>();
     s.add(r.supplier_id ?? '');
     holders.set(r.lot_key, s);
@@ -207,7 +218,7 @@ async function negativesAndPrefixes(
     if (prefix.length !== g.width || seenPrefix.has(prefix)) continue;
     if (!lotPrefixNote(prefix, [s])) continue;
     seenPrefix.add(prefix);
-    prefixes.push({ doc_id: d.id, prefix, supplier_name: s.supplier_name });
+    prefixes.push({ doc_id: d.id, prefix, supplier_name: s.supplier_name, segment: g.name });
   }
 
   return { negatives: { days, lots, wrong_supplier: wrong }, lot_prefixes: prefixes };

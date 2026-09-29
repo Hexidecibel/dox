@@ -92,7 +92,7 @@ export async function buildSearchExamples(db: D1Database, tenantId: string, now 
       let label: string | null = null;
       if (kind === 'lot_prefix') {
         const prefix = sample.lot_prefixes.find((x) => x.doc_id === p.doc_id);
-        label = prefix ? `every lot from ${prefix.supplier_name} whose code starts ${prefix.prefix}` : null;
+        label = prefix ? `every lot from ${prefix.supplier_name} ${prefix.segment} ${prefix.prefix} (declared lot format)` : null;
       }
       examples.push({ text, kind, label });
       usedTexts.add(text.toLowerCase());
