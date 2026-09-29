@@ -220,7 +220,7 @@ export function ExportLanding() {
       </Table>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 3 }}>
-        Shared through SupDox. Reply to the email that brought you here to reach {sentBy}.
+        Shared through SupDox. Reply to the email that brought you here to reach {view.sent_by_name ?? view.sent_by_email ?? 'the sender'}.
       </Typography>
     </Box>
   );
