@@ -274,6 +274,116 @@ export function uniqueFileName(taken: Set<string>, desired: string): string {
   return name;
 }
 
+// ---------------------------------------------------------------------------
+// The name a file travels under (rules table H4)
+// ---------------------------------------------------------------------------
+//
+// AJ Conner, 2026-09-20: "The original file name never travels to the
+// customer. Export under a generated name; keep the original name on the
+// internal record." A file a team uploads carries whatever name it was given
+// internally ("CMF COA - REJECTED lot, do not send.pdf"), and that name could
+// say something the company would not say to a customer. So every file that
+// leaves -- the zip, the recipient page's single-file download, the manifest,
+// the recipient page's list -- goes under a name BUILT from facts the export
+// already prints: supplier, document type, lot (or a date), position.
+//
+// The original stays on `document_versions.file_name` and in the internal
+// audit rows; it is never written into anything a recipient receives.
+
+/** Longest generated name, extension included. */
+export const EXPORT_FILE_NAME_MAX = 100;
+
+/** One name segment: ASCII letters, digits and single hyphens only. */
+function nameSegment(raw: string | null | undefined): string {
+  if (!raw) return '';
+  return raw
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '') // strip the accents NFKD split off
+    .replace(/&/g, ' and ')
+    .replace(/[^A-Za-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * The extension to keep. Taken from the original name only when it is a
+ * short alphanumeric token (".pdf"), which says nothing but the format; else
+ * from the MIME type; else none.
+ */
+function exportExtension(fileName: string | null, mime: string | null): string {
+  const m = /\.([A-Za-z0-9]{1,8})$/.exec(fileName ?? '');
+  if (m) return m[1].toLowerCase();
+  const byMime: Record<string, string> = {
+    'application/pdf': 'pdf',
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'text/csv': 'csv',
+    'text/plain': 'txt',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  };
+  return (mime && byMime[mime.toLowerCase()]) || '';
+}
+
+/**
+ * The lot, else the one resolved production date, else the date the document
+ * was filed -- "which one is this" in the fewest characters. Several lots name
+ * the first and count the rest, so the name stays short and deterministic.
+ */
+function lotOrDateSegment(row: ExportDocumentRow): string {
+  if (row.lot_label) {
+    const lots = row.lot_label.split(';').map((l) => l.trim()).filter(Boolean);
+    const first = nameSegment(lots[0]);
+    if (first) return lots.length > 1 ? `${first}-plus${lots.length - 1}` : first;
+  }
+  if (row.production_date) return nameSegment(row.production_date.slice(0, 10));
+  if (row.created_at) return nameSegment(row.created_at.slice(0, 10));
+  return '';
+}
+
+/**
+ * `{Supplier}_{DocType}_{lot or date}_{n}.{ext}` for the document at 1-based
+ * position `n` of an export. Pure and deterministic: the same export always
+ * yields the same names, so the zip, the single-file download and the
+ * manifest agree. A missing segment is left out, never invented.
+ */
+export function generatedExportFileName(row: ExportDocumentRow, n: number): string {
+  const ext = exportExtension(row.file_name, row.mime_type);
+  const suffix = `_${n}${ext ? `.${ext}` : ''}`;
+  const stem = [nameSegment(row.supplier_name), nameSegment(row.document_type_name) || 'Document', lotOrDateSegment(row)]
+    .filter(Boolean)
+    .join('_');
+  const room = EXPORT_FILE_NAME_MAX - suffix.length;
+  const trimmed = stem.length > room ? stem.slice(0, room).replace(/[-_]+$/, '') : stem;
+  return `${trimmed}${suffix}`;
+}
+
+/**
+ * Every file's name in one export, in the export's own order. The position
+ * already makes each name unique; `uniqueFileName` is kept as the belt, and
+ * `manifest.csv` is reserved so no file can shadow it.
+ */
+export function exportFileNames(rows: ExportDocumentRow[]): string[] {
+  const taken = new Set<string>([EXPORT_MANIFEST_NAME]);
+  return rows.map((row, i) => uniqueFileName(taken, generatedExportFileName(row, i + 1)));
+}
+
+/**
+ * The document's label for a recipient. Most titles are the uploaded file's
+ * name with the extension dropped (465 of 580 live documents on 2026-09-29),
+ * which would carry exactly what H4 keeps inside through the "Document"
+ * column. A title that is the file name's stem is therefore replaced by what
+ * the export already says -- type, supplier, lot -- and a title somebody
+ * actually wrote is kept.
+ */
+export function externalDocumentTitle(row: ExportDocumentRow): string {
+  const title = (row.title ?? '').trim();
+  const file = (row.file_name ?? '').trim().toLowerCase();
+  const fromFileName = !title || (file.length > 0 && file.startsWith(title.toLowerCase()));
+  if (!fromFileName) return title;
+  const parts = [row.document_type_name || 'Document', row.supplier_name, row.lot_label ? `Lot ${row.lot_label}` : null];
+  return parts.filter(Boolean).join(' - ');
+}
+
 /** RFC 4180 field: always quoted, embedded quotes doubled. */
 function csvField(v: string | number | null | undefined): string {
   if (v === null || v === undefined) return '""';
@@ -293,9 +403,11 @@ export interface ManifestMeta {
 }
 
 /**
- * The manifest, as CSV. Column one is the file name inside the zip, because
- * the question a recipient actually has is "which of these files is the
- * Darigold cream certificate".
+ * The manifest, as CSV. Column one is the file name inside the zip -- the
+ * GENERATED name (H4), never the uploaded one -- because the question a
+ * recipient actually has is "which of these files is the Darigold cream
+ * certificate". The "Document" column is `externalDocumentTitle`, for the same
+ * reason.
  */
 export function buildExportManifestCsv(
   entries: { file_name: string; row: ExportDocumentRow }[],
@@ -318,7 +430,7 @@ export function buildExportManifestCsv(
     lines.push(
       [
         csvField(e.file_name),
-        csvField(e.row.title),
+        csvField(externalDocumentTitle(e.row)),
         csvField(e.row.supplier_name),
         csvField(e.row.document_type_name),
         csvField(e.row.lot_label),
@@ -358,11 +470,14 @@ export async function buildExportZip(
   meta: ManifestMeta,
 ): Promise<BuiltExportZip> {
   const contents: Record<string, Uint8Array> = {};
-  const taken = new Set<string>([EXPORT_MANIFEST_NAME]);
   const entries: { file_name: string; row: ExportDocumentRow }[] = [];
   const unavailable: ExportDocumentRow[] = [];
+  // Named over the WHOLE list before any byte is read, so a file missing from
+  // storage does not renumber the others: the zip, the single-file route and
+  // the recipient page name each document identically.
+  const names = exportFileNames(rows);
 
-  for (const row of rows) {
+  for (const [i, row] of rows.entries()) {
     if (!row.r2_key) {
       unavailable.push(row);
       continue;
@@ -373,7 +488,7 @@ export async function buildExportZip(
       continue;
     }
     const buf = await obj.arrayBuffer();
-    const name = uniqueFileName(taken, row.file_name);
+    const name = names[i];
     contents[name] = new Uint8Array(buf);
     entries.push({ file_name: name, row });
   }
@@ -706,15 +821,17 @@ export async function buildExportLandingView(
     .first<{ name: string | null; email: string | null }>();
 
   const rows = await loadExportLinkDocuments(db, link);
+  const names = exportFileNames(rows);
 
   const items: DocumentExportItem[] = rows.map((r, i) => ({
     index: i,
-    title: r.title,
+    title: externalDocumentTitle(r),
     supplier_name: r.supplier_name,
     document_type_name: r.document_type_name,
     lot_label: r.lot_label,
     production_date: r.production_date,
-    file_name: r.file_name,
+    // The generated name (H4). The uploaded one is not in this payload.
+    file_name: names[i],
     file_size: Number(r.file_size) || 0,
   }));
 
