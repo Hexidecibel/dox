@@ -381,6 +381,7 @@ describe('ordering and rollup', () => {
       suppliers: 3,
       not_configured: 1,
       open: 1,
+      products_not_configured: 0,
       satisfied: 1,
       open_requirements: 1,
       unclassified_documents: 1,

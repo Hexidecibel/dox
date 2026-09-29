@@ -364,7 +364,18 @@ export function RequestCompose() {
               they owe on the supplier record so it is reported from then on.
             </Alert>
           )}
-          {gap.configured && gap.open.length === 0 && (
+          {gap.configured && gap.status === 'products_not_configured' && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              <AlertTitle>Some of {gap.supplier_name}'s products have nothing set up</AlertTitle>
+              Every requirement on file is closed, but per-product requirements are in use for
+              this supplier and{' '}
+              {gap.products.filter((p) => p.status === 'not_configured').length} active product
+              {gap.products.filter((p) => p.status === 'not_configured').length === 1 ? ' has' : 's have'}{' '}
+              nothing applying to {gap.products.filter((p) => p.status === 'not_configured').length === 1 ? 'it' : 'them'}.
+              That is not the same as nothing being owed.
+            </Alert>
+          )}
+          {gap.configured && gap.status === 'satisfied' && (
             <Alert severity="success" sx={{ mb: 2 }}>
               <AlertTitle>Nothing is outstanding for {gap.supplier_name}</AlertTitle>
               Every requirement they owe is closed by a confirmed document. Anything you

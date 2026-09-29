@@ -63,6 +63,7 @@ function requirement(slug: string, name: string, checklist: string): ApiRequirem
     slug,
     name,
     description: null,
+    scope: 'supplier',
     checklist,
     sort_order: 0,
     active: 1,

@@ -79,10 +79,20 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .first<{ total: number }>();
 
     // Get products
+    // Scoped to one supplier, each row also carries THIS supplier's link facts
+    // (migration 0123): who recorded the link, whether it is no longer
+    // supplied, and a "nothing owed per product" declaration. NULL on a
+    // legacy-only link, which has no product_suppliers row.
+    const linkColumns = supplierIdFilter
+      ? `, (SELECT ps.source FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_source,
+           (SELECT ps.discontinued_at FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_discontinued_at,
+           (SELECT ps.nothing_owed_reason FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_nothing_owed_reason`
+      : '';
+    const linkParams = supplierIdFilter ? [supplierIdFilter, supplierIdFilter, supplierIdFilter] : [];
     const results = await context.env.DB.prepare(
-      `SELECT * FROM products ${whereClause} ORDER BY name ASC LIMIT ? OFFSET ?`
+      `SELECT products.*${linkColumns} FROM products ${whereClause} ORDER BY name ASC LIMIT ? OFFSET ?`
     )
-      .bind(...params, limit, offset)
+      .bind(...linkParams, ...params, limit, offset)
       .all();
 
     return new Response(
@@ -207,7 +217,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       // so the answer is a link, never a second row and never a bare 409 the
       // person cannot act on (AJ, 2026-09-20: the retry said "slug exists"
       // for a product the tab never showed).
-      const link = await linkProductToSupplier(context.env.DB, tenantId, existing.id, supplierId);
+      const link = await linkProductToSupplier(context.env.DB, tenantId, existing.id, supplierId, { source: 'admin' });
       if (link.linked || link.legacyBackfilled) {
         await logAudit(
           context.env.DB,
@@ -268,7 +278,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // The provenance graph every supplier-scoped read joins through.
     if (supplierId) {
-      await linkProductToSupplier(context.env.DB, tenantId, id, supplierId);
+      await linkProductToSupplier(context.env.DB, tenantId, id, supplierId, { source: 'admin' });
     }
 
     await logAudit(

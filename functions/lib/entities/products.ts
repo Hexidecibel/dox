@@ -19,6 +19,7 @@
 
 import type { D1Database } from '@cloudflare/workers-types';
 import { generateId } from '../db';
+import type { ProductSupplierSource } from '../../../shared/requirementScope';
 
 function slugify(name: string): string {
   return name
@@ -30,6 +31,13 @@ function slugify(name: string): string {
 export interface FindOrCreateProductOpts {
   supplierId?: string | null;
   supplierSku?: string | null;
+  /**
+   * Who is recording that the supplier ships this product (0123) — stamped on
+   * a NEW `product_suppliers` row only. 'certificate' marks a product named by
+   * a certificate, which the gap engine flags as a possible duplicate of one of
+   * the tenant's own SKUs until an identifier confirms it.
+   */
+  source?: ProductSupplierSource | null;
 }
 
 export interface FindOrCreateProductResult {
@@ -85,7 +93,10 @@ export async function findOrCreateProduct(
 
   // 3. Upsert the provenance link when a supplier is known.
   if (supplierId) {
-    await linkProductToSupplier(db, tenantId, productId, supplierId, { supplierSku });
+    await linkProductToSupplier(db, tenantId, productId, supplierId, {
+      supplierSku,
+      source: opts.source ?? null,
+    });
   }
 
   return { id: productId };
@@ -106,21 +117,26 @@ export interface LinkProductToSupplierResult {
  * supplier. The one write path for "this supplier ships this product", used
  * by intake (`findOrCreateProduct`), POST /api/products from a supplier's
  * Products tab, and `bin/link-supplier-products`.
+ *
+ * `source` (0123) is written on a NEW row only. An existing link keeps what it
+ * says -- including NULL, which means "linked before anyone recorded how" --
+ * and a link a person marked no longer supplied is NOT revived by a
+ * certificate that names the product again.
  */
 export async function linkProductToSupplier(
   db: D1Database,
   tenantId: string,
   productId: string,
   supplierId: string,
-  opts: { supplierSku?: string | null } = {}
+  opts: { supplierSku?: string | null; source?: ProductSupplierSource | null } = {}
 ): Promise<LinkProductToSupplierResult> {
   const ins = await db
     .prepare(
-      `INSERT INTO product_suppliers (id, tenant_id, product_id, supplier_id, supplier_sku)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO product_suppliers (id, tenant_id, product_id, supplier_id, supplier_sku, source)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(product_id, supplier_id) DO NOTHING`
     )
-    .bind(generateId(), tenantId, productId, supplierId, opts.supplierSku ?? null)
+    .bind(generateId(), tenantId, productId, supplierId, opts.supplierSku ?? null, opts.source ?? null)
     .run();
   const upd = await db
     .prepare('UPDATE products SET supplier_id = ? WHERE id = ? AND tenant_id = ? AND supplier_id IS NULL')

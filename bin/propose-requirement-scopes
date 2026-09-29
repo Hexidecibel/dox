@@ -1,0 +1,298 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/propose-requirement-scopes — propose the starter pack's per-product /
+ * per-lot scopes (migration 0123) for an EXISTING tenant, and show what each
+ * would do to every supplier before anything is written.
+ *
+ * Migration 0123 added `requirements.scope` DEFAULT 'supplier' and backfilled
+ * nothing, so every existing gap was unchanged the day it landed. The starter
+ * pack now marks the spec sheet, ingredient statement, allergen matrix, 100g
+ * nutritionals and product label as PER PRODUCT and the COA as PER LOT — for
+ * new organisations only. This is how an existing tenant gets the same
+ * answer, one tenant at a time, by a person.
+ *
+ *   proposed   a requirement whose slug the pack scopes, still at 'supplier',
+ *              with no audit row saying a person set its scope.
+ *   skipped    anything a person chose (a non-default scope, or an audit row
+ *              naming scope), and inactive requirements.
+ *
+ * THE HONEST BOUND: before 0123 nothing recorded a scope, so "still at the
+ * default with no audit row" is the only evidence nobody decided. Printed every
+ * run. Per-lot scope changes nothing today (per-lot checking has not shipped,
+ * so a per-lot requirement is judged once per supplier and says so).
+ *
+ * Usage:
+ *   bin/propose-requirement-scopes --tenant <id>                   # dry run, LOCAL
+ *   bin/propose-requirement-scopes --tenant <id> --remote          # dry run, PRODUCTION (read only)
+ *   bin/propose-requirement-scopes --tenant <id> --apply           # LOCAL write
+ *   bin/propose-requirement-scopes --tenant <id> --remote --apply  # prompts first
+ *
+ * Flags:
+ *   --tenant ID     tenant to propose for (required)
+ *   --pack NAME     starter pack to read scopes from (default: fsqa)
+ *   --only SLUG     limit to one requirement slug (repeatable)
+ *   --apply         actually write. Without it this is a dry run.
+ *   --remote, -r    target PRODUCTION D1 (with --apply, asks you to type the tenant id)
+ *   --yes, -y       skip the production confirmation prompt
+ *   --persist-to D  local D1 state directory (a worktree's own .wrangler/state)
+ *   --json          emit the plan as JSON
+ *   -h, --help      this help
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const { query, PROJECT_ROOT, DEFAULT_DB } = require('./lib/d1');
+const {
+  planRequirementScopes,
+  proposalToSql,
+  auditNamesScope,
+  SKIP_REASONS,
+} = require('./lib/requirementScopePlan');
+
+function parseArgs(argv) {
+  const opts = { tenant: null, pack: 'fsqa', only: [], apply: false, remote: false, yes: false, json: false, persistTo: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case '--tenant': opts.tenant = argv[++i]; break;
+      case '--pack': opts.pack = argv[++i]; break;
+      case '--only': opts.only.push(argv[++i]); break;
+      case '--apply': opts.apply = true; break;
+      case '--remote':
+      case '-r': opts.remote = true; break;
+      case '--yes':
+      case '-y': opts.yes = true; break;
+      case '--json': opts.json = true; break;
+      case '--persist-to': opts.persistTo = argv[++i]; break;
+      case '-h':
+      case '--help': printHelp(); process.exit(0); break;
+      default:
+        console.error(`Unknown argument: ${a}`);
+        process.exit(2);
+    }
+  }
+  if (!opts.tenant) {
+    console.error('--tenant <id> is required. Run with --help for usage.');
+    process.exit(2);
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(opts.tenant)) {
+    console.error('--tenant must be an id: letters, digits, dashes, underscores.');
+    process.exit(2);
+  }
+  if (!/^[a-z0-9-]+$/.test(opts.pack)) {
+    console.error('--pack must be a pack name (starter-packs/<name>.json).');
+    process.exit(2);
+  }
+  if (opts.remote && opts.persistTo) {
+    console.error('--persist-to is a local option; it cannot be combined with --remote.');
+    process.exit(2);
+  }
+  return opts;
+}
+
+function printHelp() {
+  const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+  const end = lines.findIndex((l, i) => i > 2 && l.trim() === '*/');
+  console.log(lines.slice(3, end).join('\n').replace(/^ \* ?/gm, ''));
+}
+
+function sqlStr(v) {
+  if (v === null || v === undefined) return 'NULL';
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
+
+function wranglerTarget(opts) {
+  if (opts.remote) return ['--remote'];
+  return opts.persistTo ? ['--local', `--persist-to=${opts.persistTo}`] : ['--local'];
+}
+
+function read(sql, opts) {
+  if (opts.persistTo) {
+    // bin/lib/d1.js has no --persist-to; read through wrangler directly.
+    const out = execFileSync(
+      'npx',
+      ['wrangler', 'd1', 'execute', DEFAULT_DB, ...wranglerTarget(opts), '--json', `--command=${sql}`],
+      { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 },
+    ).toString();
+    const start = out.search(/[[{]/);
+    const data = JSON.parse(start >= 0 ? out.slice(start) : out);
+    const rows = [];
+    for (const r of Array.isArray(data) ? data : [data]) if (Array.isArray(r.results)) rows.push(...r.results);
+    return rows;
+  }
+  return query(sql, { remote: opts.remote });
+}
+
+function execSql(statements, opts) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-requirement-scopes-'));
+  const file = path.join(dir, 'scopes.sql');
+  fs.writeFileSync(file, `${statements.join('\n')}\n`, 'utf8');
+  try {
+    execFileSync(
+      'npx',
+      ['wrangler', 'd1', 'execute', DEFAULT_DB, ...wranglerTarget(opts), `--file=${file}`],
+      { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 },
+    );
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString() : '';
+    throw new Error(`Writing to D1 failed. The SQL is at ${file}\n${stderr || err.message}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function promptSync(question) {
+  process.stdout.write(question);
+  let fd;
+  try {
+    fd = fs.openSync('/dev/tty', 'rs');
+  } catch {
+    console.error('\nNo terminal to confirm on. Re-run interactively, or pass --yes.');
+    process.exit(1);
+  }
+  const buf = Buffer.alloc(256);
+  let out = '';
+  for (;;) {
+    const n = fs.readSync(fd, buf, 0, buf.length, null);
+    if (n === 0) break;
+    out += buf.toString('utf8', 0, n);
+    if (out.includes('\n')) break;
+  }
+  fs.closeSync(fd);
+  return out.split('\n')[0];
+}
+
+/**
+ * Per supplier the requirement is attached to: how many ACTIVE products it
+ * would be owed by (both link paths, products.active = 1, not discontinued),
+ * and how many of those a confirmed document linked to that product already
+ * closes. The same definition as functions/lib/requirement-gaps.ts.
+ */
+function impactFor(tenantId, requirementId, opts) {
+  const t = sqlStr(tenantId);
+  const r = sqlStr(requirementId);
+  return read(
+    `WITH attached AS (
+       SELECT sr.supplier_id FROM supplier_requirements sr
+        WHERE sr.tenant_id = ${t} AND sr.requirement_id = ${r}
+     ),
+     links AS (
+       SELECT ps.supplier_id, ps.product_id FROM product_suppliers ps
+         JOIN products p ON p.id = ps.product_id
+        WHERE ps.tenant_id = ${t} AND p.active = 1 AND ps.discontinued_at IS NULL
+          AND ps.nothing_owed_reason IS NULL
+       UNION
+       SELECT p.supplier_id, p.id FROM products p
+        WHERE p.tenant_id = ${t} AND p.active = 1 AND p.supplier_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM product_suppliers ps2
+                           WHERE ps2.product_id = p.id AND ps2.supplier_id = p.supplier_id)
+     )
+     SELECT s.id AS supplier_id, s.name AS supplier_name,
+            (SELECT COUNT(*) FROM links l WHERE l.supplier_id = s.id) AS products,
+            (SELECT COUNT(DISTINCT l.product_id) FROM links l
+               JOIN document_products dp ON dp.product_id = l.product_id
+               JOIN documents d ON d.id = dp.document_id
+               JOIN document_requirements dr ON dr.document_id = d.id
+              WHERE l.supplier_id = s.id AND d.supplier_id = s.id AND d.status = 'active'
+                AND dr.requirement_id = ${r} AND dr.status = 'confirmed') AS closed,
+            (SELECT COUNT(*) FROM documents d
+               JOIN document_requirements dr ON dr.document_id = d.id
+              WHERE d.supplier_id = s.id AND d.status = 'active'
+                AND dr.requirement_id = ${r} AND dr.status = 'confirmed'
+                AND NOT EXISTS (SELECT 1 FROM document_products dp WHERE dp.document_id = d.id)) AS unattributed
+       FROM suppliers s
+      WHERE s.tenant_id = ${t} AND s.id IN (SELECT supplier_id FROM attached)
+      ORDER BY s.name`,
+    opts,
+  );
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const packFile = path.join(PROJECT_ROOT, 'starter-packs', `${opts.pack}.json`);
+  if (!fs.existsSync(packFile)) {
+    console.error(`No such pack: ${packFile}`);
+    process.exit(2);
+  }
+  const pack = JSON.parse(fs.readFileSync(packFile, 'utf8'));
+
+  const cols = read(`SELECT name FROM pragma_table_info('requirements') WHERE name = 'scope'`, opts);
+  if (cols.length === 0) {
+    console.error('This database has no requirements.scope column. Apply migration 0123 first.');
+    process.exit(1);
+  }
+
+  const t = sqlStr(opts.tenant);
+  let requirements = read(
+    `SELECT id, slug, name, scope, active FROM requirements WHERE tenant_id = ${t} ORDER BY checklist, sort_order, name`,
+    opts,
+  );
+  if (opts.only.length > 0) requirements = requirements.filter((r) => opts.only.includes(r.slug));
+
+  const audits = read(
+    `SELECT resource_id AS id, action, details FROM audit_log
+      WHERE tenant_id = ${t} AND resource_type = 'requirement'
+        AND action IN ('requirement.scope_changed', 'requirement_updated', 'requirement_created')
+        AND resource_id IS NOT NULL`,
+    opts,
+  );
+  const humanDecided = new Set(audits.filter((a) => auditNamesScope(a.action, a.details)).map((a) => a.id));
+
+  const plan = planRequirementScopes({ requirements, pack, humanDecided });
+  const impact = plan.proposals.map((p) => ({
+    ...p,
+    suppliers: p.to === 'product' ? impactFor(opts.tenant, p.id, opts) : [],
+  }));
+
+  if (opts.json) {
+    console.log(JSON.stringify({ tenant: opts.tenant, pack: opts.pack, proposals: impact, skipped: plan.skipped }, null, 2));
+  } else {
+    const where = opts.remote ? 'PRODUCTION' : opts.persistTo ? `local (${opts.persistTo})` : 'local';
+    console.log(`Requirement scopes for tenant ${opts.tenant} from pack "${opts.pack}" — ${where}, ${opts.apply ? 'APPLY' : 'dry run'}\n`);
+    if (impact.length === 0) console.log('Nothing to propose.');
+    for (const p of impact) {
+      console.log(`  ${p.name} (${p.slug}): ${p.from} -> ${p.to}`);
+      if (p.to === 'lot') {
+        console.log('      per-lot checking has not shipped; judged once per supplier, so no gap changes today.');
+        continue;
+      }
+      if (p.suppliers.length === 0) console.log('      attached to no supplier; nothing changes today.');
+      for (const s of p.suppliers) {
+        const open = Number(s.products) - Number(s.closed);
+        const note =
+          Number(s.products) === 0
+            ? 'NO active products — will read open (no_products)'
+            : `${s.closed} of ${s.products} products closed, ${open} open`;
+        const un = Number(s.unattributed) > 0 ? `; ${s.unattributed} confirmed doc(s) name no product and would close nothing` : '';
+        console.log(`      ${s.supplier_name}: ${note}${un}`);
+      }
+    }
+    if (plan.skipped.length > 0) {
+      console.log('\nSkipped:');
+      for (const s of plan.skipped) console.log(`  ${s.name} (${s.slug}) — ${SKIP_REASONS[s.reason]} [${s.scope}]`);
+    }
+    console.log(
+      '\nBound: before 0123 nothing recorded a scope, so "still supplier, no audit row" is the only evidence nobody decided.',
+    );
+  }
+
+  if (!opts.apply || impact.length === 0) {
+    if (!opts.apply && impact.length > 0) console.log('\nDry run. Re-run with --apply to write.');
+    return;
+  }
+  if (opts.remote && !opts.yes) {
+    const typed = promptSync(`\nThis writes to PRODUCTION. Type the tenant id (${opts.tenant}) to continue: `);
+    if (typed.trim() !== opts.tenant) {
+      console.error('Tenant id did not match. Nothing written.');
+      process.exit(1);
+    }
+  }
+  const statements = impact.flatMap((p) => proposalToSql(opts.tenant, p));
+  execSql(statements, opts);
+  console.log(`\nWrote ${impact.length} scope change(s), each with a requirement.scope_changed audit row.`);
+}
+
+main();

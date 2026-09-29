@@ -3415,6 +3415,168 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/supplier-gaps:
+    get:
+      tags: [Supplier Requirements]
+      summary: What each supplier still owes (applicable minus confirmed closures)
+      description: |
+        The gap engine (`shared/requirementGap.ts`). One shape for one supplier
+        or the whole tenant. `status` has FOUR values and never collapses the
+        warnings into a pass: `not_configured` (nothing applies), `open`,
+        `products_not_configured` (migration 0123: everything counted is closed,
+        but per-product requirements are in use for this supplier and an active
+        product has nothing applying to it -- amber, never green) and
+        `satisfied`.
+
+        Requirement scope (0123): a requirement with `scope: product` is owed
+        by every ACTIVE product of the supplier (linked through
+        `product_suppliers` or the legacy `products.supplier_id`, active, not
+        marked no longer supplied), minus `product_requirements` exemptions,
+        plus its `add` rows. A (requirement, product) pair is closed only by a
+        confirmed document linked to that product (`document_products`); a
+        confirmed document linked to NO product closes nothing and is listed in
+        `unattributed`. Zero active products is open with
+        `gap_reason: no_products`. Such an item carries `scope`,
+        `subjects_total`, `subjects_satisfied`, `open_subjects`,
+        `exempt_subjects` and `unattributed`; a supplier-scope item carries
+        none of them. `scope: lot` is stored but judged once per supplier
+        (`lot_evaluation: supplier_level`) with a `lot_scope_not_evaluated`
+        caveat until per-lot checking ships.
+
+        `products` lists each active product's own state: `not_checked` while
+        no per-product requirement applies to the supplier (the gate -- a
+        supplier on supplier scope only is otherwise unchanged),
+        `not_configured`, `open`, `satisfied`.
+      parameters:
+        - { name: supplier_id, in: query, schema: { type: string } }
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+        - { name: include_recommended, in: query, schema: { type: boolean, default: false } }
+        - { name: status, in: query, schema: { type: string, enum: [open, satisfied, not_configured, products_not_configured] } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: Gaps, a rollup (incl. `products_not_configured`), and which tiers were counted
+          content:
+            application/json:
+              schema: { type: object }
+
+  /api/requirements/{id}/scope-preview:
+    get:
+      tags: [Supplier Requirements]
+      summary: What changing one requirement's scope would do (read-only)
+      description: |
+        Migration 0123. super_admin / org_admin. Loads the gap inputs of every
+        supplier the requirement reaches once and judges them twice -- as they
+        are, and as if the requirement had `scope` -- so the preview and the
+        report cannot compute "after" two ways. Save the change with
+        `PUT /api/requirements/{id}` `{ scope }`, which writes a
+        `requirement.scope_changed` audit row with the previous value.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: scope, in: query, required: true, schema: { type: string, enum: [supplier, product, lot] } }
+      responses:
+        '200':
+          description: Status transitions per supplier, product obligations created, documents that would stop counting
+          content:
+            application/json:
+              schema: { type: object }
+        '400':
+          description: Unknown scope
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/product-requirements:
+    get:
+      tags: [Supplier Requirements]
+      summary: Per-product exceptions (add / exempt)
+      description: Migration 0123. Any role in the tenant. Filters by supplier_id, product_id, requirement_id, mode.
+      parameters:
+        - { name: supplier_id, in: query, schema: { type: string } }
+        - { name: product_id, in: query, schema: { type: string } }
+        - { name: requirement_id, in: query, schema: { type: string } }
+        - { name: mode, in: query, schema: { type: string, enum: [add, exempt] } }
+      responses:
+        '200':
+          description: Rows with requirement, product and supplier names joined
+          content:
+            application/json:
+              schema: { type: object }
+    post:
+      tags: [Supplier Requirements]
+      summary: Add a per-product requirement to one product, or exempt one product
+      description: |
+        super_admin / org_admin. The requirement must be `scope: product` and
+        the product one the supplier ships (either link path). An exemption
+        needs a `reason`. 409 when the (supplier, product, requirement) row
+        exists. Audited `product_requirement.added` / `.exempted`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [supplier_id, product_id, requirement_id, mode]
+              properties:
+                supplier_id: { type: string }
+                product_id: { type: string }
+                requirement_id: { type: string }
+                mode: { type: string, enum: [add, exempt] }
+                tier: { type: string, enum: [required, recommended], default: required }
+                reason: { type: string, nullable: true }
+      responses:
+        '201': { description: Created }
+        '400': { description: Invalid target or missing reason }
+        '409': { description: A row already exists for this product and requirement }
+
+  /api/product-requirements/{id}:
+    put:
+      tags: [Supplier Requirements]
+      summary: Change mode, tier or reason
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Updated (audited product_requirement.updated with both sides) }
+        '404': { description: Not found in this tenant }
+    delete:
+      tags: [Supplier Requirements]
+      summary: Remove the exception (hard delete; the whole row is audited)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Removed }
+        '404': { description: Not found in this tenant }
+
+  /api/suppliers/{id}/products/{productId}:
+    put:
+      tags: [Suppliers]
+      summary: No longer supplied / nothing owed per product
+      description: |
+        Migration 0123. super_admin / org_admin. `discontinued` marks the link
+        no longer supplied (the product leaves per-product checking and is
+        named in a caveat); `nothing_owed_reason` declares the product owes
+        nothing per product (a reason is required; null clears). A legacy-only
+        link gets a `product_suppliers` row (source NULL) to hold the facts.
+        Audited `supplier_product.discontinued` / `.resupplied` /
+        `.nothing_owed_declared` / `.nothing_owed_cleared`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: productId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                discontinued: { type: boolean }
+                nothing_owed_reason: { type: string, nullable: true }
+      responses:
+        '200': { description: The link row after the change }
+        '400': { description: Nothing to change, or a declaration without a reason }
+        '404': { description: Supplier or product not found, or not linked }
+
   /api/spec-gaps:
     get:
       tags: [Spec Register]

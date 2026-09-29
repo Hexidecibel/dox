@@ -83,6 +83,7 @@ function project(pack) {
       description: r.description,
       checklist: r.checklist,
       sort_order: r.sort_order,
+      scope: r.scope,
     })),
     claim_types: pack.claim_types.map((c) => ({
       name: c.name,
@@ -147,6 +148,8 @@ export interface StarterPackRequirement {
   description: string | null;
   checklist: string | null;
   sort_order: number;
+  /** What it is owed PER (migration 0123): 'supplier' | 'product' | 'lot'. */
+  scope: string;
 }
 
 export interface StarterPackClaimType {

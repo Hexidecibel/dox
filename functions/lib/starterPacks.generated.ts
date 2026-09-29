@@ -28,6 +28,8 @@ export interface StarterPackRequirement {
   description: string | null;
   checklist: string | null;
   sort_order: number;
+  /** What it is owed PER (migration 0123): 'supplier' | 'product' | 'lot'. */
+  scope: string;
 }
 
 export interface StarterPackClaimType {
@@ -346,91 +348,104 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "trial-balance-on-file",
         "description": null,
         "checklist": "Period Close",
-        "sort_order": 10
+        "sort_order": 10,
+        "scope": "supplier"
       },
       {
         "name": "General Ledger on file",
         "slug": "general-ledger-on-file",
         "description": null,
         "checklist": "Period Close",
-        "sort_order": 20
+        "sort_order": 20,
+        "scope": "supplier"
       },
       {
         "name": "Bank Reconciliations on file",
         "slug": "bank-reconciliations-on-file",
         "description": null,
         "checklist": "Period Close",
-        "sort_order": 30
+        "sort_order": 30,
+        "scope": "supplier"
       },
       {
         "name": "Financial Statements on file",
         "slug": "financial-statements-on-file",
         "description": null,
         "checklist": "Period Close",
-        "sort_order": 40
+        "sort_order": 40,
+        "scope": "supplier"
       },
       {
         "name": "Payroll Register on file",
         "slug": "payroll-register-on-file",
         "description": null,
         "checklist": "Period Close",
-        "sort_order": 50
+        "sort_order": 50,
+        "scope": "supplier"
       },
       {
         "name": "Fixed Asset Register on file",
         "slug": "fixed-asset-register-on-file",
         "description": null,
         "checklist": "Period Close",
-        "sort_order": 60
+        "sort_order": 60,
+        "scope": "supplier"
       },
       {
         "name": "Journal Entry Support on file",
         "slug": "journal-entry-support-on-file",
         "description": null,
         "checklist": "Period Close",
-        "sort_order": 70
+        "sort_order": 70,
+        "scope": "supplier"
       },
       {
         "name": "Board Approval on file",
         "slug": "board-approval-on-file",
         "description": null,
         "checklist": "Period Close",
-        "sort_order": 80
+        "sort_order": 80,
+        "scope": "supplier"
       },
       {
         "name": "Tax Return on file",
         "slug": "tax-return-on-file",
         "description": null,
         "checklist": "Tax & Audit",
-        "sort_order": 90
+        "sort_order": 90,
+        "scope": "supplier"
       },
       {
         "name": "External Audit Report on file",
         "slug": "external-audit-report-on-file",
         "description": null,
         "checklist": "Tax & Audit",
-        "sort_order": 100
+        "sort_order": 100,
+        "scope": "supplier"
       },
       {
         "name": "Counterparty W-9 on file",
         "slug": "counterparty-w9-on-file",
         "description": null,
         "checklist": "Counterparty",
-        "sort_order": 110
+        "sort_order": 110,
+        "scope": "supplier"
       },
       {
         "name": "Executed Contract on file",
         "slug": "executed-contract-on-file",
         "description": null,
         "checklist": "Counterparty",
-        "sort_order": 120
+        "sort_order": 120,
+        "scope": "supplier"
       },
       {
         "name": "Insurance Certificate on file",
         "slug": "insurance-certificate-on-file",
         "description": null,
         "checklist": "Counterparty",
-        "sort_order": 130
+        "sort_order": 130,
+        "scope": "supplier"
       }
     ],
     "claim_types": [
@@ -866,224 +881,256 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "spec-sheet",
         "description": "A current product specification is on file.",
         "checklist": "Product Specification",
-        "sort_order": 10
+        "sort_order": 10,
+        "scope": "product"
       },
       {
         "name": "Microbiological Limits",
         "slug": "micro-limits",
         "description": "Micro limits stated for the product.",
         "checklist": "Product Specification",
-        "sort_order": 20
+        "sort_order": 20,
+        "scope": "supplier"
       },
       {
         "name": "Pack Size / Case Configuration",
         "slug": "pack-size",
         "description": null,
         "checklist": "Product Specification",
-        "sort_order": 30
+        "sort_order": 30,
+        "scope": "supplier"
       },
       {
         "name": "100g Nutritionals",
         "slug": "nutritionals-100g",
         "description": "Nutrition values per 100g.",
         "checklist": "Allergens, Labeling & Nutrition",
-        "sort_order": 40
+        "sort_order": 40,
+        "scope": "product"
       },
       {
         "name": "Allergen Matrix",
         "slug": "allergen-matrix",
         "description": "Allergen declaration covering the big-9.",
         "checklist": "Allergens, Labeling & Nutrition",
-        "sort_order": 50
+        "sort_order": 50,
+        "scope": "product"
       },
       {
         "name": "Country of Origin",
         "slug": "country-of-origin",
         "description": null,
         "checklist": "Product Specification",
-        "sort_order": 60
+        "sort_order": 60,
+        "scope": "supplier"
       },
       {
         "name": "GTIN / UPC",
         "slug": "gtin",
         "description": null,
         "checklist": "Product Specification",
-        "sort_order": 70
+        "sort_order": 70,
+        "scope": "supplier"
       },
       {
         "name": "Shelf Life & Storage",
         "slug": "shelf-life",
         "description": null,
         "checklist": "Product Specification",
-        "sort_order": 80
+        "sort_order": 80,
+        "scope": "supplier"
       },
       {
         "name": "Ingredient Statement",
         "slug": "ingredient-statement",
         "description": null,
         "checklist": "Allergens, Labeling & Nutrition",
-        "sort_order": 90
+        "sort_order": 90,
+        "scope": "product"
       },
       {
         "name": "Certificate of Analysis on file",
         "slug": "coa-on-file",
         "description": null,
         "checklist": "Certificates of Analysis",
-        "sort_order": 100
+        "sort_order": 100,
+        "scope": "lot"
       },
       {
         "name": "Safety Data Sheet on file",
         "slug": "sds-on-file",
         "description": "Required for chemicals and sanitation products.",
         "checklist": "Regulatory Registrations & Statements",
-        "sort_order": 110
+        "sort_order": 110,
+        "scope": "supplier"
       },
       {
         "name": "Letter of Guarantee on file",
         "slug": "letter-of-guarantee",
         "description": null,
         "checklist": "Commercial & Legal",
-        "sort_order": 120
+        "sort_order": 120,
+        "scope": "supplier"
       },
       {
         "name": "Certificate of Insurance on file",
         "slug": "certificate-of-insurance",
         "description": null,
         "checklist": "Commercial & Legal",
-        "sort_order": 130
+        "sort_order": 130,
+        "scope": "supplier"
       },
       {
         "name": "W-9 on file",
         "slug": "w9-on-file",
         "description": null,
         "checklist": "Commercial & Legal",
-        "sort_order": 140
+        "sort_order": 140,
+        "scope": "supplier"
       },
       {
         "name": "3rd Party Audit REPORT on file",
         "slug": "third-party-audit-report",
         "description": "The full audit report. Separate line item from the certificate — a supplier can send one without the other, and only having the certificate hides the findings.",
         "checklist": "Audit & Certification",
-        "sort_order": 150
+        "sort_order": 150,
+        "scope": "supplier"
       },
       {
         "name": "3rd Party Audit CERTIFICATE on file",
         "slug": "third-party-audit-certificate",
         "description": "The valid-through certificate. Separate line item from the report, and the one that drives expiry tracking.",
         "checklist": "Audit & Certification",
-        "sort_order": 160
+        "sort_order": 160,
+        "scope": "supplier"
       },
       {
         "name": "HACCP Plan on file",
         "slug": "haccp-plan",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 170
+        "sort_order": 170,
+        "scope": "supplier"
       },
       {
         "name": "Food Safety Plan on file",
         "slug": "food-safety-plan",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 180
+        "sort_order": 180,
+        "scope": "supplier"
       },
       {
         "name": "Food Defense Plan on file",
         "slug": "food-defense-plan",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 190
+        "sort_order": 190,
+        "scope": "supplier"
       },
       {
         "name": "Recall Program on file",
         "slug": "recall-program",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 200
+        "sort_order": 200,
+        "scope": "supplier"
       },
       {
         "name": "Pest Control Program on file",
         "slug": "pest-control-program",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 210
+        "sort_order": 210,
+        "scope": "supplier"
       },
       {
         "name": "Sanitation Program on file",
         "slug": "sanitation-program",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 220
+        "sort_order": 220,
+        "scope": "supplier"
       },
       {
         "name": "GMP Self Audit on file",
         "slug": "gmp-self-audit",
         "description": null,
         "checklist": "Audit & Certification",
-        "sort_order": 230
+        "sort_order": 230,
+        "scope": "supplier"
       },
       {
         "name": "Process Flow Diagram on file",
         "slug": "process-flow-diagram",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 240
+        "sort_order": 240,
+        "scope": "supplier"
       },
       {
         "name": "Product Label on file",
         "slug": "product-label",
         "description": null,
         "checklist": "Allergens, Labeling & Nutrition",
-        "sort_order": 250
+        "sort_order": 250,
+        "scope": "product"
       },
       {
         "name": "Organic Certificate on file",
         "slug": "organic-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 260
+        "sort_order": 260,
+        "scope": "supplier"
       },
       {
         "name": "Kosher Certificate on file",
         "slug": "kosher-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 270
+        "sort_order": 270,
+        "scope": "supplier"
       },
       {
         "name": "Halal Certificate on file",
         "slug": "halal-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 280
+        "sort_order": 280,
+        "scope": "supplier"
       },
       {
         "name": "Gluten-Free Certificate on file",
         "slug": "gluten-free-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 290
+        "sort_order": 290,
+        "scope": "supplier"
       },
       {
         "name": "Non-GMO Certificate on file",
         "slug": "non-gmo-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 300
+        "sort_order": 300,
+        "scope": "supplier"
       },
       {
         "name": "Animal Welfare Certificate on file",
         "slug": "animal-welfare-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 310
+        "sort_order": 310,
+        "scope": "supplier"
       },
       {
         "name": "Sustainability Certificate on file",
         "slug": "sustainability-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 320
+        "sort_order": 320,
+        "scope": "supplier"
       }
     ],
     "claim_types": [

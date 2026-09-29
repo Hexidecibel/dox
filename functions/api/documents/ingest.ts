@@ -496,8 +496,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           // known for this ingest.
           if (supplierId) {
             await context.env.DB.prepare(
-              `INSERT INTO product_suppliers (id, tenant_id, product_id, supplier_id)
-               VALUES (?, ?, ?, ?)
+              `INSERT INTO product_suppliers (id, tenant_id, product_id, supplier_id, source)
+               VALUES (?, ?, ?, ?, 'connector')
                ON CONFLICT(product_id, supplier_id) DO NOTHING`
             )
               .bind(generateId(), tenantId, link.product_id, supplierId)
@@ -703,8 +703,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           // known for this ingest.
           if (supplierId) {
             await context.env.DB.prepare(
-              `INSERT INTO product_suppliers (id, tenant_id, product_id, supplier_id)
-               VALUES (?, ?, ?, ?)
+              `INSERT INTO product_suppliers (id, tenant_id, product_id, supplier_id, source)
+               VALUES (?, ?, ?, ?, 'connector')
                ON CONFLICT(product_id, supplier_id) DO NOTHING`
             )
               .bind(generateId(), tenantId, link.product_id, supplierId)

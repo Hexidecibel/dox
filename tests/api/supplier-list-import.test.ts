@@ -73,6 +73,7 @@ beforeEach(async () => {
   for (const t of [seed.tenantId, seed.tenantId2]) {
     await db.prepare('DELETE FROM supplier_requirements WHERE tenant_id = ?').bind(t).run();
     await db.prepare('DELETE FROM supplier_list_imports WHERE tenant_id = ?').bind(t).run();
+    await db.prepare('DELETE FROM product_suppliers WHERE tenant_id = ?').bind(t).run();
     await db.prepare('DELETE FROM product_identifiers WHERE tenant_id = ?').bind(t).run();
     await db.prepare('DELETE FROM products WHERE tenant_id = ?').bind(t).run();
     await db.prepare('DELETE FROM suppliers WHERE tenant_id = ?').bind(t).run();
@@ -103,6 +104,7 @@ describe('POST /api/supplier-list/import — dry run', () => {
     expect(await count('SELECT COUNT(*) AS n FROM suppliers WHERE tenant_id = ?', seed.tenantId)).toBe(0);
     expect(await count('SELECT COUNT(*) AS n FROM supplier_requirements WHERE tenant_id = ?', seed.tenantId)).toBe(0);
     expect(await count('SELECT COUNT(*) AS n FROM supplier_list_imports')).toBe(0);
+    expect(await count('SELECT COUNT(*) AS n FROM product_suppliers WHERE tenant_id = ?', seed.tenantId)).toBe(0);
     expect(await count('SELECT COUNT(*) AS n FROM audit_log')).toBe(auditBefore);
 
     expect(body.counts).toMatchObject({
@@ -202,6 +204,15 @@ describe('POST /api/supplier-list/import — apply', () => {
       expect.arrayContaining([{ rule: 'claim', claim: 'rbst-free', product: '0801 Unsalted Butter 25kg Bag' }]),
     );
     expect(await rowsFor(seed.tenantId, 'Old Creamery Supply')).toEqual([]);
+
+    // 0123: the verified list records the matched product as supplied, stamped 'import'.
+    const link = await db
+      .prepare(
+        `SELECT ps.source FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
+          WHERE ps.product_id = 'prod_0801' AND s.name = 'Darigold, Inc.'`,
+      )
+      .first<{ source: string }>();
+    expect(link?.source).toBe('import');
 
     const run = await db
       .prepare('SELECT file_name, input_format, pack, counts, row_outcomes, input_rows, created_by FROM supplier_list_imports WHERE id = ?')

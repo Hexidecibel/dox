@@ -559,7 +559,7 @@ export async function produceCoa(
   const effectiveProductName = productName || approvedFields.product_name || aiProductName || null;
   let linkedProductId: string | null = null;
   if (effectiveProductName) {
-    const product = await findOrCreateProduct(db, item.tenant_id, effectiveProductName, { supplierId });
+    const product = await findOrCreateProduct(db, item.tenant_id, effectiveProductName, { supplierId, source: 'certificate' });
     linkedProductId = product.id;
 
     // Link document to product
@@ -866,7 +866,7 @@ export async function produceMultiProductCoa(
     // backfill + product_suppliers provenance link).
     let perProductId: string | null = null;
     if (product.productName) {
-      const productRecord = await findOrCreateProduct(db, item.tenant_id, product.productName, { supplierId });
+      const productRecord = await findOrCreateProduct(db, item.tenant_id, product.productName, { supplierId, source: 'certificate' });
       perProductId = productRecord.id;
 
       await db.prepare(
@@ -1350,7 +1350,7 @@ export async function produceCoaRecords(
     let perProductId: string | null = null;
     const productName = record.fields?.product_name || pageMetadata.product_name || null;
     if (productName) {
-      const productRecord = await findOrCreateProduct(db, item.tenant_id, productName, { supplierId });
+      const productRecord = await findOrCreateProduct(db, item.tenant_id, productName, { supplierId, source: 'certificate' });
       perProductId = productRecord.id;
       await db
         .prepare(

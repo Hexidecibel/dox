@@ -424,6 +424,23 @@ export default function SupplierRequirementsEditor({
                     />
                   );
                 })()}
+                {row.requirement_scope === 'product' || row.requirement_scope === 'lot' ? (
+                  <Tooltip
+                    title={
+                      row.requirement_scope === 'product'
+                        ? 'Owed by every active product of this supplier. A product can be exempted (with a reason) on the Products tab.'
+                        : 'Owed per lot. Per-lot checking has not shipped yet, so it is judged once for this supplier.'
+                    }
+                  >
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      color="info"
+                      label={row.requirement_scope === 'product' ? 'per product' : 'per lot'}
+                      sx={{ mt: 0.5, ml: 0.5 }}
+                    />
+                  </Tooltip>
+                ) : null}
                 {row.requirement_active === 0 ? (
                   <Tooltip title="This requirement is deactivated, so it will not be counted.">
                     <Chip

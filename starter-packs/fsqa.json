@@ -21,6 +21,9 @@
     "",
     "owner_labels        = the departments this vertical has. LABELS ONLY — a route needs a real person, and a human adds those.",
     "requirement_packets = named sets of requirements, applied to ONE supplier at a time. Nothing is seeded from these.",
+    "On a requirement, scope = what it is owed PER: 'supplier' (the default, closed once), 'product' (owed by every",
+    "                      active product of the supplier, closed only by a document linked to that product) or 'lot'",
+    "                      (stored; judged once per supplier until per-lot checking ships). New organisations only.",
     "spec_tests          = the analytes we judge COA results against. The 'aliases' list is the load-bearing part:",
     "                      matching is EXACT on the printed name, so a spelling that is missing here resolves to",
     "                      'not_checked' rather than to a pass or a fail.",
@@ -426,6 +429,7 @@
     {
       "name": "Specification Sheet on file",
       "slug": "spec-sheet",
+      "scope": "product",
       "checklist": "Product Specification",
       "description": "A current product specification is on file."
     },
@@ -443,12 +447,14 @@
     {
       "name": "100g Nutritionals",
       "slug": "nutritionals-100g",
+      "scope": "product",
       "checklist": "Allergens, Labeling & Nutrition",
       "description": "Nutrition values per 100g."
     },
     {
       "name": "Allergen Matrix",
       "slug": "allergen-matrix",
+      "scope": "product",
       "checklist": "Allergens, Labeling & Nutrition",
       "description": "Allergen declaration covering the big-9."
     },
@@ -470,11 +476,13 @@
     {
       "name": "Ingredient Statement",
       "slug": "ingredient-statement",
+      "scope": "product",
       "checklist": "Allergens, Labeling & Nutrition"
     },
     {
       "name": "Certificate of Analysis on file",
       "slug": "coa-on-file",
+      "scope": "lot",
       "checklist": "Certificates of Analysis"
     },
     {
@@ -553,6 +561,7 @@
     {
       "name": "Product Label on file",
       "slug": "product-label",
+      "scope": "product",
       "checklist": "Allergens, Labeling & Nutrition"
     },
     {

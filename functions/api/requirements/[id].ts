@@ -12,6 +12,11 @@ import {
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
 import { slugifyVocab } from '../../lib/registry-vocab';
+import {
+  REQUIREMENT_SCOPES,
+  isRequirementScope,
+  normalizeRequirementScope,
+} from '../../../shared/requirementScope';
 import type { Env, User } from '../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -44,7 +49,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
 /**
  * PUT /api/requirements/:id
- * Fields: name, slug, description, checklist, sort_order, active.
+ * Fields: name, slug, description, checklist, sort_order, active, scope.
+ *
+ * `scope` (0123) changes what every supplier this requirement is attached to
+ * owes — "once" becomes "once per active product". It is audited on its own
+ * (`requirement.scope_changed`, with the previous value) because it is the
+ * one field here that moves gap reports; preview the impact first with
+ * GET /api/requirements/:id/scope-preview?scope=.
  * Renaming does NOT re-slug automatically — the slug is the stable identifier
  * that starter packs and importers key on, and silently rewriting it would
  * break a re-run of `bin/create-tenant`. Pass `slug` explicitly to change it.
@@ -69,10 +80,24 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       checklist?: string | null;
       sort_order?: number;
       active?: number | boolean;
+      scope?: string;
     };
 
     const updates: string[] = [];
     const params: (string | number | null)[] = [];
+    let scopeChange: { from: string; to: string } | null = null;
+
+    if (body.scope !== undefined) {
+      if (!isRequirementScope(body.scope)) {
+        return json({ error: `scope must be one of: ${REQUIREMENT_SCOPES.join(', ')}` }, 400);
+      }
+      const from = normalizeRequirementScope(requirement.scope);
+      if (from !== body.scope) {
+        updates.push('scope = ?');
+        params.push(body.scope);
+        scopeChange = { from, to: body.scope };
+      }
+    }
 
     if (body.name !== undefined) {
       const name = sanitizeString(body.name);
@@ -120,7 +145,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       params.push(active);
     }
 
-    if (updates.length === 0) return json({ error: 'No fields to update' }, 400);
+    if (updates.length === 0) {
+      // A scope "change" to the value already stored is a no-op, not an error.
+      if (body.scope !== undefined) return json({ requirement });
+      return json({ error: 'No fields to update' }, 400);
+    }
 
     updates.push("updated_at = datetime('now')");
     params.push(id);
@@ -139,6 +168,19 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       JSON.stringify({ changes: body }),
       getClientIp(context.request),
     );
+
+    if (scopeChange) {
+      await logAudit(
+        context.env.DB,
+        user.id,
+        requirement.tenant_id as string,
+        'requirement.scope_changed',
+        'requirement',
+        id,
+        JSON.stringify({ name: requirement.name, from: scopeChange.from, to: scopeChange.to }),
+        getClientIp(context.request),
+      );
+    }
 
     const updated = await context.env.DB.prepare('SELECT * FROM requirements WHERE id = ?')
       .bind(id)

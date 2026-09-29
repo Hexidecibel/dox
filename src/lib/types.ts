@@ -11,6 +11,8 @@ export type {
   ApiTenant,
   ApiAuditEntry,
   ApiProduct,
+  ApiProductRequirement,
+  RequirementScopePreview,
   ApiDocumentType,
   LoginResponse,
   RegisterResponse,
@@ -228,7 +230,15 @@ export type {
   SupplierGapListResponse,
   SupplierGapGetResponse,
   ClassificationCounts,
+  GapReason,
+  GapSubject,
+  GapExemptSubject,
+  GapExemptRequirement,
+  GapProductRequirement,
+  ProductGap,
+  ProductGapStatus,
 } from '../../shared/requirementGap';
+export type { RequirementScope } from '../../shared/requirementScope';
 
 // ---------------------------------------------------------------------------
 // The request composer (migration 0090) — composing, issuing, amending and

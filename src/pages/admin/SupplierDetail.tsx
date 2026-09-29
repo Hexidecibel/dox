@@ -55,13 +55,14 @@ import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
 import LotSchemeSelect from '../../components/LotSchemeSelect';
 import SupplierProductIdentifiersPanel from '../../components/SupplierProductIdentifiersPanel';
 import SupplierLotFormatPanel from '../../components/SupplierLotFormatPanel';
-import SupplierRequirementGaps from '../../components/SupplierRequirementGaps';
+import SupplierRequirementGaps, { ProductStatusChip } from '../../components/SupplierRequirementGaps';
+import ProductRequirementsPanel from '../../components/ProductRequirementsPanel';
 import SupplierRequirementsEditor from '../../components/SupplierRequirementsEditor';
 import EntityNotes from '../../components/EntityNotes';
 import { SupplierWatchPanel } from '../../components/SupplierWatchPanel';
 import { useAuth } from '../../contexts/AuthContext';
 import { useModuleAccess } from '../../contexts/ModuleAccessContext';
-import type { LotScheme } from '../../lib/types';
+import type { LotScheme, ProductGap } from '../../lib/types';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -87,9 +88,16 @@ function TabPanel({ children, value, index }: TabPanelProps) {
 function ProductLotsRow({
   product,
   supplierId,
+  productGap,
+  canEdit,
+  onChanged,
 }: {
   product: ApiProduct;
   supplierId: string;
+  /** This product's state in the gap report (0123); undefined when it is not active for the supplier. */
+  productGap?: ProductGap;
+  canEdit: boolean;
+  onChanged: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [lots, setLots] = useState<LotListItem[] | null>(null);
@@ -138,12 +146,31 @@ function ProductLotsRow({
             variant="outlined"
           />
         </TableCell>
+        <TableCell>
+          {product.link_discontinued_at ? (
+            <Chip size="small" label="No longer supplied" />
+          ) : productGap ? (
+            <ProductStatusChip product={productGap} />
+          ) : (
+            '—'
+          )}
+        </TableCell>
         <TableCell>{formatDate(product.created_at)}</TableCell>
       </TableRow>
       <TableRow>
-        <TableCell sx={{ py: 0, borderBottom: open ? undefined : 'none' }} colSpan={5}>
+        <TableCell sx={{ py: 0, borderBottom: open ? undefined : 'none' }} colSpan={6}>
           <Collapse in={open} timeout="auto" unmountOnExit>
             <Box sx={{ py: 2 }}>
+              <ProductRequirementsPanel
+                supplierId={supplierId}
+                product={product}
+                productGap={productGap}
+                canEdit={canEdit}
+                onChanged={onChanged}
+              />
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                Lots
+              </Typography>
               {loading ? (
                 <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
                   <CircularProgress size={22} />
@@ -261,6 +288,8 @@ export function SupplierDetail() {
 
   // Products state
   const [products, setProducts] = useState<ApiProduct[]>([]);
+  /** product_id -> its per-product state from the gap report (0123). */
+  const [productGaps, setProductGaps] = useState<Map<string, ProductGap>>(new Map());
   const [productsLoading, setProductsLoading] = useState(false);
   const [productDialogOpen, setProductDialogOpen] = useState(false);
   const [productNotice, setProductNotice] = useState('');
@@ -361,13 +390,20 @@ export function SupplierDetail() {
     if (!id) return;
     setProductsLoading(true);
     try {
-      const result = await api.products.list({ supplier_id: id });
+      const result = await api.products.list({ supplier_id: id, limit: 200 });
       setProducts(result.products);
     } catch {
       // Products may not support supplier_id filter yet; silently fail
       setProducts([]);
     } finally {
       setProductsLoading(false);
+    }
+    // The per-product state is an addition: a failed read leaves the column blank.
+    try {
+      const gaps = await api.supplierGaps.list({ supplier_id: id });
+      setProductGaps(new Map((gaps.gaps[0]?.products ?? []).map((p) => [p.product_id, p])));
+    } catch {
+      setProductGaps(new Map());
     }
   }, [id]);
 
@@ -849,12 +885,20 @@ export function SupplierDetail() {
                   <TableCell>Name</TableCell>
                   <TableCell>Description</TableCell>
                   <TableCell>Status</TableCell>
+                  <TableCell>Requirements</TableCell>
                   <TableCell>Created</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {products.map((product) => (
-                  <ProductLotsRow key={product.id} product={product} supplierId={supplier.id} />
+                  <ProductLotsRow
+                    key={product.id}
+                    product={product}
+                    supplierId={supplier.id}
+                    productGap={productGaps.get(product.id)}
+                    canEdit={isAdmin}
+                    onChanged={loadProducts}
+                  />
                 ))}
               </TableBody>
             </Table>

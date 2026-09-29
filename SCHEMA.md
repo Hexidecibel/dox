@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 139 tables, 2 views, 233 indexes, 36 triggers.
+Objects: 140 tables, 2 views, 236 indexes, 36 triggers.
 
 ## Core documents & versions
 
@@ -260,6 +260,12 @@ Indexes: `idx_product_identifiers_lookup`, `idx_product_identifiers_product`, `i
   supplier_sku TEXT
   created_at TEXT DEFAULT (datetime('now'))
   updated_at TEXT DEFAULT (datetime('now'))
+  source TEXT
+  discontinued_at TEXT
+  discontinued_by TEXT
+  nothing_owed_reason TEXT
+  nothing_owed_at TEXT
+  nothing_owed_by TEXT
   UNIQUE(product_id, supplier_id)
 ```
 
@@ -1739,6 +1745,27 @@ Indexes: `idx_intake_duplicates_document`, `idx_intake_duplicates_matched_queue`
 
 Indexes: `idx_owner_routes_by_user`, `idx_owner_routes_lookup`, `idx_owner_routes_unique`
 
+### `product_requirements`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE
+  product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE
+  requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE
+  mode TEXT NOT NULL CHECK (mode IN ('add', 'exempt'))
+  tier TEXT NOT NULL DEFAULT 'required' CHECK (tier IN ('required', 'recommended'))
+  reason TEXT
+  source TEXT
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_by TEXT
+  UNIQUE (tenant_id, supplier_id, product_id, requirement_id)
+```
+
+Indexes: `idx_product_requirements_product`, `idx_product_requirements_requirement`, `idx_product_requirements_supplier`
+
 ### `renewal_alert_state`
 
 ```sql
@@ -1920,6 +1947,7 @@ Indexes: `idx_request_uploads_link`, `idx_request_uploads_pending`, `idx_request
   active INTEGER NOT NULL DEFAULT 1
   created_at TEXT DEFAULT (datetime('now'))
   updated_at TEXT DEFAULT (datetime('now'))
+  scope TEXT NOT NULL DEFAULT 'supplier'
   UNIQUE(tenant_id, slug)
 ```
 

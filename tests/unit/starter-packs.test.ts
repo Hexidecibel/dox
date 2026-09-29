@@ -29,7 +29,9 @@ import {
   slugify,
   sqlQuote,
   sqlNum,
+  REQUIREMENT_SCOPES as REQUIREMENT_SCOPES_MJS,
 } from '../../bin/lib/starter-packs.mjs';
+import { REQUIREMENT_SCOPES } from '../../shared/requirementScope';
 import { MODULE_KEYS } from '../../shared/modules';
 import {
   packRowId as packRowIdTs,
@@ -949,5 +951,47 @@ describe('fsqa pack — neutral requirement groups (F5)', () => {
 
   it('names no customer document anywhere in the pack', () => {
     expect(fsqaRaw).not.toMatch(/SOP\s*\d|102\.2|Medosweet/i);
+  });
+});
+
+/**
+ * Requirement scope (migration 0123). The pack says what each requirement is
+ * owed PER, and it reaches NEW organisations only (INSERT OR IGNORE).
+ */
+describe('fsqa pack — requirement scope (0123)', () => {
+  it('the .mjs mirror of the scope vocabulary equals shared/requirementScope.ts', () => {
+    expect(REQUIREMENT_SCOPES_MJS).toEqual([...REQUIREMENT_SCOPES]);
+  });
+
+  it('marks the per-product documents product scope and the COA lot scope', () => {
+    const scopeOf = (slug: string) =>
+      STARTER_PACKS.fsqa.requirements.find((r) => r.slug === slug)?.scope;
+    for (const slug of [
+      'spec-sheet',
+      'ingredient-statement',
+      'allergen-matrix',
+      'nutritionals-100g',
+      'product-label',
+    ]) {
+      expect(scopeOf(slug), slug).toBe('product');
+    }
+    expect(scopeOf('coa-on-file')).toBe('lot');
+    expect(scopeOf('certificate-of-insurance')).toBe('supplier');
+    for (const r of STARTER_PACKS.finance.requirements) expect(r.scope).toBe('supplier');
+  });
+
+  it('the SQL applier writes the scope', () => {
+    const sql = packToStatements(fsqa, TENANT).join('\n');
+    expect(sql).toMatch(
+      /INSERT OR IGNORE INTO requirements \([^)]*scope\) VALUES \([^;]*'spec-sheet'[^;]*'product'\);/,
+    );
+  });
+
+  it('refuses an unknown scope', () => {
+    const pack = JSON.parse(fsqaRaw);
+    pack.requirements[0].scope = 'facility';
+    expect(() => normalizePack(pack)).toThrow(
+      /scope "facility" must be one of supplier, product, lot/,
+    );
   });
 });
