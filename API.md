@@ -1265,7 +1265,31 @@ What a supplier owes, derived from the client's verified supplier list instead o
 
 **`dry_run` defaults to true and writes nothing at all** — not even a run row. A caller has to say it means to write. The response is the same shape either way, so the reviewer reads one report.
 
-Applying creates missing suppliers, writes derived rows with their provenance, **adopts** rows nobody had attributed (never lowering their tier — a lower derived tier is left for a person), and **flags** derived rows the list no longer implies rather than deleting them. A row a human or a packet wrote is never touched. A requirement slug the tenant does not hold is reported, never invented.
+Applying creates missing suppliers, writes derived rows with their provenance, **adopts** rows nobody had attributed (never lowering their tier — a lower derived tier is left for a person), and **flags** derived rows the list no longer implies rather than deleting them. A row a human or a packet wrote is never touched. A requirement slug the tenant does not hold is reported, never invented. An applied import also records each matched product as supplied by its supplier (`product_suppliers.source = 'import'`), so per-product requirements judge it.
+
+---
+
+## Requirement Scope — per supplier, per product, per lot
+
+What a requirement is owed PER (migration 0123). `requirements.scope` is `supplier` (default — closed once by any confirmed document), `product` or `lot`; validated in code (`shared/requirementScope.ts`), no SQL CHECK. `supplier_requirements` stays the one attach point: attaching a per-product requirement to a supplier means "owed for every **active** product of that supplier" (linked through `product_suppliers` or the legacy `products.supplier_id`, `products.active = 1`, not marked no longer supplied).
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `POST /api/requirements`, `PUT /api/requirements/:id` | super_admin, org_admin | Accept `scope`. A change writes `requirement.scope_changed` with `{from, to}`. |
+| `GET /api/requirements/:id/scope-preview?scope=` | super_admin, org_admin | Read-only: per supplier, status before/after, product obligations created, confirmed documents that would stop counting. |
+| `GET/POST /api/product-requirements`, `PUT/DELETE /api/product-requirements/:id` | read: any role; write: super_admin, org_admin | `exempt` one product from an inherited per-product requirement (**reason required**) or `add` one to one product. Only for a `product`-scope requirement and a product the supplier ships. |
+| `PUT /api/suppliers/:id/products/:productId` | super_admin, org_admin | `{ discontinued }` (no longer supplied) and `{ nothing_owed_reason }` (declared: owes nothing per product; reason required, null clears). |
+
+Rules the gap engine keeps (`GET /api/supplier-gaps`):
+
+- A (requirement, product) pair is closed only by a confirmed document **linked to that product** (`document_products`). A confirmed document linked to no product closes **nothing** — it is listed under `unattributed`, never read as "every product".
+- Zero active products is **open** (`gap_reason: no_products`), never a vacuous pass.
+- Inactive / no-longer-supplied products are named in a `products_excluded` caveat; a product created from a certificate's name with no confirmed identifier raises `possible_duplicate_products`.
+- **Gated:** a supplier with no per-product requirement (and no `add` row) is judged exactly as before; its `products` entries say `not_checked`. Once product scope is in use, a product with nothing applying and no declaration is `not_configured`, and the supplier reads `products_not_configured` (amber) rather than `satisfied`.
+- A claim about one product (`document_claims.subject_type = 'product'`) opens a per-product requirement for that product only; a facility claim applies supplier-wide with a caveat.
+- `lot` scope is stored but judged once per supplier until per-lot checking ships (`lot_evaluation: supplier_level`, caveat `lot_scope_not_evaluated`).
+
+The request composer's line closure reads the same closures (`loadConfirmedClosures`), so a per-product ask is never shown as closed by a document that names no product. Existing tenants: `bin/propose-requirement-scopes --tenant <id>` (dry run default) proposes the starter pack's scopes for rows still at the default with no audit row naming a scope.
 
 ---
 
