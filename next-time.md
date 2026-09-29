@@ -16,7 +16,7 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 **FOR AJ - DRAFTED, NOT SENT:** `~/drops/aj-2026-09-29/reply-to-aj.md` (21 numbered decisions) + 17-types, claim table, brand answer. Blockers: what a HOLD is; facility/line source; B2 precedence; C2 vs 0093; H2 whole vs per-lot; H6 shelf life shape. GFSI on AJ Clean: ASK him (question 21), do not apply.
 
-**NEXT:** search Phase 2 (Easy omnibox/cmd-K/preview; mockup https://claude.ai/artifact/PwNXjWnDpicwLYn5wpeCZ2, design `scratchpad` copy lost with the session - regenerate from the Plan in this entry's commit history if needed); product-scope Phase 2 (product-level analytes) + Phase 3 (lot scope); complaint intake awaits AJ's go. out4: iOS ticket title clip fix committed `ec49796f` on `fix/ios-ticket-title-clip` (worktree `~/local/src/out4-wt-ticket-clip`), needs an iPhone build; out4's own TicketRender/FitText tests fail 15 on master pre-existing.
+**NEXT:** search Phase 2 (Easy omnibox/cmd-K/preview; mockup https://claude.ai/artifact/PwNXjWnDpicwLYn5wpeCZ2, designs saved in `~/drops/dox-designs-2026-09-29/` (search-design.md, product-scope-design.md, aj-ledger.md, search-mockup.html)); product-scope Phase 2 (product-level analytes) + Phase 3 (lot scope); complaint intake awaits AJ's go. out4: iOS ticket title clip fix committed `ec49796f` on `fix/ios-ticket-title-clip` (worktree `~/local/src/out4-wt-ticket-clip`), needs an iPhone build; out4's own TicketRender/FitText tests fail 15 on master pre-existing.
 
 ---
 
