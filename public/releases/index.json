@@ -1,6 +1,11 @@
 {
-  "current": "2.26.0",
+  "current": "2.26.1",
   "versions": [
+    {
+      "version": "2.26.1",
+      "date": "2026-09-29",
+      "title": "Ask for a month"
+    },
     {
       "version": "2.26.0",
       "date": "2026-09-29",
