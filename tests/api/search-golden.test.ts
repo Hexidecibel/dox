@@ -179,7 +179,7 @@ const MONTHS: GoldenCase[] = [
   { q: 'sour cream produced in march', why: 'both March sour cream lots', expect: { coveringIncludes: [DOC.hollowSourA, DOC.hollowSourB] } },
   { q: 'butter produced April 2026', why: 'month + year', expect: { coveringIncludes: [DOC.cascadeMulti, DOC.cascadeSalted], notCovering: [DOC.cascadeMay1] } },
   { q: 'butter produced early may', why: 'a range phrase: May 1 is early May, May 15 is not', expect: { coveringIncludes: [DOC.cascadeMay1], notCovering: [DOC.cascadeSplit01, DOC.cascadeSplit02] } },
-  { q: 'egg produced in april', why: 'a legacy day inside the month is likely, never covering', expect: { coveringIncludes: [DOC.riversideEggStated], notCovering: [DOC.riversideEggLegacy] } },
+  { q: 'egg produced in april', why: 'a legacy day inside the month is likely, never covering', expect: { covering: [DOC.riversideEggStated], likelyIncludes: [DOC.riversideEggLegacy] } },
   { q: 'butter produced in february', why: 'a month with no lot at all', expect: { covering: [], coverage: 'none' } },
 ];
 
