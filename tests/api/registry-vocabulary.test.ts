@@ -243,6 +243,34 @@ describe('requirements — list', () => {
     expect(row.document_count).toBe(1);
     expect(row.claim_type_count).toBe(1);
   });
+
+  it('names the active document types whose approval proposes each item (closed_by_types)', async () => {
+    const reqId = await seedRequirement(seed.tenantId, 'Country of Origin (closed-by test)');
+    const lonely = await seedRequirement(seed.tenantId, 'Nothing closes me');
+    const mk = async (name: string, active: number) => {
+      const id = `dt-${generateTestId()}`;
+      await db
+        .prepare('INSERT INTO document_types (id, tenant_id, name, slug, active) VALUES (?, ?, ?, ?, ?)')
+        .bind(id, seed.tenantId, name, `slug-${id}`, active)
+        .run();
+      await db
+        .prepare(
+          `INSERT INTO document_type_requirements (id, tenant_id, document_type_id, requirement_id, source)
+           VALUES (?, ?, ?, ?, 'human')`,
+        )
+        .bind(`dtr-${generateTestId()}`, seed.tenantId, id, reqId)
+        .run();
+    };
+    await mk('Specification Sheet, current', 1); // a comma in a name must survive
+    await mk('Country of Origin Statement', 1);
+    await mk('Retired Type', 0);
+
+    const res = await call(reqList, { user: orgAdmin });
+    const row = res.body.requirements.find((r: any) => r.id === reqId);
+    expect(row.closed_by_types).toEqual(['Country of Origin Statement', 'Specification Sheet, current']);
+    expect(row.closed_by_types_raw).toBeUndefined();
+    expect(res.body.requirements.find((r: any) => r.id === lonely).closed_by_types).toEqual([]);
+  });
 });
 
 describe('requirements — read / update / delete', () => {

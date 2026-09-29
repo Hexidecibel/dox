@@ -57,6 +57,14 @@ import { DocumentTypeInstructionsDialog } from '../../components/DocumentTypeIns
 import { helpContent } from '../../lib/helpContent';
 import { LeadDaysField, LeadTimePreviewNote, useLeadTimePreview } from '../../components/RenewalLeadTime';
 import { DEFAULT_RENEWAL_ALERT_LEAD_DAYS } from '../../../shared/renewalLeadTime';
+import { TypeClosesRequirementsField } from '../../components/TypeClosesRequirementsField';
+
+/** Same members, order ignored. */
+function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const set = new Set(a);
+  return b.every((id) => set.has(id));
+}
 
 export function DocumentTypes() {
   const [documentTypes, setDocumentTypes] = useState<ApiDocumentType[]>([]);
@@ -104,6 +112,10 @@ export function DocumentTypes() {
   const [formLeadValid, setFormLeadValid] = useState(true);
   const [orgLeadDays, setOrgLeadDays] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
+  // What this type closes (migration 0100). null = not loaded yet; the
+  // original is kept so an unchanged mapping is never re-written.
+  const [formCloses, setFormCloses] = useState<string[] | null>(null);
+  const [closesOriginal, setClosesOriginal] = useState<string[] | null>(null);
 
   /**
    * Extraction-instruction state (migration 0098 — the document-type layer of
@@ -198,6 +210,8 @@ export function DocumentTypes() {
     setFormRenewalTouched(false);
     setFormLeadDays(null);
     setFormLeadValid(true);
+    setFormCloses([]);
+    setClosesOriginal([]);
     setFormTenantId(
       isSuperAdmin
         ? (tenantFilter || selectedTenantId || '')
@@ -224,7 +238,22 @@ export function DocumentTypes() {
     setFormLeadDays(dt.renewal_alert_lead_days ?? null);
     setFormLeadValid(true);
     setFormTenantId(dt.tenant_id);
+    setFormCloses(null);
+    setClosesOriginal(null);
     setDialogOpen(true);
+    api.documentTypeRequirements
+      .list({ documentTypeId: dt.id })
+      .then((res) => {
+        const ids = res.requirements.map((r) => r.requirement_id);
+        setFormCloses(ids);
+        setClosesOriginal(ids);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Could not load what this type closes');
+        setFormCloses([]);
+        // Left null: an unreadable mapping is never overwritten on save.
+        setClosesOriginal(null);
+      });
   };
 
   // The organization's lead time, for the "Use organization default (N days)"
@@ -299,6 +328,13 @@ export function DocumentTypes() {
           ...renewalPayload(),
           renewal_alert_lead_days: formLeadDays,
         });
+        if (formCloses !== null && closesOriginal !== null && !sameIdSet(formCloses, closesOriginal)) {
+          await api.documentTypeRequirements.replace({
+            documentTypeId: editingType.id,
+            requirementIds: formCloses,
+            source: 'human',
+          });
+        }
       } else {
         const tenantId = isSuperAdmin ? formTenantId : user?.tenant_id;
         if (!tenantId) {
@@ -306,7 +342,7 @@ export function DocumentTypes() {
           setSaving(false);
           return;
         }
-        await api.documentTypes.create({
+        const created = await api.documentTypes.create({
           name: formName.trim(),
           description: formDescription.trim() || undefined,
           tenant_id: tenantId,
@@ -315,6 +351,13 @@ export function DocumentTypes() {
           ...renewalPayload(),
           renewal_alert_lead_days: formLeadDays,
         });
+        if (formCloses && formCloses.length > 0 && created.documentType?.id) {
+          await api.documentTypeRequirements.replace({
+            documentTypeId: created.documentType.id,
+            requirementIds: formCloses,
+            source: 'human',
+          });
+        }
       }
       setDialogOpen(false);
       loadDocumentTypes();
@@ -704,6 +747,16 @@ export function DocumentTypes() {
               </Box>
             )}
           </Box>
+
+          {/* What a document of this type proposes it closes (migration 0100) */}
+          <TypeClosesRequirementsField
+            key={`closes:${editingType?.id ?? 'new'}:${dialogOpen}`}
+            tenantId={dialogTenantId}
+            value={formCloses}
+            initial={closesOriginal}
+            onChange={setFormCloses}
+            disabled={saving}
+          />
 
           {/* Feature Toggles */}
           <Box>

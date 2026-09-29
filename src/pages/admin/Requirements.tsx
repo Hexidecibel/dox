@@ -55,6 +55,20 @@ import { useTenant } from '../../contexts/TenantContext';
 import { HelpWell } from '../../components/HelpWell';
 import { EmptyState } from '../../components/EmptyState';
 
+/**
+ * What the "Satisfied by" number counts, said outright (AJ, 2026-09-20: "reads
+ * 0 on every row -- what does that number count?"). It is NOT the types that
+ * could close the item; that is "Closed by".
+ */
+const SATISFIED_BY_TOOLTIP =
+  'Approved documents confirmed against this requirement. A suggested link a person has not confirmed is not counted.';
+
+/** Read-only "Closed by: <types>" -- the document-type mapping (migration 0100). */
+function closedByText(req: ApiRequirement): string {
+  const types = req.closed_by_types ?? [];
+  return types.length ? types.join(', ') : 'no document type yet';
+}
+
 export function Requirements() {
   const [requirements, setRequirements] = useState<ApiRequirement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -294,6 +308,9 @@ export function Requirements() {
                     label={`${req.claim_type_count ?? 0} claims require`}
                   />
                 </Box>
+                <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 0.5 }}>
+                  Closed by: {closedByText(req)}
+                </Typography>
               </CardContent>
             </Card>
           ))}
@@ -306,8 +323,13 @@ export function Requirements() {
                 <TableCell>Requirement</TableCell>
                 <TableCell>Group</TableCell>
                 <TableCell>Slug</TableCell>
+                <TableCell>
+                  <Tooltip title="Document types whose approval proposes this item. Edit on Settings > Document Types.">
+                    <span>Closed by</span>
+                  </Tooltip>
+                </TableCell>
                 <TableCell align="right">
-                  <Tooltip title="Documents whose confirmed links satisfy this item">
+                  <Tooltip title={SATISFIED_BY_TOOLTIP}>
                     <span>Satisfied by</span>
                   </Tooltip>
                 </TableCell>
@@ -338,6 +360,11 @@ export function Requirements() {
                   <TableCell>
                     <Typography variant="body2" color="text.secondary" fontFamily="monospace">
                       {req.slug}
+                    </Typography>
+                  </TableCell>
+                  <TableCell>
+                    <Typography variant="body2" color={req.closed_by_types?.length ? 'text.primary' : 'text.secondary'}>
+                      {closedByText(req)}
                     </Typography>
                   </TableCell>
                   <TableCell align="right">{req.document_count ?? 0}</TableCell>

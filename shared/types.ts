@@ -1021,8 +1021,11 @@ export interface ApiSpecCheck {
 
 export interface ApiRequirement extends RequirementRow {
   tenant_name?: string;
+  /** Documents whose link to this item is CONFIRMED (a suggestion does not count). */
   document_count?: number;
   claim_type_count?: number;
+  /** Names of the active document types whose approval proposes this item (0100). */
+  closed_by_types?: string[];
 }
 
 /**
