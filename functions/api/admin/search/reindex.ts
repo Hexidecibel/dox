@@ -37,6 +37,7 @@ import {
   drainSearchReindexQueue,
   enqueueFullTenantReindex,
 } from '../../../lib/search-reindex';
+import { drainDocumentKeyJobs } from '../../../lib/search/keys';
 import type { Env, User } from '../../../lib/types';
 
 interface ReindexBody {
@@ -96,6 +97,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         maxJobs,
       });
     }
+    // Search keys (0122) drain beside the FTS jobs: same queue, own rebuild.
+    let keysResult = null;
+    if (action === 'drain' || action === 'enqueue_and_drain') {
+      keysResult = await drainDocumentKeyJobs(context.env.DB, { tenantId: body.tenant_id, maxJobs: Math.max(maxJobs, 100) });
+    }
 
     try {
       await logAudit(
@@ -105,7 +111,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         'admin.search.reindex',
         'search_reindex_jobs',
         null,
-        JSON.stringify({ action, enqueued, drain: drainResult }),
+        JSON.stringify({ action, enqueued, drain: drainResult, keys: keysResult }),
         getClientIp(context.request),
       );
     } catch {
@@ -113,7 +119,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     return new Response(
-      JSON.stringify({ enqueued, drain: drainResult }),
+      JSON.stringify({ enqueued, drain: drainResult, keys: keysResult }),
       { headers: { 'Content-Type': 'application/json' } },
     );
   } catch (err) {
