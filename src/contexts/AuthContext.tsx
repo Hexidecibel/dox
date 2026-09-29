@@ -116,3 +116,9 @@ export function useAuth(): AuthContextType {
   }
   return context;
 }
+
+/** The auth context, or null outside an AuthProvider (a component rendered on
+ *  its own in a test). For UI that only adapts to the role, never gates on it. */
+export function useOptionalAuth(): AuthContextType | null {
+  return useContext(AuthContext);
+}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useOptionalAuth } from '../../contexts/AuthContext';
 import {
   Alert,
   Box,
@@ -125,10 +126,15 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
   const sort: SearchSort = query.view.sort ?? 'relevance';
   const sent = useMemo<SearchQuery>(() => ({ ...query, text: debouncedText }), [query, debouncedText]);
   const asked = sent.text.trim() !== '' || sent.clauses.length > 0;
+  // A super_admin belongs to no organization: until one is chosen in the top
+  // bar there is nothing to search, and the server's "tenant_id is required"
+  // is not something to show a person.
+  const auth = useOptionalAuth();
+  const needsTenant = auth?.user?.role === 'super_admin' && !tenantId;
   const run = useSearchRun({
     query: sent,
     tenantId,
-    enabled: asked || surface === 'documents',
+    enabled: !needsTenant && (asked || surface === 'documents'),
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
   });
@@ -472,6 +478,9 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
             </Box>
           ))}
         </Alert>
+      )}
+      {needsTenant && (asked || surface === 'documents') && (
+        <Alert severity="info" sx={{ mb: 1.5 }}>Choose an organization in the top bar to search its documents.</Alert>
       )}
       {run.error && <Alert severity="error" sx={{ mb: 1.5 }}>{run.error}</Alert>}
 
