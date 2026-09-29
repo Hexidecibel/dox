@@ -191,6 +191,8 @@ function inferDocumentDateOrder(values) {
   if (dmy && !mdy) return "dmy";
   return null;
 }
+var MON = `\\b(${MONTH_ALT})\\b\\.?`;
+var MON_FREE = `(?<!\\d[-\\s.]?)${MON}`;
 
 // shared/lotProductionDate.ts
 var PRODUCTION_DATE_KEYS = [

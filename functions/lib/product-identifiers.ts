@@ -29,8 +29,14 @@ export const CATALOG_CAP = 5000;
  * tenant has none, so a tenant that never configured identifiers pays for one
  * empty indexed read and nothing else.
  */
-export async function loadProductCatalog(db: D1Database, tenantId: string): Promise<PreparedCatalog | null> {
-  const res = await db
+export interface CatalogRow {
+  id: string; product_id: string; kind: ProductIdentifierKind; value: string; supplier_id: string | null;
+  superseded: number; confirmed: number; note: string | null; product_name: string; supplier_name: string | null;
+}
+
+/** The catalog read as one statement, so a caller can put it in its own batch. */
+export function productCatalogStatement(db: D1Database, tenantId: string): D1PreparedStatement {
+  return db
     .prepare(
       `SELECT pi.id, pi.product_id, pi.kind, pi.value, pi.supplier_id, pi.superseded, pi.confirmed, pi.note,
               p.name AS product_name, s.name AS supplier_name
@@ -40,12 +46,11 @@ export async function loadProductCatalog(db: D1Database, tenantId: string): Prom
         WHERE pi.tenant_id = ? AND p.active = 1
         LIMIT ?`,
     )
-    .bind(tenantId, CATALOG_CAP)
-    .all<{
-      id: string; product_id: string; kind: ProductIdentifierKind; value: string; supplier_id: string | null;
-      superseded: number; confirmed: number; note: string | null; product_name: string; supplier_name: string | null;
-    }>();
-  const rows = res.results ?? [];
+    .bind(tenantId, CATALOG_CAP);
+}
+
+/** Rows of `productCatalogStatement`, grouped by product (null when there are none). */
+export function catalogFromRows(rows: CatalogRow[]): PreparedCatalog | null {
   if (rows.length === 0) return null;
   const byProduct = new Map<string, CatalogProduct>();
   for (const r of rows) {
@@ -57,6 +62,11 @@ export async function loadProductCatalog(db: D1Database, tenantId: string): Prom
     byProduct.set(r.product_id, p);
   }
   return prepareCatalog([...byProduct.values()]);
+}
+
+export async function loadProductCatalog(db: D1Database, tenantId: string): Promise<PreparedCatalog | null> {
+  const res = await productCatalogStatement(db, tenantId).all<CatalogRow>();
+  return catalogFromRows(res.results ?? []);
 }
 
 export async function listProductIdentifiers(db: D1Database, productId: string): Promise<ProductIdentifier[]> {

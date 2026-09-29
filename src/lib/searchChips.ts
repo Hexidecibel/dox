@@ -11,7 +11,7 @@
 
 import type { Clause } from '../../shared/searchQuery';
 import { SEARCH_FIELDS, STATUS_LABELS, UPLOADED_BUCKETS } from '../../shared/searchFields';
-import { findQueryDates, formatIsoHuman } from '../../shared/searchDates';
+import { describeSpanValues, findQueryDates, formatIsoHuman, sinceWords } from '../../shared/searchDates';
 
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 import type { SearchConstraint, SearchDateRole } from '../../shared/types';
@@ -98,9 +98,11 @@ export function chipParts(c: Clause, labels: Record<string, string> = {}, constr
   const key = ROLE_KEY[role];
   const [a, b] = c.values.map(chipDate);
   let value = a?.text ?? '—';
-  if (c.op === 'between' && b) value = `${a.text} – ${b.text}`;
+  const span = c.op === 'between' && c.values[1] ? describeSpanValues(c.values[0], c.values[1]) : null;
+  if (span) value = span.text;
+  else if (c.op === 'between' && b) value = `${a.text} – ${b.text}`;
   else if (c.op === 'before') value = `before ${a.text}`;
-  else if (c.op === 'after') value = `after ${a.text}`;
+  else if (c.op === 'after') value = sinceWords(c.values[0]) ?? `after ${a.text}`;
   return { key, value, note: a?.anyYear ? 'any year' : undefined };
 }
 
@@ -123,6 +125,7 @@ export function parseDateInput(input: string, allowYearless: boolean): string | 
   if (hits.length !== 1) return null;
   const d = hits[0].date;
   if (d.kind === 'day') return d.iso;
+  if (d.kind !== 'month_day') return null;
   return allowYearless ? `--${String(d.month).padStart(2, '0')}-${String(d.day).padStart(2, '0')}` : null;
 }
 

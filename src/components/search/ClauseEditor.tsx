@@ -143,16 +143,21 @@ export function ClauseEditor({
   const words = clauseWords(clause, labels);
 
   const applyDates = (op: ClauseOp, a: string, b: string) => {
-    const yearless = op === 'on';
-    const v0 = parseDateInput(a, yearless);
+    // A span may be year-less at both ends ("Apr 1 – Apr 30", any year) on an identifying date.
+    const spanYearless = op === 'between' && def.class === 'identifying';
+    const v0 = parseDateInput(a, op === 'on' || spanYearless);
     if (!v0) {
       setError(`"${a || '(empty)'}" is not a date. Try Sep 2 or 2026-09-02.`);
       return;
     }
     if (op === 'between') {
-      const v1 = parseDateInput(b, false);
+      const v1 = parseDateInput(b, spanYearless);
       if (!v1) {
         setError(`"${b || '(empty)'}" is not a date.`);
+        return;
+      }
+      if (v0.startsWith('--') !== v1.startsWith('--')) {
+        setError('Give both dates a year, or neither (any year).');
         return;
       }
       commit({ ...clause, op, values: [v0, v1] });
