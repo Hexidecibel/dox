@@ -2765,6 +2765,21 @@ export interface SearchResultCoverage {
   match_checks?: SearchConstraintCheck[];
   /** The failing checks' messages joined — null when covering. */
   match_reason?: string | null;
+  /**
+   * Every lot row the document carries (POST /api/search/query, identifying
+   * searches; capped at 24), so a result can mark the rows that answer and dim
+   * the other lots on the same certificate.
+   */
+  doc_lots?: SearchDocLot[] | null;
+}
+
+/** One lot row a document carries, as the result row and preview pane show it. */
+export interface SearchDocLot {
+  lot_number: string;
+  sub_lot_code: string;
+  lot_key: string;
+  production_date: string | null;
+  production_date_source: SearchMatchedLot['production_date_source'];
 }
 
 export interface SearchUnreviewedCandidate {
@@ -2801,6 +2816,14 @@ export interface SearchCoverageFields {
 
 export interface NaturalSearchResponse extends SearchCoverageFields {
   parsed_query: ParsedQuery;
+  /**
+   * The question as clauses of the one query model (search redesign Phase 2),
+   * every one `source: 'ai'` with its reason in `note`, so the workspace shows
+   * the AI's reading as chips a person can edit or reject.
+   */
+  clauses?: import('./searchQuery').Clause[];
+  /** What the AI read that is not a clause (and why), shown beside the chips. */
+  ai_dropped?: SearchDroppedConstraint[];
   results: (Document & SearchResultCoverage & {
     relevance_score?: number;
     match_context?: SearchMatchContext[];
@@ -4635,6 +4658,22 @@ export interface SearchQueryRequest {
    * `interpreted` and are NOT written into the query: the text stays text.
    */
   interpret?: boolean;
+}
+
+/** POST /api/search/interpret — how typed text reads, without running the search. */
+export interface SearchInterpretRequest {
+  text: string;
+  /** super_admin only; everyone else is pinned to their own tenant. */
+  tenant_id?: string;
+}
+
+export interface SearchInterpretResponse {
+  /** Detected clauses (`source: 'detected'`), in the order they were typed. */
+  clauses: import('./searchQuery').Clause[];
+  /** The text left once every detected phrase is cut out. */
+  residual: string;
+  /** Each clause in words, keyed by clause id. */
+  labels: Record<string, string>;
 }
 
 export interface SearchQueryClauseSummary {
