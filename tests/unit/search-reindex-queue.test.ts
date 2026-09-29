@@ -305,7 +305,9 @@ describe('drainSearchReindexQueue — basic drain', () => {
     expect(await searchDocs(TENANT_A, 'zenithco')).toContain('rqx-doc-drain-1');
     expect(await searchDocs(TENANT_A, 'acmecorp')).not.toContain('rqx-doc-drain-1');
 
-    const jobs = await listJobs({ tenant_id: TENANT_A });
+    // Only the supplier-rename job: since 0122 inserting a document also
+    // enqueues a `document_keys` job, which this FTS drainer leaves alone.
+    const jobs = await listJobs({ tenant_id: TENANT_A, entity_kind: 'supplier' });
     expect(jobs).toHaveLength(1);
     expect(jobs[0].status).toBe('completed');
     expect(jobs[0].processed_at).not.toBeNull();
