@@ -636,8 +636,12 @@ export function SpecLimits() {
         COA arrives. Limits never block an approval — they ask for eyes. A limit
         with no supplier applies everywhere; add a narrower one to override it.
         Mark the few that would actually stop a load as{' '}
-        <strong>{SPEC_CRITICALITY_LABELS.high}</strong> so they are not read at
-        the same volume as the many you simply track.
+        <Tooltip arrow title={SPEC_CRITICALITY_HELP.high}>
+          <strong>{SPEC_CRITICALITY_LABELS.high}</strong>
+        </Tooltip>{' '}
+        so they are not read at the same volume as the many you simply track.
+        Critical is the tier a shipment hold will key on; holds are not enforced
+        yet, so today a critical result flags and alerts.
       </Typography>
 
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 3 }}>

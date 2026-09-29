@@ -60,6 +60,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import {
   SPEC_CRITICALITY_COLOR,
+  SPEC_CRITICALITY_HELP,
   SPEC_CRITICALITY_LABELS,
   isSpecCriticality,
 } from '../../shared/specCriticality';
@@ -426,7 +427,7 @@ export function SpecAlerts() {
                           return (
                             <Tooltip
                               arrow
-                              title="How this limit was ranked when the result was judged. Re-ranking it since does not change this row."
+                              title={`${SPEC_CRITICALITY_HELP[tier]} How this limit was ranked when the result was judged; re-ranking it since does not change this row.`}
                             >
                               <Chip
                                 size="small"

@@ -15,6 +15,7 @@ import type {
 } from '../lib/types';
 import {
   SPEC_CRITICALITY_COLOR,
+  SPEC_CRITICALITY_HELP,
   SPEC_CRITICALITY_LABELS,
   compareSpecCriticality,
   parseSpecCriticality,
@@ -250,7 +251,11 @@ export function SpecRowMarker({
                   while scanning a results table. A result we could not check
                   says "verify" on the line, so it is never read as a failure
                   (AJ, 2026-09-14). */}
-              {critical && <strong>{SPEC_CRITICALITY_LABELS.high}: </strong>}
+              {critical && (
+                <Tooltip arrow title={SPEC_CRITICALITY_HELP.high}>
+                  <strong>{SPEC_CRITICALITY_LABELS.high}: </strong>
+                </Tooltip>
+              )}
               {!bad && <strong>{COULD_NOT_CHECK_LABEL}: </strong>}
               {v.message}
               <ConversionChip conversion={v.conversion} />
@@ -446,8 +451,8 @@ export function SpecWarningBanner({
             : `This COA fails ${criticalOutOfSpec} critical limits`
           : outOfSpec > 0
             ? outOfSpec === 1
-              ? 'This COA has an out-of-spec result on a tracked parameter'
-              : `This COA has ${outOfSpec} out-of-spec results on tracked parameters`
+              ? 'This COA has an out-of-spec result on a non-critical parameter'
+              : `This COA has ${outOfSpec} out-of-spec results on non-critical parameters`
             : missingByAnalyte.length > 0
               ? `This COA is incomplete — ${missingByAnalyte.length} required ${missingByAnalyte.length === 1 ? 'analyte is' : 'analytes are'} not reported`
               : notChecked > 0
@@ -457,7 +462,7 @@ export function SpecWarningBanner({
       {criticalOutOfSpec > 0 && trackedFailures > 0 && (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
           {trackedFailures} further {trackedFailures === 1 ? 'result is' : 'results are'} outside a
-          tracked limit — listed below, under the critical ones.
+          major or minor limit — listed below, under the critical ones.
         </Typography>
       )}
       {failures.length > 0 && (
@@ -467,12 +472,14 @@ export function SpecWarningBanner({
               by position alone. */}
           {failures.map((v, i) => (
             <Typography component="li" variant="caption" key={i} sx={{ display: 'list-item' }}>
-              <Box
-                component="span"
-                sx={{ fontWeight: 700, color: verdictColor(v), mr: 0.5 }}
-              >
-                {SPEC_CRITICALITY_LABELS[specCriticalityOf(v)]}:
-              </Box>
+              <Tooltip arrow title={SPEC_CRITICALITY_HELP[specCriticalityOf(v)]}>
+                <Box
+                  component="span"
+                  sx={{ fontWeight: 700, color: verdictColor(v), mr: 0.5 }}
+                >
+                  {SPEC_CRITICALITY_LABELS[specCriticalityOf(v)]}:
+                </Box>
+              </Tooltip>
               {v.message}
               <ConversionChip conversion={v.conversion} />
             </Typography>
@@ -554,7 +561,7 @@ export function SpecWarningBanner({
         Compared against the limits on file and the one printed on this COA — no
         AI, no guessing. This does not block approval; it asks for your eyes. A
         result listed as &quot;could not be judged&quot; was <strong>not</strong>
-        checked, and is not a pass. Critical / tracked comes from how each limit
+        checked, and is not a pass. Critical / major / minor comes from how each limit
         is ranked in Settings › Spec Limits, and changes nothing about the
         result — every judged result is shown either way.
       </Typography>

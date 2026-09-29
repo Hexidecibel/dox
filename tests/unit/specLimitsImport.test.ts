@@ -537,11 +537,22 @@ describe('criticality column', () => {
       sheetWithTier(
         ['Coliform', '≤', '10', 'CFU/g', '', '', 'Critical'],
         ['Standard Plate Count', '≤', '20000', 'CFU/g', '', '', 'low'],
-        ['Yeast', '≤', '100', 'CFU/g', '', '', 'Tracked']
+        ['Yeast', '≤', '100', 'CFU/g', '', '', 'Major']
       )
     );
     expect(p.errors).toEqual([]);
     expect(p.analytes.map((a: any) => a.criticality)).toEqual(['high', 'low', 'medium']);
+  });
+
+  it('still accepts the labels an earlier screen showed (Tracked, Informational)', () => {
+    const p = parseAnalyteSheet(
+      sheetWithTier(
+        ['Yeast', '≤', '100', 'CFU/g', '', '', 'Tracked'],
+        ['Mold', '≤', '100', 'CFU/g', '', '', 'informational']
+      )
+    );
+    expect(p.errors).toEqual([]);
+    expect(p.analytes.map((a: any) => a.criticality)).toEqual(['medium', 'low']);
   });
 
   it('defaults a blank cell to the middle tier, and says nothing about it', () => {
