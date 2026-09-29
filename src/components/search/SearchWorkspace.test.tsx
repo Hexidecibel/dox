@@ -3,7 +3,13 @@ import { render, screen, waitFor, within, fireEvent } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
+const authState = vi.hoisted(() => ({ user: null as null | { role: string } }));
+vi.mock('../../contexts/AuthContext', () => ({
+  useOptionalAuth: () => (authState.user ? { user: authState.user } : null),
+}));
+
 vi.mock('../../lib/api', () => {
+  const examples = vi.fn().mockResolvedValue({ examples: [], as_of: '2026-09-29' });
   const query = vi.fn();
   const interpret = vi.fn();
   const natural = vi.fn();
@@ -15,6 +21,7 @@ vi.mock('../../lib/api', () => {
       search: {
         query,
         interpret,
+        examples,
         natural,
         universal,
         saved: { list: savedList, create: vi.fn(), update: vi.fn(), delete: vi.fn() },
@@ -22,7 +29,7 @@ vi.mock('../../lib/api', () => {
       documents: { getWithVersion },
       documentExports: { downloadZip: vi.fn(), send: vi.fn() },
     },
-    __mocks: { query, interpret, natural, universal, savedList },
+    __mocks: { query, interpret, natural, universal, savedList, examples },
   };
 });
 
@@ -37,6 +44,7 @@ const mocks = (apiModule as unknown as {
     natural: ReturnType<typeof vi.fn>;
     universal: ReturnType<typeof vi.fn>;
     savedList: ReturnType<typeof vi.fn>;
+    examples: ReturnType<typeof vi.fn>;
   };
 }).__mocks;
 
@@ -97,6 +105,8 @@ beforeEach(() => {
   mocks.natural.mockReset();
   mocks.universal.mockReset().mockResolvedValue(null);
   mocks.savedList.mockReset().mockResolvedValue({ saved_searches: [] });
+  mocks.examples.mockReset().mockResolvedValue({ examples: [], as_of: '2026-09-29' });
+  authState.user = null;
   window.localStorage.clear();
 });
 
@@ -345,5 +355,49 @@ describe('keyboard', () => {
     expect(rows[1]).toHaveFocus();
     await user.keyboard(' '); // the likely row has no checkbox until Include anyway
     expect(screen.getByTestId('export-selection-bar')).toHaveTextContent('1 selected');
+  });
+
+  it("Try shows the tenant's own examples, verified server-side, and a click asks it", async () => {
+    mocks.examples.mockResolvedValue({
+      as_of: '2026-09-29',
+      examples: [
+        { text: 'lot 20726135-02', kind: 'lot_dash' },
+        { text: 'PO K145501', kind: 'supplier_po' },
+        { text: 'butter produced May 14', kind: 'neg_adjacent_day', teaching: true, label: 'nothing on file — see how a near miss is shown' },
+      ],
+    });
+    mocks.query.mockResolvedValue(LOT_ANSWER);
+    render(wrap(<SearchWorkspace surface="search" tenantId="t1" />));
+    const row = await screen.findByTestId('search-examples');
+    expect(mocks.examples).toHaveBeenCalledWith('t1', expect.anything());
+    expect(within(row).getByText('lot 20726135-02')).toBeInTheDocument();
+    expect(within(row).queryByText('lot 10426203-03')).not.toBeInTheDocument();
+    expect(within(row).getByText(/butter produced May 14 — nothing on file/)).toHaveAttribute('data-teaching', 'true');
+    expect(screen.getByPlaceholderText('lot 20726135-02 · PO K145501')).toBeInTheDocument();
+    await userEvent.click(within(row).getByText('PO K145501'));
+    await waitFor(() => expect(mocks.query).toHaveBeenCalled());
+    expect(lastQuery().text).toBe('PO K145501');
+  });
+
+  it('an empty tenant falls back to the static chips', async () => {
+    render(wrap(<SearchWorkspace surface="search" tenantId="t1" />));
+    const row = await screen.findByTestId('search-examples');
+    expect(within(row).getByText('lot 10426203-03')).toBeInTheDocument();
+  });
+
+  it('a super_admin with no organization chosen gets no examples, and none are asked for', async () => {
+    authState.user = { role: 'super_admin' };
+    render(wrap(<SearchWorkspace surface="search" />));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mocks.examples).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('search-examples')).not.toBeInTheDocument();
+  });
+
+  it('a failed examples request shows no row rather than an error', async () => {
+    mocks.examples.mockRejectedValue(new Error('tenant_id is required'));
+    render(wrap(<SearchWorkspace surface="search" tenantId="t1" />));
+    await waitFor(() => expect(mocks.examples).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByTestId('search-examples')).not.toBeInTheDocument();
   });
 });

@@ -59,6 +59,7 @@ import type {
   SearchQueryResponse,
   SearchInterpretRequest,
   SearchInterpretResponse,
+  SearchExamplesResponse,
   ApiSupplier,
   SupplierListResponse,
   SupplierLookupOrCreateResponse,
@@ -3437,6 +3438,14 @@ export const api = {
         body: JSON.stringify(body),
         ...(signal ? { signal } : {}),
       }),
+
+    /**
+     * GET /api/search/examples — "Try" chips built from this tenant's own
+     * documents, each verified before it is offered. `examples: []` for an
+     * empty tenant; the workspace falls back to its static chips.
+     */
+    examples: (tenantId?: string, signal?: AbortSignal): Promise<SearchExamplesResponse> =>
+      fetchApi<SearchExamplesResponse>(`/search/examples${tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : ''}`, signal ? { signal } : undefined),
 
     /**
      * POST /api/search/query — the one executor (search redesign Phase 1).

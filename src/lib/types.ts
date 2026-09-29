@@ -70,6 +70,8 @@ export type {
   SearchQueryResponse,
   SearchInterpretRequest,
   SearchInterpretResponse,
+  SearchExample,
+  SearchExamplesResponse,
   SearchDocLot,
   OrderNaturalSearchResponse,
   ApiSupplier,
