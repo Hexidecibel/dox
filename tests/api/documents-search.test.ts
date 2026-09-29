@@ -634,4 +634,36 @@ describe('GET /api/documents/search — FTS5 backbone', () => {
       }
     });
   });
+
+  describe('Phase 1 stopgap — every filter is honoured (AJ I1)', () => {
+    it('repeated supplier_id values OR together and AND with the type', async () => {
+      const { body } = await search(
+        `tenant_id=${seed.tenantId}&supplier_id=${supplierAId}&supplier_id=${supplierBId}&document_type_id=${docTypeCoaId}`,
+        superAdmin,
+      );
+      const ids = body.documents.map((d: { id: string }) => d.id).sort();
+      expect(ids).toEqual([docAId, docCId].sort());
+    });
+
+    it('date_from / date_to bound created_at instead of being ignored', async () => {
+      const { body } = await search(
+        `tenant_id=${seed.tenantId}&supplier_id=${supplierAId},${supplierBId}&date_from=2024-02-01&date_to=2024-02-28`,
+        superAdmin,
+      );
+      expect(body.documents.map((d: { id: string }) => d.id)).toEqual([docBId]);
+    });
+
+    it('facets come back in one batch, including status, each leaving out only its own filter', async () => {
+      const { body } = await search(
+        `tenant_id=${seed.tenantId}&supplier_id=${supplierAId}&document_type_id=${docTypeCoaId}&facets=1`,
+        superAdmin,
+      );
+      expect(body.documents.map((d: { id: string }) => d.id)).toEqual([docAId]);
+      const sup = new Map(body.facets.supplier.map((f: { value: string; count: number }) => [f.value, f.count]));
+      // Supplier counts ignore the supplier filter but keep the type filter.
+      expect(sup.get(supplierAId)).toBe(1);
+      expect(sup.get(supplierBId)).toBe(1);
+      expect(body.facets.status.length).toBeGreaterThan(0);
+    });
+  });
 });
