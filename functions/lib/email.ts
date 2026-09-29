@@ -995,3 +995,55 @@ export function buildDocumentExportEmail(params: {
 
   return { subject, html, text };
 }
+
+/**
+ * A certificate that was already expired when it arrived (rules table G4).
+ *
+ * ONE builder for both audiences, because the two emails must never be
+ * mistaken for each other: `routingGap: false` is the notice to the QA lane
+ * ("this arrived dead, it does not count, ask for a current one");
+ * `routingGap: true` goes to org_admins and says NOBODY in the QA lane was
+ * told — the renewal path's routing-gap discipline, not a silent re-broadcast.
+ */
+export function buildExpiredOnArrivalEmail(params: {
+  tenantName: string;
+  supplierName: string | null;
+  documents: Array<{ title: string; expires_on: string; arrived_on: string; days_expired: number }>;
+  appUrl?: string;
+  routingGap?: boolean;
+}): { subject: string; html: string; text: string } {
+  const n = params.documents.length;
+  const first = params.documents[0];
+  const subject = params.routingGap
+    ? `SupDox: ${n === 1 ? 'an expired-on-arrival certificate' : `${n} expired-on-arrival certificates`} had no QA owner — nobody was alerted`
+    : n === 1
+      ? `SupDox: ${first.title} was already expired when it arrived`
+      : `SupDox: ${n} certificates were already expired when they arrived`;
+  const lines = params.documents.map(
+    (d) =>
+      `${d.title}: expired ${d.expires_on}, arrived ${d.arrived_on} (${d.days_expired} day${d.days_expired === 1 ? '' : 's'} late)`
+  );
+  const from = params.supplierName ? ` from ${params.supplierName}` : '';
+  const lead = params.routingGap
+    ? `No QA owner route is configured for ${params.tenantName}, so nobody in the QA lane was told about ${n === 1 ? 'this certificate' : 'these certificates'}${from}. Add a route for the "QA" owner label in Settings › Owner Routing.`
+    : `${n === 1 ? 'This certificate' : 'These certificates'}${from} had already expired on the day ${n === 1 ? 'it' : 'they'} reached ${params.tenantName}. ${n === 1 ? 'It was' : 'They were'} filed, but ${n === 1 ? 'it does' : 'they do'} not count as satisfying the requirement — ask the supplier for a current one.`;
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr><td style="background:#8a1c1c;padding:24px 32px;"><h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox — ${params.routingGap ? 'routing gap' : 'expired on arrival'}</h1></td></tr>
+    <tr><td style="padding:32px;">
+      <p style="margin:0 0 16px;color:#555;line-height:1.6;">${escapeHtml(lead)}</p>
+      <ul style="margin:0 0 24px;padding-left:20px;color:#333;line-height:1.8;">
+        ${lines.map((l) => `<li>${escapeHtml(l)}</li>`).join('\n')}
+      </ul>
+      ${params.appUrl ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(params.appUrl.replace(/\/$/, ''))}/documents" style="color:#1A365D;">Open SupDox</a></p>` : ''}
+      <p style="margin:16px 0 0;color:#777;font-size:13px;line-height:1.6;">SupDox does not reject or hold anything on its own — this is for a person to act on.</p>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+  const text = `${lead}\n\n${lines.map((l) => `- ${l}`).join('\n')}\n`;
+  return { subject, html, text };
+}

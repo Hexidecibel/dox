@@ -48,6 +48,8 @@
  */
 
 import type { SupplierRequirementTier } from './types';
+import { expiredOnArrival } from './expiredOnArrival';
+import type { ExpiredOnArrival } from './expiredOnArrival';
 
 // ---------------------------------------------------------------------------
 // Inputs — the shapes the D1 loader hands in
@@ -101,6 +103,15 @@ export interface ClosureRow {
   document_id: string;
   document_title: string;
   confirmed_at: string | null;
+  /**
+   * The document's own printed expiry (`primary_metadata.document_expires_on`)
+   * and the day it arrived (`documents.arrived_at`, else `created_at`). Carried
+   * so a certificate already expired on arrival does NOT close anything (rules
+   * table G4). Optional: a loader that does not pass them gets today's answer.
+   */
+  expires_on?: string | null;
+  arrived_at?: string | null;
+  created_at?: string | null;
 }
 
 /** Migration 0081 states, counted over this supplier's active documents. */
@@ -161,6 +172,15 @@ export interface SatisfiedByDocument {
   confirmed_at: string | null;
 }
 
+/**
+ * A confirmed link that was NOT counted as closing the requirement, and why.
+ * Only one reason today (G4); a union so a second one cannot be a boolean.
+ */
+export interface NotCountedDocument extends SatisfiedByDocument {
+  reason: 'expired_on_arrival';
+  expired_on_arrival: ExpiredOnArrival;
+}
+
 /** One applicable requirement, judged. */
 export interface GapRequirement extends RequirementVocab {
   tier: SupplierRequirementTier;
@@ -169,6 +189,18 @@ export interface GapRequirement extends RequirementVocab {
   opened_by: OpenedByClaim[];
   satisfied: boolean;
   satisfied_by: SatisfiedByDocument[];
+  /**
+   * Confirmed documents offered for this requirement that do not close it —
+   * today, only certificates that were already expired when they arrived (G4).
+   * Listed, never dropped: "you sent it, and it was dead on arrival" is the
+   * thing to say to the supplier.
+   */
+  not_counted: NotCountedDocument[];
+  /**
+   * Why an OPEN requirement is open when something was offered for it. Null
+   * when it is satisfied, or when nothing was offered at all.
+   */
+  gap_reason: 'expired_on_arrival' | null;
   /** One plain-language line, ready to render or paste into an email. */
   summary: string;
 }
@@ -199,7 +231,8 @@ export type GapCaveatCode =
   | 'no_requirements_configured'
   | 'no_documents'
   | 'unclassified_documents'
-  | 'recommended_excluded';
+  | 'recommended_excluded'
+  | 'expired_on_arrival';
 
 /**
  * A reason the numbers above might not mean what they appear to mean. Emitted
@@ -270,6 +303,10 @@ function summarize(item: GapRequirement): string {
     const n = item.satisfied_by.length;
     return `${item.name} (${tier}) — closed by ${n} confirmed document${n === 1 ? '' : 's'}`;
   }
+  if (item.gap_reason === 'expired_on_arrival') {
+    const f = item.not_counted[0].expired_on_arrival;
+    return `${item.name} (${tier}) — open; expired on arrival: ${item.not_counted[0].document_title} expired ${f.expires_on}, before it arrived on ${f.arrived_on}`;
+  }
   if (item.opened_by.length > 0) {
     const claims = [...new Set(item.opened_by.map((c) => c.claim_type_name))];
     return `${item.name} (${tier}) — open; triggered by the ${claims
@@ -312,6 +349,8 @@ export function computeSupplierGap(
       opened_by: [],
       satisfied: false,
       satisfied_by: [],
+      not_counted: [],
+      gap_reason: null,
       summary: '',
     };
     byId.set(vocab.requirement_id, created);
@@ -343,11 +382,32 @@ export function computeSupplierGap(
   // Closures for requirements that do NOT apply are ignored rather than
   // credited: a document closing something nobody asked for is not a gap being
   // filled, and counting it would let satisfied exceed applicable.
+  //
+  // A certificate already expired when it arrived closes NOTHING (G4). It is
+  // kept on the item as `not_counted`, so the gap can say what was sent and
+  // why it did not count, rather than looking as if the supplier sent nothing.
   for (const closure of input.closures) {
     const item = byId.get(closure.requirement_id);
     if (!item) continue;
-    const dup = item.satisfied_by.some((d) => d.document_id === closure.document_id);
+    const dup =
+      item.satisfied_by.some((d) => d.document_id === closure.document_id) ||
+      item.not_counted.some((d) => d.document_id === closure.document_id);
     if (dup) continue;
+    const dead = expiredOnArrival({
+      expires_on: closure.expires_on,
+      arrived_at: closure.arrived_at,
+      created_at: closure.created_at,
+    });
+    if (dead) {
+      item.not_counted.push({
+        document_id: closure.document_id,
+        document_title: closure.document_title,
+        confirmed_at: closure.confirmed_at ?? null,
+        reason: 'expired_on_arrival',
+        expired_on_arrival: dead,
+      });
+      continue;
+    }
     item.satisfied = true;
     item.satisfied_by.push({
       document_id: closure.document_id,
@@ -357,7 +417,10 @@ export function computeSupplierGap(
   }
 
   const applicable = [...byId.values()].sort(compareRequirements);
-  for (const item of applicable) item.summary = summarize(item);
+  for (const item of applicable) {
+    item.gap_reason = !item.satisfied && item.not_counted.length > 0 ? 'expired_on_arrival' : null;
+    item.summary = summarize(item);
+  }
 
   // --- Counts. Both tiers are always counted; only the counted tiers drive
   //     `open` and `status`. ------------------------------------------------
@@ -417,6 +480,17 @@ export function computeSupplierGap(
       } not been classified, so ${
         unreviewed === 1 ? 'it' : 'they'
       } cannot close anything yet. Open counts may be overstated.`,
+    });
+  }
+
+  const deadOnArrival = open.filter((i) => i.gap_reason === 'expired_on_arrival').length;
+  if (deadOnArrival > 0) {
+    caveats.push({
+      code: 'expired_on_arrival',
+      count: deadOnArrival,
+      message: `${deadOnArrival} open requirement${deadOnArrival === 1 ? ' was' : 's were'} answered with a certificate that had already expired when it arrived. ${
+        deadOnArrival === 1 ? 'It does' : 'They do'
+      } not count; ask the supplier for a current one.`,
     });
   }
 

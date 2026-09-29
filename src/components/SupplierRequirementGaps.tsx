@@ -407,6 +407,16 @@ export default function SupplierRequirementGaps({
                                 label={`closed by ${item.satisfied_by.length}`}
                               />
                             </Tooltip>
+                          ) : item.gap_reason === 'expired_on_arrival' ? (
+                            // G4: something WAS sent — it was dead on arrival.
+                            <Tooltip title={item.summary}>
+                              <Chip
+                                size="small"
+                                color="error"
+                                variant="outlined"
+                                label="open — expired on arrival"
+                              />
+                            </Tooltip>
                           ) : (
                             <Chip size="small" color="error" variant="outlined" label="open" />
                           )}
