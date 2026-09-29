@@ -5187,6 +5187,21 @@ export interface AlertLandingSpecFailure {
   printed_limit: string | null;
 }
 
+/**
+ * One result that was NOT judged but that somebody must be told about (rules
+ * table E1/E2: an MPN result against a CFU limit, a presence/absence test on a
+ * smaller sample than required). Listed apart from the failures, because it is
+ * not one: nothing was found out of spec, the result simply cannot be compared.
+ * Same allow-list discipline — no limit of ours, no id.
+ */
+export interface AlertLandingNotJudged {
+  test: string;
+  value: string | null;
+  unit: string | null;
+  /** Why, in words ("not judged — method mismatch, please resolve with the supplier's lab"). */
+  note: string;
+}
+
 /** One document needing renewal, as shown on an alert landing page. */
 export interface AlertLandingRenewal {
   title: string;
@@ -5218,6 +5233,8 @@ export interface AlertLandingView {
   } | null;
   /** Present for kind === 'spec_alert'; empty otherwise. */
   failures: AlertLandingSpecFailure[];
+  /** Notify-only could-not-check results (E1/E2) for kind === 'spec_alert'; empty otherwise. */
+  not_judged: AlertLandingNotJudged[];
   /** Present for kind === 'renewal_alert'; empty otherwise. */
   renewals: AlertLandingRenewal[];
 }

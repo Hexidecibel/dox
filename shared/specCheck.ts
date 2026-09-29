@@ -52,6 +52,58 @@ export type SpecOperator = '<' | '<=' | '>' | '>=' | 'between' | '==' | 'absent'
 
 export type SpecVerdictKind = 'in_spec' | 'out_of_spec' | 'not_checked';
 
+/**
+ * WHY a result could not be judged, where the reason is one a person must be
+ * TOLD about rather than only shown (rules table E1/E2, ruled 2026-09-27).
+ *
+ *   `method_mismatch`        the result and the limit are counted by different
+ *                            methods (MPN against CFU). Per D1 one method is
+ *                            never judged against the other; per E1 the
+ *                            mismatch notifies a human EVERY time, because it
+ *                            is a reporting-format problem to settle with the
+ *                            supplier's lab and silence would leave it forever.
+ *   `sample_basis_mismatch`  a presence/absence result tested on a smaller
+ *                            sample than the limit requires ("absent in 10 g"
+ *                            against "absent in 25 g"). Per E2 it notifies
+ *                            every time.
+ *
+ * A category is an ADDITION to `not_checked`, never a fourth verdict: the
+ * three-state model is untouched and the result is still not judged. Every
+ * other `not_checked` (a censored "<50" against ≤10, a straddled bound) carries
+ * no category and stays review-queue-only, which is what it always was.
+ *
+ * Dilution is part of E2 but is not detected: nothing in the extraction records
+ * a dilution, and inventing one from a printed ratio would be a guess.
+ * NOTIFY ONLY. E2's hold half is out of scope — dox has no hold.
+ */
+export type NotCheckedCategory = 'method_mismatch' | 'sample_basis_mismatch';
+
+/** The categories that mail the owner on approval (E1, E2). All of them, today. */
+export const NOTIFYING_NOT_CHECKED_CATEGORIES: readonly NotCheckedCategory[] = [
+  'method_mismatch',
+  'sample_basis_mismatch',
+];
+
+/**
+ * True when a verdict is one a person must be TOLD about even though nothing
+ * was judged — the notify-only half of E1/E2. Never true of a judged result.
+ */
+export function isNotifyOnlyVerdict(v: { verdict: SpecVerdictKind; not_checked_category?: NotCheckedCategory | null }): boolean {
+  return (
+    v.verdict === 'not_checked' &&
+    !!v.not_checked_category &&
+    NOTIFYING_NOT_CHECKED_CATEGORIES.includes(v.not_checked_category)
+  );
+}
+
+/** What the notification says about each category, in words, for the email and the queue. */
+export const NOT_CHECKED_CATEGORY_NOTE: Record<NotCheckedCategory, string> = {
+  method_mismatch:
+    "not judged — method mismatch, please resolve with the supplier's lab",
+  sample_basis_mismatch:
+    "not judged — sample size smaller than the limit requires, please resolve with the supplier's lab",
+};
+
 export type MeasuredKind =
   | 'numeric'
   | 'censored_lt'
@@ -174,6 +226,11 @@ export interface SpecVerdict {
    * see the `lab_verdict` branch in `checkConfiguredLimits`.
    */
   lab_verdict?: 'pass' | 'fail';
+  /**
+   * Set only on a `not_checked` verdict whose reason must be notified, not just
+   * shown (E1/E2). See `NotCheckedCategory`. Absent on every other verdict.
+   */
+  not_checked_category?: NotCheckedCategory;
   /**
    * How much the configured limit behind this verdict MATTERS (migration 0095).
    * Carried so the reviewer UI can rank a load-stopping failure above a tracked
@@ -869,6 +926,27 @@ export function unitRefusalNote(from: UnitInfo, to: UnitInfo): string {
   return '';
 }
 
+/**
+ * The notify category of a unit refusal, when it has one (E1). Only a genuine
+ * METHOD mismatch qualifies: CFU against MPN on the same scale (both linear, or
+ * both log). A cell count against a colony count is a different measurement,
+ * a basis mismatch is a product question, and a method-less count is missing a
+ * fact rather than contradicting one — none of those is E1, so none notifies.
+ */
+export function unitRefusalCategory(from: UnitInfo, to: UnitInfo): NotCheckedCategory | null {
+  const method = (family: string): { scale: 'linear' | 'log'; method: string } | null => {
+    const parts = family.split(':');
+    if (parts[0] === 'log') return { scale: 'log', method: parts[1] ?? '' };
+    return { scale: 'linear', method: parts[0] };
+  };
+  const f = method(from.family);
+  const t = method(to.family);
+  if (!f || !t || f.scale !== t.scale) return null;
+  const enumerations = new Set(['cfu', 'mpn']);
+  if (!enumerations.has(f.method) || !enumerations.has(t.method)) return null;
+  return f.method !== t.method ? 'method_mismatch' : null;
+}
+
 // ---------------------------------------------------------------------------
 // A unit that is on the PAGE but not on the RESULT
 // ---------------------------------------------------------------------------
@@ -1293,6 +1371,8 @@ export interface Comparison {
   unit_equivalence_applied?: boolean;
   /** The conversion the comparison rested on, when there was one. */
   conversion?: UnitConversion;
+  /** Why it could not be judged, when that reason notifies (E1/E2). */
+  not_checked_category?: NotCheckedCategory;
 }
 
 /**
@@ -1330,6 +1410,7 @@ export function compareToLimit(
             verdict: 'not_checked',
             reason: `tested absent in ${vb} g but the limit requires absence in ${limit.basis_grams} g — a smaller sample is a weaker test`,
             value_num: null,
+            not_checked_category: 'sample_basis_mismatch',
           };
         }
         return { verdict: 'in_spec', reason: 'reported absent', value_num: null };
@@ -1374,10 +1455,12 @@ export function compareToLimit(
   const lu = normalizeUnit(limit.unit);
   const match = resolveUnits(vu, lu, policy);
   if (match === null) {
+    const category = unitRefusalCategory(vu, lu);
     return {
       verdict: 'not_checked',
       reason: `result is in ${vu.canonical || 'an unknown unit'} but the limit is in ${lu.canonical || 'another unit'} — not comparable${unitRefusalNote(vu, lu)}`,
       value_num: null,
+      ...(category ? { not_checked_category: category } : {}),
     };
   }
   // Rounded like the factor, so a result that converts to exactly the limit
@@ -1736,6 +1819,7 @@ function judgePrinted(
     return {
       ...base,
       ...equated,
+      ...(cmp.not_checked_category ? { not_checked_category: cmp.not_checked_category } : {}),
       verdict: 'not_checked',
       limit_text: limitText,
       reason: cmp.reason,
@@ -2210,7 +2294,11 @@ export function toSpecLimit(l: ConfiguredLimit, test: SpecTestDef): SpecLimit {
     raw: '',
     limit_id: l.id,
     spec_test_id: l.spec_test_id,
-    basis_grams: null,
+    // An absence limit configured "per 25 g" states its sample size in the unit
+    // box; reading it is what lets E2's sample-size mismatch ("absent in 10 g")
+    // be caught against OUR limit and not only against a printed one. A limit
+    // whose unit names no gram amount keeps no basis, exactly as before.
+    basis_grams: l.operator === 'absent' ? basisGrams(l.unit || test.default_unit || '') : null,
   };
 }
 
@@ -2794,6 +2882,7 @@ export function checkConfiguredLimits(
     } else if (cmp.verdict === 'not_checked') {
       verdicts.push({
         ...base,
+        ...(cmp.not_checked_category ? { not_checked_category: cmp.not_checked_category } : {}),
         verdict: 'not_checked',
         message: `${test.name} could not be judged against our limit of ${limitText} — ${reason}.`,
       });

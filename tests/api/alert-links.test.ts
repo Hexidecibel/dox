@@ -250,6 +250,9 @@ describe('the response is an allow-list', () => {
       'unit',
       'judged_against',
       'printed_limit',
+      // E1/E2 notify-only rows: analyte, printed value, and a fixed sentence.
+      'not_judged',
+      'note',
       'renewals',
       'category',
       'due_date',
@@ -528,6 +531,35 @@ describe('the emails carry the link', () => {
     // The portal deep link survives as a clearly secondary line for the
     // account-holding queue owner, who needs the full record.
     expect(html).toContain('https://supdox.com/documents/doc-123');
+  });
+
+  it('names each failure\'s tier with its explainer (B1)', () => {
+    const { html, text } = buildSpecAlertEmail({
+      tenantName: 'Test Corp',
+      documentTitle: 'Andersen COA 8817',
+      documentId: 'doc-123',
+      supplierName: null,
+      failures: [{ test: 'Coliform', value: '40', limit: null, source: 'limit', criticality: 'high' }],
+    });
+    expect(html).toContain('Critical');
+    expect(html).toContain('Holds are not enforced yet');
+    expect(text).toContain('[Critical]');
+  });
+
+  it('can be opened by a notify-only result alone, and never calls it out of spec (E1)', () => {
+    const { subject, html } = buildSpecAlertEmail({
+      tenantName: 'Test Corp',
+      documentTitle: 'Andersen COA 8817',
+      documentId: 'doc-123',
+      supplierName: 'Andersen Dairy',
+      failures: [],
+      notJudged: [
+        { test: 'E. coli', value: '3 MPN/g', note: "not judged — method mismatch, please resolve with the supplier's lab" },
+      ],
+    });
+    expect(subject).toBe('SupDox: E. coli not judged (method mismatch) on Andersen COA 8817');
+    expect(html).toContain('result not judged');
+    expect(html).not.toContain('outside the acceptance limit');
   });
 
   it('falls back to the portal link when no alert link could be minted', () => {

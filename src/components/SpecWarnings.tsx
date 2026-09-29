@@ -21,7 +21,12 @@ import {
   parseSpecCriticality,
 } from '../../shared/specCriticality';
 import type { SpecCriticality } from '../../shared/specCriticality';
-import { formatUnitConversion, NO_LIMIT_CONFIGURED_LABEL, watchEndedLabel } from '../../shared/specCheck';
+import {
+  formatUnitConversion,
+  NO_LIMIT_CONFIGURED_LABEL,
+  NOT_CHECKED_CATEGORY_NOTE,
+  watchEndedLabel,
+} from '../../shared/specCheck';
 import type { UnitConversion } from '../../shared/specCheck';
 
 /**
@@ -520,6 +525,13 @@ export function SpecWarningBanner({
               >
                 {v.message}
                 <ConversionChip conversion={v.conversion} />
+                {/* E1/E2: never judged, always told. Said here so the reviewer
+                    knows approving does not bury it. */}
+                {v.not_checked_category && (
+                  <Box component="span" sx={{ fontWeight: 600, color: 'info.main' }}>
+                    {' '}The owner is notified on approval — {NOT_CHECKED_CATEGORY_NOTE[v.not_checked_category]}.
+                  </Box>
+                )}
               </Typography>
             ))}
           </Box>

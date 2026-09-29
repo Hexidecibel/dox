@@ -1,5 +1,11 @@
 import type { ExpirationRow, ExpirationStatus } from './expirations';
 import { renewalAlertLeadSourceLabel } from '../../shared/renewalLeadTime';
+import {
+  SPEC_CRITICALITY_HELP,
+  SPEC_CRITICALITY_LABELS,
+  parseSpecCriticality,
+} from '../../shared/specCriticality';
+import type { SpecCriticality } from '../../shared/specCriticality';
 
 interface SendEmailOptions {
   /** A single address or a list — a list sends one email to all recipients. */
@@ -646,7 +652,15 @@ export function buildSpecAlertEmail(params: {
     limit: string | null;
     /** 'printed' = the COA's own stated limit; 'limit' = ours. */
     source: 'printed' | 'limit';
+    /** The limit's tier (0095), named on the line with its B1 explainer. */
+    criticality?: SpecCriticality | null;
   }>;
+  /**
+   * Results that could NOT be judged but must be notified (rules table E1/E2:
+   * MPN against CFU, a smaller presence/absence sample). Their own list, never
+   * counted as failures — nothing was found out of spec. May be the only content.
+   */
+  notJudged?: Array<{ test: string; value: string | null; note: string }>;
   /**
    * Required analytes (migration 0109) the certificate did not report. Listed
    * in their own table under the failures — incomplete is a different finding
@@ -666,17 +680,23 @@ export function buildSpecAlertEmail(params: {
   const n = failures.length;
   const missing = params.missingRequired ?? [];
   const m = missing.length;
+  const notJudged = params.notJudged ?? [];
+  const nj = notJudged.length;
+  const notJudgedSubject =
+    nj === 1 ? `${notJudged[0].test} not judged (${notJudged[0].note.replace(/^not judged — /, '').split(',')[0]})` : `${nj} results not judged`;
+  const tierLabel = (c?: SpecCriticality | null) => (c ? SPEC_CRITICALITY_LABELS[parseSpecCriticality(c)] : null);
 
   const missingSubject =
     m === 1
       ? `required ${missing[0].analyte} not reported`
       : `${m} required analytes not reported`;
+  const extraSubjects = [m ? missingSubject : null, nj ? notJudgedSubject : null].filter(Boolean).join('; ');
   const subject =
     n === 0
-      ? `SupDox: ${missingSubject} on ${documentTitle}`
+      ? `SupDox: ${extraSubjects} on ${documentTitle}`
       : n === 1
-        ? `SupDox: out-of-spec ${failures[0].test} on ${documentTitle}${m ? `; ${missingSubject}` : ''}`
-        : `SupDox: ${n} out-of-spec results on ${documentTitle}${m ? `; ${missingSubject}` : ''}`;
+        ? `SupDox: out-of-spec ${failures[0].test} on ${documentTitle}${extraSubjects ? `; ${extraSubjects}` : ''}`
+        : `SupDox: ${n} out-of-spec results on ${documentTitle}${extraSubjects ? `; ${extraSubjects}` : ''}`;
 
   const sourceLabel = (s: 'printed' | 'limit') =>
     s === 'limit' ? 'our limit' : "the COA's own limit";
@@ -693,7 +713,11 @@ export function buildSpecAlertEmail(params: {
   const rows = failures
     .map(
       (f) => `<tr>
-              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;font-weight:600;">${escapeHtml(f.test)}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;font-weight:600;">${escapeHtml(f.test)}${
+                f.criticality
+                  ? `<br><span title="${escapeHtml(SPEC_CRITICALITY_HELP[parseSpecCriticality(f.criticality)])}" style="font-size:12px;font-weight:600;color:${parseSpecCriticality(f.criticality) === 'high' ? '#d32f2f' : '#666'};">${escapeHtml(tierLabel(f.criticality) ?? '')}</span>`
+                  : ''
+              }</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#d32f2f;font-weight:600;">${escapeHtml(f.value || '—')}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#333;">${limitCell(f)}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#666;font-size:13px;">${sourceLabel(f.source)}</td>
@@ -725,7 +749,7 @@ export function buildSpecAlertEmail(params: {
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:40px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
     <tr>
       <td style="background:#8B1A1A;padding:24px 32px;">
-        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox — out of spec</h1>
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">SupDox — ${n > 0 ? 'out of spec' : m > 0 ? 'incomplete certificate' : 'result not judged'}</h1>
       </td>
     </tr>
     <tr>
@@ -750,6 +774,13 @@ export function buildSpecAlertEmail(params: {
         <ul style="margin:0 0 24px;padding-left:20px;color:#333;line-height:1.8;">
           ${missing.map((x) => `<li><strong>${escapeHtml(x.analyte)}</strong> — ${x.why === 'no_result' ? 'listed with no result' : 'not on the certificate'}</li>`).join('\n')}
         </ul>` : ''}
+        ${nj > 0 ? `<h2 style="margin:0 0 16px;color:#333;font-size:18px;">${nj === 1 ? 'A result could' : `${nj} results could`} not be judged</h2>
+        <p style="margin:0 0 16px;color:#555;line-height:1.6;">
+          ${n > 0 || m > 0 ? 'The certificate' : `<strong>${escapeHtml(documentTitle)}</strong>${supplierName ? ` from <strong>${escapeHtml(supplierName)}</strong>` : ''}`} reports ${nj === 1 ? 'a result' : 'results'} that cannot be compared with the limit on file. Nothing was found out of spec; the reporting needs settling with the supplier's lab.
+        </p>
+        <ul style="margin:0 0 24px;padding-left:20px;color:#333;line-height:1.8;">
+          ${notJudged.map((x) => `<li><strong>${escapeHtml(x.test)}</strong>${x.value ? ` (${escapeHtml(x.value)})` : ''} — ${escapeHtml(x.note)}</li>`).join('\n')}
+        </ul>` : ''}
         ${link ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;">See the result</a></p>` : ''}
         ${alertLink ? `<p style="margin:8px 0 0;color:#999;font-size:12px;">No login needed. This link works for 30 days.${portalLink ? ` If you have a SupDox account, the full record is <a href="${escapeHtml(portalLink)}" style="color:#1A365D;">here</a>.` : ''}</p>` : ''}
         <p style="margin:16px 0 0;color:#777;font-size:13px;line-height:1.6;">
@@ -769,12 +800,16 @@ export function buildSpecAlertEmail(params: {
 </html>`;
 
   const textLines = failures.map(
-    (f) => `- ${f.test}: ${f.value || '—'} (limit ${f.limit || '—'}, ${sourceLabel(f.source)})`
+    (f) =>
+      `- ${f.test}: ${f.value || '—'} (limit ${f.limit || '—'}, ${sourceLabel(f.source)})${
+        f.criticality ? ` [${tierLabel(f.criticality)}]` : ''
+      }`
   );
+  const notJudgedLines = notJudged.map((x) => `- ${x.test}${x.value ? ` (${x.value})` : ''}: ${x.note}`);
   const missingLines = missing.map(
     (x) => `- ${x.analyte}: required, ${x.why === 'no_result' ? 'listed with no result' : 'not on the certificate'}`
   );
-  const text = `${n > 0 ? 'Out of spec' : 'Incomplete certificate'} — ${documentTitle}${supplierName ? ` from ${supplierName}` : ''}\n\n${[...textLines, ...missingLines].join('\n')}\n${link ? `\n${link}\n` : ''}\nSupDox does not reject or hold anything on its own — this is for a person to look at.\n`;
+  const text = `${n > 0 ? 'Out of spec' : m > 0 ? 'Incomplete certificate' : 'Result not judged'} — ${documentTitle}${supplierName ? ` from ${supplierName}` : ''}\n\n${[...textLines, ...missingLines, ...notJudgedLines].join('\n')}\n${link ? `\n${link}\n` : ''}\nSupDox does not reject or hold anything on its own — this is for a person to look at.\n`;
 
   return { subject, html, text };
 }

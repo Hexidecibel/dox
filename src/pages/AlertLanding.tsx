@@ -173,6 +173,8 @@ export function AlertLanding() {
               </Stack>
               <Divider sx={{ mb: 3 }} />
 
+              {view.failures.length > 0 && (
+              <>
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5 }}>
                 {view.failures.length === 1
                   ? 'This result is outside its limit'
@@ -205,6 +207,26 @@ export function AlertLanding() {
                   </TableBody>
                 </Table>
               </Box>
+              </>
+              )}
+
+              {(view.not_judged ?? []).length > 0 && (
+                <Box sx={{ mt: view.failures.length > 0 ? 3 : 0 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5 }}>
+                    {view.not_judged.length === 1
+                      ? 'This result could not be judged'
+                      : `${view.not_judged.length} results could not be judged`}
+                  </Typography>
+                  <Stack spacing={1}>
+                    {view.not_judged.map((r, i) => (
+                      <Typography variant="body2" key={`${r.test}-${i}`}>
+                        <strong>{r.test}</strong>
+                        {' '}({[r.value, r.unit].filter(Boolean).join(' ') || '—'}): {r.note}.
+                      </Typography>
+                    ))}
+                  </Stack>
+                </Box>
+              )}
 
               <Typography variant="body2" color="text.secondary" sx={{ mt: 3, lineHeight: 1.7 }}>
                 These values were read from the document and compared against the limits on file.

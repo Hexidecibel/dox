@@ -255,6 +255,19 @@ function unitRefusalNote(from, to) {
   }
   return "";
 }
+function unitRefusalCategory(from, to) {
+  const method = (family) => {
+    const parts = family.split(":");
+    if (parts[0] === "log") return { scale: "log", method: parts[1] ?? "" };
+    return { scale: "linear", method: parts[0] };
+  };
+  const f = method(from.family);
+  const t = method(to.family);
+  if (!f || !t || f.scale !== t.scale) return null;
+  const enumerations = /* @__PURE__ */ new Set(["cfu", "mpn"]);
+  if (!enumerations.has(f.method) || !enumerations.has(t.method)) return null;
+  return f.method !== t.method ? "method_mismatch" : null;
+}
 function isKnownUnit(raw) {
   const u = normalizeUnit(raw);
   return u.family !== "unknown" && !u.family.startsWith("other:");
@@ -485,7 +498,8 @@ function compareToLimit(value, limit, policy = STRICT_UNIT_POLICY) {
           return {
             verdict: "not_checked",
             reason: `tested absent in ${vb} g but the limit requires absence in ${limit.basis_grams} g \u2014 a smaller sample is a weaker test`,
-            value_num: null
+            value_num: null,
+            not_checked_category: "sample_basis_mismatch"
           };
         }
         return { verdict: "in_spec", reason: "reported absent", value_num: null };
@@ -520,10 +534,12 @@ function compareToLimit(value, limit, policy = STRICT_UNIT_POLICY) {
   const lu = normalizeUnit(limit.unit);
   const match = resolveUnits(vu, lu, policy);
   if (match === null) {
+    const category = unitRefusalCategory(vu, lu);
     return {
       verdict: "not_checked",
       reason: `result is in ${vu.canonical || "an unknown unit"} but the limit is in ${lu.canonical || "another unit"} \u2014 not comparable${unitRefusalNote(vu, lu)}`,
-      value_num: null
+      value_num: null,
+      ...category ? { not_checked_category: category } : {}
     };
   }
   const v = exact(value.value * match.factor);
@@ -811,7 +827,11 @@ function toSpecLimit(l, test) {
     raw: "",
     limit_id: l.id,
     spec_test_id: l.spec_test_id,
-    basis_grams: null
+    // An absence limit configured "per 25 g" states its sample size in the unit
+    // box; reading it is what lets E2's sample-size mismatch ("absent in 10 g")
+    // be caught against OUR limit and not only against a printed one. A limit
+    // whose unit names no gram amount keeps no basis, exactly as before.
+    basis_grams: l.operator === "absent" ? basisGrams(l.unit || test.default_unit || "") : null
   };
 }
 var NO_LIMIT_CONFIGURED_LABEL = "No limit configured";
@@ -1050,6 +1070,7 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
     } else if (cmp.verdict === "not_checked") {
       verdicts.push({
         ...base,
+        ...cmp.not_checked_category ? { not_checked_category: cmp.not_checked_category } : {},
         verdict: "not_checked",
         message: `${test.name} could not be judged against our limit of ${limitText} \u2014 ${reason}.`
       });
