@@ -1,6 +1,11 @@
 {
-  "current": "2.25.0",
+  "current": "2.26.0",
   "versions": [
+    {
+      "version": "2.26.0",
+      "date": "2026-09-29",
+      "title": "Type it the way you would say it"
+    },
     {
       "version": "2.25.0",
       "date": "2026-09-29",
