@@ -326,18 +326,43 @@ export function Layout() {
         </AppBar>
       )}
 
-      {/* Desktop top bar — hosts the Help shortcut. */}
+      {/* Sidebar Drawer */}
+      <Drawer
+        variant={isMobile ? 'temporary' : 'permanent'}
+        open={isMobile ? mobileOpen : true}
+        onClose={() => setMobileOpen(false)}
+        sx={{
+          width: DRAWER_WIDTH,
+          flexShrink: 0,
+          '& .MuiDrawer-paper': {
+            width: DRAWER_WIDTH,
+            boxSizing: 'border-box',
+          },
+        }}
+      >
+        {drawerContent}
+      </Drawer>
+
+      {/* Main column: a persistent header on desktop (search, notifications,
+          help) that page content scrolls under, never on top of. It used to
+          float fixed in the corner, over whatever the page put there. */}
+      <Box sx={{ flex: 1, minWidth: 0, maxWidth: '100%', display: 'flex', flexDirection: 'column' }}>
       {!isMobile && (
         <Box
+          component="header"
           sx={{
-            position: 'fixed',
+            position: 'sticky',
             top: 0,
-            right: 0,
-            zIndex: (t) => t.zIndex.drawer + 1,
-            p: 1,
+            zIndex: (t) => t.zIndex.appBar,
+            height: 56,
+            px: 3,
             display: 'flex',
             alignItems: 'center',
+            justifyContent: 'flex-end',
             gap: 0.5,
+            bgcolor: 'background.default',
+            borderBottom: '1px solid',
+            borderColor: 'divider',
           }}
         >
           <Button
@@ -373,25 +398,6 @@ export function Layout() {
           </Tooltip>
         </Box>
       )}
-
-      {/* Sidebar Drawer */}
-      <Drawer
-        variant={isMobile ? 'temporary' : 'permanent'}
-        open={isMobile ? mobileOpen : true}
-        onClose={() => setMobileOpen(false)}
-        sx={{
-          width: DRAWER_WIDTH,
-          flexShrink: 0,
-          '& .MuiDrawer-paper': {
-            width: DRAWER_WIDTH,
-            boxSizing: 'border-box',
-          },
-        }}
-      >
-        {drawerContent}
-      </Drawer>
-
-      {/* Main content */}
       <Box
         component="main"
         sx={{
@@ -408,6 +414,7 @@ export function Layout() {
             tenant mid-demo must not be ambushed. */}
         <SetupBanner />
         <Outlet />
+      </Box>
       </Box>
       <CommandPalette
         open={paletteOpen}
