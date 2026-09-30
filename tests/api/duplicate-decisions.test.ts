@@ -243,6 +243,21 @@ describe('a byte-identical arrival', () => {
     expect(replaced?.details.new_version).toBe(2);
   });
 
+  it('replace with no renewal answer keeps the renewal decision already on the document', async () => {
+    const { docId, queueId } = await identicalPair('byte-renewal');
+    await db
+      .prepare(`UPDATE documents SET renewal_due_date = '2027-03-01', renewal_decision = 'accepted', renewal_decided_by = ? WHERE id = ?`)
+      .bind(seed.orgAdminId, docId)
+      .run();
+    const res = await approve(queueId, { fields: { title: 'byte-renewal v2' }, supplier_id: supplierA, duplicate_decision: 'replace' });
+    expect(res.status).toBe(200);
+    const doc = await db
+      .prepare('SELECT current_version, renewal_due_date, renewal_decision, renewal_decided_by FROM documents WHERE id = ?')
+      .bind(docId)
+      .first<{ current_version: number; renewal_due_date: string | null; renewal_decision: string | null; renewal_decided_by: string | null }>();
+    expect(doc).toEqual({ current_version: 2, renewal_due_date: '2027-03-01', renewal_decision: 'accepted', renewal_decided_by: seed.orgAdminId });
+  });
+
   it('keep_both: a separate document, the original untouched', async () => {
     const { docId, queueId } = await identicalPair('byte-keep');
     const res = await approve(queueId, { fields: { title: 'kept copy' }, supplier_id: supplierA, duplicate_decision: 'keep_both' });

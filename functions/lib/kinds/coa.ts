@@ -488,6 +488,7 @@ async function writeReplacementVersion(
     .run();
 
   const renewal = args.renewal;
+  const answered = renewal ? 1 : 0;
   const updated = await db
     .prepare(
       `UPDATE documents
@@ -498,8 +499,11 @@ async function writeReplacementVersion(
               supplier_id = COALESCE(?, supplier_id),
               primary_metadata = ?,
               extended_metadata = ?,
-              renewal_due_date = ?, renewal_decision = ?, renewal_snapshot = ?,
-              renewal_decided_at = ?, renewal_decided_by = ?,
+              renewal_due_date = CASE WHEN ? THEN ? ELSE renewal_due_date END,
+              renewal_decision = CASE WHEN ? THEN ? ELSE renewal_decision END,
+              renewal_snapshot = CASE WHEN ? THEN ? ELSE renewal_snapshot END,
+              renewal_decided_at = CASE WHEN ? THEN ? ELSE renewal_decided_at END,
+              renewal_decided_by = CASE WHEN ? THEN ? ELSE renewal_decided_by END,
               current_version = ?,
               updated_at = datetime('now')
         WHERE id = ? AND tenant_id = ? AND current_version = ?`
@@ -512,11 +516,13 @@ async function writeReplacementVersion(
       args.supplierId,
       args.primaryMetadata,
       args.extendedMetadata,
-      renewal?.due_date ?? null,
-      renewal?.decision ?? null,
-      renewal?.snapshot ?? null,
-      renewal?.decided_at ?? null,
-      renewal?.decided_by ?? null,
+      // No renewal answer on this card keeps the document's existing decision:
+      // a Replace must never silently clear a renewal someone confirmed.
+      answered, renewal?.due_date ?? null,
+      answered, renewal?.decision ?? null,
+      answered, renewal?.snapshot ?? null,
+      answered, renewal?.decided_at ?? null,
+      answered, renewal?.decided_by ?? null,
       versionNumber,
       existing.id,
       item.tenant_id,
