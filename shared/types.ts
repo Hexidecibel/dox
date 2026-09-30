@@ -2240,6 +2240,18 @@ export interface IntakeDuplicate {
   overridden_by: string | null;
   overridden_by_name: string | null;
   overridden_at: string | null;
+  /** 0132: why it matched. NULL on rows written before 0132 (all byte-identical). */
+  match_basis?: DuplicateMatchBasis | null;
+  /** 0132: 'queued' = sent to the Review Queue with a proposal; NULL = a 0108 suppression. */
+  disposition?: 'queued' | null;
+  /** 0132: what a person decided on the card ('rejected' = the card was rejected). */
+  decision?: DuplicateDecision | 'rejected' | null;
+  decided_by?: string | null;
+  decided_by_name?: string | null;
+  decided_at?: string | null;
+  /** The document the decision produced (keep_both) or versioned (replace). */
+  decision_document_id?: string | null;
+  decision_version_number?: number | null;
 }
 
 export interface IntakeDuplicateListResponse {
@@ -2287,6 +2299,82 @@ export interface QueueIntakeHistory {
   identical_documents: Array<{ id: string; title: string }>;
   /** Set when a person sent this item for review despite the match. */
   sent_anyway: Pick<IntakeDuplicate, 'id' | 'match_kind' | 'matched_document_id' | 'matched_document_title' | 'overridden_by_name' | 'overridden_at'> | null;
+  /**
+   * "You already have this" (migration 0132): an approved document this
+   * pending item is the same file as, or a newer revision of. When set, the
+   * approve action REQUIRES `duplicate_decision`. Computed at read, so it
+   * vanishes if the matched document is deleted meanwhile.
+   */
+  already_have?: DuplicateProposal | null;
+}
+
+// ---------------------------------------------------------------------------
+// "You already have this" -- a person decides (migration 0132)
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY an arrival was matched to a document we already hold. Exact identity
+ * keys only -- never a fuzzy title:
+ *   identical_bytes    -- same SHA-256, same tenant (the 0108 match)
+ *   document_number    -- same supplier + type + the paper's own document number
+ *   certificate_number -- same supplier + type + certificate number
+ *   lot_set            -- same supplier + a lot-scoped type (COA) + exactly the same lots
+ */
+export type DuplicateMatchBasis = 'identical_bytes' | 'document_number' | 'certificate_number' | 'lot_set';
+
+/**
+ * What the reviewer chose on a "you already have this" card:
+ *   replace   -- a NEW VERSION of the matched document (earlier versions stay)
+ *   keep_both -- a separate document, as for any other approval
+ *   discard   -- "don't need this copy": the card closes as a rejection with
+ *                reason 'duplicate_discarded'; no document is created or changed
+ */
+export type DuplicateDecision = 'replace' | 'keep_both' | 'discard';
+
+export const DUPLICATE_DECISIONS: readonly DuplicateDecision[] = ['replace', 'keep_both', 'discard'];
+
+/** What PUT /api/queue/:id says it did with a duplicate decision (the toast reads `summary`). */
+export interface QueueDuplicateDecisionOutcome {
+  decision: DuplicateDecision | 'rejected';
+  /** "Replaced "X": it is now v3; v1–v2 stay in version history." */
+  summary: string;
+  matched_document_id: string;
+  document_id: string | null;
+  version_number: number | null;
+}
+
+/** One document "Replace existing" would add a version to. */
+export interface DuplicateProposalDocument {
+  id: string;
+  title: string;
+  current_version: number;
+  /** Lot keys linked to this document (records COAs pair by lot). */
+  lot_keys: string[];
+}
+
+export interface DuplicateProposal {
+  basis: DuplicateMatchBasis;
+  /** Plain words: why this matched ("the same file, byte for byte", "document number SPEC-114"). */
+  reason: string;
+  /** The value that matched, when the basis is a number or lots. */
+  matched_value: string | null;
+  /** The primary document (the one the card names and links to). */
+  document_id: string;
+  document_title: string;
+  supplier_name: string | null;
+  document_type_name: string | null;
+  /** When it was approved (documents.approved_at, else created_at). */
+  approved_at: string | null;
+  /** The primary document's current version, and the version Replace would create. */
+  current_version: number;
+  next_version: number;
+  /**
+   * Every document the matched arrival became. One for a flat approval; one
+   * per lot for a records-shaped COA. Replace versions each of them.
+   */
+  documents: DuplicateProposalDocument[];
+  /** The ledger row recorded at intake (byte-identical), if any. */
+  intake_duplicate_id: string | null;
 }
 
 /**
@@ -2313,7 +2401,18 @@ export const REJECTION_REASONS = [
   'sales_sheet',
   'unreadable',
   'other',
+  // "Discard" on a "you already have this" card (migration 0132): the person
+  // saw the matched document and did not need this copy. Set ONLY by that
+  // button (the reject dialog does not offer it), so "how many copies did we
+  // throw away as redundant" stays countable apart from `duplicate`, which a
+  // reviewer picks by hand on a card that carried no match.
+  'duplicate_discarded',
 ] as const;
+
+/** Reasons a person picks in the reject dialog (the rest are set by a dedicated button). */
+export const REJECT_DIALOG_REASONS: readonly RejectionReason[] = REJECTION_REASONS.filter(
+  (r) => r !== 'duplicate_discarded',
+);
 
 export type RejectionReason = (typeof REJECTION_REASONS)[number];
 
@@ -2345,6 +2444,10 @@ export const REJECTION_REASON_LABELS: Record<
   other: {
     label: 'Something else',
     help: 'Anything the options above do not cover — please say what.',
+  },
+  duplicate_discarded: {
+    label: 'Discarded: already have it',
+    help: 'This copy was not needed: the matched document already on file was kept unchanged.',
   },
 };
 
@@ -2380,6 +2483,11 @@ export interface QueuedResponse {
     intake_duplicate?: IntakeDuplicateNotice | null;
     /** Queued, but this exact file was rejected before. */
     previously_rejected?: IntakeRejectedMatch | null;
+    /**
+     * Queued, and this exact file is already an approved document (0132): the
+     * card will ask Replace existing / Keep as a new document.
+     */
+    already_have?: DuplicateProposal | null;
   }>;
   document_type?: {
     id: string;

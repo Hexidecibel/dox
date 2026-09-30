@@ -1,5 +1,6 @@
 import { generateId } from '../db';
 import { admitIntake, auditRejectedResend, reopenRunClosedByDuplicate } from './duplicates';
+import { recordQueuedDuplicate } from './already-have';
 import type { IntakeDuplicateNotice, IntakeRejectedMatch } from '../../../shared/types';
 
 /**
@@ -15,13 +16,16 @@ import type { IntakeDuplicateNotice, IntakeRejectedMatch } from '../../../shared
  * connector-only columns `supplier_id` and `connector_run_id` (NULL when not
  * provided).
  *
- * EXACT DUPLICATES (migration 0108). Before inserting, the checksum is
- * compared with what the tenant already holds (functions/lib/intake/duplicates.ts).
- * An arrival identical to an approved file, or to one still waiting in the
- * queue, does NOT become a row here: it is recorded in `intake_duplicates` and
- * the result says so (`outcome: 'duplicate'`, `queueId: null`). Every caller
- * must handle that — the type forces it. An arrival identical to a REJECTED
- * file is queued normally and carries `previouslyRejected`.
+ * EXACT DUPLICATES (migrations 0108 + 0132). Before inserting, the checksum
+ * is compared with what the tenant already holds (functions/lib/intake/duplicates.ts).
+ * An arrival identical to one still WAITING in the queue (or to an approved
+ * order/shipment file) does NOT become a row here: it is recorded in
+ * `intake_duplicates` and the result says so (`outcome: 'duplicate'`,
+ * `queueId: null`). Every caller must handle that — the type forces it.
+ * An arrival identical to an approved DOCUMENT is queued (0132) with a ledger
+ * row naming the document (`alreadyHave`), and the card asks a person what to
+ * do with it. An arrival identical to a REJECTED file is queued normally and
+ * carries `previouslyRejected`.
  */
 export interface EnqueueDocumentParams {
   tenantId: string;
@@ -73,6 +77,12 @@ export type EnqueueDocumentResult =
       queueId: string;
       /** The last rejection of this exact file, when there was one. */
       previouslyRejected: IntakeRejectedMatch | null;
+      /**
+       * 0132: these exact bytes are already an approved document, so the card
+       * will ask Replace / Keep as new / Discard. Same shape as a suppression
+       * notice (no title: some doors answer people outside the tenant).
+       */
+      alreadyHave: IntakeDuplicateNotice | null;
     }
   | {
       outcome: 'duplicate';
@@ -85,12 +95,14 @@ export async function enqueueDocument(
   params: EnqueueDocumentParams,
 ): Promise<EnqueueDocumentResult> {
   let previouslyRejected: IntakeRejectedMatch | null = null;
+  let alreadyHaveMatch: { documentId: string; queueId: string | null } | null = null;
   if (params.duplicateCheck !== 'skip') {
     const admission = await admitIntake(db, params);
     if (admission.outcome === 'duplicate') {
       return { outcome: 'duplicate', queueId: null, duplicate: admission.notice };
     }
     previouslyRejected = admission.previouslyRejected;
+    alreadyHaveMatch = admission.alreadyHave;
   }
 
   const queueId = params.id || generateId();
@@ -135,5 +147,49 @@ export async function enqueueDocument(
     });
   }
 
-  return { outcome: 'queued', queueId, previouslyRejected };
+  let alreadyHave: IntakeDuplicateNotice | null = null;
+  if (alreadyHaveMatch) {
+    const ledgerId = await recordQueuedDuplicate(db, {
+      tenantId: params.tenantId,
+      queueId,
+      checksum: params.checksum,
+      matchedDocumentId: alreadyHaveMatch.documentId,
+      matchedQueueId: alreadyHaveMatch.queueId,
+      source: params.source,
+      sourceDetail: params.sourceDetail ?? null,
+      sourceId: params.sourceId ?? null,
+      connectorRunId: params.connectorRunId ?? null,
+      requestUploadId: params.requestUploadId ?? null,
+      fileName: params.fileName,
+      fileSize: params.fileSize,
+      mimeType: params.mimeType,
+      fileR2Key: params.fileR2Key,
+      enqueueParams: {
+        tenantId: params.tenantId,
+        documentTypeId: params.documentTypeId ?? null,
+        fileR2Key: params.fileR2Key,
+        fileName: params.fileName,
+        fileSize: params.fileSize,
+        mimeType: params.mimeType,
+        checksum: params.checksum,
+        createdBy: params.createdBy ?? null,
+        source: params.source,
+        sourceDetail: params.sourceDetail ?? null,
+        outputKind: params.outputKind ?? null,
+        sourceId: params.sourceId ?? null,
+        supplierId: params.supplierId ?? null,
+        connectorRunId: params.connectorRunId ?? null,
+      },
+      createdBy: params.createdBy ?? null,
+      clientIp: params.clientIp ?? null,
+    });
+    alreadyHave = {
+      intake_duplicate_id: ledgerId ?? '',
+      match_kind: 'already_approved',
+      matched_document_id: alreadyHaveMatch.documentId,
+      matched_queue_id: alreadyHaveMatch.queueId,
+    };
+  }
+
+  return { outcome: 'queued', queueId, previouslyRejected, alreadyHave };
 }

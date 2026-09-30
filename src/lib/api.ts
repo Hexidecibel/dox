@@ -127,6 +127,8 @@ import type {
   RenewalDecisionPayload,
   QueueArrivalDecisionInput,
   QueueArrivalDecisionOutcome,
+  DuplicateDecision,
+  QueueDuplicateDecisionOutcome,
   QueuePacketView,
   QueuePacketChild,
   PacketRangeInput,
@@ -2584,6 +2586,12 @@ export const api = {
        * applied; `applied: false` means the approval still happened.
        */
       arrival_decision?: QueueArrivalDecisionInput;
+      /**
+       * "You already have this" (0132): REQUIRED when the item's
+       * `intake_history.already_have` is set. 'discard' closes the card as a
+       * rejection and changes nothing on file.
+       */
+      duplicate_decision?: DuplicateDecision;
     }) =>
       fetchApi<{
         document?: any;
@@ -2591,6 +2599,7 @@ export const api = {
         summary?: string;
         item?: any;
         arrival_decision?: QueueArrivalDecisionOutcome;
+        duplicate_decision?: QueueDuplicateDecisionOutcome;
       }>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify({ status: 'approved', ...data }) }),
     /**
      * Reject a queue item. `reason` is a small closed enum (see

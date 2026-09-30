@@ -1,16 +1,18 @@
 /**
- * Exact-duplicate detection at intake (migration 0108).
+ * Exact-duplicate detection at intake (migration 0108, changed by 0132).
  *
  * The contract, per case, across the doors:
- *   1. identical to an APPROVED file -> no new review card; a ledger row links
- *      the arrival to the existing document; the document can list it.
+ *   1. identical to an APPROVED document -> QUEUED (0132) with a ledger row
+ *      naming the document; the card carries `already_have` and approving it
+ *      needs a person's decision (the decision itself is pinned in
+ *      duplicate-decisions.test.ts).
  *   2. identical to a file WAITING in the queue -> no second card; the waiting
  *      card lists "also received".
  *   3. identical to a REJECTED file -> queued normally, with the rejection on
  *      the card.
- * Plus: "Review anyway" enqueues and audits; the supplier portal still tells
- * the supplier their file was received and links the arrival for staff; same
- * bytes in ANOTHER tenant are not a duplicate; the ingest API is unchanged.
+ * Plus: "Review anyway" still replays a suppression (a waiting twin, or a 0108
+ * row) and audits; same bytes in ANOTHER tenant are not a duplicate; the
+ * ingest API is unchanged.
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
@@ -228,37 +230,55 @@ beforeAll(async () => {
 // ---------------------------------------------------------------------------
 
 describe('smart upload', () => {
-  it('case 1: a file identical to an approved document makes no card and links to it', async () => {
+  it('case 1: a file identical to an approved document is QUEUED, saying so, with a ledger row (0132)', async () => {
     const bytes = uniquePdf('smart-1');
     const docId = await seedApprovedDocument(seed.tenantId, seed.orgAdminId, bytes, 'Edaleen 2.5-Gal COA');
     const ck = await checksumOf(bytes);
 
     const { status, body } = await smartUpload(bytes, 'again.pdf');
     expect(status).toBe(200);
-    expect(body.items[0].id).toBe('');
-    expect(body.items[0].intake_duplicate?.match_kind).toBe('already_approved');
-    expect(body.items[0].intake_duplicate?.matched_document_id).toBe(docId);
-    expect(body.items[0].duplicate?.document_title).toBe('Edaleen 2.5-Gal COA');
-    expect(await queueRowsFor(ck)).toHaveLength(0);
+    const queueId = body.items[0].id;
+    expect(queueId).toBeTruthy();
+    expect(body.items[0].intake_duplicate).toBeNull();
+    // Said right after upload, in the card's own words.
+    expect(body.items[0].already_have?.document_id).toBe(docId);
+    expect(body.items[0].already_have?.basis).toBe('identical_bytes');
+    expect(body.items[0].already_have?.next_version).toBe(2);
+    expect(await queueRowsFor(ck)).toHaveLength(1);
 
     const ledger = await ledgerFor(ck);
     expect(ledger).toHaveLength(1);
     expect(ledger[0].matched_document_id).toBe(docId);
-    expect(ledger[0].queue_id).toBeNull();
+    expect(ledger[0].queue_id).toBe(queueId);
+    expect(ledger[0].disposition).toBe('queued');
+    expect(ledger[0].match_basis).toBe('identical_bytes');
+    expect(ledger[0].decision).toBeNull();
     expect(ledger[0].created_by).toBe(seed.orgAdminId);
 
     const audit = await db
-      .prepare(`SELECT details FROM audit_log WHERE action = 'intake.duplicate_suppressed' AND resource_id = ?`)
-      .bind(ledger[0].id)
+      .prepare(`SELECT details FROM audit_log WHERE action = 'intake.duplicate_queued' AND resource_id = ?`)
+      .bind(queueId)
       .first<{ details: string }>();
     expect(JSON.parse(audit!.details).matched_document_id).toBe(docId);
+    const suppressed = await db
+      .prepare(`SELECT COUNT(*) AS n FROM audit_log WHERE action = 'intake.duplicate_suppressed' AND resource_id = ?`)
+      .bind(ledger[0].id)
+      .first<{ n: number }>();
+    expect(suppressed?.n).toBe(0);
 
-    // The document page's list.
+    // The card: already_have, and NOT "sent anyway".
+    const item = await getQueueItem(queueId);
+    expect(item.intake_history?.already_have?.document_id).toBe(docId);
+    expect(item.intake_history?.already_have?.document_title).toBe('Edaleen 2.5-Gal COA');
+    expect(item.intake_history?.already_have?.intake_duplicate_id).toBe(ledger[0].id);
+    expect(item.intake_history?.sent_anyway).toBeNull();
+
+    // The document page's list still shows it arrived again.
     const list = await listDuplicates(`document_id=${docId}`);
     expect(list.status).toBe(200);
     expect(list.body.duplicates.map((d) => d.id)).toEqual([ledger[0].id]);
-    expect(list.body.duplicates[0].matched_document_title).toBe('Edaleen 2.5-Gal COA');
     expect(list.body.duplicates[0].file_name).toBe('again.pdf');
+    expect(list.body.duplicates[0].disposition).toBe('queued');
   });
 
   it('case 2: a file identical to one waiting makes no second card and the waiting card says so', async () => {
@@ -325,10 +345,13 @@ describe('smart upload', () => {
     await db.prepare('UPDATE documents SET external_ref = ? WHERE id = ?').bind(`queue-${queueId}-2614A`, docId).run();
 
     const again = await smartUpload(bytes, 'records-again.pdf');
-    expect(again.body.items[0].intake_duplicate?.match_kind).toBe('already_approved');
-    expect(again.body.items[0].intake_duplicate?.matched_document_id).toBe(docId);
-    expect(again.body.items[0].intake_duplicate?.matched_queue_id).toBe(queueId);
-    expect(await queueRowsFor(ck)).toHaveLength(1);
+    expect(again.body.items[0].id).toBeTruthy();
+    expect(again.body.items[0].already_have?.document_id).toBe(docId);
+    const [row] = await ledgerFor(ck);
+    expect(row.matched_document_id).toBe(docId);
+    expect(row.matched_queue_id).toBe(queueId);
+    expect(row.queue_id).toBe(again.body.items[0].id);
+    expect(await queueRowsFor(ck)).toHaveLength(2);
   });
 });
 
@@ -338,11 +361,16 @@ describe('email ingest (webhook)', () => {
     const approvedBytes = uniquePdf('email-1');
     const docId = await seedApprovedDocument(seed.tenantId, seed.orgAdminId, approvedBytes);
     const r1 = await emailIngest(approvedBytes);
-    expect(r1.results[0].status).toBe('duplicate');
-    expect(await queueRowsFor(await checksumOf(approvedBytes))).toHaveLength(0);
+    // 0132: queued, and the card surfaces what we already have.
+    expect(r1.results[0].status).toBe('queued');
+    const q1 = await queueRowsFor(await checksumOf(approvedBytes));
+    expect(q1).toHaveLength(1);
     const l1 = await ledgerFor(await checksumOf(approvedBytes));
     expect(l1[0].matched_document_id).toBe(docId);
     expect(l1[0].source).toBe('email');
+    expect(l1[0].queue_id).toBe(q1[0].id);
+    expect(l1[0].disposition).toBe('queued');
+    expect((await getQueueItem(q1[0].id)).intake_history?.already_have?.document_id).toBe(docId);
 
     // 2 — the forwarded-twice case this exists for.
     const fwd = uniquePdf('email-2');
@@ -367,19 +395,16 @@ describe('email ingest (webhook)', () => {
 describe('connector drop', () => {
   it('cases 1, 2 and 3, and a suppressed run does not stay running', async () => {
     const approvedBytes = uniquePdf('drop-1');
-    await seedApprovedDocument(seed.tenantId, seed.orgAdminId, approvedBytes);
+    const docId = await seedApprovedDocument(seed.tenantId, seed.orgAdminId, approvedBytes);
     const d1 = await drop(approvedBytes);
     expect(d1.status).toBe(200);
     expect(d1.body.queued).toBe(true);
-    expect(d1.body.queue_id).toBeNull();
-    expect(d1.body.duplicate).toEqual({ received_again: true, match_kind: 'already_approved' });
+    // 0132: queued for a person to decide, not suppressed.
+    expect(d1.body.queue_id).toBeTruthy();
+    expect(d1.body.duplicate).toBeUndefined();
     // No document title crosses to a partner.
     expect(JSON.stringify(d1.body)).not.toContain('Approved COA');
-    const run = await db
-      .prepare('SELECT status FROM connector_runs WHERE id = ?')
-      .bind(d1.body.run_id)
-      .first<{ status: string }>();
-    expect(run?.status).toBe('success');
+    expect((await ledgerFor(await checksumOf(approvedBytes)))[0].matched_document_id).toBe(docId);
 
     const waitingBytes = uniquePdf('drop-2');
     const w1 = await drop(waitingBytes);
@@ -388,6 +413,11 @@ describe('connector drop', () => {
     expect(w2.body.queue_id).toBeNull();
     expect(w2.body.duplicate.match_kind).toBe('already_waiting');
     expect(await queueRowsFor(await checksumOf(waitingBytes))).toHaveLength(1);
+    const run = await db
+      .prepare('SELECT status FROM connector_runs WHERE id = ?')
+      .bind(w2.body.run_id)
+      .first<{ status: string }>();
+    expect(run?.status).toBe('success');
 
     const rejBytes = uniquePdf('drop-3');
     const x1 = await drop(rejBytes);
@@ -399,8 +429,8 @@ describe('connector drop', () => {
 
   it('"Review anyway" replays the connector enqueue into the same run and reopens it', async () => {
     const bytes = uniquePdf('drop-review');
-    await seedApprovedDocument(seed.tenantId, seed.orgAdminId, bytes);
-    const d = await drop(bytes, 'replay.pdf');
+    await drop(bytes, 'first.pdf');
+    const d = await drop(bytes, 'replay.pdf'); // a waiting twin: suppressed
     const ledger = await ledgerFor(await checksumOf(bytes));
     const res = await reviewAnyway(String(ledger[0].id));
     expect(res.status).toBe(200);
@@ -423,9 +453,10 @@ describe('connector drop', () => {
 describe('"Review anyway"', () => {
   it('enqueues the file, stamps who and when, audits, and refuses a second time', async () => {
     const bytes = uniquePdf('review');
-    const docId = await seedApprovedDocument(seed.tenantId, seed.orgAdminId, bytes);
-    await smartUpload(bytes, 'look-again.pdf');
+    const first = await smartUpload(bytes, 'first-copy.pdf');
+    await smartUpload(bytes, 'look-again.pdf'); // a waiting twin: suppressed
     const [row] = await ledgerFor(await checksumOf(bytes));
+    expect(row.match_kind).toBe('already_waiting');
 
     const open = await listDuplicates('state=open&limit=200');
     expect(open.body.duplicates.some((d) => d.id === row.id)).toBe(true);
@@ -453,8 +484,8 @@ describe('"Review anyway"', () => {
 
     // The new card knows why it exists.
     const item = await getQueueItem(res.body.queue_id);
-    expect(item.intake_history?.sent_anyway?.matched_document_id).toBe(docId);
-    expect(item.intake_history?.identical_documents.map((d) => d.id)).toContain(docId);
+    expect(item.intake_history?.sent_anyway?.match_kind).toBe('already_waiting');
+    expect(row.matched_queue_id).toBe(first.body.items[0].id);
 
     const again = await reviewAnyway(String(row.id));
     expect(again.status).toBe(409);
@@ -464,8 +495,8 @@ describe('"Review anyway"', () => {
 
   it('is refused to a reader, and 410s when the stored file is gone', async () => {
     const bytes = uniquePdf('gone');
-    await seedApprovedDocument(seed.tenantId, seed.orgAdminId, bytes);
-    await smartUpload(bytes);
+    await smartUpload(bytes, 'one.pdf');
+    await smartUpload(bytes, 'two.pdf'); // suppressed against the waiting one
     const [row] = await ledgerFor(await checksumOf(bytes));
 
     const reader: TestUser = { id: seed.readerId, email: 'r@test.com', name: 'Reader', role: 'reader', tenant_id: seed.tenantId };
@@ -502,7 +533,7 @@ describe('tenant isolation', () => {
 });
 
 describe('supplier portal', () => {
-  it('case 1: the supplier sees it received; the arrival is linked to the existing document for staff', async () => {
+  it('case 1: the supplier sees it received; staff get a card that says we already have it', async () => {
     const content = uniquePdf('portal-1');
     const { token, lineIds } = await makeRequestFor(fixture(), ['Allergen statement']);
     const refs = await refsFor(token, lineIds);
@@ -525,25 +556,37 @@ describe('supplier portal', () => {
       .prepare('SELECT id, document_id, queue_id FROM request_uploads WHERE request_id = ?')
       .bind(second.requestId)
       .first<{ id: string; document_id: string | null; queue_id: string | null }>();
-    expect(arrival?.document_id).toBe(docId);
-    expect(arrival?.queue_id).toBeNull();
+    // 0132: queued like any arrival; nothing linked until a person decides.
+    expect(arrival?.queue_id).toBeTruthy();
+    expect(arrival?.document_id).toBeNull();
     const line = await db.prepare('SELECT status FROM request_lines WHERE id = ?').bind(second.lineIds[0]).first<{ status: string }>();
     expect(line?.status).toBe('received');
-    expect(await queueRowsFor(await checksumOf(content))).toHaveLength(1);
+    expect(await queueRowsFor(await checksumOf(content))).toHaveLength(2);
 
     const [row] = await ledgerFor(await checksumOf(content));
     expect(row.request_upload_id).toBe(arrival!.id);
     expect(row.source).toBe('request_link');
+    expect(row.queue_id).toBe(arrival!.queue_id);
 
-    // "Review anyway" re-points the arrival at the new review, since nobody has decided it.
-    const res = await reviewAnyway(String(row.id));
-    expect(res.status).toBe(200);
+    const item = await getQueueItem(arrival!.queue_id!);
+    expect(item.intake_history?.already_have?.document_id).toBe(docId);
+    expect(item.intake_history?.already_have?.basis).toBe('identical_bytes');
+
+    // Replace: the arrival is linked to the SAME document, now at v2.
+    await markExtracted(fixture(), arrival!.queue_id!);
+    const approved = await queuePut(
+      arrival!.queue_id!,
+      { status: 'approved', fields: { lot_number: 'L-1' }, supplier_id: supplierId, duplicate_decision: 'replace' },
+      userA,
+    );
+    expect(approved.status).toBe(200);
     const after = await db
-      .prepare('SELECT document_id, queue_id FROM request_uploads WHERE id = ?')
+      .prepare('SELECT document_id FROM request_uploads WHERE id = ?')
       .bind(arrival!.id)
-      .first<{ document_id: string | null; queue_id: string | null }>();
-    expect(after?.queue_id).toBe(res.body.queue_id);
-    expect(after?.document_id).toBeNull();
+      .first<{ document_id: string | null }>();
+    expect(after?.document_id).toBe(docId);
+    const doc = await db.prepare('SELECT current_version FROM documents WHERE id = ?').bind(docId).first<{ current_version: number }>();
+    expect(doc?.current_version).toBe(2);
   });
 
   it('case 2: a second arrival follows the waiting item and is linked when it is approved', async () => {

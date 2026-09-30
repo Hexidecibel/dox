@@ -254,7 +254,10 @@ export async function markExtracted(fx: RequestFixture, queueId: string): Promis
     )
     .bind(
       docTypeId,
-      JSON.stringify({ supplier_name: 'Portal Supplier', lot_number: 'L-1', product_name: 'Cream' }),
+      // A lot of its own per item: since 0132 two COAs from one supplier with
+      // the same lot are "the same document, newer revision", and these
+      // stand-in extractions are not meant to be that.
+      JSON.stringify({ supplier_name: 'Portal Supplier', lot_number: `L-${queueId.slice(0, 8)}`, product_name: 'Cream' }),
       queueId,
     )
     .run();

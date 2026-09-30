@@ -109,6 +109,7 @@ import { helpContent } from '../lib/helpContent';
 import { formatDateTime } from '../utils/format';
 import { IntakeHistoryAlerts, IntakeHistoryChips, ReceivedAgainList } from '../components/IntakeDuplicateNotes';
 import { PacketSplitCard, PacketChip } from '../components/PacketSplitCard';
+import { DuplicateDecisionCard } from '../components/DuplicateDecisionCard';
 import { PageSourceNote, PageSourceTable } from '../components/PageTextSources';
 
 function formatFileSize(bytes: number): string {
@@ -400,6 +401,22 @@ export default function ReviewQueue() {
     message: '',
     severity: 'success',
   });
+
+  // "You already have this" (0132): per item, what Approve will do with a file
+  // we already hold. Replace is the default; the Import page may have chosen
+  // already (handed over in sessionStorage, read once).
+  const [duplicateChoice, setDuplicateChoice] = useState<Record<string, 'replace' | 'keep_both'>>({});
+  const duplicateChoiceFor = (itemId: string): 'replace' | 'keep_both' => {
+    const chosen = duplicateChoice[itemId];
+    if (chosen) return chosen;
+    try {
+      const handed = sessionStorage.getItem(`dox.duplicateChoice.${itemId}`);
+      if (handed === 'replace' || handed === 'keep_both') return handed;
+    } catch {
+      // storage unavailable: the default stands
+    }
+    return 'replace';
+  };
 
   // Template dialog state
   const [templateDialog, setTemplateDialog] = useState<{
@@ -825,6 +842,24 @@ export default function ReviewQueue() {
     return { message: `${base}; ${n} ${noun} ${verb}`, severity: 'success' };
   };
 
+  /** "Discard" on a you-already-have-this card: closes it as a rejection, changes nothing on file. */
+  const handleDiscardDuplicate = async (id: string) => {
+    setActionLoading(prev => ({ ...prev, [id]: true }));
+    try {
+      const res = await api.queue.approve(id, { duplicate_decision: 'discard' });
+      setSnackbar({
+        open: true,
+        message: res.duplicate_decision?.summary ?? 'Discarded this copy; the document on file is unchanged.',
+        severity: 'success',
+      });
+      loadQueue();
+    } catch (err) {
+      setSnackbar({ open: true, message: err instanceof Error ? err.message : 'Discard failed', severity: 'error' });
+    } finally {
+      setActionLoading(prev => ({ ...prev, [id]: false }));
+    }
+  };
+
   const handleApprove = async (id: string) => {
     if (arrivalChoicePending(id)) {
       setSnackbar({ open: true, message: 'Choose what to do with the supplier request first.', severity: 'error' });
@@ -922,6 +957,13 @@ export default function ReviewQueue() {
 
       const arrivalDecision = arrivalDecisionFor(arrivalDrafts[id]);
       const arrivalPayload = arrivalDecision ? { arrival_decision: arrivalDecision } : {};
+      // 0132: an item we already have must say what it is. A multi-product
+      // approval makes several documents, so it can only be kept as new.
+      const duplicatePayload = item?.intake_history?.already_have
+        ? { duplicate_decision: isMultiProduct(id) ? ('keep_both' as const) : duplicateChoiceFor(id) }
+        : {};
+      const withDuplicate = (base: string, res: { duplicate_decision?: { summary: string } }) =>
+        res.duplicate_decision?.summary ? `${base}. ${res.duplicate_decision.summary}` : base;
 
       if (isMultiProduct(id)) {
         // Multi-product approval
@@ -931,6 +973,7 @@ export default function ReviewQueue() {
           ...supplierPayload,
           ...renewalPayload,
           ...arrivalPayload,
+          ...duplicatePayload,
           shared_fields: primaryFields,
           products: products.map(p => ({
             product_name: p.product_name,
@@ -944,13 +987,14 @@ export default function ReviewQueue() {
         });
         setSnackbar({
           open: true,
-          ...arrivalOutcomeMessage(`${products.length} documents created from multi-product approval`, res.arrival_decision, arrivalDecision),
+          ...arrivalOutcomeMessage(withDuplicate(`${products.length} documents created from multi-product approval`, res), res.arrival_decision, arrivalDecision),
         });
       } else {
         const res = await api.queue.approve(id, {
           ...supplierPayload,
           ...renewalPayload,
           ...arrivalPayload,
+          ...duplicatePayload,
           fields: primaryFields,
           product_name: productName || undefined,
           selected_source: selectedSource,
@@ -960,7 +1004,7 @@ export default function ReviewQueue() {
         });
         setSnackbar({
           open: true,
-          ...arrivalOutcomeMessage('Item approved and imported', res.arrival_decision, arrivalDecision),
+          ...arrivalOutcomeMessage(withDuplicate('Item approved and imported', res), res.arrival_decision, arrivalDecision),
         });
       }
 
@@ -1889,6 +1933,20 @@ export default function ReviewQueue() {
                     {(item.packet_proposal || item.packet_split_at || item.packet_parent_id) && (
                       <PacketSplitCard queueId={item.id} onSplit={() => { void loadQueue(); }} />
                     )}
+                    {item.status === 'pending' && item.intake_history?.already_have && (
+                      <DuplicateDecisionCard
+                        proposal={item.intake_history.already_have}
+                        value={isMultiProduct(item.id) ? 'keep_both' : duplicateChoiceFor(item.id)}
+                        onChange={(next) => setDuplicateChoice((prev) => ({ ...prev, [item.id]: next }))}
+                        onDiscard={() => { void handleDiscardDuplicate(item.id); }}
+                        replaceDisabledReason={
+                          isMultiProduct(item.id)
+                            ? 'This approval makes one document per product, so it cannot become one new version.'
+                            : null
+                        }
+                        busy={!!actionLoading[item.id]}
+                      />
+                    )}
                     <IntakeHistoryAlerts history={item.intake_history} />
                     {item.source === 'request_link' && (
                       <SupplierClaimPanel
@@ -2056,6 +2114,7 @@ export default function ReviewQueue() {
                             onApproved={() => loadQueue()}
                             arrivalDecision={arrivalDecisionFor(arrivalDrafts[item.id])}
                             arrivalChoicePending={arrivalChoicePending(item.id)}
+                            duplicateDecision={item.intake_history?.already_have ? duplicateChoiceFor(item.id) : undefined}
                             onPageChange={(page) =>
                               setCoaPdfPage((prev) => ({ ...prev, [item.id]: page }))
                             }

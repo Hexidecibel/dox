@@ -98,7 +98,11 @@ export function IntakeHistoryChips({ history }: { history: QueueIntakeHistory | 
           <Chip label="Rejected before" size="small" color="warning" variant="outlined" sx={{ ml: 0.5 }} />
         </Tooltip>
       )}
-      {history.identical_documents.length > 0 && (
+      {history.already_have ? (
+        <Tooltip title={`You already have this: ${history.already_have.document_title}. Approving asks whether to replace it or keep both.`} arrow>
+          <Chip label="Already have this" size="small" color="warning" variant="outlined" sx={{ ml: 0.5 }} />
+        </Tooltip>
+      ) : history.identical_documents.length > 0 && (
         <Tooltip title="This exact file is already a document." arrow>
           <Chip label="Already a document" size="small" color="warning" variant="outlined" sx={{ ml: 0.5 }} />
         </Tooltip>
@@ -109,7 +113,10 @@ export function IntakeHistoryChips({ history }: { history: QueueIntakeHistory | 
 
 export function IntakeHistoryAlerts({ history }: { history: QueueIntakeHistory | undefined }) {
   if (!history) return null;
-  const { also_received, previously_rejected, identical_documents, sent_anyway } = history;
+  const { also_received, previously_rejected, sent_anyway } = history;
+  // The "you already have this" card (0132) says what this alert used to, and
+  // asks what to do about it; saying it twice would be noise.
+  const identical_documents = history.already_have ? [] : history.identical_documents;
   if (!also_received.length && !previously_rejected && !identical_documents.length && !sent_anyway) return null;
   return (
     <Stack spacing={1} sx={{ mb: 2 }}>
@@ -168,7 +175,7 @@ function matchSentence(d: IntakeDuplicate): React.ReactNode {
     if (d.matched_document_id) {
       return (
         <>
-          Identical to{' '}
+          {d.match_basis && d.match_basis !== 'identical_bytes' ? 'A newer revision of' : 'Identical to'}{' '}
           <Link component={RouterLink} to={`/documents/${d.matched_document_id}`}>
             {d.matched_document_title ?? 'a document'}
           </Link>
@@ -196,6 +203,24 @@ function matchSentence(d: IntakeDuplicate): React.ReactNode {
       , {then}
     </>
   );
+}
+
+/** 0132: what a person decided on a card intake queued with "you already have this". */
+function decisionSentence(d: IntakeDuplicate): string {
+  const who = d.decided_by_name ?? 'someone';
+  const when = d.decided_at ? ` on ${formatDateTime(d.decided_at)}` : '';
+  switch (d.decision) {
+    case 'replace':
+      return `Replaced the document on file by ${who}${when}${d.decision_version_number ? `: it became v${d.decision_version_number}` : ''}.`;
+    case 'keep_both':
+      return `Kept as a separate document by ${who}${when}.`;
+    case 'discard':
+      return `Discarded by ${who}${when}; the document on file was not changed.`;
+    case 'rejected':
+      return `Rejected by ${who}${when}.`;
+    default:
+      return 'Waiting in the Review Queue for a person to decide: replace, keep both, or discard.';
+  }
 }
 
 function DuplicateRow({
@@ -233,12 +258,16 @@ function DuplicateRow({
           </Typography>
           <Typography variant="body2" color="text.secondary">
             Received again on {formatDateTime(d.received_at)} from {fromPhrase(d.source, d.source_detail)}
-            {showMatch ? <> — {matchSentence(d)}</> : ' — identical to this document'}
+            {showMatch ? <> — {matchSentence(d)}</> : d.match_basis && d.match_basis !== 'identical_bytes' ? ' — a newer revision of this document' : ' — identical to this document'}
           </Typography>
           {d.queue_id && (
-            <Typography variant="caption" color="text.secondary">
-              Sent for review anyway by {d.overridden_by_name ?? 'someone'}
-              {d.overridden_at ? ` on ${formatDateTime(d.overridden_at)}` : ''}
+            <Typography variant="caption" color="text.secondary" display="block">
+              {d.disposition === 'queued' ? decisionSentence(d) : (
+                <>
+                  Sent for review anyway by {d.overridden_by_name ?? 'someone'}
+                  {d.overridden_at ? ` on ${formatDateTime(d.overridden_at)}` : ''}
+                </>
+              )}
             </Typography>
           )}
           {error && (
@@ -299,9 +328,9 @@ export function ReceivedAgainList({ tenantId }: { tenantId?: string }) {
   return (
     <Box>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-        Files that arrived again, byte for byte identical to one already approved or already waiting. They were
-        kept, not reviewed twice. Nothing here was deleted or rejected; send any of them for review if it needs a
-        second look.
+        Files that arrived again. One identical to a file still waiting was kept, not reviewed twice; send it for
+        review if it needs a second look. Since 30 Sep 2026 a file we already have as a document goes to the Review
+        Queue instead, where a person chooses to replace the document, keep both, or discard the copy.
       </Typography>
       <Box sx={{ display: 'flex', gap: 0.5, mb: 1.5 }}>
         <Chip
@@ -368,8 +397,8 @@ export function ReceivedAgainPanel({ documentId }: { documentId: string }) {
           Received again
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          This exact file arrived {rows.length === 1 ? 'once more' : `${rows.length} more times`} after it was first
-          received. Nobody was asked to review it twice, unless it says so below.
+          This document arrived again {rows.length === 1 ? 'once' : `${rows.length} times`} after it was first
+          received. Each line says what happened to that copy.
         </Typography>
         {rows.map((d) => (
           <DuplicateRow

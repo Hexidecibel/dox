@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import type { IntakeDuplicateNotice } from '../../shared/types';
+import type { DuplicateProposal, IntakeDuplicateNotice } from '../../shared/types';
+import { DuplicateDecisionCard } from '../components/DuplicateDecisionCard';
 import { useNavigate } from 'react-router-dom';
 import {
   Box,
@@ -85,6 +86,10 @@ interface QueuedItem {
   intakeDuplicate?: IntakeDuplicateNotice | null;
   /** Set once "Review anyway" put it in the queue after all. */
   sentAnyway?: boolean;
+  /** Queued, and we already have this exact file as a document (0132). */
+  alreadyHave?: DuplicateProposal | null;
+  /** Set once "Discard" closed it here. */
+  discarded?: string | null;
 }
 
 interface EditableResult {
@@ -507,6 +512,7 @@ export function Import() {
         processingStatus: item.id ? 'queued' : item.intake_duplicate ? 'duplicate' : 'error',
         duplicate: item.duplicate,
         intakeDuplicate: item.intake_duplicate ?? null,
+        alreadyHave: item.already_have ?? null,
       }));
 
       setQueuedItems(items);
@@ -1112,8 +1118,44 @@ export function Import() {
                 ) : item.duplicate ? (
                   <Chip label="Duplicate detected" size="small" color="warning" />
                 ) : null}
+                {item.alreadyHave && item.discarded && (
+                  <Chip label="Discarded" size="small" variant="outlined" />
+                )}
               </Box>
             ))}
+            {/* 0132: said now, in the card's own words, so nobody is surprised in
+                the Review Queue. Replace / Keep carry the choice to the card,
+                where the extraction is confirmed; Discard acts here. */}
+            {queuedItems.map((item, i) =>
+              item.id && item.alreadyHave && !item.discarded ? (
+                <Box key={`dup-${i}`} sx={{ mt: 1 }}>
+                  <Typography variant="caption" color="text.secondary">{item.fileName}</Typography>
+                  <DuplicateDecisionCard
+                    proposal={item.alreadyHave}
+                    value="replace"
+                    compact
+                    onChange={(next) => {
+                      try {
+                        sessionStorage.setItem(`dox.duplicateChoice.${item.id}`, next);
+                      } catch {
+                        // the card defaults to Replace anyway
+                      }
+                      navigate(`/review?item=${item.id}`);
+                    }}
+                    onDiscard={async () => {
+                      try {
+                        const res = await api.queue.approve(item.id, { duplicate_decision: 'discard' });
+                        setQueuedItems(prev => prev.map((q, idx) => idx === i
+                          ? { ...q, discarded: res.duplicate_decision?.summary ?? 'Discarded' }
+                          : q));
+                      } catch (err) {
+                        setError(err instanceof Error ? err.message : 'Could not discard it');
+                      }
+                    }}
+                  />
+                </Box>
+              ) : null
+            )}
           </Box>
 
           <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>

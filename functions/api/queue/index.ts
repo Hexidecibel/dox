@@ -7,6 +7,7 @@ import { LOT_SCHEME_SELECT, withInvariantWarnings, withSalesSheetWarning } from 
 import { specConfigLoader, withSpecConfig } from '../../lib/spec-warnings';
 import { withRenewalProposal } from '../../lib/renewal-proposal';
 import { loadQueueIntakeHistory } from '../../lib/intake/duplicates';
+import { alreadyHaveInput, loadAlreadyHave } from '../../lib/intake/already-have';
 
 /**
  * GET /api/queue
@@ -161,10 +162,20 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       })),
     );
     const rows = results.results ?? [];
-    const itemsWithHistory = items.map((it, i) => ({
-      ...it,
-      intake_history: history.get(String(rows[i]?.id)),
-    }));
+    // "You already have this" (0132): the approved document each pending card
+    // is, byte for byte or as a newer revision. Approving it needs a decision.
+    const alreadyHave = await loadAlreadyHave(
+      context.env.DB,
+      rows.map((r) => alreadyHaveInput(r as Record<string, unknown>)),
+    );
+    const itemsWithHistory = items.map((it, i) => {
+      const id = String(rows[i]?.id);
+      const h = history.get(id);
+      return {
+        ...it,
+        intake_history: h ? { ...h, already_have: alreadyHave.get(id) ?? null } : h,
+      };
+    });
 
     return new Response(
       JSON.stringify({
