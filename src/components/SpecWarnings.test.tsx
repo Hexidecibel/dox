@@ -248,3 +248,37 @@ describe('document page Test results — five states, five labels', () => {
     expect(checked.querySelector('.MuiChip-colorSuccess')).not.toBeNull();
   });
 });
+
+describe('D2: known wrong vs just verify', () => {
+  const conflict = verdict({
+    verdict: 'not_checked',
+    not_checked_kind: 'known_conflict',
+    value_raw: '24.26',
+    unit_raw: '%',
+    message: 'Coliform could not be judged against our limit of ≤10 CFU/g — result is in % but the limit is in CFU/g.',
+  });
+  const gap = verdict({
+    verdict: 'not_checked',
+    value_raw: '<50',
+    message: 'Coliform could not be judged against our limit of ≤10 CFU/g — reported as <50, which straddles the ≤10 limit.',
+  });
+
+  it('lists a conflict with the configuration apart from a result to verify, conflict first', () => {
+    render(<SpecWarningBanner verdicts={[gap, conflict]} />);
+    expect(screen.getByText(/1 result conflicts with your configuration/)).toBeTruthy();
+    expect(screen.getByTestId('spec-known-conflicts').textContent).toContain('result is in %');
+    expect(screen.getByTestId('spec-verify').textContent).toContain('straddles');
+    expect(screen.getByTestId('spec-verify').textContent).not.toContain('result is in %');
+  });
+
+  it('a result that is only unconfirmed keeps the verify wording', () => {
+    render(<SpecWarningBanner verdicts={[gap]} />);
+    expect(screen.getByText(/1 result could not be checked — verify by hand/)).toBeTruthy();
+    expect(screen.queryByTestId('spec-known-conflicts')).toBeNull();
+  });
+
+  it('the collapsed-row chip names a conflict', () => {
+    render(<SpecAlertChip verdicts={[conflict]} />);
+    expect(screen.getByText('1 conflicts with your configuration')).toBeTruthy();
+  });
+});

@@ -23,6 +23,7 @@ __export(specCheck_exports, {
   LIMIT_THRESHOLD_FIELDS: () => LIMIT_THRESHOLD_FIELDS,
   NOTIFYING_NOT_CHECKED_CATEGORIES: () => NOTIFYING_NOT_CHECKED_CATEGORIES,
   NOT_CHECKED_CATEGORY_NOTE: () => NOT_CHECKED_CATEGORY_NOTE,
+  NOT_CHECKED_KIND_LABELS: () => NOT_CHECKED_KIND_LABELS,
   NO_LIMIT_CONFIGURED_LABEL: () => NO_LIMIT_CONFIGURED_LABEL,
   STRICT_UNIT_POLICY: () => STRICT_UNIT_POLICY,
   checkConfiguredLimits: () => checkConfiguredLimits,
@@ -43,6 +44,7 @@ __export(specCheck_exports, {
   matchSpecTest: () => matchSpecTest,
   normalizeTestName: () => normalizeTestName,
   normalizeUnit: () => normalizeUnit,
+  notCheckedKindOf: () => notCheckedKindOf,
   overdueWatches: () => overdueWatches,
   parseLimitExpression: () => parseLimitExpression,
   parseMeasuredValue: () => parseMeasuredValue,
@@ -59,6 +61,7 @@ __export(specCheck_exports, {
   unitFactor: () => unitFactor,
   unitInferenceNote: () => unitInferenceNote,
   unitRefusalCategory: () => unitRefusalCategory,
+  unitRefusalKind: () => unitRefusalKind,
   unitRefusalNote: () => unitRefusalNote,
   validateLimitShape: () => validateLimitShape,
   watchEndedLabel: () => watchEndedLabel,
@@ -90,6 +93,20 @@ var NOT_CHECKED_CATEGORY_NOTE = {
   method_mismatch: "not judged \u2014 method mismatch, please resolve with the supplier's lab",
   sample_basis_mismatch: "not judged \u2014 sample size smaller than the limit requires, please resolve with the supplier's lab"
 };
+var NOT_CHECKED_KIND_LABELS = {
+  known_conflict: {
+    label: "Conflicts with your configuration",
+    help: "The result is reported in a way your limit for this test says it is never measured. Probably wrong on the certificate: send it back or ask the supplier."
+  },
+  verify: {
+    label: "Could not confirm \u2014 verify by hand",
+    help: "Nothing contradicts your configuration; the checker just lacks what it needs to compare. Confirm it yourself."
+  }
+};
+function notCheckedKindOf(v) {
+  if (v.verdict !== "not_checked") return null;
+  return v.not_checked_kind ?? "verify";
+}
 function specResultKey(scope, target) {
   const where = target.kind === "table" ? `t${target.table_index}r${target.row_index}${target.col_index === void 0 ? "" : `c${target.col_index}`}` : `g${target.group}/${target.cell}`;
   return `${scope}::${where}`;
@@ -341,6 +358,31 @@ function unitRefusalCategory(from, to) {
   const enumerations = /* @__PURE__ */ new Set(["cfu", "mpn"]);
   if (!enumerations.has(f.method) || !enumerations.has(t.method)) return null;
   return f.method !== t.method ? "method_mismatch" : null;
+}
+function unitRefusalKind(from, to) {
+  const dimension = (family) => {
+    if (concentrationClass(family)) return "concentration";
+    if (family === "ph" || family === "temp") return family;
+    const parts = family.split(":");
+    if (parts[0] === "log") return parts[1] === "other" || parts[1] === "unspecified" ? null : "count";
+    if (COUNT_METHODS.has(parts[0])) return "count";
+    return null;
+  };
+  const fd = dimension(from.family);
+  const td = dimension(to.family);
+  if (!fd || !td) return "verify";
+  if (fd !== td) return "known_conflict";
+  if (fd === "count") {
+    const method = (family) => {
+      const parts = family.split(":");
+      return parts[0] === "log" ? parts[1] : parts[0];
+    };
+    const fm = method(from.family);
+    const tm = method(to.family);
+    if (fm === "any" || tm === "any") return "verify";
+    if (fm !== tm) return "known_conflict";
+  }
+  return "verify";
 }
 function isKnownUnit(raw) {
   const u = normalizeUnit(raw);
@@ -613,7 +655,8 @@ function compareToLimit(value, limit, policy = STRICT_UNIT_POLICY) {
       verdict: "not_checked",
       reason: `result is in ${vu.canonical || "an unknown unit"} but the limit is in ${lu.canonical || "another unit"} \u2014 not comparable${unitRefusalNote(vu, lu)}`,
       value_num: null,
-      ...category ? { not_checked_category: category } : {}
+      ...category ? { not_checked_category: category } : {},
+      not_checked_kind: unitRefusalKind(vu, lu)
     };
   }
   const v = exact(value.value * match.factor);
@@ -1269,6 +1312,9 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       verdicts.push({
         ...base,
         ...cmp.not_checked_category ? { not_checked_category: cmp.not_checked_category } : {},
+        // D2: a unit-kind conflict with OUR configured limit is "known wrong
+        // by your definitions". The printed-limit path above never sets it.
+        ...cmp.not_checked_kind === "known_conflict" ? { not_checked_kind: "known_conflict" } : {},
         verdict: "not_checked",
         message: `${test.name} could not be judged against our limit of ${limitText} \u2014 ${reason}.`
       });
@@ -1645,6 +1691,7 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   LIMIT_THRESHOLD_FIELDS,
   NOTIFYING_NOT_CHECKED_CATEGORIES,
   NOT_CHECKED_CATEGORY_NOTE,
+  NOT_CHECKED_KIND_LABELS,
   NO_LIMIT_CONFIGURED_LABEL,
   STRICT_UNIT_POLICY,
   checkConfiguredLimits,
@@ -1665,6 +1712,7 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   matchSpecTest,
   normalizeTestName,
   normalizeUnit,
+  notCheckedKindOf,
   overdueWatches,
   parseLimitExpression,
   parseMeasuredValue,
@@ -1681,6 +1729,7 @@ function findSpecDisagreements(sources, verdicts, opts = {}) {
   unitFactor,
   unitInferenceNote,
   unitRefusalCategory,
+  unitRefusalKind,
   unitRefusalNote,
   validateLimitShape,
   watchEndedLabel,
