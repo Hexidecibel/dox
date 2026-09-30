@@ -1,6 +1,11 @@
 {
-  "current": "2.26.1",
+  "current": "2.27.0",
   "versions": [
+    {
+      "version": "2.27.0",
+      "date": "2026-09-29",
+      "title": "Every field, and your own examples"
+    },
     {
       "version": "2.26.1",
       "date": "2026-09-29",
