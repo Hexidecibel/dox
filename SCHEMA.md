@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 141 tables, 2 views, 245 indexes, 42 triggers.
+Objects: 141 tables, 2 views, 246 indexes, 42 triggers.
 
 ## Core documents & versions
 
@@ -61,10 +61,12 @@ Triggers: `trg_bundles_ad_fts`, `trg_bundles_ai_fts`, `trg_bundles_au_fts`
   created_at TEXT DEFAULT (datetime('now'))
   extracted_text TEXT
   search_text TEXT
+  source_packet_queue_id TEXT REFERENCES processing_queue(id) ON DELETE SET NULL
+  source_packet TEXT CHECK (source_packet IS NULL OR json_valid(source_packet))
   UNIQUE(document_id, version_number)
 ```
 
-Indexes: `idx_document_versions_checksum`, `idx_document_versions_doc`, `idx_document_versions_text`
+Indexes: `idx_document_versions_checksum`, `idx_document_versions_doc`, `idx_document_versions_source_packet`, `idx_document_versions_text`
 
 Triggers: `trg_document_versions_ai_fts`, `trg_document_versions_au_fts`
 
@@ -155,6 +157,7 @@ Triggers: `trg_document_categories_ad_fts`, `trg_document_categories_ai_fts`
   renewal_alert_lead_days INTEGER CHECK (renewal_alert_lead_days IS NULL OR renewal_alert_lead_days BETWEEN 7 AND 365)
   renewal_alert_lead_updated_at TEXT
   renewal_alert_lead_updated_by TEXT
+  renewal_window TEXT CHECK (renewal_window IS NULL OR json_valid(renewal_window))
   UNIQUE(tenant_id, slug)
 ```
 
