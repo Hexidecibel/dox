@@ -60,12 +60,12 @@ if (!row) { console.log('\nNothing to do: the type does not close the from-requi
 if (clash) { console.error('\nRefusing: the type already closes the to-requirement. Remove the wrong mapping in the UI instead.'); process.exit(1); }
 
 const statements = [
-  `UPDATE document_type_requirements SET requirement_id = ${sqlStr(o.to)} WHERE id = ${sqlStr(row.id)}`,
+  `UPDATE document_type_requirements SET requirement_id = ${sqlStr(o.to)} WHERE id = ${sqlStr(row.id)};`,
   `INSERT INTO audit_log (user_id, tenant_id, action, resource_type, resource_id, details)
    VALUES (NULL, ${sqlStr(o.tenant)}, 'document_type.requirement_repointed', 'document_types', ${sqlStr(o.type)}, ${sqlStr(JSON.stringify({
      mapping_id: row.id, from: { id: from.id, slug: from.slug }, to: { id: to.id, slug: to.slug },
      reason: 'setup-wizard slip corrected by script', script: 'bin/repoint-doctype-requirement',
-   }))})`,
+   }))});`,
 ];
 if (!o.apply) {
   console.log(`\nDRY RUN - ${statements.length} statement(s) not written. Re-run with --apply to write.`);
