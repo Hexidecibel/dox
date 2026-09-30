@@ -1,24 +1,38 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 /**
- * bin/report-lot-key-scheme — REPORT ONLY. Lists lots on file whose stored
- * identity (lot_key, sub_lot_code) disagrees with what their supplier's lot
- * format would store (migration 0110), and what a repair would be — including
- * the 1032610210326102 class (a base read into the sublot field) and whether a
- * repair would merge two lot rows. Changes nothing; there is no apply mode.
+ * bin/report-lot-key-scheme — lists lots on file whose stored identity
+ * (lot_key, sub_lot_code) disagrees with what their supplier's lot format
+ * would store (migration 0110), and what a repair would be — including the
+ * 1032610210326102 class (a base read into the sublot field) and whether a
+ * repair would merge two lot rows. DRY RUN by default: with --apply it makes
+ * exactly the repairs it printed (bin/lib/lotKeySchemeReport.js planRepairs):
  *
- * The format per supplier is its DECLARED one when the target has
- * supplier_lot_schemes; otherwise (e.g. production before 0110) the
- * declarations bin/seed-supplier-lot-schemes would make, labelled "proposed".
+ *   REKEY  lot_key / sub_lot_code updated in place (lot_number untouched)
+ *   MERGE  the suggested identity already exists for the same product and
+ *          supplier: document links, order lines and suggestions move to it,
+ *          the emptied row is deleted with its whole content in the audit row
+ *   SKIP   does_not_fit (fix the certificate), or a merge whose two rows state
+ *          different production dates
+ *
+ * Only DECLARED formats are repaired; a "proposed — not declared" format
+ * (a target without 0110) is reported only. Every write is guarded by the
+ * stored identity the plan read, and audited ('lot.identity_repaired' /
+ * 'lot.merged_on_identity_repair').
  *
  * Usage:
- *   bin/report-lot-key-scheme                       # LOCAL, Cush Co
+ *   bin/report-lot-key-scheme                       # LOCAL, Cush Co, dry run
  *   bin/report-lot-key-scheme --remote              # PRODUCTION (read-only)
  *   bin/report-lot-key-scheme --tenant <id> [--json]
+ *   bin/report-lot-key-scheme --tenant <id> --remote --apply   # prompts first
  *
  * Flags:
- *   --tenant ID     tenant (repeatable). Default: Cush Co (1f03c3e73add44bfafb33bb16508b78b)
- *   --remote, -r    read PRODUCTION D1
+ *   --tenant ID     tenant (repeatable; exactly one with --apply).
+ *                   Default: Cush Co (1f03c3e73add44bfafb33bb16508b78b)
+ *   --lot ID        only repair this lot id (repeatable; default every repair)
+ *   --apply         write the repairs. Without it nothing is changed.
+ *   --remote, -r    PRODUCTION D1 (with --apply, asks you to type the tenant id)
+ *   --yes, -y       skip the production confirmation prompt
  *   --json          print the report as JSON
  *   -h, --help      this help
  */
@@ -27,15 +41,19 @@ const fs = require('fs');
 const { query } = require('./lib/d1');
 const lotScheme = require('./lib/shared/lotScheme');
 const { DECLARATIONS } = require('./lib/lotSchemeSeed');
-const { reportLots, formatReport } = require('./lib/lotKeySchemeReport');
+const { reportLots, formatReport, planRepairs, repairToSql, formatRepairs } = require('./lib/lotKeySchemeReport');
+const { execSql, confirmOrExit, sqlStr } = require('./lib/d1Apply');
 
 function parseArgs(argv) {
-  const opts = { tenants: [], remote: false, json: false };
+  const opts = { tenants: [], lots: [], remote: false, json: false, apply: false, yes: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--tenant') opts.tenants.push(argv[++i]);
+    else if (a === '--lot') opts.lots.push(argv[++i]);
     else if (a === '--remote' || a === '-r') opts.remote = true;
     else if (a === '--json') opts.json = true;
+    else if (a === '--apply') opts.apply = true;
+    else if (a === '--yes' || a === '-y') opts.yes = true;
     else if (a === '-h' || a === '--help') {
       const lines = fs.readFileSync(__filename, 'utf8').split('\n');
       console.log(lines.slice(3, lines.findIndex((l, j) => j > 2 && l.trim() === '*/')).join('\n').replace(/^ \* ?/gm, ''));
@@ -45,14 +63,31 @@ function parseArgs(argv) {
       process.exit(2);
     }
   }
+  if (opts.apply && opts.tenants.length !== 1) {
+    console.error('--apply repairs one tenant at a time: pass exactly one --tenant <id>.');
+    process.exit(2);
+  }
   if (opts.tenants.length === 0) opts.tenants = ['1f03c3e73add44bfafb33bb16508b78b'];
-  for (const t of opts.tenants) {
+  for (const t of [...opts.tenants, ...opts.lots]) {
     if (!/^[A-Za-z0-9_-]+$/.test(t || '')) {
-      console.error('--tenant must be an id.');
+      console.error('--tenant / --lot must be an id.');
       process.exit(2);
     }
   }
   return opts;
+}
+
+function loadLots(ids, remote) {
+  if (ids.length === 0) return new Map();
+  const list = ids.map(sqlStr).join(', ');
+  const rows = query(
+    `SELECT l.*, (SELECT COUNT(*) FROM document_lots x WHERE x.lot_id = l.id) AS document_lots,
+            (SELECT COUNT(*) FROM order_items x WHERE x.lot_id = l.id) AS order_items,
+            (SELECT COUNT(*) FROM lot_match_suggestions x WHERE x.lot_id = l.id) AS suggestions
+       FROM lots l WHERE l.id IN (${list})`,
+    { remote },
+  );
+  return new Map(rows.map((r) => [r.id, r]));
 }
 
 function main() {
@@ -60,6 +95,8 @@ function main() {
   const { remote } = opts;
   const has0110 = Number(query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'supplier_lot_schemes'`, { remote })[0]?.n ?? 0) > 0;
   const out = [];
+  const statements = [];
+  const runAt = new Date().toISOString();
   for (const t of opts.tenants) {
     const tenant = query(`SELECT id, name FROM tenants WHERE id = '${t}'`, { remote })[0];
     if (!tenant) {
@@ -77,15 +114,15 @@ function main() {
       for (const r of rows) {
         const v = lotScheme.validateLotSchemeSpec(JSON.parse(r.spec));
         const sup = suppliers.find((s) => s.id === r.supplier_id);
-        if (v.ok && sup) formats.push({ supplier: sup, spec: v.spec, source: `declared v${r.version}` });
+        if (v.ok && sup) formats.push({ supplier: sup, spec: v.spec, source: `declared v${r.version}`, declared: true });
       }
     }
     for (const d of DECLARATIONS) {
       const matches = suppliers.filter((s) => s.active !== 0 && d.match.test(String(s.name).trim()));
       if (matches.length !== 1 || formats.some((f) => f.supplier.id === matches[0].id)) continue;
-      formats.push({ supplier: matches[0], spec: lotScheme.LOT_SCHEME_TEMPLATES[d.template].spec, source: 'proposed — not declared' });
+      formats.push({ supplier: matches[0], spec: lotScheme.LOT_SCHEME_TEMPLATES[d.template].spec, source: 'proposed — not declared', declared: false });
     }
-    if (!opts.json) console.log(`== ${tenant.name} (${t}), ${remote ? 'PRODUCTION' : 'local'} — report only, nothing is changed`);
+    if (!opts.json) console.log(`== ${tenant.name} (${t}), ${remote ? 'PRODUCTION' : 'local'} — ${opts.apply ? 'APPLY' : 'dry run, nothing is changed'}`);
     for (const f of formats) {
       const lots = query(
         `SELECT id AS lot_id, product_id, lot_number, sub_lot_code, lot_key FROM lots
@@ -93,11 +130,40 @@ function main() {
         { remote },
       );
       const report = reportLots(f.spec, lots, lotScheme);
-      out.push({ tenant: t, supplier: f.supplier, source: f.source, format: lotScheme.lotSchemeLabel(f.spec), ...report });
-      if (!opts.json) for (const line of formatReport(f.supplier.name, lotScheme.lotSchemeLabel(f.spec), f.source, report)) console.log(line);
+      const rows = opts.lots.length ? report.rows.filter((r) => opts.lots.includes(r.lot_id)) : report.rows;
+      let repairPlan = { repairs: [], skipped: [] };
+      if (f.declared && rows.length) {
+        const ids = [...new Set(rows.flatMap((r) => [r.lot_id, r.would_merge_into].filter(Boolean)))];
+        repairPlan = planRepairs({ ...report, rows }, loadLots(ids, remote));
+        for (const rep of repairPlan.repairs) statements.push(...repairToSql(t, rep, sqlStr, runAt));
+      }
+      out.push({ tenant: t, supplier: f.supplier, source: f.source, format: lotScheme.lotSchemeLabel(f.spec), ...report, repairs: repairPlan });
+      if (!opts.json) {
+        for (const line of formatReport(f.supplier.name, lotScheme.lotSchemeLabel(f.spec), f.source, report)) console.log(line);
+        if (!f.declared && report.rows.length) console.log('    (format not declared — report only, no repair)');
+        const lines = formatRepairs(repairPlan);
+        if (lines.length) {
+          console.log('    repair plan:');
+          for (const line of lines) console.log(line);
+        }
+      }
     }
   }
   if (opts.json) console.log(JSON.stringify(out, null, 2));
+
+  if (!opts.apply) {
+    if (!opts.json) console.log(`\nDRY RUN — ${statements.length} statement(s) not written.${statements.length ? ' Re-run with --tenant <id> --apply to write.' : ''}`);
+    return;
+  }
+  if (statements.length === 0) {
+    console.log('Nothing to repair.');
+    return;
+  }
+  if (remote && !opts.yes) {
+    confirmOrExit(`About to REPAIR lot identities in PRODUCTION for tenant ${opts.tenants[0]} (${statements.length} statements).`, opts.tenants[0]);
+  }
+  execSql(statements, { remote, label: 'lot-key-repair' });
+  console.log(`Wrote ${statements.length} statement(s). Re-run without --apply: the repaired lots now match their format.`);
 }
 
 try {

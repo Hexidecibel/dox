@@ -8,8 +8,9 @@
  *   - A supplier with any existing declaration is never overwritten; an
  *     ambiguous supplier is skipped, not guessed.
  *   - The key report finds the 1032610210326102 class and the kept-whole
- *     composite, says what a repair would be and when it would merge, and has
- *     no write path at all.
+ *     composite, says what a repair would be and when it would merge, and
+ *     writes only behind --apply (the repair SQL is tested against D1 in
+ *     tests/api/prod-data-repairs.test.ts).
  *   - The bin scripts run the compiled engine, which is the TypeScript one.
  */
 import { describe, it, expect } from 'vitest';
@@ -138,8 +139,13 @@ describe('key report', () => {
     expect(reportLots(lotScheme.LOT_SCHEME_TEMPLATES.none.spec, lots(DARIGOLD_LOTS), compiled).rows).toEqual([]);
   });
 
-  it('the report script has no write path', () => {
-    expect(reportCli).not.toMatch(/--apply|execFileSync|wrangler', 'd1', 'execute'|\bUPDATE\b|\bDELETE\b|\bINSERT\b/);
+  it('the report script writes only under --apply, one tenant, confirmed on production', () => {
+    // The repair SQL lives in the library (planRepairs / repairToSql, exercised
+    // against D1 in tests/api/prod-data-repairs.test.ts); the CLI only gates it.
+    expect(reportCli).not.toMatch(/\bUPDATE\b|\bDELETE\b|\bINSERT\b/);
+    expect(reportCli).toMatch(/if \(!opts\.apply\) \{/);
+    expect(reportCli).toMatch(/--apply repairs one tenant at a time/);
+    expect(reportCli).toMatch(/if \(remote && !opts\.yes\) \{\s*confirmOrExit\(/);
     expect(seedCli).toContain("'--apply'");
   });
 });

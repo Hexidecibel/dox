@@ -1,0 +1,126 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/fix-stale-julian-context — remove the stale "Code dates may use Julian
+ * format" line from tenants' stored extraction context. Dry run default.
+ *
+ * The model no longer decodes lot or code dates (Declared Lot Formats: every
+ * prompt copy says copy as printed, never convert). A tenant whose
+ * extraction_context was saved from the old dairy template still carries the
+ * old line, and a stored context replaces the code default wholesale, so the
+ * fix in the code never reached them. Rule: bin/lib/staleJulianContext.js --
+ * only the EXACT old line is touched; a reworded Julian line is reported.
+ *
+ * Every change is guarded by the exact text it read (a context edited since
+ * the dry run is not touched), stamps extraction_context_updated_at, clears
+ * extraction_context_updated_by (no portal user made this edit) and writes a
+ * `tenant_extraction_context_updated` audit row holding the full before and
+ * after text.
+ *
+ * Usage:
+ *   bin/fix-stale-julian-context                       # dry run, LOCAL, every tenant
+ *   bin/fix-stale-julian-context --remote              # dry run, PRODUCTION
+ *   bin/fix-stale-julian-context --remote --apply      # prompts first
+ *
+ * Flags:
+ *   --tenant ID     only this tenant (repeatable; default every tenant)
+ *   --replace       swap in the code default's current line ("copy them
+ *                   exactly as printed; never convert") instead of removing
+ *   --apply         write. Without it nothing is changed.
+ *   --remote, -r    PRODUCTION D1 (with --apply, asks you to type "julian")
+ *   --yes, -y       skip the production confirmation prompt
+ *   -h, --help      this help
+ */
+
+'use strict';
+
+const fs = require('fs');
+const { query } = require('./lib/d1');
+const { execSql, confirmOrExit, sqlStr } = require('./lib/d1Apply');
+const { planContextFix, lineDiff } = require('./lib/staleJulianContext');
+
+function parseArgs(argv) {
+  const o = { tenants: [], replace: false, apply: false, remote: false, yes: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--tenant') o.tenants.push(argv[++i]);
+    else if (a === '--replace') o.replace = true;
+    else if (a === '--apply') o.apply = true;
+    else if (a === '--remote' || a === '-r') o.remote = true;
+    else if (a === '--yes' || a === '-y') o.yes = true;
+    else if (a === '-h' || a === '--help') {
+      const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+      console.log(lines.slice(3, lines.findIndex((l, j) => j > 2 && l.trim() === '*/')).join('\n').replace(/^ \* ?/gm, ''));
+      process.exit(0);
+    } else {
+      console.error(`Unknown argument: ${a}`);
+      process.exit(2);
+    }
+  }
+  for (const t of o.tenants) {
+    if (!/^[A-Za-z0-9_-]+$/.test(t || '')) {
+      console.error('--tenant must be an id.');
+      process.exit(2);
+    }
+  }
+  return o;
+}
+
+function main() {
+  const o = parseArgs(process.argv.slice(2));
+  const where = o.tenants.length ? `WHERE id IN (${o.tenants.map(sqlStr).join(', ')})` : '';
+  const tenants = query(`SELECT id, name, extraction_context FROM tenants ${where} ORDER BY name`, { remote: o.remote });
+  const mode = o.replace ? 'replace' : 'remove';
+  const runAt = new Date().toISOString();
+  const statements = [];
+  let changed = 0;
+  console.log(`fix-stale-julian-context — ${o.apply ? 'APPLY' : 'DRY RUN'}, ${o.remote ? 'PRODUCTION' : 'LOCAL'}, mode ${mode}`);
+  for (const t of tenants) {
+    const p = planContextFix(t.extraction_context, mode);
+    const label = `${t.name} (${t.id})`;
+    if (p.action === 'default') {
+      console.log(`\n${label}: no stored context (uses the code default) — nothing to do`);
+      continue;
+    }
+    if (p.action !== 'change') {
+      console.log(`\n${label}: stale line not present${p.similar.length ? ` — REWORDED Julian line(s) left for a person: ${p.similar.map((s) => JSON.stringify(s.trim())).join(', ')}` : ''}`);
+      continue;
+    }
+    changed++;
+    console.log(`\n${label}: line ${p.removed.join(', ')} — ${t.extraction_context.length} -> ${p.after.length} characters`);
+    console.log(lineDiff(t.extraction_context, p.after).split('\n').map((l) => `    ${l}`).join('\n'));
+    statements.push(
+      `UPDATE tenants SET extraction_context = ${sqlStr(p.after)}, extraction_context_updated_at = datetime('now'), extraction_context_updated_by = NULL
+        WHERE id = ${sqlStr(t.id)} AND extraction_context = ${sqlStr(t.extraction_context)};`,
+      `INSERT INTO audit_log (user_id, tenant_id, action, resource_type, resource_id, details)
+       SELECT NULL, ${sqlStr(t.id)}, 'tenant_extraction_context_updated', 'tenants', ${sqlStr(t.id)}, ${sqlStr(JSON.stringify({
+         reason: 'stale Julian code-date line (the model no longer decodes lot codes)',
+         mode,
+         removed_lines: p.removed,
+         length: p.after.length,
+         before: t.extraction_context,
+         after: p.after,
+         tool: 'bin/fix-stale-julian-context',
+         run_at: runAt,
+       }))}
+        WHERE EXISTS (SELECT 1 FROM tenants WHERE id = ${sqlStr(t.id)} AND extraction_context = ${sqlStr(p.after)});`,
+    );
+  }
+  console.log(`\n${changed} tenant(s) to change.`);
+  if (!o.apply) {
+    console.log(`DRY RUN — ${statements.length} statement(s) not written.${changed ? ' Re-run with --apply to write.' : ''}`);
+    return;
+  }
+  if (!changed) return;
+  if (o.remote && !o.yes) confirmOrExit(`About to rewrite extraction_context for ${changed} PRODUCTION tenant(s).`, 'julian');
+  execSql(statements, { remote: o.remote, label: 'julian-context' });
+  console.log(`Wrote ${statements.length} statement(s). Re-run without --apply: those tenants now read "stale line not present".`);
+  console.log('The process-worker reads extraction_context per job; no restart is needed for this change.');
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+}

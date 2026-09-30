@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/archive-duplicate-documents — archive the LATER copies of a file that
+ * was approved more than once, where that is provably safe. Dry run default.
+ *
+ * WHY
+ *   Before migration 0108 nothing at intake compared checksums, so the same
+ *   email forwarded twice became two approved documents, each with its own spec
+ *   register rows, lots and products (bin/audit-duplicate-documents reports
+ *   them: on prod 61 groups, 74 later copies). Intake no longer does this; the
+ *   copies already on file are this script's job.
+ *
+ * WHAT IT DOES (bin/lib/duplicateArchivePlan.js holds the whole rule)
+ *   - groups exactly as bin/audit-duplicate-documents does (same library);
+ *   - per later copy, compares everything hanging off it with the kept
+ *     (first-arrival) copy BY CONTENT: confirmed requirement links and claims,
+ *     lots, products, spec results and their verdicts/acknowledgements, spec
+ *     gaps, a renewal decision;
+ *   - re-points only what asserts nothing new: the "received again" ledger
+ *     (intake_duplicates) and a PENDING lot suggestion the kept copy lacks;
+ *   - SKIPS, with the reason, any copy something points at by hand or by mail
+ *     (order line, accepted suggestion, bundle, supplier arrival/claim/accepted
+ *     request line, live alert or export link, a note) or that carries a fact
+ *     the kept copy lacks;
+ *   - ARCHIVES the rest: documents.status = 'archived'. No row and no byte is
+ *     deleted; un-archiving is the document page's own status control.
+ *   - writes one `document.archived_as_duplicate` audit row per archived copy
+ *     naming the kept copy, the checksum and every re-pointed row.
+ *
+ * Usage:
+ *   bin/archive-duplicate-documents                          # dry run, LOCAL, all tenants
+ *   bin/archive-duplicate-documents --remote                 # dry run, PRODUCTION
+ *   bin/archive-duplicate-documents --tenant <id> --remote --apply   # prompts first
+ *
+ * Flags:
+ *   --tenant ID     only this tenant (required with --apply)
+ *   --apply         actually write. Without it this is a dry run.
+ *   --remote, -r    PRODUCTION D1 (with --apply, asks you to type the tenant id)
+ *   --staging       STAGING D1 (remote)
+ *   --yes, -y       skip the production confirmation prompt
+ *   --json          print the plan as JSON
+ *   -h, --help      this help
+ */
+
+'use strict';
+
+const fs = require('fs');
+const d1 = require('./lib/d1');
+const audit = require('./lib/duplicateDocumentsAudit');
+const plan = require('./lib/duplicateArchivePlan');
+const { execSql, confirmOrExit, loadDevVars } = require('./lib/d1Apply');
+
+function parseArgs(argv) {
+  const o = { tenant: null, apply: false, remote: false, db: d1.DEFAULT_DB, yes: false, json: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--tenant') o.tenant = argv[++i] || null;
+    else if (a === '--apply') o.apply = true;
+    else if (a === '--remote' || a === '-r') o.remote = true;
+    else if (a === '--staging') {
+      o.remote = true;
+      o.db = 'doc-upload-db-staging';
+    } else if (a === '--yes' || a === '-y') o.yes = true;
+    else if (a === '--json') o.json = true;
+    else if (a === '-h' || a === '--help') {
+      const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+      console.log(lines.slice(3, lines.findIndex((l, j) => j > 2 && l.trim() === '*/')).join('\n').replace(/^ \* ?/gm, ''));
+      process.exit(0);
+    } else {
+      console.error(`Unknown argument: ${a}`);
+      process.exit(2);
+    }
+  }
+  if (o.tenant && !/^[A-Za-z0-9_-]+$/.test(o.tenant)) {
+    console.error('--tenant must be an id.');
+    process.exit(2);
+  }
+  if (o.apply && !o.tenant) {
+    console.error('--apply writes one tenant at a time: add --tenant <id>.');
+    process.exit(2);
+  }
+  return o;
+}
+
+function main() {
+  const o = parseArgs(process.argv.slice(2));
+  if (o.remote) loadDevVars();
+  const opts = { remote: o.remote, db: o.db };
+  const qy = (sql) => d1.query(sql, opts);
+
+  const versionRows = qy(audit.versionGroupsSql(o.tenant));
+  const queueRows = qy(audit.queueGroupsSql(o.tenant));
+  const docIds = [...new Set([...versionRows, ...queueRows].map((r) => r.document_id))];
+  const queueIds = [...new Set([...versionRows, ...queueRows].map((r) => audit.queueIdFromExternalRef(r.external_ref)).filter(Boolean))];
+  const linkRows = [];
+  for (const part of audit.chunk(docIds)) linkRows.push(...qy(audit.linksSql(part)));
+  const queueItems = [];
+  for (const part of audit.chunk(queueIds)) queueItems.push(...qy(audit.queueItemsSql(part)));
+  const report = audit.buildReport({ versionRows, queueRows, queueItems, linkRows });
+
+  const groupDocIds = [...new Set(report.groups.flatMap((g) => g.documents.map((d) => d.document_id)))];
+  const rowsByKind = {};
+  for (const part of plan.chunk(groupDocIds)) {
+    for (const [kind, sql] of Object.entries(plan.evidenceSql(part))) {
+      rowsByKind[kind] = (rowsByKind[kind] || []).concat(qy(sql));
+    }
+  }
+  const exportLinks = qy(plan.LIVE_EXPORT_LINKS_SQL);
+  const ev = plan.buildEvidence(rowsByKind, exportLinks);
+  const p = plan.planArchive(report, ev);
+
+  const target = o.remote ? `REMOTE ${o.db}` : `LOCAL ${o.db}`;
+  if (o.json) console.log(JSON.stringify({ target, tenant: o.tenant, ...p }, null, 2));
+  else {
+    console.log(`archive-duplicate-documents — ${o.apply ? 'APPLY' : 'DRY RUN'}`);
+    console.log(`  target : ${target}`);
+    console.log(`  tenant : ${o.tenant || 'all'}`);
+    console.log(`  groups : ${report.groups.length} (${report.summary.surplus_documents} later copies)`);
+    console.log('');
+    console.log(plan.renderPlan(p));
+  }
+
+  const runAt = new Date().toISOString();
+  const statements = p.archive.flatMap((a) => plan.archiveToSql(a, runAt));
+  if (!o.apply) {
+    if (!o.json) console.log(`\nDRY RUN — ${statements.length} statement(s) not written.${p.archive.length ? ' Re-run with --tenant <id> --apply to write.' : ''}`);
+    return;
+  }
+  if (statements.length === 0) {
+    console.log('Nothing to do.');
+    return;
+  }
+  if (o.remote && !o.yes) {
+    confirmOrExit(`About to ARCHIVE ${p.archive.length} document(s) in ${target} for tenant ${o.tenant} (${statements.length} statements).`, o.tenant);
+  }
+  execSql(statements, { remote: o.remote, db: o.db, label: 'archive-duplicates' });
+  console.log(`Archived ${p.archive.length} copy(ies) in ${target}. Re-run without --apply: they now read "not active".`);
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(err instanceof Error ? err.stack : String(err));
+  process.exit(1);
+}

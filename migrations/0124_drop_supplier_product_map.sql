@@ -1,0 +1,34 @@
+-- DROP supplier_product_map (0075). Product identity has ONE store.
+--
+-- 0113 copied every supplier_product_map row into product_identifiers (as a
+-- confirmed supplier_name, plus distributor_sku as our_sku; exact duplicates of
+-- seeded rows skipped) and left the table in place, unread and unwritten, for
+-- one release so prod could be checked. Several releases have shipped since
+-- (0113 went out in v2.18.0; prod is at 0123 under v2.26.1).
+--
+-- Verified on prod before this was written (read-only):
+--   - 3 map rows, all Country Morning, all accounted for in product_identifiers:
+--       CREAM HEAVY WHIPPING 40 -> supplier_name "Cream - Heavy Whipping 40%"
+--         (seed; equal once the % is read as a space, 0113's skip rule) and
+--         our_sku 0801 (seed)
+--       MILK WHOLE    -> supplier_name "Milk - Whole" (seed) and our_sku 30417
+--         (migrated_product_map)
+--       HALF AND HALF -> supplier_name + our_sku 0708 (migrated_product_map)
+--   - no view, trigger or foreign key references the table; only its own
+--     index idx_supplier_product_map_lookup, which DROP TABLE removes.
+--   - no SQL in functions/, shared/, src/ or workers/ reads or writes it
+--     (tests/unit/productMapRetired.test.ts), and the two bin/ scripts that
+--     still cleared it (seed-cmf-bridge, reprocess-cmf-files) no longer do.
+-- Re-check with: bin/verify-product-map-retired --remote
+--
+-- NOTHING POINTS AT THIS TABLE, so no PRAGMA defer_foreign_keys and no rebuild.
+-- The rows themselves are not lost: 0113 copied them, each copy's note cites
+-- the map row id, and a Time Travel bookmark (bin/backup) precedes the apply.
+--
+-- APPLY: this is destructive by design, so bin/migrate-prod-one refuses it
+-- without the flag:
+--   bin/migrate-prod-one --allow-destructive 0124_drop_supplier_product_map.sql
+-- Plain-ASCII header (the 0110 D1 import finding).
+
+DROP INDEX IF EXISTS idx_supplier_product_map_lookup;
+DROP TABLE IF EXISTS supplier_product_map;
