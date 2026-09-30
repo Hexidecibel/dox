@@ -4,6 +4,10 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-30: THE FIVE LONG-OPEN PROD DATA ITEMS ARE DONE (Chris approved).** Bookmark `0000176b-00000520-000050f6-3df784e3f5eab24320887b16a03612dc` (+ table exports, `~/drops/dox-backups/*20260930T003901Z*`). (1) 46 of the 74 duplicate later-copies archived (status only, audit row names the kept copy); 28 SKIPPED because the two extractions disagree (spec results / lots / products the kept copy lacks) - a person must choose; 6 pending lot suggestions still point at archived copies (their kept copy has its own). (2) 2 lot-key repairs applied (one re-key, one merge; emptied row deleted, whole row in audit). (3) classification backfill: Cush Co 511, Q8 16, Medosweet 6. (4) stale "Julian format" line removed from Cush Co + Q8 extraction_context. (5) `supplier_product_map` DROPPED via 0124 (stamped; 3/3 rows accounted for). Scripts: bin/archive-duplicate-documents, bin/report-lot-key-scheme --apply, bin/backfill-classification-status, bin/fix-stale-julian-context, bin/verify-product-map-retired. Code for these is on local master (unpushed, with the held search work).
+
+---
+
 **2026-09-29 (end): v2.26.1 LIVE ("Ask for a month"). HELD, unshipped, local master only (not pushed): tenant-grounded search examples (`GET /api/search/examples`), the search golden corpus (`tests/api/search-golden.test.ts`, 90 pass / 6 skipped) and `bin/eval-search`.** Chris said hold - do not deploy or push these without asking. The 6 skipped golden rows are product words ALONE ("unsalted butter", SKU "4417", "5 gallon bag"): the reader only chips product words next to another constraint; a code or pack should chip on its own (Phase 3 rule) - small follow-up, rows switch on automatically. Local eval on the Cush Co copy: 98.4% overall, negatives 50/50.
 
 ---
