@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 141 tables, 2 views, 245 indexes, 42 triggers.
+Objects: 141 tables, 2 views, 247 indexes, 47 triggers.
 
 ## Core documents & versions
 
@@ -107,9 +107,12 @@ Triggers: `trg_document_versions_ai_fts`, `trg_document_versions_au_fts`
   renewal_decided_at TEXT
   renewal_decided_by TEXT
   arrived_at TEXT
+  approved_at TEXT
+  intake_source TEXT
+  origin_queue_id TEXT
 ```
 
-Indexes: `idx_documents_category`, `idx_documents_classification_status`, `idx_documents_document_type`, `idx_documents_lot_number`, `idx_documents_po_number`, `idx_documents_renewal_due_date`, `idx_documents_renewal_type`, `idx_documents_status`, `idx_documents_tenant`, `idx_documents_tenant_external_ref`, `idx_documents_tenant_owner`, `idx_documents_tenant_status_created`, `idx_documents_tenant_status_renewal`, `idx_documents_tenant_status_supplier`, `idx_documents_tenant_status_type`
+Indexes: `idx_documents_category`, `idx_documents_classification_status`, `idx_documents_document_type`, `idx_documents_lot_number`, `idx_documents_po_number`, `idx_documents_renewal_due_date`, `idx_documents_renewal_type`, `idx_documents_status`, `idx_documents_tenant`, `idx_documents_tenant_approved`, `idx_documents_tenant_external_ref`, `idx_documents_tenant_intake_source`, `idx_documents_tenant_owner`, `idx_documents_tenant_status_created`, `idx_documents_tenant_status_renewal`, `idx_documents_tenant_status_supplier`, `idx_documents_tenant_status_type`
 
 Triggers: `trg_documents_ad_fts`, `trg_documents_ad_search_keys`, `trg_documents_ai_fts`, `trg_documents_ai_search_keys`, `trg_documents_au_fts`, `trg_documents_au_search_keys`
 
@@ -129,8 +132,6 @@ Document classification and the IDP Document Registry fields (migrations 0076-00
 ```
 
 Indexes: `idx_document_categories_document`, `idx_document_categories_type`
-
-Triggers: `trg_document_categories_ad_fts`, `trg_document_categories_ai_fts`
 
 ### `document_types`
 
@@ -249,6 +250,8 @@ Triggers: `trg_lots_au_fts`, `trg_lots_au_search_keys`
 ```
 
 Indexes: `idx_product_identifiers_lookup`, `idx_product_identifiers_product`, `idx_product_identifiers_unique_plain`, `idx_product_identifiers_unique_supplier`
+
+Triggers: `trg_product_identifiers_ad_reindex`, `trg_product_identifiers_ai_reindex`, `trg_product_identifiers_au_reindex`
 
 ### `product_suppliers`
 
@@ -1570,6 +1573,8 @@ Indexes: `idx_document_requests_assigned`, `idx_document_requests_due`, `idx_doc
 
 Indexes: `idx_document_requirements_document`, `idx_document_requirements_requirement`
 
+Triggers: `trg_document_requirements_ad_fts`, `trg_document_requirements_ai_fts`, `trg_document_requirements_au_fts`
+
 ### `document_search_keys`
 
 ```sql
@@ -1971,6 +1976,8 @@ Indexes: `idx_request_uploads_link`, `idx_request_uploads_pending`, `idx_request
 
 Indexes: `idx_requirements_checklist`, `idx_requirements_tenant`
 
+Triggers: `trg_requirements_au_reindex`
+
 ### `spec_limits`
 
 ```sql
@@ -2087,10 +2094,22 @@ SELECT
   (COALESCE(dt.name, '') || ' ' || COALESCE(dt.slug, ''))
                                     AS document_type_text,
   COALESCE(
-    (SELECT GROUP_CONCAT(COALESCE(p.name, ''), ' ')
-       FROM document_products dp
-       JOIN products p ON p.id = dp.product_id
-      WHERE dp.document_id = d.id),
+    (SELECT GROUP_CONCAT(txt, ' ') FROM (
+       SELECT COALESCE(p.name, '') AS txt
+         FROM products p
+        WHERE p.id IN (SELECT dp.product_id FROM document_products dp WHERE dp.document_id = d.id
+                       UNION
+                       SELECT l.product_id FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
+                        WHERE dl.document_id = d.id AND l.product_id IS NOT NULL)
+       UNION ALL
+       SELECT pi.value AS txt
+         FROM product_identifiers pi
+        WHERE pi.confirmed = 1
+          AND pi.product_id IN (SELECT dp.product_id FROM document_products dp WHERE dp.document_id = d.id
+                                UNION
+                                SELECT l.product_id FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
+                                 WHERE dl.document_id = d.id AND l.product_id IS NOT NULL)
+    )),
     ''
   )                                 AS product_text,
   COALESCE(
@@ -2108,10 +2127,10 @@ SELECT
     ''
   )                                 AS lot_text,
   COALESCE(
-    (SELECT GROUP_CONCAT(COALESCE(dct.name, ''), ' ')
-       FROM document_categories dc
-       JOIN document_types dct ON dct.id = dc.document_type_id
-      WHERE dc.document_id = d.id),
+    (SELECT GROUP_CONCAT(COALESCE(r.name, ''), ' ')
+       FROM document_requirements dr
+       JOIN requirements r ON r.id = dr.requirement_id
+      WHERE dr.document_id = d.id AND dr.status != 'rejected'),
     ''
   )                                 AS category_text,
   REPLACE(REPLACE(REPLACE(COALESCE(d.aliases, ''), '[', ''), ']', ''), '"', '')

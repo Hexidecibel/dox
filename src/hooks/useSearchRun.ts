@@ -33,13 +33,15 @@ export function useSearchRun(opts: {
   enabled: boolean;
   limit: number;
   offset: number;
+  /** Which facets to count (default every one). Easy mode asks for its five. */
+  facetFields?: readonly string[];
 }): SearchRunResult {
-  const { query, tenantId, enabled, limit, offset } = opts;
+  const { query, tenantId, enabled, limit, offset, facetFields } = opts;
   const [state, setState] = useState<SearchRunResult>({ data: null, answeredText: null, loading: false, error: null });
   const inflight = useRef<{ key: string; controller: AbortController } | null>(null);
   const cache = useRef(new Map<string, { at: number; data: SearchQueryResponse }>());
 
-  const key = enabled ? `${queryKey(query)}|${tenantId ?? ''}|${limit}|${offset}` : null;
+  const key = enabled ? `${queryKey(query)}|${tenantId ?? ''}|${limit}|${offset}|${(facetFields ?? []).join(',')}` : null;
 
   useEffect(() => {
     if (!key) {
@@ -64,11 +66,12 @@ export function useSearchRun(opts: {
     api.search
       .query(
         {
-          query: { ...query, view: { entity: 'documents', ...(query.view.sort ? { sort: query.view.sort } : {}) } },
+          query: { ...query, view: { entity: query.view.entity ?? 'documents', ...(query.view.sort ? { sort: query.view.sort } : {}) } },
           tenant_id: tenantId,
           limit,
           offset,
           facets: true,
+          ...(facetFields && facetFields.length ? { facet_fields: [...facetFields] } : {}),
           interpret: true,
         },
         controller.signal,

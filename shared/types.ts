@@ -4470,6 +4470,12 @@ export interface SavedSearch {
   name: string;
   query: Record<string, any>;
   scope: 'personal' | 'shared';
+  /** Who saved it (a shared view names its publisher). */
+  owner_name?: string | null;
+  /** Saved by the person asking. */
+  mine?: boolean;
+  can_edit?: boolean;
+  can_delete?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -4477,13 +4483,14 @@ export interface SavedSearch {
 export interface CreateSavedSearchRequest {
   name: string;
   query: Record<string, any>;
-  /** Reserved for v2 — current API only accepts 'personal'. */
+  /** 'shared' publishes to the whole organization: org_admin only (403 otherwise). */
   scope?: 'personal' | 'shared';
 }
 
 export interface UpdateSavedSearchRequest {
   name?: string;
   query?: Record<string, any>;
+  scope?: 'personal' | 'shared';
 }
 
 export interface SavedSearchListResponse {

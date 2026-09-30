@@ -10,7 +10,7 @@
  */
 
 import type { Clause } from '../../shared/searchQuery';
-import { SEARCH_FIELDS, STATUS_LABELS, UPLOADED_BUCKETS } from '../../shared/searchFields';
+import { enumLabel, SEARCH_FIELDS, UPLOADED_BUCKETS } from '../../shared/searchFields';
 import { describeSpanValues, findQueryDates, formatIsoHuman, sinceWords } from '../../shared/searchDates';
 
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -57,25 +57,44 @@ function shortNote(note: string | null | undefined, max = 60): string | undefine
 
 export function chipParts(c: Clause, labels: Record<string, string> = {}, constraint?: SearchConstraint | null): ChipParts {
   const def = SEARCH_FIELDS[c.field];
-  const named = c.values.map((v) => labels[v] ?? (c.field === 'status' ? STATUS_LABELS[v] ?? v : v));
+  const named = c.values.map((v) => labels[v] ?? enumLabel(c.field, v));
   switch (c.field) {
     case 'supplier':
     case 'document_type':
     case 'product':
-    case 'status': {
+    case 'status':
+    case 'requirement':
+    case 'claim':
+    case 'spec_verdict':
+    case 'renewal_state':
+    case 'classification':
+    case 'owner':
+    case 'intake_source': {
       const key = `${c.exclude ? 'not ' : ''}${def.label.toLowerCase()}`;
       if (c.field === 'product' && c.ambiguous && c.values.length > 1) {
         return { key: 'product', value: `“${c.raw ?? orList(named)}”`, note: `could mean ${c.values.length} products` };
       }
       return { key, value: orList(named), note: c.source === 'ai' ? undefined : shortNote(c.note) };
     }
-    case 'uploaded': {
+    case 'uploaded':
+    case 'approved': {
+      const key = c.field;
+      if (c.op === 'missing') return { key, value: 'not recorded' };
       const bucket = UPLOADED_BUCKETS.find((b) => b.value === `${c.op}:${c.values[0]}`);
-      if (bucket) return { key: 'uploaded', value: bucket.label.toLowerCase() };
-      if (c.op === 'within') return { key: 'uploaded', value: `last ${c.values[0]} days` };
-      if (c.op === 'older_than') return { key: 'uploaded', value: `over ${c.values[0]} days ago` };
-      break;
+      if (bucket) return { key, value: bucket.label.toLowerCase() };
+      if (c.op === 'within') return { key, value: `last ${c.values[0]} days` };
+      if (c.op === 'older_than') return { key, value: `over ${c.values[0]} days ago` };
+      const [a, b] = c.values.map(chipDate);
+      if (c.op === 'between' && b) return { key, value: `${a.text} – ${b.text}` };
+      if (c.op === 'before') return { key, value: `before ${a.text}` };
+      if (c.op === 'after') return { key, value: `after ${a.text}` };
+      return { key, value: a?.text ?? '—' };
     }
+    case 'document_number':
+    case 'certificate_number':
+      return { key: c.field === 'document_number' ? 'document #' : 'certificate #', value: c.values[0] ?? '', mono: true, note: shortNote(c.note ?? constraint?.note ?? null) };
+    case 'customer':
+      return { key: 'customer', value: named[0] ?? '—', note: shortNote(constraint?.note ?? null, 70) };
     case 'text':
       return { key: 'mentions', value: `“${c.values.join(' ')}”`, note: c.source === 'typed' && c.note ? shortNote(c.note) : undefined };
     case 'lot': {

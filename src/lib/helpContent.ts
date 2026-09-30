@@ -838,6 +838,18 @@ const search: ModuleHelpExpanded = {
           "Type a WMS order number (1797062) to see the certificates for its lots. A certificate counts as covering only when a person accepted the lot match or one of its lot rows is exactly the shipped lot. A suggested match shows as \"confirm\".",
       },
       {
+        heading: 'Advanced: every filter, as rows',
+        body:
+          "Advanced (the switch beside Filters, or the A key) shows the same search as rows: where [field] [is any of / on / between / starts with …] [values], each row Include or Exclude, joined by AND. The chips you typed in Easy are the rows here, and the rows come back as chips — switching loses nothing. Beyond supplier, type, product and dates you can filter on the requirement a document satisfies, the claim it triggers, its spec result (out of spec, could not check, in spec, or no results judged — which is not a pass), its renewal (past due, due within its warning time, current, does not renew, no date confirmed), classification, owner, the door it came in by (email, a connector, a supplier request link, uploaded directly), the day it was approved (or approval not recorded), its document # or certificate #, and a customer (followed through that customer's WMS orders the way an order number is). " +
+          "The facet rail counts what adding each value would leave, and shows how far a count moved when a filter changed; x on a row, or its ⊘ button, excludes the value. A number, a date, a lot, a PO or a customer is something a document must be, so it can only be included: \"not lot X\" is not a question a document can cover.",
+      },
+      {
+        heading: 'Result modes, columns and saved views',
+        body:
+          "Show the matching documents as Documents, Lots, Products or Suppliers. A filter that does not describe that kind of row (an owner, for suppliers) is greyed with \"doesn't apply\" and kept for when you switch back. For a search that asks for something specific, a Lots / Products / Suppliers row counts only documents that cover it or likely cover it — never a nearby one — and Show documents narrows back to them. Columns chooses what the documents table shows. " +
+          "Saved searches keep the filters, the mode, the columns and the sort. An organization admin can share a saved view with everyone in the organization: everyone can open it, only the person who saved it can change it, and an admin can take it down. Selecting and sending works exactly as in Easy: a covering row can be ticked, a likely or nearby one needs Include anyway first.",
+      },
+      {
         heading: 'Ask AI',
         body:
           "Typing is fast and reads only what it can be sure of. ✦ Ask AI (or Ctrl/⌘ + Enter) sends a question in plain words (\"Darigold certificates from early September that aren't approved yet\") to the language model and turns its reading into chips, each marked ✦ with why it was read that way — edit or remove any of them like any other chip. It never runs by itself. If part of the question could not become a filter, that is said above the results instead of being quietly dropped.",
@@ -845,7 +857,7 @@ const search: ModuleHelpExpanded = {
       {
         heading: 'Keyboard',
         body:
-          "/ puts the cursor in the search box. ↑ ↓ (or j k) move through the results and show each in the preview; Space selects the one you are on (only where a checkbox is offered); Enter opens it. E downloads the selection as a ZIP and S sends it. Ctrl/⌘ + Enter asks the AI, Ctrl/⌘ + K opens search from any page, and Esc closes whatever is open.",
+          "/ puts the cursor in the search box. ↑ ↓ (or j k) move through the results and show each in the preview; Space selects the one you are on (only where a checkbox is offered); Enter opens it. E downloads the selection as a ZIP and S sends it. A switches between Easy and Advanced, and x on a facet row excludes that value. Ctrl/⌘ + Enter asks the AI, Ctrl/⌘ + K opens search from any page, and Esc closes whatever is open.",
       },
       {
         heading: 'Scope',

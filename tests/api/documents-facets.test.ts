@@ -466,7 +466,7 @@ describe('facet writes — the 0079 FTS pipeline still fires', () => {
     expect(hits.results.map((r) => r.doc_id)).toContain(docId);
   });
 
-  it('keeps category_text working when categories AND facets are sent together', async () => {
+  it('category_text names the requirements when categories AND facets are sent together', async () => {
     const typeId = `dt-${generateTestId()}`;
     const marker = `Catmarker${generateTestId()}`;
     await db
@@ -489,12 +489,14 @@ describe('facet writes — the 0079 FTS pipeline still fires', () => {
     expect(cats?.n).toBe(1);
     expect(await requirementRows(docId)).toHaveLength(1);
 
-    // And the document_categories FTS trigger still refreshed category_text.
-    const hits = await db
+    // Since 0131 category_text names the REQUIREMENTS the document satisfies;
+    // the retired document_categories junction no longer feeds search.
+    const hit = async (m: string) => ((await db
       .prepare('SELECT doc_id FROM documents_fts WHERE documents_fts MATCH ?')
-      .bind(`category_text:${marker}`)
-      .all<{ doc_id: string }>();
-    expect(hits.results.map((r) => r.doc_id)).toContain(docId);
+      .bind(m)
+      .all<{ doc_id: string }>()).results ?? []).map((r) => r.doc_id);
+    expect(await hit('category_text:allergen')).toContain(docId);
+    expect(await hit(`category_text:${marker}`)).not.toContain(docId);
   });
 
   it('a facet-only PUT leaves the document searchable', async () => {
