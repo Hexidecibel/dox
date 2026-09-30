@@ -3,7 +3,7 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import type { Env, User } from '../../lib/types';
-import { LOT_SCHEME_SELECT, withInvariantWarnings } from '../../lib/queue-warnings';
+import { LOT_SCHEME_SELECT, withInvariantWarnings, withSalesSheetWarning } from '../../lib/queue-warnings';
 import { specConfigLoader, withSpecConfig } from '../../lib/spec-warnings';
 import { withRenewalProposal } from '../../lib/renewal-proposal';
 import { loadQueueIntakeHistory } from '../../lib/intake/duplicates';
@@ -133,7 +133,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         const config = await loadSpecConfigFor(String(rest.tenant_id ?? ''));
         return withSpecConfig(
           withRenewalProposal(
-            withInvariantWarnings({ ...rest, profile_exists: profile_exists === 1 })
+            withSalesSheetWarning(withInvariantWarnings({ ...rest, profile_exists: profile_exists === 1 }))
           ),
           config,
           {

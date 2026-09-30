@@ -2131,6 +2131,13 @@ export interface ProcessingQueueItem {
    */
   invariant_warnings?: InvariantFailure[];
   /**
+   * Rules table F6: set when this item is being filed as a specification sheet
+   * and carries no revision/issue/effective date and no document number -- the
+   * marks of a controlled document -- so it may be a SALES sheet. Advisory.
+   * `shared/salesSheetCheck.ts`.
+   */
+  sales_sheet_warning?: import('./salesSheetCheck').SalesSheetWarning | null;
+  /**
    * Conformance verdicts on this item's TEST RESULTS, computed server-side by
    * `shared/specCheck.ts`. Deliberately separate from `invariant_warnings`: an
    * invariant says the extraction looks wrong (a data chore), a spec verdict

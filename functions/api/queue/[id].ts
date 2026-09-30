@@ -11,7 +11,7 @@ import {
 import { decideArrival, preflightArrivalDecision } from '../../lib/request-arrivals';
 // NOTE: `deleteFile` is deliberately NOT imported any more — rejecting a queue
 // item no longer destroys its R2 object. See handleReject's R2 RETENTION note.
-import { LOT_SCHEME_SELECT, invariantWarningsFor, withInvariantWarnings } from '../../lib/queue-warnings';
+import { LOT_SCHEME_SELECT, invariantWarningsFor, withInvariantWarnings, withSalesSheetWarning } from '../../lib/queue-warnings';
 import { loadSpecConfig, withSpecConfig, specResultsWithConfig } from '../../lib/spec-warnings';
 import { registerAndNotifyForApproval } from '../../lib/spec-register';
 import { recordArrivalAndCheckExpiry } from '../../lib/expired-on-arrival';
@@ -127,10 +127,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // frozen at approve time — this is only the starting value.
     const enriched = withSpecConfig(
       withRenewalProposal(
-        withInvariantWarnings({
-          ...rest,
-          profile_exists: profile_exists === 1,
-        })
+        withSalesSheetWarning(
+          withInvariantWarnings({
+            ...rest,
+            profile_exists: profile_exists === 1,
+          })
+        )
       ),
       specConfig,
       {

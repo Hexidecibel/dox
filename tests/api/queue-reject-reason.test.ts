@@ -255,3 +255,46 @@ describe('approving over a warning is allowed but recorded', () => {
     expect(await auditRows('queue_item.approved_with_warnings')).toHaveLength(0);
   });
 });
+
+describe('F6: a sales sheet filed as a spec sheet is flagged at review', () => {
+  const SALES_TEXT = `Northfield Creamery Ingredients
+Sour Cream Powder
+Why chefs and formulators love it
+Ask your Northfield rep for samples and pricing.
+Typical values are for information only and are not specifications.`;
+
+  async function specType(): Promise<string> {
+    const id = generateTestId();
+    await db
+      .prepare(`INSERT INTO document_types (id, tenant_id, name, slug, active) VALUES (?, ?, 'Specification Sheet', ?, 1)`)
+      .bind(id, seed.tenantId, `specification-sheet-${id.slice(0, 6)}`)
+      .run();
+    return id;
+  }
+
+  it('the queue list carries the warning for an uncontrolled "spec sheet", and not for a controlled one', async () => {
+    const typeId = await specType();
+    const sales = await makeQueueItem({ product_name: 'Sour Cream Powder' }, SALES_TEXT);
+    const real = await makeQueueItem({ product_name: 'Light Cream' }, 'PRODUCT SPECIFICATIONS\nLatest Rev: 2 Mar 2026 JAG');
+    await db
+      .prepare('UPDATE processing_queue SET document_type_id = ? WHERE id IN (?, ?)')
+      .bind(typeId, sales.id, real.id)
+      .run();
+
+    const res = await listQueue(listContext('status=pending'));
+    const body = (await res.json()) as {
+      items: Array<{ id: string; sales_sheet_warning: { message: string; marketing_evidence: string[] } | null }>;
+    };
+    const byId = Object.fromEntries(body.items.map((i) => [i.id, i]));
+    expect(byId[sales.id].sales_sheet_warning?.message).toContain('Sales sheet, not a spec sheet');
+    expect(byId[sales.id].sales_sheet_warning?.marketing_evidence.length).toBeGreaterThan(0);
+    expect(byId[real.id].sales_sheet_warning).toBeNull();
+  });
+
+  it('never flags a document that is not being filed as a spec sheet', async () => {
+    await makeQueueItem({ product_name: 'Sour Cream Powder' }, SALES_TEXT);
+    const res = await listQueue(listContext('status=pending'));
+    const body = (await res.json()) as { items: Array<{ sales_sheet_warning: unknown }> };
+    expect(body.items[0].sales_sheet_warning).toBeNull();
+  });
+});
