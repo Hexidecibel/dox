@@ -4,6 +4,10 @@ Notes and thoughts for the next session. Claude reads this on startup.
 
 ---
 
+**2026-09-30 (end): v2.28.0 LIVE ("You already have this").** v2.27.0 shipped earlier the same day (Advanced search, every field, examples, golden corpus, G3/F7/H1/F6/D2; migrations 0125/0126/0130/0131). v2.28.0 = duplicates raised at import: Replace existing (new version, history kept) / Keep as new / Discard (reason `duplicate_discarded`); migration 0132. Staging is now CURRENT (migrations 0124-0132 applied, build deployed) - keep it that way before each deploy or the e2e gate tests stale code and flakes. AJ: detailed follow-up (16 questions) + a short high-level update both posted in #ai-briefs. PENDING FROM CHRIS: press Admin > Search > Reindex (drains the 10 one-time 0131 jobs). Parked: Cush Co CFU/mL-as-CFU/g setting (backlog.md). The earlier "held on local master" entry is SUPERSEDED - everything shipped.
+
+---
+
 **2026-09-30 (later): LOCAL MASTER IS 23 AHEAD OF ORIGIN - ALL HELD, NOTHING DEPLOYED (prod = v2.26.1).** Gates on the merged tree: 332 files / 4639 tests, ratchet 27. Waiting on Chris to ship: search examples + golden corpus (140 rows, 0 skipped) + `bin/eval-search`; **search Phase 3** (Advanced mode, every field, product words alone, shared views; migrations **0130** provenance + **0131** FTS rebuild - rehearsed, NOT applied); **rules-table rows** G3 calendar-window renewals (0125), F7 baseline, H1 packet citation (0126), F6 sales-sheet check, D2 known-wrong vs verify - 0125/0126 NOT applied; the prod-data scripts (already APPLIED on prod). Search "satisfies requirement / triggers claim" = CONFIRMED links only (filter, facets, mirror) - decided by us, matches the gap engine. To ship: `bin/backup`, then `bin/migrate-prod-one` 0125 0126 0130 0131 one at a time (0131 is a view/trigger rebuild - check its header), then `bin/release --minor` + `bin/deploy`, push the tag only after exit=0. New AJ questions: `~/drops/dox-designs-2026-09-29/aj-ledger.md` (bottom).
 
 ---
