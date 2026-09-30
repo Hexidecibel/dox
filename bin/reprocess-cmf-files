@@ -9,7 +9,7 @@
 # product_maps bridge block) -> produceCoaRecords -> rematch. The point is to
 # validate the STEADY-STATE lot_scheme=date_code path: lots stored STRIPPED to
 # bare MMDDYY at PRODUCE time (no rectify/backfill), the product identifier
-# bridge (0113; supplier_product_map is retired), and matching against a real
+# bridge (0113; supplier_product_map dropped by 0124), and matching against a real
 # prod-derived order side.
 #
 # NOTHING writes to prod. Prod R2/D1 are READ-ONLY sources for the corpus +
@@ -133,7 +133,6 @@ DELETE FROM orders WHERE tenant_id='${TENANT_ID}';
 DELETE FROM document_lots WHERE lot_id IN (SELECT id FROM lots WHERE tenant_id='${TENANT_ID}');
 DELETE FROM document_lots WHERE document_id IN (SELECT id FROM documents WHERE tenant_id='${TENANT_ID}');
 DELETE FROM lots WHERE tenant_id='${TENANT_ID}';
-DELETE FROM supplier_product_map WHERE tenant_id='${TENANT_ID}';
 DELETE FROM product_identifiers WHERE tenant_id='${TENANT_ID}';
 DELETE FROM product_suppliers WHERE tenant_id='${TENANT_ID}';
 DELETE FROM document_products WHERE document_id IN (SELECT id FROM documents WHERE tenant_id='${TENANT_ID}');

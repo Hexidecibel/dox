@@ -136,8 +136,10 @@ describe('COA approve: product_maps teach writes identifiers', () => {
     expect((rows.results ?? []).filter((r) => r.value === '30904').map((r) => r.product_id)).toEqual([tote]);
     expect((rows.results ?? []).some((r) => r.product_id === whole)).toBe(false);
 
-    // No supplier_product_map row is written any more.
-    const legacy = await db.prepare('SELECT COUNT(*) AS n FROM supplier_product_map').first<{ n: number }>();
+    // supplier_product_map is gone (0124): teaching can only have written identifiers.
+    const legacy = await db
+      .prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'supplier_product_map'")
+      .first<{ n: number }>();
     expect(legacy!.n).toBe(0);
 
     const audit = await db

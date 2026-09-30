@@ -1,0 +1,75 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/verify-product-map-retired — READ-ONLY pre-flight for migration 0124
+ * (DROP supplier_product_map). Answers the two questions the drop depends on:
+ *
+ *   1. Is every supplier_product_map row accounted for in product_identifiers?
+ *      A row is accounted for when its product carries a supplier_name for
+ *      that supplier whose value_norm equals the stored key (0113 wrote
+ *      lower(key); a seeded name equal once '%' reads as a space counts, which
+ *      is 0113's own skip rule), AND -- when the row had a distributor_sku --
+ *      an our_sku with that value.
+ *   2. Does anything in the database still reference the table (a view, a
+ *      trigger, another table's foreign key)?
+ *
+ * Exit 0 = safe to drop (or already dropped); exit 1 = something unaccounted.
+ *
+ * Usage:
+ *   bin/verify-product-map-retired             # LOCAL
+ *   bin/verify-product-map-retired --remote    # PRODUCTION
+ *   bin/verify-product-map-retired --staging   # STAGING
+ */
+
+'use strict';
+
+const { query, DEFAULT_DB } = require('./lib/d1');
+
+const args = process.argv.slice(2);
+const remote = args.includes('--remote') || args.includes('-r') || args.includes('--staging');
+const db = args.includes('--staging') ? 'doc-upload-db-staging' : DEFAULT_DB;
+const opts = { remote, db };
+
+const exists = query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'supplier_product_map'", opts)[0];
+console.log(`verify-product-map-retired — ${remote ? `REMOTE ${db}` : `LOCAL ${db}`}`);
+if (!Number(exists?.n)) {
+  console.log('supplier_product_map does not exist (0124 already applied). Nothing to verify.');
+  process.exit(0);
+}
+
+const normName = (v) => String(v || '').toLowerCase().replace(/%/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+const rows = query(
+  `SELECT m.id, m.tenant_id, m.supplier_id, m.coa_product_name_key, m.order_product_id, m.distributor_sku
+     FROM supplier_product_map m ORDER BY m.tenant_id, m.coa_product_name_key`,
+  opts,
+);
+let bad = 0;
+for (const r of rows) {
+  const ids = query(
+    `SELECT kind, value, value_norm, source, confirmed, supplier_id FROM product_identifiers
+      WHERE tenant_id = '${r.tenant_id}' AND product_id = '${r.order_product_id}'`,
+    opts,
+  );
+  const name = ids.find((i) => i.kind === 'supplier_name' && i.supplier_id === r.supplier_id && normName(i.value_norm) === normName(r.coa_product_name_key));
+  const sku = r.distributor_sku ? ids.find((i) => i.kind === 'our_sku' && i.value === r.distributor_sku) : null;
+  const ok = Boolean(name) && (!r.distributor_sku || Boolean(sku));
+  if (!ok) bad++;
+  console.log(`  ${ok ? 'OK     ' : 'MISSING'}  ${r.coa_product_name_key} (map row ${r.id})`);
+  console.log(`           name  -> ${name ? `"${name.value}" (${name.source}${name.confirmed ? ', confirmed' : ''})` : 'NOT FOUND'}`);
+  if (r.distributor_sku) console.log(`           sku ${r.distributor_sku} -> ${sku ? `our_sku (${sku.source})` : 'NOT FOUND'}`);
+}
+
+const refs = query(
+  `SELECT type, name FROM sqlite_master
+    WHERE sql LIKE '%supplier_product_map%' AND name NOT IN ('supplier_product_map', 'idx_supplier_product_map_lookup')`,
+  opts,
+);
+for (const r of refs) console.log(`  REFERENCED by ${r.type} ${r.name}`);
+
+console.log(`\n${rows.length} map row(s): ${rows.length - bad} accounted for, ${bad} missing; ${refs.length} other schema object(s) reference the table.`);
+if (bad || refs.length) {
+  console.log('NOT SAFE to drop: resolve the rows above first.');
+  process.exit(1);
+}
+console.log('Safe to drop: bin/migrate-prod-one --allow-destructive 0124_drop_supplier_product_map.sql');
