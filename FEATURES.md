@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.28.0](releases/v2.28.0.md) — 2026-09-30 — You already have this
 - [v2.27.0](releases/v2.27.0.md) — 2026-09-29 — Every field, and your own examples
 - [v2.26.1](releases/v2.26.1.md) — 2026-09-29 — Ask for a month
 - [v2.26.0](releases/v2.26.0.md) — 2026-09-29 — Type it the way you would say it

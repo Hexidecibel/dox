@@ -1,6 +1,11 @@
 {
-  "current": "2.27.0",
+  "current": "2.28.0",
   "versions": [
+    {
+      "version": "2.28.0",
+      "date": "2026-09-30",
+      "title": "You already have this"
+    },
     {
       "version": "2.27.0",
       "date": "2026-09-29",
