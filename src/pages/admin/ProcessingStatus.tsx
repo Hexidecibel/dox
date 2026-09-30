@@ -41,6 +41,7 @@ import {
   Error as ErrIcon,
 } from '@mui/icons-material';
 import { AUTH_TOKEN_KEY } from '../../lib/types';
+import { useAuth } from '../../contexts/AuthContext';
 import { formatDateTime } from '../../utils/format';
 import type { ProcessingStatusResponse } from '../../../shared/types';
 
@@ -542,7 +543,66 @@ function LoadingSkeleton() {
   );
 }
 
+/**
+ * Rebuild the search index: queue a full re-emit for every organization and
+ * drain it in one call (POST /api/admin/search/reindex, super_admin only).
+ * Used after a migration changes what search indexes, or when free text looks
+ * stale; routine edits already drain on their own.
+ */
+function SearchIndexCard() {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const rebuild = async () => {
+    setBusy(true);
+    setResult(null);
+    try {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const res = await fetch('/api/admin/search/reindex', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'enqueue_and_drain' }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        enqueued?: number;
+        drain?: { jobsCompleted?: number; jobsFailed?: number; docsReindexed?: number };
+      };
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      const d = body.drain ?? {};
+      setResult({
+        ok: !d.jobsFailed,
+        text: `Rebuilt: ${d.docsReindexed ?? 0} documents re-indexed across ${d.jobsCompleted ?? 0} job(s)${d.jobsFailed ? `, ${d.jobsFailed} failed` : ''}.`,
+      });
+    } catch (err) {
+      setResult({ ok: false, text: err instanceof Error ? err.message : 'Rebuild failed' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Typography variant="subtitle1" fontWeight={600} gutterBottom>
+        Search index
+      </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+        Rebuilds free-text search for every organization. Needed after an update that changes what search reads; everyday edits keep it current on their own.
+      </Typography>
+      <Button variant="outlined" size="small" onClick={rebuild} disabled={busy} startIcon={busy ? <CircularProgress size={14} /> : undefined}>
+        {busy ? 'Rebuilding…' : 'Rebuild search index'}
+      </Button>
+      {result && (
+        <Alert severity={result.ok ? 'success' : 'error'} sx={{ mt: 1.5 }}>
+          {result.text}
+        </Alert>
+      )}
+    </Paper>
+  );
+}
+
 export function ProcessingStatus() {
+  const { isSuperAdmin } = useAuth();
   const [data, setData] = useState<ProcessingStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -680,6 +740,7 @@ export function ProcessingStatus() {
           <QwenCard data={data.qwen} />
           {data.models && <ModelsCard data={data.models} />}
           <StaleCard data={data.stale} />
+          {isSuperAdmin && <SearchIndexCard />}
           <Box sx={{ gridColumn: { xs: '1', md: '1 / -1' } }}>
             <ErrorsCard data={data.errors} onRefresh={() => load(true)} />
           </Box>
