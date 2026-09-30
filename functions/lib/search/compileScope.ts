@@ -25,9 +25,9 @@
  *     'deleted' is never searchable;
  *   - product = linked through document_products OR through a linked lot row's
  *     product (a split COA is linked only that way);
- *   - requirement / claim = a link that is not REJECTED (a suggested link is a
- *     rule's default a person has not overruled; a rejected one is a person
- *     saying no, and never counts);
+ *   - requirement / claim = a CONFIRMED link, the same rule the gap engine
+ *     closes on: a suggested link is a rule's default nobody has checked, so
+ *     filtering on it would say "satisfies" about something no person said;
  *   - owner / intake source: `__none__` is "nothing recorded";
  *   - uploaded / approved dates compare at DAY granularity; `created_at` holds
  *     both `YYYY-MM-DD HH:MM:SS` and ISO `…T…Z` spellings — a day-start string
@@ -152,13 +152,13 @@ export function renewalStateSql(today: string): string {
     ELSE 'current' END)`;
 }
 
-/** The non-rejected requirement / claim links, as char(31)-joined `id char(30) name` pairs. */
+/** The CONFIRMED requirement / claim links, as char(31)-joined `id char(30) name` pairs. */
 const REQ_IDS_SQL = `(SELECT GROUP_CONCAT(drx.requirement_id || char(30) || COALESCE(rx.name, ''), char(31))
     FROM document_requirements drx LEFT JOIN requirements rx ON rx.id = drx.requirement_id
-    WHERE drx.document_id = d.id AND drx.status != 'rejected')`;
+    WHERE drx.document_id = d.id AND drx.status = 'confirmed')`;
 const CLAIM_IDS_SQL = `(SELECT GROUP_CONCAT(dcx.claim_type_id || char(30) || COALESCE(cx.name, ''), char(31))
     FROM document_claims dcx LEFT JOIN claim_types cx ON cx.id = dcx.claim_type_id
-    WHERE dcx.document_id = d.id AND dcx.status != 'rejected')`;
+    WHERE dcx.document_id = d.id AND dcx.status = 'confirmed')`;
 
 const OWNER_SQL = `NULLIF(TRIM(d.owner), '')`;
 const INTAKE_SQL = `NULLIF(TRIM(d.intake_source), '')`;
@@ -254,11 +254,11 @@ function clauseSql(c: Clause, today: string): { sql: string; params: unknown[] }
       return { sql: c.exclude ? `NOT ${has}` : has, params: [...vals, ...vals] };
     }
     case 'requirement': {
-      const has = `EXISTS (SELECT 1 FROM document_requirements drq WHERE drq.document_id = d.id AND drq.status != 'rejected' AND drq.requirement_id IN (${p}))`;
+      const has = `EXISTS (SELECT 1 FROM document_requirements drq WHERE drq.document_id = d.id AND drq.status = 'confirmed' AND drq.requirement_id IN (${p}))`;
       return { sql: c.exclude ? `NOT ${has}` : has, params: vals };
     }
     case 'claim': {
-      const has = `EXISTS (SELECT 1 FROM document_claims dcq WHERE dcq.document_id = d.id AND dcq.status != 'rejected' AND dcq.claim_type_id IN (${p}))`;
+      const has = `EXISTS (SELECT 1 FROM document_claims dcq WHERE dcq.document_id = d.id AND dcq.status = 'confirmed' AND dcq.claim_type_id IN (${p}))`;
       return { sql: c.exclude ? `NOT ${has}` : has, params: vals };
     }
     case 'spec_verdict': return enumSql(c, SPEC_VERDICT_SQL);

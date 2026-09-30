@@ -403,7 +403,7 @@ function facetStatement(field: FacetField, today: string): { cols: string; selec
         cols: '',
         select: `SELECT dr.requirement_id AS value, r.name AS label, COUNT(DISTINCT dr.document_id) AS count
                    FROM document_requirements dr JOIN requirements r ON r.id = dr.requirement_id
-                  WHERE dr.document_id IN (SELECT id FROM base) AND dr.status != 'rejected'
+                  WHERE dr.document_id IN (SELECT id FROM base) AND dr.status = 'confirmed'
                   GROUP BY dr.requirement_id ORDER BY count DESC, label ASC LIMIT 50`,
         extra: [],
       };
@@ -412,7 +412,7 @@ function facetStatement(field: FacetField, today: string): { cols: string; selec
         cols: '',
         select: `SELECT dc.claim_type_id AS value, ct.name AS label, COUNT(DISTINCT dc.document_id) AS count
                    FROM document_claims dc JOIN claim_types ct ON ct.id = dc.claim_type_id
-                  WHERE dc.document_id IN (SELECT id FROM base) AND dc.status != 'rejected'
+                  WHERE dc.document_id IN (SELECT id FROM base) AND dc.status = 'confirmed'
                   GROUP BY dc.claim_type_id ORDER BY count DESC, label ASC LIMIT 50`,
         extra: [],
       };

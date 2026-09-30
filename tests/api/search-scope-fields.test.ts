@@ -224,7 +224,9 @@ describe('every facet, and the Advanced columns', () => {
     // Sticky: the renewal facet still offers the states the selection left out.
     expect(f.renewal_state!.map((x) => x.value).sort()).toEqual(['current', 'does_not_renew', 'expiring', 'not_set', 'past_due']);
     expect(f.renewal_state!.find((x) => x.value === 'expiring')!.label).toBe('Due within its warning time');
-    expect(f.requirement!.find((x) => x.value === REQ.coi)).toMatchObject({ label: 'Certificate of Insurance', count: 1 });
+    // The one expiring COI (Valley's) is only SUGGESTED against the requirement:
+    // nobody has confirmed it satisfies it, so the facet must not count it.
+    expect(f.requirement!.find((x) => x.value === REQ.coi)).toBeUndefined();
   });
 
   it('an identifying search counts facets over its ANSWERS only', async () => {
