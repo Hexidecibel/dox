@@ -45,6 +45,15 @@ const resolve = (q: string) => resolveProductPhrase(q, catalog);
 const ids = (q: string) => resolve(q)?.resolution.candidates.map((c) => c.product_id).sort() ?? null;
 
 describe('resolveProductPhrase', () => {
+  it('a phrase that IS a recorded name word for word is `named`; a word inside names is not', () => {
+    expect(resolve('brick cheese')!.named).toBe(true);
+    expect(resolve('heavy whipping cream 40%')!.named).toBe(true);
+    expect(resolve('heavy whipping cream 40%')!.resolution.ambiguous).toBe(true);
+    expect(resolve('cream')!.named).toBe(false);
+    expect(resolve('whipping cream')!.named).toBe(false);
+    expect(resolve('2235')!.named).toBe(false);
+  });
+
   it('resolves our SKU, a supplier item and a former item to one product each', () => {
     expect(ids('2235')).toEqual(['p2235']);
     expect(ids('810004')).toEqual(['p2235']);

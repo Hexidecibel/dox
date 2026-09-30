@@ -92,6 +92,11 @@ describe('statement budget', () => {
     expect(body.stats.scan_fallback).toBe(false);
   });
 
+  it('words that may NAME a product cost one round trip for the catalog, no more', async () => {
+    const { outside } = await measured(q(SCOPE, 'budget'), { interpret: true });
+    expect(outside.round_trips).toBeLessThanOrEqual(2);
+  });
+
   it('interpreting typed text costs no extra round trip', async () => {
     const { body, outside } = await measured(q([], 'K100004'), { interpret: true });
     expect(body.interpreted?.clauses[0]).toMatchObject({ field: 'po' });

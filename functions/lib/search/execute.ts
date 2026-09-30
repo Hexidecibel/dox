@@ -100,7 +100,7 @@ import {
 import { catalogFromRows, loadProductCatalog, productCatalogStatement, type CatalogRow } from '../product-identifiers';
 import { compileScope, scopeHolds, scopeWhere, uploadedBounds, type CompiledScope, type ScopeAttrs } from './compileScope';
 import { drainDocumentKeyJobs } from './keys';
-import { detectProduct, lotPrefixNote, resolveDetections, scanHasCandidates, scanNorms, scanOrderValues, scanResidualWords, scanText, type DetectionHits } from './interpret';
+import { detectProduct, lotPrefixNote, resolveDetections, scanHasCandidates, scanMayNameProduct, scanNorms, scanOrderValues, scanText, type DetectionHits } from './interpret';
 import type { LotSchemeSpec } from '../../../shared/lotScheme';
 
 /** Pending key rebuilds a search drains before it reads keys. */
@@ -949,9 +949,25 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
 
   const scan = input.interpret && typedText ? scanText(typedText, { now }) : null;
   const detecting = !!scan && scanHasCandidates(scan);
+  const productChosen = query.clauses.some((c) => c.field === 'product');
 
-  // Nothing identifying anywhere: the scope / text path, one round trip.
+  // Nothing identifying anywhere: the scope / text path, one round trip —
+  // plus one for the product catalog when the typed words may NAME a product
+  // on their own (a code, a pack, a recorded name: "4417", "unsalted butter").
+  // Descriptive words alone ("butter") stay a browse (detectProduct).
   if (explicitIdent.length === 0 && !detecting) {
+    if (scan && !productChosen && scanMayNameProduct(scan)) {
+      const pb = new Batch();
+      const ci = pb.add(productCatalogStatement(db, tenantId));
+      await pb.run(db);
+      const product = detectProduct({ clauses: [], residual: typedText }, catalogFromRows(pb.rows<CatalogRow>(ci)), { otherConstraints: false });
+      if (product.detection.clauses.length) {
+        const interpreted = { clauses: product.detection.clauses, residual: product.detection.residual };
+        scope = compileScope([...query.clauses, ...interpreted.clauses], now);
+        const res = await runScopePath(db, tenantId, scope, clauseText, input, stats);
+        return withClauseSummaries({ ...res, labels: { ...product.labels, ...res.labels }, interpreted }, query.clauses, interpreted.clauses, stats);
+      }
+    }
     const res = await runScopePath(db, tenantId, scope, text, input, stats);
     return withClauseSummaries(res, query.clauses, [], stats);
   }
@@ -1032,7 +1048,7 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
   const labelIdx = lblStmt ? r0.add(lblStmt) : null;
   // Words beside the typed candidates may name a product ("butter produced in
   // April") — asked in the same batch, only when a product is not already chosen.
-  const catalogIdx = scan && detecting && scanResidualWords(scan) && !query.clauses.some((c) => c.field === 'product')
+  const catalogIdx = scan && detecting && scanMayNameProduct(scan) && !productChosen
     ? r0.add(productCatalogStatement(db, tenantId))
     : null;
   await r0.run(db);
@@ -1110,7 +1126,8 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
 
   // The text read as nothing identifying after all: back to the scope/text path.
   if (identClauses.length === 0) {
-    const res = await runScopePath(db, tenantId, scope, text, input, stats);
+    // A product the words NAMED took those words: they are not searched as text as well.
+    const res = await runScopePath(db, tenantId, scope, detectedScope.length ? residual : text, input, stats);
     return withClauseSummaries({ ...res, ...(interpreted ? { interpreted } : {}) }, query.clauses, [], stats);
   }
 

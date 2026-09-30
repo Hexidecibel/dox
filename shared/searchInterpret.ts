@@ -341,13 +341,18 @@ export function scanResidualWords(s: TextScan): string {
 }
 
 /**
- * Product words next to another constraint ("butter produced in April"): the
+ * Product words ("butter produced in April", "4417", "5 gallon bag"): the
  * words left over are resolved through the product identifier graph (0107).
- * The rule is Phase 3's, unchanged: words alone apply ONLY next to another
- * constraint ("butter" by itself stays a browse); every word must be accounted
- * for; a phrase that fits several products becomes one clause listing every
- * candidate with `ambiguous: true` — nothing is picked; a phrase that fits
- * nothing stays text. `labels` names each product for its chip.
+ * The Products-by-Any-Name rule:
+ *   - a CODE (our SKU, a supplier's item number, a GTIN), a PACK, or a phrase
+ *     that IS a recorded name word for word (an alias, a supplier's product
+ *     name) is a constraint on its own — it names a product;
+ *   - words that only DESCRIBE ("butter") apply only next to another
+ *     constraint — by themselves they stay a browse;
+ *   - every word must be accounted for; a phrase that fits nothing stays text;
+ *   - a phrase that fits several products becomes one clause listing every
+ *     candidate with `ambiguous: true` — nothing is picked.
+ * `labels` names each product for its chip.
  */
 export function detectProduct(
   det: Detection,
@@ -355,9 +360,10 @@ export function detectProduct(
   opts: { otherConstraints: boolean },
 ): { detection: Detection; labels: Record<string, string> } {
   const phrase = det.residual.trim();
-  if (!catalog || !phrase || !opts.otherConstraints) return { detection: det, labels: {} };
+  if (!catalog || !phrase) return { detection: det, labels: {} };
   const resolved = resolveProductPhrase(phrase, catalog);
   if (!resolved || resolved.resolution.candidates.length === 0) return { detection: det, labels: {} };
+  if (!opts.otherConstraints && !resolved.strong && !resolved.named) return { detection: det, labels: {} };
   const cands = resolved.resolution.candidates;
   const labels: Record<string, string> = {};
   for (const k of cands) labels[k.product_id] = k.product_name;
@@ -369,6 +375,16 @@ export function detectProduct(
     };
   clause.id = `d${det.clauses.length + 1}`;
   return { detection: { clauses: [...det.clauses, clause], residual: '' }, labels };
+}
+
+/**
+ * Could the words a scan leaves name a product? True when descriptive words
+ * remain OR a number was typed that nothing else claimed (our SKU "4417" is
+ * never on a document, so only the product catalog can say what it is). The
+ * server reads the catalog only when this holds.
+ */
+export function scanMayNameProduct(s: TextScan): boolean {
+  return !!scanResidualWords(s) || s.idTokens.length > 0;
 }
 
 /** Nothing on file: what the browser knows before the server has answered. */

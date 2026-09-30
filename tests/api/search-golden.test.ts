@@ -191,6 +191,10 @@ const PRODUCT_WORDS: GoldenCase[] = [
   { q: 'heavy whipping cream 40%', why: 'one supplier name on two products: ambiguous, nothing picked', expect: { productChips: [P.creamTote, P.whipBag] } },
   { q: '5 gallon bag', why: 'a pack', expect: { productChips: [P.whipBag] } },
   { q: 'unsalted butter produced Apr 17', why: 'alias + a day', expect: { covering: [DOC.cascadeMulti], notCovering: [DOC.cascadeSalted] } },
+  { q: 'butter', why: 'a word that only DESCRIBES stays a browse: no product chip on its own', expect: { productChips: [], coverage: 'unconstrained' } },
+  { q: '300 gallon tote', why: 'a pack two products share: ambiguous, nothing picked', expect: { productChips: [P.creamTote, P.milkTote], includes: [DOC.valleyCreamTote, DOC.valleyMilkTote], excludes: [DOC.valleyWhipBag] } },
+  { q: '4418', why: 'our SKU alone narrows to that product', expect: { productChips: [P.butterSalted], includes: [DOC.cascadeSalted], excludes: [DOC.cascadeMulti] } },
+  { q: 'sour cream', why: 'an alias alone narrows to that product', expect: { productChips: [P.sourCream], includes: [DOC.hollowSourA, DOC.hollowSourB], excludes: [DOC.valleyCreamTote] } },
 ];
 
 // ===========================================================================

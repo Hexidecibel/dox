@@ -194,6 +194,15 @@ export interface PhraseResolution {
    * applied only alongside another constraint.
    */
   strong: boolean;
+  /**
+   * The words (with no code) ARE a name a product is recorded by — an alias,
+   * a supplier's product name or our own product name, word for word, nothing
+   * more and nothing less ("unsalted butter", "Cream - Heavy Whipping 40%").
+   * A recorded name is an identifier, not a description, so like a code it is
+   * a constraint on its own; a word that only appears INSIDE names ("butter")
+   * is not.
+   */
+  named: boolean;
   /** The character spans of `phrase` that were resolved (always the whole phrase today). */
 }
 
@@ -252,10 +261,18 @@ export function resolveProductPhrase(phrase: string, catalog: PreparedCatalog): 
     pool = catalog.products.map((product) => ({ product, codeVia: [] }));
   }
 
+  const sameSet = <T>(a: readonly T[], b: readonly T[]): boolean => a.length === b.length && a.every((x) => b.includes(x));
+  const isWholeName = (p: PreparedProduct): boolean => codeTokens.length === 0 && restPhrase.words.length > 0 && p.names.some((n) =>
+    sameSet(n.phrase.words, restPhrase.words)
+    && sameSet(n.phrase.attributes, restPhrase.attributes)
+    && (!restPhrase.pack ? !n.phrase.pack : !!n.phrase.pack && comparePacks(restPhrase.pack, n.phrase.pack).equivalent));
+  let named = false;
+
   const candidates: SearchProductCandidate[] = [];
   for (const { product: p, codeVia } of pool) {
     const d = describes(p);
     if (!d.ok) continue;
+    if (isWholeName(p)) named = true;
     const via: SearchProductMatchedVia[] = codeVia.map(viaOf);
     // Words: prefer a confirmed name that carries each word.
     const usedNames = new Map<string, NameEntry>();
@@ -309,6 +326,7 @@ export function resolveProductPhrase(phrase: string, catalog: PreparedCatalog): 
   return {
     resolution: { phrase: text, candidates, ambiguous, message },
     strong: codeTokens.length > 0 || !!restPhrase.pack,
+    named,
   };
 }
 
