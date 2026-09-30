@@ -1,0 +1,76 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+/**
+ * bin/repoint-doctype-requirement — change which requirement ONE document
+ * type closes (a `document_type_requirements` row, migration 0100), for the
+ * case where a setup-wizard slip mapped a type to the wrong requirement.
+ *
+ * The UI way is Settings > Document Types > "Closes these requirements"; this
+ * exists for a fix made on someone else's tenant without their login. It moves
+ * exactly one mapping row from `--from` to `--to`, refuses if the target
+ * mapping already exists or the source one does not, and writes an audit row
+ * with both sides. Existing document links are NOT touched: a mapping only
+ * shapes the suggestions made for documents approved from now on.
+ *
+ * Usage:
+ *   bin/repoint-doctype-requirement --tenant T --type DT_ID --from REQ_ID --to REQ_ID            # dry run, local
+ *   bin/repoint-doctype-requirement ... --remote                                                 # dry run, PRODUCTION
+ *   bin/repoint-doctype-requirement ... --remote --apply                                         # asks you to type "repoint"
+ *
+ * Flags: --remote/-r production D1; --apply write; --yes/-y skip the prompt.
+ */
+const { query } = require('./lib/d1');
+const { execSql, confirmOrExit, sqlStr, loadDevVars } = require('./lib/d1Apply');
+
+const o = { tenant: null, type: null, from: null, to: null, remote: false, apply: false, yes: false };
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === '--tenant') o.tenant = argv[++i];
+  else if (a === '--type') o.type = argv[++i];
+  else if (a === '--from') o.from = argv[++i];
+  else if (a === '--to') o.to = argv[++i];
+  else if (a === '--remote' || a === '-r') o.remote = true;
+  else if (a === '--apply') o.apply = true;
+  else if (a === '--yes' || a === '-y') o.yes = true;
+  else { console.error(`Unknown argument: ${a}`); process.exit(2); }
+}
+if (!o.tenant || !o.type || !o.from || !o.to) {
+  console.error('Required: --tenant, --type, --from, --to');
+  process.exit(2);
+}
+if (o.remote) loadDevVars();
+
+const q = (sql) => query(sql, { remote: o.remote });
+const type = q(`SELECT id, name FROM document_types WHERE id = ${sqlStr(o.type)} AND tenant_id = ${sqlStr(o.tenant)}`)[0];
+const from = q(`SELECT id, slug, name FROM requirements WHERE id = ${sqlStr(o.from)} AND tenant_id = ${sqlStr(o.tenant)}`)[0];
+const to = q(`SELECT id, slug, name FROM requirements WHERE id = ${sqlStr(o.to)} AND tenant_id = ${sqlStr(o.tenant)}`)[0];
+if (!type || !from || !to) {
+  console.error(`Not found in tenant ${o.tenant}: ${!type ? 'type ' : ''}${!from ? 'from-requirement ' : ''}${!to ? 'to-requirement' : ''}`);
+  process.exit(1);
+}
+const row = q(`SELECT id FROM document_type_requirements WHERE tenant_id = ${sqlStr(o.tenant)} AND document_type_id = ${sqlStr(o.type)} AND requirement_id = ${sqlStr(o.from)}`)[0];
+const clash = q(`SELECT id FROM document_type_requirements WHERE tenant_id = ${sqlStr(o.tenant)} AND document_type_id = ${sqlStr(o.type)} AND requirement_id = ${sqlStr(o.to)}`)[0];
+
+console.log(`Target: ${o.remote ? 'PRODUCTION' : 'LOCAL'} D1, tenant ${o.tenant}`);
+console.log(`  type  "${type.name}" (${type.id})`);
+console.log(`  from  "${from.name}" (${from.slug})`);
+console.log(`  to    "${to.name}" (${to.slug})`);
+if (!row) { console.log('\nNothing to do: the type does not close the from-requirement.'); process.exit(0); }
+if (clash) { console.error('\nRefusing: the type already closes the to-requirement. Remove the wrong mapping in the UI instead.'); process.exit(1); }
+
+const statements = [
+  `UPDATE document_type_requirements SET requirement_id = ${sqlStr(o.to)} WHERE id = ${sqlStr(row.id)}`,
+  `INSERT INTO audit_log (user_id, tenant_id, action, resource_type, resource_id, details)
+   VALUES (NULL, ${sqlStr(o.tenant)}, 'document_type.requirement_repointed', 'document_types', ${sqlStr(o.type)}, ${sqlStr(JSON.stringify({
+     mapping_id: row.id, from: { id: from.id, slug: from.slug }, to: { id: to.id, slug: to.slug },
+     reason: 'setup-wizard slip corrected by script', script: 'bin/repoint-doctype-requirement',
+   }))})`,
+];
+if (!o.apply) {
+  console.log(`\nDRY RUN - ${statements.length} statement(s) not written. Re-run with --apply to write.`);
+  process.exit(0);
+}
+if (o.remote && !o.yes) confirmOrExit('About to WRITE to PRODUCTION D1.', 'repoint');
+execSql(statements, { remote: o.remote, label: 'repoint-doctype-requirement' });
+console.log(`\nRepointed. "${type.name}" now closes "${to.name}".`);
