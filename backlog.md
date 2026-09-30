@@ -446,3 +446,9 @@ Assignment (C/D) is independently shippable once profiles are stateful.
   makes sense — Records' REST + WebSocket + auth surface is most of it,
   so write a "mobile-friendly API audit" task before kickoff. **Status:**
   Backlog — revisit after Records Phase 4 ships.
+
+## Reassess: Cush Co's "Treat CFU/mL as CFU/g" setting vs AJ's C2 rule (parked 2026-09-30)
+- Setting: Settings › Spec Limits › "Treat CFU/mL as CFU/g" (`tenants.spec_volume_mass_equivalent`, migration 0093). ON for Cush Co only (turned on 2026-09-03 by the System Admin account); off everywhere else.
+- It lets a per-mL count (fluid dairy COAs) be judged against our per-g limits. 339 Cush Co results were judged in-spec through it (each verdict's `limit_snapshot.unit_equivalence = 'volume_mass'`).
+- AJ's rules table C2 (2026-09-27): per-volume vs per-mass is never compared. For milk/cream 1 mL ~ 1 g (about 3% off); for most products it is not.
+- Decision (Chris, 2026-09-30): KEEP IT ON for Cush Co for now; default stays off so C2 governs other orgs. Options when reassessing: keep; turn off (new fluid-dairy counts become "could not check" until per-mL limits exist; past verdicts stay frozen); or replace the switch with per-mL limits written for the fluid products.
