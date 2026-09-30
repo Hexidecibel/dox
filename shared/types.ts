@@ -1357,6 +1357,34 @@ export interface ApiDocumentVersion {
   uploader_name?: string;
   uploader_email?: string;
   created_at: string;
+  /** The packet this version was split out of (0126, rules table H1); null otherwise. */
+  source_packet_queue_id?: string | null;
+  /** Frozen citation JSON (`PacketCitation`), or null. */
+  source_packet?: string | null;
+}
+
+/**
+ * Where a split document came from (migration 0126, rules table H1), frozen at
+ * approval into `document_versions.source_packet`: the packet as received and
+ * the pages this part is.
+ */
+export interface PacketCitation {
+  queue_id: string;
+  file_name: string;
+  /** The day the packet reached us (processing_queue.created_at). */
+  received_at: string | null;
+  checksum: string | null;
+  page_count: number | null;
+  /** [from, to], 1-based, inclusive. */
+  pages: [number, number] | null;
+  /** 1-based. */
+  part_number: number | null;
+  part_count: number | null;
+  /** The packet index's own words for this part -- a hint, not a type. */
+  part_label: string | null;
+  split_at: string | null;
+  split_by: string | null;
+  split_method: string | null;
 }
 
 export interface ApiAuditEntry {
@@ -1589,6 +1617,10 @@ export interface DocumentVersion {
   uploader_name?: string;
   uploader_email?: string;
   created_at: string;
+  /** The packet this version was split out of (0126, rules table H1). */
+  source_packet_queue_id?: string | null;
+  /** Frozen `PacketCitation` JSON, or null when not from a packet. */
+  source_packet?: string | null;
 }
 
 export interface User {

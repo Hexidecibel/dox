@@ -21,6 +21,7 @@ import {
   Visibility as PreviewIcon,
 } from '@mui/icons-material';
 import type { DocumentVersion } from '../lib/types';
+import type { PacketCitation } from '../../shared/types';
 import { api } from '../lib/api';
 
 interface VersionHistoryProps {
@@ -28,6 +29,45 @@ interface VersionHistoryProps {
   versions: DocumentVersion[];
   activeVersion?: number;
   onPreviewVersion?: (version: DocumentVersion) => void;
+}
+
+/** The frozen packet citation on a version (0126), or null. Never throws. */
+export function packetCitationOf(version: DocumentVersion): PacketCitation | null {
+  if (!version.source_packet) return null;
+  try {
+    const c = JSON.parse(version.source_packet) as PacketCitation;
+    return c && typeof c.file_name === 'string' ? c : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Rules table H1: "each split part cites the packet it came from and its page
+ * range" -- in words, with the way back to the file the supplier sent.
+ */
+export function PacketCitationLine({ documentId, version }: { documentId: string; version: DocumentVersion }) {
+  const c = packetCitationOf(version);
+  if (!c) return null;
+  const pages = c.pages ? (c.pages[0] === c.pages[1] ? `page ${c.pages[0]}` : `pages ${c.pages[0]}-${c.pages[1]}`) : null;
+  const part = c.part_number && c.part_count ? `part ${c.part_number} of ${c.part_count}` : null;
+  const received = c.received_at ? `received ${formatDateTime(c.received_at)}` : null;
+  return (
+    <Typography variant="caption" display="block" sx={{ mt: 0.25 }} data-testid="packet-citation">
+      Split from packet <strong>{c.file_name}</strong>
+      {[received, pages, part].filter(Boolean).length > 0 && ` (${[received, pages, part].filter(Boolean).join(', ')})`}
+      {c.part_label && ` · listed in the packet as "${c.part_label}"`}
+      {' · '}
+      <Box
+        component="button"
+        type="button"
+        onClick={() => api.documents.downloadPacketSource(documentId, version.version_number)}
+        sx={{ p: 0, border: 0, background: 'none', color: 'primary.main', cursor: 'pointer', font: 'inherit', textDecoration: 'underline' }}
+      >
+        open the original packet
+      </Box>
+    </Typography>
+  );
 }
 
 function formatFileSize(bytes: number): string {
@@ -110,6 +150,7 @@ export function VersionHistory({ documentId, versions, activeVersion, onPreviewV
                   {version.change_notes}
                 </Typography>
               )}
+              <PacketCitationLine documentId={documentId} version={version} />
               <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.25 }}>
                 {version.uploader_name && `${version.uploader_name} · `}
                 {formatDateTime(version.created_at)}
@@ -199,6 +240,7 @@ export function VersionHistory({ documentId, versions, activeVersion, onPreviewV
                       {version.change_notes}
                     </Typography>
                   )}
+                  <PacketCitationLine documentId={documentId} version={version} />
                   <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.25 }}>
                     {version.uploader_name && `${version.uploader_name} · `}
                     {formatDateTime(version.created_at)}

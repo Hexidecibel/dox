@@ -24,6 +24,7 @@ import { onRequestGet as getPacket } from '../../functions/api/queue/[id]/packet
 import { onRequestPost as splitPacketRoute } from '../../functions/api/queue/[id]/packet/split';
 import { onRequestPost as dismissPacketRoute } from '../../functions/api/queue/[id]/packet/dismiss';
 import { onRequestPut as updateQueueItem } from '../../functions/api/queue/[id]';
+import { onRequestGet as downloadDocument } from '../../functions/api/documents/[id]/download';
 import type { PacketProposal } from '../../shared/packetDetect';
 import type { QueuePacketView } from '../../shared/types';
 
@@ -460,5 +461,119 @@ describe('the container is never approved, and its parts are their own decisions
     expect(view.part_count).toBe(3);
     expect(view.children.map((c) => c.pages)).toEqual([[1, 2], [3, 3], [4, 5]]);
     expect(view.children.every((c) => c.status === 'pending')).toBe(true);
+  });
+});
+
+describe('H1: an approved part cites its packet (migration 0126)', () => {
+  async function splitAndApprovePart(partIndex: number) {
+    const id = await seedPacketItem(seed.tenantId, 'test-corp');
+    // The packet arrived well before anyone split it.
+    await db.prepare("UPDATE processing_queue SET created_at = '2026-09-01 08:00:00' WHERE id = ?").bind(id).run();
+    await splitPacketRoute(ctx(id, 'POST', ADMIN(), {}, '/split'));
+    const child = await db
+      .prepare('SELECT id FROM processing_queue WHERE packet_parent_id = ? AND packet_part_index = ?')
+      .bind(id, partIndex)
+      .first<{ id: string }>();
+    await db
+      .prepare("UPDATE processing_queue SET processing_status = 'ready', created_at = '2026-09-20 08:00:00' WHERE id = ?")
+      .bind(child!.id)
+      .run();
+    const res = await updateQueueItem(
+      putCtx(child!.id, { status: 'approved', fields: { document_expires_on: '2026-09-10' } }, ADMIN()),
+    );
+    expect(res.status).toBe(200);
+    const body = await readJson<{ document?: { id: string } }>(res);
+    return { packetId: id, childId: child!.id, documentId: body.document!.id };
+  }
+
+  it('writes the packet, its arrival and the page range onto the version', async () => {
+    const { packetId, documentId } = await splitAndApprovePart(2);
+    const v = await db
+      .prepare('SELECT source_packet_queue_id, source_packet FROM document_versions WHERE document_id = ?')
+      .bind(documentId)
+      .first<{ source_packet_queue_id: string; source_packet: string }>();
+    expect(v!.source_packet_queue_id).toBe(packetId);
+    const c = JSON.parse(v!.source_packet);
+    expect(c).toMatchObject({
+      queue_id: packetId,
+      file_name: 'packet.pdf',
+      received_at: '2026-09-01 08:00:00',
+      pages: [4, 5],
+      part_number: 3,
+      part_count: 3,
+      part_label: 'Allergen Statement',
+      page_count: 6,
+      split_by: seed.orgAdminId,
+    });
+    const audit = await db
+      .prepare(`SELECT COUNT(*) AS n FROM audit_log WHERE action = 'document.packet_source_recorded' AND resource_id = ?`)
+      .bind(documentId)
+      .first<{ n: number }>();
+    expect(audit!.n).toBe(1);
+  });
+
+  it("dates the part's arrival from the PACKET, not the split (G4)", async () => {
+    const { documentId } = await splitAndApprovePart(1);
+    const d = await db.prepare('SELECT arrived_at FROM documents WHERE id = ?').bind(documentId).first<{ arrived_at: string }>();
+    expect(d!.arrived_at).toBe('2026-09-01 08:00:00');
+  });
+
+  it('an ordinary approval carries no citation', async () => {
+    const id = await seedPacketItem(seed.tenantId, 'test-corp', 6, null);
+    const res = await updateQueueItem(putCtx(id, { status: 'approved', fields: {} }, ADMIN()));
+    expect(res.status).toBe(200);
+    const body = await readJson<{ document: { id: string } }>(res);
+    const v = await db
+      .prepare('SELECT source_packet_queue_id, source_packet FROM document_versions WHERE document_id = ?')
+      .bind(body.document.id)
+      .first<{ source_packet_queue_id: string | null; source_packet: string | null }>();
+    expect(v).toEqual({ source_packet_queue_id: null, source_packet: null });
+  });
+
+  it('rejecting the container keeps the packet with no reclaim date', async () => {
+    const id = await seedPacketItem(seed.tenantId, 'test-corp');
+    await splitPacketRoute(ctx(id, 'POST', ADMIN(), {}, '/split'));
+    await updateQueueItem(putCtx(id, { status: 'rejected', rejection_reason: 'other', rejection_note: 'parts handled' }, ADMIN()));
+    const row = await db
+      .prepare('SELECT status, file_retain_until FROM processing_queue WHERE id = ?')
+      .bind(id)
+      .first<{ status: string; file_retain_until: string | null }>();
+    expect(row).toEqual({ status: 'rejected', file_retain_until: null });
+
+    // An ordinary rejection still gets its 90-day reclaim date.
+    const plain = await seedPacketItem(seed.tenantId, 'test-corp', 6, null);
+    await updateQueueItem(putCtx(plain, { status: 'rejected', rejection_reason: 'other', rejection_note: 'x' }, ADMIN()));
+    const p = await db
+      .prepare('SELECT file_retain_until FROM processing_queue WHERE id = ?')
+      .bind(plain)
+      .first<{ file_retain_until: string | null }>();
+    expect(p!.file_retain_until).not.toBeNull();
+  });
+
+  it('the document download hands back the original packet, and only to its tenant', async () => {
+    const { packetId, documentId } = await splitAndApprovePart(0);
+    const dl = (user: { id: string; role: string; tenant_id: string | null }) =>
+      downloadDocument({
+        request: new Request(`http://localhost/api/documents/${documentId}/download?version=1&source=packet`),
+        env,
+        data: { user },
+        params: { id: documentId },
+        waitUntil: () => {},
+        passThroughOnException: () => {},
+        next: async () => new Response(null),
+        functionPath: `/api/documents/${documentId}/download`,
+      } as unknown as Parameters<typeof downloadDocument>[0]);
+
+    const res = await dl(ADMIN());
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Disposition')).toContain('packet.pdf');
+    const parent = await db
+      .prepare('SELECT file_r2_key FROM processing_queue WHERE id = ?')
+      .bind(packetId)
+      .first<{ file_r2_key: string }>();
+    const original = await env.FILES.get(parent!.file_r2_key);
+    expect((await res.arrayBuffer()).byteLength).toBe((await original!.arrayBuffer()).byteLength);
+
+    expect([403, 404]).toContain((await dl(OTHER_ADMIN())).status);
   });
 });
