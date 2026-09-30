@@ -169,8 +169,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const extendedMetadataStr = body.extended_metadata ? JSON.stringify(body.extended_metadata) : null;
 
     await context.env.DB.prepare(
-      `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, document_type_id, supplier_id, primary_metadata, extended_metadata)
-       VALUES (?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?)`
+      `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, document_type_id, supplier_id, primary_metadata, extended_metadata, intake_source)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?, 'direct_upload')`
     )
       .bind(
         id,

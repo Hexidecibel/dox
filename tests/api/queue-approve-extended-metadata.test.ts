@@ -276,3 +276,26 @@ describe('buildFlatExtendedMetadata', () => {
     expect(buildFlatExtendedMetadata('{not json')).toBeNull();
   });
 });
+
+/**
+ * Migration 0130: approval stamps WHEN, FROM WHICH queue item and BY WHICH
+ * door (the Advanced search's "Approved" and "Came in by" filters read them).
+ */
+describe('PUT /api/queue/:id — approval stamps document provenance (0130)', () => {
+  it('writes approved_at, origin_queue_id and the queue item\'s own intake door', async () => {
+    const queueId = await seedFlatQueueItem(seed.tenantId, seed.orgAdminId, null);
+    await db.prepare(`UPDATE processing_queue SET source = 'email' WHERE id = ?`).bind(queueId).run();
+    const user = { id: seed.orgAdminId, role: 'org_admin', tenant_id: seed.tenantId };
+    const response = await updateQueueItem(
+      makePutContext(queueId, { status: 'approved', fields: { supplier_name: 'Andersen Dairy', lot_number: 'L-930' } }, user)
+    );
+    expect(response.status).toBe(200);
+    const row = await db
+      .prepare('SELECT approved_at, origin_queue_id, intake_source FROM documents WHERE external_ref = ?')
+      .bind(`queue-${queueId}`)
+      .first<{ approved_at: string | null; origin_queue_id: string | null; intake_source: string | null }>();
+    expect(row!.approved_at).toBeTruthy();
+    expect(row!.origin_queue_id).toBe(queueId);
+    expect(row!.intake_source).toBe('email');
+  });
+});

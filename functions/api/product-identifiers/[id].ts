@@ -8,6 +8,7 @@
  * and the right one added, so the audit log shows both.
  */
 
+import { drainSoon } from '../../lib/search-reindex';
 import { getClientIp, logAudit } from '../../lib/db';
 import {
   BadRequestError,
@@ -74,6 +75,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       .prepare('SELECT pi.*, s.name AS supplier_name FROM product_identifiers pi LEFT JOIN suppliers s ON s.id = pi.supplier_id WHERE pi.id = ?')
       .bind(row.id)
       .first<ProductIdentifier>();
+    drainSoon(context, context.env.DB);
     return json({ identifier: updated });
   } catch (err) {
     const httpErr = errorToResponse(err);
@@ -94,6 +96,7 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
       JSON.stringify({ identifier: row }),
       getClientIp(context.request),
     );
+    drainSoon(context, context.env.DB);
     return json({ success: true });
   } catch (err) {
     const httpErr = errorToResponse(err);

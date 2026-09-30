@@ -32,7 +32,7 @@ import { describe, it, expect } from 'vitest';
 import { env } from 'cloudflare:test';
 import type { Clause } from '../../shared/searchQuery';
 import {
-  DOC, DT, GOLDEN_OTHER_USER, GOLDEN_READER, GOLDEN_SUPER, GOLDEN_TENANT, GOLDEN_USER, P, QUEUE, SUP, seedGoldenCorpus,
+  CLAIM, CUSTOMER, DOC, DT, GOLDEN_OTHER_USER, REQ, GOLDEN_READER, GOLDEN_SUPER, GOLDEN_TENANT, GOLDEN_USER, P, QUEUE, SUP, seedGoldenCorpus,
 } from '../fixtures/search-golden/corpus';
 import { ask, bands, monthPhrasesSupported, productWordsSupported, type TestUser } from '../fixtures/search-golden/run';
 
@@ -65,6 +65,10 @@ const supplier = (...ids: string[]): Clause => ({ id: 'c-sup', field: 'supplier'
 const docType = (...ids: string[]): Clause => ({ id: 'c-type', field: 'document_type', op: 'in', values: ids, source: 'builder' });
 const product = (ids: string[], ambiguous = false): Clause => ({ id: 'c-prod', field: 'product', op: 'in', values: ids, source: ambiguous ? 'detected' : 'builder', ...(ambiguous ? { ambiguous: true } : {}) });
 const lotParts = (lot: string, sublot: string): Clause => ({ id: 'c-lot', field: 'lot', op: 'is', values: [lot], sublot, source: 'builder' });
+/** Any Phase 3 field, as a builder row. */
+const f = (field: Clause['field'], values: string[], extra: Partial<Clause> = {}): Clause => ({
+  id: `c-${field}`, field, op: extra.op ?? (['document_number', 'certificate_number', 'customer'].includes(field) ? 'is' : 'in'), values, source: 'builder', ...extra,
+});
 
 const CASCADE_COAS = [DOC.cascadeMulti, DOC.cascadeMay1, DOC.cascadeSalted, DOC.cascadeDecoded, DOC.cascadeSplit01, DOC.cascadeSplit02];
 
@@ -197,6 +201,51 @@ const PRODUCT_WORDS: GoldenCase[] = [
   { q: 'sour cream', why: 'an alias alone narrows to that product', expect: { productChips: [P.sourCream], includes: [DOC.hollowSourA, DOC.hollowSourB], excludes: [DOC.valleyCreamTote] } },
 ];
 
+/**
+ * Phase 3 — every field. Scope fields narrow and never claim coverage (a scope
+ * alone answers 'unconstrained'); document # / certificate # / customer are
+ * identifying and answer covered / likely / none. Excluding an identifying
+ * field is refused. Seeded by `seedRegistry` in the corpus.
+ */
+const EVERY_FIELD: GoldenCase[] = [
+  { q: '', clauses: [f('document_number', ['SS-820004-R3'])], why: "the spec sheet's own document number", expect: { coverage: 'covered', covering: [DOC.cascadeSpec] } },
+  { q: '', clauses: [f('document_number', ['ss 820004 r3'])], why: 'case and separators fold', expect: { coverage: 'covered', covering: [DOC.cascadeSpec] } },
+  { q: '', clauses: [f('document_number', ['SQF-C-778812'])], why: 'a CERTIFICATE number is not a document number', expect: { coverage: 'none', covering: [], likely: [] } },
+  { q: '', clauses: [f('certificate_number', ['SQF-C-778812'])], why: 'the certificate number', expect: { coverage: 'covered', covering: [DOC.cascadeSqf], notCovering: [DOC.hollowSqf] } },
+  { q: '', clauses: [f('certificate_number', ['SS-820004-R3'])], why: 'a document number is not a certificate number', expect: { coverage: 'none', covering: [] } },
+  { q: '', clauses: [f('certificate_number', ['2072610703'])], why: 'a lot that reads like a number is not a certificate number', expect: { coverage: 'none', covering: [] } },
+  { q: '', clauses: [f('customer', [CUSTOMER.harbor])], why: "a customer: accepted match covers, a pending suggestion is likely", expect: { coverage: 'covered', covering: [DOC.cascadeMulti], likely: [DOC.cascadeMay1] } },
+  { q: '', clauses: [f('customer', [CUSTOMER.pier])], why: 'a customer with no orders: nothing covers', expect: { coverage: 'none', covering: [], likely: [] } },
+  { q: '', clauses: [f('customer', [CUSTOMER.harbor]), f('spec_verdict', ['out_of_spec'])], why: 'customer + out of spec: what we sent them that failed', expect: { coverage: 'covered', covering: [DOC.cascadeMulti], likely: [] } },
+  { q: '', clauses: [f('requirement', [REQ.coi])], why: 'satisfies a requirement; a REJECTED link never counts', expect: { coverage: 'unconstrained', includes: [DOC.cascadeCoi, DOC.valleyCoi], excludes: [DOC.riversideCoi, DOC.cascadeMulti] } },
+  { q: '', clauses: [f('requirement', [REQ.coi], { exclude: true }), docType(DT.coi)], why: 'excluding a requirement keeps the documents that do not satisfy it', expect: { includes: [DOC.riversideCoi], excludes: [DOC.cascadeCoi, DOC.valleyCoi] } },
+  { q: '', clauses: [f('requirement', [REQ.audit]), supplier(SUP.hollow)], why: 'requirement AND supplier', expect: { includes: [DOC.hollowSqf], excludes: [DOC.cascadeSqf] } },
+  { q: '', clauses: [f('claim', [CLAIM.kosher])], why: 'triggers a claim', expect: { includes: [DOC.valleyKosher], excludes: [DOC.cascadeSqf, DOC.valleyCoi] } },
+  { q: '', clauses: [f('spec_verdict', ['out_of_spec'])], why: 'one failed result makes the document out of spec', expect: { includes: [DOC.cascadeMulti], excludes: [DOC.cascadeSalted, DOC.hollowSourA] } },
+  { q: '', clauses: [f('spec_verdict', ['in_spec'])], why: 'in spec = judged, nothing failed, nothing unjudged', expect: { includes: [DOC.cascadeSalted], excludes: [DOC.cascadeMulti, DOC.hollowSourA, DOC.valleyCreamTote] } },
+  { q: '', clauses: [f('spec_verdict', ['not_checked'])], why: 'could not check: an unjudged result or a gap', expect: { includes: [DOC.hollowSourA, DOC.valleyCreamTote], excludes: [DOC.cascadeMulti, DOC.cascadeSalted] } },
+  { q: '', clauses: [f('spec_verdict', ['none']), supplier(SUP.cascade)], why: 'no results judged is not a pass', expect: { includes: [DOC.cascadeSpec, DOC.cascadeMay1], excludes: [DOC.cascadeMulti, DOC.cascadeSalted] } },
+  { q: '', clauses: [f('renewal_state', ['expiring'])], why: 'due inside its warning time', expect: { includes: [DOC.valleyCoi], excludes: [DOC.riversideCoi, DOC.cascadeCoi, DOC.cascadeMulti] } },
+  { q: '', clauses: [f('renewal_state', ['past_due'])], why: 'past its date', expect: { includes: [DOC.riversideCoi], excludes: [DOC.valleyCoi, DOC.cascadeCoi] } },
+  { q: '', clauses: [f('renewal_state', ['current'])], why: 'due next year', expect: { includes: [DOC.cascadeCoi], excludes: [DOC.valleyCoi, DOC.riversideCoi] } },
+  { q: '', clauses: [f('renewal_state', ['does_not_renew'])], why: 'a COA by its type; a certificate a reviewer cleared', expect: { includes: [DOC.cascadeMulti, DOC.cascadeSqf], excludes: [DOC.valleyCoi, DOC.hollowSqf] } },
+  { q: '', clauses: [f('renewal_state', ['not_set']), docType(DT.sqf)], why: 'nobody settled a date', expect: { includes: [DOC.hollowSqf], excludes: [DOC.cascadeSqf] } },
+  { q: '', clauses: [f('classification', ['needs_review'])], why: 'classification state', expect: { includes: [DOC.valleyKosher], excludes: [DOC.cascadeSpec, DOC.cascadeMulti] } },
+  { q: '', clauses: [f('owner', ['Insurance'])], why: 'owner', expect: { includes: [DOC.cascadeCoi, DOC.valleyCoi, DOC.riversideCoi], excludes: [DOC.cascadeSqf] } },
+  { q: '', clauses: [f('owner', ['__none__']), docType(DT.sqf)], why: '"no owner" is its own value', expect: { includes: [DOC.hollowSqf], excludes: [DOC.cascadeSqf] } },
+  { q: '', clauses: [f('owner', ['Insurance'], { exclude: true }), docType(DT.coi, DT.sqf)], why: 'not Insurance keeps the unowned and the QA ones', expect: { includes: [DOC.cascadeSqf, DOC.hollowSqf], excludes: [DOC.cascadeCoi, DOC.valleyCoi, DOC.riversideCoi] } },
+  { q: '', clauses: [f('intake_source', ['email'])], why: 'came in by email', expect: { includes: [DOC.cascadeMulti], excludes: [DOC.cascadeSalted, DOC.valleyInvoice] } },
+  { q: '', clauses: [f('intake_source', ['direct_upload'])], why: 'uploaded directly, never reviewed', expect: { includes: [DOC.valleyInvoice], excludes: [DOC.cascadeMulti] } },
+  { q: '', clauses: [f('approved', ['30'], { op: 'within' })], why: 'approved in the last 30 days', expect: { includes: [DOC.cascadeMulti], excludes: [DOC.cascadeSalted, DOC.valleyInvoice] } },
+  { q: '', clauses: [f('approved', ['1'], { op: 'missing' }), supplier(SUP.valley)], why: 'approval not recorded', expect: { includes: [DOC.valleyInvoice], excludes: [DOC.cascadeMulti] } },
+  { q: 'PO K145273', clauses: [f('spec_verdict', ['in_spec'])], why: 'a scope that rules the only covering document out: nothing covers WITHIN it', expect: { coverage: 'none', covering: [], likely: [] } },
+  { q: 'PO K145273', clauses: [f('spec_verdict', ['out_of_spec'])], why: 'the same PO inside the scope it passes', expect: { coverage: 'covered', covering: [DOC.cascadeMulti] } },
+  { q: 'lot 20726107', clauses: [f('intake_source', ['email'])], why: 'lot + intake door: only the email-approved certificate', expect: { coverage: 'covered', covering: [DOC.cascadeMulti], notCovering: [DOC.cascadeSalted] } },
+  { q: '', clauses: [{ id: 'c-x', field: 'lot', op: 'is', values: ['20726107'], exclude: true, source: 'builder' }], why: '"not lot X" is not a coverage question: refused', expect: { status: 400 } },
+  { q: '', clauses: [f('customer', [CUSTOMER.harbor], { exclude: true })], why: 'an identifying field cannot be excluded', expect: { status: 400 } },
+  { q: '', clauses: [f('customer', [CUSTOMER.harbor])], as: 'other', why: "another tenant's customer id finds nothing", expect: { covering: [], likely: [], excludes: [DOC.cascadeMulti] } },
+];
+
 // ===========================================================================
 // Runner
 // ===========================================================================
@@ -266,6 +315,7 @@ table('dates — production day, legacy and decoded provenance, roles', DATES);
 table('browse, chips and roles', BROWSE);
 table('negatives — nothing covers, and nothing nearby is presented as covering', NEGATIVES);
 table('tenant isolation', ISOLATION);
+table('every field (search Phase 3)', EVERY_FIELD);
 table(`month / range phrases (${MONTHS_ON ? 'reader supports them' : 'SKIPPED: the reader does not read "produced in april" yet'})`, MONTHS, MONTHS_ON);
 table(`product words -> product chips (${PRODUCT_WORDS_ON ? 'reader supports them' : 'SKIPPED: the reader does not turn "unsalted butter" into a product chip yet'})`, PRODUCT_WORDS, PRODUCT_WORDS_ON);
 

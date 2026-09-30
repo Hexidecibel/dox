@@ -25,7 +25,8 @@ import { BadRequestError, errorToResponse, requireRole, requireTenantAccess } fr
 import { runSearch } from '../../lib/search/execute';
 import type { Env, User } from '../../lib/types';
 import type { SearchQueryRequest } from '../../../shared/types';
-import type { SearchQuery } from '../../../shared/searchQuery';
+import { savedView, type SearchQuery } from '../../../shared/searchQuery';
+import { FACET_FIELDS, type FacetField } from '../../../shared/searchFields';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -44,8 +45,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       v: 1,
       text: typeof raw.text === 'string' ? raw.text : '',
       clauses: Array.isArray(raw.clauses) ? raw.clauses : [],
-      view: raw.view && typeof raw.view === 'object' ? { ...raw.view, entity: 'documents' } : { entity: 'documents' },
+      view: savedView(raw.view),
     };
+    if (raw.view && typeof raw.view === 'object' && typeof raw.view.page === 'number') query.view.page = raw.view.page;
 
     let tenantId = body.tenant_id || null;
     if (user.role !== 'super_admin') tenantId = user.tenant_id;
@@ -61,6 +63,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       offset,
       facets: body.facets !== false,
       interpret: body.interpret === true,
+      facetFields: Array.isArray(body.facet_fields)
+        ? body.facet_fields.filter((f): f is FacetField => (FACET_FIELDS as readonly string[]).includes(f as string))
+        : undefined,
     });
 
     return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });

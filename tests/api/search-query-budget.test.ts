@@ -16,6 +16,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
+import { FACET_FIELDS, type FacetField } from '../../shared/searchFields';
 import { countingDb, runSearch, type StatementStats } from '../../functions/lib/search/execute';
 import type { Clause, SearchQuery } from '../../shared/searchQuery';
 
@@ -52,10 +53,11 @@ const SCOPE: Clause[] = [
   { id: 'c3', field: 'uploaded', op: 'within', values: ['365'], source: 'facet' },
 ];
 
-async function measured(query: SearchQuery, opts: { interpret?: boolean; repairLimit?: number } = {}) {
+async function measured(query: SearchQuery, opts: { interpret?: boolean; repairLimit?: number; facetFields?: FacetField[] } = {}) {
   const outside: StatementStats = { statements: 0, round_trips: 0 };
   const body = await runSearch(countingDb(db, outside), T, {
     query, limit: 20, offset: 0, facets: true, interpret: opts.interpret ?? false,
+    ...(opts.facetFields ? { facetFields: opts.facetFields } : {}),
     ...(opts.repairLimit !== undefined ? { repairLimit: opts.repairLimit } : {}),
   });
   // The response reports what it cost, and the outside count agrees.
@@ -72,11 +74,25 @@ describe('statement budget', () => {
     expect(body.keys_pending ?? 0).toBe(0);
   });
 
-  it('a scope-only search is ONE round trip: the page, five facets and the labels in one batch', async () => {
+  it('a scope-only search is ONE round trip: the page, every facet and the labels in one batch', async () => {
     const { body, outside } = await measured(q(SCOPE));
     expect(outside.round_trips).toBe(1);
-    expect(outside.statements).toBe(7);
+    expect(outside.statements).toBe(FACET_FIELDS.length + 2);
     expect(body.total).toBe(6);
+  });
+
+  it('asking for five facets (Easy mode) prepares five facet statements', async () => {
+    const { body, outside } = await measured(q(SCOPE), { facetFields: ['supplier', 'document_type', 'product', 'status', 'uploaded'] });
+    expect(outside.round_trips).toBe(1);
+    expect(outside.statements).toBe(7);
+    expect(Object.keys(body.facets ?? {}).sort()).toEqual(['document_type', 'product', 'status', 'supplier', 'uploaded']);
+  });
+
+  it('a Lots / Products / Suppliers mode adds ONE statement to the same round trip', async () => {
+    const { body, outside } = await measured({ ...q(SCOPE), view: { entity: 'suppliers' } });
+    expect(outside.round_trips).toBe(1);
+    expect(outside.statements).toBe(FACET_FIELDS.length + 3);
+    expect(body.groups?.rows.map((r) => r.document_count)).toEqual([6]);
   });
 
   it('a text + scope search is still one round trip', async () => {

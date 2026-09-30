@@ -1,3 +1,4 @@
+import { drainSoon } from '../../lib/search-reindex';
 import { logAudit, getClientIp } from '../../lib/db';
 import {
   requireRole,
@@ -311,6 +312,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       parseExtractionFields(updated as Record<string, unknown>);
     }
 
+    drainSoon(context, context.env.DB);
     return new Response(
       JSON.stringify({ documentType: updated }),
       { headers: { 'Content-Type': 'application/json' } }

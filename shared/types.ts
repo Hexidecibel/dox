@@ -2436,7 +2436,13 @@ export type SearchConstraintKind =
   /** An invoice number printed on the document itself. Never followed through orders. */
   | 'invoice'
   /** A number that is on file as more than one kind of identifier: any kind answers. */
-  | 'identifier';
+  | 'identifier'
+  /**
+   * A customer (search redesign Phase 3): followed through that customer's WMS
+   * orders exactly like an order — covering only through a person-accepted
+   * lot match or an exact lot row; a pending suggestion is likely.
+   */
+  | 'customer';
 
 export interface SearchConstraint {
   id: string;
@@ -2497,6 +2503,12 @@ export interface SearchConstraint {
    * exact lot row.
    */
   orders?: SearchOrderEvidence[] | null;
+  /**
+   * `identifier` only: compare on `key_kinds` alone — no lot, no WMS order
+   * (a document # / certificate # clause: a lot that happens to read the same
+   * is not the document's number).
+   */
+  keys_only?: boolean;
 }
 
 /**
@@ -4658,6 +4670,8 @@ export interface SearchQueryRequest {
   offset?: number;
   /** Include facet counts (default true). */
   facets?: boolean;
+  /** Which facets to count (default: every one). Easy mode asks for its five. */
+  facet_fields?: string[];
   /**
    * Read identifying clauses out of `query.text` (dates with a role, lots, a
    * PO / invoice / order / identifier on file). Detected clauses come back in
@@ -4733,6 +4747,66 @@ export interface SearchQueryResponse extends SearchCoverageFields {
   keys_pending?: number;
   /** What the answer cost: D1 statements prepared, round trips, subjects judged. */
   stats: { statements: number; round_trips: number; candidates: number; scan_fallback: boolean };
+  /**
+   * Clauses NOT run because their field does not apply to the result mode
+   * (`view.entity`), by id. Kept in the query, greyed, never silently dropped.
+   */
+  not_applied?: string[];
+  /** The result mode's rows when `view.entity` is lots / products / suppliers. */
+  groups?: SearchGroups;
+  /**
+   * Per-document values for the Advanced table's optional columns, by document
+   * id (only for the documents on this page).
+   */
+  columns?: Record<string, SearchDocColumns>;
+}
+
+/** One row of a Lots / Products / Suppliers result mode (search redesign Phase 3). */
+export interface SearchGroupRow {
+  /** lot_key + supplier for a lot; the product / supplier id otherwise. */
+  key: string;
+  label: string;
+  /** A second line: "Darigold · BTR BULK U/S 25KG", the SKU, … */
+  detail: string | null;
+  /** Where the row's own page is, when it has one. */
+  href: string | null;
+  document_count: number;
+  /** Of those, how many COVER what was asked (identifying searches only). */
+  covering_count?: number;
+  likely_count?: number;
+  lot_count?: number;
+  /** Latest production date among the row's lots. */
+  latest_production_date?: string | null;
+  /** A few of the documents behind the row (for "show documents"). */
+  document_ids: string[];
+}
+
+export interface SearchGroups {
+  entity: 'lots' | 'products' | 'suppliers';
+  rows: SearchGroupRow[];
+  /** Rows in all (rows may be capped). */
+  total: number;
+  /** True when more rows exist than were returned. */
+  capped: boolean;
+}
+
+/** The Advanced table's optional per-document values. */
+export interface SearchDocColumns {
+  products: string[];
+  lots: string[];
+  production: string | null;
+  code_best_by: string | null;
+  renewal_due: string | null;
+  renewal_state: string | null;
+  spec_verdict: string | null;
+  classification: string | null;
+  owner: string | null;
+  intake_source: string | null;
+  approved: string | null;
+  document_number: string | null;
+  certificate_number: string | null;
+  po: string | null;
+  shelf_life: string | null;
 }
 
 // === Admin — Processing Status health page ===
