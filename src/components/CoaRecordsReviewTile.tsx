@@ -259,8 +259,14 @@ export default function CoaRecordsReviewTile({
   onPageChange,
   arrivalDecision,
   arrivalChoicePending = false,
+  duplicateDecision,
 }: {
   item: ProcessingQueueItem;
+  /**
+   * "You already have this" (0132): the choice made on the card above
+   * (replace / keep as new). Undefined when nothing matched.
+   */
+  duplicateDecision?: 'replace' | 'keep_both';
   onApproved: () => void;
   /**
    * Supplier-portal items: what the reviewer chose to decide in the same
@@ -484,12 +490,14 @@ export default function CoaRecordsReviewTile({
         ...(Object.keys(productMapsBody).length > 0 ? { product_maps: productMapsBody } : {}),
         selected_source: 'text',
         ...(arrivalDecision ? { arrival_decision: arrivalDecision } : {}),
+        ...(duplicateDecision ? { duplicate_decision: duplicateDecision } : {}),
       });
       const approvedMsg =
-        res.summary ||
+        (res.duplicate_decision?.summary ? `${res.duplicate_decision.summary} ` : '') +
+        (res.summary ||
         (outcome === 'approve_all'
           ? `All ${records.length} record(s) approved`
-          : `${approveCount} record(s) approved; held records keep this item pending`);
+          : `${approveCount} record(s) approved; held records keep this item pending`));
       if (res.arrival_decision && !res.arrival_decision.applied) {
         setError(`${approvedMsg}, but the supplier request was not updated: ${res.arrival_decision.error}`);
       } else {

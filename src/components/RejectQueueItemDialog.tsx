@@ -15,7 +15,7 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { ATTENTION_REASON_PRESETS, REJECTION_REASONS, REJECTION_REASON_LABELS } from '../lib/types';
+import { ATTENTION_REASON_PRESETS, REJECT_DIALOG_REASONS, REJECTION_REASON_LABELS } from '../lib/types';
 import type { QueueArrivalDecisionInput, RejectionReason, RequestArrival } from '../lib/types';
 import { AttentionReasonField, initialTickedLineIds } from './SupplierClaimPanel';
 
@@ -128,7 +128,7 @@ export default function RejectQueueItemDialog({
             value={reason}
             onChange={(e) => pickReason(e.target.value as RejectionReason)}
           >
-            {REJECTION_REASONS.map((r) => (
+            {REJECT_DIALOG_REASONS.map((r) => (
               <FormControlLabel
                 key={r}
                 value={r}
