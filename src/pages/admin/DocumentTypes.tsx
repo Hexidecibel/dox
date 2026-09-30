@@ -44,8 +44,14 @@ import { api } from '../../lib/api';
 import {
   defaultRenewalMonthsForTypeName,
   defaultRenewalPolicyForTypeName,
+  defaultRenewalSettingForTypeName,
+  describeRenewalWindow,
+  parseRenewalWindow,
   renewalPeriodLabel,
+  validateRenewalWindow,
+  FDA_FOOD_FACILITY_REGISTRATION_WINDOW,
   SPEC_SHEET_RENEWAL_MONTHS,
+  type RenewalWindow,
 } from '../../../shared/renewalPeriod';
 import type { ApiDocumentType } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
@@ -97,6 +103,14 @@ export function DocumentTypes() {
    * save time — the two-column shape is the storage concern, not the form's.
    */
   const [formRenewalMonths, setFormRenewalMonths] = useState('');
+  /**
+   * The fixed calendar window (0125, rules table G3), edited as text so a
+   * half-typed 'MM-DD' is not thrown away. Used only when the Select says
+   * 'window'; validated by the same `validateRenewalWindow` the API runs.
+   */
+  const [formWindow, setFormWindow] = useState<{ opens: string; closes: string; every_years: string; reference_year: string; source: string }>(
+    windowToForm(FDA_FOOD_FACILITY_REGISTRATION_WINDOW)
+  );
   /**
    * Whether the admin has touched the renewal period on THIS dialog. Until
    * they do, a new type follows the name (a spec sheet proposes three years),
@@ -207,6 +221,7 @@ export function DocumentTypes() {
     setFormAutoIngest(false);
     setFormExtractTables(true);
     setFormRenewalMonths('');
+    setFormWindow(windowToForm(FDA_FOOD_FACILITY_REGISTRATION_WINDOW));
     setFormRenewalTouched(false);
     setFormLeadDays(null);
     setFormLeadValid(true);
@@ -226,12 +241,16 @@ export function DocumentTypes() {
     setFormDescription(dt.description || '');
     setFormAutoIngest(!!dt.auto_ingest);
     setFormExtractTables(dt.extract_tables !== 0);
+    const storedWindow = dt.renewal_policy === 'period' ? parseRenewalWindow(dt.renewal_window) : null;
+    setFormWindow(windowToForm(storedWindow ?? FDA_FOOD_FACILITY_REGISTRATION_WINDOW));
     setFormRenewalMonths(
       dt.renewal_policy === 'none'
         ? 'none'
-        : dt.renewal_interval_months == null
-          ? ''
-          : String(dt.renewal_interval_months)
+        : storedWindow
+          ? 'window'
+          : dt.renewal_interval_months == null
+            ? ''
+            : String(dt.renewal_interval_months)
     );
     // An existing type keeps what it has; never re-guess from the name here.
     setFormRenewalTouched(true);
@@ -299,9 +318,20 @@ export function DocumentTypes() {
       setFormRenewalMonths('none');
       return;
     }
+    // A name that reads as an FDA food facility registration starts on the
+    // 21 CFR 1.230(b) window (rules table G3) — visible and editable here.
+    const proposedWindow = defaultRenewalSettingForTypeName(formName).window;
+    if (proposedWindow) {
+      setFormWindow(windowToForm(proposedWindow));
+      setFormRenewalMonths('window');
+      return;
+    }
     const proposed = defaultRenewalMonthsForTypeName(formName);
     setFormRenewalMonths(proposed == null ? '' : String(proposed));
   }, [formName, editingType, formRenewalTouched]);
+
+  const windowCheck = validateRenewalWindow(formToWindow(formWindow));
+  const windowInvalid = formRenewalMonths === 'window' && !windowCheck.ok;
 
   /**
    * Split the single Select value into the two columns the API takes.
@@ -309,10 +339,21 @@ export function DocumentTypes() {
    * column is never read, so leaving a stale number there would only show the
    * next admin a period that does not apply.
    */
-  const renewalPayload = (): { renewal_policy: 'inherit' | 'period' | 'none'; renewal_interval_months: number | null } => {
-    if (formRenewalMonths === 'none') return { renewal_policy: 'none', renewal_interval_months: null };
-    if (!formRenewalMonths) return { renewal_policy: 'inherit', renewal_interval_months: null };
-    return { renewal_policy: 'period', renewal_interval_months: Number(formRenewalMonths) };
+  const renewalPayload = (): {
+    renewal_policy: 'inherit' | 'period' | 'none';
+    renewal_interval_months: number | null;
+    renewal_window: RenewalWindow | null;
+  } => {
+    if (formRenewalMonths === 'none') return { renewal_policy: 'none', renewal_interval_months: null, renewal_window: null };
+    if (!formRenewalMonths) return { renewal_policy: 'inherit', renewal_interval_months: null, renewal_window: null };
+    if (formRenewalMonths === 'window' && windowCheck.ok) {
+      return {
+        renewal_policy: 'period',
+        renewal_interval_months: windowCheck.window.every_years * 12,
+        renewal_window: windowCheck.window,
+      };
+    }
+    return { renewal_policy: 'period', renewal_interval_months: Number(formRenewalMonths), renewal_window: null };
   };
 
   const handleSave = async () => {
@@ -485,7 +526,7 @@ export function DocumentTypes() {
                       variant="outlined"
                     />
                     <Chip
-                      label={`Renews: ${renewalPeriodLabel(dt.renewal_interval_months, dt.renewal_policy)}`}
+                      label={`Renews: ${renewalPeriodLabel(dt.renewal_interval_months, dt.renewal_policy, dt.renewal_window)}`}
                       size="small"
                       variant="outlined"
                     />
@@ -594,7 +635,7 @@ export function DocumentTypes() {
                     </TableCell>
                     <TableCell>
                       <Typography variant="body2" color="text.secondary">
-                        {renewalPeriodLabel(dt.renewal_interval_months, dt.renewal_policy)}
+                        {renewalPeriodLabel(dt.renewal_interval_months, dt.renewal_policy, dt.renewal_window)}
                       </Typography>
                       {dt.renewal_alert_lead_days != null && dt.renewal_policy !== 'none' && (
                         <Typography variant="caption" color="text.secondary" component="div">
@@ -704,8 +745,71 @@ export function DocumentTypes() {
                 3 years (specification sheets)
               </MenuItem>
               <MenuItem value="60">5 years</MenuItem>
+              <MenuItem value="window">Fixed calendar window (e.g. FDA registration)</MenuItem>
             </Select>
           </FormControl>
+          {formRenewalMonths === 'window' && (
+            <Box sx={{ mb: 2, p: 1.5, border: 1, borderColor: 'divider', borderRadius: 1 }} data-testid="renewal-window-fields">
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1 }}>
+                <TextField
+                  size="small"
+                  label="Window opens (MM-DD)"
+                  value={formWindow.opens}
+                  onChange={(e) => setFormWindow((w) => ({ ...w, opens: e.target.value.trim() }))}
+                  disabled={saving}
+                  sx={{ width: 170 }}
+                />
+                <TextField
+                  size="small"
+                  label="Window closes (MM-DD)"
+                  value={formWindow.closes}
+                  onChange={(e) => setFormWindow((w) => ({ ...w, closes: e.target.value.trim() }))}
+                  disabled={saving}
+                  sx={{ width: 170 }}
+                />
+                <TextField
+                  size="small"
+                  type="number"
+                  label="Every N years"
+                  value={formWindow.every_years}
+                  onChange={(e) => setFormWindow((w) => ({ ...w, every_years: e.target.value }))}
+                  disabled={saving}
+                  sx={{ width: 130 }}
+                />
+                <TextField
+                  size="small"
+                  type="number"
+                  label="A year it opens in"
+                  value={formWindow.reference_year}
+                  onChange={(e) => setFormWindow((w) => ({ ...w, reference_year: e.target.value }))}
+                  disabled={saving}
+                  sx={{ width: 150 }}
+                />
+              </Box>
+              <TextField
+                size="small"
+                fullWidth
+                label="Where this window comes from"
+                value={formWindow.source}
+                onChange={(e) => setFormWindow((w) => ({ ...w, source: e.target.value }))}
+                disabled={saving}
+                sx={{ mb: 1 }}
+              />
+              <Typography variant="body2" color={windowInvalid ? 'error' : 'text.secondary'}>
+                {windowCheck.ok
+                  ? `Renews ${describeRenewalWindow(windowCheck.window)}. A document of this type is due when the next window closes after its effective date, whatever date it prints.`
+                  : windowCheck.error}
+              </Typography>
+              <Button
+                size="small"
+                sx={{ mt: 0.5, textTransform: 'none' }}
+                onClick={() => setFormWindow(windowToForm(FDA_FOOD_FACILITY_REGISTRATION_WINDOW))}
+                disabled={saving}
+              >
+                Use the FDA food facility registration window (21 CFR 1.230)
+              </Button>
+            </Box>
+          )}
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             How long a document of this type stays current. Most documents renew annually;
             specification sheets renew at three years, because both major food-safety schemes
@@ -792,7 +896,7 @@ export function DocumentTypes() {
           <Button
             variant="contained"
             onClick={handleSave}
-            disabled={!formName.trim() || saving || !formLeadValid || (!editingType && isSuperAdmin && !formTenantId)}
+            disabled={!formName.trim() || saving || !formLeadValid || windowInvalid || (!editingType && isSuperAdmin && !formTenantId)}
           >
             {saving ? 'Saving...' : editingType ? 'Save Changes' : 'Add Document Type'}
           </Button>
@@ -815,4 +919,26 @@ export function DocumentTypes() {
       )}
     </Box>
   );
+}
+
+/** The window as the dialog edits it: every field as text. */
+function windowToForm(w: RenewalWindow): { opens: string; closes: string; every_years: string; reference_year: string; source: string } {
+  return {
+    opens: w.opens,
+    closes: w.closes,
+    every_years: String(w.every_years),
+    reference_year: String(w.reference_year),
+    source: w.source ?? '',
+  };
+}
+
+/** Back to the API shape; numbers that do not parse stay invalid so validation says so. */
+function formToWindow(f: { opens: string; closes: string; every_years: string; reference_year: string; source: string }): unknown {
+  return {
+    opens: f.opens,
+    closes: f.closes,
+    every_years: f.every_years.trim() === '' ? NaN : Number(f.every_years),
+    reference_year: f.reference_year.trim() === '' ? NaN : Number(f.reference_year),
+    source: f.source.trim() || null,
+  };
 }

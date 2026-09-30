@@ -105,6 +105,50 @@ export const NOT_CHECKED_CATEGORY_NOTE: Record<NotCheckedCategory, string> = {
     "not judged — sample size smaller than the limit requires, please resolve with the supplier's lab",
 };
 
+/**
+ * WHAT KIND OF WORK a `not_checked` verdict is for the reviewer (rules table
+ * D2, distinction ruled by AJ 2026-09-14; the presentation was left to us):
+ *
+ *   `known_conflict`  "known wrong by your definitions" -- the checker can SEE
+ *                     a conflict with the customer's own configuration: the
+ *                     result is printed in a unit of a different KIND from the
+ *                     one our configured limit is written in (a percent where
+ *                     the limit counts colonies, MPN where it counts CFU, a
+ *                     cell count against a colony count, pH against percent).
+ *                     A probable send-back.
+ *   `verify`          "just verify this" -- the checker lacks something it
+ *                     needs: a censored "<50" against 10, an unreadable cell,
+ *                     a combined yeast-and-mold figure, a per-mL result
+ *                     against a per-g limit (product-dependent, C2), an
+ *                     ounce, a count with no method. A confirmation.
+ *
+ * Like `NotCheckedCategory`, an ADDITION to `not_checked` and never a fourth
+ * verdict: nothing is judged, nothing is held. `known_conflict` is only ever
+ * set on the CONFIGURED-limit path -- a result that disagrees with the COA's
+ * own printed limit conflicts with the supplier's paper, not with "your
+ * definitions", so it stays `verify`. Read it through `notCheckedKindOf`,
+ * which answers `verify` for every other not_checked and null for a judgement.
+ */
+export type NotCheckedKind = 'known_conflict' | 'verify';
+
+/** Reviewer-facing words for the two kinds. The one place they are written. */
+export const NOT_CHECKED_KIND_LABELS: Record<NotCheckedKind, { label: string; help: string }> = {
+  known_conflict: {
+    label: 'Conflicts with your configuration',
+    help: 'The result is reported in a way your limit for this test says it is never measured. Probably wrong on the certificate: send it back or ask the supplier.',
+  },
+  verify: {
+    label: 'Could not confirm — verify by hand',
+    help: 'Nothing contradicts your configuration; the checker just lacks what it needs to compare. Confirm it yourself.',
+  },
+};
+
+/** The kind of a verdict, or null when it was judged. */
+export function notCheckedKindOf(v: { verdict: SpecVerdictKind; not_checked_kind?: NotCheckedKind | null }): NotCheckedKind | null {
+  if (v.verdict !== 'not_checked') return null;
+  return v.not_checked_kind ?? 'verify';
+}
+
 export type MeasuredKind =
   | 'numeric'
   | 'censored_lt'
@@ -232,6 +276,12 @@ export interface SpecVerdict {
    * shown (E1/E2). See `NotCheckedCategory`. Absent on every other verdict.
    */
   not_checked_category?: NotCheckedCategory;
+  /**
+   * D2: `known_conflict` when the result's unit is of a different kind from
+   * the one our configured limit is written in. Absent means `verify` on a
+   * `not_checked` verdict -- read it through `notCheckedKindOf`.
+   */
+  not_checked_kind?: NotCheckedKind;
   /**
    * How far out, in the terms of the analyte's D3 category (migration 0120,
    * `shared/specBand.ts`). Attached AFTER judging by `attachSpecBands`; orders
@@ -954,6 +1004,43 @@ export function unitRefusalCategory(from: UnitInfo, to: UnitInfo): NotCheckedCat
   return f.method !== t.method ? 'method_mismatch' : null;
 }
 
+/**
+ * D2: is a unit refusal a CONFLICT (two units of different kinds -- the
+ * result cannot be the thing the limit measures) or a gap to VERIFY (same
+ * kind, but the conversion needs a fact we do not have, or a unit we do not
+ * recognise)? Mirrors the families `resolveUnits` already refuses; it only
+ * sorts the refusals it produced.
+ */
+export function unitRefusalKind(from: UnitInfo, to: UnitInfo): NotCheckedKind {
+  const dimension = (family: string): string | null => {
+    if (concentrationClass(family)) return 'concentration';
+    if (family === 'ph' || family === 'temp') return family;
+    const parts = family.split(':');
+    if (parts[0] === 'log') return parts[1] === 'other' || parts[1] === 'unspecified' ? null : 'count';
+    if (COUNT_METHODS.has(parts[0])) return 'count';
+    return null; // 'other:...' -- a unit we do not recognise is a gap, not a contradiction
+  };
+  const fd = dimension(from.family);
+  const td = dimension(to.family);
+  if (!fd || !td) return 'verify';
+  if (fd !== td) return 'known_conflict';
+  if (fd === 'count') {
+    const method = (family: string) => {
+      const parts = family.split(':');
+      return parts[0] === 'log' ? parts[1] : parts[0];
+    };
+    const fm = method(from.family);
+    const tm = method(to.family);
+    // A count with no stated method is missing a fact, not contradicting one.
+    if (fm === 'any' || tm === 'any') return 'verify';
+    // CFU vs MPN, cells vs CFU: a different measurement from the one configured.
+    if (fm !== tm) return 'known_conflict';
+  }
+  // Same kind, refused for a product-dependent basis (per mL vs per g, % v/v vs
+  // % w/w, mg/L vs ppm), an ounce, or log vs linear: verify.
+  return 'verify';
+}
+
 // ---------------------------------------------------------------------------
 // A unit that is on the PAGE but not on the RESULT
 // ---------------------------------------------------------------------------
@@ -1380,6 +1467,8 @@ export interface Comparison {
   conversion?: UnitConversion;
   /** Why it could not be judged, when that reason notifies (E1/E2). */
   not_checked_category?: NotCheckedCategory;
+  /** D2: set on a unit refusal whose two units are of different KINDS. */
+  not_checked_kind?: NotCheckedKind;
 }
 
 /**
@@ -1468,6 +1557,7 @@ export function compareToLimit(
       reason: `result is in ${vu.canonical || 'an unknown unit'} but the limit is in ${lu.canonical || 'another unit'} — not comparable${unitRefusalNote(vu, lu)}`,
       value_num: null,
       ...(category ? { not_checked_category: category } : {}),
+      not_checked_kind: unitRefusalKind(vu, lu),
     };
   }
   // Rounded like the factor, so a result that converts to exactly the limit
@@ -2900,6 +2990,9 @@ export function checkConfiguredLimits(
       verdicts.push({
         ...base,
         ...(cmp.not_checked_category ? { not_checked_category: cmp.not_checked_category } : {}),
+        // D2: a unit-kind conflict with OUR configured limit is "known wrong
+        // by your definitions". The printed-limit path above never sets it.
+        ...(cmp.not_checked_kind === 'known_conflict' ? { not_checked_kind: 'known_conflict' as const } : {}),
         verdict: 'not_checked',
         message: `${test.name} could not be judged against our limit of ${limitText} — ${reason}.`,
       });

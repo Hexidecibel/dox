@@ -176,7 +176,26 @@ describe('deriveSupplierRequirements', () => {
     expect(slugs(bySupplier.sup_1)).toEqual(['certificate-of-insurance']);
     expect(problems).toEqual([
       { kind: 'unknown_requirement', slug: 'third-party-audit-certificate', because: 'named by the baseline rule' },
+      // KNOWN is a tenant seeded before F7: the two new baseline items are
+      // reported, never invented.
+      { kind: 'unknown_requirement', slug: 'business-license', because: 'named by the baseline rule' },
+      { kind: 'unknown_requirement', slug: 'fda-food-facility-registration', because: 'named by the baseline rule' },
     ]);
+  });
+
+  it('F7: the universal baseline includes a business license and an FDA registration, required, whatever is claimed', () => {
+    const known = new Set([...KNOWN, 'business-license', 'fda-food-facility-registration']);
+    const { bySupplier, problems } = derive([supplier({ categories: ['packaging'] })], known);
+    expect(slugs(bySupplier.sup_1)).toEqual(
+      ['business-license', 'certificate-of-insurance', 'fda-food-facility-registration', 'third-party-audit-certificate'],
+    );
+    for (const r of bySupplier.sup_1) {
+      expect(r.tier).toBe('required');
+      expect(r.basis).toEqual([{ rule: 'baseline' }]);
+    }
+    expect(problems.filter((p) => p.kind === 'unknown_requirement')).toEqual([]);
+    // Not approved still derives nothing.
+    expect(derive([supplier({ approved: false })], known).bySupplier.sup_1 ?? []).toEqual([]);
   });
 
   it('reports a category packet the pack does not define', () => {

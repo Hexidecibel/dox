@@ -7,7 +7,7 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
-import { parseRenewalIntervalMonths, parseTypeRenewalSetting } from '../../lib/registry';
+import { parseRenewalIntervalMonths, parseTypeRenewalWindowSetting } from '../../lib/registry';
 import { parseRenewalAlertLeadDays } from '../../../shared/renewalLeadTime';
 import type { Env, User } from '../../lib/types';
 
@@ -100,6 +100,8 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       renewal_interval_months?: number | null;
       /** 'inherit' | 'period' | 'none' — see migration 0097. */
       renewal_policy?: string | null;
+      /** A fixed calendar renewal window (0125, G3); null clears it. */
+      renewal_window?: unknown;
       /** Days of renewal-alert warning for this type; null = the organization's setting (0111). */
       renewal_alert_lead_days?: number | null;
     };
@@ -195,7 +197,11 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     // 'none' is "does not renew", and only 'period' gives the months column any
     // meaning. Sending months alone is still valid and means 'period', which is
     // exactly what a pre-0097 client does.
-    if (body.renewal_interval_months !== undefined || body.renewal_policy !== undefined) {
+    if (
+      body.renewal_interval_months !== undefined ||
+      body.renewal_policy !== undefined ||
+      body.renewal_window !== undefined
+    ) {
       const parsedMonths = parseRenewalIntervalMonths(body.renewal_interval_months ?? null);
       if (!parsedMonths.ok) {
         return new Response(
@@ -203,7 +209,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           { status: 400, headers: { 'Content-Type': 'application/json' } }
         );
       }
-      const parsed = parseTypeRenewalSetting(body.renewal_policy, parsedMonths.value);
+      const parsed = parseTypeRenewalWindowSetting(body.renewal_policy, parsedMonths.value, body.renewal_window);
       if (!parsed.ok) {
         return new Response(
           JSON.stringify({ error: parsed.error }),
@@ -214,6 +220,13 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       params.push(parsed.months);
       updates.push('renewal_policy = ?');
       params.push(parsed.policy);
+      // The window (0125) is written only when it changes state: a window
+      // object sets it, null or a non-'period' policy clears it, and a PUT
+      // that says nothing about it under 'period' leaves it alone.
+      if (parsed.window !== undefined) {
+        updates.push('renewal_window = ?');
+        params.push(parsed.window === null ? null : JSON.stringify(parsed.window));
+      }
     }
 
     // Renewal alert lead time override (migration 0111). Stamped and audited
@@ -282,7 +295,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       'document_type_updated',
       'document_type',
       docTypeId,
-      JSON.stringify({ changes: body }),
+      JSON.stringify({
+        changes: body,
+        ...(body.renewal_window !== undefined || body.renewal_policy !== undefined
+          ? { previous_renewal_window: documentType.renewal_window ?? null }
+          : {}),
+      }),
       getClientIp(context.request)
     );
 

@@ -11,10 +11,11 @@ import {
 import { decideArrival, preflightArrivalDecision } from '../../lib/request-arrivals';
 // NOTE: `deleteFile` is deliberately NOT imported any more — rejecting a queue
 // item no longer destroys its R2 object. See handleReject's R2 RETENTION note.
-import { LOT_SCHEME_SELECT, invariantWarningsFor, withInvariantWarnings } from '../../lib/queue-warnings';
+import { LOT_SCHEME_SELECT, invariantWarningsFor, withInvariantWarnings, withSalesSheetWarning } from '../../lib/queue-warnings';
 import { loadSpecConfig, withSpecConfig, specResultsWithConfig } from '../../lib/spec-warnings';
 import { registerAndNotifyForApproval } from '../../lib/spec-register';
 import { recordArrivalAndCheckExpiry } from '../../lib/expired-on-arrival';
+import { arrivalForQueueItem, recordPacketProvenance } from '../../lib/packet-provenance';
 import {
   REJECTION_REASONS,
   type RejectionReason,
@@ -93,6 +94,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       `SELECT pq.*, dt.name as document_type_name, dt.slug as document_type_slug,
               dt.renewal_policy as type_renewal_policy,
               dt.renewal_interval_months as type_renewal_interval_months,
+              dt.renewal_window as type_renewal_window,
               t.name as tenant_name, t.slug as tenant_slug,
               u.name as created_by_name, r.name as reviewed_by_name,
               CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists,
@@ -125,10 +127,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // frozen at approve time — this is only the starting value.
     const enriched = withSpecConfig(
       withRenewalProposal(
-        withInvariantWarnings({
-          ...rest,
-          profile_exists: profile_exists === 1,
-        })
+        withSalesSheetWarning(
+          withInvariantWarnings({
+            ...rest,
+            profile_exists: profile_exists === 1,
+          })
+        )
       ),
       specConfig,
       {
@@ -510,6 +514,16 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         // and the document it became are now two rows that should know about
         // each other. Provenance only — see the note on the helper for what
         // this deliberately does NOT do to the request's checklist.
+        // H1 (rules table, 2026-09-20): a part of a split packet cites the
+        // packet and its pages on the version it became. Best-effort.
+        if ((item as { packet_parent_id?: string | null }).packet_parent_id) {
+          await recordPacketProvenance(
+            context.env.DB,
+            item as unknown as Parameters<typeof recordPacketProvenance>[1],
+            await approvedDocumentIds(response),
+            user.id
+          );
+        }
         await linkApprovedDocumentToRequestUpload(context, user, item.id, response, combinedUploadId !== null);
         if (combinedUploadId) {
           return await runCombinedArrivalDecision(context, user, item, combinedUploadId, body.arrival_decision!, response);
@@ -584,6 +598,22 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
  * Best-effort throughout: the approval has already happened and its response
  * is already built. Nothing here may change that.
  */
+/** The document ids an approve response names (flat, multi-product or records). */
+async function approvedDocumentIds(response: Response): Promise<string[]> {
+  try {
+    const payload = (await response.clone().json()) as {
+      document?: { id?: string };
+      documents?: Array<{ id?: string }>;
+    };
+    return [
+      ...(payload.document?.id ? [payload.document.id] : []),
+      ...(payload.documents ?? []).map((d) => d?.id).filter((id): id is string => !!id),
+    ];
+  } catch {
+    return [];
+  }
+}
+
 async function linkApprovedDocumentToRequestUpload(
   context: EventContext<Env, string, Record<string, unknown>>,
   user: User,
@@ -1381,7 +1411,13 @@ async function checkArrivalForApproval(
       tenantId: String(item.tenant_id),
       tenantName: String(item.tenant_name ?? ''),
       queueItemId: item.id,
-      arrivedAt: item.created_at ?? null,
+      // A packet PART arrived when its packet did, not when it was split
+      // (H1 + G4): judging a lapse against the split day blames the supplier
+      // for days the packet waited in our own queue.
+      arrivedAt: await arrivalForQueueItem(
+        context.env.DB,
+        item as unknown as Parameters<typeof arrivalForQueueItem>[1]
+      ),
       supplierId,
       supplierName,
       documentTypeId: item.document_type_id == null ? null : String(item.document_type_id),
@@ -1590,6 +1626,7 @@ async function handleReject(
     tenant_id: string;
     file_r2_key: string;
     file_name: string;
+    packet_split_at?: string | null;
   },
   rejectionReason?: RejectionReason,
   rejectionNote?: string
@@ -1627,6 +1664,14 @@ async function handleReject(
   // a few hundred KB per rejected COA is far cheaper than another blind
   // post-mortem. `/api/queue/:id/file` keeps working for rejected items, so a
   // reviewer can now re-open what they threw away.
+  //
+  // A SPLIT PACKET IS THE EXCEPTION (rules table H1, 2026-09-20): "the
+  // original packet stays on record as received". Rejecting the container is
+  // how it leaves the queue once its parts are handled, and every approved
+  // part cites it (document_versions.source_packet, 0126), so its file is
+  // retained with NO reclaim date. A sweeper that honours file_retain_until
+  // therefore never reaches it.
+  const isPacketContainer = !!item.packet_split_at;
   await context.env.DB.prepare(
     `UPDATE processing_queue
      SET status = 'rejected',
@@ -1634,7 +1679,7 @@ async function handleReject(
          reviewed_at = datetime('now'),
          rejection_reason = ?,
          rejection_note = ?,
-         file_retain_until = datetime('now', ?),
+         file_retain_until = CASE WHEN ? THEN NULL ELSE datetime('now', ?) END,
          processing_status = CASE
            WHEN processing_status IN ('ready', 'error') THEN processing_status
            ELSE 'error'
@@ -1645,7 +1690,7 @@ async function handleReject(
          END
      WHERE id = ?`
   )
-    .bind(user.id, reason, note, `+${REJECTED_FILE_RETENTION_DAYS} days`, item.id)
+    .bind(user.id, reason, note, isPacketContainer ? 1 : 0, `+${REJECTED_FILE_RETENTION_DAYS} days`, item.id)
     .run();
 
   // Audit log. The reason travels here too so the audit trail is self-contained
@@ -1662,7 +1707,8 @@ async function handleReject(
       rejection_reason: reason,
       rejection_note: note,
       file_retained: true,
-      file_retain_days: REJECTED_FILE_RETENTION_DAYS,
+      file_retain_days: isPacketContainer ? null : REJECTED_FILE_RETENTION_DAYS,
+      ...(isPacketContainer ? { packet_source_of_record: true } : {}),
     }),
     getClientIp(context.request)
   );

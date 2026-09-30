@@ -585,6 +585,17 @@ export const api = {
     },
 
     /**
+     * Download the ORIGINAL PACKET a version was split out of (rules table H1,
+     * migration 0126). Opens in a new tab, like `download`.
+     */
+    downloadPacketSource: (id: string, version: number) => {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const params = new URLSearchParams({ version: String(version), source: 'packet' });
+      if (token) params.set('token', token);
+      window.open(`${API_BASE}/documents/${id}/download?${params.toString()}`, '_blank');
+    },
+
+    /**
      * GET /api/documents/:id/versions
      * Returns: { versions: ApiDocumentVersion[], document_id, current_version }
      * We unwrap to just the versions array.
@@ -1179,7 +1190,7 @@ export const api = {
      * POST /api/document-types
      * Returns: { documentType: ApiDocumentType }
      */
-    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_alert_lead_days?: number | null }) =>
+    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null }) =>
       fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -1189,7 +1200,7 @@ export const api = {
      * PUT /api/document-types/:id
      * Returns: { documentType: ApiDocumentType }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_alert_lead_days?: number | null }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null }) =>
       fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),

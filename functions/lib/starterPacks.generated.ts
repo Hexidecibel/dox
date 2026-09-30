@@ -787,10 +787,32 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "extraction_instructions": null
       },
       {
+        "name": "Business License",
+        "slug": "business-license",
+        "description": "The supplier's current business or operating license. Part of the universal baseline (rules table F7): owed by every approved supplier, whatever it sells or claims.",
+        "sort_order": 200,
+        "owner": "Purchasing",
+        "closes": [
+          "business-license"
+        ],
+        "extraction_instructions": null
+      },
+      {
+        "name": "FDA Food Facility Registration",
+        "slug": "fda-food-facility-registration",
+        "description": "The supplier facility's FDA food facility registration. Renews inside a fixed window, October 1 to December 31 of every even-numbered year (21 CFR 1.230(b)), so it is due when the next window closes whatever date it prints (rules table G3). Part of the universal baseline (F7).",
+        "sort_order": 210,
+        "owner": "Food Safety",
+        "closes": [
+          "fda-food-facility-registration"
+        ],
+        "extraction_instructions": null
+      },
+      {
         "name": "HACCP Plan",
         "slug": "haccp-plan",
         "description": "Hazard analysis and critical control point plan.",
-        "sort_order": 200,
+        "sort_order": 220,
         "owner": "Food Safety",
         "closes": [
           "haccp-plan"
@@ -801,7 +823,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "name": "Food Safety Plan",
         "slug": "food-safety-plan",
         "description": "Preventive controls / FSMA food safety plan.",
-        "sort_order": 210,
+        "sort_order": 230,
         "owner": "Food Safety",
         "closes": [
           "food-safety-plan"
@@ -812,7 +834,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "name": "Food Defense Plan",
         "slug": "food-defense-plan",
         "description": "Intentional adulteration / food defense plan.",
-        "sort_order": 220,
+        "sort_order": 240,
         "owner": "Food Safety",
         "closes": [
           "food-defense-plan"
@@ -823,7 +845,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "name": "Recall Program",
         "slug": "recall-program",
         "description": "Recall and traceability program, including mock recall results.",
-        "sort_order": 230,
+        "sort_order": 250,
         "owner": "Food Safety",
         "closes": [
           "recall-program"
@@ -834,7 +856,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "name": "Pest Control Program",
         "slug": "pest-control-program",
         "description": "Pest control program and service records.",
-        "sort_order": 240,
+        "sort_order": 260,
         "owner": "Food Safety",
         "closes": [
           "pest-control-program"
@@ -845,7 +867,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "name": "Sanitation Program",
         "slug": "sanitation-program",
         "description": "SSOPs and sanitation schedules.",
-        "sort_order": 250,
+        "sort_order": 270,
         "owner": "Food Safety",
         "closes": [
           "sanitation-program"
@@ -856,7 +878,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "name": "GMP Self Audit",
         "slug": "gmp-self-audit",
         "description": "Internal good-manufacturing-practice self audit.",
-        "sort_order": 260,
+        "sort_order": 280,
         "owner": "Food Safety",
         "closes": [
           "gmp-self-audit"
@@ -867,7 +889,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "name": "Process Flow Diagram",
         "slug": "process-flow-diagram",
         "description": "Production process flow for the supplied product.",
-        "sort_order": 270,
+        "sort_order": 290,
         "owner": "Food Safety",
         "closes": [
           "process-flow-diagram"
@@ -989,11 +1011,27 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "scope": "supplier"
       },
       {
+        "name": "Business License on file",
+        "slug": "business-license",
+        "description": "A current business or operating license. Universal baseline (F7): required of every approved supplier regardless of what it claims.",
+        "checklist": "Commercial & Legal",
+        "sort_order": 150,
+        "scope": "supplier"
+      },
+      {
+        "name": "FDA Food Facility Registration on file",
+        "slug": "fda-food-facility-registration",
+        "description": "A current FDA food facility registration. Universal baseline (F7). Goes stale when the biennial renewal window closes (G3).",
+        "checklist": "Regulatory Registrations & Statements",
+        "sort_order": 160,
+        "scope": "supplier"
+      },
+      {
         "name": "3rd Party Audit REPORT on file",
         "slug": "third-party-audit-report",
         "description": "The full audit report. Separate line item from the certificate — a supplier can send one without the other, and only having the certificate hides the findings.",
         "checklist": "Audit & Certification",
-        "sort_order": 150,
+        "sort_order": 170,
         "scope": "supplier"
       },
       {
@@ -1001,7 +1039,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "third-party-audit-certificate",
         "description": "The valid-through certificate. Separate line item from the report, and the one that drives expiry tracking.",
         "checklist": "Audit & Certification",
-        "sort_order": 160,
+        "sort_order": 180,
         "scope": "supplier"
       },
       {
@@ -1009,7 +1047,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "haccp-plan",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 170,
+        "sort_order": 190,
         "scope": "supplier"
       },
       {
@@ -1017,7 +1055,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "food-safety-plan",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 180,
+        "sort_order": 200,
         "scope": "supplier"
       },
       {
@@ -1025,7 +1063,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "food-defense-plan",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 190,
+        "sort_order": 210,
         "scope": "supplier"
       },
       {
@@ -1033,7 +1071,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "recall-program",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 200,
+        "sort_order": 220,
         "scope": "supplier"
       },
       {
@@ -1041,7 +1079,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "pest-control-program",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 210,
+        "sort_order": 230,
         "scope": "supplier"
       },
       {
@@ -1049,7 +1087,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "sanitation-program",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 220,
+        "sort_order": 240,
         "scope": "supplier"
       },
       {
@@ -1057,7 +1095,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "gmp-self-audit",
         "description": null,
         "checklist": "Audit & Certification",
-        "sort_order": 230,
+        "sort_order": 250,
         "scope": "supplier"
       },
       {
@@ -1065,7 +1103,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "process-flow-diagram",
         "description": null,
         "checklist": "Food Safety Plans & Programs",
-        "sort_order": 240,
+        "sort_order": 260,
         "scope": "supplier"
       },
       {
@@ -1073,7 +1111,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "product-label",
         "description": null,
         "checklist": "Allergens, Labeling & Nutrition",
-        "sort_order": 250,
+        "sort_order": 270,
         "scope": "product"
       },
       {
@@ -1081,7 +1119,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "organic-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 260,
+        "sort_order": 280,
         "scope": "supplier"
       },
       {
@@ -1089,7 +1127,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "kosher-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 270,
+        "sort_order": 290,
         "scope": "supplier"
       },
       {
@@ -1097,7 +1135,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "halal-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 280,
+        "sort_order": 300,
         "scope": "supplier"
       },
       {
@@ -1105,7 +1143,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "gluten-free-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 290,
+        "sort_order": 310,
         "scope": "supplier"
       },
       {
@@ -1113,7 +1151,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "non-gmo-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 300,
+        "sort_order": 320,
         "scope": "supplier"
       },
       {
@@ -1121,7 +1159,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "animal-welfare-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 310,
+        "sort_order": 330,
         "scope": "supplier"
       },
       {
@@ -1129,7 +1167,7 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
         "slug": "sustainability-certificate",
         "description": null,
         "checklist": "Claim Substantiation",
-        "sort_order": 320,
+        "sort_order": 340,
         "scope": "supplier"
       }
     ],
@@ -1358,7 +1396,9 @@ export const STARTER_PACKS: Record<string, StarterPack> = {
           "letter-of-guarantee",
           "certificate-of-insurance",
           "w9-on-file",
-          "third-party-audit-certificate"
+          "third-party-audit-certificate",
+          "business-license",
+          "fda-food-facility-registration"
         ],
         "recommends": [
           "third-party-audit-report",

@@ -45,6 +45,7 @@ export default function RejectQueueItemDialog({
   onClose,
   onConfirm,
   arrival,
+  suggestedReason,
 }: {
   open: boolean;
   fileName?: string;
@@ -53,6 +54,12 @@ export default function RejectQueueItemDialog({
   onConfirm: (reason: RejectionReason, note: string, arrivalDecision?: QueueArrivalDecisionInput) => void;
   /** The supplier arrival this item came from, when it came through a request link. */
   arrival?: RequestArrival | null;
+  /**
+   * A reason the reviewer already chose by pressing a labelled button (F6's
+   * "Reject as sales sheet"). Pre-selected on open; still changeable. Without
+   * it the dialog opens on nothing, so the reason stays a real choice.
+   */
+  suggestedReason?: RejectionReason | null;
 }) {
   const [reason, setReason] = useState<RejectionReason | ''>('');
   const [note, setNote] = useState('');
@@ -72,8 +79,11 @@ export default function RejectQueueItemDialog({
       setSendBack(false);
       setLineIds(arrival ? initialTickedLineIds(arrival) : []);
       setAttentionReason('');
+      if (suggestedReason) pickReason(suggestedReason);
     }
-  }, [open, arrival]);
+    // pickReason reads only state this effect has just reset.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, arrival, suggestedReason]);
 
   const pickReason = (r: RejectionReason) => {
     setReason(r);

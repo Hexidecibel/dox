@@ -21,6 +21,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var renewalPeriod_exports = {};
 __export(renewalPeriod_exports, {
   ANNUAL_RENEWAL_MONTHS: () => ANNUAL_RENEWAL_MONTHS,
+  FDA_FOOD_FACILITY_REGISTRATION_WINDOW: () => FDA_FOOD_FACILITY_REGISTRATION_WINDOW,
   MAX_RENEWAL_PERIOD_MONTHS: () => MAX_RENEWAL_PERIOD_MONTHS,
   SPEC_SHEET_RENEWAL_MONTHS: () => SPEC_SHEET_RENEWAL_MONTHS,
   TYPE_RENEWAL_POLICIES: () => TYPE_RENEWAL_POLICIES,
@@ -29,13 +30,18 @@ __export(renewalPeriod_exports, {
   defaultRenewalMonthsForTypeName: () => defaultRenewalMonthsForTypeName,
   defaultRenewalPolicyForTypeName: () => defaultRenewalPolicyForTypeName,
   defaultRenewalSettingForTypeName: () => defaultRenewalSettingForTypeName,
+  describeRenewalWindow: () => describeRenewalWindow,
   looksLikeCoaType: () => looksLikeCoaType,
+  looksLikeFdaFacilityRegistrationType: () => looksLikeFdaFacilityRegistrationType,
   looksLikeSpecSheetType: () => looksLikeSpecSheetType,
+  nextRenewalWindow: () => nextRenewalWindow,
+  parseRenewalWindow: () => parseRenewalWindow,
   parseTypeRenewalPolicy: () => parseTypeRenewalPolicy,
   renewalPeriodLabel: () => renewalPeriodLabel,
   renewalRuleLabel: () => renewalRuleLabel,
   resolveRenewalExpiry: () => resolveRenewalExpiry,
-  resolveRenewalPeriodMonths: () => resolveRenewalPeriodMonths
+  resolveRenewalPeriodMonths: () => resolveRenewalPeriodMonths,
+  validateRenewalWindow: () => validateRenewalWindow
 });
 module.exports = __toCommonJS(renewalPeriod_exports);
 var ANNUAL_RENEWAL_MONTHS = 12;
@@ -67,6 +73,103 @@ function addMonths(date, months) {
   const lastDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0)).getUTCDate();
   base.setUTCDate(Math.min(day, lastDay));
   return base.toISOString().slice(0, 10);
+}
+var FDA_FOOD_FACILITY_REGISTRATION_WINDOW = {
+  opens: "10-01",
+  closes: "12-31",
+  every_years: 2,
+  reference_year: 2024,
+  source: "21 CFR 1.230(b): renewed between October 1 and December 31 of each even-numbered year"
+};
+var WINDOW_KEYS = /* @__PURE__ */ new Set(["opens", "closes", "every_years", "reference_year", "source"]);
+var DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+var MONTH_NAMES = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December"
+];
+function validMonthDay(v) {
+  if (typeof v !== "string") return false;
+  const m = /^(\d{2})-(\d{2})$/.exec(v);
+  if (!m) return false;
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  return month >= 1 && month <= 12 && day >= 1 && day <= DAYS_IN_MONTH[month - 1];
+}
+function validateRenewalWindow(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, error: "renewal_window must be an object" };
+  }
+  const o = raw;
+  const unknown = Object.keys(o).filter((k) => !WINDOW_KEYS.has(k));
+  if (unknown.length) return { ok: false, error: `renewal_window has unknown settings: ${unknown.join(", ")}` };
+  if (!validMonthDay(o.opens)) return { ok: false, error: "renewal_window.opens must be a day of the year as 'MM-DD' (not February 29)" };
+  if (!validMonthDay(o.closes)) return { ok: false, error: "renewal_window.closes must be a day of the year as 'MM-DD' (not February 29)" };
+  if (o.opens === o.closes) return { ok: false, error: "renewal_window.opens and closes must differ" };
+  const every = o.every_years;
+  if (typeof every !== "number" || !Number.isInteger(every) || every < 1 || every > 10) {
+    return { ok: false, error: "renewal_window.every_years must be a whole number from 1 to 10" };
+  }
+  const ref = o.reference_year;
+  if (typeof ref !== "number" || !Number.isInteger(ref) || ref < 1900 || ref > 2200) {
+    return { ok: false, error: "renewal_window.reference_year must be a year the window occurs in" };
+  }
+  let source = null;
+  if (o.source !== void 0 && o.source !== null) {
+    if (typeof o.source !== "string" || o.source.length > 300) {
+      return { ok: false, error: "renewal_window.source must be text of at most 300 characters" };
+    }
+    source = o.source.trim() || null;
+  }
+  return { ok: true, window: { opens: o.opens, closes: o.closes, every_years: every, reference_year: ref, source } };
+}
+function parseRenewalWindow(raw) {
+  if (raw === null || raw === void 0 || raw === "") return null;
+  let v = raw;
+  if (typeof raw === "string") {
+    try {
+      v = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  const r = validateRenewalWindow(v);
+  return r.ok ? r.window : null;
+}
+function nextRenewalWindow(anchor, w) {
+  const a = dateOnly(anchor);
+  if (!a || !/^\d{4}-\d{2}-\d{2}$/.test(a)) return null;
+  const year = Number(a.slice(0, 4));
+  const crossesYear = w.closes < w.opens;
+  for (let y = year - 1; y <= year + w.every_years + 1; y++) {
+    if (((y - w.reference_year) % w.every_years + w.every_years) % w.every_years !== 0) continue;
+    const opens = `${y}-${w.opens}`;
+    if (opens <= a) continue;
+    return { opens, closes: `${crossesYear ? y + 1 : y}-${w.closes}` };
+  }
+  return null;
+}
+function monthDayWords(md) {
+  const [m, d] = md.split("-").map(Number);
+  return `${MONTH_NAMES[m - 1]} ${d}`;
+}
+function describeRenewalWindow(w) {
+  const cycle = w.every_years === 1 ? "every year" : `every ${w.every_years} years (${w.reference_year}, ${w.reference_year + w.every_years}, ...)`;
+  return `${monthDayWords(w.opens)} to ${monthDayWords(w.closes)}, ${cycle}`;
+}
+function looksLikeFdaFacilityRegistrationType(name) {
+  const n = name.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!n) return false;
+  return /\bfda\b.*\bregistration\b/.test(n) || /\bfood\s+facility\s+registration\b/.test(n);
 }
 function usablePeriod(months) {
   if (months === null || months === void 0) return null;
@@ -128,6 +231,27 @@ function resolveRenewalExpiry(input) {
       "Documents of this type do not renew \u2014 each one is superseded by the next rather than re-collected on a cadence."
     );
   }
+  const window = period.rule === "document_type_default" && input.renewal_type !== "keep_current" ? parseRenewalWindow(input.type_renewal_window) : null;
+  if (window) {
+    const anchor2 = dateOnly(input.meta_effective_date);
+    const next = anchor2 ? nextRenewalWindow(anchor2, window) : null;
+    if (!anchor2 || !next) {
+      return {
+        due_date: null,
+        rule: "unresolvable",
+        period_months: period.months,
+        anchor_date: null,
+        reason: `Renews in the window ${describeRenewalWindow(window)}, but the document has no effective date to place it in a window.`
+      };
+    }
+    return {
+      due_date: next.closes,
+      rule: "document_type_window",
+      period_months: period.months,
+      anchor_date: anchor2,
+      reason: `Effective ${anchor2}; renews in the window ${describeRenewalWindow(window)}, so it is due when the next window closes on ${next.closes}${window.source ? ` (${window.source})` : ""}.`
+    };
+  }
   const printed = dateOnly(input.meta_document_expires_on);
   if (printed) {
     return {
@@ -188,8 +312,13 @@ function defaultRenewalPolicyForTypeName(name) {
   return "inherit";
 }
 function defaultRenewalSettingForTypeName(name) {
+  if (looksLikeFdaFacilityRegistrationType(name)) {
+    const w = FDA_FOOD_FACILITY_REGISTRATION_WINDOW;
+    return { policy: "period", interval_months: w.every_years * 12, window: w };
+  }
   const policy = defaultRenewalPolicyForTypeName(name);
   return {
+    window: null,
     policy,
     // The months column is read ONLY under 'period' (see resolveRenewalPeriodMonths),
     // so anything stored beside another policy would be a number nothing reads
@@ -197,8 +326,10 @@ function defaultRenewalSettingForTypeName(name) {
     interval_months: policy === "period" ? defaultRenewalMonthsForTypeName(name) : null
   };
 }
-function renewalPeriodLabel(months, policy) {
+function renewalPeriodLabel(months, policy, window) {
   if (parseTypeRenewalPolicy(policy) === "none") return "Does not renew";
+  const w = parseTypeRenewalPolicy(policy) === "period" ? parseRenewalWindow(window) : null;
+  if (w) return describeRenewalWindow(w);
   const usable = usablePeriod(months ?? null);
   if (usable === null) return "Annual (default)";
   const d = describePeriod(usable);
@@ -214,6 +345,8 @@ function renewalRuleLabel(resolved) {
       return `${describePeriod(resolved.period_months ?? ANNUAL_RENEWAL_MONTHS)} \u2014 set on this document`;
     case "document_type_default":
       return `${describePeriod(resolved.period_months ?? ANNUAL_RENEWAL_MONTHS)} \u2014 this document type's default`;
+    case "document_type_window":
+      return "closes with this document type's renewal window";
     case "system_default_annual":
       return "one year \u2014 the default when nothing else is set";
     case "no_renewal_period":
@@ -225,6 +358,7 @@ function renewalRuleLabel(resolved) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   ANNUAL_RENEWAL_MONTHS,
+  FDA_FOOD_FACILITY_REGISTRATION_WINDOW,
   MAX_RENEWAL_PERIOD_MONTHS,
   SPEC_SHEET_RENEWAL_MONTHS,
   TYPE_RENEWAL_POLICIES,
@@ -233,11 +367,16 @@ function renewalRuleLabel(resolved) {
   defaultRenewalMonthsForTypeName,
   defaultRenewalPolicyForTypeName,
   defaultRenewalSettingForTypeName,
+  describeRenewalWindow,
   looksLikeCoaType,
+  looksLikeFdaFacilityRegistrationType,
   looksLikeSpecSheetType,
+  nextRenewalWindow,
+  parseRenewalWindow,
   parseTypeRenewalPolicy,
   renewalPeriodLabel,
   renewalRuleLabel,
   resolveRenewalExpiry,
-  resolveRenewalPeriodMonths
+  resolveRenewalPeriodMonths,
+  validateRenewalWindow
 });

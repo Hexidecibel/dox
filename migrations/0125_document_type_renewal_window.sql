@@ -1,0 +1,32 @@
+-- A DOCUMENT TYPE THAT RENEWS INSIDE A CALENDAR WINDOW, not N months from issue.
+--
+-- Rules table G3 (AJ, ruled 2026-09-20): fixed-window renewal as a general rule
+-- type, and the FDA food facility registration type now. A food facility
+-- registration is renewed inside a fixed window on a fixed cycle (21 CFR
+-- 1.230(b): October 1 to December 31 of each even-numbered year), and other
+-- agencies and programs work the same way. Evidence for such a type goes stale
+-- at the CLOSE of the window, whatever date the document prints.
+--
+-- document_types.renewal_window: JSON {opens, closes, every_years,
+-- reference_year, source} or NULL. Validated in code (shared/renewalPeriod.ts
+-- `validateRenewalWindow`); SQL only checks json_valid, the 0110 discipline.
+--
+-- WHY A COLUMN AND NOT A FOURTH renewal_policy WORD. 0097 put a CHECK on
+-- renewal_policy ('inherit','period','none'), and widening a CHECK means
+-- rebuilding document_types -- which six tables reference with ON DELETE
+-- CASCADE, so the DROP inside a rebuild would delete their rows (deferral does
+-- not stop CASCADE; see CLAUDE.md). Instead a window REFINES a period: it is
+-- read ONLY under renewal_policy = 'period', and the API writes
+-- renewal_interval_months = every_years * 12 beside it, so the pair still
+-- cannot disagree -- "renews every 24 months, due at the close of the window".
+-- Changing the policy away from 'period' clears the window.
+--
+-- NULL means "no window", which is every existing row. Nothing is backfilled:
+-- a tenant that already has an FDA registration type sets the window on
+-- Document Types; the FSQA starter pack gives new organisations the type with
+-- the window already set.
+--
+-- Plain-ASCII header (the 0110 D1 import finding).
+
+ALTER TABLE document_types ADD COLUMN renewal_window TEXT
+  CHECK (renewal_window IS NULL OR json_valid(renewal_window));

@@ -147,8 +147,12 @@ describe('POST /api/supplier-list/import — dry run', () => {
     expect(cSlugs).not.toContain('micro-limits');
 
     const packaging = byName['Cascade Packaging'];
+    // Baseline (COI, audit certificate, and F7's business license + FDA
+    // registration) plus a spec sheet for the product bought.
     expect(packaging.lines.map((l) => l.requirement_slug).sort()).toEqual([
+      'business-license',
       'certificate-of-insurance',
+      'fda-food-facility-registration',
       'spec-sheet',
       'third-party-audit-certificate',
     ]);

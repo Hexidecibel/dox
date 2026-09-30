@@ -35,6 +35,9 @@ const BASELINE_REQUIRED = [
   'certificate-of-insurance',
   'w9-on-file',
   'third-party-audit-certificate',
+  // Rules table F7 (2026-09-27): the universal baseline.
+  'business-license',
+  'fda-food-facility-registration',
 ];
 const BASELINE_RECOMMENDED = ['third-party-audit-report', 'recall-program'];
 

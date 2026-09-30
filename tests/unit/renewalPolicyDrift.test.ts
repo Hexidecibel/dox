@@ -76,10 +76,10 @@ describe('planRenewalPolicyDrift — what a starter-pack tenant needs', () => {
 
     const coa = p.corrections.find((c) => c.id === 'dt_coa')!;
     expect(coa.from).toEqual({ policy: 'inherit', interval_months: null });
-    expect(coa.to).toEqual({ policy: 'none', interval_months: null });
+    expect(coa.to).toEqual({ policy: 'none', interval_months: null, window: null });
 
     const spec = p.corrections.find((c) => c.id === 'dt_spec')!;
-    expect(spec.to).toEqual({ policy: 'period', interval_months: 36 });
+    expect(spec.to).toEqual({ policy: 'period', interval_months: 36, window: null });
   });
 
   it('is idempotent — re-planning after the corrections finds nothing', () => {
@@ -146,6 +146,15 @@ describe('correctionToSql — the write is its own guard', () => {
     const p = plan(AS_SEEDED);
     const sql = correctionToSql('tenant_x', p.corrections.find((c) => c.id === 'dt_spec')!, sqlStr);
     expect(sql).toContain('renewal_interval_months = 36');
+    expect(sql).toContain('renewal_window = NULL');
+  });
+
+  it('writes the window WITH the period for an FDA registration (G3), never the period alone', () => {
+    const p = plan([{ id: 'dt_fda', name: 'FDA Food Facility Registration', renewal_policy: 'inherit', renewal_interval_months: null }]);
+    const sql = correctionToSql('tenant_x', p.corrections[0], sqlStr);
+    expect(sql).toContain('renewal_interval_months = 24');
+    expect(sql).toContain(`"opens":"10-01"`);
+    expect(sql).toContain(`"every_years":2`);
   });
 });
 

@@ -156,18 +156,20 @@ describe('the packet finding, as data', () => {
     expect(parts.every((p: { pdf: string }) => p.pdf === whole.pdf)).toBe(true);
   });
 
-  it('seventeen of the twenty-six parts have no type in the FSQA starter pack', () => {
-    expect(pack.document_types).toHaveLength(27);
+  it('sixteen of the twenty-six parts have no type in the FSQA starter pack', () => {
+    // 29 since G3/F7 (2026-09-29) added FDA Food Facility Registration and
+    // Business License; the former gave page 5's Bioterrorism statement a type.
+    expect(pack.document_types).toHaveLength(29);
     const none = corpus.documents.filter(
       (d: { document_type_expected_none?: boolean; part_of?: string }) =>
         d.document_type_expected_none && d.part_of === 'packet-fdlw-2026'
     );
-    expect(none).toHaveLength(17);
+    expect(none).toHaveLength(16);
     // Plus the whole-packet entry, whose correct answer is also "none" — for a
     // different reason: there, a type DOES fit twenty-five times over.
     expect(
       corpus.documents.filter((d: { document_type_expected_none?: boolean }) => d.document_type_expected_none)
-    ).toHaveLength(18);
+    ).toHaveLength(17);
 
     // Exactly two carry the flag AND an accept list, where the pack holds an
     // adjacent-but-not-equal type. Keeping that number pinned is the point: the

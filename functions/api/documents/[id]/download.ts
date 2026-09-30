@@ -11,6 +11,13 @@ import type { Env, User, Document, DocumentVersion } from '../../../lib/types';
  * GET /api/documents/:id/download
  * Download a document version file.
  * Optional ?version=N query param (defaults to current version).
+ *
+ * ?source=packet (rules table H1, migration 0126): instead of the version's own
+ * file, the ORIGINAL PACKET that version was split out of -- "a reviewer must
+ * be able to walk from any single document back to what the supplier actually
+ * sent". Same access rule as the document itself (the packet belongs to the
+ * same tenant), audited as its own action. 404 when the version was not split
+ * from a packet or the packet's file is gone.
  */
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -61,6 +68,41 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     if (!version) {
       throw new NotFoundError(`Version ${versionNumber} not found`);
+    }
+
+    if (url.searchParams.get('source') === 'packet') {
+      const packetId = (version as { source_packet_queue_id?: string | null }).source_packet_queue_id;
+      const packet = packetId
+        ? await context.env.DB.prepare(
+            'SELECT id, file_r2_key, file_name, mime_type FROM processing_queue WHERE id = ? AND tenant_id = ?'
+          )
+            .bind(packetId, doc.tenant_id)
+            .first<{ id: string; file_r2_key: string; file_name: string; mime_type: string }>()
+        : null;
+      const packetObject = packet ? await downloadFile(context.env.FILES, packet.file_r2_key) : null;
+      if (!packet || !packetObject) {
+        return new Response(
+          JSON.stringify({ error: 'This version was not split from a packet on file' }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      await logAudit(
+        context.env.DB,
+        user.id,
+        doc.tenant_id,
+        'document_packet_source_downloaded',
+        'document_version',
+        version.id,
+        JSON.stringify({ document_id: docId, version: versionNumber, packet_queue_id: packet.id, file_name: packet.file_name }),
+        getClientIp(context.request)
+      );
+      const packetName = packet.file_name.replace(/"/g, '');
+      return new Response(packetObject.body, {
+        headers: {
+          'Content-Type': packet.mime_type || 'application/pdf',
+          'Content-Disposition': isPreview ? 'inline' : `attachment; filename="${packetName}"`,
+        },
+      });
     }
 
     // Get file from R2

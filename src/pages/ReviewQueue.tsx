@@ -96,6 +96,7 @@ import {
 } from '../components/InvariantWarnings';
 import { SpecAlertChip, SpecWarningBanner } from '../components/SpecWarnings';
 import RejectQueueItemDialog from '../components/RejectQueueItemDialog';
+import { SalesSheetWarningBanner } from '../components/SalesSheetWarningBanner';
 import { REJECTION_REASON_LABELS } from '../lib/types';
 import type { QueueArrivalDecisionInput, QueueArrivalDecisionOutcome, RejectionReason, RequestArrival } from '../lib/types';
 import type { LearnedFieldHint } from '../../shared/types';
@@ -389,6 +390,8 @@ export default function ReviewQueue() {
 
   // Item pending a rejection reason (null = dialog closed).
   const [rejectTarget, setRejectTarget] = useState<ProcessingQueueItem | null>(null);
+  /** A reject reason a banner pre-selected (F6's "Reject as sales sheet"); cleared with the dialog. */
+  const [rejectSuggestedReason, setRejectSuggestedReason] = useState<RejectionReason | null>(null);
   // Per-item set of dismissed invariant-warning keys.
   const [dismissedWarnings, setDismissedWarnings] = useState<Record<string, Set<string>>>({});
 
@@ -1052,6 +1055,7 @@ export default function ReviewQueue() {
       });
       setSnackbar({ open: true, ...arrivalOutcomeMessage('Item rejected', res.arrival_decision, arrivalDecision) });
       setRejectTarget(null);
+      setRejectSuggestedReason(null);
       loadQueue();
     } catch (err) {
       setSnackbar({ open: true, message: err instanceof Error ? err.message : 'Rejection failed', severity: 'error' });
@@ -2835,6 +2839,14 @@ export default function ReviewQueue() {
                                 missingRequired={item.spec_missing_required}
                                 watchOverdue={item.spec_watch_overdue}
                               />
+                              <SalesSheetWarningBanner
+                                warning={item.sales_sheet_warning}
+                                disabled={!!actionLoading[item.id]}
+                                onRejectAsSalesSheet={() => {
+                                  setRejectSuggestedReason('sales_sheet');
+                                  setRejectTarget(item);
+                                }}
+                              />
                               <InvariantWarningBanner
                                 warnings={item.invariant_warnings}
                                 dismissed={itemDismissed}
@@ -3264,7 +3276,7 @@ export default function ReviewQueue() {
                           variant="outlined"
                           color="error"
                           size="small"
-                          onClick={(e) => { e.stopPropagation(); setRejectTarget(item); }}
+                          onClick={(e) => { e.stopPropagation(); setRejectSuggestedReason(null); setRejectTarget(item); }}
                           disabled={isActioning || isProcessing}
                           startIcon={<CancelIcon />}
                         >
@@ -3283,7 +3295,7 @@ export default function ReviewQueue() {
                           variant="outlined"
                           color="error"
                           size="small"
-                          onClick={(e) => { e.stopPropagation(); setRejectTarget(item); }}
+                          onClick={(e) => { e.stopPropagation(); setRejectSuggestedReason(null); setRejectTarget(item); }}
                           disabled={isActioning || isProcessing}
                           startIcon={<CancelIcon />}
                         >
@@ -3304,7 +3316,11 @@ export default function ReviewQueue() {
         open={!!rejectTarget}
         fileName={rejectTarget?.file_name}
         submitting={!!rejectTarget && !!actionLoading[rejectTarget.id]}
-        onClose={() => setRejectTarget(null)}
+        onClose={() => {
+          setRejectTarget(null);
+          setRejectSuggestedReason(null);
+        }}
+        suggestedReason={rejectSuggestedReason}
         arrival={rejectTarget ? arrivalsByItem[rejectTarget.id] ?? null : null}
         onConfirm={(reason, note, arrivalDecision) => {
           if (rejectTarget) handleReject(rejectTarget.id, reason, note, arrivalDecision);

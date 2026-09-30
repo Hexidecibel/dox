@@ -548,6 +548,13 @@ export interface DocumentTypeRow {
    */
   renewal_policy: TypeRenewalPolicy;
   /**
+   * A fixed calendar renewal window (migration 0125, rules table G3), as the
+   * stored JSON string, or null. Read only under `renewal_policy = 'period'`,
+   * where `renewal_interval_months` is its cycle in months. Parse with
+   * `parseRenewalWindow` (shared/renewalPeriod.ts).
+   */
+  renewal_window?: string | null;
+  /**
    * The department that owns renewals for documents of this type (migration
    * 0100) — a free-text `owner_routes` label, not a user id, because the owners
    * are ROLES that change hands and some of them will never have an account.
@@ -1350,6 +1357,34 @@ export interface ApiDocumentVersion {
   uploader_name?: string;
   uploader_email?: string;
   created_at: string;
+  /** The packet this version was split out of (0126, rules table H1); null otherwise. */
+  source_packet_queue_id?: string | null;
+  /** Frozen citation JSON (`PacketCitation`), or null. */
+  source_packet?: string | null;
+}
+
+/**
+ * Where a split document came from (migration 0126, rules table H1), frozen at
+ * approval into `document_versions.source_packet`: the packet as received and
+ * the pages this part is.
+ */
+export interface PacketCitation {
+  queue_id: string;
+  file_name: string;
+  /** The day the packet reached us (processing_queue.created_at). */
+  received_at: string | null;
+  checksum: string | null;
+  page_count: number | null;
+  /** [from, to], 1-based, inclusive. */
+  pages: [number, number] | null;
+  /** 1-based. */
+  part_number: number | null;
+  part_count: number | null;
+  /** The packet index's own words for this part -- a hint, not a type. */
+  part_label: string | null;
+  split_at: string | null;
+  split_by: string | null;
+  split_method: string | null;
 }
 
 export interface ApiAuditEntry {
@@ -1582,6 +1617,10 @@ export interface DocumentVersion {
   uploader_name?: string;
   uploader_email?: string;
   created_at: string;
+  /** The packet this version was split out of (0126, rules table H1). */
+  source_packet_queue_id?: string | null;
+  /** Frozen `PacketCitation` JSON, or null when not from a packet. */
+  source_packet?: string | null;
 }
 
 export interface User {
@@ -2091,6 +2130,13 @@ export interface ProcessingQueueItem {
    * approval — the checks have known false positives.
    */
   invariant_warnings?: InvariantFailure[];
+  /**
+   * Rules table F6: set when this item is being filed as a specification sheet
+   * and carries no revision/issue/effective date and no document number -- the
+   * marks of a controlled document -- so it may be a SALES sheet. Advisory.
+   * `shared/salesSheetCheck.ts`.
+   */
+  sales_sheet_warning?: import('./salesSheetCheck').SalesSheetWarning | null;
   /**
    * Conformance verdicts on this item's TEST RESULTS, computed server-side by
    * `shared/specCheck.ts`. Deliberately separate from `invariant_warnings`: an
@@ -5124,6 +5170,8 @@ export interface RenewalSnapshot {
   reason: string;
   type_renewal_policy: TypeRenewalPolicy | string | null;
   type_renewal_interval_months: number | null;
+  /** The fixed renewal window in force (0125), when the type had one. Absent on pre-0125 snapshots. */
+  type_renewal_window?: import('./renewalPeriod').RenewalWindow | null;
 }
 
 /**

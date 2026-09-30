@@ -26,6 +26,8 @@ import {
   formatUnitConversion,
   NO_LIMIT_CONFIGURED_LABEL,
   NOT_CHECKED_CATEGORY_NOTE,
+  NOT_CHECKED_KIND_LABELS,
+  notCheckedKindOf,
   watchEndedLabel,
 } from '../../shared/specCheck';
 import type { UnitConversion } from '../../shared/specCheck';
@@ -110,6 +112,8 @@ export function countSpecVerdicts(verdicts: SpecVerdict[] | undefined) {
     /** Failures on a limit the tenant marked as load-stopping. */
     criticalOutOfSpec: failures.filter((v) => specCriticalityOf(v) === 'high').length,
     notChecked: live.filter((v) => v.verdict === 'not_checked').length,
+    /** D2: could-not-check results that conflict with OUR configuration. */
+    knownConflicts: live.filter((v) => notCheckedKindOf(v) === 'known_conflict').length,
     total: live.length,
   };
 }
@@ -123,7 +127,9 @@ function verdictColor(v: SpecVerdict): string {
   // Could-not-check is blue, not grey: grey is "No limit configured", and the
   // two must never be mistaken for each other — one asks for a person to
   // verify, the other says nothing was judged at all.
-  if (v.verdict === 'not_checked') return 'info.main';
+  // D2: "known wrong by your definitions" is a probable send-back, so it is
+  // amber like a tracked deviation; "just verify" stays blue.
+  if (v.verdict === 'not_checked') return notCheckedKindOf(v) === 'known_conflict' ? 'warning.main' : 'info.main';
   if (v.verdict !== 'out_of_spec') return 'text.secondary';
   const color = SPEC_CRITICALITY_COLOR[specCriticalityOf(v)];
   return color === 'error' ? 'error.main' : 'warning.main';
@@ -444,7 +450,7 @@ export function SpecWarningBanner({
   /** Watches in force for this document past their review-by date. */
   watchOverdue?: OverdueWatchSummary[];
 }) {
-  const { outOfSpec, criticalOutOfSpec, notChecked } = countSpecVerdicts(verdicts);
+  const { outOfSpec, criticalOutOfSpec, notChecked, knownConflicts } = countSpecVerdicts(verdicts);
   const noLimit = unjudged || [];
   const missing = missingRequired || [];
   const watches = watchOverdue || [];
@@ -459,14 +465,19 @@ export function SpecWarningBanner({
   const unmatched = noLimit.length > 0 ? 0 : (summary?.unmatched ?? 0);
   const live = liveSpecVerdicts(verdicts);
   const failures = live.filter((v) => v.verdict === 'out_of_spec');
-  const unchecked = live.filter((v) => v.verdict === 'not_checked');
+  // D2 (rules table, ruled 2026-09-14): two different kinds of work inside
+  // could-not-check. A conflict with the customer's own configuration is a
+  // probable rejection; a gap is a confirmation. Listed apart, conflict first.
+  const conflicts = live.filter((v) => notCheckedKindOf(v) === 'known_conflict');
+  const unchecked = live.filter((v) => notCheckedKindOf(v) === 'verify');
   const missingByAnalyte = groupMissing(missing);
 
   // Red is reserved for a failure on a limit somebody marked as load-stopping.
   // A batch of tracked deviations is amber: still unmissable, still listed in
   // full, but it does not spend the reviewer's alarm on parameters the plant
   // knowingly writes tighter than it can hit.
-  const tone = criticalOutOfSpec > 0 ? 'error' : outOfSpec > 0 || missing.length > 0 ? 'warning' : 'info';
+  const tone =
+    criticalOutOfSpec > 0 ? 'error' : outOfSpec > 0 || missing.length > 0 || knownConflicts > 0 ? 'warning' : 'info';
   const trackedFailures = outOfSpec - criticalOutOfSpec;
 
   return (
@@ -482,7 +493,9 @@ export function SpecWarningBanner({
               : `This COA has ${outOfSpec} out-of-spec results on non-critical parameters`
             : missingByAnalyte.length > 0
               ? `This COA is incomplete — ${missingByAnalyte.length} required ${missingByAnalyte.length === 1 ? 'analyte is' : 'analytes are'} not reported`
-              : notChecked > 0
+              : knownConflicts > 0
+                ? `${knownConflicts} ${knownConflicts === 1 ? 'result conflicts' : 'results conflict'} with your configuration — probably wrong on the certificate`
+                : notChecked > 0
                 ? `${notChecked} ${notChecked === 1 ? 'result' : 'results'} could not be checked — verify by hand`
                 : 'A supplier watch on this COA is past its review-by date'}
       </Typography>
@@ -531,8 +544,31 @@ export function SpecWarningBanner({
           </Box>
         </Box>
       )}
+      {conflicts.length > 0 && (
+        <Box sx={{ mt: failures.length || missingByAnalyte.length ? 1 : 0.5 }} data-testid="spec-known-conflicts">
+          <Tooltip arrow title={NOT_CHECKED_KIND_LABELS.known_conflict.help}>
+            <Typography variant="caption" sx={{ fontWeight: 700, color: 'warning.main', display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <NotCheckedIcon sx={{ fontSize: 14 }} />
+              {NOT_CHECKED_KIND_LABELS.known_conflict.label} — not judged, but the certificate reports this in a way your limit says it is never measured
+            </Typography>
+          </Tooltip>
+          <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+            {conflicts.map((v, i) => (
+              <Typography component="li" variant="caption" key={i} sx={{ display: 'list-item' }}>
+                {v.message}
+                <BandChip band={v.band} />
+                {v.not_checked_category && (
+                  <Box component="span" sx={{ fontWeight: 600, color: 'info.main' }}>
+                    {' '}The owner is notified on approval — {NOT_CHECKED_CATEGORY_NOTE[v.not_checked_category]}.
+                  </Box>
+                )}
+              </Typography>
+            ))}
+          </Box>
+        </Box>
+      )}
       {unchecked.length > 0 && (
-        <Box sx={{ mt: failures.length || missingByAnalyte.length ? 1 : 0.5 }}>
+        <Box sx={{ mt: failures.length || missingByAnalyte.length || conflicts.length ? 1 : 0.5 }} data-testid="spec-verify">
           <Typography variant="caption" sx={{ fontWeight: 700, color: 'info.main', display: 'flex', alignItems: 'center', gap: 0.5 }}>
             <NotCheckedIcon sx={{ fontSize: 14 }} />
             {COULD_NOT_CHECK_LABEL} — a limit applies but could not be compared; this is not a failure and not a pass
@@ -701,7 +737,7 @@ export function SpecAlertChip({
   verdicts: SpecVerdict[] | undefined;
   missingRequired?: MissingRequiredAnalyte[];
 }) {
-  const { outOfSpec, criticalOutOfSpec, notChecked } = countSpecVerdicts(verdicts);
+  const { outOfSpec, criticalOutOfSpec, notChecked, knownConflicts } = countSpecVerdicts(verdicts);
   const missing = groupMissing(missingRequired || []);
   const chips: ReactElement[] = [];
   if (outOfSpec > 0 || notChecked > 0) {
@@ -713,7 +749,9 @@ export function SpecAlertChip({
     const label =
       outOfSpec > 0
         ? `${outOfSpec} out of spec${criticalOutOfSpec > 0 ? ' (critical)' : ''}`
-        : `${notChecked} could not check`;
+        : knownConflicts > 0
+          ? `${knownConflicts} conflict${knownConflicts === 1 ? 's' : ''} with your configuration`
+          : `${notChecked} could not check`;
     chips.push(
       <Tooltip
         key="verdicts"
@@ -725,7 +763,7 @@ export function SpecAlertChip({
       >
         <Chip
           size="small"
-          color={criticalOutOfSpec > 0 ? 'error' : outOfSpec > 0 ? 'warning' : 'info'}
+          color={criticalOutOfSpec > 0 ? 'error' : outOfSpec > 0 || knownConflicts > 0 ? 'warning' : 'info'}
           variant={outOfSpec > 0 ? 'filled' : 'outlined'}
           icon={
             outOfSpec > 0 ? (

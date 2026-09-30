@@ -303,9 +303,10 @@
       ],
       "part_of": "packet-fdlw-2026",
       "toc_label": "3. FDA Bioterrorism Statement | Page 5",
-      "document_type_accept": [],
-      "document_type_expected_none": true,
-      "document_type_note": "No type in the FSQA starter pack (27 types) covers this. \"none\" is the correct answer and parks the item for a human — see README, \"the eighteen with nowhere to go\".",
+      "document_type_accept": [
+        "fda food facility registration"
+      ],
+      "document_type_note": "The supplier's statement of its FDA food facility registration under the Bioterrorism Act (registration 06-13573). Had no type until the pack gained \"FDA Food Facility Registration\" with rules table G3/F7 (2026-09-29); it now has one. The page prints \"December 31, 2026\" -- the close of the 2026 biennial renewal window the type's fixed-window rule proposes, so it is also the corpus's evidence for that rule.",
       "pdf_text_must_contain": [
         "FDA BIOTERRORISM STATEMENT",
         "December 31, 2026",

@@ -103,9 +103,11 @@ without a fallback.
 
 ### 2. "None" is very often the right answer
 
-**Seventeen of the packet's twenty-six parts have no matching type in the FSQA
-starter pack's 27** (eighteen documents corpus-wide, counting the whole packet).
-There is no Bioterrorism Statement, no BSE Statement, no BPA Statement, no Prop
+**Sixteen of the packet's twenty-six parts have no matching type in the FSQA
+starter pack's 29** (seventeen documents corpus-wide, counting the whole packet).
+It was seventeen of 27 until 2026-09-29, when rules table G3/F7 added "FDA Food
+Facility Registration" (and "Business License") and page 5's Bioterrorism Act
+registration statement gained a type. There is no BSE Statement, no BPA Statement, no Prop
 65 Statement, no rBST Statement, no Vegetarian Statement, no PHO Statement, no
 Rennet Statement, no Yellow Prussiate Statement, no Heavy Metal Statement, no
 Irradiation Statement, no PFAS Statement, no Environmental Program — and no type

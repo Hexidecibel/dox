@@ -158,6 +158,8 @@ export interface RenewalInput {
    * 'period'.
    */
   type_renewal_interval_months: number | null;
+  /** document_types.renewal_window (0125) — a fixed calendar window, JSON. */
+  type_renewal_window: string | null;
 }
 
 export interface StatusResult {
@@ -349,6 +351,7 @@ interface RawDocRow {
   meta_effective_date: string | null;
   type_renewal_policy: string | null;
   type_renewal_interval_months: number | null;
+  type_renewal_window: string | null;
   type_renewal_alert_lead_days: number | null;
   document_type_id: string | null;
 }
@@ -370,6 +373,7 @@ const DOC_SQL = `
     json_extract(d.primary_metadata, '$.effective_date')      AS meta_effective_date,
     dt.renewal_policy             AS type_renewal_policy,
     dt.renewal_interval_months    AS type_renewal_interval_months,
+    dt.renewal_window             AS type_renewal_window,
     dt.renewal_alert_lead_days    AS type_renewal_alert_lead_days
   FROM documents d
   LEFT JOIN document_types dt ON dt.id = d.document_type_id
@@ -463,6 +467,7 @@ export async function computeExpirations(
         meta_effective_date: r.meta_effective_date,
         type_renewal_policy: r.type_renewal_policy,
         type_renewal_interval_months: r.type_renewal_interval_months,
+        type_renewal_window: r.type_renewal_window,
       },
       asOf,
       viewWindow,

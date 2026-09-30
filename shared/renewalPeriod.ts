@@ -40,6 +40,10 @@
  *   1. `renewal_due_date`                  → the record's own canonical date
  *   2. a `renewal_decision` with no date   → a reviewer answered "it doesn't"
  *   3. a type that DOES NOT RENEW          → categorical, see WHAT RENEWS
+ *   3b. a type that renews in a fixed WINDOW (0125, rules table G3)
+ *                                          → close of the next window after
+ *                                            the effective date, whatever the
+ *                                            document prints (`RenewalWindow`)
  *   4. `primary_metadata.document_expires_on`
  *                                          → the DOCUMENT's own stated expiry
  *   5. `documents.renewal_interval_months` → a period set on THIS document
@@ -168,6 +172,12 @@ export type RenewalRule =
   | 'document_interval'
   /** The document type's configured period (three years for spec sheets). */
   | 'document_type_default'
+  /**
+   * The document type renews inside a fixed calendar WINDOW on a fixed cycle
+   * (rules table G3): due at the close of the next window after the document
+   * took effect, whatever date the document prints. See `RenewalWindow`.
+   */
+  | 'document_type_window'
   /** Nobody configured anything: twelve months. */
   | 'system_default_annual'
   /**
@@ -263,6 +273,14 @@ export interface RenewalPeriodInput {
   /** document_types.renewal_interval_months — the per-type period (0096). */
   type_renewal_interval_months: number | null;
   /**
+   * document_types.renewal_window (0125) — a fixed calendar window, as the
+   * stored JSON string or the parsed object. Read ONLY under the 'period'
+   * policy. REQUIRED for the same reason `type_renewal_policy` is: a call site
+   * that forgot it would silently turn an FDA registration's window back into
+   * "24 months from issue". Pass `null` when there is none.
+   */
+  type_renewal_window: RenewalWindow | string | null;
+  /**
    * primary_metadata.$.document_expires_on — the date THE DOCUMENT stops being
    * valid, as printed on it.
    *
@@ -330,6 +348,167 @@ export function addMonths(date: string, months: number): string | null {
   const lastDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0)).getUTCDate();
   base.setUTCDate(Math.min(day, lastDay));
   return base.toISOString().slice(0, 10);
+}
+
+// ── fixed-window renewal (rules table G3) ───────────────────────────────────
+
+/**
+ * A document type that renews inside a CALENDAR WINDOW on a fixed cycle,
+ * rather than N months after it took effect (AJ, ruled 2026-09-20).
+ *
+ * The motivating case is an FDA food facility registration: every registrant
+ * renews between October 1 and December 31 of each even-numbered year (21 CFR
+ * 1.230(b)), whenever it first registered. "Evidence for a fixed-window type
+ * goes stale at the close of the window whatever date the document prints" --
+ * so a registration renewed in November 2024 is good until December 31, 2026,
+ * and one first made in March 2025 is ALSO due December 31, 2026.
+ *
+ * The rule: due at the CLOSE of the first window that OPENS strictly after the
+ * document's effective date. A filing inside a window is that window's
+ * renewal, so it is carried to the next one; a filing on the opening day is
+ * the same.
+ *
+ * Stored as `document_types.renewal_window` (migration 0125) and read ONLY
+ * under the 'period' policy, where the months column holds every_years * 12:
+ * a window refines a period rather than being a fourth policy word, because
+ * 0097's CHECK on renewal_policy cannot be widened without rebuilding a table
+ * six others CASCADE from.
+ *
+ *   opens / closes   'MM-DD'. `closes` earlier in the year than `opens` means
+ *                    the window crosses New Year and closes the next year.
+ *                    February 29 is refused: a window that exists three years
+ *                    in four is not a window.
+ *   every_years      the cycle (2 for FDA).
+ *   reference_year   any year the window occurs in (2024 for FDA: even years).
+ *   source           where the window comes from, in words, shown beside it.
+ */
+export interface RenewalWindow {
+  opens: string;
+  closes: string;
+  every_years: number;
+  reference_year: number;
+  source: string | null;
+}
+
+/**
+ * The FDA food facility registration renewal window, 21 CFR 1.230(b). Offered
+ * as the starting value for a type that reads as an FDA registration (the
+ * aflatoxin 0.5 ppb pattern: a well-known published rule as a DEFAULT, never
+ * hard-coded into a verdict). Every value is visible and editable on Document
+ * Types. AJ's table notes the dates were pending his verification.
+ */
+export const FDA_FOOD_FACILITY_REGISTRATION_WINDOW: RenewalWindow = {
+  opens: '10-01',
+  closes: '12-31',
+  every_years: 2,
+  reference_year: 2024,
+  source: '21 CFR 1.230(b): renewed between October 1 and December 31 of each even-numbered year',
+};
+
+const WINDOW_KEYS = new Set(['opens', 'closes', 'every_years', 'reference_year', 'source']);
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+function validMonthDay(v: unknown): v is string {
+  if (typeof v !== 'string') return false;
+  const m = /^(\d{2})-(\d{2})$/.exec(v);
+  if (!m) return false;
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  return month >= 1 && month <= 12 && day >= 1 && day <= DAYS_IN_MONTH[month - 1];
+}
+
+/** Validate a submitted/stored window. Unknown keys are refused, not ignored. */
+export function validateRenewalWindow(
+  raw: unknown,
+): { ok: true; window: RenewalWindow } | { ok: false; error: string } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: 'renewal_window must be an object' };
+  }
+  const o = raw as Record<string, unknown>;
+  const unknown = Object.keys(o).filter((k) => !WINDOW_KEYS.has(k));
+  if (unknown.length) return { ok: false, error: `renewal_window has unknown settings: ${unknown.join(', ')}` };
+  if (!validMonthDay(o.opens)) return { ok: false, error: "renewal_window.opens must be a day of the year as 'MM-DD' (not February 29)" };
+  if (!validMonthDay(o.closes)) return { ok: false, error: "renewal_window.closes must be a day of the year as 'MM-DD' (not February 29)" };
+  if (o.opens === o.closes) return { ok: false, error: 'renewal_window.opens and closes must differ' };
+  const every = o.every_years;
+  if (typeof every !== 'number' || !Number.isInteger(every) || every < 1 || every > 10) {
+    return { ok: false, error: 'renewal_window.every_years must be a whole number from 1 to 10' };
+  }
+  const ref = o.reference_year;
+  if (typeof ref !== 'number' || !Number.isInteger(ref) || ref < 1900 || ref > 2200) {
+    return { ok: false, error: 'renewal_window.reference_year must be a year the window occurs in' };
+  }
+  let source: string | null = null;
+  if (o.source !== undefined && o.source !== null) {
+    if (typeof o.source !== 'string' || o.source.length > 300) {
+      return { ok: false, error: 'renewal_window.source must be text of at most 300 characters' };
+    }
+    source = o.source.trim() || null;
+  }
+  return { ok: true, window: { opens: o.opens, closes: o.closes, every_years: every, reference_year: ref, source } };
+}
+
+/** Read a stored window (JSON string or object). Anything invalid is null: ignored, never obeyed. */
+export function parseRenewalWindow(raw: unknown): RenewalWindow | null {
+  if (raw === null || raw === undefined || raw === '') return null;
+  let v: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      v = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  const r = validateRenewalWindow(v);
+  return r.ok ? r.window : null;
+}
+
+/**
+ * The next window that opens strictly after `anchor` (YYYY-MM-DD), as
+ * {opens, closes} dates. null when the anchor cannot be read.
+ */
+export function nextRenewalWindow(anchor: string, w: RenewalWindow): { opens: string; closes: string } | null {
+  const a = dateOnly(anchor);
+  if (!a || !/^\d{4}-\d{2}-\d{2}$/.test(a)) return null;
+  const year = Number(a.slice(0, 4));
+  const crossesYear = w.closes < w.opens;
+  for (let y = year - 1; y <= year + w.every_years + 1; y++) {
+    if ((((y - w.reference_year) % w.every_years) + w.every_years) % w.every_years !== 0) continue;
+    const opens = `${y}-${w.opens}`;
+    if (opens <= a) continue;
+    return { opens, closes: `${crossesYear ? y + 1 : y}-${w.closes}` };
+  }
+  return null;
+}
+
+function monthDayWords(md: string): string {
+  const [m, d] = md.split('-').map(Number);
+  return `${MONTH_NAMES[m - 1]} ${d}`;
+}
+
+/** "October 1 to December 31, every 2 years (2024, 2026, ...)". */
+export function describeRenewalWindow(w: RenewalWindow): string {
+  const cycle =
+    w.every_years === 1
+      ? 'every year'
+      : `every ${w.every_years} years (${w.reference_year}, ${w.reference_year + w.every_years}, ...)`;
+  return `${monthDayWords(w.opens)} to ${monthDayWords(w.closes)}, ${cycle}`;
+}
+
+/**
+ * Does this document type look like an FDA food facility registration? The
+ * same kind of NAME MATCH as `looksLikeSpecSheetType`, for the same reason and
+ * under the same contract: it proposes a starting value once, at type creation,
+ * into a setting an admin can see and change -- never at read time.
+ */
+export function looksLikeFdaFacilityRegistrationType(name: string): boolean {
+  const n = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!n) return false;
+  return /\bfda\b.*\bregistration\b/.test(n) || /\bfood\s+facility\s+registration\b/.test(n);
 }
 
 // ── period resolution ───────────────────────────────────────────────────────
@@ -451,6 +630,39 @@ export function resolveRenewalExpiry(input: RenewalPeriodInput): ResolvedRenewal
     return noRenewal(
       'Documents of this type do not renew — each one is superseded by the next rather than re-collected on a cadence.',
     );
+  }
+
+  // Tier 3b — a fixed calendar WINDOW on the type (G3). Above the printed
+  // expiry by AJ's ruling: "evidence for a fixed-window type goes stale at the
+  // close of the window whatever date the document prints." Read only when the
+  // type's own period answered (a period set on THIS document is still more
+  // specific), and only under 'period', which `resolveRenewalPeriodMonths`
+  // already enforces by answering `document_type_default`. A document that
+  // declares itself `keep_current` has said it has no cadence, and is honoured
+  // below as before.
+  const window =
+    period.rule === 'document_type_default' && input.renewal_type !== 'keep_current'
+      ? parseRenewalWindow(input.type_renewal_window)
+      : null;
+  if (window) {
+    const anchor = dateOnly(input.meta_effective_date);
+    const next = anchor ? nextRenewalWindow(anchor, window) : null;
+    if (!anchor || !next) {
+      return {
+        due_date: null,
+        rule: 'unresolvable',
+        period_months: period.months,
+        anchor_date: null,
+        reason: `Renews in the window ${describeRenewalWindow(window)}, but the document has no effective date to place it in a window.`,
+      };
+    }
+    return {
+      due_date: next.closes,
+      rule: 'document_type_window',
+      period_months: period.months,
+      anchor_date: anchor,
+      reason: `Effective ${anchor}; renews in the window ${describeRenewalWindow(window)}, so it is due when the next window closes on ${next.closes}${window.source ? ` (${window.source})` : ''}.`,
+    };
   }
 
   // Tier 4 — the expiry printed on the DOCUMENT (not the product's shelf life;
@@ -618,11 +830,22 @@ export interface TypeRenewalDefault {
   policy: TypeRenewalPolicy;
   /** Only ever non-null under `policy === 'period'`. */
   interval_months: number | null;
+  /**
+   * A fixed renewal window (0125). Only ever non-null under 'period', with
+   * `interval_months` = every_years * 12. Today only an FDA food facility
+   * registration starts with one.
+   */
+  window: RenewalWindow | null;
 }
 
 export function defaultRenewalSettingForTypeName(name: string): TypeRenewalDefault {
+  if (looksLikeFdaFacilityRegistrationType(name)) {
+    const w = FDA_FOOD_FACILITY_REGISTRATION_WINDOW;
+    return { policy: 'period', interval_months: w.every_years * 12, window: w };
+  }
   const policy = defaultRenewalPolicyForTypeName(name);
   return {
+    window: null,
     policy,
     // The months column is read ONLY under 'period' (see resolveRenewalPeriodMonths),
     // so anything stored beside another policy would be a number nothing reads
@@ -639,8 +862,11 @@ export function defaultRenewalSettingForTypeName(name: string): TypeRenewalDefau
 export function renewalPeriodLabel(
   months: number | null | undefined,
   policy?: TypeRenewalPolicy | string | null,
+  window?: RenewalWindow | string | null,
 ): string {
   if (parseTypeRenewalPolicy(policy) === 'none') return 'Does not renew';
+  const w = parseTypeRenewalPolicy(policy) === 'period' ? parseRenewalWindow(window) : null;
+  if (w) return describeRenewalWindow(w);
   const usable = usablePeriod(months ?? null);
   if (usable === null) return 'Annual (default)';
   const d = describePeriod(usable);
@@ -663,6 +889,8 @@ export function renewalRuleLabel(resolved: ResolvedRenewal): string {
       return `${describePeriod(resolved.period_months ?? ANNUAL_RENEWAL_MONTHS)} — set on this document`;
     case 'document_type_default':
       return `${describePeriod(resolved.period_months ?? ANNUAL_RENEWAL_MONTHS)} — this document type's default`;
+    case 'document_type_window':
+      return "closes with this document type's renewal window";
     case 'system_default_annual':
       return 'one year — the default when nothing else is set';
     case 'no_renewal_period':

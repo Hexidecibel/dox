@@ -23,6 +23,7 @@
 import { checkExtraction } from '../../shared/extractionInvariants';
 import type { InvariantFailure } from '../../shared/extractionInvariants';
 import { validateLotSchemeSpec, type LotSchemeSpec } from '../../shared/lotScheme';
+import { salesSheetWarning, type SalesSheetWarning } from '../../shared/salesSheetCheck';
 
 /**
  * The SQL fragment a queue read selects so the lot-format checks (0110) have the
@@ -106,4 +107,34 @@ export function withInvariantWarnings<T extends WarnableRow>(
   const warnings = invariantWarningsFor(row);
   const { lot_scheme_spec: _spec, lot_scheme_supplier_name: _name, ...rest } = row;
   return { ...(rest as T), invariant_warnings: warnings };
+}
+
+/**
+ * Rules table F6: a queue item being filed as a specification sheet that
+ * carries none of the marks of a controlled document is probably a SALES
+ * sheet. Advisory, like everything in this file -- the reviewer decides, and
+ * the warning names the preset reject reason. See shared/salesSheetCheck.ts.
+ */
+export function withSalesSheetWarning<T extends WarnableRow>(
+  row: T
+): T & { sales_sheet_warning: SalesSheetWarning | null } {
+  let warning: SalesSheetWarning | null = null;
+  try {
+    const text = str(row.extracted_text);
+    let fields: Record<string, unknown> | null = null;
+    const raw = str(row.ai_fields);
+    if (raw) {
+      const v: unknown = JSON.parse(raw);
+      if (v && typeof v === 'object' && !Array.isArray(v)) fields = v as Record<string, unknown>;
+    }
+    warning = salesSheetWarning({
+      documentTypeName: str(row.document_type_name),
+      documentTypeGuess: str(row.document_type_guess),
+      fields,
+      text: text && text.length > MAX_TEXT_CHARS ? null : text,
+    });
+  } catch (err) {
+    console.error('[queue-warnings] sales-sheet check failed:', err instanceof Error ? err.message : String(err));
+  }
+  return { ...row, sales_sheet_warning: warning };
 }

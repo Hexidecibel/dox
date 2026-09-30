@@ -268,6 +268,31 @@ function unitRefusalCategory(from, to) {
   if (!enumerations.has(f.method) || !enumerations.has(t.method)) return null;
   return f.method !== t.method ? "method_mismatch" : null;
 }
+function unitRefusalKind(from, to) {
+  const dimension = (family) => {
+    if (concentrationClass(family)) return "concentration";
+    if (family === "ph" || family === "temp") return family;
+    const parts = family.split(":");
+    if (parts[0] === "log") return parts[1] === "other" || parts[1] === "unspecified" ? null : "count";
+    if (COUNT_METHODS.has(parts[0])) return "count";
+    return null;
+  };
+  const fd = dimension(from.family);
+  const td = dimension(to.family);
+  if (!fd || !td) return "verify";
+  if (fd !== td) return "known_conflict";
+  if (fd === "count") {
+    const method = (family) => {
+      const parts = family.split(":");
+      return parts[0] === "log" ? parts[1] : parts[0];
+    };
+    const fm = method(from.family);
+    const tm = method(to.family);
+    if (fm === "any" || tm === "any") return "verify";
+    if (fm !== tm) return "known_conflict";
+  }
+  return "verify";
+}
 function isKnownUnit(raw) {
   const u = normalizeUnit(raw);
   return u.family !== "unknown" && !u.family.startsWith("other:");
@@ -539,7 +564,8 @@ function compareToLimit(value, limit, policy = STRICT_UNIT_POLICY) {
       verdict: "not_checked",
       reason: `result is in ${vu.canonical || "an unknown unit"} but the limit is in ${lu.canonical || "another unit"} \u2014 not comparable${unitRefusalNote(vu, lu)}`,
       value_num: null,
-      ...category ? { not_checked_category: category } : {}
+      ...category ? { not_checked_category: category } : {},
+      not_checked_kind: unitRefusalKind(vu, lu)
     };
   }
   const v = exact(value.value * match.factor);
@@ -1071,6 +1097,9 @@ function checkConfiguredLimits(sources, tests, limits, ctx, opts = {}) {
       verdicts.push({
         ...base,
         ...cmp.not_checked_category ? { not_checked_category: cmp.not_checked_category } : {},
+        // D2: a unit-kind conflict with OUR configured limit is "known wrong
+        // by your definitions". The printed-limit path above never sets it.
+        ...cmp.not_checked_kind === "known_conflict" ? { not_checked_kind: "known_conflict" } : {},
         verdict: "not_checked",
         message: `${test.name} could not be judged against our limit of ${limitText} \u2014 ${reason}.`
       });
