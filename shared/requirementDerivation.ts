@@ -58,7 +58,8 @@ export interface SupplierListRules {
 }
 
 /**
- * The rules as AJ stated them on 2026-09-14, mapped onto the fsqa pack's slugs.
+ * The rules as AJ stated them on 2026-09-14 (baseline widened by F7 on
+ * 2026-09-27), mapped onto the fsqa pack's slugs.
  *
  *   certificate-of-insurance        "certificate of liability insurance"
  *   third-party-audit-certificate   "a third-party food safety certificate"
@@ -76,6 +77,14 @@ export const DEFAULT_SUPPLIER_LIST_RULES: SupplierListRules = {
   baseline: [
     { slug: 'certificate-of-insurance', tier: 'required' },
     { slug: 'third-party-audit-certificate', tier: 'required' },
+    // Rules table F7 (AJ, ruled 2026-09-27): "bare-minimum operational
+    // documents (business license, FDA registration, and similar
+    // industry-wide requirements) are required regardless of anything the
+    // supplier has or hasn't claimed." In the fsqa pack from this change on;
+    // a tenant seeded earlier does not hold these slugs, and rule 7 REPORTS
+    // them on the import preview rather than inventing them.
+    { slug: 'business-license', tier: 'required' },
+    { slug: 'fda-food-facility-registration', tier: 'required' },
   ],
   categoryPackets: {
     ingredient: 'ingredient-supplier',

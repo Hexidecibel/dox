@@ -170,7 +170,8 @@ export default function SupplierListImport({ tenantId, onApplied }: SupplierList
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
           One row per supplier and product you buy from them. Requirements are worked out from it: every approved supplier
-          owes a certificate of insurance and a third-party food safety certificate; its category adds that category&apos;s
+          owes a certificate of insurance, a third-party food safety certificate, a business license and an FDA food
+          facility registration; its category adds that category&apos;s
           packet; each claim you make on a product adds the paperwork that claim needs; each product bought adds a spec
           sheet. Requirements a person set are never changed.
         </Typography>
