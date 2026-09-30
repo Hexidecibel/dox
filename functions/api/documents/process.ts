@@ -1,6 +1,7 @@
 import { computeChecksum, uploadFile } from '../../lib/r2';
 import { generateId } from '../../lib/db';
 import { enqueueDocument } from '../../lib/intake/enqueue';
+import { alreadyHaveFor } from '../../lib/intake/already-have';
 import {
   requireRole,
   requireTenantAccess,
@@ -248,12 +249,31 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (doc) duplicate = { document_id: doc.id, document_title: doc.title, file_name: doc.file_name ?? fileName };
       }
 
+      // 0132: queued, but these exact bytes are already an approved document.
+      // Say so NOW, with the same words the card will use, so the person is
+      // not surprised in the Review Queue. Best-effort: the card recomputes.
+      let alreadyHave: QueuedResponse['items'][number]['already_have'] = null;
+      if (enqueued.outcome === 'queued' && enqueued.alreadyHave) {
+        try {
+          alreadyHave = await alreadyHaveFor(context.env.DB, {
+            id: enqueued.queueId,
+            tenant_id: tenantId,
+            checksum,
+            status: 'pending',
+            output_kind: outputKind,
+          });
+        } catch {
+          alreadyHave = null;
+        }
+      }
+
       queuedItems.push({
         id: enqueued.queueId ?? '',
         file_name: fileName,
         duplicate,
         intake_duplicate: enqueued.outcome === 'duplicate' ? enqueued.duplicate : null,
         previously_rejected: enqueued.outcome === 'queued' ? enqueued.previouslyRejected : null,
+        already_have: alreadyHave,
       });
     }
 

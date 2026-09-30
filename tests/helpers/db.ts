@@ -125,6 +125,7 @@ import m0125 from '../../migrations/0125_document_type_renewal_window.sql?raw';
 import m0126 from '../../migrations/0126_document_version_packet_source.sql?raw';
 import m0130 from '../../migrations/0130_document_provenance.sql?raw';
 import m0131 from '../../migrations/0131_fts_registry_rebuild.sql?raw';
+import m0132 from '../../migrations/0132_duplicate_decisions.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -140,7 +141,7 @@ const migrations: string[] = [
   m0096, m0097, m0098, m0099, m0100, m0101, m0102, m0103, m0104,
   m0105, m0106, m0107, m0108, m0109, m0110, m0111, m0112, m0113, m0114,
   m0115, m0116, m0117, m0118, m0119, m0120, m0121, m0122, m0123, m0124,
-  m0125, m0126, m0130, m0131,
+  m0125, m0126, m0130, m0131, m0132,
 ];
 
 /** The ordered migration SQL, for a test that stops the chain part-way (e.g. the 0110 lots rebuild). */

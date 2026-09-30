@@ -1,7 +1,7 @@
 // R2Bucket from the ambient global, not the package — see the note at the top
 // of functions/lib/kinds/coa.ts.
 import type { D1Database } from '@cloudflare/workers-types';
-import { produceCoa, produceMultiProductCoa } from './kinds/coa';
+import { produceCoa, produceMultiProductCoa, type ReplaceWrite } from './kinds/coa';
 import type { RenewalWrite } from './renewal-proposal';
 
 /**
@@ -108,6 +108,12 @@ export interface ApproveOptions {
    * does not renew".
    */
   renewal?: RenewalWrite;
+  /**
+   * "Replace existing" (migration 0132): write this approval as the NEXT
+   * VERSION of that document instead of a new document. Only set when a
+   * person chose it on a "you already have this" card.
+   */
+  replace?: ReplaceWrite;
 }
 
 export interface ApproveResult {
@@ -115,6 +121,10 @@ export interface ApproveResult {
   title: string;
   externalRef: string;
   supplierId: string | null;
+  /** The version this approval wrote: 1 for a new document, N+1 on replace. */
+  versionNumber?: number;
+  /** On replace, the version that was current before. */
+  previousVersion?: number | null;
 }
 
 export async function approveQueueItem(

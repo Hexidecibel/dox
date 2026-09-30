@@ -535,7 +535,7 @@ export async function registerAndNotifyForApproval(
   },
   verdicts: SpecVerdict[],
   limits: ConfiguredLimit[],
-  documentsByRecord: Array<{ documentId: string; title: string; recordIndex: number | null }>,
+  documentsByRecord: Array<{ documentId: string; title: string; recordIndex: number | null; versionNumber?: number }>,
   /**
    * What was not judged (0109), addressed by scope exactly like the verdicts.
    * Optional: a caller without it registers verdicts only, as before.
@@ -578,7 +578,7 @@ export async function registerAndNotifyForApproval(
     for (const { doc, verdicts: docVerdicts, unjudged: docUnjudged, missing: docMissing } of grouped.values()) {
       await registerSpecGaps(
         db,
-        { tenantId: base.tenantId, documentId: doc.documentId, versionNumber: 1, queueItemId: base.queueItemId },
+        { tenantId: base.tenantId, documentId: doc.documentId, versionNumber: doc.versionNumber ?? 1, queueItemId: base.queueItemId },
         { unjudged: docUnjudged, missing_required: docMissing }
       );
       const { failures, notifyOnly } = await registerSpecChecks(
@@ -586,7 +586,7 @@ export async function registerAndNotifyForApproval(
         {
           tenantId: base.tenantId,
           documentId: doc.documentId,
-          versionNumber: 1,
+          versionNumber: doc.versionNumber ?? 1,
           queueItemId: base.queueItemId,
           // The reviewer approved with these failures in front of them, so the
           // approval itself is the acknowledgement.

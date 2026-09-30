@@ -1,6 +1,7 @@
 import { generateId, logAudit } from '../../lib/db';
 import { computeChecksum, uploadFile } from '../../lib/r2';
 import { admitIntake, auditRejectedResend } from '../../lib/intake/duplicates';
+import { recordQueuedDuplicate } from '../../lib/intake/already-have';
 import type { IntakeRejectedMatch } from '../../../shared/types';
 import { extractText } from '../../lib/extract';
 import { extractFields, classifyDocumentType } from '../../lib/llm';
@@ -400,6 +401,31 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
               source: 'email',
               fileName,
               rejected: previouslyRejected,
+              clientIp: context.request.headers.get('cf-connecting-ip') || 'webhook',
+            });
+          }
+
+          // 0132: the exact bytes are already an approved document. Queued
+          // (above) so a person decides on the card; the ledger row names the
+          // document. Nothing about it goes back to the sender.
+          if (admission.alreadyHave) {
+            await recordQueuedDuplicate(context.env.DB, {
+              tenantId: mapping.tenant_id,
+              queueId,
+              checksum,
+              matchedDocumentId: admission.alreadyHave.documentId,
+              matchedQueueId: admission.alreadyHave.queueId,
+              source: 'email',
+              sourceDetail,
+              sourceId: null,
+              connectorRunId: null,
+              requestUploadId: null,
+              fileName,
+              fileSize: file.size,
+              mimeType,
+              fileR2Key: r2Key,
+              enqueueParams: { source: 'email', sourceDetail, fileName, checksum },
+              createdBy: mapping.default_user_id,
               clientIp: context.request.headers.get('cf-connecting-ip') || 'webhook',
             });
           }

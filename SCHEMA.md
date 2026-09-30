@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 140 tables, 2 views, 247 indexes, 47 triggers.
+Objects: 140 tables, 2 views, 248 indexes, 47 triggers.
 
 ## Core documents & versions
 
@@ -1706,9 +1706,16 @@ Indexes: `idx_entity_notes_author`, `idx_entity_notes_entity`
   queue_id TEXT REFERENCES processing_queue(id) ON DELETE SET NULL
   overridden_by TEXT REFERENCES users(id) ON DELETE SET NULL
   overridden_at TEXT
+  match_basis TEXT CHECK (match_basis IS NULL OR match_basis IN ('identical_bytes', 'document_number', 'certificate_number', 'lot_set'))
+  disposition TEXT CHECK (disposition IS NULL OR disposition IN ('queued'))
+  decision TEXT CHECK (decision IS NULL OR decision IN ('replace', 'keep_both', 'discard', 'rejected'))
+  decided_by TEXT REFERENCES users(id) ON DELETE SET NULL
+  decided_at TEXT
+  decision_document_id TEXT REFERENCES documents(id) ON DELETE SET NULL
+  decision_version_number INTEGER
 ```
 
-Indexes: `idx_intake_duplicates_document`, `idx_intake_duplicates_matched_queue`, `idx_intake_duplicates_queue`, `idx_intake_duplicates_tenant_received`
+Indexes: `idx_intake_duplicates_decision_document`, `idx_intake_duplicates_document`, `idx_intake_duplicates_matched_queue`, `idx_intake_duplicates_queue`, `idx_intake_duplicates_tenant_received`
 
 ### `module_visibility`
 

@@ -20,14 +20,17 @@ const SELECT_COLUMNS = `
   idup.source, idup.source_detail, idup.source_id, idup.connector_run_id, idup.request_upload_id,
   idup.file_name, idup.file_size, idup.mime_type, idup.received_at,
   idup.created_by, cu.name AS created_by_name,
-  idup.queue_id, idup.overridden_by, ou.name AS overridden_by_name, idup.overridden_at`;
+  idup.queue_id, idup.overridden_by, ou.name AS overridden_by_name, idup.overridden_at,
+  idup.match_basis, idup.disposition, idup.decision, idup.decided_by, du.name AS decided_by_name,
+  idup.decided_at, idup.decision_document_id, idup.decision_version_number`;
 
 const JOINS = `
   FROM intake_duplicates idup
   LEFT JOIN documents md ON md.id = idup.matched_document_id
   LEFT JOIN processing_queue mq ON mq.id = idup.matched_queue_id
   LEFT JOIN users cu ON cu.id = idup.created_by
-  LEFT JOIN users ou ON ou.id = idup.overridden_by`;
+  LEFT JOIN users ou ON ou.id = idup.overridden_by
+  LEFT JOIN users du ON du.id = idup.decided_by`;
 
 export interface ListIntakeDuplicatesOptions {
   /** NULL = every tenant (super_admin only; the endpoint enforces that). */

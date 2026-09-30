@@ -1,33 +1,33 @@
 /**
- * Exact-duplicate detection at intake (migration 0108).
+ * Exact-duplicate detection at intake (migration 0108, changed by 0132).
  *
  * THE RULE, IN ONE PLACE
  * ----------------------
  * Every intake door computes a SHA-256 of the bytes. Before an arrival becomes
  * a review card, it is compared with what this TENANT already holds:
  *
- *   1. identical to an APPROVED file   -> no new card. A ledger row
- *      (`intake_duplicates`, match_kind `already_approved`) links the arrival
- *      to the document it already became, and the document page says
- *      "received again".
- *   2. identical to a file still WAITING in the Review Queue -> no second
+ *   1. identical to a file still WAITING in the Review Queue -> no second
  *      card. Ledger row `already_waiting` against that queue item, whose card
- *      says "also received from <source>".
+ *      says "also received from <source>". (Checked FIRST since 0132: the
+ *      waiting card is where the decision about these bytes will be made.)
+ *   2. identical to an APPROVED DOCUMENT -> QUEUED (0132; 0108 suppressed it),
+ *      with a ledger row (`already_approved`, basis `identical_bytes`,
+ *      disposition `queued`) naming the document. The card says "You already
+ *      have this" and approving it requires a person's choice -- replace
+ *      (a new version), keep as a new document, or discard. See
+ *      ./already-have.ts. An approved ORDER/SHIPMENT file (records, no
+ *      document to version) is still suppressed as in 0108.
  *   3. identical to a REJECTED file    -> queued normally (a resend after a
  *      rejection is often deliberate), and the card says "this exact file was
- *      rejected on <date> for <reason>". Not a suppression, so no ledger row;
- *      an audit row records that the match was seen.
- *
- * Precedence is 1, then 2, then 3: "a reviewer already approved this" is the
- * strongest thing intake can know about a file.
+ *      rejected on <date> for <reason>". An audit row records the match.
  *
  * NOTHING HERE DECIDES ANYTHING A PERSON DECIDES
  * ---------------------------------------------
  * A suppression deletes nothing and rejects nothing. The bytes stay where the
  * door put them, the exact enqueue call is stored, and "Review anyway"
  * (POST /api/intake-duplicates/:id/review) replays it. Every suppression writes
- * an audit row. The match is BYTE-IDENTICAL only; a re-scan of the same page
- * is a different file and goes to review like any other, on purpose.
+ * an audit row. This module matches BYTE-IDENTICAL only; the newer-revision
+ * match needs the extraction and lives in ./already-have.ts.
  *
  * WHAT "APPROVED" MEANS HERE
  * --------------------------
@@ -44,7 +44,7 @@
  * KNOWN LIMIT: two identical files arriving in the same instant can both pass
  * the check (there is no unique index to make the second unwritable, because
  * prod already holds pending twins that would fail its creation). The window
- * is one request; the worst case is today's behaviour.
+ * is one request; the worst case is two cards.
  */
 
 import { generateId, logAudit } from '../db';
@@ -102,7 +102,23 @@ export async function findIntakeMatch(
 ): Promise<IntakeMatch | null> {
   if (!checksum) return null;
 
-  // 1a. A live document whose version is these bytes. Oldest first: the
+  // 1. Still waiting for a reviewer (any processing state, errors included —
+  //    an errored item is still a card someone has to deal with). First since
+  //    0132: an approved twin no longer suppresses, it QUEUES with a proposal,
+  //    so a second arrival of the same bytes must follow that waiting card
+  //    instead of opening another one.
+  const waiting = await db
+    .prepare(
+      `SELECT id FROM processing_queue
+        WHERE tenant_id = ? AND checksum = ? AND status = 'pending'
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1`,
+    )
+    .bind(tenantId, checksum)
+    .first<{ id: string }>();
+  if (waiting) return { kind: 'already_waiting', queueId: waiting.id };
+
+  // 2a. A live document whose version is these bytes. Oldest first: the
   //     original is the one a person approved first.
   const byVersion = await db
     .prepare(
@@ -124,7 +140,7 @@ export async function findIntakeMatch(
     };
   }
 
-  // 1b. An approved queue item that is these bytes (page-scoped records COA,
+  // 2b. An approved queue item that is these bytes (page-scoped records COA,
   //     or an order/shipment approval with no document).
   const approvedItem = await db
     .prepare(
@@ -162,19 +178,6 @@ export async function findIntakeMatch(
   if (recordsApproval) {
     return { kind: 'already_approved', documentId: null, documentTitle: null, queueId: recordsApproval.id };
   }
-
-  // 2. Still waiting for a reviewer (any processing state, errors included —
-  //    an errored item is still a card someone has to deal with).
-  const waiting = await db
-    .prepare(
-      `SELECT id FROM processing_queue
-        WHERE tenant_id = ? AND checksum = ? AND status = 'pending'
-        ORDER BY created_at ASC, id ASC
-        LIMIT 1`,
-    )
-    .bind(tenantId, checksum)
-    .first<{ id: string }>();
-  if (waiting) return { kind: 'already_waiting', queueId: waiting.id };
 
   // 3. Rejected before. Most recent rejection, because that is the reason a
   //    person gave last.
@@ -242,7 +245,16 @@ export interface AdmitIntakeArgs extends IntakeReplayParams {
 }
 
 export type IntakeAdmission =
-  | { outcome: 'admit'; previouslyRejected: IntakeRejectedMatch | null }
+  | {
+      outcome: 'admit';
+      previouslyRejected: IntakeRejectedMatch | null;
+      /**
+       * 0132: the exact bytes are already an approved DOCUMENT. Queue the file
+       * anyway, then call `recordQueuedDuplicate` (./already-have.ts) with the
+       * new queue id; the card asks the person what to do.
+       */
+      alreadyHave: { documentId: string; documentTitle: string | null; queueId: string | null } | null;
+    }
   | { outcome: 'duplicate'; notice: IntakeDuplicateNotice; matchedDocumentTitle: string | null };
 
 /**
@@ -252,13 +264,24 @@ export type IntakeAdmission =
  * it.
  *
  * Returns `admit` when the caller should queue the file (with the previous
- * rejection to warn about, if any). The caller writes the case-3 audit row via
- * `auditRejectedResend` once it has a queue id.
+ * rejection to warn about, or the approved document it already is). The
+ * caller writes the case-3 audit row via `auditRejectedResend`, and the
+ * already-have ledger row via `recordQueuedDuplicate`, once it has a queue id.
  */
 export async function admitIntake(db: D1Database, args: AdmitIntakeArgs): Promise<IntakeAdmission> {
   const match = await findIntakeMatch(db, args.tenantId, args.checksum);
-  if (!match) return { outcome: 'admit', previouslyRejected: null };
-  if (match.kind === 'rejected') return { outcome: 'admit', previouslyRejected: match.rejected };
+  if (!match) return { outcome: 'admit', previouslyRejected: null, alreadyHave: null };
+  if (match.kind === 'rejected') return { outcome: 'admit', previouslyRejected: match.rejected, alreadyHave: null };
+  // 0132: a file we already hold as a DOCUMENT goes to a person, not to the
+  // ledger. Only an approved order/shipment (no document to version) is
+  // still suppressed.
+  if (match.kind === 'already_approved' && match.documentId) {
+    return {
+      outcome: 'admit',
+      previouslyRejected: null,
+      alreadyHave: { documentId: match.documentId, documentTitle: match.documentTitle, queueId: match.queueId },
+    };
+  }
 
   const id = generateId();
   const matchKind: IntakeDuplicateMatchKind = match.kind;
@@ -470,7 +493,7 @@ export async function loadQueueIntakeHistory(
                   match_kind, matched_document_id,
                   (SELECT title FROM documents WHERE id = intake_duplicates.matched_document_id) AS matched_document_title,
                   (SELECT name FROM users WHERE id = intake_duplicates.overridden_by) AS overridden_by_name,
-                  overridden_at
+                  overridden_at, disposition
              FROM intake_duplicates
             WHERE matched_queue_id IN (${ph(part.length)}) OR queue_id IN (${ph(part.length)})
             ORDER BY received_at ASC`,
@@ -489,6 +512,7 @@ export async function loadQueueIntakeHistory(
           matched_document_title: string | null;
           overridden_by_name: string | null;
           overridden_at: string | null;
+          disposition: string | null;
         }>();
       for (const r of rows.results ?? []) {
         if (r.matched_queue_id && out.has(r.matched_queue_id)) {
@@ -501,7 +525,10 @@ export async function loadQueueIntakeHistory(
             queue_id: r.queue_id,
           });
         }
-        if (r.queue_id && out.has(r.queue_id)) {
+        // A row intake QUEUED (0132) is the card's own "you already have
+        // this", carried by `already_have`; only a person's "Review anyway"
+        // is "sent anyway".
+        if (r.queue_id && out.has(r.queue_id) && r.disposition !== 'queued') {
           out.get(r.queue_id)!.sent_anyway = {
             id: r.id,
             match_kind: r.match_kind,

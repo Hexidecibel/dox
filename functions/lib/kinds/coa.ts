@@ -9,6 +9,7 @@
 // otherwise in scope here and its two copies DO match structurally.
 import type { D1Database } from '@cloudflare/workers-types';
 import { generateId, logAudit } from '../db';
+import { ConflictError } from '../permissions';
 import { stampApprovalProvenance } from '../document-provenance';
 import { buildR2Key, uploadFile, downloadFile, deleteFile, computeChecksum } from '../r2';
 import { findOrCreateSupplier } from '../suppliers';
@@ -26,6 +27,7 @@ import type { CoaRecordsPayload } from '../../../shared/types';
 import { buildFlatExtendedMetadata } from '../../../shared/coaExtendedMetadata';
 import { resolveProductionDate } from '../../../shared/lotProductionDate';
 import { rowScopedSearchText } from '../../../shared/rowScopedText';
+import { keptVersionsLabel } from '../../../shared/duplicateProposal';
 import type { RenewalWrite } from '../renewal-proposal';
 import type {
   QueueItem,
@@ -392,13 +394,182 @@ async function auditRenewalDecision(
   }
 }
 
+/**
+ * "Replace existing" (migration 0132): turn an approval into a NEW VERSION of
+ * a document we already hold instead of a new document.
+ *
+ * The earlier versions stay exactly where they are (their rows and R2 objects
+ * are not touched); the document row takes the new extraction -- title,
+ * metadata, type, supplier -- and moves `current_version` on. Everything
+ * downstream (products, lots, requirement suggestions, classification, spec
+ * register) then runs against the same document id, as for a new document.
+ *
+ * The renewal columns are the NEW paper's answer. When nobody answered on this
+ * card they are cleared (all-NULL = "nobody decided about this version"),
+ * because the previous decision was about the previous paper; the previous
+ * values are kept in the `document.version_replaced` audit row.
+ *
+ * Order: the version row first (UNIQUE(document_id, version_number) makes a
+ * concurrent upload collide there, before the document is touched), then the
+ * document, guarded on the version that was read.
+ */
+export interface ReplaceWrite {
+  documentId: string;
+  changeNote: string;
+}
+
+async function writeReplacementVersion(
+  db: D1Database,
+  files: R2Bucket,
+  args: {
+    item: QueueItem;
+    target: ReplaceWrite;
+    title: string;
+    description: string | null;
+    category: string | null;
+    supplierId: string | null;
+    primaryMetadata: string | null;
+    extendedMetadata: string | null;
+    renewal: RenewalWrite | undefined;
+    bytes: ArrayBuffer;
+    mimeType: string;
+    fileSize: number;
+    checksum: string;
+    searchText: string | null;
+    userId: string;
+    clientIp: string | null;
+  }
+): Promise<{ documentId: string; versionNumber: number; previousVersion: number; externalRef: string | null }> {
+  const { item, target } = args;
+  const existing = await db
+    .prepare(
+      `SELECT id, title, external_ref, current_version, renewal_due_date, renewal_decision, renewal_snapshot
+         FROM documents WHERE id = ? AND tenant_id = ? AND status = 'active'`
+    )
+    .bind(target.documentId, item.tenant_id)
+    .first<{
+      id: string;
+      title: string;
+      external_ref: string | null;
+      current_version: number;
+      renewal_due_date: string | null;
+      renewal_decision: string | null;
+      renewal_snapshot: string | null;
+    }>();
+  if (!existing) {
+    throw new ConflictError(
+      'The document this file was to replace is no longer active. Choose "Keep as a new document".'
+    );
+  }
+  const previousVersion = Number(existing.current_version) || 1;
+  const versionNumber = previousVersion + 1;
+  const r2Key = buildR2Key(item.tenant_slug, existing.id, versionNumber, item.file_name);
+  await uploadFile(files, r2Key, args.bytes, args.mimeType);
+
+  await db
+    .prepare(
+      `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, change_notes, uploaded_by, extracted_text, search_text)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(
+      generateId(),
+      existing.id,
+      versionNumber,
+      item.file_name,
+      args.fileSize,
+      args.mimeType,
+      r2Key,
+      args.checksum,
+      target.changeNote,
+      args.userId,
+      item.extracted_text,
+      args.searchText
+    )
+    .run();
+
+  const renewal = args.renewal;
+  const updated = await db
+    .prepare(
+      `UPDATE documents
+          SET title = ?,
+              description = COALESCE(?, description),
+              category = COALESCE(?, category),
+              document_type_id = COALESCE(?, document_type_id),
+              supplier_id = COALESCE(?, supplier_id),
+              primary_metadata = ?,
+              extended_metadata = ?,
+              renewal_due_date = ?, renewal_decision = ?, renewal_snapshot = ?,
+              renewal_decided_at = ?, renewal_decided_by = ?,
+              current_version = ?,
+              updated_at = datetime('now')
+        WHERE id = ? AND tenant_id = ? AND current_version = ?`
+    )
+    .bind(
+      args.title,
+      args.description,
+      args.category,
+      item.document_type_id,
+      args.supplierId,
+      args.primaryMetadata,
+      args.extendedMetadata,
+      renewal?.due_date ?? null,
+      renewal?.decision ?? null,
+      renewal?.snapshot ?? null,
+      renewal?.decided_at ?? null,
+      renewal?.decided_by ?? null,
+      versionNumber,
+      existing.id,
+      item.tenant_id,
+      previousVersion
+    )
+    .run();
+  if (!updated.meta?.changes) {
+    throw new ConflictError('The document changed while this was being approved. Reload and try again.');
+  }
+
+  await auditRenewalDecision(db, args.userId, item.tenant_id, existing.id, item.id, renewal, args.clientIp);
+  try {
+    await logAudit(
+      db,
+      args.userId,
+      item.tenant_id,
+      'document.version_replaced',
+      'document',
+      existing.id,
+      JSON.stringify({
+        queue_item_id: item.id,
+        summary: `Replaced from the Review Queue: now v${versionNumber}; ${keptVersionsLabel(previousVersion)}.`,
+        previous_version: previousVersion,
+        new_version: versionNumber,
+        previous_title: existing.title,
+        title: args.title,
+        file_name: item.file_name,
+        checksum: args.checksum,
+        change_note: target.changeNote,
+        previous_renewal: {
+          renewal_due_date: existing.renewal_due_date,
+          renewal_decision: existing.renewal_decision,
+          renewal_snapshot: existing.renewal_snapshot,
+        },
+      }),
+      args.clientIp
+    );
+  } catch (err) {
+    console.warn(
+      '[queue-approve] version_replaced audit failed:',
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+  return { documentId: existing.id, versionNumber, previousVersion, externalRef: existing.external_ref };
+}
+
 export async function produceCoa(
   db: D1Database,
   files: R2Bucket,
   item: QueueItem,
   options: ApproveOptions
 ): Promise<ApproveResult> {
-  const { fields, productName, userId, clientIp, autoIngested, selectedSource = 'text', fieldPicks, dismissals, tableEdits, supplierId: overrideSupplierId, supplierName: overrideSupplierName, renewal } = options;
+  const { fields, productName, userId, clientIp, autoIngested, selectedSource = 'text', fieldPicks, dismissals, tableEdits, supplierId: overrideSupplierId, supplierName: overrideSupplierName, renewal, replace } = options;
 
   // Download file from pending R2 location
   const pendingFile = await downloadFile(files, item.file_r2_key);
@@ -408,14 +579,16 @@ export async function produceCoa(
 
   const fileData = await pendingFile.arrayBuffer();
 
-  // Generate IDs and build paths
-  const docId = generateId();
-  const externalRef = `queue-${item.id}`;
+  // Generate IDs and build paths. On "Replace existing" (0132) the document is
+  // the matched one, and the upload happens in writeReplacementVersion under
+  // that document's NEXT version number.
+  let docId = replace ? replace.documentId : generateId();
+  let externalRef = `queue-${item.id}`;
   const checksum = await computeChecksum(fileData);
   const r2Key = buildR2Key(item.tenant_slug, docId, 1, item.file_name);
 
   // Upload file to final R2 location
-  await uploadFile(files, r2Key, fileData, item.mime_type);
+  if (!replace) await uploadFile(files, r2Key, fileData, item.mime_type);
 
   // Parse approved fields — use provided fields or fall back to AI fields
   const approvedFields = fields || (item.ai_fields ? JSON.parse(item.ai_fields) : {});
@@ -481,6 +654,32 @@ export async function produceCoa(
 
   // Insert document. The renewal columns (0097) are appended only when a
   // reviewer actually answered the renewal question — see renewalColumns.
+  let versionNumber = 1;
+  let previousVersion: number | null = null;
+  if (replace) {
+    const written = await writeReplacementVersion(db, files, {
+      item,
+      target: replace,
+      title,
+      description: approvedFields.description || null,
+      category: approvedFields.category || null,
+      supplierId,
+      primaryMetadata: primaryMetadataStr,
+      extendedMetadata: extendedMetadataStr,
+      renewal,
+      bytes: fileData,
+      mimeType: item.mime_type,
+      fileSize: item.file_size,
+      checksum,
+      searchText: null,
+      userId,
+      clientIp: clientIp || null,
+    });
+    docId = written.documentId;
+    versionNumber = written.versionNumber;
+    previousVersion = written.previousVersion;
+    externalRef = written.externalRef ?? externalRef;
+  } else {
   const renewalCols = renewalColumns(renewal);
   await db.prepare(
     `INSERT INTO documents (id, tenant_id, title, description, category, tags, current_version, status, created_by, external_ref, document_type_id, supplier_id, primary_metadata, extended_metadata${renewalCols.columns})
@@ -503,6 +702,7 @@ export async function produceCoa(
     .run();
 
   await auditRenewalDecision(db, userId, item.tenant_id, docId, item.id, renewal, clientIp || null);
+  }
   // Propose the checklist items a document of this TYPE normally closes
   // (migration 0100). Best-effort by construction — see requirement-defaults.ts:
   // a suggestion that cannot be written must never fail an approve that has
@@ -526,7 +726,8 @@ export async function produceCoa(
     clientIp: clientIp ?? null,
   });
 
-  // Insert document version
+  // Insert document version (a replacement wrote its own, above).
+  if (!replace) {
   const versionId = generateId();
   await db.prepare(
     `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, checksum, uploaded_by, extracted_text)
@@ -544,6 +745,7 @@ export async function produceCoa(
       item.extracted_text
     )
     .run();
+  }
 
   // Link product if a product name is available. Fall back through the approved
   // fields and then the raw extracted ai_fields — when the reviewer approves
@@ -709,6 +911,8 @@ export async function produceCoa(
       file_name: item.file_name,
       fields_corrected: fields && item.ai_fields ? JSON.stringify(fields) !== item.ai_fields : false,
       selected_source: selectedSource,
+      version_number: versionNumber,
+      ...(replace ? { replaced_document: true, previous_version: previousVersion } : {}),
     }),
     clientIp || null
   );
@@ -718,6 +922,8 @@ export async function produceCoa(
     title,
     externalRef: externalRef,
     supplierId,
+    versionNumber,
+    previousVersion,
   };
 }
 
@@ -1085,6 +1291,12 @@ export interface CoaRecordsApproveOptions {
   supplierName?: string;
   /** See ApproveOptions.renewal — the reviewer's confirmed renewal (0097). */
   renewal?: RenewalWrite;
+  /**
+   * "Replace existing" (0132): per approved record_index, the document this
+   * record becomes the NEXT VERSION of. The caller pairs records to documents
+   * exactly (pairRecordsToDocuments) or refuses; nothing here guesses.
+   */
+  replaceTargets?: Record<number, ReplaceWrite>;
 }
 
 export interface CoaRecordsApproveResult {
@@ -1095,6 +1307,9 @@ export interface CoaRecordsApproveResult {
     lotKey: string | null;
     subLotCode: string;
     recordIndex: number;
+    /** The version this approval wrote (1, or N+1 on replace). */
+    versionNumber?: number;
+    previousVersion?: number | null;
   }>;
   supplierId: string | null;
   /** record_index of records that were held (kept pending upstream). */
@@ -1116,6 +1331,7 @@ export async function produceCoaRecords(
     supplierId: overrideSupplierId,
     supplierName: overrideSupplierName,
     renewal,
+    replaceTargets = {},
   } = options;
 
   const pageMetadata = payload.page_metadata ?? {};
@@ -1214,16 +1430,22 @@ export async function produceCoaRecords(
     // If a document already exists for this sublot identity, REUSE it — skip the
     // insert/upload/version, but still run product + lot linkage below (both are
     // idempotent), so a re-run reconciles links without creating duplicates.
-    const existingDoc = await db
-      .prepare('SELECT id FROM documents WHERE tenant_id = ? AND external_ref = ?')
-      .bind(item.tenant_id, externalRef)
-      .first<{ id: string }>();
+    const replaceTarget = replaceTargets[record.record_index];
+    const existingDoc = replaceTarget
+      ? null
+      : await db
+          .prepare('SELECT id FROM documents WHERE tenant_id = ? AND external_ref = ?')
+          .bind(item.tenant_id, externalRef)
+          .first<{ id: string }>();
 
     let docId: string;
+    let versionNumber = 1;
+    let previousVersion: number | null = null;
+    let producedRef = externalRef;
     if (existingDoc) {
       docId = existingDoc.id;
     } else {
-      docId = generateId();
+      docId = replaceTarget ? replaceTarget.documentId : generateId();
       const r2Key = buildR2Key(item.tenant_slug, docId, 1, item.file_name);
 
       // P4 (page-scoped PDF): each per-record document is the customer
@@ -1243,7 +1465,7 @@ export async function produceCoaRecords(
       const recordMime = scope.scoped ? 'application/pdf' : item.mime_type;
       const recordSize = recordBytes.byteLength;
       const recordChecksum = scope.scoped ? await computeChecksum(recordBytes) : checksum;
-      await uploadFile(files, r2Key, recordBytes, recordMime);
+      if (!replaceTarget) await uploadFile(files, r2Key, recordBytes, recordMime);
 
       const primaryMetadata: Record<string, string> = {};
       for (const [k, v] of Object.entries(mergedFields)) {
@@ -1275,6 +1497,40 @@ export async function produceCoaRecords(
       const extendedMetadataStr =
         Object.keys(extended).length > 0 ? JSON.stringify(extended) : null;
 
+      // The text this row is SEARCHED on (0106): the certificate's text with the
+      // other rows' lot numbers and dates blanked, so a sibling printed on the
+      // same page cannot make this row match. extracted_text stays the file's.
+      const siblingFields = payload.records
+        .filter((r) => r.record_index !== record.record_index)
+        .map((r) => ({ ...pageMetadata, ...r.fields }) as Record<string, unknown>);
+      const scoped = rowScopedSearchText(item.extracted_text, mergedFields, siblingFields);
+
+      if (replaceTarget) {
+        // "Replace existing" (0132): this record becomes the next version of
+        // the document it was paired with. Same bytes-per-record as a new one.
+        const written = await writeReplacementVersion(db, files, {
+          item,
+          target: replaceTarget,
+          title,
+          description: (mergedFields.description as string) || null,
+          category: (mergedFields.category as string) || null,
+          supplierId,
+          primaryMetadata: primaryMetadataStr,
+          extendedMetadata: extendedMetadataStr,
+          renewal,
+          bytes: recordBytes,
+          mimeType: recordMime,
+          fileSize: recordSize,
+          checksum: recordChecksum,
+          searchText: scoped ? scoped.text : null,
+          userId,
+          clientIp: clientIp || null,
+        });
+        docId = written.documentId;
+        versionNumber = written.versionNumber;
+        previousVersion = written.previousVersion;
+        producedRef = written.externalRef ?? externalRef;
+      } else {
       // Same single reviewer decision across every sublot record produced
       // from this one certificate.
       const renewalCols = renewalColumns(renewal);
@@ -1300,6 +1556,7 @@ export async function produceCoaRecords(
         .run();
 
       await auditRenewalDecision(db, userId, item.tenant_id, docId, item.id, renewal, clientIp || null);
+      }
       // Propose the checklist items a document of this TYPE normally closes
       // (migration 0100). Best-effort by construction — see requirement-defaults.ts:
       // a suggestion that cannot be written must never fail an approve that has
@@ -1323,14 +1580,7 @@ export async function produceCoaRecords(
         clientIp: clientIp ?? null,
       });
 
-      // The text this row is SEARCHED on (0106): the certificate's text with the
-      // other rows' lot numbers and dates blanked, so a sibling printed on the
-      // same page cannot make this row match. extracted_text stays the file's.
-      const siblingFields = payload.records
-        .filter((r) => r.record_index !== record.record_index)
-        .map((r) => ({ ...pageMetadata, ...r.fields }) as Record<string, unknown>);
-      const scoped = rowScopedSearchText(item.extracted_text, mergedFields, siblingFields);
-
+      if (!replaceTarget) {
       const versionId = generateId();
       await db
         .prepare(
@@ -1350,6 +1600,7 @@ export async function produceCoaRecords(
           scoped ? scoped.text : null
         )
         .run();
+      }
     }
 
     // Link product (per-record product_name, falling back to page metadata).
@@ -1390,10 +1641,12 @@ export async function produceCoaRecords(
     results.push({
       documentId: docId,
       title,
-      externalRef,
+      externalRef: producedRef,
       lotKey: lot ? lot.lotKey : null,
       subLotCode: lot ? lot.subLotCode : '',
       recordIndex: record.record_index,
+      versionNumber,
+      previousVersion,
     });
   }
 

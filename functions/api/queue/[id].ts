@@ -1,11 +1,19 @@
 import { generateId, logAudit, getClientIp } from '../../lib/db';
 import { loadQueueIntakeHistory } from '../../lib/intake/duplicates';
+import {
+  alreadyHaveFor,
+  alreadyHaveInput,
+  decisionSummary,
+  loadAlreadyHave,
+  recordDuplicateDecision,
+} from '../../lib/intake/already-have';
 import type { ParsedCustomer, ParsedOrder, ParsedShipment } from '../../../shared/connectorOutput';
 import {
   requireRole,
   requireTenantAccess,
   NotFoundError,
   BadRequestError,
+  ConflictError,
   errorToResponse,
 } from '../../lib/permissions';
 import { decideArrival, preflightArrivalDecision } from '../../lib/request-arrivals';
@@ -21,6 +29,9 @@ import {
   type RejectionReason,
   type QueueArrivalDecisionInput,
   type QueueArrivalDecisionOutcome,
+  DUPLICATE_DECISIONS,
+  type DuplicateDecision,
+  type DuplicateProposal,
 } from '../../../shared/types';
 import { approveQueueItem, approveMultiProductQueueItem } from '../../lib/queue-approve';
 import {
@@ -34,7 +45,9 @@ import type { QueueItem, FieldPickCapture, FieldDismissalCapture, TableEditCaptu
 import type { Env, User } from '../../lib/types';
 import { parseCoaRecords } from '../../../shared/types';
 import type { TemplateFieldMapping, CoaRecordsPayload } from '../../../shared/types';
-import { produceCoaRecords, type CoaRecordDecision } from '../../lib/kinds/coa';
+import { computeRecordLotKey, produceCoaRecords, type CoaRecordDecision, type ReplaceWrite } from '../../lib/kinds/coa';
+import { loadResolvedLotScheme } from '../../lib/lot-schemes';
+import { pairRecordsToDocuments } from '../../../shared/duplicateProposal';
 import { teachSupplierProduct } from '../../lib/product-identifiers';
 import { linkCoaToOrders } from '../../lib/entities/matching';
 import { documentSupplierItem } from '../../../shared/productIdentity';
@@ -151,8 +164,16 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       },
     ]);
 
+    const alreadyHave = await loadAlreadyHave(context.env.DB, [alreadyHaveInput(item as Record<string, unknown>)]);
+    const hist = history.get(String(item.id));
+
     return new Response(
-      JSON.stringify({ item: { ...enriched, intake_history: history.get(String(item.id)) } }),
+      JSON.stringify({
+        item: {
+          ...enriched,
+          intake_history: hist ? { ...hist, already_have: alreadyHave.get(String(item.id)) ?? null } : hist,
+        },
+      }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (err) {
@@ -290,6 +311,18 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       arrival_decision?: QueueArrivalDecisionInput;
       /** Reviewer-edited tables, when a client sends them (spec audit only). */
       tables?: unknown;
+      /**
+       * "You already have this" (migration 0132). REQUIRED to approve an item
+       * whose `intake_history.already_have` is set -- nothing is decided by
+       * omission:
+       *   'replace'   -- this approval becomes the NEXT VERSION of the matched
+       *                  document(s); earlier versions stay in history
+       *   'keep_both' -- a separate document, as for any other approval
+       *   'discard'   -- close the card as a rejection with reason
+       *                  'duplicate_discarded'; no document is created or changed
+       *                  (accepted with either status)
+       */
+      duplicate_decision?: DuplicateDecision;
     };
 
     if (!body.status || !['approved', 'rejected'].includes(body.status)) {
@@ -346,6 +379,44 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       );
     }
 
+    // "YOU ALREADY HAVE THIS" (migration 0132). Recomputed here from the
+    // item's stored extraction, exactly as the card computed it, so the gate
+    // and the card cannot disagree. An approval of a matched item must say
+    // what it is -- a new version, a separate document, or a discarded copy --
+    // and one that does not is refused with nothing written.
+    const duplicateDecision = body.duplicate_decision ?? null;
+    if (duplicateDecision != null && !(DUPLICATE_DECISIONS as readonly string[]).includes(duplicateDecision)) {
+      throw new BadRequestError(`duplicate_decision must be one of: ${DUPLICATE_DECISIONS.join(', ')}`);
+    }
+    if (body.status === 'rejected' && (duplicateDecision === 'replace' || duplicateDecision === 'keep_both')) {
+      throw new BadRequestError(`duplicate_decision "${duplicateDecision}" only goes with an approval`);
+    }
+    const duplicateProposal: DuplicateProposal | null = await alreadyHaveFor(
+      context.env.DB,
+      alreadyHaveInput(item as unknown as Record<string, unknown>)
+    );
+    if (body.status === 'approved' && duplicateProposal && !duplicateDecision) {
+      return new Response(
+        JSON.stringify({
+          error:
+            `You already have this: "${duplicateProposal.document_title}". ${duplicateProposal.reason} ` +
+            `Choose duplicate_decision "replace" (becomes v${duplicateProposal.next_version}), "keep_both" or "discard".`,
+          code: 'duplicate_decision_required',
+          already_have: duplicateProposal,
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (duplicateDecision && duplicateDecision !== 'keep_both' && !duplicateProposal) {
+      throw new BadRequestError(
+        `There is no matching document on file to ${duplicateDecision === 'replace' ? 'replace' : 'keep instead'}; approve or reject it as usual.`
+      );
+    }
+    // Discard is a rejection with its own reason, whichever status was sent:
+    // the bytes follow the normal rejected-file retention and the existing
+    // document is not touched.
+    const status: 'approved' | 'rejected' = duplicateDecision === 'discard' ? 'rejected' : body.status;
+
     // Combined approve-and-decide. Everything the decision can fail on that
     // does not depend on the document is checked NOW, before the queue half
     // writes anything, so a stale line id or a cancelled request is a plain
@@ -353,7 +424,69 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     const combinedUploadId =
       body.arrival_decision == null
         ? null
-        : await preflightCombinedArrivalDecision(context, item, body.status, body.arrival_decision);
+        : await preflightCombinedArrivalDecision(context, item, status, body.arrival_decision);
+
+    // Replace targets, validated BEFORE anything is written: a guessed pairing
+    // would version the wrong certificate, so an inexact one is refused.
+    const replaceNote = duplicateProposal
+      ? `Replaced from the Review Queue (${item.file_name}): ${duplicateProposal.reason}`
+      : '';
+    let flatReplace: ReplaceWrite | undefined;
+    let recordsReplace: Record<number, ReplaceWrite> | undefined;
+    if (status === 'approved' && duplicateDecision === 'replace' && duplicateProposal) {
+      const kindForReplace = item.output_kind || 'coa';
+      const payloadForReplace =
+        parseCoaRecords(body.records as string | null | undefined) ?? parseCoaRecords(item.ai_records);
+      const scheme = await loadResolvedLotScheme(
+        context.env.DB,
+        item.tenant_id,
+        body.supplier_id ?? item.supplier_id ?? null
+      );
+      const refuse = (why: string) =>
+        new BadRequestError(`"Replace existing" is not available here: ${why} Choose "Keep as a new document" or "Discard".`);
+      if (kindForReplace === 'coa' && payloadForReplace) {
+        const decisions = normalizeRecordDecisions(body.record_decisions);
+        const approvedRecords = payloadForReplace.records.filter((r) => (decisions[r.record_index] ?? 'approve') === 'approve');
+        if (payloadForReplace.records.some((r) => decisions[r.record_index] === 'hold')) {
+          throw refuse('some records are held, and a replacement has to be decided in one go.');
+        }
+        const pairing = pairRecordsToDocuments(
+          approvedRecords.map((r) => ({
+            record_index: r.record_index,
+            lot_key:
+              computeRecordLotKey(
+                { ...(payloadForReplace.page_metadata ?? {}), ...(r.fields ?? {}) } as Record<string, string | null>,
+                scheme
+              )?.lotKey ?? null,
+          })),
+          duplicateProposal.documents
+        );
+        if (!pairing) {
+          throw refuse('the lots on this file do not pair one-to-one with the documents on file.');
+        }
+        recordsReplace = {};
+        for (const [idx, documentId] of pairing) recordsReplace[idx] = { documentId, changeNote: replaceNote };
+      } else if (body.products && body.products.length > 0) {
+        throw refuse(`this approval makes ${body.products.length} documents (one per product), not one.`);
+      } else {
+        let target: string | null = duplicateProposal.documents.length === 1 ? duplicateProposal.document_id : null;
+        if (!target) {
+          let flat: Record<string, string | null> = {};
+          try {
+            flat = (body.fields as Record<string, string | null> | undefined) ?? (item.ai_fields ? JSON.parse(item.ai_fields) : {});
+          } catch {
+            flat = {};
+          }
+          const pairing = pairRecordsToDocuments(
+            [{ record_index: 0, lot_key: computeRecordLotKey(flat, scheme)?.lotKey ?? null }],
+            duplicateProposal.documents
+          );
+          target = pairing?.get(0) ?? null;
+        }
+        if (!target) throw refuse('the file on record was split into several documents and this one does not pair with one of them.');
+        flatReplace = { documentId: target, changeNote: replaceNote };
+      }
+    }
 
     // Defined as a const arrow (not a hoisted declaration) so TypeScript keeps
     // the non-null narrowing of `item` inside the closure.
@@ -411,7 +544,8 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           selectedSource,
           { supplierId: body.supplier_id, supplierName: body.supplier_name },
           body.product_maps,
-          renewal
+          renewal,
+          recordsReplace
         );
       }
       const captures = {
@@ -426,11 +560,14 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       if (body.products && body.products.length > 0) {
         return await handleMultiProductApprove(context, user, item, body.shared_fields, body.products, body.save_template, selectedSource, captures, supplierOverride, renewal);
       }
-      return await handleApprove(context, user, item, body.fields, body.product_name, body.save_template, selectedSource, captures, supplierOverride, renewal);
+      return await handleApprove(context, user, item, body.fields, body.product_name, body.save_template, selectedSource, captures, supplierOverride, renewal, flatReplace);
     };
 
-    if (body.status === 'approved') {
-      const response = await dispatchApprove();
+    if (status === 'approved') {
+      let response = await dispatchApprove();
+      if (response.ok && duplicateProposal && duplicateDecision) {
+        response = await withDuplicateDecision(context, user, item, duplicateProposal, duplicateDecision, response);
+      }
       // Record what the reviewer waved through. The warnings are recomputed
       // against the values the human actually submitted, so an edit that FIXED
       // the problem produces no row. This is the only way the "37% of corpus
@@ -531,7 +668,23 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }
       return response;
     }
-    const rejected = await handleReject(context, user, item, body.rejection_reason, body.rejection_note);
+    let rejected = await handleReject(
+      context,
+      user,
+      item,
+      duplicateDecision === 'discard' ? 'duplicate_discarded' : body.rejection_reason,
+      body.rejection_note
+    );
+    if (rejected.ok && duplicateProposal) {
+      rejected = await withDuplicateDecision(
+        context,
+        user,
+        item,
+        duplicateProposal,
+        duplicateDecision === 'discard' ? 'discard' : 'rejected',
+        rejected
+      );
+    }
     if (combinedUploadId && rejected.ok) {
       return await runCombinedArrivalDecision(context, user, item, combinedUploadId, body.arrival_decision!, rejected);
     }
@@ -598,6 +751,89 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
  * Best-effort throughout: the approval has already happened and its response
  * is already built. Nothing here may change that.
  */
+/**
+ * Record a "you already have this" decision (0132) -- ledger + audit -- and
+ * add `duplicate_decision` (with the plain-words summary the toast shows) to
+ * the response. The summary names the version the approval ACTUALLY wrote,
+ * read back from the response, never the one the card predicted.
+ */
+async function withDuplicateDecision(
+  context: EventContext<Env, string, Record<string, unknown>>,
+  user: User,
+  item: QueueItem & {
+    checksum?: string | null;
+    source?: string | null;
+    source_detail?: string | null;
+    source_id?: string | null;
+    connector_run_id?: string | null;
+  },
+  proposal: DuplicateProposal,
+  decision: DuplicateDecision | 'rejected',
+  response: Response
+): Promise<Response> {
+  let payload: Record<string, unknown>;
+  try {
+    payload = (await response.clone().json()) as Record<string, unknown>;
+  } catch {
+    return response;
+  }
+  const docs: Array<{ id: string; current_version?: number; previous_version?: number }> = [
+    ...(payload.document ? [payload.document as { id: string; current_version?: number; previous_version?: number }] : []),
+    ...((payload.documents as Array<{ id: string; current_version?: number; previous_version?: number }> | undefined) ?? []),
+  ];
+  const first = decision === 'replace' || decision === 'keep_both' ? docs[0] ?? null : null;
+  const versionNumber = decision === 'replace' ? first?.current_version ?? null : decision === 'keep_both' ? 1 : null;
+  const replaced =
+    decision === 'replace'
+      ? docs.map((d) => ({
+          document_id: d.id,
+          previous_version: Number(d.previous_version ?? (d.current_version ?? 2) - 1),
+          new_version: Number(d.current_version ?? 1),
+        }))
+      : undefined;
+  try {
+    await recordDuplicateDecision(context.env.DB, {
+      item: {
+        id: item.id,
+        tenant_id: item.tenant_id,
+        checksum: item.checksum ?? null,
+        file_name: item.file_name,
+        file_size: item.file_size,
+        mime_type: item.mime_type,
+        file_r2_key: item.file_r2_key,
+        source: item.source ?? null,
+        source_detail: item.source_detail ?? null,
+        source_id: item.source_id ?? null,
+        connector_run_id: item.connector_run_id ?? null,
+        created_by: item.created_by ?? null,
+      },
+      proposal,
+      decision,
+      userId: user.id,
+      documentId: first?.id ?? null,
+      versionNumber,
+      replaced,
+      clientIp: getClientIp(context.request),
+    });
+  } catch (err) {
+    console.error('[queue] duplicate decision record failed:', err instanceof Error ? err.message : String(err));
+  }
+  const headers = new Headers(response.headers);
+  return new Response(
+    JSON.stringify({
+      ...payload,
+      duplicate_decision: {
+        decision,
+        summary: decisionSummary(decision, proposal, versionNumber),
+        matched_document_id: proposal.document_id,
+        document_id: first?.id ?? null,
+        version_number: versionNumber,
+      },
+    }),
+    { status: response.status, headers }
+  );
+}
+
 /** The document ids an approve response names (flat, multi-product or records). */
 async function approvedDocumentIds(response: Response): Promise<string[]> {
   try {
@@ -886,7 +1122,9 @@ async function handleApprove(
    * server-recomputed proposal. Null when nobody answered — the producer then
    * writes no renewal columns.
    */
-  renewal: RenewalWrite | null = null
+  renewal: RenewalWrite | null = null,
+  /** "Replace existing" (0132): write this approval as the next version of that document. */
+  replace?: ReplaceWrite
 ): Promise<Response> {
   const result = await approveQueueItem(
     context.env.DB,
@@ -904,6 +1142,7 @@ async function handleApprove(
       supplierId: supplierOverride?.supplierId,
       supplierName: supplierOverride?.supplierName,
       renewal: renewal ?? undefined,
+      replace,
     }
   );
 
@@ -913,7 +1152,7 @@ async function handleApprove(
     item,
     result.supplierId,
     supplierOverride?.supplierName ?? null,
-    [{ documentId: result.documentId, title: result.title }],
+    [{ documentId: result.documentId, title: result.title, versionNumber: result.versionNumber ?? 1 }],
     // The single-document path does not carry edited tables in its body —
     // reviewer table edits arrive as `captures.tableEdits` — so the stored
     // extraction is what was approved.
@@ -956,7 +1195,8 @@ async function handleApprove(
         tenant_id: item.tenant_id,
         title: result.title,
         external_ref: result.externalRef,
-        current_version: 1,
+        current_version: result.versionNumber ?? 1,
+        ...(result.previousVersion ? { previous_version: result.previousVersion } : {}),
         status: 'active',
       },
     }),
@@ -1346,7 +1586,7 @@ async function registerFlatApproveSpecChecks(
   item: QueueItem & { tenant_name?: string | null },
   supplierId: string | null,
   supplierName: string | null,
-  documents: Array<{ documentId: string; title: string }>,
+  documents: Array<{ documentId: string; title: string; versionNumber?: number }>,
   tables: unknown
 ): Promise<void> {
   try {
@@ -1376,7 +1616,7 @@ async function registerFlatApproveSpecChecks(
       },
       results,
       specConfig.limits,
-      documents.map((d) => ({ documentId: d.documentId, title: d.title, recordIndex: null })),
+      documents.map((d) => ({ documentId: d.documentId, title: d.title, recordIndex: null, versionNumber: d.versionNumber ?? 1 })),
       { unjudged, missing_required }
     );
   } catch (err) {
@@ -1446,7 +1686,9 @@ async function handleCoaRecordsApprove(
    * server-recomputed proposal. Null when nobody answered — the producer then
    * writes no renewal columns.
    */
-  renewal: RenewalWrite | null = null
+  renewal: RenewalWrite | null = null,
+  /** "Replace existing" (0132): record_index -> the document it versions. */
+  replaceTargets?: Record<number, ReplaceWrite>
 ): Promise<Response> {
   const decisions = normalizeRecordDecisions(rawDecisions);
 
@@ -1461,8 +1703,12 @@ async function handleCoaRecordsApprove(
       supplierId: supplierOverride.supplierId,
       supplierName: supplierOverride.supplierName,
       renewal: renewal ?? undefined,
+      replaceTargets,
     });
   } catch (err) {
+    // A replace that lost its target (deleted / changed meanwhile) is the
+    // person's to resolve, not a 500.
+    if (err instanceof ConflictError) throw err;
     throw new BadRequestError(
       `Failed to produce COA records: ${err instanceof Error ? err.message : String(err)}`
     );
@@ -1552,6 +1798,7 @@ async function handleCoaRecordsApprove(
         documentId: d.documentId,
         title: d.title,
         recordIndex: d.recordIndex,
+        versionNumber: d.versionNumber ?? 1,
       })),
       // What was NOT judged goes down beside what was (0109): required
       // analytes this certificate did not report, and printed results with no
@@ -1602,7 +1849,8 @@ async function handleCoaRecordsApprove(
         lot_key: d.lotKey,
         sub_lot_code: d.subLotCode,
         record_index: d.recordIndex,
-        current_version: 1,
+        current_version: d.versionNumber ?? 1,
+        ...(d.previousVersion ? { previous_version: d.previousVersion } : {}),
         status: 'active',
       })),
       held_record_indexes: result.heldRecordIndexes,
