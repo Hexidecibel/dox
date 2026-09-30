@@ -97,6 +97,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       `SELECT pq.*, dt.name as document_type_name, dt.slug as document_type_slug,
               dt.renewal_policy as type_renewal_policy,
               dt.renewal_interval_months as type_renewal_interval_months,
+              dt.renewal_window as type_renewal_window,
               t.name as tenant_name, t.slug as tenant_slug,
               u.name as created_by_name, r.name as reviewed_by_name,
               CASE WHEN sei.id IS NOT NULL THEN 1 ELSE 0 END as profile_exists,

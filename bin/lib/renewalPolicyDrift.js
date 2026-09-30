@@ -137,9 +137,14 @@ function planRenewalPolicyDrift(types) {
  */
 function correctionToSql(tenantId, correction, sqlStr) {
   const months = correction.to.interval_months;
+  // A proposed fixed window (0125, G3 -- an FDA food facility registration)
+  // travels with its period: writing 24 months without the window would date
+  // the registration 24 months from issue instead of at the window's close.
+  const window = correction.to.window ? sqlStr(JSON.stringify(correction.to.window)) : 'NULL';
   return (
     `UPDATE document_types SET renewal_policy = ${sqlStr(correction.to.policy)}, ` +
     `renewal_interval_months = ${months === null ? 'NULL' : String(months)}, ` +
+    `renewal_window = ${window}, ` +
     `updated_at = datetime('now') ` +
     `WHERE id = ${sqlStr(correction.id)} AND tenant_id = ${sqlStr(tenantId)} ` +
     `AND renewal_policy = ${sqlStr(MIGRATION_DEFAULT_POLICY)} AND renewal_interval_months IS NULL;`
@@ -147,7 +152,7 @@ function correctionToSql(tenantId, correction, sqlStr) {
 }
 
 /** Renewal keys whose presence in an audit payload proves a person chose. */
-const RENEWAL_KEYS = ['renewal_policy', 'renewal_interval_months'];
+const RENEWAL_KEYS = ['renewal_policy', 'renewal_interval_months', 'renewal_window'];
 
 /**
  * Does one audit row's details JSON name a renewal setting?

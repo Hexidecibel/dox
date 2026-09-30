@@ -3,6 +3,8 @@ import { BadRequestError } from './permissions';
 import {
   MAX_RENEWAL_PERIOD_MONTHS,
   TYPE_RENEWAL_POLICIES,
+  validateRenewalWindow,
+  type RenewalWindow,
   type TypeRenewalPolicy,
 } from '../../shared/renewalPeriod';
 import type {
@@ -119,6 +121,47 @@ export function parseTypeRenewalSetting(
   // Under 'inherit' and 'none' the months column is unread, so it is cleared
   // rather than left behind to contradict the policy on screen.
   return { ok: true, policy, months: policy === 'period' ? months : null };
+}
+
+/**
+ * Validate a submitted fixed renewal WINDOW (migration 0125, rules table G3)
+ * together with the policy/period it refines. Returns the three columns to
+ * write, or an error.
+ *
+ *   window object  -> policy 'period' (an explicit other policy is refused),
+ *                     months = every_years * 12 (an explicit different
+ *                     months is refused: the two must describe one cycle)
+ *   window null    -> the window is cleared; policy/months as submitted
+ *   window absent  -> `window: undefined` = leave the stored one alone, EXCEPT
+ *                     under a policy other than 'period', where a window is
+ *                     unread and is therefore cleared
+ */
+export function parseTypeRenewalWindowSetting(
+  rawPolicy: unknown,
+  months: number | null,
+  rawWindow: unknown,
+):
+  | { ok: true; policy: TypeRenewalPolicy; months: number | null; window: RenewalWindow | null | undefined }
+  | { ok: false; error: string } {
+  if (rawWindow === undefined || rawWindow === null) {
+    const base = parseTypeRenewalSetting(rawPolicy, months);
+    if (!base.ok) return base;
+    const window = rawWindow === null || base.policy !== 'period' ? null : undefined;
+    return { ...base, window };
+  }
+  const v = validateRenewalWindow(rawWindow);
+  if (!v.ok) return v;
+  if (rawPolicy !== undefined && rawPolicy !== null && rawPolicy !== 'period') {
+    return { ok: false, error: "a renewal_window applies only under renewal_policy 'period'" };
+  }
+  const cycle = v.window.every_years * 12;
+  if (months !== null && months !== cycle) {
+    return {
+      ok: false,
+      error: `renewal_interval_months must equal the window's cycle (${cycle}) when a renewal_window is set`,
+    };
+  }
+  return { ok: true, policy: 'period', months: cycle, window: v.window };
 }
 
 // ---------------------------------------------------------------------------

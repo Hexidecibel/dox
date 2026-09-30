@@ -205,8 +205,8 @@ export function starterPackStatements(
       db
         .prepare(
           `INSERT OR IGNORE INTO document_types
-             (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months, renewal_window)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           packRowId('dt', tenantSlug, dt.slug),
@@ -217,6 +217,7 @@ export function starterPackStatements(
           dt.owner,
           renewal.policy,
           renewal.interval_months,
+          renewal.window === null ? null : JSON.stringify(renewal.window),
         ),
     );
   }

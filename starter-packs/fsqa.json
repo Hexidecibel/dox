@@ -353,6 +353,15 @@
       ]
     },
     {
+      "name": "FDA Food Facility Registration",
+      "slug": "fda-food-facility-registration",
+      "description": "The supplier facility's FDA food facility registration. Renews inside a fixed window, October 1 to December 31 of every even-numbered year (21 CFR 1.230(b)), so it is due when the next window closes whatever date it prints (rules table G3).",
+      "owner": "Food Safety",
+      "closes": [
+        "fda-food-facility-registration"
+      ]
+    },
+    {
       "name": "HACCP Plan",
       "slug": "haccp-plan",
       "description": "Hazard analysis and critical control point plan.",
@@ -505,6 +514,12 @@
       "name": "W-9 on file",
       "slug": "w9-on-file",
       "checklist": "Commercial & Legal"
+    },
+    {
+      "name": "FDA Food Facility Registration on file",
+      "slug": "fda-food-facility-registration",
+      "checklist": "Regulatory Registrations & Statements",
+      "description": "A current FDA food facility registration. Goes stale when the biennial renewal window closes (G3)."
     },
     {
       "name": "3rd Party Audit REPORT on file",

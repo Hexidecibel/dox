@@ -77,9 +77,10 @@ describe('starter packs — every seeded document type carries a renewal setting
         const want = defaultRenewalSettingForTypeName(dt.name);
         const sql = statements.find((s) => s.includes(`'dt_acme-foods_${dt.slug}'`));
         expect(sql, `${packName}/${dt.slug}`).toBeTruthy();
-        // The renewal pair is the last two values in the row.
+        // The renewal pair, then the window (0125), are the last values in the row.
         const months = want.interval_months === null ? 'NULL' : String(want.interval_months);
-        expect(sql!.trimEnd().endsWith(`'${want.policy}', ${months});`), `${packName}/${dt.slug}`)
+        const window = want.window === null ? 'NULL' : `'${JSON.stringify(want.window).replace(/'/g, "''")}'`;
+        expect(sql!.trimEnd().endsWith(`'${want.policy}', ${months}, ${window});`), `${packName}/${dt.slug}`)
           .toBe(true);
       }
     }
@@ -97,11 +98,12 @@ describe('starter packs — every seeded document type carries a renewal setting
       const typeCalls = calls.filter((c) => c.sql.includes('INTO document_types'));
       expect(typeCalls.length, name).toBe(STARTER_PACKS[name].document_types.length);
       for (const c of typeCalls) {
-        // (id, tenant_id, name, slug, description, default_owner, policy, months)
+        // (id, tenant_id, name, slug, description, default_owner, policy, months, window)
         const typeName = c.args[2] as string;
         const want = defaultRenewalSettingForTypeName(typeName);
         expect(c.args[6], `${name}/${typeName} policy`).toBe(want.policy);
         expect(c.args[7], `${name}/${typeName} months`).toBe(want.interval_months);
+        expect(c.args[8], `${name}/${typeName} window`).toBe(want.window === null ? null : JSON.stringify(want.window));
       }
     }
   });
@@ -118,16 +120,20 @@ describe('starter packs — every seeded document type carries a renewal setting
       settings.filter((s) => s.policy === 'period' && s.interval_months === 36).length,
     ).toBeGreaterThan(0);
     expect(settings.filter((s) => s.policy === 'inherit').length).toBeGreaterThan(0);
+    // G3: the FDA food facility registration type carries its window.
+    expect(settings.filter((s) => s.window !== null).length).toBeGreaterThan(0);
   });
 
   it('names the two answers that matter, so a rule change has to be deliberate', () => {
     expect(defaultRenewalSettingForTypeName('Certificate of Analysis')).toEqual({
       policy: 'none',
       interval_months: null,
+      window: null,
     });
     expect(defaultRenewalSettingForTypeName('Specification Sheet')).toEqual({
       policy: 'period',
       interval_months: 36,
+      window: null,
     });
     // A certificate of INSURANCE renews. The COA match requires the analysis
     // word precisely so this cannot be swept up: a false 'none' here is a
@@ -135,6 +141,7 @@ describe('starter packs — every seeded document type carries a renewal setting
     expect(defaultRenewalSettingForTypeName('Certificate of Insurance')).toEqual({
       policy: 'inherit',
       interval_months: null,
+      window: null,
     });
   });
 

@@ -5,8 +5,9 @@ import { sanitizeString } from '../../lib/validation';
 import {
   defaultRenewalSettingForTypeName,
   type TypeRenewalPolicy,
+  type RenewalWindow,
 } from '../../../shared/renewalPeriod';
-import { parseRenewalIntervalMonths, parseTypeRenewalSetting } from '../../lib/registry';
+import { parseRenewalIntervalMonths, parseTypeRenewalWindowSetting } from '../../lib/registry';
 import { parseRenewalAlertLeadDays } from '../../../shared/renewalLeadTime';
 import type { Env, User } from '../../lib/types';
 
@@ -137,6 +138,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       renewal_interval_months?: number | null;
       /** 'inherit' | 'period' | 'none' — see migration 0097. */
       renewal_policy?: string | null;
+      /** A fixed calendar renewal window (0125, G3). */
+      renewal_window?: unknown;
       /** Days of renewal-alert warning for this type; null/absent = inherit (0111). */
       renewal_alert_lead_days?: number | null;
     };
@@ -217,7 +220,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // the Document Types screen — it is never re-derived at read time.
     let renewalIntervalMonths: number | null;
     let renewalPolicy: TypeRenewalPolicy;
-    if (body.renewal_interval_months !== undefined || body.renewal_policy !== undefined) {
+    let renewalWindow: RenewalWindow | null;
+    if (
+      body.renewal_interval_months !== undefined ||
+      body.renewal_policy !== undefined ||
+      body.renewal_window !== undefined
+    ) {
       const parsedMonths = parseRenewalIntervalMonths(body.renewal_interval_months ?? null);
       if (!parsedMonths.ok) {
         return new Response(
@@ -225,7 +233,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           { status: 400, headers: { 'Content-Type': 'application/json' } }
         );
       }
-      const parsed = parseTypeRenewalSetting(body.renewal_policy, parsedMonths.value);
+      const parsed = parseTypeRenewalWindowSetting(body.renewal_policy, parsedMonths.value, body.renewal_window);
       if (!parsed.ok) {
         return new Response(
           JSON.stringify({ error: parsed.error }),
@@ -234,6 +242,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       }
       renewalIntervalMonths = parsed.months;
       renewalPolicy = parsed.policy;
+      renewalWindow = parsed.window ?? null;
     } else {
       // Nothing submitted: propose both from the name. A COA type starts at
       // 'none' — it does not renew — and a spec sheet at three years. Same
@@ -246,6 +255,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const proposed = defaultRenewalSettingForTypeName(body.name);
       renewalIntervalMonths = proposed.interval_months;
       renewalPolicy = proposed.policy;
+      renewalWindow = proposed.window;
     }
 
     // Renewal alert lead time override (0111). Absent or null = inherit the
@@ -264,8 +274,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     await context.env.DB.prepare(
       `INSERT INTO document_types (id, tenant_id, name, slug, description, supplier_id, active, auto_ingest, extract_tables, renewal_interval_months, renewal_policy,
-                                   renewal_alert_lead_days, renewal_alert_lead_updated_at, renewal_alert_lead_updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, ?)`
+                                   renewal_alert_lead_days, renewal_alert_lead_updated_at, renewal_alert_lead_updated_by, renewal_window)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, ?, ?)`
     )
       .bind(
         id,
@@ -280,7 +290,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         renewalPolicy,
         renewalAlertLeadDays,
         renewalAlertLeadDays,
-        renewalAlertLeadDays === null ? null : user.id
+        renewalAlertLeadDays === null ? null : user.id,
+        renewalWindow === null ? null : JSON.stringify(renewalWindow)
       )
       .run();
 
@@ -296,6 +307,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         slug,
         renewal_interval_months: renewalIntervalMonths,
         renewal_policy: renewalPolicy,
+        renewal_window: renewalWindow,
         renewal_alert_lead_days: renewalAlertLeadDays,
       }),
       getClientIp(context.request)

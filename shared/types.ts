@@ -548,6 +548,13 @@ export interface DocumentTypeRow {
    */
   renewal_policy: TypeRenewalPolicy;
   /**
+   * A fixed calendar renewal window (migration 0125, rules table G3), as the
+   * stored JSON string, or null. Read only under `renewal_policy = 'period'`,
+   * where `renewal_interval_months` is its cycle in months. Parse with
+   * `parseRenewalWindow` (shared/renewalPeriod.ts).
+   */
+  renewal_window?: string | null;
+  /**
    * The department that owns renewals for documents of this type (migration
    * 0100) — a free-text `owner_routes` label, not a user id, because the owners
    * are ROLES that change hands and some of them will never have an account.
@@ -5022,6 +5029,8 @@ export interface RenewalSnapshot {
   reason: string;
   type_renewal_policy: TypeRenewalPolicy | string | null;
   type_renewal_interval_months: number | null;
+  /** The fixed renewal window in force (0125), when the type had one. Absent on pre-0125 snapshots. */
+  type_renewal_window?: import('./renewalPeriod').RenewalWindow | null;
 }
 
 /**

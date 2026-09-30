@@ -47,6 +47,7 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import {
   resolveRenewalExpiry,
+  parseRenewalWindow,
   dateOnly,
   type ResolvedRenewal,
   type RenewalDecision,
@@ -62,11 +63,14 @@ import {
 export interface TypeRenewalConfig {
   renewal_policy: TypeRenewalPolicy | string | null;
   renewal_interval_months: number | null;
+  /** document_types.renewal_window (0125): a fixed calendar window, JSON. */
+  renewal_window: string | null;
 }
 
 export const UNCONFIGURED_TYPE_RENEWAL: TypeRenewalConfig = {
   renewal_policy: null,
   renewal_interval_months: null,
+  renewal_window: null,
 };
 
 /** Load a document type's renewal configuration. Missing type → unconfigured. */
@@ -76,13 +80,14 @@ export async function loadTypeRenewalConfig(
 ): Promise<TypeRenewalConfig> {
   if (!documentTypeId) return UNCONFIGURED_TYPE_RENEWAL;
   const row = await db
-    .prepare('SELECT renewal_policy, renewal_interval_months FROM document_types WHERE id = ?')
+    .prepare('SELECT renewal_policy, renewal_interval_months, renewal_window FROM document_types WHERE id = ?')
     .bind(documentTypeId)
-    .first<{ renewal_policy: string | null; renewal_interval_months: number | null }>();
+    .first<{ renewal_policy: string | null; renewal_interval_months: number | null; renewal_window: string | null }>();
   if (!row) return UNCONFIGURED_TYPE_RENEWAL;
   return {
     renewal_policy: row.renewal_policy,
     renewal_interval_months: row.renewal_interval_months,
+    renewal_window: row.renewal_window ?? null,
   };
 }
 
@@ -131,6 +136,7 @@ export function buildRenewalProposal(
     renewal_decision: null,
     type_renewal_policy: type.renewal_policy,
     type_renewal_interval_months: type.renewal_interval_months,
+    type_renewal_window: type.renewal_window,
     meta_document_expires_on: dates.document_expires_on,
     meta_effective_date: dates.effective_date,
   });
@@ -238,6 +244,9 @@ export function resolveRenewalDecision(
       // this date meant when a human agreed to it.
       type_renewal_policy: type.renewal_policy,
       type_renewal_interval_months: type.renewal_interval_months,
+      // The window in force (0125), parsed, so the snapshot re-explains a
+      // window date even after an admin edits or clears the window.
+      type_renewal_window: parseRenewalWindow(type.renewal_window),
     }),
   };
 }
@@ -254,6 +263,8 @@ export interface RenewalProposableRow {
   type_renewal_policy?: unknown;
   /** document_types.renewal_interval_months, joined alias. */
   type_renewal_interval_months?: unknown;
+  /** document_types.renewal_window (0125), joined alias. */
+  type_renewal_window?: unknown;
   [key: string]: unknown;
 }
 
@@ -287,6 +298,7 @@ export function withRenewalProposal<T extends RenewalProposableRow>(
         typeof row.type_renewal_interval_months === 'number'
           ? row.type_renewal_interval_months
           : null,
+      renewal_window: typeof row.type_renewal_window === 'string' ? row.type_renewal_window : null,
     }),
   };
 }

@@ -1178,7 +1178,7 @@ export const api = {
      * POST /api/document-types
      * Returns: { documentType: ApiDocumentType }
      */
-    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_alert_lead_days?: number | null }) =>
+    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null }) =>
       fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -1188,7 +1188,7 @@ export const api = {
      * PUT /api/document-types/:id
      * Returns: { documentType: ApiDocumentType }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_alert_lead_days?: number | null }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null }) =>
       fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),

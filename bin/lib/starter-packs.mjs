@@ -781,10 +781,11 @@ export function packToStatements(rawPack, { tenantId, tenantSlug, moduleKeys } =
     // the in-portal applier call rather than a third copy of the name match.
     const renewal = defaultRenewalSettingForTypeName(dt.name);
     statements.push(
-      `INSERT OR IGNORE INTO document_types (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months) VALUES (` +
+      `INSERT OR IGNORE INTO document_types (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months, renewal_window) VALUES (` +
         `${sqlQuote(packRowId('dt', tenantSlug, dt.slug))}, ${sqlQuote(tenantId)}, ` +
         `${sqlQuote(dt.name)}, ${sqlQuote(dt.slug)}, ${sqlQuote(dt.description)}, ` +
-        `${sqlQuote(dt.owner)}, ${sqlQuote(renewal.policy)}, ${sqlNum(renewal.interval_months)});`,
+        `${sqlQuote(dt.owner)}, ${sqlQuote(renewal.policy)}, ${sqlNum(renewal.interval_months)}, ` +
+        `${renewal.window ? sqlQuote(JSON.stringify(renewal.window)) : 'NULL'});`,
     );
   }
 
