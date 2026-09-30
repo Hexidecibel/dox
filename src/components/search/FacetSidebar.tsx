@@ -7,7 +7,7 @@ import {
   withoutScope,
   type SearchQuery,
 } from '../../../shared/searchQuery';
-import { FACET_FIELDS, uploadedBucketOf, UPLOADED_BUCKETS, type FacetField } from '../../../shared/searchFields';
+import { uploadedBucketOf, UPLOADED_BUCKETS, type FacetField } from '../../../shared/searchFields';
 
 /**
  * Side rail of facet groups for `<DocumentSearchPanel>`.
@@ -29,7 +29,10 @@ export interface FacetSidebarProps {
   loading?: boolean;
 }
 
-const TITLES: Record<FacetField, string> = {
+/** Easy mode's rail: the five filters it has always had (Advanced shows every facet). */
+const EASY_FIELDS = ['supplier', 'document_type', 'product', 'status', 'uploaded'] as const;
+
+const TITLES: Record<(typeof EASY_FIELDS)[number], string> = {
   supplier: 'Supplier',
   document_type: 'Document Type',
   product: 'Product',
@@ -38,7 +41,7 @@ const TITLES: Record<FacetField, string> = {
 };
 
 export function FacetSidebar({ query, facets, onChange, loading = false }: FacetSidebarProps) {
-  const hasAny = FACET_FIELDS.some((k) => (facets[k]?.length ?? 0) > 0);
+  const hasAny = EASY_FIELDS.some((k) => (facets[k]?.length ?? 0) > 0);
 
   return (
     <Box
@@ -76,7 +79,7 @@ export function FacetSidebar({ query, facets, onChange, loading = false }: Facet
         </Box>
       ) : (
         <Stack>
-          {FACET_FIELDS.map((field) => {
+          {EASY_FIELDS.map((field) => {
             const opts = facets[field] ?? [];
             if (opts.length === 0) return null;
             if (field === 'uploaded') {

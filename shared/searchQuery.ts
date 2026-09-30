@@ -23,8 +23,11 @@
 
 import type { SearchDateRole, SearchSort, SearchState } from './types';
 import {
+  DEFAULT_COLUMNS,
+  enumLabel,
   fieldDef,
   isFieldKey,
+  SEARCH_COLUMNS,
   SEARCH_FIELDS,
   STATUS_LABELS,
   UPLOADED_BUCKETS,
@@ -269,6 +272,31 @@ export function decodeQuery(input: URLSearchParams | string): SearchQuery {
 }
 
 /**
+ * A saved VIEW keeps what it was saved with (search redesign Phase 3): the
+ * result mode, Easy or Advanced, the columns and the sort — never the page.
+ * Anything unknown is dropped, never trusted.
+ */
+export function savedView(v: Partial<SearchView> | undefined | null): SearchView {
+  const out: SearchView = { entity: 'documents' };
+  if (!v || typeof v !== 'object') return out;
+  if (v.entity && (ENTITIES as string[]).includes(v.entity)) out.entity = v.entity;
+  if (v.sort && v.sort !== 'relevance' && (SORTS as string[]).includes(v.sort)) out.sort = v.sort;
+  if (v.mode === 'advanced') out.mode = 'advanced';
+  const known = new Set(SEARCH_COLUMNS.map((c) => c.key));
+  if (Array.isArray(v.columns)) {
+    const cols = v.columns.filter((c): c is string => typeof c === 'string' && known.has(c));
+    if (cols.length) out.columns = [...new Set(cols)];
+  }
+  return out;
+}
+
+/** The columns a view shows: its own choice, else the defaults; the title always. */
+export function viewColumns(v: SearchView): string[] {
+  const cols = v.columns && v.columns.length ? v.columns : DEFAULT_COLUMNS;
+  return cols.includes('title') ? cols : ['title', ...cols];
+}
+
+/**
  * A saved search's stored payload as a query: a v1 AST as is, anything else
  * as the legacy `SearchState` it was written as.
  */
@@ -279,7 +307,7 @@ export function savedPayloadToQuery(payload: Record<string, unknown>): SearchQue
       .map((c, i) => decodeClause(encodeClause(c), `c${i + 1}`))
       .filter((c): c is Clause => !!c)
       .map((c) => ({ ...c, source: 'saved' as const }));
-    return { v: 1, text: typeof q.text === 'string' ? q.text : '', clauses, view: { entity: 'documents', ...(q.view?.sort ? { sort: q.view.sort } : {}) } };
+    return { v: 1, text: typeof q.text === 'string' ? q.text : '', clauses, view: savedView(q.view) };
   }
   return legacyStateToQuery(payload);
 }
@@ -313,6 +341,42 @@ export function withFieldValues(q: SearchQuery, field: FieldKey, values: string[
     const next: Clause = { id: '', field, op: op ?? def.defaultOp, values: clean, source: idx >= 0 ? q.clauses[idx].source : 'facet' };
     if (idx >= 0) clauses[idx] = next;
     else clauses.push(next);
+  }
+  return { ...q, clauses: renumber(clauses), view: { ...q.view, page: undefined } };
+}
+
+/** The values EXCLUDED for a scope field (its exclude clause). */
+export function excludedValues(q: SearchQuery, field: FieldKey): string[] {
+  return q.clauses.filter((c) => c.field === field && c.exclude).flatMap((c) => c.values);
+}
+
+/**
+ * Tick (or, with `exclude`, exclude) one facet value (the Advanced rail; `x`
+ * on a facet row). A value lives in at most one of the field's two clauses:
+ * excluding a ticked value moves it, and doing the same thing twice undoes it.
+ * Every other clause is untouched.
+ */
+export function toggleFacetValue(q: SearchQuery, field: FieldKey, value: string, exclude = false): SearchQuery {
+  const def = SEARCH_FIELDS[field];
+  if (exclude && !def.excludable) return q;
+  let clauses = [...q.clauses];
+  const find = (ex: boolean) => clauses.findIndex((c) => c.field === field && !!c.exclude === ex);
+  const mine = find(exclude);
+  const had = mine >= 0 && clauses[mine].values.includes(value);
+  // Out of the other clause, whichever way this goes.
+  const other = find(!exclude);
+  if (other >= 0 && clauses[other].values.includes(value)) {
+    const rest = clauses[other].values.filter((v) => v !== value);
+    clauses = rest.length ? clauses.map((c, i) => (i === other ? { ...c, values: rest } : c)) : clauses.filter((_, i) => i !== other);
+  }
+  const idx = find(exclude);
+  if (had) {
+    const rest = clauses[idx].values.filter((v) => v !== value);
+    clauses = rest.length ? clauses.map((c, i) => (i === idx ? { ...c, values: rest } : c)) : clauses.filter((_, i) => i !== idx);
+  } else if (idx >= 0) {
+    clauses = clauses.map((c, i) => (i === idx ? { ...c, values: [...c.values, value] } : c));
+  } else {
+    clauses.push({ id: '', field, op: def.defaultOp, values: [value], source: 'facet', ...(exclude ? { exclude: true } : {}) });
   }
   return { ...q, clauses: renumber(clauses), view: { ...q.view, page: undefined } };
 }
@@ -469,13 +533,34 @@ const ROLE_WORDS: Record<SearchDateRole, string> = {
 export function describeClause(c: Clause, labels: Record<string, string> = {}): string {
   const def = fieldDef(c.field);
   if (!def) return c.values.join(', ');
-  const named = c.values.map((v) => labels[v] ?? (c.field === 'status' ? STATUS_LABELS[v] ?? v : v));
+  const named = c.values.map((v) => labels[v] ?? enumLabel(c.field, v));
   switch (c.field) {
     case 'supplier':
     case 'document_type':
     case 'product':
     case 'status':
+    case 'requirement':
+    case 'claim':
+    case 'spec_verdict':
+    case 'renewal_state':
+    case 'classification':
+    case 'owner':
+    case 'intake_source':
       return `${def.label}: ${c.exclude ? 'not ' : ''}${orList(named)}`;
+    case 'approved': {
+      if (c.op === 'missing') return 'Approved: not recorded';
+      const bucket = UPLOADED_BUCKETS.find((b) => b.value === `${c.op}:${c.values[0]}`);
+      if (bucket) return `Approved: ${bucket.label.toLowerCase()}`;
+      if (c.op === 'within') return `Approved in the last ${c.values[0]} days`;
+      if (c.op === 'older_than') return `Approved more than ${c.values[0]} days ago`;
+      break;
+    }
+    case 'document_number':
+      return `Document # ${c.values[0]}`;
+    case 'certificate_number':
+      return `Certificate # ${c.values[0]}`;
+    case 'customer':
+      return `Customer: ${named[0]}`;
     case 'uploaded': {
       const bucket = UPLOADED_BUCKETS.find((b) => b.value === `${c.op}:${c.values[0]}`);
       if (bucket) return `Uploaded: ${bucket.label.toLowerCase()}`;
@@ -499,7 +584,7 @@ export function describeClause(c: Clause, labels: Record<string, string> = {}): 
     default:
       break;
   }
-  const label = c.field === 'date' ? ROLE_WORDS[c.role ?? 'any'] : c.field === 'uploaded' ? 'Uploaded' : def.label;
+  const label = c.field === 'date' ? ROLE_WORDS[c.role ?? 'any'] : def.label;
   const [a, b] = c.values;
   switch (c.op) {
     case 'on': return `${label} ${humanDate(a)}`;

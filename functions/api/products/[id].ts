@@ -1,3 +1,4 @@
+import { drainSoon } from '../../lib/search-reindex';
 import { logAudit, getClientIp } from '../../lib/db';
 import {
   requireRole,
@@ -173,6 +174,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       .bind(productId)
       .first();
 
+    drainSoon(context, context.env.DB);
     return new Response(
       JSON.stringify({ product: updated }),
       { headers: { 'Content-Type': 'application/json' } }

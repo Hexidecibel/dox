@@ -43,6 +43,9 @@ import type {
   SearchOrderEvidence,
   SearchKeyKind,
   SearchDocLot,
+  SearchDocColumns,
+  SearchGroupRow,
+  SearchGroups,
   SearchQueryResponse,
   SearchUnreviewedCandidate,
   UniversalSearchDocument,
@@ -50,14 +53,20 @@ import type {
 import type { Clause, SearchQuery } from '../../../shared/searchQuery';
 import { describeClause } from '../../../shared/searchQuery';
 import {
+  appliesTo,
   clauseToConstraint,
+  DATE_FACETS,
+  enumLabel,
   FACET_FIELDS,
+  NONE_VALUE,
   SEARCH_FIELDS,
   STATUS_LABELS,
   UPLOADED_BUCKETS,
   validateClause,
   type ConstraintContext,
   type FacetField,
+  type FieldKey,
+  type SearchEntity,
 } from '../../../shared/searchFields';
 import {
   answeringLotRows,
@@ -69,7 +78,8 @@ import {
   type CoverageSubject,
   type SubjectVerdict,
 } from '../../../shared/searchCoverage';
-import { customerPoSpellings, DATE_KEY_KINDS, foldCustomerPo, IDENTIFIER_KEY_KINDS, normalizeKeyValue, stripKeyword } from '../../../shared/searchKeys';
+import { customerPoSpellings, DATE_KEY_KINDS, foldCustomerPo, IDENTIFIER_KEY_FIELDS, IDENTIFIER_KEY_KINDS, normalizeKeyValue, stripKeyword } from '../../../shared/searchKeys';
+import { CUSTOMER_ORDER_CAP } from '../../../shared/searchCoverage';
 import { normalizeLotNumber } from '../../../shared/lotNormalize';
 import { decodeLot, formatLotIso, lotSchemeLabel } from '../../../shared/lotScheme';
 import { BadRequestError } from '../permissions';
@@ -98,9 +108,21 @@ import {
   type QueueScanRow,
 } from '../search-coverage';
 import { catalogFromRows, loadProductCatalog, productCatalogStatement, type CatalogRow } from '../product-identifiers';
-import { compileScope, scopeHolds, scopeWhere, uploadedBounds, type CompiledScope, type ScopeAttrs } from './compileScope';
+import {
+  compileScope,
+  renewalStateSql,
+  scopeAttrColumns,
+  scopeAttrsFromRow,
+  scopeHolds,
+  scopeWhere,
+  SPEC_VERDICT_SQL,
+  uploadedBounds,
+  type CompiledScope,
+  type ScopeAttrRow,
+  type ScopeAttrs,
+} from './compileScope';
 import { drainDocumentKeyJobs } from './keys';
-import { detectProduct, lotPrefixNote, resolveDetections, scanHasCandidates, scanNorms, scanOrderValues, scanResidualWords, scanText, type DetectionHits } from './interpret';
+import { detectProduct, lotPrefixNote, resolveDetections, scanHasCandidates, scanMayNameProduct, scanNorms, scanOrderValues, scanText, type DetectionHits } from './interpret';
 import type { LotSchemeSpec } from '../../../shared/lotScheme';
 
 /** Pending key rebuilds a search drains before it reads keys. */
@@ -206,7 +228,21 @@ export interface RunSearchInput {
   interpret: boolean;
   now?: Date;
   repairLimit?: number;
+  /** Which facets to count (default: every facet). Easy mode asks for its five. */
+  facetFields?: readonly FacetField[];
 }
+
+/** The facets this request counts, in sidebar order. */
+function activeFacetFields(input: RunSearchInput): FacetField[] {
+  if (!input.facets) return [];
+  const want = input.facetFields && input.facetFields.length ? new Set<string>(input.facetFields) : null;
+  return FACET_FIELDS.filter((f) => !want || want.has(f));
+}
+
+/** Rows a Lots / Products / Suppliers mode returns at most. */
+export const GROUP_CAP = 200;
+/** Documents a group row names (for "show documents"). */
+const GROUP_DOC_IDS = 20;
 
 /** Refuse a clause that cannot mean one thing (400, with the reason in words). */
 export function validateQuery(q: SearchQuery): void {
@@ -247,6 +283,16 @@ function labelStatement(db: D1Database, tenantId: string, scope: CompiledScope):
     parts.push(`SELECT 'product' AS kind, id, name, NULL AS extra FROM products WHERE tenant_id = ? AND id IN (${ph(pr.length)})`);
     params.push(tenantId, ...pr);
   }
+  const rq = ids('requirement');
+  if (rq.length) {
+    parts.push(`SELECT 'requirement' AS kind, id, name, NULL AS extra FROM requirements WHERE tenant_id = ? AND id IN (${ph(rq.length)})`);
+    params.push(tenantId, ...rq);
+  }
+  const cl = ids('claim');
+  if (cl.length) {
+    parts.push(`SELECT 'claim' AS kind, id, name, NULL AS extra FROM claim_types WHERE tenant_id = ? AND id IN (${ph(cl.length)})`);
+    params.push(tenantId, ...cl);
+  }
   if (!parts.length) return null;
   return db.prepare(parts.join(' UNION ALL ')).bind(...params);
 }
@@ -262,32 +308,272 @@ function scopeSummary(scope: CompiledScope, labels: Record<string, string>): str
 
 function withSelected(field: FacetField, rows: FacetCount[], scope: CompiledScope, labels: Record<string, string>): FacetCount[] {
   // A ticked value stays visible (count 0) so it can be unticked where it was ticked.
-  const selected = scope.clauses.filter((c) => c.field === field && !c.exclude).flatMap((c) => c.values);
+  // An EXCLUDED value stays visible too (count 0), so it can be un-excluded where it was.
+  const chosen = scope.clauses.filter((c) => c.field === field).flatMap((c) => c.values);
   const out = [...rows];
-  if (field === 'uploaded') return out;
-  for (const v of selected) {
-    if (!out.some((r) => r.value === v)) out.push({ value: v, label: labels[v] ?? STATUS_LABELS[v] ?? v, count: 0 });
+  if (DATE_FACETS.has(field)) return out;
+  for (const v of chosen) {
+    if (!out.some((r) => r.value === v)) out.push({ value: v, label: labels[v] ?? enumLabel(field, v), count: 0 });
   }
   return out;
 }
 
-function uploadedFacet(counts: number[]): FacetCount[] {
-  return UPLOADED_BUCKETS.map((b, i) => ({ value: b.value, label: b.label, count: Number(counts[i] ?? 0) }))
+/** The value a "not recorded" approval bucket carries (op `missing`). */
+export const MISSING_BUCKET = 'missing:1';
+
+function uploadedFacet(counts: number[], missing?: number): FacetCount[] {
+  const out = UPLOADED_BUCKETS.map((b, i) => ({ value: b.value, label: b.label, count: Number(counts[i] ?? 0) }))
     .filter((f) => f.count > 0);
+  if (missing) out.push({ value: MISSING_BUCKET, label: 'Not recorded', count: missing });
+  return out;
 }
 
-function uploadedCaseColumns(today: string): { sql: string; params: string[] } {
+function uploadedCaseColumns(today: string, col = 'b.created_at'): { sql: string; params: string[] } {
   const params: string[] = [];
   const cols = UPLOADED_BUCKETS.map((b, i) => {
-    const bounds = uploadedBounds({ id: '', field: 'uploaded', op: b.op, values: [String(b.days)], source: 'facet' }, today);
+    const bounds = uploadedBounds({ op: b.op, values: [String(b.days)] }, today);
     if (bounds.from) {
       params.push(bounds.from);
-      return `SUM(CASE WHEN b.created_at >= ? THEN 1 ELSE 0 END) AS b${i}`;
+      return `SUM(CASE WHEN ${col} >= ? THEN 1 ELSE 0 END) AS b${i}`;
     }
     params.push(bounds.to!);
-    return `SUM(CASE WHEN b.created_at < ? THEN 1 ELSE 0 END) AS b${i}`;
+    return `SUM(CASE WHEN ${col} < ? THEN 1 ELSE 0 END) AS b${i}`;
   });
   return { sql: cols.join(', '), params };
+}
+
+/** The computed (or NULL-able) column an enum facet groups on. */
+function enumFacetColumn(field: FacetField, today: string): string | null {
+  switch (field) {
+    case 'status': return 'd.status';
+    case 'classification': return 'd.classification_status';
+    case 'owner': return `NULLIF(TRIM(d.owner), '')`;
+    case 'intake_source': return `NULLIF(TRIM(d.intake_source), '')`;
+    case 'spec_verdict': return SPEC_VERDICT_SQL;
+    case 'renewal_state': return renewalStateSql(today);
+    default: return null;
+  }
+}
+
+/**
+ * One facet's statement over the scope/text path's `base` CTE: which columns
+ * `base` must carry, and the SELECT that counts. Positional parameters bind in
+ * textual order — the CTE's, then `extra`.
+ */
+function facetStatement(field: FacetField, today: string): { cols: string; select: string; extra: unknown[] } {
+  const enumCol = enumFacetColumn(field, today);
+  if (enumCol) {
+    return {
+      cols: `${enumCol} AS v`,
+      select: `SELECT COALESCE(b.v, '${NONE_VALUE}') AS value, COUNT(*) AS count FROM base b GROUP BY 1 ORDER BY count DESC, value ASC LIMIT 50`,
+      extra: [],
+    };
+  }
+  switch (field) {
+    case 'supplier':
+      return {
+        cols: 'd.supplier_id',
+        select: `SELECT b.supplier_id AS value, s.name AS label, COUNT(*) AS count
+                   FROM base b JOIN suppliers s ON s.id = b.supplier_id
+                  GROUP BY b.supplier_id ORDER BY count DESC, label ASC LIMIT 50`,
+        extra: [],
+      };
+    case 'document_type':
+      return {
+        cols: 'd.document_type_id',
+        select: `SELECT b.document_type_id AS value, dt.name AS label, COUNT(*) AS count
+                   FROM base b JOIN document_types dt ON dt.id = b.document_type_id
+                  GROUP BY b.document_type_id ORDER BY count DESC, label ASC LIMIT 50`,
+        extra: [],
+      };
+    case 'product':
+      return {
+        cols: '',
+        select: `SELECT x.product_id AS value, p.name AS label, COUNT(DISTINCT x.document_id) AS count
+                   FROM (SELECT dp.document_id, dp.product_id FROM document_products dp WHERE dp.document_id IN (SELECT id FROM base)
+                         UNION
+                         SELECT dl.document_id, l.product_id FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
+                          WHERE dl.document_id IN (SELECT id FROM base) AND l.product_id IS NOT NULL) x
+                   JOIN products p ON p.id = x.product_id
+                  GROUP BY x.product_id ORDER BY count DESC, label ASC LIMIT 50`,
+        extra: [],
+      };
+    case 'requirement':
+      return {
+        cols: '',
+        select: `SELECT dr.requirement_id AS value, r.name AS label, COUNT(DISTINCT dr.document_id) AS count
+                   FROM document_requirements dr JOIN requirements r ON r.id = dr.requirement_id
+                  WHERE dr.document_id IN (SELECT id FROM base) AND dr.status != 'rejected'
+                  GROUP BY dr.requirement_id ORDER BY count DESC, label ASC LIMIT 50`,
+        extra: [],
+      };
+    case 'claim':
+      return {
+        cols: '',
+        select: `SELECT dc.claim_type_id AS value, ct.name AS label, COUNT(DISTINCT dc.document_id) AS count
+                   FROM document_claims dc JOIN claim_types ct ON ct.id = dc.claim_type_id
+                  WHERE dc.document_id IN (SELECT id FROM base) AND dc.status != 'rejected'
+                  GROUP BY dc.claim_type_id ORDER BY count DESC, label ASC LIMIT 50`,
+        extra: [],
+      };
+    case 'uploaded': {
+      const c = uploadedCaseColumns(today, 'b.at');
+      return { cols: 'd.created_at AS at', select: `SELECT ${c.sql} FROM base b`, extra: c.params };
+    }
+    case 'approved': {
+      const c = uploadedCaseColumns(today, 'b.at');
+      return {
+        cols: 'd.approved_at AS at',
+        select: `SELECT ${c.sql}, SUM(CASE WHEN b.at IS NULL THEN 1 ELSE 0 END) AS bmissing FROM base b`,
+        extra: c.params,
+      };
+    }
+    default:
+      return { cols: '', select: 'SELECT NULL AS value, 0 AS count WHERE 0', extra: [] };
+  }
+}
+
+/** A facet statement's rows as facet options. */
+function facetFromRows(field: FacetField, rows: Array<Record<string, unknown>>): FacetCount[] {
+  if (DATE_FACETS.has(field)) {
+    const r = rows[0] ?? {};
+    // A date bucket needs at least one day on file to mean anything; an
+    // approval facet over documents none of which record one still offers
+    // "Not recorded" so the gap is visible.
+    const counts = UPLOADED_BUCKETS.map((_, i) => Number(r[`b${i}`] ?? 0));
+    return uploadedFacet(counts, field === 'approved' ? Number(r.bmissing ?? 0) : undefined);
+  }
+  return rows.filter((r) => r.value != null).map((r) => ({
+    value: String(r.value),
+    label: r.label != null ? String(r.label) : enumLabel(field, String(r.value)),
+    count: Number(r.count ?? 0),
+  }));
+}
+
+// ===========================================================================
+// Result modes (Lots / Products / Suppliers) and the Advanced table's columns
+// ===========================================================================
+
+function idList(v: unknown, sep = ','): string[] {
+  return typeof v === 'string' && v ? [...new Set(v.split(sep).filter(Boolean))].slice(0, GROUP_DOC_IDS) : [];
+}
+
+/** The scope path's group statement: the result mode's rows over the whole matching set. */
+function groupStatement(entity: Exclude<SearchEntity, 'documents'>): { cols: string; select: string } {
+  switch (entity) {
+    case 'suppliers':
+      return {
+        cols: 'd.supplier_id',
+        select: `SELECT b.supplier_id AS key, s.name AS label, NULL AS detail, COUNT(*) AS n,
+                        GROUP_CONCAT(b.id) AS ids, COUNT(*) OVER () AS total
+                   FROM base b JOIN suppliers s ON s.id = b.supplier_id
+                  GROUP BY b.supplier_id ORDER BY n DESC, label ASC LIMIT ?`,
+      };
+    case 'products':
+      return {
+        cols: '',
+        select: `SELECT x.product_id AS key, p.name AS label,
+                        (SELECT GROUP_CONCAT(pi.value, ' · ') FROM product_identifiers pi
+                          WHERE pi.product_id = x.product_id AND pi.kind = 'our_sku') AS detail,
+                        COUNT(DISTINCT x.document_id) AS n, COUNT(DISTINCT x.lot_id) AS lots, MAX(x.pd) AS latest,
+                        GROUP_CONCAT(DISTINCT x.document_id) AS ids, COUNT(*) OVER () AS total
+                   FROM (SELECT dp.document_id, dp.product_id, NULL AS lot_id, NULL AS pd
+                           FROM document_products dp WHERE dp.document_id IN (SELECT id FROM base)
+                         UNION ALL
+                         SELECT dl.document_id, l.product_id, l.id, l.production_date
+                           FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
+                          WHERE dl.document_id IN (SELECT id FROM base) AND l.product_id IS NOT NULL) x
+                   JOIN products p ON p.id = x.product_id
+                  GROUP BY x.product_id ORDER BY n DESC, label ASC LIMIT ?`,
+      };
+    case 'lots':
+      return {
+        cols: '',
+        select: `SELECT l.id AS key,
+                        l.lot_number || CASE WHEN COALESCE(l.sub_lot_code, '') != '' THEN ' · sublot ' || l.sub_lot_code ELSE '' END AS label,
+                        TRIM(COALESCE(s.name, '') || CASE WHEN p.name IS NOT NULL THEN ' · ' || p.name ELSE '' END) AS detail,
+                        COUNT(DISTINCT dl.document_id) AS n, l.production_date AS latest,
+                        GROUP_CONCAT(DISTINCT dl.document_id) AS ids, COUNT(*) OVER () AS total
+                   FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
+                   LEFT JOIN suppliers s ON s.id = l.supplier_id
+                   LEFT JOIN products p ON p.id = l.product_id
+                  WHERE dl.document_id IN (SELECT id FROM base)
+                  GROUP BY l.id ORDER BY l.production_date IS NULL, l.production_date DESC, label ASC LIMIT ?`,
+      };
+  }
+}
+
+function groupHref(entity: Exclude<SearchEntity, 'documents'>, key: string): string | null {
+  if (entity === 'suppliers') return `/admin/suppliers/${key}`;
+  if (entity === 'products') return `/admin/products/${key}`;
+  return null;
+}
+
+function groupsFromRows(entity: Exclude<SearchEntity, 'documents'>, rows: Array<Record<string, unknown>>): SearchGroups {
+  const out: SearchGroupRow[] = rows.filter((r) => r.key != null).map((r) => ({
+    key: String(r.key),
+    label: String(r.label ?? r.key),
+    detail: r.detail ? String(r.detail) : null,
+    href: groupHref(entity, String(r.key)),
+    document_count: Number(r.n ?? 0),
+    ...(r.lots !== undefined ? { lot_count: Number(r.lots ?? 0) } : {}),
+    ...(r.latest !== undefined ? { latest_production_date: r.latest ? String(r.latest) : null } : {}),
+    document_ids: idList(r.ids),
+  }));
+  const total = rows.length ? Number(rows[0].total ?? rows.length) : 0;
+  return { entity, rows: out, total, capped: total > out.length };
+}
+
+function metaText(meta: Record<string, unknown>, keys: string[]): string | null {
+  for (const k of keys) {
+    const v = meta[k];
+    if (v == null) continue;
+    const t = typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '';
+    if (t) return t;
+  }
+  return null;
+}
+
+/** The Advanced table's optional values for one document. */
+export function docColumnsFrom(input: {
+  metadata: Record<string, unknown>;
+  products: string[];
+  lots: Array<{ lot_number: string; sub_lot_code?: string | null; production_date?: string | null }>;
+  attrs: Partial<ScopeAttrs>;
+  renewal_due_date: string | null;
+}): SearchDocColumns {
+  const m = input.metadata;
+  const lots = [...new Set(input.lots.map((l) => (l.sub_lot_code ? `${l.lot_number} · ${l.sub_lot_code}` : l.lot_number)).filter(Boolean))];
+  const prodDates = input.lots.map((l) => l.production_date).filter((d): d is string => !!d).sort();
+  const code = metaText(m, ['code_date']);
+  const bestBy = metaText(m, ['best_by', 'best_by_date', 'best_before', 'expiration_date']);
+  return {
+    products: [...new Set(input.products.filter(Boolean))],
+    lots,
+    production: prodDates.length ? prodDates[prodDates.length - 1] : metaText(m, ['production_date', 'mfg_date', 'manufacture_date']),
+    code_best_by: [code ? `code ${code}` : null, bestBy ? `best by ${bestBy}` : null].filter(Boolean).join(' · ') || null,
+    renewal_due: input.renewal_due_date,
+    renewal_state: input.attrs.renewal_state ?? null,
+    spec_verdict: input.attrs.spec_verdict ?? null,
+    classification: input.attrs.classification ?? null,
+    owner: input.attrs.owner ?? null,
+    intake_source: input.attrs.intake_source ?? null,
+    approved: input.attrs.approved_at ?? null,
+    document_number: metaText(m, IDENTIFIER_KEY_FIELDS.document_number),
+    certificate_number: metaText(m, IDENTIFIER_KEY_FIELDS.certificate_number),
+    po: metaText(m, IDENTIFIER_KEY_FIELDS.supplier_po) ?? metaText(m, IDENTIFIER_KEY_FIELDS.customer_po),
+    shelf_life: metaText(m, ['shelf_life']),
+  };
+}
+
+function parseMeta(v: unknown): Record<string, unknown> {
+  if (typeof v !== 'string' || !v) return {};
+  try {
+    const o = JSON.parse(v);
+    return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 }
 
 // ===========================================================================
@@ -304,6 +590,40 @@ const PAGE_COLUMNS = `d.*, u.name AS creator_name, t.name AS tenant_name,
   s.name AS supplier_name,
   COALESCE(d.renewal_due_date, json_extract(d.primary_metadata, '$.expiration_date')) AS expiration,
   COUNT(*) OVER () AS total_count`;
+
+/** The Advanced table's extra values, per page row (a page is at most 200 rows). */
+function pageColumnExtras(today: string): string {
+  return `(SELECT GROUP_CONCAT(pn.name, char(31)) FROM products pn
+            WHERE pn.id IN (SELECT dpc.product_id FROM document_products dpc WHERE dpc.document_id = d.id
+                            UNION SELECT lc.product_id FROM document_lots dlc JOIN lots lc ON lc.id = dlc.lot_id
+                             WHERE dlc.document_id = d.id AND lc.product_id IS NOT NULL)) AS col_products,
+  (SELECT GROUP_CONCAT(COALESCE(ll.lot_number, '') || char(30) || COALESCE(ll.sub_lot_code, '') || char(30) || COALESCE(ll.production_date, ''), char(31))
+     FROM document_lots dll JOIN lots ll ON ll.id = dll.lot_id WHERE dll.document_id = d.id) AS col_lots,
+  ${scopeAttrColumns(today)}`;
+}
+
+/** Split a scope-path page row into the document and its column values. */
+function splitPageRow(row: Record<string, unknown>): { doc: Record<string, unknown>; columns: SearchDocColumns } {
+  const doc: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (!k.startsWith('col_') && !k.startsWith('scope_') && k !== 'total_count') doc[k] = v;
+  }
+  const lots = (typeof row.col_lots === 'string' && row.col_lots ? row.col_lots.split('\u001f') : []).map((x) => {
+    const [lot_number, sub_lot_code, production_date] = x.split('\u001e');
+    return { lot_number, sub_lot_code: sub_lot_code || null, production_date: production_date || null };
+  });
+  const products = typeof row.col_products === 'string' && row.col_products ? row.col_products.split('\u001f') : [];
+  return {
+    doc,
+    columns: docColumnsFrom({
+      metadata: { ...parseMeta(row.extended_metadata), ...parseMeta(row.primary_metadata) },
+      products,
+      lots,
+      attrs: scopeAttrsFromRow(row as ScopeAttrRow),
+      renewal_due_date: (row.renewal_due_date as string | null) ?? null,
+    }),
+  };
+}
 
 function orderByFor(sort: string | undefined, hasMatch: boolean): string {
   switch (sort) {
@@ -333,11 +653,12 @@ async function runScopePath(
                 snippet(documents_fts, ${DOCUMENTS_FTS_COLS.supplier_text}, '<mark>', '</mark>', '…', 8) AS snippet_supplier
            FROM documents_fts f WHERE f.tenant_id = ? AND documents_fts MATCH ?)`
     : '';
+  const entity = input.query.view?.entity ?? 'documents';
   const pageIdx = batch.add(
     db.prepare(
       `${matchCte}
        SELECT ${expr ? 'm.rank AS rank, m.snippet AS snippet, m.snippet_extracted AS snippet_extracted, m.snippet_supplier AS snippet_supplier,' : ''}
-              ${PAGE_COLUMNS}
+              ${PAGE_COLUMNS}, ${pageColumnExtras(scope.today)}
          FROM ${expr ? 'matches m JOIN documents d ON d.id = m.doc_id' : 'documents d'}
          ${PAGE_JOINS}
         WHERE ${where.sql}
@@ -346,50 +667,30 @@ async function runScopePath(
     ).bind(...(expr ? [tenantId, expr] : []), ...where.params, input.limit, input.offset),
   );
 
-  const facetIdx: Partial<Record<FacetField, number>> = {};
-  if (input.facets) {
-    for (const field of FACET_FIELDS) {
-      const w = scopeWhere(scope, tenantId, field);
-      const base = `${expr ? 'WITH matches AS (SELECT f.doc_id FROM documents_fts f WHERE f.tenant_id = ? AND documents_fts MATCH ?),' : 'WITH'}
-        base AS (SELECT d.id, d.supplier_id, d.document_type_id, d.status, d.created_at
+  // Every facet and the result mode's rows are counted over a `base` CTE: the
+  // scope (less the facet's own selection — sticky exclusion) and the text.
+  const baseFor = (except: FieldKey | undefined, cols: string) => {
+    const w = scopeWhere(scope, tenantId, except);
+    return {
+      sql: `${expr ? 'WITH matches AS (SELECT f.doc_id FROM documents_fts f WHERE f.tenant_id = ? AND documents_fts MATCH ?),' : 'WITH'}
+        base AS (SELECT d.id${cols ? `, ${cols}` : ''}
                    FROM ${expr ? 'matches m JOIN documents d ON d.id = m.doc_id' : 'documents d'}
-                  WHERE ${w.sql})`;
-      const pre = [...(expr ? [tenantId, expr] : []), ...w.params];
-      let sql: string;
-      let extra: unknown[] = [];
-      switch (field) {
-        case 'supplier':
-          sql = `${base} SELECT b.supplier_id AS value, s.name AS label, COUNT(*) AS count
-                   FROM base b JOIN suppliers s ON s.id = b.supplier_id
-                  GROUP BY b.supplier_id ORDER BY count DESC, label ASC LIMIT 50`;
-          break;
-        case 'document_type':
-          sql = `${base} SELECT b.document_type_id AS value, dt.name AS label, COUNT(*) AS count
-                   FROM base b JOIN document_types dt ON dt.id = b.document_type_id
-                  GROUP BY b.document_type_id ORDER BY count DESC, label ASC LIMIT 50`;
-          break;
-        case 'product':
-          sql = `${base} SELECT x.product_id AS value, p.name AS label, COUNT(DISTINCT x.document_id) AS count
-                   FROM (SELECT dp.document_id, dp.product_id FROM document_products dp WHERE dp.document_id IN (SELECT id FROM base)
-                         UNION
-                         SELECT dl.document_id, l.product_id FROM document_lots dl JOIN lots l ON l.id = dl.lot_id
-                          WHERE dl.document_id IN (SELECT id FROM base) AND l.product_id IS NOT NULL) x
-                   JOIN products p ON p.id = x.product_id
-                  GROUP BY x.product_id ORDER BY count DESC, label ASC LIMIT 50`;
-          break;
-        case 'status':
-          sql = `${base} SELECT b.status AS value, b.status AS label, COUNT(*) AS count FROM base b GROUP BY b.status ORDER BY count DESC`;
-          break;
-        case 'uploaded': {
-          const cols = uploadedCaseColumns(scope.today);
-          sql = `${base} SELECT ${cols.sql} FROM base b`;
-          extra = cols.params;
-          break;
-        }
-      }
-      // Positional parameters bind in textual order: the CTE's, then the SELECT list's.
-      facetIdx[field] = batch.add(db.prepare(sql).bind(...pre, ...extra));
-    }
+                  WHERE ${w.sql})`,
+      params: [...(expr ? [tenantId, expr] : []), ...w.params],
+    };
+  };
+  const facetFields = activeFacetFields(input);
+  const facetIdx: Partial<Record<FacetField, number>> = {};
+  for (const field of facetFields) {
+    const f = facetStatement(field, scope.today);
+    const b = baseFor(field, f.cols);
+    facetIdx[field] = batch.add(db.prepare(`${b.sql} ${f.select}`).bind(...b.params, ...f.extra));
+  }
+  let groupIdx: number | null = null;
+  if (entity !== 'documents') {
+    const g = groupStatement(entity);
+    const b = baseFor(undefined, g.cols);
+    groupIdx = batch.add(db.prepare(`${b.sql} ${g.select}`).bind(...b.params, GROUP_CAP));
   }
   const lblStmt = labelStatement(db, tenantId, scope);
   const labelIdx = lblStmt ? batch.add(lblStmt) : null;
@@ -399,25 +700,18 @@ async function runScopePath(
   for (const r of batch.rows<LabelRow>(labelIdx)) labels[r.id] = r.name;
   const pageRows = batch.rows<Record<string, unknown> & { total_count?: number }>(pageIdx);
   const total = pageRows.length ? Number(pageRows[0].total_count ?? 0) : 0;
-  const documents = pageRows.map(({ total_count: _t, ...rest }) => rest) as unknown as UniversalSearchDocument[];
+  const columns: Record<string, SearchDocColumns> = {};
+  const documents = pageRows.map((row) => {
+    const { doc, columns: cols } = splitPageRow(row);
+    columns[String(doc.id)] = cols;
+    return doc;
+  }) as unknown as UniversalSearchDocument[];
 
   let facets: SearchQueryResponse['facets'];
-  if (input.facets) {
+  if (facetFields.length) {
     facets = {};
-    for (const field of FACET_FIELDS) {
-      const rows = batch.rows<Record<string, unknown>>(facetIdx[field]);
-      let list: FacetCount[];
-      if (field === 'uploaded') {
-        const r = rows[0] ?? {};
-        list = uploadedFacet(UPLOADED_BUCKETS.map((_, i) => Number(r[`b${i}`] ?? 0)));
-      } else {
-        list = rows.filter((r) => r.value != null).map((r) => ({
-          value: String(r.value),
-          label: field === 'status' ? STATUS_LABELS[String(r.value)] ?? String(r.value) : String(r.label ?? r.value),
-          count: Number(r.count ?? 0),
-        }));
-      }
-      facets[field] = withSelected(field, list, scope, labels);
+    for (const field of facetFields) {
+      facets[field] = withSelected(field, facetFromRows(field, batch.rows<Record<string, unknown>>(facetIdx[field])), scope, labels);
     }
   }
 
@@ -434,6 +728,8 @@ async function runScopePath(
     constraints: [],
     dropped_constraints: [],
     coverage_summary: null,
+    columns,
+    ...(entity !== 'documents' && groupIdx !== null ? { groups: groupsFromRows(entity, batch.rows(groupIdx)) } : {}),
     stats: { ...stats, candidates: 0, scan_fallback: false },
   };
 }
@@ -442,14 +738,18 @@ async function runScopePath(
 // The identifying (coverage) path
 // ===========================================================================
 
-const SCOPE_EXTRA_COLUMNS = `d.document_type_id AS scope_document_type_id, d.status AS scope_status,
+/** What each candidate carries besides the judge's own projection: every scope attribute. */
+function scopeExtraColumns(today: string): string {
+  return `d.document_type_id AS scope_document_type_id, d.status AS scope_status,
   (SELECT GROUP_CONCAT(dp.product_id || char(30) || COALESCE(p.name, ''), char(31))
      FROM document_products dp LEFT JOIN products p ON p.id = dp.product_id WHERE dp.document_id = d.id) AS scope_dp_products,
   (SELECT GROUP_CONCAT(l.product_id || char(30) || COALESCE(p2.name, ''), char(31))
      FROM document_lots dl JOIN lots l ON l.id = dl.lot_id LEFT JOIN products p2 ON p2.id = l.product_id
-    WHERE dl.document_id = d.id AND l.product_id IS NOT NULL) AS scope_lot_products`;
+    WHERE dl.document_id = d.id AND l.product_id IS NOT NULL) AS scope_lot_products,
+  ${scopeAttrColumns(today)}`;
+}
 
-type SubjectRow = DocScanRow & {
+type SubjectRow = DocScanRow & ScopeAttrRow & {
   scope_document_type_id: string | null;
   scope_status: string | null;
   scope_dp_products: string | null;
@@ -461,6 +761,7 @@ interface Loaded {
   attrs: ScopeAttrs;
   productNames: Map<string, string>;
   updatedAt: string;
+  renewalDueDate: string | null;
 }
 
 function loadedFromRow(r: SubjectRow): Loaded {
@@ -481,9 +782,11 @@ function loadedFromRow(r: SubjectRow): Loaded {
       product_ids: [...productNames.keys()],
       status: r.scope_status,
       created_at: r.created_at,
+      ...scopeAttrsFromRow(r),
     },
     productNames,
     updatedAt: r.updated_at ?? '',
+    renewalDueDate: r.renewal_due_date ?? null,
   };
 }
 
@@ -520,9 +823,84 @@ function readsKeys(c: SearchConstraint): boolean {
   return c.kind === 'po' || c.kind === 'invoice' || c.kind === 'identifier' || c.kind === 'date' || c.kind === 'lot';
 }
 
-interface OrderRow { id: string; order_number: string; po_number: string | null; customer_name: string | null }
+interface OrderRow { id: string; order_number: string; po_number: string | null; customer_name: string | null; customer_id?: string | null }
+
+/** Customers a customer clause names: their name and how many live WMS orders they have. */
+interface CustomerRow { id: string; name: string; order_count: number }
 
 interface SupplierScheme { id: string; name: string; spec: string | null }
+
+/** Names for the requirement / claim ids the answering documents carry (read with them, no extra statement). */
+function facetEntityLabels(attrs: ScopeAttrs[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const a of attrs) for (const [id, name] of Object.entries(a.names ?? {})) out.set(id, name);
+  return out;
+}
+
+type JudgedRow = { id: string; verdict: SubjectVerdict; l: Loaded; inScope: boolean };
+
+/**
+ * The result mode's rows over the ANSWERS (covering + likely) of an
+ * identifying search — nearby candidates never make a row. A lot row appears
+ * only where it is a row that answers (`answeringLotRows`), so a four-lot
+ * certificate asked for one lot contributes that lot, not all four.
+ */
+function groupsFromJudged(
+  entity: Exclude<SearchEntity, 'documents'>,
+  answers: JudgedRow[],
+  constraints: SearchConstraint[],
+  dropped: SearchDroppedConstraint[],
+): SearchGroups {
+  const rows = new Map<string, SearchGroupRow & { _docs: Set<string>; _lots: Set<string> }>();
+  const touch = (key: string, label: string, detail: string | null, j: JudgedRow, lot?: { id: string; date: string | null }) => {
+    let r = rows.get(key);
+    if (!r) {
+      r = { key, label, detail, href: groupHref(entity, key), document_count: 0, covering_count: 0, likely_count: 0, document_ids: [], _docs: new Set(), _lots: new Set() };
+      if (entity !== 'suppliers') { r.lot_count = 0; r.latest_production_date = null; }
+      rows.set(key, r);
+    }
+    if (!r._docs.has(j.id)) {
+      r._docs.add(j.id);
+      r.document_count++;
+      if (j.verdict.status === 'covering') r.covering_count = (r.covering_count ?? 0) + 1;
+      else r.likely_count = (r.likely_count ?? 0) + 1;
+      if (r.document_ids.length < GROUP_DOC_IDS) r.document_ids.push(j.id);
+    }
+    if (lot && !r._lots.has(lot.id)) {
+      r._lots.add(lot.id);
+      r.lot_count = r._lots.size;
+      if (lot.date && (!r.latest_production_date || lot.date > r.latest_production_date)) r.latest_production_date = lot.date;
+    }
+  };
+  for (const j of answers) {
+    const s = j.l.subject;
+    if (entity === 'suppliers') {
+      if (j.l.attrs.supplier_id) touch(j.l.attrs.supplier_id, s.supplier_name ?? j.l.attrs.supplier_id, null, j);
+      continue;
+    }
+    const lots = answeringLotRows(s, constraints, dropped, j.verdict.status);
+    const rowsOf = lots.length ? lots : s.lots;
+    if (entity === 'lots') {
+      for (const l of rowsOf) {
+        const key = l.lot_id ?? `${l.lot_key}|${j.l.attrs.supplier_id ?? ''}`;
+        const label = l.sub_lot_code ? `${l.lot_number} · sublot ${l.sub_lot_code}` : l.lot_number;
+        touch(key, label, [s.supplier_name, l.product_name].filter(Boolean).join(' · ') || null, j, { id: key, date: l.production_date ?? null });
+      }
+      continue;
+    }
+    for (const [pid, name] of j.l.productNames) {
+      touch(pid, name, null, j);
+      for (const l of rowsOf) {
+        if (l.product_name && l.product_name !== name) continue;
+        touch(pid, name, null, j, { id: l.lot_id ?? l.lot_key, date: l.production_date ?? null });
+      }
+    }
+  }
+  const list = [...rows.values()]
+    .sort((a, b) => (b.covering_count ?? 0) - (a.covering_count ?? 0) || b.document_count - a.document_count || a.label.localeCompare(b.label))
+    .map(({ _docs: _d, _lots: _l, ...r }) => r);
+  return { entity, rows: list.slice(0, GROUP_CAP), total: list.length, capped: list.length > GROUP_CAP };
+}
 
 async function runIdentifyingPath(args: {
   db: D1Database;
@@ -536,6 +914,8 @@ async function runIdentifyingPath(args: {
   orders: OrderRow[];
   items: OrderItemRow[];
   suggestions: OrderSuggestionRow[];
+  customers: CustomerRow[];
+  entity: SearchEntity;
   keysPending: number;
   input: RunSearchInput;
   stats: StatementStats;
@@ -554,7 +934,14 @@ async function runIdentifyingPath(args: {
         byPo.set(k, [...(byPo.get(k) ?? []), ev]);
       }
     }
-    return { ordersByNumber: byNumber, ordersByPo: byPo };
+    const byCustomer: NonNullable<ConstraintContext['ordersByCustomer']> = new Map();
+    for (const c of args.customers) {
+      const evs = args.orders.filter((o) => o.customer_id === c.id)
+        .map((o) => orderEvidenceFromRows(o, args.items.filter((i) => i.order_id === o.id), args.suggestions.filter((s) => args.items.some((i) => i.id === s.order_item_id && i.order_id === o.id)), catalog))
+        .slice(0, CUSTOMER_ORDER_CAP);
+      byCustomer.set(c.id, { name: c.name, orders: evs, capped: Number(c.order_count) > evs.length });
+    }
+    return { ordersByNumber: byNumber, ordersByPo: byPo, ordersByCustomer: byCustomer };
   };
   const build = (ctx: ConstraintContext) => {
     const constraints: SearchConstraint[] = [];
@@ -671,6 +1058,28 @@ async function runIdentifyingPath(args: {
         if (lot) addSeek(`SELECT DISTINCT dl.document_id FROM lots l JOIN document_lots dl ON dl.lot_id = l.id WHERE l.tenant_id = ? AND l.lot_key = ? LIMIT ${SEEK_LIMIT}`, lot);
       }
     }
+    if (c.kind === 'customer') {
+      // Dozens of orders: every line's shipped lot in a few IN-list seeks,
+      // not one prefix seek per line (the PO / order path's shape).
+      const keys = new Set<string>();
+      for (const o of ordersOf(c)) {
+        for (const line of o.lines) {
+          for (const id of [...line.accepted_document_ids, ...line.legacy_document_ids, ...line.rejected_document_ids, ...line.suggested.map((x) => x.document_id)]) {
+            orderLinked.add(id);
+          }
+          const shipped = line.lot_number ? normalizeLotNumber(line.lot_number) : '';
+          if (shipped.length >= 5) {
+            keys.add(shipped);
+            if (shipped.length > 8) keys.add(shipped.slice(0, -2));
+          }
+        }
+      }
+      for (const chunk of chunks([...keys])) {
+        addSeek(`SELECT DISTINCT dl.document_id FROM lots l JOIN document_lots dl ON dl.lot_id = l.id
+                  WHERE l.tenant_id = ? AND l.lot_key IN (${ph(chunk.length)}) LIMIT ${SEEK_LIMIT}`, ...chunk);
+      }
+      continue;
+    }
     for (const o of ordersOf(c)) {
       for (const line of o.lines) {
         for (const id of [...line.accepted_document_ids, ...line.legacy_document_ids, ...line.rejected_document_ids, ...line.suggested.map((x) => x.document_id)]) {
@@ -695,7 +1104,7 @@ async function runIdentifyingPath(args: {
   if (scanFallback) {
     const w = scopeWhere(scope, tenantId);
     fallbackIdx = batch.add(db.prepare(
-      `${docSubjectSelect(SCOPE_EXTRA_COLUMNS)} WHERE ${w.sql} ORDER BY d.updated_at DESC LIMIT ?`,
+      `${docSubjectSelect(scopeExtraColumns(scope.today))} WHERE ${w.sql} ORDER BY d.updated_at DESC LIMIT ?`,
     ).bind(...w.params, DOC_SCAN_CAP + 1));
   }
 
@@ -762,7 +1171,7 @@ async function runIdentifyingPath(args: {
   if (ids.length) {
     const load = new Batch();
     const idxs = chunks(ids).map((chunk) => load.add(db.prepare(
-      `${docSubjectSelect(SCOPE_EXTRA_COLUMNS)} WHERE d.tenant_id = ? AND d.status != 'deleted' AND d.id IN (${ph(chunk.length)})`,
+      `${docSubjectSelect(scopeExtraColumns(scope.today))} WHERE d.tenant_id = ? AND d.status != 'deleted' AND d.id IN (${ph(chunk.length)})`,
     ).bind(tenantId, ...chunk)));
     await load.run(db);
     for (const i of idxs) for (const r of load.rows<SubjectRow>(i)) loaded.set(r.id, loadedFromRow(r));
@@ -804,7 +1213,8 @@ async function runIdentifyingPath(args: {
   if (input.facets) {
     const answers = judged.filter((j) => j.verdict.status === 'covering' || j.verdict.status === 'likely_covering');
     facets = {};
-    for (const field of FACET_FIELDS) {
+    const facetLabels = facetEntityLabels(answers.map((j) => j.l.attrs));
+    for (const field of activeFacetFields(input)) {
       const counted = answers.filter((j) => scopeHolds(scope, j.l.attrs, field));
       const tally = new Map<string, FacetCount>();
       const bump = (value: string | null, label: string | null) => {
@@ -813,22 +1223,31 @@ async function runIdentifyingPath(args: {
         f.count++;
         tally.set(value, f);
       };
-      if (field === 'uploaded') {
+      if (field === 'uploaded' || field === 'approved') {
+        const atOf = (j: (typeof counted)[number]) => (field === 'uploaded' ? j.l.attrs.created_at : j.l.attrs.approved_at ?? null);
         const counts = UPLOADED_BUCKETS.map((b) => {
-          const bd = uploadedBounds({ id: '', field: 'uploaded', op: b.op, values: [String(b.days)], source: 'facet' }, scope.today);
+          const bd = uploadedBounds({ op: b.op, values: [String(b.days)] }, scope.today);
           return counted.filter((j) => {
-            const at = j.l.attrs.created_at;
+            const at = atOf(j);
             return !!at && (!bd.from || at >= bd.from) && (!bd.to || at < bd.to);
           }).length;
         });
-        facets.uploaded = uploadedFacet(counts);
+        facets[field] = uploadedFacet(counts, field === 'approved' ? counted.filter((j) => !atOf(j)).length : undefined);
         continue;
       }
       for (const j of counted) {
-        if (field === 'supplier') bump(j.l.attrs.supplier_id, j.l.subject.supplier_name);
-        else if (field === 'document_type') bump(j.l.attrs.document_type_id, j.l.subject.document_type_name);
-        else if (field === 'status') bump(j.l.attrs.status, STATUS_LABELS[j.l.attrs.status ?? ''] ?? j.l.attrs.status);
+        const a = j.l.attrs;
+        if (field === 'supplier') bump(a.supplier_id, j.l.subject.supplier_name);
+        else if (field === 'document_type') bump(a.document_type_id, j.l.subject.document_type_name);
+        else if (field === 'status') bump(a.status, STATUS_LABELS[a.status ?? ''] ?? a.status);
         else if (field === 'product') for (const [pid, name] of j.l.productNames) bump(pid, name);
+        else if (field === 'requirement') for (const id of a.requirement_ids ?? []) bump(id, facetLabels.get(id) ?? id);
+        else if (field === 'claim') for (const id of a.claim_ids ?? []) bump(id, facetLabels.get(id) ?? id);
+        else {
+          const v = (field === 'spec_verdict' ? a.spec_verdict : field === 'renewal_state' ? a.renewal_state
+            : field === 'classification' ? a.classification : field === 'owner' ? a.owner : a.intake_source) ?? NONE_VALUE;
+          bump(v, enumLabel(field, v));
+        }
       }
       const list = [...tally.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)).slice(0, 50);
       facets[field] = withSelected(field, list, scope, labels);
@@ -840,6 +1259,16 @@ async function runIdentifyingPath(args: {
   const page = ordered.slice(input.offset, input.offset + input.limit);
   const rowsById = await fetchDocumentRows(db, page.map((p) => p.id));
   const documents: UniversalSearchDocument[] = [];
+  const columns: Record<string, SearchDocColumns> = {};
+  for (const p of page) {
+    columns[p.id] = docColumnsFrom({
+      metadata: p.l.subject.metadata,
+      products: [...p.l.productNames.values()],
+      lots: p.l.subject.lots,
+      attrs: p.l.attrs,
+      renewal_due_date: p.l.renewalDueDate,
+    });
+  }
   for (const p of page) {
     const row = rowsById.get(p.id);
     if (!row) continue;
@@ -921,6 +1350,8 @@ async function runIdentifyingPath(args: {
     candidate_count: candidates.length,
     unreviewed_candidates: unreviewed.slice(0, UNREVIEWED_CAP).map(({ score: _s, ...u }) => u),
     coverage_scan_truncated: truncated,
+    columns,
+    ...(args.entity !== 'documents' ? { groups: groupsFromJudged(args.entity, [...covering, ...likely], constraints, dropped) } : {}),
     ...(args.keysPending > 0 ? { keys_pending: args.keysPending } : {}),
     ...(args.interpreted ? { interpreted: args.interpreted } : {}),
     stats: { ...stats, candidates: loaded.size, scan_fallback: scanFallback },
@@ -932,6 +1363,22 @@ async function runIdentifyingPath(args: {
 // ===========================================================================
 
 export async function runSearch(rawDb: D1Database, tenantId: string, input: RunSearchInput): Promise<SearchQueryResponse> {
+  validateQuery(input.query);
+  // A result mode (Lots / Products / Suppliers) runs only the clauses that mean
+  // something for its rows; the others stay in the query, greyed, and are
+  // named in `not_applied` — never silently dropped (search redesign Phase 3).
+  const entity: SearchEntity = input.query.view?.entity ?? 'documents';
+  const notApplied = input.query.clauses.filter((c) => !appliesTo(c.field, entity)).map((c) => c.id);
+  const query = notApplied.length
+    ? { ...input.query, clauses: input.query.clauses.filter((c) => appliesTo(c.field, entity)) }
+    : input.query;
+  const res = await runSearchInner(rawDb, tenantId, { ...input, query }, entity);
+  const detectedNa = (res.interpreted?.clauses ?? []).filter((c) => !appliesTo(c.field, entity)).map((c) => c.id);
+  const na = [...notApplied, ...detectedNa];
+  return na.length ? { ...res, not_applied: na } : res;
+}
+
+async function runSearchInner(rawDb: D1Database, tenantId: string, input: RunSearchInput, entity: SearchEntity): Promise<SearchQueryResponse> {
   const stats: StatementStats = { statements: 0, round_trips: 0 };
   const db = countingDb(rawDb, stats);
   const query = input.query;
@@ -949,9 +1396,25 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
 
   const scan = input.interpret && typedText ? scanText(typedText, { now }) : null;
   const detecting = !!scan && scanHasCandidates(scan);
+  const productChosen = query.clauses.some((c) => c.field === 'product');
 
-  // Nothing identifying anywhere: the scope / text path, one round trip.
+  // Nothing identifying anywhere: the scope / text path, one round trip —
+  // plus one for the product catalog when the typed words may NAME a product
+  // on their own (a code, a pack, a recorded name: "4417", "unsalted butter").
+  // Descriptive words alone ("butter") stay a browse (detectProduct).
   if (explicitIdent.length === 0 && !detecting) {
+    if (scan && !productChosen && scanMayNameProduct(scan)) {
+      const pb = new Batch();
+      const ci = pb.add(productCatalogStatement(db, tenantId));
+      await pb.run(db);
+      const product = detectProduct({ clauses: [], residual: typedText }, catalogFromRows(pb.rows<CatalogRow>(ci)), { otherConstraints: false });
+      if (product.detection.clauses.length) {
+        const interpreted = { clauses: product.detection.clauses, residual: product.detection.residual };
+        scope = compileScope([...query.clauses, ...interpreted.clauses], now);
+        const res = await runScopePath(db, tenantId, scope, clauseText, input, stats);
+        return withClauseSummaries({ ...res, labels: { ...product.labels, ...res.labels }, interpreted }, query.clauses, interpreted.clauses, stats);
+      }
+    }
     const res = await runScopePath(db, tenantId, scope, text, input, stats);
     return withClauseSummaries(res, query.clauses, [], stats);
   }
@@ -1017,7 +1480,7 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
   if (ov.length) {
     const where = `o.tenant_id = ? AND o.staged_at IS NULL AND (o.order_number IN (${ph(ov.length)})${pov.length ? ` OR o.po_number IN (${ph(pov.length)})` : ''})`;
     const binds = [tenantId, ...ov, ...pov];
-    ordersIdx = r0.add(db.prepare(`SELECT o.id, o.order_number, o.po_number, o.customer_name FROM orders o WHERE ${where} LIMIT 20`).bind(...binds));
+    ordersIdx = r0.add(db.prepare(`SELECT o.id, o.order_number, o.po_number, o.customer_name, o.customer_id FROM orders o WHERE ${where} LIMIT 20`).bind(...binds));
     itemsIdx = r0.add(db.prepare(
       `SELECT oi.id, oi.order_id, oi.product_code, oi.product_name, oi.lot_number, oi.coa_document_id, oi.coa_match_status
          FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE ${where} ORDER BY oi.created_at, oi.id LIMIT 500`,
@@ -1028,11 +1491,42 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
         WHERE ${where} LIMIT 2000`,
     ).bind(...binds));
   }
+  // Customers (search redesign Phase 3): each named customer, how many live
+  // orders they have, and their most recent CUSTOMER_ORDER_CAP orders with
+  // lines and suggestions — followed exactly like an order number.
+  const customerIds = [...new Set(explicitIdent.filter((c) => c.field === 'customer').map((c) => c.values[0]))].slice(0, 5);
+  let customersIdx: number | null = null;
+  let custOrdersIdx: number | null = null;
+  let custItemsIdx: number | null = null;
+  let custSuggIdx: number | null = null;
+  if (customerIds.length) {
+    customersIdx = r0.add(db.prepare(
+      `SELECT c.id, c.name,
+              (SELECT COUNT(*) FROM orders o WHERE o.tenant_id = c.tenant_id AND o.customer_id = c.id AND o.staged_at IS NULL) AS order_count
+         FROM customers c WHERE c.tenant_id = ? AND c.id IN (${ph(customerIds.length)})`,
+    ).bind(tenantId, ...customerIds));
+    const where = `o.tenant_id = ? AND o.id IN (
+        SELECT id FROM (
+          SELECT o2.id, ROW_NUMBER() OVER (PARTITION BY o2.customer_id ORDER BY o2.created_at DESC, o2.id) AS rn
+            FROM orders o2 WHERE o2.tenant_id = ? AND o2.staged_at IS NULL AND o2.customer_id IN (${ph(customerIds.length)})
+        ) WHERE rn <= ${CUSTOMER_ORDER_CAP})`;
+    const binds = [tenantId, tenantId, ...customerIds];
+    custOrdersIdx = r0.add(db.prepare(`SELECT o.id, o.order_number, o.po_number, o.customer_name, o.customer_id FROM orders o WHERE ${where}`).bind(...binds));
+    custItemsIdx = r0.add(db.prepare(
+      `SELECT oi.id, oi.order_id, oi.product_code, oi.product_name, oi.lot_number, oi.coa_document_id, oi.coa_match_status
+         FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE ${where} ORDER BY oi.created_at, oi.id LIMIT 5000`,
+    ).bind(...binds));
+    custSuggIdx = r0.add(db.prepare(
+      `SELECT lms.order_item_id, lms.document_id, lms.status, lms.match_basis, lms.match_confidence
+         FROM lot_match_suggestions lms JOIN order_items oi ON oi.id = lms.order_item_id JOIN orders o ON o.id = oi.order_id
+        WHERE ${where} LIMIT 5000`,
+    ).bind(...binds));
+  }
   const lblStmt = labelStatement(db, tenantId, scope);
   const labelIdx = lblStmt ? r0.add(lblStmt) : null;
   // Words beside the typed candidates may name a product ("butter produced in
   // April") — asked in the same batch, only when a product is not already chosen.
-  const catalogIdx = scan && detecting && scanResidualWords(scan) && !query.clauses.some((c) => c.field === 'product')
+  const catalogIdx = scan && detecting && scanMayNameProduct(scan) && !productChosen
     ? r0.add(productCatalogStatement(db, tenantId))
     : null;
   await r0.run(db);
@@ -1073,6 +1567,15 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
     labels[r.id] = r.name;
     if (r.kind === 'supplier') schemes.push({ id: r.id, name: r.name, spec: r.extra });
   }
+  const customers = r0.rows<CustomerRow>(customersIdx);
+  for (const c of customers) labels[c.id] = c.name;
+  const uniq = <T>(rows: T[], key: (r: T) => string) => {
+    const seen = new Set<string>();
+    return rows.filter((r) => (seen.has(key(r)) ? false : (seen.add(key(r)), true)));
+  };
+  const allOrders = uniq([...r0.rows<OrderRow>(ordersIdx), ...r0.rows<OrderRow>(custOrdersIdx)], (o) => o.id);
+  const allItems = uniq([...r0.rows<OrderItemRow>(itemsIdx), ...r0.rows<OrderItemRow>(custItemsIdx)], (i) => i.id);
+  const allSugg = uniq([...r0.rows<OrderSuggestionRow>(suggIdx), ...r0.rows<OrderSuggestionRow>(custSuggIdx)], (x) => `${x.order_item_id}|${x.document_id}`);
 
   // --- detection -----------------------------------------------------------------
   let interpreted: { clauses: Clause[]; residual: string } | undefined;
@@ -1104,21 +1607,25 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
   }
   // A product read from the words is a SCOPE clause (the Ask-AI mapping's
   // rule): it narrows what is judged, it never claims coverage itself.
-  const detectedScope = (interpreted?.clauses ?? []).filter((c) => SEARCH_FIELDS[c.field].class === 'scope');
+  const readHere = (interpreted?.clauses ?? []).filter((c) => appliesTo(c.field, entity));
+  const detectedScope = readHere.filter((c) => SEARCH_FIELDS[c.field].class === 'scope');
   if (detectedScope.length) scope = compileScope([...query.clauses, ...detectedScope], now);
-  const identClauses = [...explicitWithNotes, ...(interpreted?.clauses ?? []).filter((c) => SEARCH_FIELDS[c.field].class === 'identifying')];
+  const identClauses = [...explicitWithNotes, ...readHere.filter((c) => SEARCH_FIELDS[c.field].class === 'identifying')];
 
   // The text read as nothing identifying after all: back to the scope/text path.
   if (identClauses.length === 0) {
-    const res = await runScopePath(db, tenantId, scope, text, input, stats);
+    // A product the words NAMED took those words: they are not searched as text as well.
+    const res = await runScopePath(db, tenantId, scope, detectedScope.length ? residual : text, input, stats);
     return withClauseSummaries({ ...res, ...(interpreted ? { interpreted } : {}) }, query.clauses, [], stats);
   }
 
   const res = await runIdentifyingPath({
     db, tenantId, scope, identClauses, interpreted, residual, labels, schemes,
-    orders: r0.rows<OrderRow>(ordersIdx),
-    items: r0.rows<OrderItemRow>(itemsIdx),
-    suggestions: r0.rows<OrderSuggestionRow>(suggIdx),
+    orders: allOrders,
+    items: allItems,
+    suggestions: allSugg,
+    customers,
+    entity,
     keysPending, input, stats,
   });
   const own = query.clauses.map((c) => explicitWithNotes.find((x) => x.id === c.id) ?? c);

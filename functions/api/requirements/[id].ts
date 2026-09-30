@@ -3,6 +3,7 @@
  * Mirrors /api/document-types/:id (same role gate, same soft-delete semantics).
  */
 
+import { drainSoon } from '../../lib/search-reindex';
 import { logAudit, getClientIp } from '../../lib/db';
 import {
   requireRole,
@@ -186,6 +187,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       .bind(id)
       .first();
 
+    drainSoon(context, context.env.DB);
     return json({ requirement: updated });
   } catch (err) {
     const httpErr = errorToResponse(err);

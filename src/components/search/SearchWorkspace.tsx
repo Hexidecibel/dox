@@ -9,6 +9,8 @@ import {
   Popover,
   Snackbar,
   Stack,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
   useMediaQuery,
@@ -26,6 +28,9 @@ import { CoverageResults } from './CoverageResults';
 import { FacetSidebar } from './FacetSidebar';
 import { SortMenu } from './SortMenu';
 import { SavedSearchesDialog } from './SavedSearchesDialog';
+import { FilterBuilder } from './FilterBuilder';
+import { AdvancedFacetRail } from './AdvancedFacetRail';
+import { AdvancedResults } from './AdvancedResults';
 import { ExportSelectionBar } from './ExportSelectionBar';
 import { SendExportDialog } from './SendExportDialog';
 import type { SearchSelection } from './SelectableResult';
@@ -54,6 +59,9 @@ import {
 } from '../../../shared/searchQuery';
 import { detectOptimistic } from '../../../shared/searchInterpret';
 import type { FacetField } from '../../../shared/searchFields';
+
+/** Easy mode's side rail shows these five; Advanced asks for every facet. */
+const EASY_FACETS = ['supplier', 'document_type', 'product', 'status', 'uploaded'] as const;
 import type { FacetCount, SearchDroppedConstraint, SearchSort, UniversalSearchDocument } from '../../../shared/types';
 import { chipParts } from '../../lib/searchChips';
 
@@ -123,11 +131,32 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
     [syncToUrl, urlBound],
   );
 
+  /**
+   * Easy ↔ Advanced (search Phase 3). The mode is only a presentation of the
+   * same query: going to Advanced keeps what the box reads as rows (a chip is
+   * a row), coming back shows the rows as chips. Nothing is re-serialized.
+   */
+  const setMode = useCallback(
+    (mode: 'easy' | 'advanced') => {
+      const cur = queryRef.current;
+      if ((cur.view.mode === 'advanced') === (mode === 'advanced')) return;
+      setQuery({ ...cur, view: { ...cur.view, mode: mode === 'advanced' ? 'advanced' : undefined, ...(mode === 'easy' ? { entity: 'documents' as const } : {}), page: undefined } });
+    },
+    [setQuery],
+  );
+
   // ── running it ───────────────────────────────────────────────────────────
   const debouncedText = useDebouncedValue(query.text, DEBOUNCE_MS);
   const page = query.view.page ?? 1;
   const sort: SearchSort = query.view.sort ?? 'relevance';
-  const sent = useMemo<SearchQuery>(() => ({ ...query, text: debouncedText }), [query, debouncedText]);
+  const advanced = query.view.mode === 'advanced';
+  // The columns are presentation: changing them never re-asks the server.
+  const sent = useMemo<SearchQuery>(
+    // Easy shows documents only: a result mode left in the URL must never
+    // quietly drop the clauses it does not apply to.
+    () => ({ ...query, text: debouncedText, view: { ...query.view, columns: undefined, ...(advanced ? {} : { entity: 'documents' as const }) } }),
+    [query, debouncedText, advanced],
+  );
   const asked = sent.text.trim() !== '' || sent.clauses.length > 0;
   // A super_admin belongs to no organization: until one is chosen in the top
   // bar there is nothing to search, and the server's "tenant_id is required"
@@ -141,6 +170,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
     enabled: !needsTenant && (asked || surface === 'documents'),
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
+    facetFields: advanced ? undefined : EASY_FACETS,
   });
   const data = run.data;
   const empty = !query.text.trim() && query.clauses.length === 0;
@@ -415,6 +445,9 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
       if (e.key === '/') {
         e.preventDefault();
         omniRef.current?.focus();
+      } else if (e.key === 'a' || e.key === 'A') {
+        e.preventDefault();
+        setMode(queryRef.current.view.mode === 'advanced' ? 'easy' : 'advanced');
       } else if ((e.key === 'ArrowDown' || e.key === 'j') && rows.length) {
         e.preventDefault();
         rows[Math.min(rows.length - 1, at + 1)].focus();
@@ -443,7 +476,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [enableExport, selectedDocs.length, runDownload, navigate]);
+  }, [enableExport, selectedDocs.length, runDownload, navigate, setMode]);
 
   // ── the ambiguous product, if any ────────────────────────────────────────
   const ambiguousClause = kept.find((c) => c.field === 'product' && c.ambiguous && c.values.length > 1) ?? null;
@@ -461,7 +494,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
   const keysPending = data?.keys_pending ?? 0;
 
   const results = (
-    <Box ref={resultsRef} sx={{ minWidth: 0 }}>
+    <Box ref={advanced ? undefined : resultsRef} sx={{ minWidth: 0 }}>
       {keysPending > 0 && (
         <Alert severity="info" sx={{ mb: 1.5 }}>
           {keysPending} document{keysPending === 1 ? ' is' : 's are'} still being indexed for PO, invoice and date search, so this answer also checked every document in the current filters directly.
@@ -611,6 +644,58 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
     </Box>
   );
 
+  const advancedResults = (
+    <Box ref={advanced ? resultsRef : undefined} sx={{ minWidth: 0 }}>
+      <FilterBuilder
+        query={query}
+        labels={labels}
+        facets={facets}
+        onChange={setQuery}
+        notApplied={data?.not_applied ?? []}
+        entity={query.view.entity ?? 'documents'}
+        tenantId={tenantId}
+        onLabel={(id, name) => setLabelsExtra((l) => ({ ...l, [id]: name }))}
+      />
+      <Box sx={{ mt: 2 }}>
+        {run.error && <Alert severity="error" sx={{ mb: 1.5 }}>{run.error}</Alert>}
+        {needsTenant && <Alert severity="info" sx={{ mb: 1.5 }}>Choose an organization in the top bar to search its documents.</Alert>}
+        {identifying && data && (
+          <AnswerCard
+            coverage={data.coverage}
+            coverage_summary={data.coverage_summary}
+            documents={docs}
+            dropped_constraints={data.dropped_constraints}
+            unreviewed_candidates={data.unreviewed_candidates}
+            coverage_scan_truncated={data.coverage_scan_truncated}
+            total={data.total}
+            empty={false}
+            loading={false}
+            browseWords={browseWords}
+            paletteKey={`${modKey}K`}
+            onPreview={(d) => preview(d, 'click')}
+            onSelectCovering={selection ? selectMany : undefined}
+            onAskAi={() => void askAi()}
+          />
+        )}
+        {data && (
+          <AdvancedResults
+            data={data}
+            query={query}
+            onQuery={setQuery}
+            selection={selection}
+            onActivate={preview}
+            activeId={previewId}
+          />
+        )}
+        {data && (query.view.entity ?? 'documents') === 'documents' && totalPages > 1 && (
+          <Stack alignItems="center" sx={{ mt: 2 }}>
+            <Pagination count={totalPages} page={page} onChange={(_, p) => setQuery({ ...query, view: { ...query.view, page: p > 1 ? p : undefined } })} size="small" />
+          </Stack>
+        )}
+      </Box>
+    </Box>
+  );
+
   return (
     <Box data-testid="search-workspace">
       <Omnibox
@@ -620,7 +705,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
           setDraft(t);
           setQuery({ ...queryRef.current, text: t, view: { ...queryRef.current.view, page: undefined } }, { replace: true });
         }}
-        kept={kept}
+        kept={advanced ? [] : kept}
         live={live}
         livePending={!!boxText && !serverRead}
         labels={labels}
@@ -646,18 +731,31 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
       />
 
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.5, mb: 2, flexWrap: 'wrap' }} useFlexGap>
-        <Button
+        <ToggleButtonGroup
+          exclusive
           size="small"
-          startIcon={<TuneRoundedIcon />}
-          onClick={() => setFacetsOpen((v) => !v)}
-          variant={facetsOpen ? 'contained' : 'text'}
-          disableElevation
-          sx={{ textTransform: 'none', borderRadius: 2 }}
-          aria-pressed={facetsOpen}
-          data-testid="toggle-filters"
+          value={advanced ? 'advanced' : 'easy'}
+          onChange={(_, v: 'easy' | 'advanced' | null) => v && setMode(v)}
+          aria-label="Search mode"
+          sx={{ '& .MuiToggleButton-root': { textTransform: 'none', py: 0.25, px: 1.25 } }}
         >
-          Filters
-        </Button>
+          <ToggleButton value="easy" data-testid="mode-easy">Easy</ToggleButton>
+          <ToggleButton value="advanced" data-testid="mode-advanced">Advanced</ToggleButton>
+        </ToggleButtonGroup>
+        {!advanced && (
+          <Button
+            size="small"
+            startIcon={<TuneRoundedIcon />}
+            onClick={() => setFacetsOpen((v) => !v)}
+            variant={facetsOpen ? 'contained' : 'text'}
+            disableElevation
+            sx={{ textTransform: 'none', borderRadius: 2 }}
+            aria-pressed={facetsOpen}
+            data-testid="toggle-filters"
+          >
+            Filters
+          </Button>
+        )}
         <Button
           size="small"
           startIcon={<BookmarkBorderRoundedIcon />}
@@ -678,15 +776,21 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
           display: 'grid',
           gap: 2.5,
           alignItems: 'start',
-          gridTemplateColumns: {
-            xs: '1fr',
-            md: facetsOpen ? '240px minmax(0, 1fr)' : 'minmax(0, 1fr)',
-            lg: `${facetsOpen ? '240px ' : ''}minmax(0, 1fr) minmax(360px, 0.8fr)`,
-          },
+          gridTemplateColumns: advanced
+            ? { xs: '1fr', md: '232px minmax(0, 1fr)', lg: '232px minmax(0, 1fr) minmax(320px, 0.7fr)' }
+            : {
+              xs: '1fr',
+              md: facetsOpen ? '240px minmax(0, 1fr)' : 'minmax(0, 1fr)',
+              lg: `${facetsOpen ? '240px ' : ''}minmax(0, 1fr) minmax(360px, 0.8fr)`,
+            },
         }}
       >
-        {facetsOpen && <FacetSidebar query={query} facets={facets} onChange={setQuery} loading={run.loading} />}
-        {results}
+        {advanced ? (
+          <AdvancedFacetRail query={query} facets={facets} onChange={setQuery} loading={run.loading} countsAnswers={!!identifying} />
+        ) : (
+          facetsOpen && <FacetSidebar query={query} facets={facets} onChange={setQuery} loading={run.loading} />
+        )}
+        {advanced ? advancedResults : results}
         {wide && (
           <Box sx={{ position: 'sticky', top: 16, maxHeight: 'calc(100vh - 32px)', overflowY: 'auto', pr: 0.5 }}>
             <PreviewPane doc={previewDoc} />
@@ -700,7 +804,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
         </Drawer>
       )}
 
-      <KeyboardLegend modKey={modKey} exportOn={enableExport} />
+      <KeyboardLegend modKey={modKey} exportOn={enableExport} advanced={advanced} />
 
       <Popover
         open={!!editingClause}
@@ -740,8 +844,11 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
         currentState={{ q: query.text }}
         currentPreview={queryKey(query)}
         saved={saved.saved}
-        onSave={async (name: string) => {
-          await saved.create({ name, query: query as unknown as Record<string, unknown> });
+        canShare={auth?.user?.role === 'org_admin' || (auth?.user?.role === 'super_admin' && !!auth?.user?.tenant_id)}
+        onSave={async (name: string, shared?: boolean) => {
+          // A view keeps its mode, result mode, columns and sort — never the page.
+          const view = { ...query.view, page: undefined };
+          await saved.create({ name, query: { ...query, view } as unknown as Record<string, unknown>, ...(shared ? { scope: 'shared' as const } : {}) });
         }}
         onLoad={(s: { query: Record<string, unknown> }) => setQuery(savedPayloadToQuery(s.query))}
         onDelete={saved.remove}
@@ -794,10 +901,12 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
   );
 }
 
-function KeyboardLegend({ modKey, exportOn }: { modKey: string; exportOn: boolean }) {
+function KeyboardLegend({ modKey, exportOn, advanced = false }: { modKey: string; exportOn: boolean; advanced?: boolean }) {
   const keys: Array<[string, string]> = [
     ['/', 'focus search'],
     [`${modKey}K`, 'search anywhere'],
+    ['A', advanced ? 'Easy mode' : 'Advanced mode'],
+    ...(advanced ? ([['X', 'exclude a facet value']] as Array<[string, string]>) : []),
     ['↑ ↓', 'move through results'],
     ['Space', 'select'],
     ['↵', 'open'],

@@ -22,7 +22,9 @@ import {
   makeDateConstraint,
   makeDateRangeConstraint,
   makeIdentifierConstraint,
+  makeCustomerConstraint,
   makeInvoiceConstraint,
+  makeKeyKindConstraint,
   makeLotConstraint,
   makeLotPrefixConstraint,
   makePoConstraint,
@@ -47,7 +49,19 @@ export type FieldKey =
   | 'order'
   | 'po'
   | 'invoice'
-  | 'identifier';
+  | 'identifier'
+  // --- Phase 3 (Advanced mode and every field) ---
+  | 'requirement'
+  | 'claim'
+  | 'spec_verdict'
+  | 'renewal_state'
+  | 'classification'
+  | 'owner'
+  | 'intake_source'
+  | 'approved'
+  | 'document_number'
+  | 'certificate_number'
+  | 'customer';
 
 export type ClauseOp =
   | 'in'
@@ -60,7 +74,9 @@ export type ClauseOp =
   | 'after'
   | 'within'
   | 'older_than'
-  | 'contains';
+  | 'contains'
+  /** A date field with nothing recorded (approved: "not recorded"). */
+  | 'missing';
 
 export type FieldClass = 'scope' | 'identifying' | 'text';
 export type SearchEntity = 'documents' | 'lots' | 'products' | 'suppliers';
@@ -84,29 +100,196 @@ export interface FieldDef {
 const ENTITY_OPS: ClauseOp[] = ['in'];
 const DATE_OPS: ClauseOp[] = ['on', 'between', 'before', 'after'];
 
+/**
+ * Which result modes (Documents / Lots / Products / Suppliers) each field means
+ * something in. Every mode is a view over the matching DOCUMENTS; a clause
+ * whose field does not describe that mode's row is shown greyed ("doesn't
+ * apply to lots") and is not run — it is never dropped from the query, and it
+ * applies again when the mode is switched back.
+ */
+const ALL: SearchEntity[] = ['documents', 'lots', 'products', 'suppliers'];
+/** Document housekeeping: when, how and by whom a DOCUMENT was filed. */
+const DOC_ONLY: SearchEntity[] = ['documents'];
+/** A lot, a date or a printed number is a row fact: a supplier row has none. */
+const ROWS: SearchEntity[] = ['documents', 'lots', 'products'];
+
+function scopeField(key: FieldKey, label: string, valueKind: FieldDef['valueKind'], entities: SearchEntity[]): FieldDef {
+  return { key, label, class: 'scope', valueKind, ops: ENTITY_OPS, defaultOp: 'in', facetable: true, excludable: true, multi: true, entities };
+}
+function scopeDate(key: FieldKey, label: string, entities: SearchEntity[], extra: ClauseOp[] = []): FieldDef {
+  return { key, label, class: 'scope', valueKind: 'date', ops: ['within', 'older_than', ...DATE_OPS, ...extra], defaultOp: 'within', facetable: true, excludable: false, multi: false, entities };
+}
+function identField(key: FieldKey, label: string, entities: SearchEntity[]): FieldDef {
+  return { key, label, class: 'identifying', valueKind: 'identifier', ops: ['is'], defaultOp: 'is', facetable: false, excludable: false, multi: false, entities };
+}
+function identDate(key: FieldKey, label: string, role: SearchDateRole): FieldDef {
+  return { key, label, class: 'identifying', valueKind: 'date', ops: DATE_OPS, defaultOp: 'on', facetable: false, excludable: false, multi: false, entities: ROWS, role };
+}
+
 export const SEARCH_FIELDS: Record<FieldKey, FieldDef> = {
-  supplier: { key: 'supplier', label: 'Supplier', class: 'scope', valueKind: 'entity', ops: ENTITY_OPS, defaultOp: 'in', facetable: true, excludable: true, multi: true, entities: ['documents', 'lots', 'products'] },
-  document_type: { key: 'document_type', label: 'Document type', class: 'scope', valueKind: 'entity', ops: ENTITY_OPS, defaultOp: 'in', facetable: true, excludable: true, multi: true, entities: ['documents'] },
-  product: { key: 'product', label: 'Product', class: 'scope', valueKind: 'entity', ops: ENTITY_OPS, defaultOp: 'in', facetable: true, excludable: true, multi: true, entities: ['documents', 'lots', 'suppliers'] },
-  status: { key: 'status', label: 'Status', class: 'scope', valueKind: 'enum', ops: ENTITY_OPS, defaultOp: 'in', facetable: true, excludable: true, multi: true, entities: ['documents'] },
-  uploaded: { key: 'uploaded', label: 'Uploaded', class: 'scope', valueKind: 'date', ops: ['within', 'older_than', ...DATE_OPS], defaultOp: 'within', facetable: true, excludable: false, multi: false, entities: ['documents'] },
-  text: { key: 'text', label: 'Mentions', class: 'text', valueKind: 'text', ops: ['contains'], defaultOp: 'contains', facetable: false, excludable: false, multi: false, entities: ['documents'] },
-  lot: { key: 'lot', label: 'Lot', class: 'identifying', valueKind: 'lot', ops: ['is', 'starts'], defaultOp: 'is', facetable: false, excludable: false, multi: false, entities: ['documents', 'lots'] },
-  production_date: { key: 'production_date', label: 'Production date', class: 'identifying', valueKind: 'date', ops: DATE_OPS, defaultOp: 'on', facetable: false, excludable: false, multi: false, entities: ['documents', 'lots'], role: 'production' },
-  code_date: { key: 'code_date', label: 'Code date', class: 'identifying', valueKind: 'date', ops: DATE_OPS, defaultOp: 'on', facetable: false, excludable: false, multi: false, entities: ['documents', 'lots'], role: 'code' },
-  best_by_date: { key: 'best_by_date', label: 'Best-by / expiration date', class: 'identifying', valueKind: 'date', ops: DATE_OPS, defaultOp: 'on', facetable: false, excludable: false, multi: false, entities: ['documents', 'lots'], role: 'expiration' },
-  date: { key: 'date', label: 'Date', class: 'identifying', valueKind: 'date', ops: DATE_OPS, defaultOp: 'on', facetable: false, excludable: false, multi: false, entities: ['documents', 'lots'], role: 'any' },
-  order: { key: 'order', label: 'Order', class: 'identifying', valueKind: 'identifier', ops: ['is'], defaultOp: 'is', facetable: false, excludable: false, multi: false, entities: ['documents', 'lots'] },
-  po: { key: 'po', label: 'PO', class: 'identifying', valueKind: 'identifier', ops: ['is'], defaultOp: 'is', facetable: false, excludable: false, multi: false, entities: ['documents'] },
-  invoice: { key: 'invoice', label: 'Invoice', class: 'identifying', valueKind: 'identifier', ops: ['is'], defaultOp: 'is', facetable: false, excludable: false, multi: false, entities: ['documents'] },
-  identifier: { key: 'identifier', label: 'Identifier', class: 'identifying', valueKind: 'identifier', ops: ['is'], defaultOp: 'is', facetable: false, excludable: false, multi: false, entities: ['documents'] },
+  supplier: scopeField('supplier', 'Supplier', 'entity', ALL),
+  document_type: scopeField('document_type', 'Document type', 'entity', ALL),
+  product: scopeField('product', 'Product', 'entity', ALL),
+  status: scopeField('status', 'Status', 'enum', ['documents', 'lots', 'suppliers']),
+  uploaded: scopeDate('uploaded', 'Uploaded', DOC_ONLY),
+  text: { key: 'text', label: 'Mentions', class: 'text', valueKind: 'text', ops: ['contains'], defaultOp: 'contains', facetable: false, excludable: false, multi: false, entities: ALL },
+  lot: { key: 'lot', label: 'Lot', class: 'identifying', valueKind: 'lot', ops: ['is', 'starts'], defaultOp: 'is', facetable: false, excludable: false, multi: false, entities: ROWS },
+  production_date: identDate('production_date', 'Production date', 'production'),
+  code_date: identDate('code_date', 'Code date', 'code'),
+  best_by_date: identDate('best_by_date', 'Best-by / expiration date', 'expiration'),
+  date: identDate('date', 'Date', 'any'),
+  order: identField('order', 'Order', ALL),
+  po: identField('po', 'PO', ALL),
+  invoice: identField('invoice', 'Invoice', ALL),
+  identifier: identField('identifier', 'Identifier', ALL),
+  // --- Phase 3: every field ---
+  requirement: scopeField('requirement', 'Requirement', 'entity', ALL),
+  claim: scopeField('claim', 'Claim', 'entity', ALL),
+  spec_verdict: scopeField('spec_verdict', 'Spec result', 'enum', ALL),
+  renewal_state: scopeField('renewal_state', 'Renewal', 'enum', ['documents', 'suppliers']),
+  classification: scopeField('classification', 'Classification', 'enum', DOC_ONLY),
+  owner: scopeField('owner', 'Owner', 'enum', DOC_ONLY),
+  intake_source: scopeField('intake_source', 'Came in by', 'enum', DOC_ONLY),
+  approved: scopeDate('approved', 'Approved', DOC_ONLY, ['missing']),
+  document_number: identField('document_number', 'Document #', ROWS),
+  certificate_number: identField('certificate_number', 'Certificate #', ROWS),
+  customer: { key: 'customer', label: 'Customer', class: 'identifying', valueKind: 'entity', ops: ['is'], defaultOp: 'is', facetable: false, excludable: false, multi: false, entities: ALL },
 };
 
 export const FIELD_KEYS = Object.keys(SEARCH_FIELDS) as FieldKey[];
 export const SCOPE_FIELDS = FIELD_KEYS.filter((k) => SEARCH_FIELDS[k].class === 'scope');
 /** The facets a documents search returns, in sidebar order. */
-export const FACET_FIELDS = ['supplier', 'document_type', 'product', 'status', 'uploaded'] as const;
+export const FACET_FIELDS = [
+  'supplier', 'document_type', 'product', 'requirement', 'claim', 'renewal_state', 'spec_verdict',
+  'classification', 'owner', 'intake_source', 'uploaded', 'approved', 'status',
+] as const;
 export type FacetField = (typeof FACET_FIELDS)[number];
+/** Facets whose options are day windows (single-select buckets). */
+export const DATE_FACETS: ReadonlySet<string> = new Set(['uploaded', 'approved']);
+
+/** Does this field mean anything in this result mode? */
+export function appliesTo(field: FieldKey, entity: SearchEntity): boolean {
+  return SEARCH_FIELDS[field].entities.includes(entity);
+}
+
+/**
+ * The value an enum facet uses for "nothing recorded" (no owner, no intake door
+ * on file). No real value is spelled like this.
+ */
+export const NONE_VALUE = '__none__';
+
+/**
+ * A document's spec result — the WORST judgement on its register (0085) and
+ * its gaps (0109): one out-of-spec result makes the document "out of spec"
+ * whatever else passed; a result that could not be judged, or a result its
+ * supplier's watch requires and the certificate did not print, makes it
+ * "could not check". A register holding nothing for it is "no results judged",
+ * which is NOT a pass.
+ */
+export const SPEC_VERDICT_VALUES = ['out_of_spec', 'not_checked', 'in_spec', 'none'] as const;
+export const SPEC_VERDICT_LABELS: Record<string, string> = {
+  out_of_spec: 'Out of spec',
+  not_checked: 'Could not check',
+  in_spec: 'In spec',
+  none: 'No results judged',
+};
+
+/**
+ * A document's renewal state, judged on the renewal date CONFIRMED on it (0097)
+ * by the alert engine's own rules (`classifyDaysUntil` in
+ * functions/lib/expirations.ts) against its own resolved warning time (0111:
+ * type -> organization -> 60 days). `expired` and `overdue` read together as
+ * "past due". "Does not renew" is a reviewer's cleared decision or a type whose
+ * policy is none. "No renewal date confirmed" is a document nobody settled a
+ * date on — the Renewals dashboard may still compute one from the defaults,
+ * which is why it is not called current.
+ */
+export const RENEWAL_STATE_VALUES = ['past_due', 'expiring', 'current', 'does_not_renew', 'not_set'] as const;
+export type RenewalStateValue = (typeof RENEWAL_STATE_VALUES)[number];
+export const RENEWAL_STATE_LABELS: Record<string, string> = {
+  past_due: 'Past due',
+  expiring: 'Due within its warning time',
+  current: 'Current',
+  does_not_renew: 'Does not renew',
+  not_set: 'No renewal date confirmed',
+};
+
+export const CLASSIFICATION_VALUES = ['unclassified', 'needs_review', 'classified', 'unclassifiable'] as const;
+export const CLASSIFICATION_LABELS: Record<string, string> = {
+  unclassified: 'Unclassified',
+  needs_review: 'Needs review',
+  classified: 'Classified',
+  unclassifiable: 'Unclassifiable',
+};
+
+/** How each intake door is named (`documents.intake_source`, migration 0130). */
+export const INTAKE_SOURCE_LABELS: Record<string, string> = {
+  import: 'Uploaded for review',
+  email: 'Email',
+  manual: 'Connector (run by hand)',
+  s3: 'Connector (watched bucket)',
+  r2_poll: 'Connector (watched bucket)',
+  api: 'Connector drop (API)',
+  public_link: 'Public drop link',
+  webhook: 'Webhook',
+  api_poll: 'Connector (polled API)',
+  request_link: 'Supplier request link',
+  direct_upload: 'Uploaded directly (no review)',
+  ingest_api: 'Ingest API',
+  [NONE_VALUE]: 'Not recorded',
+};
+
+/** A value's words on an enum facet or chip. */
+export function enumLabel(field: FieldKey, v: string): string {
+  switch (field) {
+    case 'status': return STATUS_LABELS[v] ?? v;
+    case 'spec_verdict': return SPEC_VERDICT_LABELS[v] ?? v;
+    case 'renewal_state': return RENEWAL_STATE_LABELS[v] ?? v;
+    case 'classification': return CLASSIFICATION_LABELS[v] ?? v;
+    case 'intake_source': return INTAKE_SOURCE_LABELS[v] ?? v;
+    case 'owner': return v === NONE_VALUE ? 'No owner' : v;
+    default: return v;
+  }
+}
+
+/** The fixed options of a closed-vocabulary field (for the clause editor). */
+export function enumOptions(field: FieldKey): Array<{ value: string; label: string }> | null {
+  const list: Partial<Record<FieldKey, readonly string[]>> = {
+    status: STATUS_VALUES,
+    spec_verdict: SPEC_VERDICT_VALUES,
+    renewal_state: RENEWAL_STATE_VALUES,
+    classification: CLASSIFICATION_VALUES,
+  };
+  const vals = list[field];
+  return vals ? vals.map((v) => ({ value: v, label: enumLabel(field, v) })) : null;
+}
+
+/**
+ * The columns the Advanced documents table can show, in order. `title` is
+ * always shown. A saved view stores its choice (`view.columns`).
+ */
+export const SEARCH_COLUMNS: Array<{ key: string; label: string; default?: boolean }> = [
+  { key: 'title', label: 'Document', default: true },
+  { key: 'type', label: 'Type', default: true },
+  { key: 'supplier', label: 'Supplier', default: true },
+  { key: 'products', label: 'Products', default: true },
+  { key: 'lots', label: 'Lot(s)', default: true },
+  { key: 'production', label: 'Production date' },
+  { key: 'code_best_by', label: 'Code / best-by' },
+  { key: 'renewal_due', label: 'Renewal due' },
+  { key: 'renewal_state', label: 'Renewal' },
+  { key: 'spec_verdict', label: 'Spec result' },
+  { key: 'classification', label: 'Classification' },
+  { key: 'owner', label: 'Owner' },
+  { key: 'intake_source', label: 'Came in by' },
+  { key: 'uploaded', label: 'Uploaded', default: true },
+  { key: 'approved', label: 'Approved' },
+  { key: 'document_number', label: 'Document #' },
+  { key: 'certificate_number', label: 'Certificate #' },
+  { key: 'po', label: 'PO' },
+  { key: 'shelf_life', label: 'Shelf life' },
+];
+export const DEFAULT_COLUMNS: string[] = SEARCH_COLUMNS.filter((c) => c.default).map((c) => c.key);
 
 export function isFieldKey(k: unknown): k is FieldKey {
   return typeof k === 'string' && Object.prototype.hasOwnProperty.call(SEARCH_FIELDS, k);
@@ -186,8 +369,18 @@ export function validateClause(c: Clause): string | null {
   if (def.key === 'status' && values.some((v) => !(STATUS_VALUES as readonly string[]).includes(v))) {
     return `Status is one of: ${STATUS_VALUES.join(', ')}.`;
   }
+  const closed: Partial<Record<FieldKey, readonly string[]>> = {
+    spec_verdict: SPEC_VERDICT_VALUES,
+    renewal_state: RENEWAL_STATE_VALUES,
+    classification: CLASSIFICATION_VALUES,
+  };
+  const vocab = closed[def.key];
+  if (vocab && values.some((v) => !vocab.includes(v))) return `${def.label} is one of: ${vocab.join(', ')}.`;
+  if (values.some((v) => v.length > 200)) return `${def.label}: a value is too long.`;
   if (def.valueKind === 'date') {
-    if (c.op === 'within' || c.op === 'older_than') {
+    if (c.op === 'missing') {
+      // "Not recorded": the value is a placeholder, there is nothing to parse.
+    } else if (c.op === 'within' || c.op === 'older_than') {
       const n = Number(values[0]);
       if (!Number.isInteger(n) || n < 1 || n > 36500) return `${def.label}: "${values[0]}" is not a number of days.`;
     } else if (c.op === 'between') {
@@ -206,7 +399,7 @@ export function validateClause(c: Clause): string | null {
     }
   }
   if (c.field === 'lot' && !normalizeLotNumber(values[0])) return `"${values[0]}" is not a lot number.`;
-  if ((c.field === 'po' || c.field === 'invoice' || c.field === 'identifier' || c.field === 'order') && normalizeKeyValue(values[0]).length < 2) {
+  if ((c.field === 'po' || c.field === 'invoice' || c.field === 'identifier' || c.field === 'order' || c.field === 'document_number' || c.field === 'certificate_number') && normalizeKeyValue(values[0]).length < 2) {
     return `${def.label}: "${values[0]}" is not an identifier.`;
   }
   return null;
@@ -230,6 +423,8 @@ export interface ConstraintContext {
   ordersByPo?: Map<string, SearchOrderEvidence[]>;
   /** Kinds of document key a number hit (identifier chip wording). */
   hitKinds?: Map<string, string[]>;
+  /** WMS orders by customer id (customer clauses), most recent first, capped. */
+  ordersByCustomer?: Map<string, { name: string; orders: SearchOrderEvidence[]; capped: boolean }>;
 }
 
 /**
@@ -302,6 +497,14 @@ export function clauseToConstraint(
         ...(ctx.ordersByPo?.get(foldCustomerPo(v)) ?? []),
       ].filter((o, i, all) => all.findIndex((x) => x.order_id === o.order_id) === i);
       return { constraint: withNote(makeIdentifierConstraint(id, v, { orders, hitKinds: ctx.hitKinds?.get(norm) }, source)) };
+    }
+    case 'document_number':
+    case 'certificate_number':
+      return { constraint: withNote(makeKeyKindConstraint(id, v, c.field, source)) };
+    case 'customer': {
+      const found = ctx.ordersByCustomer?.get(v);
+      if (!found) return { dropped: { kind: 'customer', label: `customer ${v}`, raw: v, reason: 'no customer with that id is on file.' } };
+      return { constraint: withNote(makeCustomerConstraint(id, v, found.name, found.orders, found.capped, source)) };
     }
     default:
       return { dropped: { kind: 'unknown', label: `${c.field} ${v}`, raw: v, reason: 'that field is not something a document can cover.' } };

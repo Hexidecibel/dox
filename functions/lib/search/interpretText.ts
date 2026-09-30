@@ -20,8 +20,7 @@ import { describeClause } from '../../../shared/searchQuery';
 import {
   detectProduct,
   resolveDetections,
-  scanResidualWords,
-  scanHasCandidates,
+  scanMayNameProduct,
   scanNorms,
   scanOrderValues,
   scanText,
@@ -45,7 +44,6 @@ export async function interpretQueryText(db: D1Database, tenantId: string, rawTe
   const text = rawText.replace(/\s+/g, ' ').trim().slice(0, INTERPRET_MAX_CHARS);
   if (!text) return { clauses: [], residual: '', labels: {} };
   const scan = scanText(text, { now: new Date() });
-  if (!scanHasCandidates(scan)) return { clauses: [], residual: text, labels: {} };
 
   const stmts: D1PreparedStatement[] = [];
   const idx: Partial<Record<'keys' | 'lots' | 'schemes' | 'orders' | 'catalog', number>> = {};
@@ -95,8 +93,9 @@ export async function interpretQueryText(db: D1Database, tenantId: string, rawTe
     ).bind(tenantId, ...ov, ...pov));
   }
 
-  // Words beside the candidates may name a product ("butter produced in April").
-  if (scanResidualWords(scan)) add('catalog', productCatalogStatement(db, tenantId));
+  // The words may name a product: beside a candidate ("butter produced in
+  // April"), or on their own when they are a code, a pack or a recorded name.
+  if (scanMayNameProduct(scan)) add('catalog', productCatalogStatement(db, tenantId));
 
   const results = stmts.length ? await db.batch(stmts) : [];
   const rows = <T>(k: keyof typeof idx): T[] => (idx[k] === undefined ? [] : ((results[idx[k]!]?.results ?? []) as T[]));

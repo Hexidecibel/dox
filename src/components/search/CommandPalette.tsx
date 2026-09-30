@@ -120,7 +120,14 @@ export function CommandPalette({ open, onClose, tenantId, modKey }: CommandPalet
       for (const o of hits.orders.results) {
         out.push({ group: 'Jump to', icon: '#', label: `Order ${o.order_number ?? ''}${o.customer_name ? ` · ${o.customer_name}` : ''}`, detail: o.po_number ? `PO ${o.po_number}` : 'order', run: () => go(`/orders/${o.id}`) });
       }
-      for (const c of hits.customers.results) out.push({ group: 'Jump to', icon: 'C', label: c.name, detail: 'customer', run: () => go(`/customers/${c.id}`) });
+      for (const c of hits.customers.results) {
+        out.push({ group: 'Jump to', icon: 'C', label: c.name, detail: 'customer', run: () => go(`/customers/${c.id}`) });
+        // Search Phase 3: what went to this customer, followed through their WMS orders.
+        out.push({
+          group: 'Jump to', icon: 'C', label: `Documents sent to ${c.name}`, detail: 'through their orders',
+          run: () => go(`/search?${encodeQuery({ ...EMPTY_QUERY, clauses: [{ id: 'c1', field: 'customer', op: 'is', values: [c.id], source: 'builder' }] })}`),
+        });
+      }
       for (const b of hits.bundles.results) out.push({ group: 'Jump to', icon: 'B', label: b.name, detail: 'bundle', run: () => go(`/bundles/${b.id}`) });
       for (const d of hits.documents.results.slice(0, 3)) {
         out.push({ group: 'Documents', icon: '▤', label: d.title ?? 'Document', detail: d.supplier_name ?? undefined, run: () => go(`/documents/${d.id}`) });

@@ -1113,6 +1113,78 @@ export function makeIdentifierConstraint(
   };
 }
 
+/**
+ * A document # or certificate # (search redesign Phase 3): the number the paper
+ * prints as its OWN identifier of that kind, and nothing else — not a lot that
+ * happens to read the same, not a WMS order.
+ */
+export function makeKeyKindConstraint(
+  id: string,
+  raw: string,
+  kind: 'document_number' | 'certificate_number',
+  source: SearchConstraint['source'],
+): SearchConstraint {
+  const value = raw.trim();
+  const words = KEY_KIND_LABELS[kind];
+  return {
+    id,
+    kind: 'identifier',
+    label: `${words} ${value}`,
+    raw,
+    value,
+    fields: [kind],
+    key_kinds: [kind],
+    keys_only: true,
+    orders: [],
+    source,
+    note: `Checked against the ${words} printed on each document.`,
+  };
+}
+
+/** How many of a customer's WMS orders a customer clause follows (most recent first). */
+export const CUSTOMER_ORDER_CAP = 50;
+
+/**
+ * A customer (search redesign Phase 3): the documents that went to them,
+ * followed through their WMS orders exactly like an order number — covering
+ * only where a person accepted the lot match or a lot row is exactly the
+ * shipped lot, likely on a pending suggestion. Only the most recent orders are
+ * followed, and the note says so when there are more.
+ */
+export function makeCustomerConstraint(
+  id: string,
+  customerId: string,
+  name: string,
+  orders: SearchOrderEvidence[],
+  capped: boolean,
+  source: SearchConstraint['source'],
+): SearchConstraint {
+  const n = orders.length;
+  return {
+    id,
+    kind: 'customer',
+    label: `customer ${name}`,
+    raw: name,
+    value: customerId,
+    fields: ['orders.customer_id'],
+    orders,
+    source,
+    note: n === 0
+      ? `${name} has no WMS orders on file, so nothing can be shown as sent to them.`
+      : `Followed through ${capped ? `the ${n} most recent of ${name}'s WMS orders (older orders are not checked)` : `${name}'s ${n} WMS order${n === 1 ? '' : 's'}`} to the lots they shipped; a certificate covers only where a person accepted the match or a lot row is exactly the shipped lot.`,
+  };
+}
+
+export function checkCustomer(c: SearchConstraint, s: CoverageSubject): SearchConstraintCheck {
+  const via = orderChecks(c, s, (o) => `WMS order ${o.order_number} is ${c.raw}'s.`)
+    .filter((ch) => !(ch.outcome === 'mismatch' && ch.provenance === null));
+  if (via.length) return bestOf(via);
+  return {
+    constraint_id: c.id, outcome: 'mismatch', field: 'orders', field_label: 'customer', value: null, provenance: null,
+    message: `None of ${c.raw}'s WMS orders reaches this document.`,
+  };
+}
+
 function keyCheck(c: SearchConstraint, s: CoverageSubject, kinds: IdentifierKeyKind[]): SearchConstraintCheck {
   const want = normalizeKeyValue(c.value);
   const keys = identifierKeys(s.metadata, kinds);
@@ -1164,6 +1236,7 @@ export function checkInvoice(c: SearchConstraint, s: CoverageSubject): SearchCon
 export function checkIdentifier(c: SearchConstraint, s: CoverageSubject): SearchConstraintCheck {
   const kinds = (c.key_kinds ?? IDENTIFIER_KEY_KINDS).filter((k): k is IdentifierKeyKind => (IDENTIFIER_KEY_KINDS as string[]).includes(k));
   const own = keyCheck(c, s, kinds);
+  if (c.keys_only) return own;
   const candidates: SearchConstraintCheck[] = [own];
   const lot = checkLot({ ...c, kind: 'lot', value: normalizeLotNumber(c.value), lot_parts: null }, s);
   // Only an exact lot answers an identifier; a partial lot is a lot question.
@@ -1180,6 +1253,7 @@ export function checkConstraint(c: SearchConstraint, s: CoverageSubject, order: 
     case 'po': return checkPo(c, s);
     case 'invoice': return checkInvoice(c, s);
     case 'identifier': return checkIdentifier(c, s);
+    case 'customer': return checkCustomer(c, s);
     case 'lot': return checkLot(c, s);
     case 'date': return checkDate(c, s, order);
     case 'supplier': return checkSupplier(c, s);
@@ -1226,7 +1300,7 @@ const RELEVANT: ReadonlySet<SearchCheckOutcome> = new Set([
  */
 export function isIdentifying(c: SearchConstraint): boolean {
   return c.kind === 'lot' || c.kind === 'date' || c.kind === 'order'
-    || c.kind === 'po' || c.kind === 'invoice' || c.kind === 'identifier'
+    || c.kind === 'po' || c.kind === 'invoice' || c.kind === 'identifier' || c.kind === 'customer'
     || (c.kind === 'product' && !!c.product_resolution);
 }
 

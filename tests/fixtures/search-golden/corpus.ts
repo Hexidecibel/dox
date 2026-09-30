@@ -410,6 +410,25 @@ export const ORDERS = {
   invoiceTwin: { id: 'g-order-invoice-twin', number: '263777', po: 'PO-90003', lot: '9999999901', doc: null, status: null },
 };
 
+/**
+ * Phase 3 (every field): the registry and provenance facts the Advanced
+ * filters read. Dates are RELATIVE to the day the corpus is seeded, because
+ * renewal state and "approved in the last 30 days" are judged against today.
+ */
+export const CUSTOMER = {
+  /** Every WMS order above is theirs. */
+  harbor: 'g-cust-harbor',
+  /** A customer with no orders on file: nothing can be shown as sent to them. */
+  pier: 'g-cust-pier',
+} as const;
+
+export const REQ = {
+  coi: 'g-req-coi',
+  audit: 'g-req-audit',
+} as const;
+
+export const CLAIM = { kosher: 'g-claim-kosher' } as const;
+
 export const QUEUE = {
   /** Waiting for review: lot 2072610705 — never covering. */
   pendingLot: 'g-queue-pending-lot',
@@ -533,7 +552,73 @@ async function doSeed(db: D1Database): Promise<void> {
     ).bind(id, GOLDEN_TENANT, DT.coa, `golden/${id}.pdf`, `${id}.pdf`, JSON.stringify(fields), JSON.stringify(fields), String(fields.supplier_name)).run();
   }
 
+  await seedRegistry(db);
   await rebuildDocumentKeys(db, DOCUMENTS.map((d) => d.id));
+}
+
+function dayFromToday(n: number): string {
+  return new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** Requirements, claims, spec results, renewal, owner, classification, provenance, customers. */
+async function seedRegistry(db: D1Database): Promise<void> {
+  const T = GOLDEN_TENANT;
+  // Customers own the WMS orders.
+  await db.prepare(`INSERT INTO customers (id, tenant_id, customer_number, name) VALUES (?, ?, 'C-100', 'Harbor Seafood Co'), (?, ?, 'C-200', 'Pier Bakery')`)
+    .bind(CUSTOMER.harbor, T, CUSTOMER.pier, T).run();
+  await db.prepare(`UPDATE orders SET customer_id = ? WHERE tenant_id = ?`).bind(CUSTOMER.harbor, T).run();
+
+  // What documents SATISFY (layer 2) — a rejected link never counts.
+  await db.prepare(`INSERT INTO requirements (id, tenant_id, slug, name) VALUES (?, ?, 'certificate-of-insurance', 'Certificate of Insurance'), (?, ?, 'third-party-audit', 'Third-party audit certificate')`)
+    .bind(REQ.coi, T, REQ.audit, T).run();
+  const links: Array<[string, string, string]> = [
+    [DOC.cascadeCoi, REQ.coi, 'confirmed'],
+    [DOC.valleyCoi, REQ.coi, 'suggested'],
+    [DOC.riversideCoi, REQ.coi, 'rejected'],
+    [DOC.cascadeSqf, REQ.audit, 'confirmed'],
+    [DOC.hollowSqf, REQ.audit, 'confirmed'],
+  ];
+  for (const [doc, req, status] of links) {
+    await db.prepare(`INSERT INTO document_requirements (id, document_id, requirement_id, status) VALUES (?, ?, ?, ?)`).bind(`${doc}-${req}`, doc, req, status).run();
+  }
+  // What documents TRIGGER (layer 3).
+  await db.prepare(`INSERT INTO claim_types (id, tenant_id, slug, name) VALUES (?, ?, 'kosher', 'Kosher')`).bind(CLAIM.kosher, T).run();
+  await db.prepare(`INSERT INTO document_claims (id, document_id, claim_type_id, status) VALUES (?, ?, ?, 'confirmed')`).bind(`${DOC.valleyKosher}-kosher`, DOC.valleyKosher, CLAIM.kosher).run();
+
+  // The spec register (0085) and gaps (0109).
+  const checks: Array<[string, string, string]> = [
+    [DOC.cascadeMulti, 'Moisture', 'out_of_spec'],
+    [DOC.cascadeMulti, 'Fat', 'in_spec'],
+    [DOC.cascadeSalted, 'Moisture', 'in_spec'],
+    [DOC.hollowSourA, 'Coliform', 'not_checked'],
+  ];
+  for (const [i, [doc, test, verdict]] of checks.entries()) {
+    await db.prepare(`INSERT INTO document_spec_checks (id, tenant_id, document_id, test_name_raw, verdict, source) VALUES (?, ?, ?, ?, ?, 'limit')`)
+      .bind(`g-dsc-${i}`, T, doc, test, verdict).run();
+  }
+  await db.prepare(`INSERT INTO document_spec_gaps (id, tenant_id, document_id, kind, test_name_raw, result_key, reason) VALUES ('g-gap-1', ?, ?, 'unjudged', 'Yeast', 'ai_fields::t0r1c1', 'unit refused')`)
+    .bind(T, DOC.valleyCreamTote).run();
+
+  // Renewal: a COA does not renew by its TYPE; the three insurance
+  // certificates are due in 20 days (inside the default 60-day warning),
+  // 5 days ago, and in 400 days; the Cascade SQF certificate was cleared by a
+  // reviewer (does not renew).
+  await db.prepare(`UPDATE document_types SET renewal_policy = 'none' WHERE id = ?`).bind(DT.coa).run();
+  const due: Array<[string, string]> = [[DOC.valleyCoi, dayFromToday(20)], [DOC.riversideCoi, dayFromToday(-5)], [DOC.cascadeCoi, dayFromToday(400)]];
+  for (const [doc, day] of due) {
+    await db.prepare(`UPDATE documents SET renewal_due_date = ?, renewal_type = 'hard_expiry', renewal_decision = 'accepted', owner = 'Insurance' WHERE id = ?`).bind(day, doc).run();
+  }
+  await db.prepare(`UPDATE documents SET renewal_decision = 'cleared', owner = 'QA' WHERE id = ?`).bind(DOC.cascadeSqf).run();
+
+  // Classification.
+  await db.prepare(`UPDATE documents SET classification_status = 'needs_review' WHERE id = ?`).bind(DOC.valleyKosher).run();
+  await db.prepare(`UPDATE documents SET classification_status = 'classified' WHERE id = ?`).bind(DOC.cascadeSpec).run();
+
+  // Provenance (0130): approved from the queue by email three days ago; by
+  // smart upload a hundred days ago; and an invoice uploaded directly.
+  await db.prepare(`UPDATE documents SET approved_at = ?, intake_source = 'email', origin_queue_id = 'g-queue-was-email' WHERE id = ?`).bind(`${dayFromToday(-3)} 10:00:00`, DOC.cascadeMulti).run();
+  await db.prepare(`UPDATE documents SET approved_at = ?, intake_source = 'import', origin_queue_id = 'g-queue-was-upload' WHERE id = ?`).bind(`${dayFromToday(-100)} 10:00:00`, DOC.cascadeSalted).run();
+  await db.prepare(`UPDATE documents SET intake_source = 'direct_upload' WHERE id = ?`).bind(DOC.valleyInvoice).run();
 }
 
 /** Every approved golden document of the main tenant. */

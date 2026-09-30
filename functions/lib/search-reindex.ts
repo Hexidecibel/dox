@@ -72,7 +72,7 @@ interface PendingJob {
   max_attempts: number;
 }
 
-const VALID_KINDS = new Set(['supplier', 'product', 'document_type', 'tenant']);
+const VALID_KINDS = new Set(['supplier', 'product', 'document_type', 'requirement', 'tenant']);
 
 /**
  * Look up the doc IDs affected by a single job. Returns an array of
@@ -111,12 +111,27 @@ async function affectedDocIds(
   }
 
   if (job.entity_kind === 'product') {
+    // Linked directly OR through a lot row (a split COA is linked only that
+    // way): product_text reads both since 0131.
     const r = await db
       .prepare(
-        `SELECT DISTINCT d.id
-           FROM documents d
-           JOIN document_products dp ON dp.document_id = d.id
-          WHERE d.tenant_id = ? AND dp.product_id = ?`,
+        `SELECT d.id FROM documents d
+          WHERE d.tenant_id = ?
+            AND d.id IN (SELECT dp.document_id FROM document_products dp WHERE dp.product_id = ?
+                         UNION
+                         SELECT dl.document_id FROM document_lots dl JOIN lots l ON l.id = dl.lot_id WHERE l.product_id = ?)`,
+      )
+      .bind(job.tenant_id, job.entity_id, job.entity_id)
+      .all<{ id: string }>();
+    return (r.results ?? []).map((row) => row.id);
+  }
+
+  if (job.entity_kind === 'requirement') {
+    const r = await db
+      .prepare(
+        `SELECT DISTINCT d.id FROM documents d
+           JOIN document_requirements dr ON dr.document_id = d.id
+          WHERE d.tenant_id = ? AND dr.requirement_id = ?`,
       )
       .bind(job.tenant_id, job.entity_id)
       .all<{ id: string }>();
@@ -157,13 +172,16 @@ async function reindexBatch(
     .run();
 
   // Re-insert from the source view. The view already does the supplier /
-  // doc_type / product joins and the 200KB extracted_text cap.
+  // doc_type / product joins and the 200KB extracted_text cap. Every column
+  // the triggers write, including 0079's registry columns: re-emitting fewer
+  // would blank requirement names out of a document on every rename.
   await db
     .prepare(
       `INSERT INTO documents_fts (
          rowid, title, description, tags_text, file_name,
          extracted_text, primary_metadata_text, extended_metadata_text,
          supplier_text, document_type_text, product_text, lot_text,
+         category_text, aliases_text, criteria_text, applies_to_text,
          doc_id, tenant_id
        )
        SELECT
@@ -171,6 +189,7 @@ async function reindexBatch(
          src.title, src.description, src.tags_text, src.file_name,
          src.extracted_text, src.primary_metadata_text, src.extended_metadata_text,
          src.supplier_text, src.document_type_text, src.product_text, src.lot_text,
+         src.category_text, src.aliases_text, src.criteria_text, src.applies_to_text,
          src.doc_id, src.tenant_id
        FROM documents_fts_source src
        JOIN documents_fts_map m ON m.doc_id = src.doc_id
@@ -282,6 +301,25 @@ export async function drainSearchReindexQueue(
   }
 
   return result;
+}
+
+/**
+ * Drain a few pending jobs AFTER a response, from an endpoint whose write just
+ * enqueued one (a supplier / product / type / requirement rename, an
+ * identifier change) — so a rename reaches free-text search without anybody
+ * pressing the admin button (search redesign Phase 3; the drainer used to have
+ * that one caller). Best-effort: a failure stays in the queue for the next
+ * drain, and never touches the response.
+ */
+export function drainSoon(
+  ctx: { waitUntil?: (p: Promise<unknown>) => void } | undefined,
+  db: D1Database,
+  maxJobs = 5,
+): void {
+  const p = drainSearchReindexQueue(db, { maxJobs }).catch((err) => {
+    console.error('search reindex drain failed:', err);
+  });
+  if (ctx?.waitUntil) ctx.waitUntil(p);
 }
 
 /**

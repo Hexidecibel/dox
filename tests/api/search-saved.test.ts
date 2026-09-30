@@ -7,8 +7,8 @@
  * and per-user isolation end-to-end.
  *
  * Coverage:
- *   - POST  201 happy path; 400 on missing name / query; 400 on shared
- *     scope (reserved for v2); 409 on duplicate name per user.
+ *   - POST  201 happy path; 400 on missing name / query; 409 on duplicate
+ *     name per user; 'shared' (search Phase 3) for org_admins, 403 otherwise.
  *   - GET   list returns ONLY the calling user's rows; reader role works
  *     identically to user / org_admin / super_admin.
  *   - PUT   owner can update name + query; 409 on name conflict;
@@ -227,16 +227,30 @@ describe('POST /api/search/saved', () => {
     expect(body.error).toMatch(/query/i);
   });
 
-  it("rejects POST with scope='shared' (reserved for v2)", async () => {
+  it("lets an org_admin publish a view to the organization (scope='shared')", async () => {
     const res = await createSaved(
-      makePostContext(
-        { name: 'Team Bookmark', query: { q: 'x' }, scope: 'shared' },
-        userFor('org_admin'),
-      ),
+      makePostContext({ name: 'Team Bookmark', query: { q: 'x' }, scope: 'shared' }, userFor('org_admin')),
     );
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { saved_search: SavedSearch };
+    expect(body.saved_search.scope).toBe('shared');
+  });
+
+  it("refuses scope='shared' from a non-admin with a 403 that says why (never a silent downgrade)", async () => {
+    for (const role of ['user', 'reader'] as const) {
+      const res = await createSaved(makePostContext({ name: `Team ${role}`, query: { q: 'x' }, scope: 'shared' }, userFor(role)));
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/admin/i);
+    }
+  });
+
+  it('refuses a v1 view whose clause could never run (the executor\'s own rule)', async () => {
+    const res = await createSaved(makePostContext({
+      name: 'Bad View',
+      query: { v: 1, text: '', clauses: [{ id: 'c1', field: 'lot', op: 'is', values: ['1234'], exclude: true, source: 'builder' }], view: { entity: 'documents' } },
+    }, userFor('user')));
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/shared|not yet supported/i);
   });
 
   it('rejects unknown scope values (400)', async () => {
@@ -485,5 +499,61 @@ describe('DELETE /api/search/saved/:id', () => {
       .bind(created.id)
       .first();
     expect(row).not.toBeNull();
+  });
+});
+
+describe('shared views (search Phase 3)', () => {
+  const view = { v: 1, text: '', clauses: [{ id: 'c1', field: 'owner', op: 'in', values: ['QA'], source: 'builder' }], view: { entity: 'documents', mode: 'advanced', columns: ['title', 'owner'] } };
+  const other = (): SeedUser => ({ id: seed.orgAdmin2Id, role: 'org_admin', tenant_id: seed.tenantId2 });
+
+  async function share(): Promise<SavedSearch> {
+    const res = await createSaved(makePostContext({ name: 'QA owned', query: view, scope: 'shared' }, userFor('org_admin')));
+    expect(res.status).toBe(201);
+    return ((await res.json()) as { saved_search: SavedSearch }).saved_search;
+  }
+
+  it('every role in the organization lists and opens it; the view keeps its mode and columns', async () => {
+    const shared = await share();
+    for (const role of ['user', 'reader', 'org_admin'] as const) {
+      const list = (await (await listSaved(makeListContext(userFor(role)))).json()) as { saved_searches: Array<SavedSearch & { mine: boolean; owner_name: string }> };
+      const row = list.saved_searches.find((x) => x.id === shared.id);
+      expect(row, role).toBeTruthy();
+      expect(row!.mine).toBe(role === 'org_admin');
+      expect(row!.owner_name).toBe('Org Admin');
+      const got = await getSaved(makeGetContext(shared.id, userFor(role)));
+      expect(got.status).toBe(200);
+      expect(((await got.json()) as { saved_search: SavedSearch }).saved_search.query).toEqual(view);
+    }
+  });
+
+  it('another organization never sees it (404 by id, absent from the list)', async () => {
+    const shared = await share();
+    const list = (await (await listSaved(makeListContext(other()))).json()) as { saved_searches: SavedSearch[] };
+    expect(list.saved_searches.map((x) => x.id)).not.toContain(shared.id);
+    expect((await getSaved(makeGetContext(shared.id, other()))).status).toBe(404);
+  });
+
+  it('a colleague cannot change or delete it (403); the owner can unshare it', async () => {
+    const shared = await share();
+    expect((await updateSaved(makePutContext(shared.id, { name: 'Mine now' }, userFor('user')))).status).toBe(403);
+    expect((await deleteSaved(makeDeleteContext(shared.id, userFor('user')))).status).toBe(403);
+    const res = await updateSaved(makePutContext(shared.id, { scope: 'personal' }, userFor('org_admin')));
+    expect(res.status).toBe(200);
+    expect((await getSaved(makeGetContext(shared.id, userFor('user')))).status).toBe(404);
+  });
+
+  it("an org_admin may take down a colleague-published view; a user's personal view stays invisible", async () => {
+    // A second admin in the same organization publishes; the first takes it down.
+    await db.prepare(
+      `INSERT OR IGNORE INTO users (id, email, name, role, tenant_id, password_hash, active, force_password_change)
+       VALUES ('user-org-admin-b', 'orgadmin-b@test.com', 'Admin B', 'org_admin', ?, 'x', 1, 0)`,
+    ).bind(seed.tenantId).run();
+    const adminB: SeedUser = { id: 'user-org-admin-b', role: 'org_admin', tenant_id: seed.tenantId };
+    const res = await createSaved(makePostContext({ name: 'B shares', query: view, scope: 'shared' }, adminB));
+    const id = ((await res.json()) as { saved_search: SavedSearch }).saved_search.id;
+    expect((await deleteSaved(makeDeleteContext(id, userFor('org_admin')))).status).toBe(200);
+    const personal = await createOne(userFor('user'), 'Private one');
+    expect((await getSaved(makeGetContext(personal.id, userFor('org_admin')))).status).toBe(404);
+    expect((await deleteSaved(makeDeleteContext(personal.id, userFor('org_admin')))).status).toBe(404);
   });
 });

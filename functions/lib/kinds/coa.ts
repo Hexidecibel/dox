@@ -9,6 +9,7 @@
 // otherwise in scope here and its two copies DO match structurally.
 import type { D1Database } from '@cloudflare/workers-types';
 import { generateId, logAudit } from '../db';
+import { stampApprovalProvenance } from '../document-provenance';
 import { buildR2Key, uploadFile, downloadFile, deleteFile, computeChecksum } from '../r2';
 import { findOrCreateSupplier } from '../suppliers';
 import { findOrCreateProduct } from '../entities/products';
@@ -692,6 +693,9 @@ export async function produceCoa(
   // Delete pending R2 file
   await deleteFile(files, item.file_r2_key);
 
+  // When, from which queue item, by which door (0130).
+  await stampApprovalProvenance(db, item.tenant_id, item.id, [docId]);
+
   // Audit log
   await logAudit(
     db,
@@ -964,6 +968,8 @@ export async function produceMultiProductCoa(
 
   // Delete pending R2 file
   await deleteFile(files, item.file_r2_key);
+
+  await stampApprovalProvenance(db, item.tenant_id, item.id, results.map((r) => r.documentId));
 
   // Audit log
   await logAudit(
@@ -1429,6 +1435,8 @@ export async function produceCoaRecords(
       .bind(`+${SPLIT_SOURCE_RETENTION_DAYS} days`, item.id)
       .run();
   }
+
+  await stampApprovalProvenance(db, item.tenant_id, item.id, results.map((r) => r.documentId));
 
   await logAudit(
     db,

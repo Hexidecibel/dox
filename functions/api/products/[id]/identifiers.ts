@@ -8,6 +8,7 @@
  * labels every result reached through it "via unconfirmed …").
  */
 
+import { drainSoon } from '../../../lib/search-reindex';
 import { getClientIp, logAudit } from '../../../lib/db';
 import {
   BadRequestError,
@@ -90,6 +91,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         getClientIp(context.request),
       );
     }
+    drainSoon(context, context.env.DB);
     return json({ identifier: row, created }, created ? 201 : 200);
   } catch (err) {
     const httpErr = errorToResponse(err);

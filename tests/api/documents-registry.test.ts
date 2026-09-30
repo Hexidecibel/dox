@@ -125,9 +125,10 @@ describe('registry ingest — categories[], aliases, renewal', () => {
     expect(JSON.parse(row.applies_to)).toEqual(['Kent', 'Portland']);
     expect(row.owner).toBe('QA');
 
-    // FTS: the alias is searchable via documents_fts.aliases_text, and the
-    // category name via category_text — proving the Phase-1 triggers fired on
-    // the documents insert and the document_categories inserts.
+    // FTS: the alias is searchable via documents_fts.aliases_text. Since 0131
+    // category_text reads the REQUIREMENTS a document satisfies, not the
+    // retired document_categories junction: the category rows are still
+    // written (the API contract), but they no longer feed search.
     const ftsAlias = await db.prepare(
       "SELECT doc_id FROM documents_fts WHERE documents_fts MATCH ?",
     ).bind(`aliases_text:${alias}`).all<{ doc_id: string }>();
@@ -136,7 +137,7 @@ describe('registry ingest — categories[], aliases, renewal', () => {
     const ftsCat = await db.prepare(
       "SELECT doc_id FROM documents_fts WHERE documents_fts MATCH 'category_text:Spec'",
     ).all<{ doc_id: string }>();
-    expect(ftsCat.results.map((r) => r.doc_id)).toContain(docId);
+    expect(ftsCat.results.map((r) => r.doc_id)).not.toContain(docId);
   });
 
   it('rejects an invalid renewal_type', async () => {
