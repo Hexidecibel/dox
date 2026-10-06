@@ -413,7 +413,7 @@ const orders: ModuleHelpExpanded = {
           "A certificate that covers several lots is sent whole, once, even when several lines came from it. If the whole certificate is not on file the screen says so and the page for that lot is sent instead. " +
           "When the files do not fit in one email they go as numbered emails, 1 of 3 and so on, and the screen shows the split before you send. A single file too large to attach goes as a link in the first email; that link does not expire and can be revoked from Sent documents. An order that would need more than ten emails is refused with the number, so send it in two goes. " +
           "Lines with no certificate, or whose certificate has since been archived, are listed as not sent. " +
-          "Sent, on the order, lists each send: who sent it, to which address, each file and how it went. If some of the emails failed, Resend failed parts sends only those. The order becomes delivered once every email has gone. A read-only account cannot build or send an order.",
+          "Sent, on the order, lists each send: who sent it, to which address, each file and how it went. If some of the emails failed, Resend failed parts sends only those. The order becomes delivered once every email has gone and no line was left unsent. A read-only account cannot build or send an order.",
       },
       {
         heading: 'Filtering and search',

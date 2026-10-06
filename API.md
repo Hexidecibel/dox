@@ -1759,7 +1759,8 @@ reply-to of the calling user. `recipients` defaults to the customer's address
 - **Each email succeeds or fails on its own.** 200 with `send.status` `sent` or
   `partial` when at least one went; **502** when none did. A file missing from
   storage fails its email with the reason rather than being left out. The
-  order's status becomes `delivered` only when every part went.
+  order's status becomes `delivered` only when every part went AND no line was
+  left behind (a line with no document, or one that is no longer active).
 - 30 sends an hour per user (429); 503 when email is not configured.
 
 Audited `order.coas_sent` (or `order.coas_send_failed`) naming every file, its

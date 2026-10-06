@@ -4294,7 +4294,8 @@ paths:
         A single file over 15 MB leaves as a link that does not expire. More
         than 10 emails is refused with the number. A multi-lot certificate
         goes whole, once. Each email succeeds or fails on its own; the order
-        becomes `delivered` only when every part went.
+        becomes `delivered` only when every part went and no line was left
+        behind.
       parameters:
         - name: id
           in: path

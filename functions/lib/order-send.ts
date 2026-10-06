@@ -722,9 +722,27 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
   return results;
 }
 
-/** An order whose every document reached the customer is `delivered`. */
+/**
+ * An order whose every line reached the customer is `delivered`.
+ *
+ * Two conditions, both required: every email of the send was accepted, AND no
+ * line of the order was left behind -- a line with no document, or whose
+ * document is no longer active, was listed as "not sent" on the review screen,
+ * and an order with one of those is not delivered however well the rest went.
+ */
 async function markDeliveredIfSent(db: D1Database, send: StoredSend): Promise<string | null> {
   if (send.status !== 'sent') return null;
+  const behind = await db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM order_items oi
+         LEFT JOIN documents d ON d.id = oi.coa_document_id
+        WHERE oi.order_id = ?
+          AND (oi.coa_document_id IS NULL OR d.status IS NULL OR d.status != 'active')`,
+    )
+    .bind(send.order_id)
+    .first<{ n: number }>();
+  if (Number(behind?.n) > 0) return null;
   await db
     .prepare(`UPDATE orders SET status = 'delivered', updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`)
     .bind(send.order_id, send.tenant_id)

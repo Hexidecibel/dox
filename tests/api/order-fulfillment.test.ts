@@ -773,6 +773,16 @@ describe('GET /api/orders/:id/send-preview + POST /api/orders/:id/send', () => {
     expect(plan.blocked).toBeNull();
     expect(plan.files).toHaveLength(1);
     expect(plan.lines_not_sent.map((l) => l.reason).join(' ')).toMatch(/archived/);
+
+    // What can go, goes -- but an order with a line left behind is not
+    // `delivered`, however well the rest went.
+    vi.unstubAllGlobals();
+    stubMail();
+    const sent = await send(order, { fingerprint: plan.fingerprint });
+    expect(sent.status).toBe(200);
+    expect(sent.body.send.status).toBe('sent');
+    expect(sent.body.order_status).toBe('pending');
+    expect((await readOrder(order)).order.status).toBe('pending');
   });
 
   it('splits what does not fit into numbered emails, and shows the split before sending', async () => {
