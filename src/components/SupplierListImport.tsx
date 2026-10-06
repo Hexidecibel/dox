@@ -97,6 +97,7 @@ export function importSummary(r: SupplierListImportResponse): string {
   if (c.requirements_kept_person_set) parts.push(`${c.requirements_kept_person_set} kept as a person set them`);
   if (c.requirements_held_unconfirmed) parts.push(`${c.requirements_held_unconfirmed} left unconfirmed (the list implies a lower tier)`);
   if (c.requirements_newly_flagged) parts.push(`${c.requirements_newly_flagged} no longer on the list (flagged)`);
+  if (c.contacts_added) parts.push(`${c.contacts_added} contact address${c.contacts_added === 1 ? '' : 'es'} to add`);
   return parts.join(' · ');
 }
 

@@ -503,6 +503,13 @@ const suppliers: ModuleHelpExpanded = {
           "Open a supplier to see three tabs. Products — the catalog items this supplier ships. Templates — extraction templates pinned to the supplier + document type pair (set up via the Import / Review Queue flow). Documents — every doc with a supplier_id pointing here, listed newest first. The Templates tab is where you tune auto-ingest thresholds for high-trust supplier+doctype pairs.",
       },
       {
+        heading: 'Contacts',
+        body:
+          "The Contacts tab holds the people at this supplier. One of them is the document contact: the single address renewal requests are sent to. The first contact you add becomes it; choosing another replaces it. " +
+          "Adding a contact sends nothing. A request is drafted when one of this supplier's documents nears its renewal date and goes out only after a person approves it on Renewals. With no document contact, no request is drafted for this supplier and Renewals lists its documents as waiting on one. " +
+          "The contact email column of the verified supplier list fills this in for you when the list is applied.",
+      },
+      {
         heading: 'Common questions',
         body:
           "Same supplier showing up twice? Likely a case mismatch or punctuation difference (\"ACME, Inc.\" vs \"ACME Inc\"). Pick the canonical record, add the duplicate's name as an alias, then deactivate or delete the duplicate. " +
@@ -1488,6 +1495,7 @@ const settings: ModuleHelpExpanded = {
         body:
           "Where do I change branding (logo, colors)? Tenant-level branding for the in-app UI isn't editable yet — it's on the roadmap. Public-facing forms (records sheet forms, public-link drops) carry per-form branding (logo + accent color). " +
           "Where do I configure expiration alert recipients? Settings › Owner Routing. A renewal alert is grouped by the record's owner label ('QA', 'Insurance', 'Purchasing'), and an owner route points that label at a portal user or a bare email address. A record whose owner resolves to nobody is NOT broadcast to the admins — it is reported as a routing gap, so a missing route shows up instead of being papered over. How far ahead owners are warned is set on the same screen (60 days unless you change it) and can be overridden per document type. Spec alerts fall back to the tenant's org_admins when nothing else routes; renewal alerts deliberately do not. " +
+          "Does the portal email my suppliers? Only when a person approves it. When a document from a supplier nears its renewal date, a request to that supplier's document contact is drafted - when the warning window opens, on the day of expiry, and 7 and 14 days after - and waits on Renewals > Supplier requests. The approver (the first portal user behind the document's owner, otherwise the master user chosen on Settings > Owner Routing, otherwise an administrator) reads it, edits the wording if they want, and presses Approve and send. It goes out as 'your organization via SupDox' with replies coming to the approver, and carries a link where the supplier uploads the new document. After 21 days with nothing accepted, reminders stop and your administrators are told. A supplier with no document contact (Supplier > Contacts) gets no request, and Renewals says so. " +
           "Why can't I see other tenants' settings? Tenant isolation — even super_admin has to switch tenant context (via the tenant switcher in the navbar) to view another tenant's settings.",
       },
     ],

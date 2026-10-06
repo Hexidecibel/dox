@@ -353,6 +353,15 @@ import type { SupplierGapListResponse, SupplierGapStatus } from '../../shared/re
 import type { ProductIdentifier, ProductIdentifierKind, ApiProductRequirement, RequirementScopePreview } from '../../shared/types';
 import type { RequirementScope } from '../../shared/requirementScope';
 import type { SupplierLotSchemeResponse } from '../../shared/types';
+import type {
+  ApproveRenewalSendResponse,
+  RenewalDefaultOwnerResponse,
+  RenewalRequestItem,
+  RenewalRequestListResponse,
+  SupplierContact,
+  SupplierContactWriteRequest,
+  SupplierContactsResponse,
+} from '../../shared/types';
 import type { LotSchemeSpec } from '../../shared/lotScheme';
 import type {
   BulkApplyPacketRequest,
@@ -543,7 +552,7 @@ export const api = {
      * with no explicit `status` lands 'confirmed', which is the only status
      * gap detection counts.
      */
-    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; supplier_name: string; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null; categories: string[]; primary_category_id: string | null; requirements: DocumentFacetLinkInput[]; claims: DocumentFacetLinkInput[]; aliases: string[]; criteria: string[]; applies_to: string[]; owner: string | null; renewal_type: string | null; renewal_interval_months: number | null; renewal_due_date: string | null }>): Promise<Document> => {
+    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; supplier_name: string; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null; categories: string[]; primary_category_id: string | null; requirements: DocumentFacetLinkInput[]; claims: DocumentFacetLinkInput[]; aliases: string[]; criteria: string[]; applies_to: string[]; owner: string | null; renewal_type: string | null; renewal_interval_months: number | null; renewal_due_date: string | null; renewal_reason: string | null }>): Promise<Document> => {
       const response = await fetchApi<DocumentUpdateResponse>(`/documents/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1121,6 +1130,27 @@ export const api = {
           method: 'PUT',
           body: JSON.stringify(data),
         }),
+    },
+
+    /**
+     * /api/suppliers/:id/contacts -- who at the supplier receives document
+     * requests (migration 0133). At most one active document contact; naming a
+     * new one demotes the previous one. Writes are org_admin / super_admin.
+     */
+    contacts: {
+      list: (id: string) => fetchApi<SupplierContactsResponse>(`/suppliers/${id}/contacts`),
+      create: (id: string, data: SupplierContactWriteRequest) =>
+        fetchApi<SupplierContactsResponse & { contact: SupplierContact }>(`/suppliers/${id}/contacts`, {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+      update: (id: string, contactId: string, data: SupplierContactWriteRequest) =>
+        fetchApi<SupplierContactsResponse & { contact: SupplierContact }>(
+          `/suppliers/${id}/contacts/${contactId}`,
+          { method: 'PUT', body: JSON.stringify(data) },
+        ),
+      remove: (id: string, contactId: string) =>
+        fetchApi<SupplierContactsResponse>(`/suppliers/${id}/contacts/${contactId}`, { method: 'DELETE' }),
     },
 
     /**
@@ -2067,6 +2097,53 @@ export const api = {
         return fetchApi<RenewalLeadTimePreview>(`/expirations/lead-time/preview?${qs.toString()}`);
       },
     },
+
+    /**
+     * The organization's master user (migration 0133): who approves a supplier
+     * renewal request when the record's owner route names no portal user.
+     */
+    defaultOwner: {
+      get: (params?: { tenantId?: string }): Promise<RenewalDefaultOwnerResponse> => {
+        const qs = new URLSearchParams();
+        if (params?.tenantId) qs.set('tenant_id', params.tenantId);
+        const suffix = qs.toString() ? `?${qs.toString()}` : '';
+        return fetchApi<RenewalDefaultOwnerResponse>(`/expirations/default-owner${suffix}`);
+      },
+      put: (body: { userId: string | null; tenantId?: string }): Promise<RenewalDefaultOwnerResponse> =>
+        fetchApi<RenewalDefaultOwnerResponse>(`/expirations/default-owner`, {
+          method: 'PUT',
+          body: JSON.stringify({ user_id: body.userId, tenant_id: body.tenantId }),
+        }),
+    },
+  },
+
+  /**
+   * Supplier renewal requests (migration 0133). The scheduled run DRAFTS;
+   * `approve` is the one call that mails a supplier, and it needs the assigned
+   * approver or an administrator. A refused send (no mail configured, no
+   * document contact, the provider said no) rejects with the reason.
+   */
+  renewalRequests: {
+    list: (params?: { tenantId?: string }): Promise<RenewalRequestListResponse> => {
+      const qs = new URLSearchParams();
+      if (params?.tenantId) qs.set('tenant_id', params.tenantId);
+      const suffix = qs.toString() ? `?${qs.toString()}` : '';
+      return fetchApi<RenewalRequestListResponse>(`/renewal-requests${suffix}`);
+    },
+    approve: (
+      id: string,
+      sendId: string,
+      data: { subject: string; body: string },
+    ): Promise<ApproveRenewalSendResponse> =>
+      fetchApi<ApproveRenewalSendResponse>(`/renewal-requests/${id}/sends/${sendId}/approve`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    skip: (id: string, sendId: string): Promise<{ skipped: boolean; request: RenewalRequestItem }> =>
+      fetchApi<{ skipped: boolean; request: RenewalRequestItem }>(
+        `/renewal-requests/${id}/sends/${sendId}/skip`,
+        { method: 'POST' },
+      ),
   },
 
   /**

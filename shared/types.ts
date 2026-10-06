@@ -5500,6 +5500,11 @@ export interface ExpirationNotifyResponse {
   /** Present when the caller sent `window_days`, which no longer affects who is mailed. */
   window_days_ignored?: boolean;
   reason?: RenewalNoSendReason;
+  /**
+   * Supplier renewal requests DRAFTED by this run (migration 0133). Nothing in
+   * here was sent to a supplier: a request is sent only by an approval.
+   */
+  supplier_requests?: SupplierRequestRunResult;
 }
 
 /**
