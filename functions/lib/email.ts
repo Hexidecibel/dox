@@ -7,7 +7,17 @@ import {
 } from '../../shared/specCriticality';
 import type { SpecCriticality } from '../../shared/specCriticality';
 
-interface SendEmailOptions {
+/** The portal's own sending address. The display name may vary; this never does. */
+export const PORTAL_SENDER_ADDRESS = 'noreply@supdox.com';
+const PORTAL_SENDER_NAME = 'SupDox';
+
+export interface EmailAttachment {
+  filename: string;
+  /** Base64 of the file's bytes (see `bytesToBase64`). */
+  content: string;
+}
+
+export interface SendEmailOptions {
   /** A single address or a list — a list sends one email to all recipients. */
   to: string | string[];
   subject: string;
@@ -22,10 +32,57 @@ interface SendEmailOptions {
    * human who pressed send.
    */
   replyTo?: string;
+  /**
+   * The DISPLAY NAME on the from line, e.g. "Medosweet Farms via SupDox"
+   * (build it with `viaSenderName`). Only the name: the address stays the
+   * portal's, which is why this passes SPF/DKIM/DMARC where putting the
+   * organization's own domain in the from line would not.
+   */
+  fromName?: string;
+  attachments?: EmailAttachment[];
 }
 
-export async function sendEmail(apiKey: string, options: SendEmailOptions): Promise<boolean> {
+export interface SendEmailResult {
+  ok: boolean;
+  /** HTTP status from the mail provider; 0 when the request never completed. */
+  status: number;
+  /** The provider's error text (truncated), or the thrown message. */
+  error: string | null;
+}
+
+/**
+ * "<Organization> via SupDox" — the from-line display name for mail a person
+ * sends on their organization's behalf. Characters that could break out of a
+ * quoted display name or fake an address are removed, not escaped.
+ */
+export function viaSenderName(tenantName: string | null | undefined): string {
+  const clean = (tenantName ?? '')
+    .replace(/[\r\n"<>\\,;:@]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+  return clean ? `${clean} via ${PORTAL_SENDER_NAME}` : PORTAL_SENDER_NAME;
+}
+
+/** Base64 of raw bytes, built in chunks so a multi-megabyte file cannot overflow the call stack. */
+export function bytesToBase64(bytes: ArrayBuffer | Uint8Array): string {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  // A multiple of 3, so every chunk but the last encodes without padding.
+  const CHUNK = 3 * 8192;
+  let out = '';
+  for (let i = 0; i < view.length; i += CHUNK) {
+    out += btoa(String.fromCharCode(...view.subarray(i, i + CHUNK)));
+  }
+  return out;
+}
+
+/** `sendEmail` with the provider's answer, for callers that report per-send outcomes. */
+export async function sendEmailDetailed(
+  apiKey: string,
+  options: SendEmailOptions
+): Promise<SendEmailResult> {
   try {
+    const fromName = options.fromName?.trim() || PORTAL_SENDER_NAME;
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -33,17 +90,26 @@ export async function sendEmail(apiKey: string, options: SendEmailOptions): Prom
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: 'SupDox <noreply@supdox.com>',
+        from: `${fromName} <${PORTAL_SENDER_ADDRESS}>`,
         to: Array.isArray(options.to) ? options.to : [options.to],
         subject: options.subject,
         html: options.html,
         ...(options.replyTo ? { reply_to: options.replyTo } : {}),
+        ...(options.attachments && options.attachments.length > 0
+          ? { attachments: options.attachments }
+          : {}),
       }),
     });
-    return res.ok;
-  } catch {
-    return false;
+    if (res.ok) return { ok: true, status: res.status, error: null };
+    const detail = await res.text().catch(() => '');
+    return { ok: false, status: res.status, error: detail.slice(0, 500) || null };
+  } catch (err) {
+    return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+export async function sendEmail(apiKey: string, options: SendEmailOptions): Promise<boolean> {
+  return (await sendEmailDetailed(apiKey, options)).ok;
 }
 
 export function buildInvitationEmail(params: {
