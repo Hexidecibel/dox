@@ -6,6 +6,11 @@ import {
   parseSpecCriticality,
 } from '../../shared/specCriticality';
 import type { SpecCriticality } from '../../shared/specCriticality';
+import {
+  renderApprovalBlockHtml,
+  renderApprovalBlockText,
+  type ApprovalNoticeItem,
+} from './renewal-request-email';
 
 /** The portal's own sending address. The display name may vary; this never does. */
 export const PORTAL_SENDER_ADDRESS = 'noreply@supdox.com';
@@ -502,6 +507,12 @@ export function buildRenewalAlertEmail(
    * is the difference between a task and a notification.
    */
   ownerLabel?: string | null,
+  /**
+   * Supplier renewal requests drafted for records in this digest and waiting
+   * for one of its recipients to approve (migration 0133). Folded in here so
+   * the internal alert and the draft arrive as ONE notification.
+   */
+  supplierRequests: ApprovalNoticeItem[] = [],
 ): { subject: string; html: string; text: string } {
   const count = docs.length;
   const ownerSuffix = ownerLabel ? ` (${ownerLabel})` : '';
@@ -580,6 +591,7 @@ export function buildRenewalAlertEmail(
         </table>
         ${alertUrl ? `<p style="margin:0 0 8px;"><a href="${escapeHtml(alertUrl)}" style="display:inline-block;background:#1A365D;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;">See what needs renewing</a></p>
         <p style="margin:8px 0 0;color:#999;font-size:12px;">No login needed. This link works for 30 days.</p>` : ''}
+        ${renderApprovalBlockHtml(supplierRequests)}
       </td>
     </tr>
     <tr>
@@ -604,7 +616,7 @@ export function buildRenewalAlertEmail(
     ].filter(Boolean);
     return `- ${parts.join(' · ')}`;
   });
-  const text = `Renewal attention needed for ${tenantName}\n\n${count} document${count === 1 ? '' : 's'} expiring, overdue, or expired:\n\n${textLines.join('\n')}\n${alertUrl ? `\n${alertUrl}\n(No login needed. This link works for 30 days.)\n` : ''}`;
+  const text = `Renewal attention needed for ${tenantName}\n\n${count} document${count === 1 ? '' : 's'} expiring, overdue, or expired:\n\n${textLines.join('\n')}\n${alertUrl ? `\n${alertUrl}\n(No login needed. This link works for 30 days.)\n` : ''}` + renderApprovalBlockText(supplierRequests);
 
   return { subject, html, text };
 }

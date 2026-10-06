@@ -127,6 +127,9 @@ export const MODULES: Record<ModuleKey, ModuleDefinition> = {
     uiPrefixes: ['/expirations', '/spec-alerts'],
     apiPrefixes: [
       '/api/expirations',
+      // The supplier renewal send (0133): drafts, approvals and what was sent.
+      // Same surface as the Renewals page it is shown on.
+      '/api/renewal-requests',
       '/api/spec-checks',
       '/api/spec-gaps',
       '/api/spec-limits',

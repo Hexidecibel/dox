@@ -31,6 +31,7 @@ import type {
 } from '../lib/types';
 import type { ResolvedRenewalAlertLead } from '../../shared/types';
 import { renewalAlertLeadSourceLabel } from '../../shared/renewalLeadTime';
+import { SupplierRenewalRequests } from '../components/SupplierRenewalRequests';
 
 const STATUS_CHIP: Record<ExpirationStatus, { label: string; color: 'success' | 'error' | 'warning' | 'default' }> = {
   current: { label: 'Current', color: 'success' },
@@ -102,6 +103,8 @@ export function Expirations() {
   const [tenantLead, setTenantLead] = useState<ResolvedRenewalAlertLead | null>(null);
   const [onlyAttention, setOnlyAttention] = useState(true);
   const [sending, setSending] = useState(false);
+  /** Bumped after a manual run, which may have drafted supplier requests. */
+  const [supplierRequestsKey, setSupplierRequestsKey] = useState(0);
   const [toast, setToast] = useState<{ msg: string; severity: 'success' | 'error' | 'info' | 'warning' } | null>(null);
 
   /**
@@ -155,10 +158,19 @@ export function Expirations() {
       // The unrouted count is reported WHETHER OR NOT anything sent. A run
       // that mailed three owners and silently skipped two records is not a
       // success, and the toast is the only place a person sees that.
-      const gap =
+      const routingGap =
         res.unrouted && res.unrouted.count > 0
           ? ` ${res.unrouted.count} record${res.unrouted.count === 1 ? '' : 's'} had no resolvable owner and reached nobody${res.unrouted.notice_sent ? ' — admins were sent a routing-gap notice' : ''}.`
           : '';
+      // Drafted, never sent: say so in the same breath, so "Send alert now" is
+      // not read as having written to a supplier.
+      const draftedCount = res.supplier_requests?.drafted.length ?? 0;
+      const drafted =
+        draftedCount > 0
+          ? ` ${draftedCount} supplier request${draftedCount === 1 ? ' was' : 's were'} drafted and wait${draftedCount === 1 ? 's' : ''} for approval below — nothing was sent to a supplier.`
+          : '';
+      const gap = routingGap;
+      setSupplierRequestsKey((k) => k + 1);
 
       if (res.sent) {
         const groupCount = (res.groups ?? []).filter((g) => g.sent).length;
@@ -166,7 +178,7 @@ export function Expirations() {
           msg:
             `Sent ${groupCount} owner digest${groupCount === 1 ? '' : 's'} to ` +
             `${res.recipients.length} recipient${res.recipients.length === 1 ? '' : 's'} ` +
-            `(${res.document_count} document${res.document_count === 1 ? '' : 's'}).${gap}`,
+            `(${res.document_count} document${res.document_count === 1 ? '' : 's'}).${gap}${drafted}`,
           severity: gap ? 'warning' : 'success',
         });
       } else {
@@ -182,7 +194,7 @@ export function Expirations() {
                   : res.reason === 'email_not_configured'
                     ? 'Email is not configured on the server (RESEND_API_KEY unset).'
                     : 'Alert not sent.';
-        setToast({ msg: `${reasonMsg}${gap}`, severity: gap ? 'warning' : 'info' });
+        setToast({ msg: `${reasonMsg}${gap}${drafted}`, severity: gap ? 'warning' : 'info' });
       }
     } catch (err) {
       setToast({ msg: err instanceof Error ? err.message : 'Failed to send alert', severity: 'error' });
@@ -267,6 +279,11 @@ export function Expirations() {
       )}
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+      {/* Requests to SUPPLIERS (migration 0133): drafted by the same run that
+          alerts the owner, sent only when a person approves one here. Renders
+          nothing for an organization with no supplier contact and no draft. */}
+      <SupplierRenewalRequests key={supplierRequestsKey} tenantId={selectedTenantId || undefined} />
 
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
@@ -357,7 +374,7 @@ export function Expirations() {
 
       <Snackbar
         open={!!toast}
-        autoHideDuration={5000}
+        autoHideDuration={8000}
         onClose={() => setToast(null)}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
       >

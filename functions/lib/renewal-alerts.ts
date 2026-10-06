@@ -91,6 +91,19 @@
  *     is `expiring -> overdue/expired`, which depends on the date passing, not
  *     on the window. So a lead-time change can never manufacture an
  *     "escalated" send that skips the cooldown.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SUPPLIER REQUEST IS DRAFTED HERE AND SENT ELSEWHERE (migration 0133)
+ * ---------------------------------------------------------------------------
+ * The same run that warns the owner also drafts the request to the supplier
+ * (./renewal-requests.ts). It is a SEPARATE pass, made before the digests and
+ * reported on every run as `supplier_requests`, for two reasons. The digest's
+ * cooldown and its early returns would starve the day-of and follow-up drafts.
+ * And the two must never be confused: this file mails owners; it never mails
+ * a supplier. A supplier is mailed only by a person's approval. The one place
+ * they meet is the digest email itself, which says when a draft for one of its
+ * records is waiting on one of its recipients, so the alert and the draft are
+ * one notification instead of two.
  */
 
 import type { D1Database } from '@cloudflare/workers-types';
@@ -114,6 +127,17 @@ import {
 import { sendEmail, buildRenewalAlertEmail, buildRenewalRoutingGapEmail } from './email';
 import { mintAlertLink, alertLinkUrl } from './alert-links';
 import { generateId, logAudit } from './db';
+import {
+  awaitingForDigest,
+  draftSupplierRequests,
+  emptySupplierRequestRun,
+  markApproversNotified,
+  sendApproverNotices,
+  toApprovalNoticeItem,
+  type AwaitingApproval,
+  type SupplierRequestPass,
+} from './renewal-requests';
+import type { SupplierRequestRunResult } from '../../shared/types';
 
 /** Days of quiet between repeat alerts about the same unchanged record. */
 export const DEFAULT_COOLDOWN_DAYS = 7;
@@ -270,6 +294,13 @@ export interface RenewalAlertResult {
    */
   tenant_lead: ResolvedRenewalAlertLead;
   reason?: RenewalNoSendReason;
+  /**
+   * What the supplier-request drafting pass did (migration 0133). Reported on
+   * EVERY run, including one whose digest was fully suppressed - the pass is
+   * independent of the digest on purpose. Nothing in it reached a supplier:
+   * the run drafts, a person approves.
+   */
+  supplier_requests: SupplierRequestRunResult;
 }
 
 export interface RunRenewalAlertsOptions {
@@ -436,7 +467,86 @@ export async function runRenewalAlerts(
     groups: [],
     unrouted: emptyUnrouted(),
     tenant_lead,
+    supplier_requests: emptySupplierRequestRun(),
   };
+
+  // -- supplier requests: draft, never send (migration 0133) ----------------
+  // Its OWN pass over the rows, before and independent of everything below.
+  // The digest has a cooldown and three early returns; a draft for the day of
+  // expiry must not be starved by either. Degrades rather than throws - a
+  // failure here must not cost the owner their alert.
+  let supplierPass: SupplierRequestPass;
+  try {
+    supplierPass = await draftSupplierRequests(db, resendApiKey, {
+      tenantId: opts.tenantId,
+      tenantName,
+      asOf,
+      rows,
+      appUrl: opts.appUrl,
+      actorUserId: opts.actorUserId ?? null,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[renewal-alerts] supplier request drafting failed:', message);
+    supplierPass = { result: { ...emptySupplierRequestRun(), error: message }, awaiting: [] };
+  }
+  base.supplier_requests = supplierPass.result;
+  // Drafts the owner digest carried, so the approver is told once (D-049).
+  const toldInDigest = new Set<string>();
+
+  const digest = await sendOwnerDigests(db, resendApiKey, opts, {
+    base,
+    rows,
+    asOf,
+    cooldownDays,
+    tenantName,
+    awaiting: supplierPass.awaiting,
+    toldInDigest,
+    notices: supplierPass.result.approver_notices,
+  });
+
+  // Whoever the digests did not reach - a suppressed digest, an approver who
+  // is not on the owner route, a tenant with no mail key - gets a notice of
+  // their own (or, with no key, is reported as not told).
+  const leftover = supplierPass.awaiting.filter((a) => !toldInDigest.has(a.send_id));
+  supplierPass.result.approver_notices.push(
+    ...(await sendApproverNotices(
+      db,
+      resendApiKey,
+      { tenantId: opts.tenantId, tenantName, appUrl: opts.appUrl },
+      leftover,
+    )),
+  );
+
+  return { ...digest, supplier_requests: supplierPass.result };
+}
+
+interface DigestContext {
+  base: RenewalAlertResult;
+  rows: ExpirationRow[];
+  asOf: string;
+  cooldownDays: number;
+  tenantName: string;
+  /** Drafts whose approver has not been told. Read-only here. */
+  awaiting: AwaitingApproval[];
+  /** OUT: send ids a digest that actually left carried. */
+  toldInDigest: Set<string>;
+  /** OUT: one entry per digest that carried drafts. */
+  notices: SupplierRequestRunResult['approver_notices'];
+}
+
+/**
+ * The owner digests: suppression, routing, one email per owner group, the
+ * routing gap. Unchanged in what it decides; the only addition is that a
+ * digest about a document with a waiting supplier draft says so.
+ */
+async function sendOwnerDigests(
+  db: D1Database,
+  resendApiKey: string | undefined,
+  opts: RunRenewalAlertsOptions,
+  ctx: DigestContext,
+): Promise<RenewalAlertResult> {
+  const { base, rows, asOf, cooldownDays, tenantName } = ctx;
 
   const alerts = alertingRows(rows);
   base.alerting_count = alerts.length;
@@ -525,11 +635,21 @@ export async function runRenewalAlerts(
       subjectIds: groupRows.map((r) => r.id),
     });
 
+    // A supplier request drafted for one of THESE records, whose approver is
+    // among THESE recipients, rides in this email instead of a second one.
+    const waiting = awaitingForDigest(
+      ctx.awaiting,
+      groupRows.map((r) => r.id),
+      group.recipients,
+      ctx.toldInDigest,
+    );
+
     const { subject, html } = buildRenewalAlertEmail(
       groupRows,
       tenantName,
       alertLinkUrl(opts.appUrl, token),
       group.owner_label,
+      waiting.map((w) => toApprovalNoticeItem(w, opts.appUrl)),
     );
 
     const ok = await sendEmail(resendApiKey, { to: group.recipients, subject, html });
@@ -537,6 +657,13 @@ export async function runRenewalAlerts(
     if (ok) {
       mailed.push(...groupRows);
       for (const e of group.recipients) allRecipients.add(e);
+    }
+    // A digest that failed leaves them untold; the notice pass picks them up.
+    if (ok && waiting.length > 0) {
+      const sendIds = waiting.map((w) => w.send_id);
+      for (const id of sendIds) ctx.toldInDigest.add(id);
+      await markApproversNotified(db, opts.tenantId, sendIds);
+      ctx.notices.push({ send_ids: sendIds, recipients: group.recipients, via: 'owner_digest', sent: true });
     }
   }
 

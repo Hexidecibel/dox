@@ -20,6 +20,7 @@
 
 import { generateId, logAudit } from './db';
 import { findOrCreateSupplier, isPlausibleSupplierName, normalizeSupplierName, resolveExistingSupplierId } from './suppliers';
+import { normalizeContactEmail, recordImportedContact } from './supplier-contacts';
 import {
   loadClaimVocab,
   loadExistingApplicability,
@@ -68,6 +69,25 @@ export interface SupplierListImportInput {
   unrecognizedHeaders?: string[];
   packOverride?: string | null;
   rules?: SupplierListRules;
+}
+
+/** Every contact address already on file, per supplier (normalized). Empty before 0133. */
+async function loadKnownContactEmails(db: D1Database, tenantId: string): Promise<Map<string, Set<string>>> {
+  const out = new Map<string, Set<string>>();
+  try {
+    const res = await db
+      .prepare('SELECT supplier_id, email_norm FROM supplier_contacts WHERE tenant_id = ?')
+      .bind(tenantId)
+      .all<{ supplier_id: string; email_norm: string }>();
+    for (const r of res.results ?? []) {
+      const set = out.get(r.supplier_id);
+      if (set) set.add(r.email_norm);
+      else out.set(r.supplier_id, new Set([r.email_norm]));
+    }
+  } catch {
+    // Pre-0133 database.
+  }
+  return out;
 }
 
 /** A slug-ish key for comparing a claim phrase to a claim type. */
@@ -439,6 +459,25 @@ export async function runSupplierListImport(
   const rowOutcomes = [...outcomes.values()].sort((a, b) => a.line - b.line);
   let runId: string | null = null;
 
+  // Contact addresses (0133). The column was parsed and only REPORTED until
+  // there was somewhere to put it. Counted here for both modes - an address
+  // the supplier already has is not counted and will not be touched - and
+  // written below on apply.
+  const knownContacts = await loadKnownContactEmails(db, input.tenantId);
+  const contactWrites: Array<{ supplierId: string; email: string }> = [];
+  counts.contacts_added = 0;
+  for (const meta of supplierMeta.values()) {
+    const known = meta.id ? knownContacts.get(meta.id) : undefined;
+    const seen = new Set<string>();
+    for (const email of meta.emails) {
+      const norm = normalizeContactEmail(email);
+      if (!norm || seen.has(norm) || known?.has(norm)) continue;
+      seen.add(norm);
+      counts.contacts_added++;
+      if (meta.id) contactWrites.push({ supplierId: meta.id, email });
+    }
+  }
+
   if (!input.dryRun) {
     runId = generateId();
     const stmts: D1PreparedStatement[] = [];
@@ -536,6 +575,21 @@ export async function runSupplierListImport(
     // failure in it leaves no run and no rows pointing at a missing run.
     for (let i = 0; i < stmts.length; i += 100) {
       await db.batch(stmts.slice(i, i + 100));
+    }
+
+    // After the requirement writes, and outside their batches: a contact is
+    // not part of the derivation and must not be able to roll one back. Each
+    // write is idempotent (recordImportedContact never touches an address the
+    // supplier already has), so re-applying the same list adds nothing.
+    for (const w of contactWrites) {
+      try {
+        await recordImportedContact(db, input.tenantId, w.supplierId, w.email, input.actorId);
+      } catch (err) {
+        console.error(
+          '[supplier-list-import] recording a contact failed:',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     }
 
     await logAudit(

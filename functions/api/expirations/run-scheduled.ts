@@ -248,6 +248,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       // Surfaced at the TOP of the summary, not buried per tenant: an operator
       // scanning `wrangler tail` needs to see that records went unalerted.
       documents_unrouted: results.reduce((n, r) => n + r.unrouted.count, 0),
+      // Supplier requests (0133). DRAFTS only - this run never mails a
+      // supplier; `supplier_requests_awaiting_contact` is the count nobody
+      // could be asked about because their supplier has no document contact.
+      supplier_requests_drafted: results.reduce((n, r) => n + r.supplier_requests.drafted.length, 0),
+      supplier_requests_escalated: results.reduce((n, r) => n + r.supplier_requests.escalated.length, 0),
+      supplier_requests_awaiting_contact: results.reduce(
+        (n, r) => n + r.supplier_requests.not_drafted.no_contact.length,
+        0,
+      ),
       tenants: results.map((r) => ({
         tenant_id: r.tenant_id,
         tenant_name: r.tenant_name,
@@ -275,6 +284,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           sent: g.sent,
         })),
         reason: r.reason,
+        supplier_requests: {
+          drafted: r.supplier_requests.drafted,
+          superseded_count: r.supplier_requests.superseded_count,
+          ended: r.supplier_requests.ended,
+          escalated: r.supplier_requests.escalated,
+          escalation_notice_sent: r.supplier_requests.escalation_notice_sent,
+          // Counts, not documents: this summary is read in a log tail.
+          no_supplier_count: r.supplier_requests.not_drafted.no_supplier.length,
+          no_contact_count: r.supplier_requests.not_drafted.no_contact.length,
+          past_escalation_count: r.supplier_requests.not_drafted.past_escalation.length,
+          approver_notices: r.supplier_requests.approver_notices.map((n) => ({
+            via: n.via,
+            recipient_count: n.recipients.length,
+            draft_count: n.send_ids.length,
+            sent: n.sent,
+          })),
+          ...(r.supplier_requests.error ? { error: r.supplier_requests.error } : {}),
+        },
       })),
     };
 

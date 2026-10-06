@@ -354,7 +354,18 @@ export interface MergeSuppliersResult {
  *   Unique-constrained (UPDATE OR IGNORE then DELETE leftovers):
  *     product_suppliers, extraction_templates, supplier_extraction_instructions,
  *     reviewer_field_picks, reviewer_field_dismissals, reviewer_table_edits,
- *     product_requirements (0123)
+ *     product_requirements (0123), supplier_requirements (0087)
+ *   Requests (plain): document_requests, request_links, request_uploads,
+ *     renewal_requests (0133)
+ *   Contacts (0133): supplier_contacts, one per address, one document contact
+ *
+ * THE REQUEST TABLES WERE MISSING FROM THIS LIST UNTIL 0133, and every one of
+ * them references suppliers ON DELETE CASCADE. A merge therefore DELETED every
+ * request issued to the loser, the link the supplier was holding, the files
+ * they had sent through it and the checklist of what they owe - silently, as
+ * a side effect of the DELETE at the bottom. Anything added to the schema with
+ * a supplier_id and ON DELETE CASCADE has to be added here in the same change
+ * (tests/api/supplier-merge-requests.test.ts).
  *
  * The suppliers_fts AFTER DELETE trigger cleans the search index automatically.
  */
@@ -375,7 +386,19 @@ export async function mergeSuppliers(
 
   // Tables with a plain supplier_id column. All carry tenant_id, so the
   // reassign is scoped to the tenant defensively.
-  const plainTables = ['documents', 'products', 'lots', 'processing_queue', 'connectors'];
+  const plainTables = [
+    'documents',
+    'products',
+    'lots',
+    'processing_queue',
+    'connectors',
+    // What was asked of the supplier and what came back. None has a UNIQUE
+    // that involves supplier_id, so they move as they are; lines, routing and
+    // upload claims hang off the request / upload ids and follow untouched.
+    'document_requests',
+    'request_links',
+    'request_uploads',
+  ];
   // Tables with a UNIQUE constraint that can collide when both winner and loser
   // already have an equivalent row. UPDATE OR IGNORE moves what it can, then we
   // delete the leftovers the winner already covered.
@@ -387,6 +410,9 @@ export async function mergeSuppliers(
     'reviewer_field_dismissals',
     'reviewer_table_edits',
     'product_requirements',
+    // 0087: UNIQUE(tenant, supplier, requirement). Where both owe the same
+    // requirement the winner's row (its tier, its provenance) is the one kept.
+    'supplier_requirements',
   ];
 
   const reassigned: Record<string, number> = {};
@@ -459,6 +485,70 @@ export async function mergeSuppliers(
         .prepare(`DELETE FROM ${table} WHERE supplier_id = ? AND tenant_id = ?`)
         .bind(loserId, tenantId)
         .run();
+    }
+
+    // Renewal cycles (0133) are keyed (document, due date), not on the
+    // supplier, so they move as they are. Guarded like the contacts below: a
+    // database that has not run 0133 has neither table.
+    try {
+      const cycles = await db
+        .prepare('SELECT COUNT(*) AS c FROM renewal_requests WHERE supplier_id = ? AND tenant_id = ?')
+        .bind(loserId, tenantId)
+        .first<{ c: number }>();
+      const n = cycles?.c ?? 0;
+      if (n > 0) {
+        await db
+          .prepare('UPDATE renewal_requests SET supplier_id = ? WHERE supplier_id = ? AND tenant_id = ?')
+          .bind(winnerId, loserId, tenantId)
+          .run();
+      }
+      reassigned.renewal_requests = (reassigned.renewal_requests || 0) + n;
+    } catch {
+      // Pre-0133 database.
+    }
+
+    // Contacts (0133). UNIQUE(supplier_id, email_norm), plus at most one
+    // active document contact per supplier. The winner's document contact
+    // stays the document contact: the loser's is demoted BEFORE the move so
+    // the partial unique index cannot refuse it, and an address both have is
+    // kept once, as the winner's row.
+    try {
+      const before = await db
+        .prepare('SELECT COUNT(*) AS c FROM supplier_contacts WHERE supplier_id = ? AND tenant_id = ?')
+        .bind(loserId, tenantId)
+        .first<{ c: number }>();
+      const beforeN = before?.c ?? 0;
+      if (beforeN > 0) {
+        const winnerHasDocumentContact = await db
+          .prepare(
+            `SELECT id FROM supplier_contacts
+              WHERE supplier_id = ? AND tenant_id = ? AND is_document_contact = 1 AND active = 1`,
+          )
+          .bind(winnerId, tenantId)
+          .first<{ id: string }>();
+        if (winnerHasDocumentContact) {
+          await db
+            .prepare('UPDATE supplier_contacts SET is_document_contact = 0 WHERE supplier_id = ? AND tenant_id = ?')
+            .bind(loserId, tenantId)
+            .run();
+        }
+        await db
+          .prepare('UPDATE OR IGNORE supplier_contacts SET supplier_id = ? WHERE supplier_id = ? AND tenant_id = ?')
+          .bind(winnerId, loserId, tenantId)
+          .run();
+        const after = await db
+          .prepare('SELECT COUNT(*) AS c FROM supplier_contacts WHERE supplier_id = ? AND tenant_id = ?')
+          .bind(loserId, tenantId)
+          .first<{ c: number }>();
+        const leftover = after?.c ?? 0;
+        reassigned.supplier_contacts = (reassigned.supplier_contacts || 0) + (beforeN - leftover);
+        await db
+          .prepare('DELETE FROM supplier_contacts WHERE supplier_id = ? AND tenant_id = ?')
+          .bind(loserId, tenantId)
+          .run();
+      }
+    } catch {
+      // Pre-0133 database: no contacts table.
     }
 
     // Fold loser name + aliases into winner aliases (case-insensitive dedup).

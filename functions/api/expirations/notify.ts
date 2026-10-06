@@ -95,6 +95,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       groups: result.groups,
       unrouted: result.unrouted,
       tenant_lead: result.tenant_lead,
+      // Drafted, never sent: a supplier is only ever mailed by an approval.
+      supplier_requests: result.supplier_requests,
       ...(windowDaysIgnored ? { window_days_ignored: true } : {}),
       ...(result.reason ? { reason: result.reason } : {}),
     });

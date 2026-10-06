@@ -122,6 +122,118 @@ components:
         rule_problems: { type: array, items: { type: string } }
         unrecognized_headers: { type: array, items: { type: string } }
         rules: { type: object, description: The rules in force for this pack, echoed back. }
+    SupplierContact:
+      type: object
+      properties:
+        id: { type: string }
+        supplier_id: { type: string }
+        name: { type: string, nullable: true }
+        email: { type: string }
+        role: { type: string, nullable: true }
+        priority: { type: integer, nullable: true }
+        is_document_contact: { type: boolean, description: The one address document requests go to }
+        active: { type: boolean }
+        source: { type: string, nullable: true, description: admin or import }
+        created_at: { type: string }
+        updated_at: { type: string }
+    SupplierContacts:
+      type: object
+      properties:
+        supplier:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+        contacts:
+          type: array
+          items: { $ref: '#/components/schemas/SupplierContact' }
+        document_contact:
+          allOf:
+            - { $ref: '#/components/schemas/SupplierContact' }
+          nullable: true
+    SupplierContactWrite:
+      type: object
+      properties:
+        email: { type: string }
+        name: { type: string, nullable: true }
+        role: { type: string, nullable: true }
+        priority: { type: integer, nullable: true }
+        is_document_contact: { type: boolean }
+        active: { type: boolean }
+    RenewalRequestSend:
+      type: object
+      properties:
+        id: { type: string }
+        stage: { type: string, enum: [window_open, day_of, plus_7, plus_14] }
+        status: { type: string, enum: [pending, sent, failed, skipped, superseded, cancelled] }
+        draft_subject: { type: string }
+        draft_body: { type: string }
+        approver_user_id: { type: string, nullable: true }
+        approver_name: { type: string, nullable: true }
+        approver_via: { type: string, nullable: true, enum: [owner_route, master_user, org_admins] }
+        drafted_at: { type: string }
+        approved_by: { type: string, nullable: true }
+        approved_by_name: { type: string, nullable: true }
+        approved_at: { type: string, nullable: true }
+        sent_at: { type: string, nullable: true }
+        sent_to: { type: string, nullable: true }
+        sent_subject: { type: string, nullable: true, description: The exact subject that left }
+        sent_body: { type: string, nullable: true, description: The exact body that left, link block included }
+        skipped_by_name: { type: string, nullable: true }
+        skipped_at: { type: string, nullable: true }
+        failure: { type: string, nullable: true }
+    RenewalRequest:
+      type: object
+      properties:
+        id: { type: string }
+        document:
+          type: object
+          properties:
+            id: { type: string }
+            title: { type: string }
+        supplier:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+        due_date: { type: string, format: date }
+        status: { type: string, enum: [open, satisfied, stopped, escalated] }
+        status_reason: { type: string, nullable: true }
+        escalated_at: { type: string, nullable: true }
+        closed_at: { type: string, nullable: true }
+        request_id: { type: string, nullable: true, description: The document request the first approval issued }
+        contact:
+          type: object
+          nullable: true
+          properties:
+            name: { type: string, nullable: true }
+            email: { type: string }
+        sends:
+          type: array
+          items: { $ref: '#/components/schemas/RenewalRequestSend' }
+        waiting_send_id: { type: string, nullable: true }
+        can_approve: { type: boolean, description: Whether the caller may approve or skip the waiting draft }
+        emails_sent: { type: integer }
+    RenewalDefaultOwner:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        user_id: { type: string, nullable: true }
+        user_name: { type: string, nullable: true }
+        user_email: { type: string, nullable: true }
+        resolves: { type: boolean }
+        updated_at: { type: string, nullable: true }
+        updated_by_name: { type: string, nullable: true }
+        unchanged: { type: boolean }
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              email: { type: string }
+              role: { type: string }
     ResolvedRenewalAlertLead:
       type: object
       description: A resolved renewal alert lead time and which rung answered.
@@ -3327,6 +3439,179 @@ paths:
                   tenant_lead: { $ref: '#/components/schemas/ResolvedRenewalAlertLead' }
                   window_days_ignored: { type: boolean }
                   reason: { type: string, enum: [no_documents, all_suppressed, email_not_configured, all_unrouted, no_recipients] }
+                  supplier_requests:
+                    type: object
+                    description: |
+                      Supplier renewal requests DRAFTED by this run (0133):
+                      `drafted`, `superseded_count`, `ended`, `escalated`,
+                      `not_drafted`, `approver_notices`. Nothing in it was
+                      sent to a supplier.
+
+  /api/expirations/default-owner:
+    get:
+      tags: [Renewals]
+      summary: Read the organization's master user
+      description: |
+        Migration 0133. super_admin (with `tenant_id`) or org_admin. The master
+        user approves a supplier renewal request when the record's owner route
+        names no portal user. `resolves` is false when the stored user is no
+        longer an active user of the organization.
+      parameters:
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+      responses:
+        '200':
+          description: The setting and the users who can be chosen
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RenewalDefaultOwner' }
+    put:
+      tags: [Renewals]
+      summary: Set or clear the master user
+      description: |
+        super_admin or org_admin. `user_id` is required; `null` clears it. The
+        user must be an active user of the organization. Audited
+        `renewal_default_owner_updated` with the previous value; saving the
+        stored value writes nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { type: string, nullable: true }
+                tenant_id: { type: string, description: super_admin only }
+      responses:
+        '200':
+          description: The setting as stored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RenewalDefaultOwner' }
+        '400':
+          description: Missing `user_id`, or not an active user of the organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/renewal-requests:
+    get:
+      tags: [Renewals]
+      summary: Supplier renewal requests - waiting, sent, escalated, and not drafted
+      description: |
+        Migration 0133. Any role in the tenant; Compliance module. The renewal
+        run only DRAFTS these. Nothing is sent to a supplier except by
+        `POST /api/renewal-requests/{id}/sends/{sendId}/approve`.
+
+        `not_drafted` is computed at read: alerting documents that name no
+        supplier, whose supplier has no document contact, or that were already
+        past the last follow-up window when first seen.
+      parameters:
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+      responses:
+        '200':
+          description: The cycles and what could not be drafted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items: { $ref: '#/components/schemas/RenewalRequest' }
+                  not_drafted:
+                    type: object
+                    properties:
+                      no_supplier: { type: array, items: { type: object } }
+                      no_contact: { type: array, items: { type: object } }
+                      past_escalation: { type: array, items: { type: object } }
+                  link_block_preview: { type: string }
+                  email_configured: { type: boolean }
+                  escalate_after_days: { type: integer }
+
+  /api/renewal-requests/{id}/sends/{sendId}/approve:
+    post:
+      tags: [Renewals]
+      summary: Approve a drafted renewal request and send it to the supplier
+      description: |
+        The ONLY endpoint that emails a supplier. The assigned approver, an
+        org_admin or a super_admin. On the first approval of a cycle one
+        document request is composed and issued for the expiring document, as
+        the approving person. The email is sent from "<Organization> via
+        SupDox" with reply-to the approver, no attachment, and the system's
+        link block appended below `body` (it cannot be supplied or removed).
+        The exact subject and body sent are stored and audited
+        (`renewal_request.sent`).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: sendId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject, body]
+              properties:
+                subject: { type: string, maxLength: 200 }
+                body: { type: string, maxLength: 5000 }
+      responses:
+        '200':
+          description: Sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent: { type: boolean }
+                  request: { $ref: '#/components/schemas/RenewalRequest' }
+        '403':
+          description: Neither the assigned approver nor an administrator
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: The draft is no longer waiting, or the supplier has no document contact
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502':
+          description: The mail provider refused it; the stage is `failed` and can be approved again
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Email is not configured; nothing was sent and the draft keeps waiting
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/renewal-requests/{id}/sends/{sendId}/skip:
+    post:
+      tags: [Renewals]
+      summary: Skip one stage of a renewal request
+      description: |
+        The assigned approver, an org_admin or a super_admin. Nothing is sent.
+        The cycle stays open and the next stage is still drafted when due.
+        Audited `renewal_request.skipped`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: sendId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Skipped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skipped: { type: boolean }
+                  request: { $ref: '#/components/schemas/RenewalRequest' }
+        '409':
+          description: The draft is no longer waiting
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/expirations/lead-time:
     get:
@@ -3611,6 +3896,99 @@ paths:
                   total: { type: integer }
                   limit: { type: integer }
                   offset: { type: integer }
+
+  /api/suppliers/{id}/contacts:
+    get:
+      tags: [Suppliers]
+      summary: The supplier's contacts and its document contact
+      description: |
+        Migration 0133. Any role in the tenant. `document_contact` is the one
+        address renewal requests to this supplier are sent to, or null.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Contacts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierContacts' }
+        '404':
+          description: Supplier not found in the tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    post:
+      tags: [Suppliers]
+      summary: Add a contact
+      description: |
+        org_admin / super_admin. The first contact becomes the document contact
+        unless `is_document_contact` says otherwise; naming a new document
+        contact demotes the previous one. Audited `supplier.contact_added`.
+        Adding a contact sends nothing.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SupplierContactWrite' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierContacts' }
+        '400':
+          description: Missing or invalid email
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: The supplier already has a contact with that address
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/suppliers/{id}/contacts/{contactId}:
+    put:
+      tags: [Suppliers]
+      summary: Edit a contact
+      description: |
+        org_admin / super_admin. Deactivating the document contact leaves the
+        supplier with none; nothing is promoted in its place. Audited
+        `supplier.contact_updated` with the previous and current values.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: contactId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SupplierContactWrite' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierContacts' }
+        '404':
+          description: Contact not found for this supplier
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Suppliers]
+      summary: Remove a contact
+      description: org_admin / super_admin. Audited `supplier.contact_removed` with the whole row.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: contactId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The remaining contacts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierContacts' }
 
   /api/suppliers/{id}/lot-scheme:
     get:

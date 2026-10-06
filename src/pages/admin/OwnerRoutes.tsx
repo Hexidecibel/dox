@@ -17,6 +17,7 @@ import { useTenant } from '../../contexts/TenantContext';
 import { HelpWell } from '../../components/HelpWell';
 import OwnerRoutingPanel from '../../components/OwnerRoutingPanel';
 import { RenewalLeadTimePanel } from '../../components/RenewalLeadTime';
+import { RenewalMasterUserPanel } from '../../components/RenewalMasterUserPanel';
 import { useModuleAccess } from '../../contexts/ModuleAccessContext';
 
 export function OwnerRoutes() {
@@ -46,6 +47,10 @@ export function OwnerRoutes() {
 
       {/* WHEN they are told, beside WHO is told (migration 0111). */}
       {showLeadTime && <RenewalLeadTimePanel tenantId={tenantId} />}
+
+      {/* ...and who APPROVES the request that then goes to the supplier
+          (migration 0133). Same module, same gate as the lead time. */}
+      {showLeadTime && <RenewalMasterUserPanel tenantId={tenantId} />}
 
       <OwnerRoutingPanel tenantId={tenantId} />
     </Box>

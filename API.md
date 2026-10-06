@@ -1238,6 +1238,47 @@ The value, kind and supplier of an identifier are its **identity** and are not e
 
 ---
 
+## Supplier Contacts and the Supplier Renewal Send
+
+Migration 0133. **The portal never emails a supplier on its own.** The renewal run (`POST /api/expirations/run-scheduled`, `POST /api/expirations/notify`) only **drafts** a request to the supplier's document contact; one approval by a person sends it. Both run responses carry `supplier_requests` (what was drafted, superseded, ended, escalated, and what could not be drafted and why).
+
+### Contacts
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/suppliers/:id/contacts` | any tenant user | `{ supplier, contacts[], document_contact }`. `document_contact` is the one address renewal requests go to, or `null`. |
+| `POST /api/suppliers/:id/contacts` | org_admin, super_admin | `{ email, name?, role?, priority?, is_document_contact? }`. The first contact becomes the document contact unless told otherwise. 409 when the supplier already has that address (case-insensitive). Audited `supplier.contact_added`. |
+| `PUT /api/suppliers/:id/contacts/:contactId` | org_admin, super_admin | Any of `name`, `email`, `role`, `priority`, `is_document_contact`, `active`. Naming a new document contact demotes the previous one in the same write. Audited `supplier.contact_updated` with both sides and who was replaced. |
+| `DELETE /api/suppliers/:id/contacts/:contactId` | org_admin, super_admin | Audited `supplier.contact_removed` with the whole row. |
+
+A supplier has **at most one** active document contact. Removing or deactivating it leaves none: nothing is promoted in its place, and drafting for that supplier stops until one is chosen. Adding a contact sends nothing.
+
+The verified supplier list (`POST /api/supplier-list/import`) writes its `Supplier contact email` column to contacts on apply and reports `counts.contacts_added` on a dry run. An address already on file is never changed.
+
+### The ladder
+
+A request is drafted when a document with a supplier enters its alert window (the same lead time as the internal alert), on the day of expiry, and 7 and 14 days after. A newer stage supersedes an unapproved older one, so at most one draft is waiting and at most four messages reach a supplier per cycle. At 21 days past due with no replacement accepted the cycle is `escalated`: nothing further is drafted and the organization's admins (and master user) are told once. A changed due date, an archived document, or a replacement accepted against the request ends the cycle.
+
+### Requests
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/renewal-requests` | any tenant user (`tenant_id` for super_admin) | `{ requests[], not_drafted, link_block_preview, email_configured, escalate_after_days }`. Each request has its `sends[]` (stage, status, the draft, the approver, and for a sent stage the exact `sent_subject` / `sent_body`), the current `contact`, `waiting_send_id`, and `can_approve` for the caller. `not_drafted` lists alerting documents with `no_supplier`, `no_contact`, or `past_escalation`. |
+| `POST /api/renewal-requests/:id/sends/:sendId/approve` | the assigned approver, org_admin, super_admin | `{ subject, body }` - the draft as edited. Issues one document request for the expiring document on the first approval of a cycle (as the approving person), then emails the supplier from "<Organization> via SupDox" with reply-to the approver and the system's link block appended. Audited `renewal_request.sent` with the exact text. |
+| `POST /api/renewal-requests/:id/sends/:sendId/skip` | the assigned approver, org_admin, super_admin | Sends nothing for this stage. The cycle stays open; the next stage is still drafted. Audited `renewal_request.skipped`. |
+| `GET /api/expirations/default-owner` | org_admin, super_admin (`tenant_id`) | The master user and the active users who can be chosen. `resolves: false` when the stored user is no longer active. |
+| `PUT /api/expirations/default-owner` | org_admin, super_admin | `{ "user_id": "..." }` or `null`. Must be an active user of the organization. Audited `renewal_default_owner_updated`. |
+
+**Approver.** The first active portal user on the record's owner route; otherwise the master user; otherwise any org_admin (`approver_user_id: null`).
+
+**Approve responses.** `200 { sent: true, request }`. `409` the draft is no longer waiting (sent, skipped, superseded, cancelled) or the supplier has no document contact (`code: no_document_contact`). `503` `code: email_not_configured` - nothing sent, the draft keeps waiting. `502` `code: send_failed` - the provider refused it; the stage is `failed` with the reason and can be approved again. `403` the caller is neither the approver nor an admin.
+
+The body is a fixed template filled only from supplier-facing text (organization name, contact name, the request line names, the due date). The link block is not part of `body` and cannot be supplied or removed.
+
+### Changing a renewal date after approval
+
+`PUT /api/documents/:id` with a different `renewal_due_date` records a decision: `renewal_decision` becomes `overridden` (or `cleared` when the date is set to `null`, which means "does not renew"), `renewal_decided_at/_by` are stamped, and `{ previous_due_date, new_due_date, decision, reason, decided_by, decided_at }` is appended to `renewal_snapshot.post_approval_edits` - the approval-time snapshot fields are kept. Send `renewal_reason` with it. Audited `document.renewal_decided` with `via: "document_edit"`. An unchanged value records nothing.
+
 ## Declared Lot Formats
 
 Each supplier's lot format is **declared data** (migration 0110), never a global regex: a pattern that silently mis-parses another supplier's lot is worse than no parser.

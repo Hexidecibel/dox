@@ -22,6 +22,17 @@ const notifyExp = vi.fn();
 
 vi.mock('../lib/api', () => ({
   api: {
+    // The Renewals page also mounts the supplier-requests section (0133); an
+    // organization with no drafts renders nothing there.
+    renewalRequests: {
+      list: async () => ({
+        requests: [],
+        not_drafted: { no_supplier: [], no_contact: [], past_escalation: [] },
+        link_block_preview: '',
+        email_configured: true,
+        escalate_after_days: 21,
+      }),
+    },
     expirations: {
       list: (...a: unknown[]) => listExp(...a),
       notify: (...a: unknown[]) => notifyExp(...a),

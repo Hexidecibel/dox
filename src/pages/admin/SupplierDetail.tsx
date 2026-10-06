@@ -55,6 +55,7 @@ import ExtractionInstructionsBox from '../ExtractionInstructionsBox';
 import LotSchemeSelect from '../../components/LotSchemeSelect';
 import SupplierProductIdentifiersPanel from '../../components/SupplierProductIdentifiersPanel';
 import SupplierLotFormatPanel from '../../components/SupplierLotFormatPanel';
+import SupplierContactsPanel from '../../components/SupplierContactsPanel';
 import SupplierRequirementGaps, { ProductStatusChip } from '../../components/SupplierRequirementGaps';
 import ProductRequirementsPanel from '../../components/ProductRequirementsPanel';
 import SupplierRequirementsEditor from '../../components/SupplierRequirementsEditor';
@@ -851,6 +852,7 @@ export function SupplierDetail() {
           <Tab label="Product identifiers" />
           <Tab label="Notes" />
           <Tab label="Lot format" />
+          <Tab label="Contacts" />
           {/* Last, so hiding it for a tenant without Compliance shifts no index. */}
           {complianceVisible && <Tab label="Spec watch" />}
         </Tabs>
@@ -1629,9 +1631,18 @@ export function SupplierDetail() {
       {/* Spec watch (migration 0109): this supplier's limits over the company
           defaults and the analytes its certificates must report, with their
           review-by dates. The same panel as Settings › Spec Limits, scoped. */}
+      {/* Contacts (migration 0133): who at the supplier receives document
+          requests. Index 9, ahead of the conditional Spec watch tab so that
+          hiding Compliance still shifts nothing. */}
+      <TabPanel value={tab} index={9}>
+        {tab === 9 && (
+          <SupplierContactsPanel supplierId={supplier.id} supplierName={supplier.name} canEdit={isAdmin} />
+        )}
+      </TabPanel>
+
       {complianceVisible && (
-        <TabPanel value={tab} index={9}>
-          {tab === 9 && (
+        <TabPanel value={tab} index={10}>
+          {tab === 10 && (
             <SupplierWatchPanel supplierId={supplier.id} tenantId={supplier.tenant_id} canEdit={isAdmin} />
           )}
         </TabPanel>

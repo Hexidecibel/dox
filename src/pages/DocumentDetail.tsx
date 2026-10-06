@@ -196,6 +196,8 @@ export function DocumentDetail() {
   const [regRenewalType, setRegRenewalType] = useState<RenewalType | ''>('');
   const [regRenewalInterval, setRegRenewalInterval] = useState('');
   const [regRenewalDue, setRegRenewalDue] = useState('');
+  /** Why the renewal date is being changed after approval (D-041). */
+  const [regRenewalReason, setRegRenewalReason] = useState('');
 
   // Registry facets (migration 0080): layer 2 (what this document SATISFIES)
   // and layer 3 (what it TRIGGERS). This page is where a machine's `suggested`
@@ -319,7 +321,8 @@ export function DocumentDetail() {
     setRegOwner(doc.owner || '');
     setRegRenewalType(doc.renewalType || '');
     setRegRenewalInterval(doc.renewalIntervalMonths != null ? String(doc.renewalIntervalMonths) : '');
-    setRegRenewalDue(doc.renewalDueDate || '');
+    setRegRenewalDue((doc.renewalDueDate || '').slice(0, 10));
+    setRegRenewalReason('');
     setRegistryEditing(true);
   };
 
@@ -337,8 +340,17 @@ export function DocumentDetail() {
 
   const regRenewalHasInterval = RENEWAL_OPTIONS.find((o) => o.value === regRenewalType)?.hasInterval;
 
+  // A renewal date changed HERE is a decision made after approval and is
+  // recorded as one - who, when, the previous date, and why. So the reason is
+  // asked for exactly when the date actually differs from what is stored.
+  const storedRenewalDue = (doc?.renewalDueDate || '').slice(0, 10);
+  const renewalDueChanged = registryEditing && regRenewalDue !== storedRenewalDue;
+  const renewalDueCleared = renewalDueChanged && !regRenewalDue;
+  const renewalReasonMissing = renewalDueChanged && !regRenewalReason.trim();
+
   const handleSaveRegistry = async () => {
     if (!doc || !id) return;
+    if (renewalReasonMissing) return;
     setRegistrySaving(true);
     try {
       await api.documents.update(id, {
@@ -352,6 +364,7 @@ export function DocumentDetail() {
         renewal_interval_months:
           regRenewalHasInterval && regRenewalInterval ? parseInt(regRenewalInterval, 10) : null,
         renewal_due_date: regRenewalDue || null,
+        ...(renewalDueChanged ? { renewal_reason: regRenewalReason.trim() } : {}),
       });
       setRegistryEditing(false);
       loadDocument();
@@ -1066,8 +1079,35 @@ export function DocumentDetail() {
               value={regRenewalDue} onChange={(e) => setRegRenewalDue(e.target.value)}
               InputLabelProps={{ shrink: true }}
             />
+            {renewalDueChanged && (
+              <>
+                <Alert severity={renewalDueCleared ? 'warning' : 'info'} data-testid="renewal-date-change-note">
+                  {renewalDueCleared ? (
+                    <>
+                      Leaving the date empty records that this document <strong>does not renew</strong>:
+                      it comes off the Renewals list and nobody is alerted about it. If you only do
+                      not know the date yet, cancel instead.
+                    </>
+                  ) : (
+                    <>
+                      You are changing the renewal date
+                      {storedRenewalDue ? ` from ${formatDate(storedRenewalDue)}` : ''} to{' '}
+                      {formatDate(regRenewalDue)}. The change is recorded with your name and the
+                      reason below; the date confirmed at approval is kept in the history.
+                    </>
+                  )}
+                </Alert>
+                <TextField
+                  label="Reason for the change" size="small" required multiline minRows={2}
+                  value={regRenewalReason} onChange={(e) => setRegRenewalReason(e.target.value)}
+                  error={renewalReasonMissing}
+                  helperText={renewalReasonMissing ? 'Say why, so the change can be explained later.' : ' '}
+                  inputProps={{ 'aria-label': 'Reason for the change' }}
+                />
+              </>
+            )}
             <Box sx={{ display: 'flex', gap: 1 }}>
-              <Button size="small" variant="contained" startIcon={<SaveIcon />} onClick={handleSaveRegistry} disabled={registrySaving}>
+              <Button size="small" variant="contained" startIcon={<SaveIcon />} onClick={handleSaveRegistry} disabled={registrySaving || renewalReasonMissing}>
                 {registrySaving ? 'Saving...' : 'Save'}
               </Button>
               <Button size="small" onClick={() => setRegistryEditing(false)} disabled={registrySaving}>Cancel</Button>
