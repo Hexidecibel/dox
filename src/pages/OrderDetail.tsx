@@ -14,12 +14,6 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
   Select,
   MenuItem,
   FormControl,
@@ -27,20 +21,20 @@ import {
   Collapse,
   useMediaQuery,
   useTheme,
-  Card,
-  CardContent,
   Link,
-  Tooltip,
+  Snackbar,
+  Stack,
+  TextField,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
   Delete as DeleteIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
-  Check as CheckIcon,
-  Remove as DashIcon,
-  Description as DocIcon,
   History as HistoryIcon,
+  PlaylistAdd as AddDocsIcon,
+  Add as AddIcon,
+  Send as SendIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -48,7 +42,12 @@ import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { EmptyState } from '../components/EmptyState';
 import { helpContent } from '../lib/helpContent';
-import { LotMatchSuggestionList, type LotMatchSuggestionLike } from '../components/LotMatchSuggestionList';
+import { useTenant } from '../contexts/TenantContext';
+import { OrderLines, type OrderLineSuggestion } from '../components/orders/OrderLines';
+import { AddDocumentsDialog } from '../components/orders/AddDocumentsDialog';
+import { SendOrderDialog } from '../components/orders/SendOrderDialog';
+import { OrderSendHistory } from '../components/orders/OrderSendHistory';
+import type { ApiOrderItem, OrderSendSummary } from '../../shared/types';
 
 const ORDER_STATUSES = ['pending', 'enriched', 'matched', 'fulfilled', 'delivered', 'error'] as const;
 
@@ -62,21 +61,6 @@ const statusChipProps: Record<OrderStatus, { color: 'default' | 'info' | 'warnin
   delivered: { color: 'success', variant: 'outlined' },
   error: { color: 'error' },
 };
-
-interface OrderItem {
-  id: string;
-  product_name: string | null;
-  product_code: string | null;
-  quantity: number | null;
-  lot_number: string | null;
-  lot_matched: boolean;
-  coa_document_id: string | null;
-  coa_document_title: string | null;
-}
-
-interface OrderLineSuggestion extends LotMatchSuggestionLike {
-  order_item_id: string;
-}
 
 interface Order {
   id: string;
@@ -92,6 +76,11 @@ interface Order {
   connector_run_id: string | null;
   connector_name: string | null;
   source_data: string | null;
+  staged_at?: string | null;
+  ship_date?: string | null;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  customer_email?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -102,9 +91,12 @@ export function OrderDetail() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const { isAdmin, isSuperAdmin, isReader } = useAuth();
+  const { selectedTenantId } = useTenant();
 
   const [order, setOrder] = useState<Order | null>(null);
-  const [items, setItems] = useState<OrderItem[]>([]);
+  const [items, setItems] = useState<ApiOrderItem[]>([]);
+  // What has already left on this order, newest first (migration 0134).
+  const [sends, setSends] = useState<OrderSendSummary[]>([]);
   // Pending lot-match suggestions, by order line. The matcher never links on
   // its own; a person confirms each one here.
   const [suggestions, setSuggestions] = useState<OrderLineSuggestion[]>([]);
@@ -123,15 +115,31 @@ export function OrderDetail() {
   // Source data collapse
   const [sourceDataOpen, setSourceDataOpen] = useState(false);
 
-  const loadOrder = async () => {
+  // Building the order by hand (migration 0134): pick certificates, type a
+  // line, review and send.
+  const [addDocsOpen, setAddDocsOpen] = useState(false);
+  const [sendOpen, setSendOpen] = useState(false);
+  const [lineOpen, setLineOpen] = useState(false);
+  const [lineProduct, setLineProduct] = useState('');
+  const [lineCode, setLineCode] = useState('');
+  const [lineLotNumber, setLineLotNumber] = useState('');
+  const [lineQuantity, setLineQuantity] = useState('');
+  const [lineSaving, setLineSaving] = useState(false);
+  const [lineError, setLineError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  // `quiet` reloads in place: after a pick or a send the page must not blank
+  // to a spinner and lose the person's place in the lines.
+  const loadOrder = async (quiet = false) => {
     if (!id) return;
-    setLoading(true);
+    if (!quiet) setLoading(true);
     setError('');
     try {
       const result = await api.orders.get(id) as any;
       setOrder(result.order);
       setItems(result.items || []);
       setSuggestions(result.suggestions || []);
+      setSends(result.sends || []);
       setNewStatus(result.order.status);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load order');
@@ -144,7 +152,35 @@ export function OrderDetail() {
     loadOrder();
   }, [id]);
 
-  const suggestionsFor = (itemId: string) => suggestions.filter((s) => s.order_item_id === itemId);
+  const reload = () => {
+    void loadOrder(true);
+  };
+
+  const handleAddLine = async () => {
+    if (!id) return;
+    setLineSaving(true);
+    setLineError('');
+    try {
+      await api.orders.addItems(id, {
+        item: {
+          product_name: lineProduct.trim() || null,
+          product_code: lineCode.trim() || null,
+          lot_number: lineLotNumber.trim() || null,
+          quantity: lineQuantity.trim() === '' ? null : Number(lineQuantity),
+        },
+      });
+      setLineOpen(false);
+      setLineProduct('');
+      setLineCode('');
+      setLineLotNumber('');
+      setLineQuantity('');
+      reload();
+    } catch (err) {
+      setLineError(err instanceof Error ? err.message : 'Could not add the line');
+    } finally {
+      setLineSaving(false);
+    }
+  };
 
   const handleStatusChange = async () => {
     if (!id || !newStatus || newStatus === order?.status) return;
@@ -152,7 +188,7 @@ export function OrderDetail() {
     try {
       await api.orders.update(id, { status: newStatus });
       setStatusConfirmOpen(false);
-      loadOrder();
+      reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update status');
     } finally {
@@ -215,6 +251,11 @@ export function OrderDetail() {
   }
 
   if (!order) return null;
+
+  // A staged order is still being reviewed for what the connector read; its
+  // lines are edited there, not here.
+  const canEdit = !isReader && !order.staged_at;
+  const sendable = items.some((i) => i.coa_document_id && (i.coa_document_status ?? 'active') === 'active');
 
   return (
     <Box>
@@ -287,13 +328,21 @@ export function OrderDetail() {
             </Box>
           )}
           <Box sx={{ flex: '1 1 200px' }}>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Ship date
+            </Typography>
+            <Typography variant="body1">{order.ship_date || '-'}</Typography>
+          </Box>
+          <Box sx={{ flex: '1 1 200px' }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
               <Typography variant="subtitle2" color="text.secondary" gutterBottom>
                 Source
               </Typography>
               <InfoTooltip text={helpContent.orders.list?.columnTooltips?.source} />
             </Box>
-            <Typography variant="body1">{order.connector_name || 'Manual'}</Typography>
+            <Typography variant="body1">
+              {order.connector_name || (order.created_by ? `Built by ${order.created_by_name ?? 'a former user'}` : 'Manual')}
+            </Typography>
           </Box>
         </Box>
       </Paper>
@@ -391,141 +440,79 @@ export function OrderDetail() {
         )}
       </Box>
 
-      {/* Items Table */}
-      <Typography variant="h6" fontWeight={600} gutterBottom>
-        Items ({items.length})
-      </Typography>
+      {/* Lines */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
+        <Typography variant="h6" fontWeight={600} sx={{ flex: '1 1 auto' }}>
+          Lines ({items.length})
+        </Typography>
+        {canEdit && (
+          <>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<AddIcon />}
+              onClick={() => { setLineError(''); setLineOpen(true); }}
+              sx={{ textTransform: 'none' }}
+              data-testid="order-add-line"
+            >
+              Add a line
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<AddDocsIcon />}
+              onClick={() => setAddDocsOpen(true)}
+              sx={{ textTransform: 'none' }}
+              data-testid="order-add-coas"
+            >
+              Add COAs
+            </Button>
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={<SendIcon />}
+              onClick={() => setSendOpen(true)}
+              disabled={!sendable}
+              sx={{ textTransform: 'none' }}
+              data-testid="order-review-send"
+            >
+              Review and send
+            </Button>
+          </>
+        )}
+      </Box>
 
       {items.length === 0 ? (
         <Box sx={{ mb: 3 }}>
           <EmptyState
-            title="No items on this order"
-            description="The connector ingested the order header but no line items came through. Check the source data below for the raw payload, or open the connector run to see how the parser handled this file."
+            title="No lines on this order yet"
+            description={
+              order.connector_id
+                ? 'The connector ingested the order header but no line items came through. Check the source data below for the raw payload, or open the connector run to see how the parser handled this file.'
+                : 'Add the certificates this order needs with Add COAs: each one becomes a line for every lot it certifies. Or add a line by hand and attach its certificate later.'
+            }
           />
         </Box>
-      ) : isMobile ? (
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mb: 3 }}>
-          {items.map((item) => (
-            <Card key={item.id} variant="outlined">
-              <CardContent sx={{ pb: '12px !important' }}>
-                <Typography variant="subtitle2" fontWeight={600}>
-                  {item.product_name || item.product_code || 'Unknown Product'}
-                </Typography>
-                {item.product_code && item.product_name && (
-                  <Typography variant="caption" color="text.secondary">
-                    {item.product_code}
-                  </Typography>
-                )}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 1 }}>
-                  {item.quantity != null && (
-                    <Typography variant="body2">Qty: {item.quantity}</Typography>
-                  )}
-                  {item.lot_number && (
-                    <Typography variant="body2">Lot: {item.lot_number}</Typography>
-                  )}
-                </Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 1 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                    {item.lot_matched ? (
-                      <Chip label="Matched" size="small" color="success" icon={<CheckIcon />} />
-                    ) : (
-                      <Chip label="Unmatched" size="small" variant="outlined" />
-                    )}
-                  </Box>
-                  {item.coa_document_id && (
-                    <Button
-                      size="small"
-                      startIcon={<DocIcon />}
-                      onClick={() => navigate(`/documents/${item.coa_document_id}`)}
-                    >
-                      {item.coa_document_title || 'COA'}
-                    </Button>
-                  )}
-                </Box>
-                {!item.coa_document_id && suggestionsFor(item.id).length > 0 && (
-                  <Box sx={{ mt: 1 }}>
-                    <LotMatchSuggestionList
-                      suggestions={suggestionsFor(item.id)}
-                      canResolve={!isReader}
-                      onResolved={loadOrder}
-                      onOpenDocument={(docId) => navigate(`/documents/${docId}`)}
-                    />
-                  </Box>
-                )}
-              </CardContent>
-            </Card>
-          ))}
-        </Box>
       ) : (
-        <TableContainer component={Paper} variant="outlined" sx={{ mb: 3 }}>
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableCell>Product</TableCell>
-                <TableCell>Code</TableCell>
-                <TableCell align="right">Quantity</TableCell>
-                <TableCell>
-                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
-                    Lot #
-                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.lot} />
-                  </Box>
-                </TableCell>
-                <TableCell align="center">
-                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
-                    Matched
-                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.matched} />
-                  </Box>
-                </TableCell>
-                <TableCell>
-                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
-                    COA Document
-                    <InfoTooltip text={helpContent.orders.list?.columnTooltips?.coa} />
-                  </Box>
-                </TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {items.map((item) => (
-                <TableRow key={item.id}>
-                  <TableCell>{item.product_name || '-'}</TableCell>
-                  <TableCell>{item.product_code || '-'}</TableCell>
-                  <TableCell align="right">{item.quantity != null ? item.quantity : '-'}</TableCell>
-                  <TableCell>{item.lot_number || '-'}</TableCell>
-                  <TableCell align="center">
-                    {item.lot_matched ? (
-                      <Tooltip title="Lot matched">
-                        <CheckIcon color="success" fontSize="small" />
-                      </Tooltip>
-                    ) : (
-                      <DashIcon color="disabled" fontSize="small" />
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    {item.coa_document_id ? (
-                      <Button
-                        size="small"
-                        startIcon={<DocIcon />}
-                        onClick={() => navigate(`/documents/${item.coa_document_id}`)}
-                        sx={{ textTransform: 'none' }}
-                      >
-                        {item.coa_document_title || 'View COA'}
-                      </Button>
-                    ) : suggestionsFor(item.id).length > 0 ? (
-                      <LotMatchSuggestionList
-                        suggestions={suggestionsFor(item.id)}
-                        canResolve={!isReader}
-                        onResolved={loadOrder}
-                        onOpenDocument={(docId) => navigate(`/documents/${docId}`)}
-                      />
-                    ) : (
-                      '-'
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </TableContainer>
+        <OrderLines
+          orderId={order.id}
+          items={items}
+          suggestions={suggestions}
+          canEdit={canEdit}
+          compact={isMobile}
+          onChanged={reload}
+          onOpenDocument={(docId) => navigate(`/documents/${docId}`)}
+        />
+      )}
+
+      {/* What has already left */}
+      {sends.length > 0 && (
+        <Box sx={{ mb: 3 }}>
+          <Typography variant="h6" fontWeight={600} gutterBottom>
+            Sent ({sends.length})
+          </Typography>
+          <OrderSendHistory sends={sends} onChanged={reload} />
+        </Box>
       )}
 
       {/* Source Data */}
@@ -560,6 +547,71 @@ export function OrderDetail() {
           </Collapse>
         </Box>
       )}
+
+      <AddDocumentsDialog
+        open={addDocsOpen}
+        orderId={order.id}
+        orderNumber={order.order_number}
+        tenantId={selectedTenantId || undefined}
+        onClose={() => setAddDocsOpen(false)}
+        onAdded={reload}
+      />
+
+      <SendOrderDialog
+        open={sendOpen}
+        orderId={order.id}
+        onClose={() => setSendOpen(false)}
+        onFailed={reload}
+        onSent={(result) => {
+          setSendOpen(false);
+          setNotice(
+            result.sent
+              ? `Sent to ${result.send.recipients.join(', ')}.`
+              : 'Some of the emails did not go. See Sent below to resend them.',
+          );
+          reload();
+        }}
+      />
+
+      {/* A line typed by hand */}
+      <Dialog open={lineOpen} onClose={() => !lineSaving && setLineOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Add a line</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            {lineError && <Alert severity="error">{lineError}</Alert>}
+            <Typography variant="body2" color="text.secondary">
+              For a product whose certificate is not on the order yet. A lot number is checked against the
+              certificates on file, and any that fit are offered on the line for you to confirm.
+            </Typography>
+            <TextField label="Product" value={lineProduct} onChange={(e) => setLineProduct(e.target.value)} fullWidth size="small" autoFocus inputProps={{ 'data-testid': 'line-product' }} />
+            <TextField label="Product code" value={lineCode} onChange={(e) => setLineCode(e.target.value)} fullWidth size="small" />
+            <TextField label="Lot number" value={lineLotNumber} onChange={(e) => setLineLotNumber(e.target.value)} fullWidth size="small" inputProps={{ 'data-testid': 'line-lot' }} />
+            <TextField label="Quantity" type="number" value={lineQuantity} onChange={(e) => setLineQuantity(e.target.value)} fullWidth size="small" />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setLineOpen(false)} disabled={lineSaving} sx={{ textTransform: 'none' }}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleAddLine}
+            disabled={lineSaving || (!lineProduct.trim() && !lineCode.trim() && !lineLotNumber.trim())}
+            sx={{ textTransform: 'none' }}
+            data-testid="line-save"
+          >
+            {lineSaving ? 'Adding…' : 'Add line'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Snackbar
+        open={!!notice}
+        autoHideDuration={6000}
+        onClose={() => setNotice('')}
+        message={notice}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      />
 
       {/* Status Change Confirmation */}
       <Dialog open={statusConfirmOpen} onClose={() => { setStatusConfirmOpen(false); setNewStatus(order.status); }}>

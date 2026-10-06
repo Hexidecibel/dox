@@ -99,12 +99,50 @@ export interface SearchWorkspaceProps {
   /** Selection + ZIP / Send (0115). Off by default; the page decides (library module). */
   enableExport?: boolean;
   exportSender?: { name: string; email: string };
+  /**
+   * One more thing to do with the selection, beside ZIP / Send -- "Add to
+   * order" on Documents, "Add to this order" in the order's own picker. It
+   * turns selection on by itself, so a surface that only picks need not offer
+   * export at all. The Include-anyway gate is untouched: a likely or nearby
+   * result still has to be included on purpose before it can be acted on.
+   */
+  selectionAction?: SearchSelectionAction;
+  /**
+   * The page-wide shortcuts (/ focus, A mode, arrows, Space, Enter, E, S).
+   * On by default. Off when the workspace sits inside a dialog, where a
+   * document-level key handler would act on the page behind it and Enter would
+   * navigate away from the thing being built.
+   */
+  globalShortcuts?: boolean;
+}
+
+export interface SearchSelectionAction {
+  label: string;
+  /**
+   * Runs with the selected documents. Resolve with a sentence to show and the
+   * selection clears; resolve with null when the person backed out and the
+   * selection stays; reject and the error is shown.
+   */
+  onRun: (docs: UniversalSearchDocument[]) => Promise<string | null>;
+  /** Hide ZIP / Send: this surface exists only to pick. */
+  only?: boolean;
+  testId?: string;
 }
 
 /** Shown only when the tenant's own examples are unavailable (empty tenant, no organization chosen). */
 const FALLBACK_EXAMPLES = ['lot 10426203-03', 'butter produced Sep 2', 'PO K134273', 'lot 104', 'invoice 261149'];
 
-export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId, enableExport = false, exportSender }: SearchWorkspaceProps) {
+export function SearchWorkspace({
+  surface = 'search',
+  syncToUrl = true,
+  tenantId,
+  enableExport = false,
+  exportSender,
+  selectionAction,
+  globalShortcuts = true,
+}: SearchWorkspaceProps) {
+  const selectable = enableExport || !!selectionAction;
+  const exportOffered = enableExport && !selectionAction?.only;
   const theme = useTheme();
   const wide = useMediaQuery(theme.breakpoints.up('lg'));
   const navigate = useNavigate();
@@ -353,7 +391,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
     setIncludedAnyway((prev) => new Set(prev).add(doc.id));
     setSelectedDocs((prev) => (prev.some((d) => d.id === doc.id) ? prev : [...prev, doc]));
   }, []);
-  const selection: SearchSelection | undefined = enableExport
+  const selection: SearchSelection | undefined = selectable
     ? { selectedIds, includedAnyway, onToggle: toggleDoc, onIncludeAnyway: includeAnyway, onSelectMany: selectMany }
     : undefined;
 
@@ -397,6 +435,24 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
     [selectedDocs, tenantId],
   );
 
+  const runSelectionAction = useCallback(() => {
+    if (!selectionAction || !selectedDocs.length) return;
+    setExportBusy(true);
+    setExportError(null);
+    setExportNotice(null);
+    selectionAction
+      .onRun(selectedDocs)
+      .then((notice) => {
+        // null = the person backed out; what they chose is still chosen.
+        if (notice === null) return;
+        setSelectedDocs([]);
+        setIncludedAnyway(new Set());
+        setExportNotice(notice);
+      })
+      .catch((e: unknown) => setExportError(e instanceof Error ? e.message : 'That did not work'))
+      .finally(() => setExportBusy(false));
+  }, [selectionAction, selectedDocs]);
+
   // ── saved searches ────────────────────────────────────────────────────────
   const saved = useSavedSearches();
   const [savedOpen, setSavedOpen] = useState(false);
@@ -431,6 +487,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
   // ── keyboard ──────────────────────────────────────────────────────────────
   const resultsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    if (!globalShortcuts) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
       if (document.querySelector('[role="dialog"][data-command-palette]')) return;
@@ -465,10 +522,10 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
       } else if (e.key === 'Enter' && at >= 0) {
         e.preventDefault();
         navigate(`/documents/${rows[at].dataset.docId}`);
-      } else if (e.key === 'e' && enableExport && selectedDocs.length) {
+      } else if (e.key === 'e' && exportOffered && selectedDocs.length) {
         e.preventDefault();
         runDownload();
-      } else if (e.key === 's' && enableExport && selectedDocs.length) {
+      } else if (e.key === 's' && exportOffered && selectedDocs.length) {
         e.preventDefault();
         setExportError(null);
         setSendOpen(true);
@@ -476,7 +533,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [enableExport, selectedDocs.length, runDownload, navigate, setMode]);
+  }, [globalShortcuts, exportOffered, selectedDocs.length, runDownload, navigate, setMode]);
 
   // ── the ambiguous product, if any ────────────────────────────────────────
   const ambiguousClause = kept.find((c) => c.field === 'product' && c.ambiguous && c.values.length > 1) ?? null;
@@ -804,7 +861,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
         </Drawer>
       )}
 
-      <KeyboardLegend modKey={modKey} exportOn={enableExport} advanced={advanced} />
+      {globalShortcuts && <KeyboardLegend modKey={modKey} exportOn={exportOffered} advanced={advanced} />}
 
       <Popover
         open={!!editingClause}
@@ -854,13 +911,19 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
         onDelete={saved.remove}
       />
 
-      {enableExport && (
+      {selectable && (
         <>
           <ExportSelectionBar
             count={selectedDocs.length}
             busy={exportBusy}
             error={exportError}
             notice={exportNotice}
+            hideExport={!exportOffered}
+            extraAction={
+              selectionAction
+                ? { label: selectionAction.label, onClick: runSelectionAction, testId: selectionAction.testId, primary: !exportOffered }
+                : undefined
+            }
             onDownload={runDownload}
             onSend={() => {
               setExportError(null);
@@ -877,7 +940,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
               setExportNotice(null);
             }}
           />
-          <SendExportDialog
+          {exportOffered && <SendExportDialog
             open={sendOpen}
             documents={selectedDocs}
             senderName={exportSender?.name ?? 'You'}
@@ -886,7 +949,7 @@ export function SearchWorkspace({ surface = 'search', syncToUrl = true, tenantId
             error={sendOpen ? exportError : null}
             onClose={() => setSendOpen(false)}
             onSend={runSend}
-          />
+          />}
         </>
       )}
 

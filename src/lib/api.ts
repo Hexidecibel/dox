@@ -353,6 +353,15 @@ import type { SupplierGapListResponse, SupplierGapStatus } from '../../shared/re
 import type { ProductIdentifier, ProductIdentifierKind, ApiProductRequirement, RequirementScopePreview } from '../../shared/types';
 import type { RequirementScope } from '../../shared/requirementScope';
 import type { SupplierLotSchemeResponse } from '../../shared/types';
+import type {
+  OrderGetResponse,
+  OrderItemUpdateRequest,
+  OrderItemsAddRequest,
+  OrderItemsAddResponse,
+  OrderSendPreview,
+  OrderSendRequest,
+  OrderSendResponse,
+} from '../../shared/types';
 import type { LotSchemeSpec } from '../../shared/lotScheme';
 import type {
   BulkApplyPacketRequest,
@@ -3260,8 +3269,35 @@ export const api = {
       return fetchApi(`/orders?${query}`);
     },
     get(id: string) { return fetchApi(`/orders/${id}`); },
-    create(data: { order_number: string; po_number?: string; customer_id?: string; customer_number?: string; customer_name?: string; tenant_id?: string; items?: Array<{ product_name?: string; product_code?: string; quantity?: number; lot_number?: string }> }) {
+    create(data: { order_number: string; po_number?: string; customer_id?: string; customer_number?: string; customer_name?: string; ship_date?: string | null; tenant_id?: string; items?: Array<{ product_name?: string; product_code?: string; quantity?: number; lot_number?: string }> }) {
       return fetchApi('/orders', { method: 'POST', body: JSON.stringify(data) });
+    },
+    /** GET /api/orders/:id, typed: lines with lot, production date and its doubt, plus the send history. */
+    detail(id: string) { return fetchApi<OrderGetResponse>(`/orders/${id}`); },
+    /**
+     * POST /api/orders/:id/items — put approved documents on the order (one
+     * line per lot row of each), and/or add one typed line. A pick is recorded
+     * as a person's accepted match (migration 0134).
+     */
+    addItems(id: string, body: OrderItemsAddRequest) {
+      return fetchApi<OrderItemsAddResponse>(`/orders/${id}/items`, { method: 'POST', body: JSON.stringify(body) });
+    },
+    /** PUT /api/orders/:id/items/:itemId — `coa_document_id: null` takes the document off the line. */
+    updateItem(id: string, itemId: string, body: OrderItemUpdateRequest) {
+      return fetchApi<{ success: true }>(`/orders/${id}/items/${itemId}`, { method: 'PUT', body: JSON.stringify(body) });
+    },
+    removeItem(id: string, itemId: string) {
+      return fetchApi<{ success: true }>(`/orders/${id}/items/${itemId}`, { method: 'DELETE' });
+    },
+    /** GET /api/orders/:id/send-preview — exactly what Send would do; sends nothing. */
+    sendPreview(id: string) { return fetchApi<OrderSendPreview>(`/orders/${id}/send-preview`); },
+    /** POST /api/orders/:id/send — the documents ATTACHED, split into numbered emails when they must be. */
+    send(id: string, body: OrderSendRequest) {
+      return fetchApi<OrderSendResponse>(`/orders/${id}/send`, { method: 'POST', body: JSON.stringify(body) });
+    },
+    /** POST /api/orders/:id/sends/:sendId/resend — only the emails that did not go. */
+    resendFailed(id: string, sendId: string) {
+      return fetchApi<OrderSendResponse>(`/orders/${id}/sends/${sendId}/resend`, { method: 'POST', body: '{}' });
     },
     update(id: string, data: Record<string, unknown>) {
       return fetchApi(`/orders/${id}`, { method: 'PUT', body: JSON.stringify(data) });
