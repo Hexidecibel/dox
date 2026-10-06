@@ -864,6 +864,25 @@ describe('who approves (D-050) and how they hear about it (D-049)', () => {
     expect((await waitingSend(docId)).approver_via).toBe('org_admins');
   });
 
+  it('a read-only account is never the approver, and cannot approve even when one is on the route', async () => {
+    const { sent } = stubResend();
+    const supplierId = await makeSupplier('Acme Supplier');
+    await addContact(supplierId);
+    // The owner route names only a reader: the draft falls through to the admins.
+    await addRoute('QA', { userId: seed.readerId });
+    const docId = await makeDoc('Acme COI', { supplierId, owner: 'QA' });
+    await run(asOfFor(30));
+    const draft = await waitingSend(docId);
+    expect(draft.approver_user_id).toBeNull();
+    expect(draft.approver_via).toBe('org_admins');
+
+    // Even a draft stamped with a reader's id is refused: approving sends mail
+    // outside the organization.
+    await db.prepare('UPDATE renewal_request_sends SET approver_user_id = ? WHERE id = ?').bind(seed.readerId, draft.id).run();
+    expect((await approve(await waitingSend(docId), reader())).status).toBe(403);
+    expect(toContact(sent)).toEqual([]);
+  });
+
   it('only the assigned approver or an administrator may approve or skip', async () => {
     const { sent } = stubResend();
     const supplierId = await makeSupplier('Acme Supplier');

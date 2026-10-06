@@ -225,6 +225,7 @@ export async function resolveRenewalApprover(
            FROM owner_routes r
            JOIN users u ON u.id = r.user_id
           WHERE r.tenant_id = ? AND r.owner_key = ? AND r.active = 1 AND u.active = 1
+            AND u.role != 'reader'
           ORDER BY r.created_at, r.id
           LIMIT 1`,
       )
@@ -249,7 +250,7 @@ export async function loadMasterUser(
       `SELECT u.id, u.name, u.email
          FROM tenants t
          JOIN users u ON u.id = t.default_owner_user_id
-        WHERE t.id = ? AND u.active = 1 AND u.tenant_id = t.id`,
+        WHERE t.id = ? AND u.active = 1 AND u.tenant_id = t.id AND u.role != 'reader'`,
     )
     .bind(tenantId)
     .first<{ id: string; name: string | null; email: string }>();
@@ -259,7 +260,9 @@ export async function loadMasterUser(
 /**
  * May this person approve or skip this draft? The assigned approver, or an
  * administrator of the tenant. Not "any user": the draft was routed to a named
- * person for the same reason the alert was.
+ * person for the same reason the alert was. Never a read-only account, even an
+ * assigned one -- approving sends mail outside the organization, the same bar
+ * as every other send (AJ, 2026-10-06: "anyone but a read-only account").
  */
 export function canApproveSend(
   user: Pick<User, 'id' | 'role' | 'tenant_id'>,
@@ -269,6 +272,7 @@ export function canApproveSend(
   if (user.role === 'super_admin') return true;
   if (user.tenant_id !== tenantId) return false;
   if (user.role === 'org_admin') return true;
+  if (user.role === 'reader') return false;
   return approverUserId !== null && approverUserId === user.id;
 }
 
