@@ -6,11 +6,19 @@ import {
   errorToResponse,
 } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
+import { loadOrderLines, parseShipDate, requireTenantCustomer } from '../../lib/order-items';
+import { loadOrderSends } from '../../lib/order-send';
 import type { Env, User } from '../../lib/types';
 
 /**
  * GET /api/orders/:id
  * Get a single order by ID with items, joined connector/customer/product/document names.
+ *
+ * Each line carries what a person checks before a certificate goes to a
+ * customer (migration 0134): the linked lot row and its production date WITH
+ * its doubt, who picked the certificate, its file size, and whether the whole
+ * original of a per-lot page is on file. `sends` is the record of what has
+ * already left on this order.
  */
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -20,10 +28,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const order = await context.env.DB.prepare(
       `SELECT o.*,
         c.name as connector_name,
-        cust.name as customer_name_resolved
+        cust.name as customer_name_resolved,
+        cust.email as customer_email,
+        cu.name as created_by_name
       FROM orders o
       LEFT JOIN connectors c ON c.id = o.connector_id
       LEFT JOIN customers cust ON cust.id = o.customer_id
+      LEFT JOIN users cu ON cu.id = o.created_by
       WHERE o.id = ?`
     )
       .bind(orderId)
@@ -38,18 +49,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       throw new NotFoundError('Order not found');
     }
 
-    const itemsResult = await context.env.DB.prepare(
-      `SELECT oi.*,
-        p.name as product_name_resolved,
-        d.title as coa_document_title
-      FROM order_items oi
-      LEFT JOIN products p ON p.id = oi.product_id
-      LEFT JOIN documents d ON d.id = oi.coa_document_id
-      WHERE oi.order_id = ?
-      ORDER BY oi.created_at ASC`
-    )
-      .bind(orderId)
-      .all();
+    const items = await loadOrderLines(
+      context.env.DB,
+      context.env.FILES,
+      order.tenant_id as string,
+      orderId
+    );
 
     // Pending lot-match suggestions for this order's lines. The matcher never
     // links a COA to a line on its own (functions/lib/entities/matching.ts), so
@@ -69,7 +74,15 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       .all();
 
     return new Response(
-      JSON.stringify({ order, items: itemsResult.results, suggestions: suggestionsResult.results ?? [] }),
+      JSON.stringify({
+        order,
+        items,
+        suggestions: suggestionsResult.results ?? [],
+        sends: await loadOrderSends(context.env.DB, user, {
+          tenantId: order.tenant_id as string,
+          orderId,
+        }),
+      }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (err) {
@@ -114,6 +127,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       customer_id?: string;
       customer_number?: string;
       customer_name?: string;
+      ship_date?: string | null;
       error_message?: string;
     };
 
@@ -138,8 +152,18 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     }
 
     if (body.customer_id !== undefined) {
+      // The same check as create: a customer id from another organization must
+      // never be stored on this one's order.
+      if (body.customer_id) {
+        await requireTenantCustomer(context.env.DB, order.tenant_id as string, body.customer_id);
+      }
       updates.push('customer_id = ?');
       params.push(body.customer_id || null);
+    }
+
+    if (body.ship_date !== undefined) {
+      updates.push('ship_date = ?');
+      params.push(parseShipDate(body.ship_date));
     }
 
     if (body.customer_number !== undefined) {
@@ -229,6 +253,18 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
 
     // Verify tenant access
     requireTenantAccess(user, order.tenant_id as string);
+
+    // Suggestion rows reference the order's lines with no ON DELETE action, so
+    // they go first -- otherwise an order whose lines were ever matched or
+    // picked could not be deleted at all. The record of what was SENT on the
+    // order (order_sends, 0134) is deliberately not touched: it points at the
+    // order by bare id and outlives it.
+    await context.env.DB.prepare(
+      `DELETE FROM lot_match_suggestions
+        WHERE order_item_id IN (SELECT id FROM order_items WHERE order_id = ?)`
+    )
+      .bind(orderId)
+      .run();
 
     await context.env.DB.prepare(
       'DELETE FROM orders WHERE id = ?'

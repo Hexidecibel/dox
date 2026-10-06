@@ -17,6 +17,11 @@
  * over a filtered list.
  *
  * THE TOKEN IS NEVER RETURNED. See `buildExportLinkSummary`.
+ *
+ * ORDER SENDS ARE LISTED TOO (migration 0134). Documents mailed to a customer
+ * from an order leave as attachments, not through a link, so there is nothing
+ * to revoke and nothing to count -- but they left, and this is the screen that
+ * says what left. `order_sends` follows the same scope rule as `links`.
  */
 import { errorToResponse } from '../../../lib/permissions';
 import {
@@ -24,6 +29,7 @@ import {
   loadExportLinkTitles,
   type ExportLinkListRow,
 } from '../../../lib/document-export';
+import { loadOrderSends } from '../../../lib/order-send';
 import type { DocumentExportLinkListResponse } from '../../../../shared/types';
 import type { Env, User } from '../../../lib/types';
 
@@ -106,6 +112,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       ),
       scope,
       can_see_tenant: canSeeTenant,
+      // What left as ATTACHMENTS from an order (migration 0134), in the same
+      // scope. Listed beside the links because the question this screen
+      // answers is "what did we send, and to whom" -- not "which links exist".
+      order_sends: await loadOrderSends(context.env.DB, user, {
+        tenantId,
+        sentBy: scope === 'mine' ? user.id : undefined,
+        limit,
+      }),
     };
     return json(body);
   } catch (err) {

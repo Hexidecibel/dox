@@ -197,15 +197,16 @@ describe('produceCoaRecords', () => {
     expect(q?.status).toBe('approved');
   });
 
-  it('RETAINS the source bundle instead of deleting it', async () => {
+  it('RETAINS the source bundle instead of deleting it, with NO reclaim date', async () => {
     // This path page-scopes: it writes one PDF per record, so the produced
     // documents are SLICES of the bundle, not the bundle. Deleting the staging
     // object here destroys the only surviving copy of the multi-page shape.
     //
     // That cost is measured: across three studies the bundle shape could not be
     // graded even once, because every multi-page item resolves to slices that
-    // would be graded as if they were originals. Every approval widened the gap.
-    // So this path stamps the migration-0083 tombstone instead of deleting.
+    // would be graded as if they were originals. And since rules table H2 the
+    // bundle is also what a CUSTOMER receives: a multi-lot certificate goes out
+    // whole (functions/lib/coa-original.ts).
     const item = await makeCoaQueueItem(darigoldPayload());
     await produceCoaRecords(db, files, item, {
       payload: darigoldPayload(),
@@ -216,22 +217,34 @@ describe('produceCoaRecords', () => {
     const obj = await files.get(item.file_r2_key);
     expect(obj).not.toBeNull();
 
-    // ...and tombstoned rather than kept forever.
+    // ...and kept the way a split packet's container is kept: no tombstone. It
+    // used to be stamped 90 days out; a certificate a customer may ask for
+    // again next year cannot carry a reclaim date.
+    const row = await db
+      .prepare('SELECT status, file_retain_until FROM processing_queue WHERE id = ?')
+      .bind(item.id)
+      .first<{ status: string; file_retain_until: string | null }>();
+    expect(row?.status).toBe('approved');
+    expect(row?.file_retain_until).toBeNull();
+  });
+
+  it('clears a reclaim date already on the item when it is approved', async () => {
+    const item = await makeCoaQueueItem(darigoldPayload());
+    await db
+      .prepare(`UPDATE processing_queue SET file_retain_until = datetime('now', '+90 days') WHERE id = ?`)
+      .bind(item.id)
+      .run();
+    await produceCoaRecords(db, files, item, { payload: darigoldPayload(), userId: seed.userId });
     const row = await db
       .prepare('SELECT file_retain_until FROM processing_queue WHERE id = ?')
       .bind(item.id)
       .first<{ file_retain_until: string | null }>();
-    expect(row?.file_retain_until).toBeTruthy();
-    // Roughly 90 days out — assert the window is in the future and not absurd.
-    const days = (Date.parse(row!.file_retain_until!.replace(' ', 'T') + 'Z') - Date.now()) / 86400000;
-    expect(days).toBeGreaterThan(80);
-    expect(days).toBeLessThan(100);
+    expect(row?.file_retain_until).toBeNull();
   });
 
   it('does NOT retain when records are held — the item is not resolved yet', async () => {
-    // Retention is stamped only when the whole item is resolved, matching where
-    // the delete used to live. A partially-approved item keeps its staging file
-    // for the ordinary reason: there is still work to do on it.
+    // A partially-approved item keeps its staging file for the ordinary reason:
+    // there is still work to do on it. Nothing is stamped either way.
     const payload = darigoldPayload();
     const item = await makeCoaQueueItem(payload);
     const result = await produceCoaRecords(db, files, item, {

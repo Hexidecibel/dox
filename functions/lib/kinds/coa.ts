@@ -41,16 +41,6 @@ import type {
 } from '../queue-approve';
 
 /**
- * How long the SOURCE BUNDLE survives after a per-record (page-scoped) approve.
- *
- * Mirrors REJECTED_FILE_RETENTION_DAYS in functions/api/queue/[id].ts — same
- * tombstone column (migration 0083), same reasoning: a few hundred KB is far
- * cheaper than a document shape we can never measure again. A sweeper may
- * reclaim objects past file_retain_until; that job is deliberately not built.
- */
-const SPLIT_SOURCE_RETENTION_DAYS = 90;
-
-/**
  * Producer for the `coa` doc-kind (Phase P2). Owns the canonical-entity
  * writes for an approved COA queue item: documents + document_versions +
  * products (findOrCreateProduct) + lots (attachLotToCoaDocument → lots +
@@ -1666,7 +1656,7 @@ export async function produceCoaRecords(
       .bind(userId, item.id)
       .run();
 
-    // RETAIN THE SOURCE BUNDLE — do NOT delete it on this path.
+    // RETAIN THE SOURCE BUNDLE, WITH NO RECLAIM DATE — do NOT delete it here.
     //
     // The other two approve paths delete the staging object safely, because
     // there the produced document IS the original bytes, re-uploaded under a
@@ -1675,23 +1665,24 @@ export async function produceCoaRecords(
     // the only surviving copy of the multi-page BUNDLE — the produced documents
     // are slices of it, not it.
     //
-    // The cost of that is measured. Across three separate studies the bundle
-    // shape could not be graded even once: 99.1% of the eligible corpus is
-    // single-page, and every multi-page item resolves to page-scoped slices
-    // that would be graded as if they were originals — an error class that has
-    // already produced two wrong conclusions, so those items get excluded
-    // instead. The hardest document shape in the product is the one we can
-    // never measure, and every approval widened the gap.
+    // Two things depend on that copy. Measurement: across three separate
+    // studies the bundle shape could not be graded even once, because every
+    // multi-page item resolves to page-scoped slices that would be graded as
+    // if they were originals. And, since rules table H2 (2026-10-06), the
+    // CUSTOMER: a multi-lot certificate goes out WHOLE, an exact copy of what
+    // the supplier issued, and this object is that copy
+    // (functions/lib/coa-original.ts walks a per-lot document back to it).
     //
-    // So stamp the same tombstone migration 0083 introduced for reject rather
-    // than deleting. `/api/queue/:id/file` prefers the staging object when it
-    // exists, so a retained bundle also stops that endpoint falling back to a
-    // slice and reporting X-File-Scoped: true.
+    // So it is kept the way a split packet's container is kept (rules table
+    // H1, functions/api/queue/[id].ts): `file_retain_until` stays NULL, and a
+    // sweeper that honours that column never reaches it. This path used to
+    // stamp a 90-day tombstone; a certificate a customer may ask for again in
+    // a year cannot have a reclaim date. `/api/queue/:id/file` prefers the
+    // staging object when it exists, so a retained bundle also stops that
+    // endpoint falling back to a slice and reporting X-File-Scoped: true.
     await db
-      .prepare(
-        `UPDATE processing_queue SET file_retain_until = datetime('now', ?) WHERE id = ?`
-      )
-      .bind(`+${SPLIT_SOURCE_RETENTION_DAYS} days`, item.id)
+      .prepare(`UPDATE processing_queue SET file_retain_until = NULL WHERE id = ?`)
+      .bind(item.id)
       .run();
   }
 

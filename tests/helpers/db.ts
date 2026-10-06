@@ -126,6 +126,7 @@ import m0126 from '../../migrations/0126_document_version_packet_source.sql?raw'
 import m0130 from '../../migrations/0130_document_provenance.sql?raw';
 import m0131 from '../../migrations/0131_fts_registry_rebuild.sql?raw';
 import m0132 from '../../migrations/0132_duplicate_decisions.sql?raw';
+import m0134 from '../../migrations/0134_order_fulfillment_sends.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -141,7 +142,7 @@ const migrations: string[] = [
   m0096, m0097, m0098, m0099, m0100, m0101, m0102, m0103, m0104,
   m0105, m0106, m0107, m0108, m0109, m0110, m0111, m0112, m0113, m0114,
   m0115, m0116, m0117, m0118, m0119, m0120, m0121, m0122, m0123, m0124,
-  m0125, m0126, m0130, m0131, m0132,
+  m0125, m0126, m0130, m0131, m0132, m0134,
 ];
 
 /** The ordered migration SQL, for a test that stops the chain part-way (e.g. the 0110 lots rebuild). */
@@ -438,6 +439,9 @@ export async function cleanTables(db: D1Database): Promise<void> {
     // all three before suppliers, requirements and users.
     'request_routing', 'request_lines', 'document_requests',
     'request_template_lines', 'request_templates',
+    // 0134 order sends: files CASCADE from the send, and the send FKs users +
+    // tenants only (order_id is a bare pointer), so both clear ahead of users.
+    'order_send_files', 'order_sends',
     'order_items', 'orders', 'document_versions', 'document_products', 'documents',
     'requirements', 'claim_types',
     // 0098 type-level extraction guidance FKs document_types + tenants, so it
