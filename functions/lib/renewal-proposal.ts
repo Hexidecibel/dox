@@ -302,3 +302,101 @@ export function withRenewalProposal<T extends RenewalProposableRow>(
     }),
   };
 }
+
+// ---------------------------------------------------------------------------
+// The renewal date changed AFTER approval (D-041)
+// ---------------------------------------------------------------------------
+
+/**
+ * `undefined` = not a date at all (refuse it); `null` = deliberately empty.
+ * Accepts a full ISO timestamp and keeps the day, like `dateOnly` above.
+ */
+export function normalizeRenewalDate(v: unknown): string | null | undefined {
+  if (v === null || v === undefined) return null;
+  if (typeof v !== 'string') return undefined;
+  const t = v.trim();
+  if (t === '') return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:$|[T ])/.exec(t);
+  if (!m) return undefined;
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return undefined;
+  return `${m[1]}-${m[2]}-${m[3]}`;
+}
+
+export interface PostApprovalRenewalEdit {
+  decision: RenewalDecision;
+  /** The new `documents.renewal_snapshot`, JSON. */
+  snapshot: string;
+  decided_at: string;
+  edit: import('../../shared/types').RenewalPostApprovalEdit;
+}
+
+/**
+ * What to write when a person changes a document's renewal date on the
+ * document page, after it was approved.
+ *
+ * Until this existed the edit was a plain column update: no who, no why, and
+ * the snapshot went on describing a date the document no longer carried. AJ's
+ * ruling (D-041) is that a changed date is a DECISION and is recorded like
+ * the approval-time one:
+ *
+ *   - `renewal_decision` becomes 'overridden', or 'cleared' when the date is
+ *     emptied. 'cleared' is the word `resolveRenewalExpiry` tier 2 already
+ *     reads as "a person said this does not renew", so the dashboard stops
+ *     deriving an annual date for it -- which is what emptying the box means,
+ *     and why the screen says so in words before saving.
+ *   - The ORIGINAL proposal is kept. The snapshot's own fields (the proposed
+ *     date, its rule, the type configuration in force at approval) are frozen
+ *     and stay frozen; each later edit is APPENDED to `post_approval_edits`
+ *     with the previous date, the new date, the reason, who and when. A
+ *     document approved with no decision at all gets a snapshot holding only
+ *     the edits, which is the literal truth of it.
+ *
+ * Pure: the caller writes the columns and the `document.renewal_decided`
+ * audit row.
+ */
+export function postApprovalRenewalEdit(input: {
+  previous: string | null;
+  next: string | null;
+  reason: unknown;
+  snapshot: string | null | undefined;
+  userId: string;
+  now?: string;
+}): PostApprovalRenewalEdit {
+  const decidedAt = input.now ?? new Date().toISOString();
+  const reason =
+    typeof input.reason === 'string' && input.reason.trim().length > 0
+      ? input.reason.trim().slice(0, 1000)
+      : null;
+  const decision: RenewalDecision = input.next === null ? 'cleared' : 'overridden';
+
+  let base: Record<string, unknown> = {};
+  if (typeof input.snapshot === 'string' && input.snapshot) {
+    try {
+      const parsed: unknown = JSON.parse(input.snapshot);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        base = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // An unreadable snapshot is kept verbatim rather than discarded.
+      base = { unparsed_snapshot: input.snapshot };
+    }
+  }
+  const earlier = Array.isArray(base.post_approval_edits) ? base.post_approval_edits : [];
+  const edit = {
+    previous_due_date: input.previous,
+    new_due_date: input.next,
+    decision,
+    reason,
+    decided_by: input.userId,
+    decided_at: decidedAt,
+  };
+
+  return {
+    decision,
+    decided_at: decidedAt,
+    edit,
+    snapshot: JSON.stringify({ ...base, post_approval_edits: [...earlier, edit] }),
+  };
+}

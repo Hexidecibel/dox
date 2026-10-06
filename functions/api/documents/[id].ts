@@ -23,6 +23,11 @@ import { applyDocumentTypeRequirementDefaults } from '../../lib/requirement-defa
 import { recordClassification } from '../../lib/classification';
 import type { Env, User, Document } from '../../lib/types';
 import type { RenewalType } from '../../../shared/types';
+import {
+  normalizeRenewalDate,
+  postApprovalRenewalEdit,
+  type PostApprovalRenewalEdit,
+} from '../../lib/renewal-proposal';
 
 /**
  * GET /api/documents/:id
@@ -195,7 +200,41 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       renewal_type?: RenewalType | null;
       renewal_interval_months?: number | null;
       renewal_due_date?: string | null;
+      /**
+       * Why the renewal date is being changed after approval (D-041). The
+       * screen requires it; the API records it when given and does not refuse
+       * its absence -- the spec-rationale precedent: a write that is refused
+       * for a missing sentence is worse than one whose reason reads "none
+       * recorded".
+       */
+      renewal_reason?: string | null;
     };
+
+    // A renewal date edited HERE is a decision made after approval, and is
+    // recorded as one (see `postApprovalRenewalEdit`). Only a real change
+    // counts: the registry editor sends the field on every save.
+    let renewalEdit: PostApprovalRenewalEdit | null = null;
+    if (body.renewal_due_date !== undefined) {
+      const stored = doc as unknown as { renewal_due_date: string | null; renewal_snapshot: string | null };
+      const next = normalizeRenewalDate(body.renewal_due_date);
+      if (next === undefined) {
+        return new Response(
+          JSON.stringify({ error: 'renewal_due_date must be a date (YYYY-MM-DD) or null' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      body.renewal_due_date = next;
+      const previous = normalizeRenewalDate(stored.renewal_due_date) ?? null;
+      if (next !== previous) {
+        renewalEdit = postApprovalRenewalEdit({
+          previous,
+          next,
+          reason: body.renewal_reason,
+          snapshot: stored.renewal_snapshot,
+          userId: user.id,
+        });
+      }
+    }
 
     // Validate renewal_type up front against the CHECK set.
     if (
@@ -320,6 +359,10 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     if (body.renewal_due_date !== undefined) {
       updates.push('renewal_due_date = ?');
       params.push(body.renewal_due_date ?? null);
+    }
+    if (renewalEdit) {
+      updates.push('renewal_decision = ?', 'renewal_snapshot = ?', 'renewal_decided_at = ?', 'renewal_decided_by = ?');
+      params.push(renewalEdit.decision, renewalEdit.snapshot, renewalEdit.decided_at, user.id);
     }
     // When categories is provided, keep document_type_id = the primary.
     if (body.categories !== undefined) {
@@ -454,6 +497,29 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         byHuman: true,
         clientIp: getClientIp(context.request),
       });
+    }
+
+    // The same audit action the approval-time decision writes (kinds/coa.ts),
+    // so "when did this document get its renewal date, and who said so" is one
+    // query whichever screen answered it. `via` tells the two apart.
+    if (renewalEdit) {
+      await logAudit(
+        context.env.DB,
+        user.id,
+        doc.tenant_id,
+        'document.renewal_decided',
+        'document',
+        docId,
+        JSON.stringify({
+          via: 'document_edit',
+          decision: renewalEdit.decision,
+          previous_due_date: renewalEdit.edit.previous_due_date,
+          renewal_due_date: renewalEdit.edit.new_due_date,
+          reason: renewalEdit.edit.reason,
+          snapshot: renewalEdit.snapshot,
+        }),
+        getClientIp(context.request)
+      );
     }
 
     await logAudit(
