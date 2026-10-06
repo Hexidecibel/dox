@@ -91,6 +91,19 @@
  *     is `expiring -> overdue/expired`, which depends on the date passing, not
  *     on the window. So a lead-time change can never manufacture an
  *     "escalated" send that skips the cooldown.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SUPPLIER REQUEST IS DRAFTED HERE AND SENT ELSEWHERE (migration 0133)
+ * ---------------------------------------------------------------------------
+ * The same run that warns the owner also drafts the request to the supplier
+ * (./renewal-requests.ts). It is a SEPARATE pass, made before the digests and
+ * reported on every run as `supplier_requests`, for two reasons. The digest's
+ * cooldown and its early returns would starve the day-of and follow-up drafts.
+ * And the two must never be confused: this file mails owners; it never mails
+ * a supplier. A supplier is mailed only by a person's approval. The one place
+ * they meet is the digest email itself, which says when a draft for one of its
+ * records is waiting on one of its recipients, so the alert and the draft are
+ * one notification instead of two.
  */
 
 import type { D1Database } from '@cloudflare/workers-types';
