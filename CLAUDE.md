@@ -98,6 +98,7 @@ changes, update its entry there and keep the line here to 1-2 sentences.
 - **Scheduled Renewal Alerts (per-owner)**: `workers/renewal-alerts/` cron -> `POST /api/expirations/run-scheduled`; engine `functions/lib/renewal-alerts.ts`, routing `functions/lib/alert-routing.ts`, lead time `shared/renewalLeadTime.ts` (0091, 0111). Renewals pass `adminFallback: false`: an unrouted record is a routing gap, never re-broadcast to admins. No run-wide `window_days`.
 - **Renewal Periods + the Approval-Time Decision**: resolved in ONE place, `resolveRenewalExpiry` (`shared/renewalPeriod.ts`); the proposal is confirmed at approval with a frozen `renewal_snapshot` (`functions/lib/renewal-proposal.ts`; 0096, 0097). `document_expires_on` is NOT `expiration_date` (the product's shelf life). An `unresolvable` proposal is not an answer. Type defaults come from `defaultRenewalSettingForTypeName`.
 - **Documents out of Search (migration 0115)**: `functions/lib/document-export.ts`; `POST /api/document-exports/zip` and `/send` (a token link, never attachments), recipient page `/export/:token`, Sent documents + revoke (0116). Caps are stated, never truncated; the token is never returned; reader may ZIP, not send; there is no Extend.
+- **Manual COA Fulfillment: an order a person builds and sends (migration 0134)**: `functions/lib/order-items.ts` (a pick = the accept columns + an `accepted` `manual_pick` suggestion row), `functions/lib/order-send.ts` + `shared/orderSend.ts` (attachments under generated names, 15 MB parts "1 of N", a non-expiring link for one oversize file, `partial` sends that resend), `functions/lib/coa-original.ts` (a multi-lot certificate goes WHOLE; never guesses the original). One order record for both tiers; approved documents only; no type check (sales documents come later).
 - **One Search Query + Executor (search redesign Phase 1, migration 0122)**: `shared/searchQuery.ts` + `shared/searchFields.ts`, executor `POST /api/search/query` (`functions/lib/search/execute.ts`), keys in `document_search_keys`. Scope fields are SQL filters; identifying fields are judged by the UNCHANGED `evaluateSubject` -- never nearest-as-answer. "lot 104" is a lot prefix, never free text.
 - **Search Advanced mode and every field (search Phase 3, migrations 0130/0131)**: Easy and Advanced edit the ONE `Clause[]` (`src/components/search/`, `compileScope.ts`). Each new scope field is one SQL expression with a JS mirror; `keys_only` identifying fields; result modes return `groups`; shared saved views are org_admin only.
 - **Search regression testing (golden corpus + eval harness + tenant examples)**: `tests/api/search-golden.test.ts` (+ `tests/fixtures/search-golden/`), `shared/searchProbes.ts`, `bin/eval-search`, `GET /api/search/eval-sample`, `GET /api/search/examples`. Legacy / lot-decoded dates must land LIKELY, never covering.
@@ -111,7 +112,7 @@ changes, update its entry there and keep the line here to 1-2 sentences.
 - **Supplier Requirements from Real Data (migration 0112)**: `deriveSupplierRequirements` (`shared/requirementDerivation.ts`) through ONE door, `POST /api/supplier-list/import` (`dry_run` default true). A human or packet row is never touched by an import; a derived row no longer implied is flagged, never deleted; a slug the tenant lacks is reported, never invented.
 - **Request Composer**: `functions/lib/document-requests.ts` (`issueRequest`, the one issue path) + arrivals in `functions/lib/request-arrivals.ts` (0090, 0092, 0094, 0104, 0119). Amending after issue is a NEW version, never an overwrite; an arrival is not a document; accept requires Review Queue approval first.
 
-## Migrations (0001-0132; 0127-0129 unused)
+## Migrations (0001-0134; 0127-0129 unused)
 
 **Current schema state: `SCHEMA.md`** (generated — regenerate with `./bin/schema-doc`
 after every migration). This table is migration *history*; SCHEMA.md is what the
@@ -270,6 +271,7 @@ describes. Add the full rationale for a new migration there and a one-line row h
 | 0130 | document_provenance | documents.approved_at / intake_source / origin_queue_id; backfilled only where provable |
 | 0131 | fts_registry_rebuild | documents_fts_source rebuilt on requirements + product identifiers. Use bin/migrate-prod-one |
 | 0132 | duplicate_decisions | intake_duplicates gains match_basis / disposition / decision columns: a person decides |
+| 0134 | order_fulfillment_sends | orders.ship_date / created_by, order_items.picked_by / picked_at, order_sends + order_send_files, document_export_links.never_expires |
 
 ## Role Model (4 roles)
 

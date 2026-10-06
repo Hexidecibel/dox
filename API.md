@@ -1676,6 +1676,100 @@ forwarded link can never be edited into covering something else. Links expire
 in 30 days, carry a `revoked_at` kill switch, and every view and download
 writes an audit row.
 
+### Building an order by hand, and sending its certificates (migration 0134)
+
+On the basic tier nothing feeds orders in, so a person records what the matcher
+would otherwise be told and puts the approved certificate on each line. It is
+the same order record a connector writes -- there is no second "manual order"
+object. All of it is module-gated under `fulfillment`, and every write needs
+`user` or above (a read-only account builds and sends nothing).
+
+**`POST /api/orders`** — body `{ order_number, po_number?, customer_id?,
+customer_name?, customer_number?, ship_date?, items? }`. `ship_date` is
+`YYYY-MM-DD` and must be a real day. A `customer_id` must belong to the
+organization (400 otherwise) and supplies the order's customer name and number
+unless others are typed. An order number already in use answers **409** with
+the number in the message. The creating user is stored as `created_by`.
+`PUT /api/orders/:id` takes `ship_date` and applies the same customer check.
+
+**`GET /api/orders/:id`** — `{ order, items, suggestions, sends }`. Each item
+carries what a person checks before a certificate goes out: the linked lot row
+(`lot_row_number`, `sub_lot_code`), the production date **with its doubt**
+(`production_date_state`: `stated` / `decoded` / `legacy` / `ambiguous` /
+`conflict` / `unparseable` / `none`, plus `production_date_label` and
+`production_date_note` -- only `stated` is a date the certificate printed and
+that reads one way), `picked_by` / `picked_by_name`, the certificate's
+`coa_document_status`, type, supplier and `coa_file_size`, and `coa_original`
+(`not_split` / `on_file` / `missing`: whether the whole certificate behind a
+per-lot page is on file). `sends` is the record of what has already left.
+
+**`POST /api/orders/:id/items`** — body `{ document_ids: [...] }` and/or
+`{ item: { product_id?, product_name?, product_code?, quantity?, lot_number? } }`.
+Picking a document writes **one line per lot row** it certifies, exactly the
+way accepting a lot-match suggestion writes one (`coa_document_id`, `lot_id`,
+`lot_matched = 1`, `coa_match_status = 'matched'`, `coa_matched_at`), stamps
+`picked_by` / `picked_at`, and records an `accepted` suggestion with
+`match_basis: "manual_pick"` -- so the fulfillment report, lot counts and
+search coverage read it as a person's accepted match. An existing line for that
+lot with no certificate is **filled** rather than duplicated. Only **active
+documents of the order's own organization with a file** may be picked: anything
+else is listed in `refused` with its reason and the rest still land
+(`results[].outcome` is `added` / `filled` / `already_on_order`; 400 when
+nothing at all could be written). At most 50 documents per call. A typed line's
+lot number is resolved and the matcher is asked for certificates, which arrive
+as suggestions. A staged order (still in connector review) answers 409; another
+organization's order answers 404. Audited `order_item.coa_picked` /
+`order_item.added`.
+
+**`PUT /api/orders/:id/items/:itemId`** — `product_id`, `product_name`,
+`product_code`, `quantity`, `lot_number`, and the pick itself:
+`coa_document_id` (a document id puts it on the line; `null` takes it off, and
+the pair is then never offered back by the matcher) with an optional `lot_id`
+when the document certifies several lots (400 asking which, if it is not
+given). **`DELETE /api/orders/:id/items/:itemId`** removes the line, with the
+whole row in the audit record.
+
+**`GET /api/orders/:id/send-preview`** — exactly what Send would do; sends
+nothing. `files[]` (each under the **generated** name it travels under, with
+`bytes`, `delivery` `attachment` / `link`, `source` `document` / `original`,
+`part_number`, the order lines it stands for, and `notes` in plain words),
+`parts[]` (the subject each email will carry), `part_count`, `recipient` (the
+customer's address on record), `from_name`, `reply_to`, `lines_not_sent[]`
+(with the reason), `warnings`, `blocked` (`nothing_to_send` /
+`too_many_parts` / `too_many_linked` / `order_staged`, or null), `limits`, and
+a `fingerprint`. No storage key or queue id is in it.
+
+**`POST /api/orders/:id/send`** — body `{ recipients?, subject?, message?,
+fingerprint? }`. The customer gets an exact copy of each file **attached**, not
+a link: from `"<Organization> via SupDox"` at the portal's own address, with a
+reply-to of the calling user. `recipients` defaults to the customer's address
+(400 when there is none); at most 10. Rules:
+
+- **Generated file names only.** The uploaded name appears nowhere in the mail.
+- **A multi-lot certificate goes whole**, once, however many lines were cut
+  from it (`source: "original"`). When the original is not on file, or could
+  not be confirmed as the source of that version, the per-lot page is sent and
+  the file's `notes` say so.
+- **15 MB of files per email.** What does not fit goes in numbered emails
+  (`"… (2 of 3)"`), in line order. More than **10** emails is refused **413**
+  with both numbers; nothing is ever dropped to make it fit.
+- **A single file over 15 MB leaves as a link** in the first email. That link
+  does not expire (`never_expires`) and can be revoked.
+- **A plan that changed since the preview is refused 409** (`fingerprint`).
+- **Each email succeeds or fails on its own.** 200 with `send.status` `sent` or
+  `partial` when at least one went; **502** when none did. A file missing from
+  storage fails its email with the reason rather than being left out. The
+  order's status becomes `delivered` only when every part went.
+- 30 sends an hour per user (429); 503 when email is not configured.
+
+Audited `order.coas_sent` (or `order.coas_send_failed`) naming every file, its
+documents, its part, how it went, and the recipients.
+
+**`POST /api/orders/:id/sends/:sendId/resend`** — sends again **only** the
+emails that did not go, rebuilt from the stored record (same files, names,
+subject and recipients; the reply-to stays the original sender's). The sender
+or an admin; 409 when every part already went.
+
 **`GET /api/document-exports/links`** — "Documents you sent". One row per send:
 when, by whom, on whose behalf, to which addresses, how many documents (with
 the first few titles), the view and download counts, and a resolved `state` of
@@ -1685,7 +1779,12 @@ organization's sends, anybody else their own**; `scope=mine|tenant` is a
 request, and the response reports the `scope` it actually answered in, so a
 client can never render "everyone" over a filtered list. **The token is never
 returned** — this is the accountability screen, not a second way to open every
-export ever sent.
+export ever sent. A link minted for a file too large to attach to an order send
+has `never_expires: true`: its `state` is `active` until somebody revokes it,
+never `expired`. The response also carries **`order_sends`** -- documents sent
+from an order as attachments (migration 0134), in the same scope -- each with
+its recipients, per-email outcomes and files. There is nothing to revoke or
+count for those: an attachment is in the recipient's inbox.
 
 **`POST /api/document-exports/links/:id/revoke`** — the kill switch, reachable
 at last (migration 0116 records who pressed it). Effective immediately and on

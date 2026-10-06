@@ -49,6 +49,11 @@ tags:
     description: Audit log queries
   - name: API Keys
     description: API key management for programmatic access
+  - name: Orders
+    description: |
+      Building an order by hand and sending its documents to the customer:
+      picking approved documents onto lines, the send preview, the send and
+      its record (migration 0134).
   - name: Supplier Arrivals
     description: |
       Files suppliers sent through a request link, as staff see them, and the
@@ -4040,6 +4045,9 @@ paths:
                         state: { type: string, enum: [active, expired, revoked] }
                         created_at: { type: string }
                         expires_at: { type: string }
+                        never_expires:
+                          type: boolean
+                          description: A link that does not run out (0134). Still revocable; its state is never `expired`.
                         revoked_at: { type: string, nullable: true }
                         revoked_by_name: { type: string, nullable: true }
                         sent_by_id: { type: string }
@@ -4062,8 +4070,305 @@ paths:
                         can_revoke: { type: boolean }
                   scope: { type: string, enum: [tenant, mine] }
                   can_see_tenant: { type: boolean }
+                  order_sends:
+                    description: Documents sent from an order as attachments (migration 0134), in the same scope. Nothing to revoke or count.
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        order_id: { type: string }
+                        order_number: { type: string }
+                        status: { type: string, enum: [sent, partial, failed] }
+                        recipients: { type: array, items: { type: string } }
+                        part_count: { type: integer }
         '400': { description: No organization selected }
         '403': { description: Another tenant }
+
+  /api/orders/{id}/items:
+    post:
+      tags: [Orders]
+      summary: Put lines on an order by hand - pick approved documents, or type a line
+      description: |
+        Migration 0134. `document_ids` picks approved documents: one line per
+        lot row of each, written exactly as an accepted lot match is
+        (`coa_document_id`, `lot_id`, `lot_matched`, `coa_match_status =
+        'matched'`, `coa_matched_at`) plus `picked_by` / `picked_at` and an
+        `accepted` suggestion with `match_basis: manual_pick`. An existing line
+        for that lot with no certificate is filled, not duplicated. `item` adds
+        one typed line; a typed lot number is resolved and the matcher's
+        certificates arrive as suggestions.
+
+        Only ACTIVE documents of the order's own organization that have a file
+        may be picked. Anything else is listed in `refused` with its reason and
+        the rest still land. Nothing checks the document's type. `user` and
+        above; module-gated under `fulfillment`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                document_ids:
+                  type: array
+                  maxItems: 50
+                  items: { type: string }
+                item:
+                  type: object
+                  properties:
+                    product_id: { type: string, nullable: true }
+                    product_name: { type: string, nullable: true }
+                    product_code: { type: string, nullable: true }
+                    quantity: { type: number, nullable: true }
+                    lot_number: { type: string, nullable: true }
+      responses:
+        '201':
+          description: What was written, and what was refused
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        document_id: { type: string }
+                        order_item_id: { type: string }
+                        outcome: { type: string, enum: [added, filled, already_on_order] }
+                        lot_id: { type: string, nullable: true }
+                        lot_number: { type: string, nullable: true }
+                  refused:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        document_id: { type: string }
+                        reason: { type: string }
+                  item_id: { type: string }
+        '400': { description: Nothing could be written (every document refused, or an empty request) }
+        '403': { description: A read-only account cannot build an order }
+        '404': { description: No such order in this organization }
+        '409': { description: The order is still in staged connector review }
+
+  /api/orders/{id}/items/{itemId}:
+    put:
+      tags: [Orders]
+      summary: Change one order line, or put a document on it / take it off
+      description: |
+        `coa_document_id` is the pick: a document id puts that approved
+        document on the line (with `lot_id` when it certifies several lots),
+        `null` takes it off - and the matcher then never offers that pair back.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                product_id: { type: string, nullable: true }
+                product_name: { type: string, nullable: true }
+                product_code: { type: string, nullable: true }
+                quantity: { type: number, nullable: true }
+                lot_number: { type: string, nullable: true }
+                coa_document_id: { type: string, nullable: true }
+                lot_id: { type: string, nullable: true }
+      responses:
+        '200': { description: Saved }
+        '400': { description: Not an active document of this organization, or the lot was not named }
+        '403': { description: A read-only account }
+        '404': { description: No such order or line }
+    delete:
+      tags: [Orders]
+      summary: Remove one order line
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Removed; the whole row is in the audit record }
+        '403': { description: A read-only account }
+        '404': { description: No such order or line }
+
+  /api/orders/{id}/send-preview:
+    get:
+      tags: [Orders]
+      summary: Exactly what sending this order's documents would do - sends nothing
+      description: |
+        The review screen's data (migration 0134): every file under the
+        GENERATED name it travels under, which email each rides in, whether a
+        certificate goes whole (`source: original`) or as one lot's page, what
+        leaves as a link, which lines will not be sent, and whether the order
+        can be sent at all. Carries a `fingerprint` that Send echoes back.
+        No storage key or queue id is returned.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The plan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recipient: { type: string, nullable: true }
+                  from_name: { type: string }
+                  reply_to: { type: string }
+                  default_subject: { type: string }
+                  email_configured: { type: boolean }
+                  part_count: { type: integer }
+                  total_bytes: { type: integer }
+                  fingerprint: { type: string }
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        file_name: { type: string }
+                        bytes: { type: integer }
+                        delivery: { type: string, enum: [attachment, link] }
+                        source: { type: string, enum: [document, original] }
+                        part_number: { type: integer }
+                        document_ids: { type: array, items: { type: string } }
+                        lot_label: { type: string, nullable: true }
+                        notes: { type: array, items: { type: string } }
+                  parts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        part_number: { type: integer }
+                        subject: { type: string }
+                        bytes: { type: integer }
+                        file_count: { type: integer }
+                  lines_not_sent:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        order_item_id: { type: string }
+                        reason: { type: string }
+                  warnings: { type: array, items: { type: string } }
+                  blocked:
+                    type: object
+                    nullable: true
+                    properties:
+                      code: { type: string, enum: [nothing_to_send, too_many_parts, too_many_linked, order_staged] }
+                      message: { type: string }
+        '403': { description: A read-only account cannot send, so has no review to make }
+        '404': { description: No such order in this organization }
+
+  /api/orders/{id}/send:
+    post:
+      tags: [Orders]
+      summary: Mail an order's documents to the customer, attached
+      description: |
+        An exact copy of each file ATTACHED under a generated name, from
+        "<Organization> via SupDox" with a reply-to of the caller. 15 MB of
+        files per email; what does not fit goes in numbered emails ("2 of 3").
+        A single file over 15 MB leaves as a link that does not expire. More
+        than 10 emails is refused with the number. A multi-lot certificate
+        goes whole, once. Each email succeeds or fails on its own; the order
+        becomes `delivered` only when every part went.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recipients:
+                  description: Defaults to the customer's address on record.
+                  type: array
+                  maxItems: 10
+                  items: { type: string, format: email }
+                subject: { type: string }
+                message: { type: string }
+                fingerprint:
+                  type: string
+                  description: From the preview that was reviewed. A changed plan is refused.
+      responses:
+        '200':
+          description: At least one email went. `send.status` is `sent` or `partial`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent: { type: boolean }
+                  order_status: { type: string }
+                  send:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      status: { type: string, enum: [sent, partial, failed] }
+                      recipients: { type: array, items: { type: string } }
+                      subject: { type: string }
+                      part_count: { type: integer }
+                      can_resend: { type: boolean }
+        '400': { description: Nothing to send, no address to send to, or an address that is not valid }
+        '403': { description: A read-only account cannot send }
+        '404': { description: No such order in this organization }
+        '409': { description: The order changed since it was reviewed, or is still in staged review }
+        '413': { description: More emails than one send allows; the message carries both numbers }
+        '429': { description: Rate limited (30 sends an hour per user) }
+        '502': { description: No email could be sent. The failed send is recorded and can be resent. }
+        '503': { description: Email is not configured for this portal }
+
+  /api/orders/{id}/sends/{sendId}/resend:
+    post:
+      tags: [Orders]
+      summary: Send again only the emails of a send that did not go
+      description: |
+        Rebuilt from the stored record - the same files, names, subject and
+        recipients, the reply-to of the original sender. Emails that already
+        went are never sent twice. The sender or an admin.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: sendId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: The send record after the attempt }
+        '403': { description: Not the sender, not an admin, or a read-only account }
+        '404': { description: No such order or send }
+        '409': { description: Every email of this send already went }
+        '429': { description: Rate limited }
+        '503': { description: Email is not configured for this portal }
 
   /api/document-exports/links/{id}/revoke:
     post:
