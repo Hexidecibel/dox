@@ -51,6 +51,8 @@ import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 import { HelpWell } from '../components/HelpWell';
 import { helpContent } from '../lib/helpContent';
+import { OrderSendHistory } from '../components/orders/OrderSendHistory';
+import type { OrderSendSummary } from '../../shared/types';
 import type {
   DocumentExportLinkSummary,
   DocumentExportLinkState,
@@ -94,7 +96,9 @@ function StateChip({ link }: { link: DocumentExportLinkSummary }) {
       ? `Revoked ${formatWhen(link.revoked_at)}${link.revoked_by_name ? ` by ${link.revoked_by_name}` : ''} — the link now opens nothing`
       : link.state === 'expired'
         ? `Expired ${formatDay(link.expires_at)} on its own`
-        : `Opens until ${formatDay(link.expires_at)}`;
+        : link.never_expires
+          ? 'Does not expire. It opens until somebody revokes it.'
+          : `Opens until ${formatDay(link.expires_at)}`;
   return (
     <Tooltip arrow title={title}>
       <Chip size="small" label={STATE_LABEL[link.state]} color={STATE_COLOR[link.state]} variant="outlined" />
@@ -106,6 +110,8 @@ export function SentDocuments() {
   const { user } = useAuth();
   const { selectedTenantId } = useTenant();
   const [links, setLinks] = useState<DocumentExportLinkSummary[]>([]);
+  // Documents sent from an ORDER, as attachments (migration 0134).
+  const [orderSends, setOrderSends] = useState<OrderSendSummary[]>([]);
   const [scope, setScope] = useState<'tenant' | 'mine'>('tenant');
   const [canSeeTenant, setCanSeeTenant] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -123,6 +129,7 @@ export function SentDocuments() {
         tenant_id: selectedTenantId || undefined,
       });
       setLinks(res.links);
+      setOrderSends(res.order_sends ?? []);
       setCanSeeTenant(res.can_see_tenant);
       // The server decides the scope; reflect what it actually answered rather
       // than what was asked, so the toggle never lies about what is on screen.
@@ -242,7 +249,9 @@ export function SentDocuments() {
                         <Typography variant="caption" color="text.secondary" display="block">
                           {l.state === 'revoked'
                             ? `Revoked ${formatDay(l.revoked_at)}`
-                            : `Expires ${formatDay(l.expires_at)}`}
+                            : l.never_expires
+                              ? 'Does not expire'
+                              : `Expires ${formatDay(l.expires_at)}`}
                         </Typography>
                       </TableCell>
                       <TableCell>
@@ -329,6 +338,21 @@ export function SentDocuments() {
           </>
         )}
       </Paper>
+
+      {/* Sent from an order: attachments, so nothing to revoke and nothing to count. */}
+      {!loading && orderSends.length > 0 && (
+        <Box sx={{ mt: 4 }} data-testid="sent-order-sends">
+          <Typography variant="h6" fontWeight={600} gutterBottom>
+            Sent from orders ({orderSends.length})
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            Certificates sent to a customer from an order go as attachments, under generated file names. An
+            attachment is in the recipient&apos;s inbox: it cannot be revoked, and the portal cannot tell whether it
+            was opened. What is recorded is what left, to whom, and whether each email was accepted.
+          </Typography>
+          <OrderSendHistory sends={orderSends} showOrder onChanged={load} />
+        </Box>
+      )}
 
       <Dialog open={Boolean(confirming)} onClose={() => !revoking && setConfirming(null)} maxWidth="sm" fullWidth>
         <DialogTitle>Revoke this link?</DialogTitle>

@@ -68,7 +68,14 @@ export type MatchBasis =
   | 'lot+product+supplier'
   | 'lot+product'
   | 'lot+code'
-  | 'lot_only';
+  | 'lot_only'
+  /**
+   * Not the engine's: a PERSON put this certificate on this line by hand
+   * (functions/lib/order-items.ts, migration 0134). Written already
+   * 'accepted', never ranked, and never produced by `classifyMatch`. It is in
+   * this union so every reader of `match_basis` has a name for it.
+   */
+  | 'manual_pick';
 
 export interface MatchClassification {
   basis: MatchBasis;

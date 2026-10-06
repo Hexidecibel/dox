@@ -464,6 +464,24 @@ export interface BuiltExportZip {
  * Assemble the archive. The manifest is added LAST, after the names are
  * settled, so it describes the files as they actually landed.
  */
+/**
+ * One document file's bytes, or null when storage does not hold them.
+ *
+ * The single R2 read of this module, shared by the zip and by anything else
+ * that sends the same files another way (an order's attachments,
+ * functions/lib/order-send.ts) -- so "the file was not in storage" is decided
+ * in one place and reported, never thrown.
+ */
+export async function readExportBytes(
+  files: R2Bucket,
+  r2Key: string | null | undefined,
+): Promise<ArrayBuffer | null> {
+  if (!r2Key) return null;
+  const obj = await files.get(r2Key);
+  if (!obj) return null;
+  return obj.arrayBuffer();
+}
+
 export async function buildExportZip(
   files: R2Bucket,
   rows: ExportDocumentRow[],
@@ -478,16 +496,11 @@ export async function buildExportZip(
   const names = exportFileNames(rows);
 
   for (const [i, row] of rows.entries()) {
-    if (!row.r2_key) {
+    const buf = await readExportBytes(files, row.r2_key);
+    if (!buf) {
       unavailable.push(row);
       continue;
     }
-    const obj = await files.get(row.r2_key);
-    if (!obj) {
-      unavailable.push(row);
-      continue;
-    }
-    const buf = await obj.arrayBuffer();
     const name = names[i];
     contents[name] = new Uint8Array(buf);
     entries.push({ file_name: name, row });
@@ -531,6 +544,8 @@ export interface DocumentExportLinkRow {
   revoked_at: string | null;
   /** Who pulled it back (migration 0116). NULL on rows revoked before that. */
   revoked_by?: string | null;
+  /** 1 = does not run out (migration 0134). Absent on a pre-0134 database. */
+  never_expires?: number | null;
   view_count: number;
   last_viewed_at: string | null;
   download_count: number;
@@ -545,12 +560,31 @@ export interface MintExportLinkInput {
   onBehalfOf?: string | null;
   message?: string | null;
   ttlDays?: number;
+  /**
+   * A link that does not run out (migration 0134): a customer's certificate
+   * that was too large to attach. Still revocable.
+   */
+  neverExpires?: boolean;
 }
 
 export interface MintedExportLink {
   id: string;
   token: string;
   expires_at: string;
+  never_expires: boolean;
+}
+
+/**
+ * What `expires_at` holds on a link that does not expire. The column is NOT
+ * NULL (0115), so it needs a value; `never_expires` is the authority and this
+ * is only what a reader that predates the flag would see -- far enough out
+ * that it fails open the same way.
+ */
+export const EXPORT_LINK_NEVER_EXPIRES_AT = '9999-12-31T23:59:59.000Z';
+
+/** True for a link that does not run out, whatever `expires_at` says. */
+export function exportLinkNeverExpires(row: { never_expires?: number | boolean | null }): boolean {
+  return Number(row.never_expires) === 1 || row.never_expires === true;
 }
 
 /**
@@ -564,16 +598,19 @@ export async function mintExportLink(
 ): Promise<MintedExportLink> {
   const id = generateId();
   const token = generateExportToken();
+  const neverExpires = input.neverExpires === true;
   const expires = new Date();
   expires.setUTCDate(expires.getUTCDate() + (input.ttlDays ?? EXPORT_LINK_TTL_DAYS));
-  const expiresAt = expires.toISOString();
+  const expiresAt = neverExpires ? EXPORT_LINK_NEVER_EXPIRES_AT : expires.toISOString();
 
+  // `never_expires` is named only when it is asked for, so an ordinary send
+  // writes exactly the statement it always has.
   await db
     .prepare(
       `INSERT INTO document_export_links
          (id, token, tenant_id, document_ids, created_by, on_behalf_of,
-          recipients, message, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          recipients, message, expires_at${neverExpires ? ', never_expires' : ''})
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${neverExpires ? ', 1' : ''})`,
     )
     .bind(
       id,
@@ -588,7 +625,7 @@ export async function mintExportLink(
     )
     .run();
 
-  return { id, token, expires_at: expiresAt };
+  return { id, token, expires_at: expiresAt, never_expires: neverExpires };
 }
 
 /**
@@ -627,12 +664,16 @@ export async function revokeExportLink(
  * whether somebody pulled the link back; collapsing that into "expired"
  * because thirty days have since passed would erase the only fact worth
  * recording about it.
+ *
+ * A link that NEVER EXPIRES (0134) is active until somebody revokes it: time
+ * does not end it, a person still can.
  */
 export function exportLinkState(
-  row: Pick<DocumentExportLinkRow, 'revoked_at' | 'expires_at'>,
+  row: Pick<DocumentExportLinkRow, 'revoked_at' | 'expires_at' | 'never_expires'>,
   now: Date = new Date(),
 ): DocumentExportLinkState {
   if (row.revoked_at) return 'revoked';
+  if (exportLinkNeverExpires(row)) return 'active';
   if (!row.expires_at) return 'expired';
   return new Date(row.expires_at).getTime() <= now.getTime() ? 'expired' : 'active';
 }
@@ -677,6 +718,7 @@ export function buildExportLinkSummary(
     state: exportLinkState(row, now),
     created_at: row.created_at,
     expires_at: row.expires_at,
+    never_expires: exportLinkNeverExpires(row),
     revoked_at: row.revoked_at,
     revoked_by_name: row.revoked_by_name ?? null,
     sent_by_id: row.created_by,
@@ -757,6 +799,9 @@ export async function loadUsableExportLink(
     .first<DocumentExportLinkRow>();
   if (!row) return null;
   if (row.revoked_at) return null;
+  // Revocation is checked first and always: "does not expire" (0134) is about
+  // time, never about a person pulling the link back.
+  if (exportLinkNeverExpires(row)) return row;
   if (!row.expires_at) return null;
   if (new Date(row.expires_at).getTime() <= Date.now()) return null;
   return row;
@@ -842,6 +887,7 @@ export async function buildExportLandingView(
     on_behalf_of: link.on_behalf_of,
     message: link.message,
     expires_at: link.expires_at,
+    never_expires: exportLinkNeverExpires(link),
     documents: items,
   };
 }

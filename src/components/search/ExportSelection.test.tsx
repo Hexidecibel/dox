@@ -119,6 +119,48 @@ describe('ExportSelectionBar', () => {
   });
 });
 
+describe('ExportSelectionBar with one more action (migration 0134)', () => {
+  it('offers the extra action beside ZIP and Send, and runs it', async () => {
+    const onClick = vi.fn();
+    render(
+      <ExportSelectionBar
+        count={2}
+        onDownload={vi.fn()}
+        onSend={vi.fn()}
+        onClear={vi.fn()}
+        extraAction={{ label: 'Add to order', onClick, testId: 'add-to-order' }}
+      />,
+    );
+    expect(screen.getByTestId('export-download')).toBeInTheDocument();
+    expect(screen.getByTestId('export-send')).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('add-to-order'));
+    expect(onClick).toHaveBeenCalled();
+  });
+
+  it('a surface that only picks hides ZIP and Send', () => {
+    render(
+      <ExportSelectionBar
+        count={1}
+        hideExport
+        onDownload={vi.fn()}
+        onSend={vi.fn()}
+        onClear={vi.fn()}
+        extraAction={{ label: 'Add to this order', onClick: vi.fn(), primary: true }}
+      />,
+    );
+    expect(screen.getByText('Add to this order')).toBeInTheDocument();
+    expect(screen.queryByTestId('export-download')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('export-send')).not.toBeInTheDocument();
+    expect(screen.getByTestId('export-clear')).toBeInTheDocument();
+  });
+
+  it('with no extra action the bar is exactly what it was', () => {
+    render(<ExportSelectionBar count={1} onDownload={vi.fn()} onSend={vi.fn()} onClear={vi.fn()} />);
+    expect(screen.queryByTestId('selection-extra-action')).not.toBeInTheDocument();
+    expect(screen.getByTestId('export-download')).toBeInTheDocument();
+  });
+});
+
 describe('SendExportDialog', () => {
   const docs = [covering, nearby];
 

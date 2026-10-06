@@ -3,8 +3,10 @@ import {
   requireRole,
   requireTenantAccess,
   BadRequestError,
+  ConflictError,
   errorToResponse,
 } from '../../lib/permissions';
+import { parseShipDate, requireTenantCustomer } from '../../lib/order-items';
 import { sanitizeString } from '../../lib/validation';
 import { buildMatchExpr } from '../../lib/search-fts';
 import type { Env, User } from '../../lib/types';
@@ -131,6 +133,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 /**
  * POST /api/orders
  * Create an order with optional items.
+ *
+ * This is how a person builds an order on the basic tier (migration 0134):
+ * the customer, the customer's PO / order number and the ship date -- the same
+ * record a connector writes on the automatic tier, with `created_by` saying a
+ * person made it. A `customer_id` must be this organization's (it used to be
+ * stored unchecked), and an order number already in use answers 409 with words
+ * rather than falling through to the UNIQUE constraint as a 500.
  */
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -143,6 +152,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       customer_id?: string;
       customer_number?: string;
       customer_name?: string;
+      ship_date?: string | null;
       tenant_id?: string;
       items?: Array<{
         product_id?: string;
@@ -171,15 +181,35 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const orderId = generateId();
     const orderNumber = sanitizeString(body.order_number.trim());
     const poNumber = body.po_number ? sanitizeString(body.po_number.trim()) : null;
-    const customerName = body.customer_name ? sanitizeString(body.customer_name.trim()) : null;
-    const customerNumber = body.customer_number ? sanitizeString(body.customer_number.trim()) : null;
+    let customerName = body.customer_name ? sanitizeString(body.customer_name.trim()) : null;
+    let customerNumber = body.customer_number ? sanitizeString(body.customer_number.trim()) : null;
     const customerId = body.customer_id || null;
+    const shipDate = parseShipDate(body.ship_date);
+
+    // A chosen customer must be this organization's, and its name and number
+    // are what the order prints unless the caller typed others.
+    if (customerId) {
+      const customer = await requireTenantCustomer(context.env.DB, tenantId, customerId);
+      customerName = customerName ?? customer.name;
+      customerNumber = customerNumber ?? customer.customer_number;
+    }
+
+    const taken = await context.env.DB.prepare(
+      'SELECT id FROM orders WHERE tenant_id = ? AND order_number = ?'
+    )
+      .bind(tenantId, orderNumber)
+      .first<{ id: string }>();
+    if (taken) {
+      throw new ConflictError(
+        `Order ${orderNumber} already exists. Open it, or use a different order number.`
+      );
+    }
 
     await context.env.DB.prepare(
-      `INSERT INTO orders (id, tenant_id, order_number, po_number, customer_id, customer_number, customer_name, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`
+      `INSERT INTO orders (id, tenant_id, order_number, po_number, customer_id, customer_number, customer_name, ship_date, created_by, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`
     )
-      .bind(orderId, tenantId, orderNumber, poNumber, customerId, customerNumber, customerName)
+      .bind(orderId, tenantId, orderNumber, poNumber, customerId, customerNumber, customerName, shipDate, user.id)
       .run();
 
     // Create items if provided
@@ -210,7 +240,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       'order.created',
       'order',
       orderId,
-      JSON.stringify({ order_number: orderNumber, item_count: body.items?.length || 0 }),
+      JSON.stringify({
+        order_number: orderNumber,
+        po_number: poNumber,
+        customer_id: customerId,
+        ship_date: shipDate,
+        item_count: body.items?.length || 0,
+      }),
       getClientIp(context.request)
     );
 

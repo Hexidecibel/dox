@@ -333,6 +333,46 @@ describe('bands and the 0115 gates, in the workspace', () => {
   });
 });
 
+describe('a selection action (migration 0134: Add to order)', () => {
+  it('turns selection on by itself, keeps the Include-anyway gate, and runs with what was selected', async () => {
+    mocks.query.mockResolvedValue(LOT_ANSWER);
+    const onRun = vi.fn().mockResolvedValue('2 lines added to order SO-1.');
+    const user = userEvent.setup();
+    // No enableExport: a surface that only picks still gets checkboxes.
+    render(wrap(<SearchWorkspace surface="search" selectionAction={{ label: 'Add to this order', only: true, testId: 'pick', onRun }} />, '/?f=lot.is;sub=03:10426203'));
+    await user.click(await screen.findByTestId('select-cov'));
+    // The likely result is still gated exactly as it is for export.
+    expect(screen.queryByTestId('select-lik')).not.toBeInTheDocument();
+    expect(screen.getByTestId('include-anyway-lik')).toBeInTheDocument();
+    expect(screen.queryByTestId('export-download')).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId('pick'));
+    expect(onRun).toHaveBeenCalledTimes(1);
+    expect(onRun.mock.calls[0][0].map((d: { id: string }) => d.id)).toEqual(['cov']);
+    // Done: the notice shows and the selection clears.
+    expect(await screen.findByText('2 lines added to order SO-1.')).toBeInTheDocument();
+    expect(screen.queryByText('1 selected')).not.toBeInTheDocument();
+  });
+
+  it('keeps the selection when the person backs out, and shows a refusal', async () => {
+    mocks.query.mockResolvedValue(LOT_ANSWER);
+    const onRun = vi.fn().mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('This document is archived.'));
+    const user = userEvent.setup();
+    render(wrap(<SearchWorkspace surface="search" enableExport selectionAction={{ label: 'Add to order', testId: 'pick', onRun }} />, '/?f=lot.is;sub=03:10426203'));
+    await user.click(await screen.findByTestId('select-cov'));
+    // Beside ZIP and Send on a page that also exports.
+    expect(screen.getByTestId('export-download')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('pick'));
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('pick'));
+    expect(await screen.findByText('This document is archived.')).toBeInTheDocument();
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
+  });
+});
+
 describe('keyboard', () => {
   it('/ focuses the box; ↓ moves to a result; Space selects only where a checkbox exists', async () => {
     mocks.query.mockResolvedValue(LOT_ANSWER);
@@ -355,6 +395,20 @@ describe('keyboard', () => {
     expect(rows[1]).toHaveFocus();
     await user.keyboard(' '); // the likely row has no checkbox until Include anyway
     expect(screen.getByTestId('export-selection-bar')).toHaveTextContent('1 selected');
+  });
+
+  it('globalShortcuts={false} leaves the page keys alone (the workspace inside a dialog)', async () => {
+    mocks.query.mockResolvedValue(LOT_ANSWER);
+    const user = userEvent.setup();
+    render(wrap(<SearchWorkspace surface="search" enableExport globalShortcuts={false} />, '/?f=lot.is;sub=03:10426203'));
+    await screen.findByTestId('select-cov');
+    (document.activeElement as HTMLElement)?.blur();
+    await user.keyboard('/');
+    expect(screen.getByTestId('omnibox-input')).not.toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(document.querySelectorAll('[data-nav-row]')[0]).not.toHaveFocus();
+    // And the legend that advertises them is gone with them.
+    expect(screen.queryByTestId('keyboard-legend')).not.toBeInTheDocument();
   });
 
   it("Try shows the tenant's own examples, verified server-side, and a click asks it", async () => {

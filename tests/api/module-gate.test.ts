@@ -155,6 +155,16 @@ describe('the middleware gate', () => {
     expect(res.body.error).toContain(MODULES.fulfillment.label);
     // A nested path under the module is gated too, or the deep link is the hole.
     expect((await callChain(req('/api/orders/xyz/items'), { user: regularUser() })).status).toBe(403);
+    // The hand-built order routes (migration 0134) need no prefix of their
+    // own: building, previewing, sending and resending all sit under it.
+    for (const path of [
+      '/api/orders/xyz/items/abc',
+      '/api/orders/xyz/send-preview',
+      '/api/orders/xyz/send',
+      '/api/orders/xyz/sends/s1/resend',
+    ]) {
+      expect((await callChain(req(path), { user: regularUser() })).status, path).toBe(403);
+    }
   });
 
   it('distinguishes "the tenant turned it off" from "your function does not include it"', async () => {

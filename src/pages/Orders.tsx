@@ -16,10 +16,6 @@ import {
   TableHead,
   TableRow,
   Paper,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
   FormControl,
   InputLabel,
   Select,
@@ -39,6 +35,8 @@ import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { EmptyState } from '../components/EmptyState';
 import { helpContent } from '../lib/helpContent';
+import { NewOrderDialog } from '../components/orders/NewOrderDialog';
+import { useAuth } from '../contexts/AuthContext';
 
 
 const ITEMS_PER_PAGE = 50;
@@ -89,13 +87,10 @@ export function Orders() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // Create dialog
+  // Create dialog. A read-only account cannot build an order, so it is not
+  // offered the button the API would refuse.
+  const { isReader } = useAuth();
   const [createOpen, setCreateOpen] = useState(false);
-  const [createOrderNumber, setCreateOrderNumber] = useState('');
-  const [createPoNumber, setCreatePoNumber] = useState('');
-  const [createCustomerName, setCreateCustomerName] = useState('');
-  const [createCustomerNumber, setCreateCustomerNumber] = useState('');
-  const [creating, setCreating] = useState(false);
 
   const loadOrders = useCallback(async () => {
     setLoading(true);
@@ -136,30 +131,6 @@ export function Orders() {
     }
   };
 
-  const handleCreate = async () => {
-    if (!createOrderNumber.trim()) return;
-    setCreating(true);
-    try {
-      await api.orders.create({
-        order_number: createOrderNumber.trim(),
-        po_number: createPoNumber.trim() || undefined,
-        customer_name: createCustomerName.trim() || undefined,
-        customer_number: createCustomerNumber.trim() || undefined,
-        tenant_id: selectedTenantId || undefined,
-      });
-      setCreateOpen(false);
-      setCreateOrderNumber('');
-      setCreatePoNumber('');
-      setCreateCustomerName('');
-      setCreateCustomerNumber('');
-      loadOrders();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create order');
-    } finally {
-      setCreating(false);
-    }
-  };
-
   const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
 
   const getStatusChip = (status: string) => {
@@ -189,13 +160,16 @@ export function Orders() {
             </Typography>
           )}
         </Box>
-        <Button
-          variant="contained"
-          startIcon={<AddIcon />}
-          onClick={() => setCreateOpen(true)}
-        >
-          New Order
-        </Button>
+        {!isReader && (
+          <Button
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={() => setCreateOpen(true)}
+            data-testid="orders-new"
+          >
+            New Order
+          </Button>
+        )}
       </Box>
 
       <HelpWell id="orders.list" title={helpContent.orders.list?.headline ?? 'Orders'}>
@@ -404,57 +378,17 @@ export function Orders() {
         </Box>
       )}
 
-      {/* Create Order Dialog */}
-      <Dialog open={createOpen} onClose={() => setCreateOpen(false)} maxWidth="sm" fullWidth fullScreen={isMobile}>
-        <DialogTitle>New Order</DialogTitle>
-        <DialogContent>
-          <TextField
-            label="Order Number"
-            fullWidth
-            required
-            value={createOrderNumber}
-            onChange={(e) => setCreateOrderNumber(e.target.value)}
-            disabled={creating}
-            sx={{ mt: 1, mb: 2 }}
-            autoFocus
-          />
-          <TextField
-            label="PO Number"
-            fullWidth
-            value={createPoNumber}
-            onChange={(e) => setCreatePoNumber(e.target.value)}
-            disabled={creating}
-            sx={{ mb: 2 }}
-          />
-          <TextField
-            label="Customer Name"
-            fullWidth
-            value={createCustomerName}
-            onChange={(e) => setCreateCustomerName(e.target.value)}
-            disabled={creating}
-            sx={{ mb: 2 }}
-          />
-          <TextField
-            label="Customer Number"
-            fullWidth
-            value={createCustomerNumber}
-            onChange={(e) => setCreateCustomerNumber(e.target.value)}
-            disabled={creating}
-          />
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setCreateOpen(false)} disabled={creating}>
-            Cancel
-          </Button>
-          <Button
-            variant="contained"
-            onClick={handleCreate}
-            disabled={creating || !createOrderNumber.trim()}
-          >
-            {creating ? 'Creating...' : 'Create Order'}
-          </Button>
-        </DialogActions>
-      </Dialog>
+      {/* New order: the customer, PO and ship date; the lines are added on the order itself. */}
+      <NewOrderDialog
+        open={createOpen}
+        tenantId={selectedTenantId || undefined}
+        fullScreen={isMobile}
+        onClose={() => setCreateOpen(false)}
+        onCreated={(order) => {
+          setCreateOpen(false);
+          navigate(`/orders/${order.id}`);
+        }}
+      />
     </Box>
   );
 }

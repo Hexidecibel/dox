@@ -36,6 +36,9 @@ export function matchBasisLabel(basis: string | null): string {
       return 'lot number only';
     case 'legacy_auto_link':
       return 'linked automatically before matches needed confirming';
+    case 'manual_pick':
+      // Not the matcher's: a person put this certificate on the line (0134).
+      return 'picked by hand on the order';
     default:
       return basis ?? 'unknown basis';
   }

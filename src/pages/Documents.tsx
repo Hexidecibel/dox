@@ -1,7 +1,9 @@
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Box, Typography, Button } from '@mui/material';
 import { Add as AddIcon } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
-import { SearchWorkspace } from '../components/search/SearchWorkspace';
+import { SearchWorkspace, type SearchSelectionAction } from '../components/search/SearchWorkspace';
+import { AddToOrderDialog, describePickResult } from '../components/orders/AddToOrderDialog';
 import { RoleGuard } from '../components/RoleGuard';
 import { useTenant } from '../contexts/TenantContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -20,6 +22,35 @@ export function Documents() {
   const { user } = useAuth();
   const { isVisible } = useModuleAccess();
   const navigate = useNavigate();
+
+  // "Add to order" (migration 0134): the selected documents go onto an open
+  // order or a new one. Offered only to someone who can build an order -- not
+  // a read-only account, and not where Order Fulfillment is switched off.
+  const canBuildOrders = !!user && user.role !== 'reader' && isVisible('fulfillment');
+  const [orderPick, setOrderPick] = useState<string[] | null>(null);
+  const settle = useRef<((notice: string | null) => void) | null>(null);
+  const finishPick = useCallback((notice: string | null) => {
+    settle.current?.(notice);
+    settle.current = null;
+    setOrderPick(null);
+  }, []);
+  const addToOrder = useMemo<SearchSelectionAction | undefined>(
+    () =>
+      canBuildOrders
+        ? {
+            label: 'Add to order',
+            testId: 'add-to-order',
+            // Resolves when the dialog closes: with what happened, or null when
+            // the person backed out and the selection should stay.
+            onRun: (docs) =>
+              new Promise<string | null>((resolve) => {
+                settle.current = resolve;
+                setOrderPick(docs.map((d) => d.id));
+              }),
+          }
+        : undefined,
+    [canBuildOrders],
+  );
 
   return (
     <Box>
@@ -44,6 +75,15 @@ export function Documents() {
         tenantId={selectedTenantId || undefined}
         enableExport={isVisible('library')}
         exportSender={user ? { name: user.name || user.email, email: user.email } : undefined}
+        selectionAction={addToOrder}
+      />
+
+      <AddToOrderDialog
+        open={orderPick !== null}
+        tenantId={selectedTenantId || undefined}
+        documentIds={orderPick ?? []}
+        onClose={() => finishPick(null)}
+        onAdded={({ orderNumber, response }) => finishPick(`${describePickResult(orderNumber, response)} Open Orders to review and send.`)}
       />
     </Box>
   );

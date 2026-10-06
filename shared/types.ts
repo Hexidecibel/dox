@@ -3185,6 +3185,13 @@ export interface OrderRow {
   /** User-defined extended fields. JSON string keyed by FieldMappingExtended.key. */
   extended_metadata: string | null;
   error_message: string | null;
+  /** Set while a connector-made order waits for a person to approve it. */
+  staged_at?: string | null;
+  confidence?: number | null;
+  /** The day the goods ship, YYYY-MM-DD (migration 0134). */
+  ship_date?: string | null;
+  /** The user who built the order by hand; NULL = a connector did (0134). */
+  created_by?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -3207,6 +3214,10 @@ export interface OrderListResponse {
 export interface OrderGetResponse {
   order: ApiOrder;
   items: ApiOrderItem[];
+  /** Pending lot-match suggestions for the order's lines. */
+  suggestions?: unknown[];
+  /** Every send of this order's documents, newest first (migration 0134). */
+  sends?: OrderSendSummary[];
 }
 
 // === Order Item Row & API Types ===
@@ -3222,11 +3233,250 @@ export interface OrderItemRow {
   coa_document_id: string | null;
   match_confidence: number | null;
   created_at: string;
+  staged_at?: string | null;
+  confidence?: number | null;
+  lot_id?: string | null;
+  /** 'matched' once a person put a certificate on the line; else 'unmatched'. */
+  coa_match_status?: string | null;
+  coa_matched_at?: string | null;
+  /** Who picked the certificate by hand; NULL = an accepted suggestion (0134). */
+  picked_by?: string | null;
+  picked_at?: string | null;
 }
 
+/**
+ * How sure the portal is of a lot row's production date. Only `stated` is a
+ * date the certificate itself printed and that reads one way; everything else
+ * must be shown WITH its doubt, never as plain fact (migrations 0106 / 0110).
+ */
+export type OrderLineDateState =
+  | 'stated'
+  | 'decoded'
+  | 'legacy'
+  | 'ambiguous'
+  | 'conflict'
+  | 'unparseable'
+  | 'none';
+
+/** Whether the whole certificate a per-lot page was cut from is on file. */
+export type OrderLineOriginalState =
+  /** The document's own file is the whole certificate. */
+  | 'not_split'
+  /** A per-lot page; the whole original is on file and is what gets sent. */
+  | 'on_file'
+  /** A per-lot page whose original is not on file (or could not be confirmed). */
+  | 'missing';
+
 export interface ApiOrderItem extends OrderItemRow {
-  product_name_resolved?: string;
-  coa_document_title?: string;
+  product_name_resolved?: string | null;
+  coa_document_title?: string | null;
+  /** 'active' | 'archived' | 'deleted' -- a line can outlive its document. */
+  coa_document_status?: string | null;
+  coa_document_type_name?: string | null;
+  coa_supplier_name?: string | null;
+  /** Size of the document's current file, bytes. */
+  coa_file_size?: number | null;
+  coa_original?: OrderLineOriginalState | null;
+  picked_by_name?: string | null;
+  /** The linked lot row, as the lot register holds it. */
+  lot_row_number?: string | null;
+  sub_lot_code?: string | null;
+  production_date?: string | null;
+  production_date_raw?: string | null;
+  production_date_status?: string | null;
+  production_date_source?: string | null;
+  /** Resolved on the server so every screen words the doubt the same way. */
+  production_date_state?: OrderLineDateState;
+  production_date_label?: string | null;
+  production_date_note?: string | null;
+}
+
+/** POST /api/orders/:id/items -- pick approved documents, or type one line. */
+export interface OrderItemsAddRequest {
+  /** Approved documents to put on the order: one line per lot row of each. */
+  document_ids?: string[];
+  /** One hand-typed line with no document yet. */
+  item?: {
+    product_id?: string | null;
+    product_name?: string | null;
+    product_code?: string | null;
+    quantity?: number | null;
+    lot_number?: string | null;
+  };
+}
+
+export type OrderPickOutcome =
+  /** A new line was written for this lot row. */
+  | 'added'
+  /** An existing line for the same lot had no certificate; it was filled. */
+  | 'filled'
+  /** The order already carries this document on this lot. Nothing written. */
+  | 'already_on_order';
+
+export interface OrderPickResult {
+  document_id: string;
+  order_item_id: string;
+  outcome: OrderPickOutcome;
+  lot_id: string | null;
+  lot_number: string | null;
+}
+
+export interface OrderItemsAddResponse {
+  results: OrderPickResult[];
+  /** Ids that are not active documents of this organization. Nothing was written for them. */
+  refused: { document_id: string; reason: string }[];
+  /** The hand-typed line, when one was asked for. */
+  item_id?: string;
+}
+
+/** PUT /api/orders/:id/items/:itemId */
+export interface OrderItemUpdateRequest {
+  product_id?: string | null;
+  product_name?: string | null;
+  product_code?: string | null;
+  quantity?: number | null;
+  lot_number?: string | null;
+  /** A document id puts it on the line (a pick); null takes it off. */
+  coa_document_id?: string | null;
+  /** Which lot row of that document the line is for, when it has several. */
+  lot_id?: string | null;
+}
+
+// === Sending an order's documents (migration 0134) ===
+
+export type OrderSendDelivery = 'attachment' | 'link';
+/** 'original' = the whole certificate a per-lot page was cut from. */
+export type OrderSendSource = 'document' | 'original';
+export type OrderSendStatus = 'sent' | 'partial' | 'failed';
+
+/** One order line a file stands for, as the review screen prints it. */
+export interface OrderSendLineRef {
+  order_item_id: string;
+  product_name: string | null;
+  product_code: string | null;
+  lot_label: string | null;
+  production_date_label: string | null;
+  production_date_state: OrderLineDateState;
+}
+
+/** One file of a planned send. */
+export interface OrderSendPlanFile {
+  /** Stable within one plan; not an id anywhere else. */
+  key: string;
+  /** The GENERATED name it travels under. The uploaded name never leaves. */
+  file_name: string;
+  bytes: number;
+  delivery: OrderSendDelivery;
+  source: OrderSendSource;
+  /** Which email it rides in, 1-based. */
+  part_number: number;
+  document_ids: string[];
+  document_title: string;
+  supplier_name: string | null;
+  document_type_name: string | null;
+  lot_label: string | null;
+  lines: OrderSendLineRef[];
+  /** Plain words the sender must read: per-lot page fallback, link instead of attachment. */
+  notes: string[];
+}
+
+export interface OrderSendPlanPart {
+  part_number: number;
+  /** The subject exactly as this email will carry it ("... (2 of 3)"). */
+  subject: string;
+  bytes: number;
+  file_count: number;
+}
+
+/** GET /api/orders/:id/send-preview -- exactly what Send would do, nothing sent. */
+export interface OrderSendPreview {
+  order: {
+    id: string;
+    order_number: string;
+    po_number: string | null;
+    ship_date: string | null;
+    customer_id: string | null;
+    customer_name: string | null;
+  };
+  /** The customer's address on record, pre-filled and editable. */
+  recipient: string | null;
+  from_name: string;
+  reply_to: string;
+  default_subject: string;
+  email_configured: boolean;
+  files: OrderSendPlanFile[];
+  parts: OrderSendPlanPart[];
+  part_count: number;
+  total_bytes: number;
+  /** Lines with no document, or whose document is no longer active: not sent, and said. */
+  lines_not_sent: { order_item_id: string; product_name: string | null; lot_number: string | null; reason: string }[];
+  warnings: string[];
+  /** Why this order cannot be sent as it stands, or null. */
+  blocked: { code: string; message: string } | null;
+  limits: { max_part_bytes: number; max_parts: number };
+  /** Send echoes this back; a plan that changed since the review is refused. */
+  fingerprint: string;
+}
+
+export interface OrderSendRequest {
+  /** One address or several; defaults to the customer's address on record. */
+  recipients?: string[] | string;
+  subject?: string;
+  message?: string;
+  /** From the preview the sender reviewed. */
+  fingerprint?: string;
+}
+
+export interface OrderSendPartResult {
+  part_number: number;
+  ok: boolean;
+  /** HTTP status from the mail provider; 0 when the request never completed. */
+  status: number;
+  error: string | null;
+  sent_at: string | null;
+  attempts: number;
+}
+
+export interface OrderSendFileRecord {
+  position: number;
+  file_name: string;
+  bytes: number;
+  part_number: number;
+  delivery: OrderSendDelivery;
+  source: OrderSendSource;
+  document_id: string;
+  document_ids: string[];
+  document_title: string | null;
+  lot_label: string | null;
+  sent_ok: boolean;
+}
+
+/** One send, as the order page and "Sent documents" list it. */
+export interface OrderSendSummary {
+  id: string;
+  order_id: string;
+  order_number: string;
+  customer_name: string | null;
+  status: OrderSendStatus;
+  created_at: string;
+  sent_by_id: string;
+  sent_by_name: string | null;
+  sent_by_email: string | null;
+  recipients: string[];
+  subject: string;
+  message: string | null;
+  part_count: number;
+  parts: OrderSendPartResult[];
+  files: OrderSendFileRecord[];
+  /** Whether THIS caller may press "resend failed parts". */
+  can_resend: boolean;
+}
+
+export interface OrderSendResponse {
+  send: OrderSendSummary;
+  /** True only when every email was accepted. */
+  sent: boolean;
+  order_status: string;
 }
 
 // === Unified Activity Feed ===
@@ -5817,6 +6067,12 @@ export interface DocumentExportLandingView {
   on_behalf_of: string | null;
   message: string | null;
   expires_at: string;
+  /**
+   * True for a link that does not run out (migration 0134 -- a customer's
+   * certificate too large to attach). `expires_at` then holds a far-future
+   * placeholder and must not be printed.
+   */
+  never_expires?: boolean;
   documents: DocumentExportItem[];
 }
 
@@ -5850,6 +6106,8 @@ export interface DocumentExportLinkSummary {
   state: DocumentExportLinkState;
   created_at: string;
   expires_at: string;
+  /** A link that does not run out (0134). Still revocable; never 'expired'. */
+  never_expires: boolean;
   revoked_at: string | null;
   revoked_by_name: string | null;
   sent_by_id: string;
@@ -5877,6 +6135,12 @@ export interface DocumentExportLinkListResponse {
   scope: 'tenant' | 'mine';
   /** Whether this caller is allowed to ask for the tenant-wide list at all. */
   can_see_tenant: boolean;
+  /**
+   * Documents sent from an ORDER as attachments (migration 0134), in the same
+   * scope as `links`. Nothing to revoke and nothing to count: an attachment is
+   * in the recipient's inbox, and the screen says so.
+   */
+  order_sends: OrderSendSummary[];
 }
 
 export interface DocumentExportRevokeResponse {

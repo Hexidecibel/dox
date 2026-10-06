@@ -380,7 +380,9 @@ const orders: ModuleHelpExpanded = {
   detail: {
     headline: 'Order detail',
     well:
-      "Everything dox knows about this order: line items, customer, source connector, attached documents, and the audit trail of how it moved through the COA workflow.",
+      "Everything dox knows about this order: its lines, customer, PO and ship date, the certificate on each line, and what has already been sent. " +
+      "Add COAs puts approved certificates on the order, one line per lot each certifies; every line shows its product, lot and production date so a wrong pick is visible before it goes. " +
+      "Review and send shows exactly what the customer will receive before anything leaves.",
   },
   help: {
     sections: [
@@ -394,6 +396,24 @@ const orders: ModuleHelpExpanded = {
         body:
           "Orders move through six statuses. pending — just ingested, customer / products not yet resolved. enriched — customer matched against the customer roster, line items resolved against the product catalog. matched — for each line, a lot has been picked and the COA for that lot is on file. fulfilled — every required document is attached. delivered — the COA package has been sent to the customer. error — something failed during ingest or enrichment; check the order detail for the specific error. " +
           "The progression is mostly automatic — pipeline jobs (enrichment + matching) run on creation. You only need to step in for matched ones (pick lots) and to confirm delivery.",
+      },
+      {
+        heading: 'Building an order by hand',
+        body:
+          "New Order asks for the customer, your order number, the customer's PO and the ship date. Pick a customer who is on file and the order has an address to send to; a name that is not on file can still be typed, and you enter the address when you send. " +
+          "On the order, Add COAs opens the same search as the Documents page: find the certificates by lot, product, production date or PO and add them. Each certificate becomes a line for every lot it certifies, recorded as your pick. A result that only might fit still has to be included on purpose, exactly as when you export. You can also start from Documents: select results and choose Add to order. " +
+          "Only approved documents can go on an order; an archived or deleted one is refused and the message says which. Add a line is for a product whose certificate is not on file yet: type the lot and any certificate that fits is offered on the line for you to confirm. " +
+          "Each line shows who picked its certificate. A production date the portal is not sure of is marked and says why, for instance decoded from the lot code rather than stated on the certificate. It is never shown as a plain date.",
+      },
+      {
+        heading: 'Review and send',
+        body:
+          "Review and send shows the customer's address (you can change it for this send), the subject, and every file under the name it will travel under, with the product, lot and production date of the lines it stands for. The name a file was uploaded under is never sent. " +
+          "The customer receives an exact copy of each certificate attached to the email, from your organization's name with replies coming to you. " +
+          "A certificate that covers several lots is sent whole, once, even when several lines came from it. If the whole certificate is not on file the screen says so and the page for that lot is sent instead. " +
+          "When the files do not fit in one email they go as numbered emails, 1 of 3 and so on, and the screen shows the split before you send. A single file too large to attach goes as a link in the first email; that link does not expire and can be revoked from Sent documents. An order that would need more than ten emails is refused with the number, so send it in two goes. " +
+          "Lines with no certificate, or whose certificate has since been archived, are listed as not sent. " +
+          "Sent, on the order, lists each send: who sent it, to which address, each file and how it went. If some of the emails failed, Resend failed parts sends only those. The order becomes delivered once every email has gone and no line was left unsent. A read-only account cannot build or send an order.",
       },
       {
         heading: 'Filtering and search',
@@ -1598,7 +1618,9 @@ export const helpContent = {
     well:
       'Every set of documents that left here as an emailed link: when, by whom, to which addresses, how many documents, and whether the link still opens. ' +
       'The link is the credential — anyone holding the URL can open it, including anyone the mail was forwarded to — so the open and download counts are counts of requests, not of people, and the portal cannot say which recipient made them. ' +
-      'Revoke kills a link at once for everybody; it cannot recall a file already downloaded. There is no extend: a link keeps the expiry its email promised, and sending again is the honest way to give someone more time.',
+      'Revoke kills a link at once for everybody; it cannot recall a file already downloaded. There is no extend: a link keeps the expiry its email promised, and sending again is the honest way to give someone more time. ' +
+      'One kind of link does not expire: a certificate too large to attach to an order goes to the customer as a link that stays open until someone revokes it, and it is listed here marked that way. ' +
+      'Certificates sent from an order as attachments are listed below the links: what left, to whom, and whether each email was accepted. An attachment cannot be revoked and nothing reports whether it was opened.',
   },
   tenants,
   users,

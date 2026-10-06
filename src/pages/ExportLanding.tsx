@@ -142,8 +142,9 @@ export function ExportLanding() {
       </Typography>
       <Typography variant="body2" color="text.secondary">
         Sent by <SenderLine name={view.sent_by_name} email={view.sent_by_email} />
-        {view.on_behalf_of ? ` on behalf of ${view.on_behalf_of}` : ''}. This link works until{' '}
-        {formatDate(view.expires_at)}.
+        {view.on_behalf_of ? ` on behalf of ${view.on_behalf_of}` : ''}.{' '}
+        {/* A certificate too large to attach is sent by a link that does not run out (0134). */}
+        {view.never_expires ? 'This link does not expire.' : `This link works until ${formatDate(view.expires_at)}.`}
       </Typography>
 
       {view.message && (

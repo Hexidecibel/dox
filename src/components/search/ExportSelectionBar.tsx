@@ -1,6 +1,7 @@
 import { Alert, Box, Button, CircularProgress, Paper, Stack, Typography } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
 import MailOutlineIcon from '@mui/icons-material/MailOutline';
+import PlaylistAddIcon from '@mui/icons-material/PlaylistAdd';
 
 /**
  * The bar that appears once something is selected — "N selected", download,
@@ -12,6 +13,9 @@ import MailOutlineIcon from '@mui/icons-material/MailOutline';
  *
  * It renders nothing at all when nothing is selected, so the search page a
  * person is only reading is unchanged.
+ *
+ * `extraAction` is one more thing to do with the selection ("Add to order");
+ * `hideExport` drops ZIP / Send for a surface whose only job is to pick.
  */
 export interface ExportSelectionBarProps {
   count: number;
@@ -22,6 +26,8 @@ export interface ExportSelectionBarProps {
   onSend: () => void;
   onClear: () => void;
   onDismissMessage?: () => void;
+  extraAction?: { label: string; onClick: () => void; testId?: string; primary?: boolean };
+  hideExport?: boolean;
 }
 
 export function ExportSelectionBar({
@@ -33,6 +39,8 @@ export function ExportSelectionBar({
   onSend,
   onClear,
   onDismissMessage,
+  extraAction,
+  hideExport = false,
 }: ExportSelectionBarProps) {
   if (count === 0 && !error && !notice) return null;
 
@@ -69,7 +77,20 @@ export function ExportSelectionBar({
               {count} selected
             </Typography>
             {busy && <CircularProgress size={18} />}
-            <Button
+            {extraAction && (
+              <Button
+                size="small"
+                variant={extraAction.primary ? 'contained' : 'outlined'}
+                startIcon={<PlaylistAddIcon />}
+                onClick={extraAction.onClick}
+                disabled={busy}
+                sx={{ textTransform: 'none' }}
+                data-testid={extraAction.testId ?? 'selection-extra-action'}
+              >
+                {extraAction.label}
+              </Button>
+            )}
+            {!hideExport && <Button
               size="small"
               variant="contained"
               startIcon={<DownloadIcon />}
@@ -79,8 +100,8 @@ export function ExportSelectionBar({
               data-testid="export-download"
             >
               Download ZIP
-            </Button>
-            <Button
+            </Button>}
+            {!hideExport && <Button
               size="small"
               variant="outlined"
               startIcon={<MailOutlineIcon />}
@@ -90,7 +111,7 @@ export function ExportSelectionBar({
               data-testid="export-send"
             >
               Send by email
-            </Button>
+            </Button>}
             <Button
               size="small"
               onClick={onClear}
