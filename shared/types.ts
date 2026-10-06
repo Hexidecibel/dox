@@ -5280,6 +5280,24 @@ export interface RenewalSnapshot {
   type_renewal_interval_months: number | null;
   /** The fixed renewal window in force (0125), when the type had one. Absent on pre-0125 snapshots. */
   type_renewal_window?: import('./renewalPeriod').RenewalWindow | null;
+  /**
+   * Every change to the renewal date made on the document page AFTER approval
+   * (D-041), oldest first. The fields above are the approval-time proposal and
+   * are never rewritten; a snapshot that holds only this key belongs to a
+   * document nobody answered the question for at approval.
+   */
+  post_approval_edits?: RenewalPostApprovalEdit[];
+}
+
+export interface RenewalPostApprovalEdit {
+  previous_due_date: string | null;
+  /** Null: the date was emptied, which records "does not renew". */
+  new_due_date: string | null;
+  decision: RenewalDecision;
+  /** Why. Asked for by the screen; null when a caller gave none. */
+  reason: string | null;
+  decided_by: string;
+  decided_at: string;
 }
 
 /**
@@ -5305,6 +5323,9 @@ export interface ExpirationRow {
   title: string;
   primary_category_name: string | null;
   owner: string | null;
+  /** documents.supplier_id / document_type_id (carried since 0133). */
+  supplier_id?: string | null;
+  document_type_id?: string | null;
   /** Bucketed renewal_type; 'unknown' for rows with a bare expiry + no type. */
   renewal_type: RenewalType | 'unknown';
   /** Resolved canonical next-action date (YYYY-MM-DD). */
@@ -7155,6 +7176,12 @@ export interface SupplierListImportCounts {
   requirements_held_unconfirmed: number;
   requirements_newly_flagged: number;
   requirements_still_flagged: number;
+  /**
+   * Contact addresses on the list that the supplier does not have on file yet
+   * (migration 0133): written to supplier contacts on apply, counted on a dry
+   * run. Absent on runs recorded before 0133.
+   */
+  contacts_added?: number;
 }
 
 /** POST /api/supplier-list/import */
@@ -7254,4 +7281,198 @@ export interface ReplaceDocumentTypeRequirementsResponse extends DocumentTypeReq
   added: number;
   /** Rows it deleted. Reported because a replace can silently subtract. */
   removed: number;
+}
+
+// ---------------------------------------------------------------------------
+// Supplier contacts + the supplier renewal send (migration 0133)
+// ---------------------------------------------------------------------------
+
+/** One person at a supplier (GET /api/suppliers/:id/contacts). */
+export interface SupplierContact {
+  id: string;
+  supplier_id: string;
+  name: string | null;
+  email: string;
+  /** The roster, later: free text, not used to route anything yet. */
+  role: string | null;
+  priority: number | null;
+  /** The ONE address document requests to this supplier go to. */
+  is_document_contact: boolean;
+  active: boolean;
+  /** 'admin' | 'import' | null. */
+  source: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SupplierContactsResponse {
+  supplier: { id: string; name: string };
+  contacts: SupplierContact[];
+  /** The contact renewal requests go to, or null: "no document contact on file". */
+  document_contact: SupplierContact | null;
+}
+
+export interface SupplierContactWriteRequest {
+  name?: string | null;
+  email?: string;
+  role?: string | null;
+  priority?: number | null;
+  is_document_contact?: boolean;
+  active?: boolean;
+}
+
+export type RenewalRequestStage = import('./renewalRequestTemplate').RenewalRequestStage;
+
+/** A (document, due date) cycle. */
+export type RenewalRequestStatus = 'open' | 'satisfied' | 'stopped' | 'escalated';
+
+/** One stage of a cycle. */
+export type RenewalRequestSendStatus =
+  | 'pending'
+  | 'sent'
+  | 'failed'
+  | 'skipped'
+  | 'superseded'
+  | 'cancelled';
+
+/** Which rung named the approver (D-050). */
+export type RenewalApproverVia = 'owner_route' | 'master_user' | 'org_admins';
+
+export interface RenewalRequestSend {
+  id: string;
+  stage: RenewalRequestStage;
+  status: RenewalRequestSendStatus;
+  /** What the fixed template produced. Never rewritten. */
+  draft_subject: string;
+  draft_body: string;
+  /** Null: no single person resolved, any administrator may approve. */
+  approver_user_id: string | null;
+  approver_name: string | null;
+  approver_via: RenewalApproverVia | null;
+  drafted_at: string;
+  approved_by: string | null;
+  approved_by_name: string | null;
+  approved_at: string | null;
+  sent_at: string | null;
+  sent_to: string | null;
+  /** The EXACT text that left, link block included. Null until sent. */
+  sent_subject: string | null;
+  sent_body: string | null;
+  skipped_by_name: string | null;
+  skipped_at: string | null;
+  /** The mail provider's answer when a send was refused. */
+  failure: string | null;
+}
+
+export interface RenewalRequestItem {
+  id: string;
+  document: { id: string; title: string };
+  supplier: { id: string; name: string };
+  due_date: string;
+  status: RenewalRequestStatus;
+  /** Why a cycle ended: due_date_changed, document_archived, replacement_accepted ... */
+  status_reason: string | null;
+  escalated_at: string | null;
+  closed_at: string | null;
+  /** The document request the first approval issued; null before that. */
+  request_id: string | null;
+  /** Where an approved send will go right now. Null: no document contact on file. */
+  contact: { name: string | null; email: string } | null;
+  sends: RenewalRequestSend[];
+  /** The one draft waiting (or failed and retryable), if any. */
+  waiting_send_id: string | null;
+  /** Whether the CALLER may approve or skip the waiting draft. */
+  can_approve: boolean;
+  /** Requests that actually reached the supplier in this cycle (0-4). */
+  emails_sent: number;
+}
+
+export interface RenewalNotDraftedDocument {
+  document_id: string;
+  title: string;
+  due_date: string | null;
+  days_until: number | null;
+  supplier_id: string | null;
+  supplier_name: string | null;
+}
+
+/** Alerting documents no supplier request was drafted for, and why. */
+export interface RenewalNotDrafted {
+  /** The document names no supplier, so there is nobody to ask. */
+  no_supplier: RenewalNotDraftedDocument[];
+  /** The supplier has no document contact on file. */
+  no_contact: RenewalNotDraftedDocument[];
+  /** Already past the last follow-up window when first seen; nothing is opened. */
+  past_escalation: RenewalNotDraftedDocument[];
+}
+
+export interface RenewalRequestListResponse {
+  requests: RenewalRequestItem[];
+  not_drafted: RenewalNotDrafted;
+  /** The fixed block appended below every approved body, with a placeholder URL. */
+  link_block_preview: string;
+  /** False when RESEND_API_KEY is unset: drafts exist, nothing can be sent. */
+  email_configured: boolean;
+  /** Days past due after which reminders stop and the cycle is escalated. */
+  escalate_after_days: number;
+}
+
+export interface ApproveRenewalSendRequest {
+  subject: string;
+  body: string;
+}
+
+export interface ApproveRenewalSendResponse {
+  sent: boolean;
+  request: RenewalRequestItem;
+  /** Present when the send was refused. */
+  error?: string;
+  code?: 'email_not_configured' | 'no_document_contact' | 'send_failed';
+}
+
+/** What one run of the drafting pass did, per tenant. */
+export interface SupplierRequestRunResult {
+  drafted: Array<{
+    renewal_request_id: string;
+    send_id: string;
+    document_id: string;
+    stage: RenewalRequestStage;
+    approver_user_id: string | null;
+    approver_via: RenewalApproverVia;
+  }>;
+  superseded_count: number;
+  ended: Array<{
+    renewal_request_id: string;
+    document_id: string;
+    status: RenewalRequestStatus;
+    reason: string;
+  }>;
+  escalated: Array<{ renewal_request_id: string; document_id: string; emails_sent: number }>;
+  /** Admins told about the escalations of this run. */
+  escalation_notified: string[];
+  escalation_notice_sent: boolean;
+  not_drafted: RenewalNotDrafted;
+  /** How each waiting draft was announced to its approver in this run. */
+  approver_notices: Array<{
+    send_ids: string[];
+    recipients: string[];
+    via: 'owner_digest' | 'notice';
+    sent: boolean;
+  }>;
+  /** The pass failed and was skipped; the internal alert still ran. */
+  error?: string;
+}
+
+/** GET/PUT /api/expirations/default-owner -- the tenant's master user (D-050). */
+export interface RenewalDefaultOwnerResponse {
+  tenant_id: string;
+  user_id: string | null;
+  user_name: string | null;
+  user_email: string | null;
+  /** False when the stored user is inactive or gone: it no longer resolves. */
+  resolves: boolean;
+  updated_at: string | null;
+  updated_by_name: string | null;
+  /** Active users of this organisation who can be chosen. */
+  candidates: Array<{ id: string; name: string; email: string; role: string }>;
 }

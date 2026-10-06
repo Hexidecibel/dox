@@ -65,7 +65,7 @@ export const SUPPLIER_LIST_COLUMNS: readonly SupplierListColumn[] = [
     key: 'supplier_contact_email',
     header: 'Supplier contact email',
     required: false,
-    help: 'Optional. Recorded on the import for reference.',
+    help: 'Optional. Added to the supplier\'s contacts when the list is applied; the first address becomes the document contact (where renewal requests are sent) if the supplier has none.',
     synonyms: ['contact email', 'email', 'supplier email', 'contact'],
   },
   {
