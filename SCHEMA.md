@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 140 tables, 2 views, 248 indexes, 47 triggers.
+Objects: 145 tables, 2 views, 260 indexes, 47 triggers.
 
 ## Core documents & versions
 
@@ -308,6 +308,29 @@ Triggers: `trg_products_ad_fts`, `trg_products_ai_fts`, `trg_products_au_fts`, `
   tenant_id UNINDEXED
   tokenize = "unicode61 remove_diacritics 2 tokenchars '-_/.'"
 ```
+
+### `supplier_contacts`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE
+  name TEXT
+  email TEXT NOT NULL
+  email_norm TEXT NOT NULL
+  role TEXT
+  priority INTEGER
+  is_document_contact INTEGER NOT NULL DEFAULT 1
+  active INTEGER NOT NULL DEFAULT 1
+  source TEXT
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_by TEXT
+  UNIQUE(supplier_id, email_norm)
+```
+
+Indexes: `idx_supplier_contacts_document_contact`, `idx_supplier_contacts_supplier`
 
 ### `supplier_extraction_instructions`
 
@@ -831,6 +854,8 @@ Indexes: `idx_lms_order_item`, `idx_lms_tenant_status`
   lot_id TEXT REFERENCES lots(id)
   coa_match_status TEXT DEFAULT 'unmatched'
   coa_matched_at TEXT
+  picked_by TEXT
+  picked_at TEXT
 ```
 
 Indexes: `idx_order_items_lot`, `idx_order_items_lot_id`, `idx_order_items_order`
@@ -858,6 +883,8 @@ Triggers: `trg_order_items_ad_fts`, `trg_order_items_ai_fts`, `trg_order_items_a
   extended_metadata TEXT
   staged_at TEXT
   confidence REAL
+  ship_date TEXT
+  created_by TEXT
   UNIQUE(tenant_id, order_number)
 ```
 
@@ -1266,6 +1293,9 @@ Indexes: `idx_sessions_user`
   renewal_alert_lead_days INTEGER CHECK (renewal_alert_lead_days IS NULL OR renewal_alert_lead_days BETWEEN 7 AND 365)
   renewal_alert_lead_updated_at TEXT
   renewal_alert_lead_updated_by TEXT
+  default_owner_user_id TEXT
+  default_owner_updated_at TEXT
+  default_owner_updated_by TEXT
 ```
 
 ### `users`
@@ -1505,6 +1535,7 @@ Indexes: `idx_document_claims_document`, `idx_document_claims_subject`, `idx_doc
   download_count INTEGER NOT NULL DEFAULT 0
   last_downloaded_at TEXT
   revoked_by TEXT REFERENCES users(id)
+  never_expires INTEGER NOT NULL DEFAULT 0
 ```
 
 Indexes: `idx_document_export_links_sender`, `idx_document_export_links_tenant`, `idx_document_export_links_token`
@@ -1729,6 +1760,54 @@ Indexes: `idx_intake_duplicates_decision_document`, `idx_intake_duplicates_docum
   FOREIGN KEY (tenant_id, owner_key) REFERENCES owner_labels(tenant_id, owner_key) ON DELETE CASCADE
 ```
 
+### `order_send_files`
+
+```sql
+  id TEXT PRIMARY KEY
+  send_id TEXT NOT NULL REFERENCES order_sends(id) ON DELETE CASCADE
+  tenant_id TEXT NOT NULL
+  position INTEGER NOT NULL
+  document_id TEXT NOT NULL
+  version_number INTEGER
+  document_ids TEXT NOT NULL CHECK (json_valid(document_ids))
+  document_title TEXT
+  lot_label TEXT
+  file_name TEXT NOT NULL
+  bytes INTEGER NOT NULL DEFAULT 0
+  checksum TEXT
+  part_number INTEGER NOT NULL
+  delivery TEXT NOT NULL CHECK (delivery IN ('attachment', 'link'))
+  source TEXT NOT NULL CHECK (source IN ('document', 'original'))
+  source_queue_id TEXT
+  export_link_id TEXT
+  sent_ok INTEGER NOT NULL DEFAULT 0
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+```
+
+Indexes: `idx_order_send_files_document`, `idx_order_send_files_send`
+
+### `order_sends`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  order_id TEXT NOT NULL
+  order_number TEXT NOT NULL
+  customer_id TEXT
+  customer_name TEXT
+  sent_by TEXT NOT NULL REFERENCES users(id)
+  recipients TEXT NOT NULL CHECK (json_valid(recipients))
+  subject TEXT NOT NULL
+  message TEXT
+  part_count INTEGER NOT NULL
+  parts TEXT CHECK (parts IS NULL OR json_valid(parts))
+  status TEXT NOT NULL CHECK (status IN ('sent', 'partial', 'failed'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+```
+
+Indexes: `idx_order_sends_order`, `idx_order_sends_sender`, `idx_order_sends_tenant`
+
 ### `owner_labels`
 
 ```sql
@@ -1796,6 +1875,57 @@ Indexes: `idx_product_requirements_product`, `idx_product_requirements_requireme
 ```
 
 Indexes: `idx_renewal_alert_state_doc`
+
+### `renewal_request_sends`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  renewal_request_id TEXT NOT NULL REFERENCES renewal_requests(id) ON DELETE CASCADE
+  stage TEXT NOT NULL CHECK (stage IN ('window_open', 'day_of', 'plus_7', 'plus_14'))
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed', 'skipped', 'superseded', 'cancelled'))
+  draft_subject TEXT NOT NULL
+  draft_body TEXT NOT NULL
+  approver_user_id TEXT
+  approver_via TEXT
+  drafted_as_of TEXT NOT NULL
+  drafted_at TEXT NOT NULL DEFAULT (datetime('now'))
+  notified_at TEXT
+  approved_by TEXT
+  approved_at TEXT
+  sent_at TEXT
+  sent_to TEXT
+  sent_subject TEXT
+  sent_body TEXT
+  skipped_by TEXT
+  skipped_at TEXT
+  failure TEXT
+  attempt_count INTEGER NOT NULL DEFAULT 0
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  UNIQUE(renewal_request_id, stage)
+```
+
+Indexes: `idx_renewal_request_sends_approver`, `idx_renewal_request_sends_tenant_status`
+
+### `renewal_requests`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE
+  due_date TEXT NOT NULL
+  request_id TEXT REFERENCES document_requests(id) ON DELETE SET NULL
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'satisfied', 'stopped', 'escalated'))
+  status_reason TEXT
+  escalated_at TEXT
+  closed_at TEXT
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  UNIQUE(document_id, due_date)
+```
+
+Indexes: `idx_renewal_requests_request`, `idx_renewal_requests_supplier`, `idx_renewal_requests_tenant_status`
 
 ### `request_lines`
 
