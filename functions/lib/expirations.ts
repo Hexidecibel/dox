@@ -183,6 +183,14 @@ export interface ExpirationRow {
   title: string;
   primary_category_name: string | null;
   owner: string | null;
+  /**
+   * documents.supplier_id / document_type_id. Carried for the supplier renewal
+   * request (0133): a request is drafted to the supplier the document came
+   * from, and a row with no supplier is reported as one nobody can be asked
+   * about. Never shown to a supplier.
+   */
+  supplier_id: string | null;
+  document_type_id: string | null;
   renewal_type: RenewalType | 'unknown';
   /** The resolved next-action date (canonical). */
   renewal_due_date: string | null;
@@ -354,6 +362,7 @@ interface RawDocRow {
   type_renewal_window: string | null;
   type_renewal_alert_lead_days: number | null;
   document_type_id: string | null;
+  supplier_id: string | null;
 }
 
 const DOC_SQL = `
@@ -363,6 +372,7 @@ const DOC_SQL = `
     dt.name                       AS primary_category_name,
     d.owner                       AS owner,
     d.document_type_id            AS document_type_id,
+    d.supplier_id                 AS supplier_id,
     d.renewal_type                AS renewal_type,
     d.renewal_due_date            AS renewal_due_date,
     d.renewal_interval_months     AS renewal_interval_months,
@@ -482,6 +492,8 @@ export async function computeExpirations(
       title: r.title,
       primary_category_name: r.primary_category_name,
       owner: r.owner,
+      supplier_id: r.supplier_id ?? null,
+      document_type_id: r.document_type_id ?? null,
       renewal_type: bucket,
       renewal_due_date: due_date,
       status,
