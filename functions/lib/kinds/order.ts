@@ -48,7 +48,53 @@ export interface IngestOrdersResult {
    * failures are VISIBLE instead of being swallowed into output.errors.
    */
   errorMessages: string[];
+  /**
+   * Plain-words notes about what the write did that a person should know and
+   * that is NOT an error: today, one per order on which lines a person had
+   * decided were kept instead of being replaced by the file's. Shown with the
+   * approval's summary and written to its audit row and the connector run.
+   */
+  notes: string[];
 }
+
+/** An existing line of an order being re-ingested, with whether a PERSON has decided anything on it. */
+interface ExistingLine {
+  id: string;
+  product_code: string | null;
+  product_name: string | null;
+  lot_number: string | null;
+  picked_by: string | null;
+  suggestions: number;
+  decided: number;
+}
+
+/** Case, surrounding and repeated whitespace fold; nothing else, so "L-100" is not "L100". */
+function lineToken(value: unknown): string {
+  return String(value ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * Is this connector line the same line as an existing one?
+ *
+ * By what the line IS: the same lot, and the same product -- by code when both
+ * sides print one, by name otherwise. A different lot of the same product is a
+ * different line (it ships under a different certificate), which is exactly
+ * the case a person-picked line has to survive.
+ */
+function sameLine(existing: ExistingLine, item: { product_code?: string | null; product_name?: string | null; lot_number?: string | null }): boolean {
+  if (lineToken(existing.lot_number) !== lineToken(item.lot_number)) return false;
+  const a = lineToken(existing.product_code);
+  const b = lineToken(item.product_code);
+  if (a && b) return a === b;
+  return lineToken(existing.product_name) === lineToken(item.product_name);
+}
+
+/** A person picked this line's certificate (0134), or accepted / rejected a suggestion on it. */
+function personDecided(line: ExistingLine): boolean {
+  return !!line.picked_by || line.decided > 0;
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /**
  * Build the canonical contact list for a parsed customer.
@@ -179,6 +225,7 @@ export async function ingestOrders(
   // Upsert orders
   let ordersCreated = 0;
   let ordersStaged = 0;
+  const notes: string[] = [];
   const orderSideScheme = orderSideSchemeResolver(db, tenantId);
   for (const order of output.orders) {
     try {
@@ -272,20 +319,15 @@ export async function ingestOrders(
       }
       if (isStaged) ordersStaged++;
 
-      // Insert order items (delete existing first for idempotency). Items
-      // inherit the order's stage state so the review UI can show/edit them
-      // together. Per-item confidence is preserved so the reviewer can spot
-      // which line dragged the order down.
+      // Write the order's lines. Items inherit the order's stage state so the
+      // review UI can show/edit them together. Per-item confidence is preserved
+      // so the reviewer can spot which line dragged the order down.
       if (order.items.length > 0) {
-        await db.prepare(`DELETE FROM order_items WHERE order_id = ?`).bind(orderId).run();
-        for (const item of order.items) {
-          const itemId = generateId();
-          const itemConfidence = typeof item._confidence === 'number' ? item._confidence : null;
-
-          // Phase 2 entity graph: resolve product + lot so order lines can be
-          // matched to COAs by lot. Supplier is unknown on the order side
-          // (nullable). All best-effort — a resolution hiccup must never fail
-          // the order upsert.
+        // Phase 2 entity graph: resolve product + lot so order lines can be
+        // matched to COAs by lot. Supplier is unknown on the order side
+        // (nullable). All best-effort — a resolution hiccup must never fail
+        // the order upsert.
+        const resolveLine = async (item: (typeof order.items)[number]) => {
           let lineProductId: string | null = null;
           let lineLotId: string | null = null;
           if (item.product_name) {
@@ -311,7 +353,30 @@ export async function ingestOrders(
               lineLotId = lot?.id ?? null;
             } catch { /* non-fatal */ }
           }
+          return { lineProductId, lineLotId };
+        };
 
+        // Try to match a line against existing COAs by lot.
+        const linkLine = async (itemId: string, lineLotId: string | null, lineProductId: string | null) => {
+          if (!lineLotId) return;
+          try {
+            await linkOrderToCoas(db, tenantId, {
+              orderItemId: itemId,
+              lotId: lineLotId,
+              productId: lineProductId,
+            });
+          } catch (err) {
+            console.warn(
+              `[orchestrator] linkOrderToCoas failed for order_item ${itemId}:`,
+              err instanceof Error ? err.message : String(err)
+            );
+          }
+        };
+
+        const insertLine = async (item: (typeof order.items)[number]) => {
+          const itemId = generateId();
+          const itemConfidence = typeof item._confidence === 'number' ? item._confidence : null;
+          const { lineProductId, lineLotId } = await resolveLine(item);
           await db.prepare(
             `INSERT INTO order_items (id, order_id, product_id, product_name, product_code, quantity, lot_number,
              lot_id, confidence, staged_at)
@@ -322,21 +387,80 @@ export async function ingestOrders(
             item.quantity || null, item.lot_number || null,
             lineLotId, itemConfidence, stagedAt
           ).run();
+          await linkLine(itemId, lineLotId, lineProductId);
+        };
 
-          // Try to match this line against existing COAs by lot.
-          if (lineLotId) {
-            try {
-              await linkOrderToCoas(db, tenantId, {
-                orderItemId: itemId,
-                lotId: lineLotId,
-                productId: lineProductId,
-              });
-            } catch (err) {
-              console.warn(
-                `[orchestrator] linkOrderToCoas failed for order_item ${itemId}:`,
-                err instanceof Error ? err.message : String(err)
-              );
+        // What is on the order already, and whether a PERSON decided any of it.
+        // A fresh order has nothing; an order no person touched and the matcher
+        // never wrote a suggestion for takes the path it always took.
+        const existingLines: ExistingLine[] = existing
+          ? ((await db.prepare(
+              `SELECT oi.id, oi.product_code, oi.product_name, oi.lot_number, oi.picked_by,
+                      (SELECT COUNT(*) FROM lot_match_suggestions s WHERE s.order_item_id = oi.id) AS suggestions,
+                      (SELECT COUNT(*) FROM lot_match_suggestions s
+                        WHERE s.order_item_id = oi.id AND COALESCE(s.status, 'pending') != 'pending') AS decided
+                 FROM order_items oi WHERE oi.order_id = ? ORDER BY oi.created_at, oi.id`
+            ).bind(orderId).all<ExistingLine>()).results ?? [])
+          : [];
+        const untouched = existingLines.every((l) => !l.picked_by && Number(l.suggestions) === 0);
+
+        if (untouched) {
+          // Delete existing first for idempotency — the original behaviour,
+          // unchanged for every order nobody has worked on.
+          await db.prepare(`DELETE FROM order_items WHERE order_id = ?`).bind(orderId).run();
+          for (const item of order.items) await insertLine(item);
+        } else {
+          // Somebody (or the matcher) has hung something off these lines. A
+          // suggestion row references its line with no ON DELETE action, so the
+          // blanket delete above cannot run here — it failed the whole order
+          // with a foreign-key error, which is the only reason a person's pick
+          // used to survive a re-ingest, and why the connector's update was
+          // lost with it. So: reconcile line by line.
+          const consumed = new Set<string>();
+          let added = 0;
+          let updated = 0;
+          let removed = 0;
+          for (const item of order.items) {
+            const match = existingLines.find((l) => !consumed.has(l.id) && sameLine(l, item));
+            if (!match) {
+              await insertLine(item);
+              added++;
+              continue;
             }
+            consumed.add(match.id);
+            // A line a person decided is NEVER overwritten: not its quantity,
+            // not its product, not its certificate. The file agreeing that the
+            // line exists changes nothing about what the person did with it.
+            if (personDecided(match)) continue;
+            const itemConfidence = typeof item._confidence === 'number' ? item._confidence : null;
+            const { lineProductId, lineLotId } = await resolveLine(item);
+            await db.prepare(
+              `UPDATE order_items SET product_id = ?, product_name = ?, product_code = ?, quantity = ?,
+                      lot_number = ?, lot_id = ?, confidence = ?, staged_at = ?
+                WHERE id = ?`
+            ).bind(
+              lineProductId, item.product_name || null, item.product_code || null,
+              item.quantity || null, item.lot_number || null,
+              lineLotId, itemConfidence, stagedAt, match.id
+            ).run();
+            updated++;
+            await linkLine(match.id, lineLotId, lineProductId);
+          }
+          // Lines the file no longer lists: removed as before, unless a person
+          // decided something on them. An undecided line has only the matcher's
+          // own pending suggestions, which go with it.
+          for (const line of existingLines) {
+            if (consumed.has(line.id) || personDecided(line)) continue;
+            await db.prepare(`DELETE FROM lot_match_suggestions WHERE order_item_id = ?`).bind(line.id).run();
+            await db.prepare(`DELETE FROM order_items WHERE id = ?`).bind(line.id).run();
+            removed++;
+          }
+          const kept = existingLines.filter(personDecided).length;
+          if (kept > 0) {
+            notes.push(
+              `Order ${orderNumber}: kept ${plural(kept, 'line')} a person had decided (not changed by this file). ` +
+              `The file listed ${plural(order.items.length, 'line')}: ${added} added, ${removed} removed, ${updated} updated.`
+            );
           }
         }
       }
@@ -375,5 +499,6 @@ export async function ingestOrders(
     customersCreated,
     errors: errorCount,
     errorMessages,
+    notes,
   };
 }
