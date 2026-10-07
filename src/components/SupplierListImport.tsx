@@ -37,12 +37,14 @@ import {
   UploadFile as UploadIcon,
 } from '@mui/icons-material';
 import { api } from '../lib/api';
+import { ITEM_APPROVAL_LABELS } from '../../shared/itemApproval';
 import {
   SUPPLIER_LIST_COLUMNS,
   supplierListTemplateCsv,
 } from '../../shared/supplierListTemplate';
 import type {
   SupplierListDerivedLine,
+  SupplierListApprovalOutcome,
   SupplierListImportResponse,
   SupplierListImportRun,
 } from '../../shared/types';
@@ -86,6 +88,68 @@ function readFile(file: File): Promise<{ csv?: string; xlsx_base64?: string }> {
   });
 }
 
+const APPROVAL_ACTION_LABEL: Record<SupplierListApprovalOutcome['action'], string> = {
+  set: 'Will be set',
+  unchanged: 'Already says so',
+  kept_person: 'Kept: a person decided',
+  unresolved: 'Not recorded: item not in the catalog',
+  conflict: 'Not changed: the rows disagree',
+};
+
+/**
+ * What the Approved column does to each item's approval (migration 0135).
+ * Rows that change nothing because they already agree are counted, not
+ * listed: the table is what a person has to read before pressing Apply.
+ */
+function ItemApprovalPreview({ approvals }: { approvals: SupplierListApprovalOutcome[] }) {
+  if (approvals.length === 0) return null;
+  const shown = approvals.filter((a) => a.action !== 'unchanged');
+  const unchanged = approvals.length - shown.length;
+  return (
+    <Box sx={{ mt: 2 }} data-testid="item-approval-preview">
+      <Typography variant="subtitle2">Item approvals</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+        The Approved column also sets whether each item is approved from that supplier. A decision a person
+        made is never overridden.
+        {unchanged > 0 ? ` ${unchanged} already ${unchanged === 1 ? 'says' : 'say'} what the list says.` : ''}
+      </Typography>
+      {shown.length > 0 && (
+        <Box sx={{ overflowX: 'auto' }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Supplier</TableCell>
+                <TableCell>Item</TableCell>
+                <TableCell>The list says</TableCell>
+                <TableCell>On file</TableCell>
+                <TableCell>What happens</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {shown.map((a) => (
+                <TableRow key={`${a.supplier_name}|${a.product_label}|${a.lines.join(',')}`}>
+                  <TableCell>{a.supplier_name}</TableCell>
+                  <TableCell>{a.product_label}</TableCell>
+                  <TableCell>{a.listed ? ITEM_APPROVAL_LABELS[a.listed] : '—'}</TableCell>
+                  <TableCell>{a.current ? ITEM_APPROVAL_LABELS[a.current] : 'Nothing yet'}</TableCell>
+                  <TableCell>
+                    {APPROVAL_ACTION_LABEL[a.action]}
+                    {a.reason ? (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                        {a.reason}
+                      </Typography>
+                    ) : null}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
 export function importSummary(r: SupplierListImportResponse): string {
   const c = r.counts;
   const parts = [
@@ -98,6 +162,8 @@ export function importSummary(r: SupplierListImportResponse): string {
   if (c.requirements_held_unconfirmed) parts.push(`${c.requirements_held_unconfirmed} left unconfirmed (the list implies a lower tier)`);
   if (c.requirements_newly_flagged) parts.push(`${c.requirements_newly_flagged} no longer on the list (flagged)`);
   if (c.contacts_added) parts.push(`${c.contacts_added} contact address${c.contacts_added === 1 ? '' : 'es'} to add`);
+  if (c.approvals_set) parts.push(`${c.approvals_set} item approval${c.approvals_set === 1 ? '' : 's'} to set`);
+  if (c.approvals_kept_person_set) parts.push(`${c.approvals_kept_person_set} approval${c.approvals_kept_person_set === 1 ? '' : 's'} kept as a person decided`);
   return parts.join(' · ');
 }
 
@@ -330,6 +396,8 @@ export default function SupplierListImport({ tenantId, onApplied }: SupplierList
               </AccordionDetails>
             </Accordion>
           ))}
+
+          <ItemApprovalPreview approvals={preview.approvals ?? []} />
 
           <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
             <Button variant="contained" disabled={busy || preview.counts.rows_accepted === 0} onClick={() => void send(false)}>

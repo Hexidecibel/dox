@@ -358,6 +358,7 @@ export interface MergeSuppliersResult {
  *   Requests (plain): document_requests, request_links, request_uploads,
  *     renewal_requests (0133)
  *   Contacts (0133): supplier_contacts, one per address, one document contact
+ *   Facilities (0135): supplier_facilities, one per name; items re-pointed
  *
  * THE REQUEST TABLES WERE MISSING FROM THIS LIST UNTIL 0133, and every one of
  * them references suppliers ON DELETE CASCADE. A merge therefore DELETED every
@@ -549,6 +550,49 @@ export async function mergeSuppliers(
       }
     } catch {
       // Pre-0133 database: no contacts table.
+    }
+
+    // Facilities (0135). UNIQUE(supplier_id, name_norm): a facility both have
+    // is kept once, as the winner's row, and the items that named the loser's
+    // copy are re-pointed at it FIRST -- the delete would otherwise SET NULL
+    // their facility and lose which plant they come from.
+    try {
+      const before = await db
+        .prepare('SELECT COUNT(*) AS c FROM supplier_facilities WHERE supplier_id = ? AND tenant_id = ?')
+        .bind(loserId, tenantId)
+        .first<{ c: number }>();
+      const beforeN = before?.c ?? 0;
+      if (beforeN > 0) {
+        await db
+          .prepare(
+            `UPDATE product_suppliers
+                SET facility_id = (SELECT w.id FROM supplier_facilities w
+                                     JOIN supplier_facilities l ON l.name_norm = w.name_norm
+                                    WHERE l.id = product_suppliers.facility_id AND w.supplier_id = ?)
+              WHERE facility_id IN (SELECT l.id FROM supplier_facilities l
+                                      JOIN supplier_facilities w
+                                        ON w.name_norm = l.name_norm AND w.supplier_id = ?
+                                     WHERE l.supplier_id = ?)`,
+          )
+          .bind(winnerId, winnerId, loserId)
+          .run();
+        await db
+          .prepare('UPDATE OR IGNORE supplier_facilities SET supplier_id = ? WHERE supplier_id = ? AND tenant_id = ?')
+          .bind(winnerId, loserId, tenantId)
+          .run();
+        const after = await db
+          .prepare('SELECT COUNT(*) AS c FROM supplier_facilities WHERE supplier_id = ? AND tenant_id = ?')
+          .bind(loserId, tenantId)
+          .first<{ c: number }>();
+        const leftover = after?.c ?? 0;
+        reassigned.supplier_facilities = (reassigned.supplier_facilities || 0) + (beforeN - leftover);
+        await db
+          .prepare('DELETE FROM supplier_facilities WHERE supplier_id = ? AND tenant_id = ?')
+          .bind(loserId, tenantId)
+          .run();
+      }
+    } catch {
+      // Pre-0135 database: no facilities table.
     }
 
     // Fold loser name + aliases into winner aliases (case-insensitive dedup).

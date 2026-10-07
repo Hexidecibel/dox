@@ -124,9 +124,145 @@ components:
         flagged: { type: array, items: { type: object }, description: Derived rows the list no longer implies. Flagged, never deleted. }
         rows: { type: array, items: { type: object }, description: Per input row, what became of it. }
         unmatched: { type: array, items: { type: object }, description: Products and claims the row named that the tenant does not hold. Reported, never invented. }
+        approvals:
+          type: array
+          description: |
+            Migration 0135. What the Approved column does to each
+            supplier-and-item pair. `action` is set / unchanged / kept_person
+            (a person decided; never overridden) / unresolved (the product is
+            not in the catalog) / conflict (the list's rows disagree). A dry
+            run reports these and writes nothing.
+          items:
+            type: object
+            properties:
+              lines: { type: array, items: { type: integer } }
+              supplier_id: { type: string, nullable: true }
+              supplier_name: { type: string }
+              product_id: { type: string, nullable: true }
+              product_label: { type: string }
+              listed: { type: string, nullable: true, enum: [approved, pending, not_approved] }
+              current: { type: string, nullable: true, enum: [approved, pending, not_approved] }
+              current_source: { type: string, nullable: true }
+              action: { type: string, enum: [set, unchanged, kept_person, unresolved, conflict] }
+              reason: { type: string, nullable: true }
         rule_problems: { type: array, items: { type: string } }
         unrecognized_headers: { type: array, items: { type: string } }
         rules: { type: object, description: The rules in force for this pack, echoed back. }
+    ApprovedItem:
+      type: object
+      description: One item from one supplier (migration 0135). Approval is separate from `supplied`.
+      properties:
+        link_id: { type: string, nullable: true, description: The product_suppliers row. Null = a legacy-only link made after 0135 with nothing recorded yet. }
+        product_id: { type: string }
+        product_name: { type: string }
+        product_active: { type: boolean }
+        our_sku: { type: string, nullable: true }
+        supplier_id: { type: string }
+        supplier_name: { type: string }
+        facility:
+          type: object
+          nullable: true
+          description: Null = no facility recorded. The item counts toward the whole supplier.
+          properties:
+            id: { type: string }
+            name: { type: string }
+            plant_code: { type: string, nullable: true }
+            active: { type: boolean }
+        approval_status: { type: string, enum: [approved, pending, not_approved] }
+        approval_source: { type: string, nullable: true, enum: [initial, person, import], description: initial = on file when approvals were introduced and nobody decided it. Null = nothing said yet. }
+        approval_decided_at: { type: string, nullable: true }
+        approval_decided_by: { type: string, nullable: true }
+        approval_decided_by_name: { type: string, nullable: true }
+        approval_note: { type: string, nullable: true }
+        supplied: { type: boolean, description: Not marked no longer supplied. Independent of approval. }
+        discontinued_at: { type: string, nullable: true }
+        link_source: { type: string, nullable: true }
+        brand_owner: { type: string, nullable: true }
+        producer: { type: string, nullable: true }
+        plant_code: { type: string, nullable: true }
+        private_label: { type: boolean, description: Brand owner and producer both recorded and different. Display only. }
+    SupplierFacility:
+      type: object
+      properties:
+        id: { type: string }
+        supplier_id: { type: string }
+        name: { type: string }
+        plant_code: { type: string, nullable: true, description: Recorded, never matched on }
+        notes: { type: string, nullable: true }
+        active: { type: boolean }
+        item_count: { type: integer }
+        created_at: { type: string }
+        updated_at: { type: string }
+    SupplierFacilities:
+      type: object
+      properties:
+        supplier:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+        facilities:
+          type: array
+          items: { $ref: '#/components/schemas/SupplierFacility' }
+    CustomerContact:
+      type: object
+      properties:
+        id: { type: string }
+        customer_id: { type: string }
+        name: { type: string, nullable: true }
+        email: { type: string }
+        role: { type: string, nullable: true }
+        is_primary: { type: boolean }
+        coa_recipient: { type: boolean, description: Pre-filled as a recipient when an order's documents are sent }
+        created_at: { type: string }
+        updated_at: { type: string }
+    CustomerContacts:
+      type: object
+      properties:
+        customer:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+            email: { type: string, nullable: true }
+        contacts:
+          type: array
+          items: { $ref: '#/components/schemas/CustomerContact' }
+    CustomerItemRequirement:
+      type: object
+      description: What one customer needs for one item (migration 0135).
+      properties:
+        id: { type: string }
+        customer_id: { type: string }
+        product_id: { type: string }
+        product_name: { type: string }
+        product_active: { type: boolean }
+        coa_required: { type: string, enum: ['yes', 'no', on_request] }
+        must_show: { type: string, nullable: true }
+        timing: { type: string, nullable: true }
+        delivery_contact_id: { type: string, nullable: true }
+        delivery_contact:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            name: { type: string, nullable: true }
+            email: { type: string }
+        source: { type: string, nullable: true }
+        notes: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string }
+    CustomerItemRequirements:
+      type: object
+      properties:
+        customer:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+        requirements:
+          type: array
+          items: { $ref: '#/components/schemas/CustomerItemRequirement' }
     SupplierContact:
       type: object
       properties:
@@ -3841,8 +3977,17 @@ paths:
   /api/suppliers/{id}/products/{productId}:
     put:
       tags: [Suppliers]
-      summary: No longer supplied / nothing owed per product
+      summary: No longer supplied / nothing owed per product; approval and facility
       description: |
+        Migration 0135 adds `approval_status` (+ `approval_note`) and
+        `facility_id`. Approval is a separate fact from `discontinued`.
+        `not_approved` needs a note (400, and nothing else in the request is
+        applied). A decision made here is stamped `approval_source: person`
+        and is never overridden by the supplier list. `facility_id` must be
+        one of this supplier's facilities that is in use, or null. Audited
+        `product_supplier.approval_decided` / `product_supplier.facility_set`.
+        Neither changes a gap, a renewal, a search answer or an order send.
+
         Migration 0123. super_admin / org_admin. `discontinued` marks the link
         no longer supplied (the product leaves per-product checking and is
         named in a caveat); `nothing_owed_reason` declares the product owes
@@ -3862,9 +4007,12 @@ paths:
               properties:
                 discontinued: { type: boolean }
                 nothing_owed_reason: { type: string, nullable: true }
+                approval_status: { type: string, enum: [approved, pending, not_approved] }
+                approval_note: { type: string, nullable: true, description: Required with not_approved }
+                facility_id: { type: string, nullable: true }
       responses:
         '200': { description: The link row after the change }
-        '400': { description: Nothing to change, or a declaration without a reason }
+        '400': { description: 'Nothing to change, a declaration without a reason, not_approved without a note, or a facility that is not this supplier''s or is retired' }
         '404': { description: Supplier or product not found, or not linked }
 
   /api/spec-gaps:
@@ -3901,6 +4049,327 @@ paths:
                   total: { type: integer }
                   limit: { type: integer }
                   offset: { type: integer }
+
+  /api/approved-items:
+    get:
+      tags: [Suppliers]
+      summary: The approved item list - one row per item-and-supplier pair
+      description: |
+        Migration 0135. Any role in the organization. Approval
+        (`approval_status`) and whether the item is currently supplied
+        (`supplied`) are separate facts and both are returned. `counts`
+        ignore the `approval` filter. `private_label` is a display flag.
+        Nothing is blocked by this list, and no gap, renewal or search answer
+        reads it. Change an approval with
+        `PUT /api/suppliers/{id}/products/{productId}`.
+      parameters:
+        - { name: supplier_id, in: query, schema: { type: string } }
+        - { name: product_id, in: query, schema: { type: string } }
+        - { name: facility_id, in: query, schema: { type: string } }
+        - { name: approval, in: query, schema: { type: string, enum: [approved, pending, not_approved] } }
+        - { name: supplied, in: query, schema: { type: string, enum: ['1', '0'] }, description: 1 = currently supplied, 0 = no longer supplied }
+        - { name: q, in: query, schema: { type: string }, description: 'Item, supplier, brand owner, producer, facility or any identifier of the item' }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+        - { name: tenant_id, in: query, schema: { type: string }, description: super_admin only }
+      responses:
+        '200':
+          description: The pairs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ApprovedItem' }
+                  total: { type: integer }
+                  counts:
+                    type: object
+                    properties:
+                      approved: { type: integer }
+                      pending: { type: integer }
+                      not_approved: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        '400': { description: An unknown approval or supplied value, or no tenant for a super_admin }
+
+  /api/suppliers/{id}/facilities:
+    get:
+      tags: [Suppliers]
+      summary: The supplier's facilities
+      description: Migration 0135. Any role in the tenant. Each facility carries `item_count`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Facilities
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierFacilities' }
+        '404': { description: Supplier not found in the tenant }
+    post:
+      tags: [Suppliers]
+      summary: Add a facility
+      description: |
+        org_admin / super_admin. A facility is added by a person; nothing
+        infers one from a certificate. One per name under a supplier (case and
+        spacing ignored). Audited `supplier.facility_added`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                plant_code: { type: string, nullable: true }
+                notes: { type: string, nullable: true }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierFacilities' }
+        '400': { description: No name }
+        '409': { description: The supplier already has a facility of that name }
+
+  /api/suppliers/{id}/facilities/{facilityId}:
+    put:
+      tags: [Suppliers]
+      summary: Edit, retire or reactivate a facility
+      description: |
+        org_admin / super_admin. `active: false` retires it: items that name
+        it keep it and no new item can take it. Audited
+        `supplier.facility_updated`; a save that changes nothing writes no row.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: facilityId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                plant_code: { type: string, nullable: true }
+                notes: { type: string, nullable: true }
+                active: { type: boolean }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierFacilities' }
+        '404': { description: Facility not found for this supplier }
+        '409': { description: Another facility of this supplier has that name }
+    delete:
+      tags: [Suppliers]
+      summary: Remove a facility
+      description: |
+        org_admin / super_admin. The items that named it go back to "no
+        facility recorded" (`cleared_items`); no item is removed. Audited
+        `supplier.facility_removed` with the whole row and the item ids.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: facilityId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The remaining facilities and how many items were cleared
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/SupplierFacilities' }
+                  - type: object
+                    properties:
+                      cleared_items: { type: integer }
+
+  /api/customers/{id}/contacts:
+    get:
+      tags: [Orders]
+      summary: The people at a customer and who receives COAs
+      description: |
+        Migration 0135. Any role in the tenant. Contacts with `coa_recipient`
+        are pre-filled on an order send; the sender can still edit the list.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Contacts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerContacts' }
+        '404': { description: Customer not found in the tenant }
+    post:
+      tags: [Orders]
+      summary: Add a customer contact
+      description: |
+        org_admin / super_admin. `coa_recipient` defaults true; the first
+        contact is the primary unless told otherwise. Audited
+        `customer.contact_added`. Adding a contact sends nothing.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+                name: { type: string, nullable: true }
+                role: { type: string, nullable: true }
+                is_primary: { type: boolean }
+                coa_recipient: { type: boolean }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerContacts' }
+        '400': { description: Missing or invalid email }
+        '409': { description: The customer already has a contact at that address }
+
+  /api/customers/{id}/contacts/{contactId}:
+    put:
+      tags: [Orders]
+      summary: Edit a customer contact
+      description: org_admin / super_admin. Naming a new primary steps the previous one down. Audited `customer.contact_updated`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: contactId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string }
+                name: { type: string, nullable: true }
+                role: { type: string, nullable: true }
+                is_primary: { type: boolean }
+                coa_recipient: { type: boolean }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerContacts' }
+        '404': { description: Contact not found for this customer }
+        '409': { description: Another contact of this customer has that address }
+    delete:
+      tags: [Orders]
+      summary: Remove a customer contact
+      description: |
+        org_admin / super_admin. A COA requirement that named it keeps its
+        other details and has no delivery contact. Audited
+        `customer.contact_removed`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: contactId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The remaining contacts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerContacts' }
+
+  /api/customers/{id}/item-requirements:
+    get:
+      tags: [Orders]
+      summary: What this customer needs for each item
+      description: Migration 0135. Any role in the tenant. One row per customer and item.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Requirements
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerItemRequirements' }
+        '404': { description: Customer not found in the tenant }
+    post:
+      tags: [Orders]
+      summary: Add a COA requirement for an item
+      description: |
+        org_admin / super_admin. A requirement decides nothing: the order
+        review prints it beside the item and warns when a required item has no
+        certificate on the order. Audited `customer.item_requirement_added`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id]
+              properties:
+                product_id: { type: string }
+                coa_required: { type: string, enum: ['yes', 'no', on_request], default: 'yes' }
+                must_show: { type: string, nullable: true }
+                timing: { type: string, nullable: true }
+                delivery_contact_id: { type: string, nullable: true, description: A contact of this customer }
+                notes: { type: string, nullable: true }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerItemRequirements' }
+        '400': { description: 'No product, a product of another organization, an unknown coa_required, or a contact of another customer' }
+        '409': { description: The customer already has a requirement for that item }
+
+  /api/customers/{id}/item-requirements/{requirementId}:
+    put:
+      tags: [Orders]
+      summary: Edit a COA requirement
+      description: |
+        org_admin / super_admin. Any field except `product_id` - another item
+        is another row. Audited `customer.item_requirement_updated`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: requirementId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                coa_required: { type: string, enum: ['yes', 'no', on_request] }
+                must_show: { type: string, nullable: true }
+                timing: { type: string, nullable: true }
+                delivery_contact_id: { type: string, nullable: true }
+                notes: { type: string, nullable: true }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerItemRequirements' }
+        '400': { description: An attempt to move it to another item, or an invalid value }
+        '404': { description: Requirement not found for this customer }
+    delete:
+      tags: [Orders]
+      summary: Remove a COA requirement
+      description: org_admin / super_admin. Audited `customer.item_requirement_removed` with the whole row.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: requirementId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The remaining requirements
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerItemRequirements' }
 
   /api/suppliers/{id}/contacts:
     get:
@@ -4613,7 +5082,39 @@ paths:
               schema:
                 type: object
                 properties:
-                  recipient: { type: string, nullable: true }
+                  recipient: { type: string, nullable: true, description: The customer's own address on record }
+                  recipients:
+                    type: array
+                    items: { type: string }
+                    description: |
+                      Migration 0135. The addresses to pre-fill: the customer's
+                      COA contacts (primary first), then any delivery contact
+                      named by a requirement for an item on this order; capped
+                      at 10. With no such contact, the customer's own address.
+                  recipient_source: { type: string, enum: [coa_contacts, customer_email, none] }
+                  recipients_over_cap: { type: integer, description: COA contacts left off the list by the cap }
+                  item_requirements:
+                    type: array
+                    description: The customer's requirement for each line whose item has one. Information and a warning only - never part of `blocked` or the fingerprint.
+                    items:
+                      type: object
+                      properties:
+                        order_item_id: { type: string }
+                        product_id: { type: string }
+                        product_name: { type: string, nullable: true }
+                        lot_label: { type: string, nullable: true }
+                        coa_required: { type: string, enum: ['yes', 'no', on_request] }
+                        must_show: { type: string, nullable: true }
+                        timing: { type: string, nullable: true }
+                        summary: { type: string }
+                        delivery_contact:
+                          type: object
+                          nullable: true
+                          properties:
+                            name: { type: string, nullable: true }
+                            email: { type: string }
+                        document_on_line: { type: boolean }
+                        missing: { type: boolean, description: Required and nothing on this line will be sent }
                   from_name: { type: string }
                   reply_to: { type: string }
                   default_subject: { type: string }

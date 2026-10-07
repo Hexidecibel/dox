@@ -50,6 +50,7 @@ import {
   Description as DocsIcon,
   Search as SearchIcon,
   LocalShipping as SuppliersIcon,
+  FactCheck as ApprovedItemsIcon,
   Timeline as ActivityIcon,
   FileUpload as ImportIcon,
   RateReview as RateReviewIcon,
@@ -79,6 +80,7 @@ import { ApiKeys } from '../pages/admin/ApiKeys';
 import { Products } from '../pages/admin/Products';
 import { ProductDetail } from '../pages/admin/ProductDetail';
 import { Suppliers } from '../pages/admin/Suppliers';
+import { ApprovedItems } from '../pages/admin/ApprovedItems';
 import { SupplierDetail } from '../pages/admin/SupplierDetail';
 import { DocumentTypes } from '../pages/admin/DocumentTypes';
 import { Requirements } from '../pages/admin/Requirements';
@@ -247,6 +249,16 @@ export const SURFACES: Surface[] = [
     nav: { label: 'Suppliers', icon: <SuppliersIcon />, order: 40 },
   },
   { path: '/admin/suppliers/:id', element: <SupplierDetail />, module: 'library', roles: ADMIN },
+  // The approved item list (migration 0135): one row per item from each
+  // supplier that ships it. No `roles` on purpose -- "may we buy this from
+  // them" is asked by sales and receiving as often as by QA, and the API
+  // answers any role. Deciding an approval stays an admin action on the page.
+  {
+    path: '/admin/approved-items',
+    element: <ApprovedItems />,
+    module: 'library',
+    nav: { label: 'Approved items', icon: <ApprovedItemsIcon />, order: 45 },
+  },
   // The request composer (migration 0090). Reading is open to any
   // authenticated user of the tenant — an outstanding-request list is
   // evidence, not configuration, and the API says the same. The composing

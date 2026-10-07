@@ -360,6 +360,19 @@ import type {
   RenewalRequestListResponse,
   SupplierContact,
   SupplierContactWriteRequest,
+  ApprovedItemsResponse,
+  CustomerContact,
+  CustomerContactWriteRequest,
+  CustomerContactsResponse,
+  CustomerItemRequirement,
+  CustomerItemRequirementWriteRequest,
+  CustomerItemRequirementsResponse,
+  ItemApprovalStatus,
+  SupplierFacilitiesResponse,
+  SupplierFacility,
+  SupplierFacilityWriteRequest,
+  SupplierProductLink,
+  SupplierProductLinkWriteRequest,
   SupplierContactsResponse,
   OrderGetResponse,
   OrderItemUpdateRequest,
@@ -1161,6 +1174,31 @@ export const api = {
     },
 
     /**
+     * /api/suppliers/:id/facilities -- the named places an item can be said to
+     * come from (migration 0135). A person adds them; nothing infers one from a
+     * certificate. Writes are org_admin / super_admin. Removing one sends the
+     * items that named it back to "no facility recorded" (`cleared_items`).
+     */
+    facilities: {
+      list: (id: string) => fetchApi<SupplierFacilitiesResponse>(`/suppliers/${id}/facilities`),
+      create: (id: string, data: SupplierFacilityWriteRequest) =>
+        fetchApi<SupplierFacilitiesResponse & { facility: SupplierFacility }>(`/suppliers/${id}/facilities`, {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+      update: (id: string, facilityId: string, data: SupplierFacilityWriteRequest) =>
+        fetchApi<SupplierFacilitiesResponse & { facility: SupplierFacility }>(
+          `/suppliers/${id}/facilities/${facilityId}`,
+          { method: 'PUT', body: JSON.stringify(data) },
+        ),
+      remove: (id: string, facilityId: string) =>
+        fetchApi<SupplierFacilitiesResponse & { cleared_items: number }>(
+          `/suppliers/${id}/facilities/${facilityId}`,
+          { method: 'DELETE' },
+        ),
+    },
+
+    /**
      * POST /api/suppliers/lookup-or-create
      * Fuzzy match or create supplier by name.
      * Returns: { supplier: ApiSupplier, created: boolean }
@@ -1619,18 +1657,49 @@ export const api = {
 
   /**
    * PUT /api/suppliers/:id/products/:productId (0123) — "no longer supplied"
-   * and "nothing owed per product" (reason required; null clears).
+   * and "nothing owed per product" (reason required; null clears); and (0135)
+   * the item's approval from this supplier (`not_approved` needs a note) and
+   * the facility it comes from. Approval is separate from "supplied".
    */
   supplierProducts: {
-    update: (
-      supplierId: string,
-      productId: string,
-      data: { discontinued?: boolean; nothing_owed_reason?: string | null },
-    ) =>
-      fetchApi<{ link: Record<string, unknown> }>(`/suppliers/${supplierId}/products/${productId}`, {
+    update: (supplierId: string, productId: string, data: SupplierProductLinkWriteRequest) =>
+      fetchApi<{ link: SupplierProductLink }>(`/suppliers/${supplierId}/products/${productId}`, {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
+  },
+
+  /**
+   * GET /api/approved-items (0135) — one row per item-and-supplier pair with
+   * approval, facility, whether it is currently supplied, brand owner,
+   * producer and the private-label flag. Any role; changing an approval is
+   * `supplierProducts.update`.
+   */
+  approvedItems: {
+    list: (params?: {
+      supplier_id?: string;
+      product_id?: string;
+      facility_id?: string;
+      approval?: ItemApprovalStatus;
+      supplied?: boolean;
+      q?: string;
+      limit?: number;
+      offset?: number;
+      tenant_id?: string;
+    }) => {
+      const query = new URLSearchParams();
+      if (params?.supplier_id) query.set('supplier_id', params.supplier_id);
+      if (params?.product_id) query.set('product_id', params.product_id);
+      if (params?.facility_id) query.set('facility_id', params.facility_id);
+      if (params?.approval) query.set('approval', params.approval);
+      if (params?.supplied !== undefined) query.set('supplied', params.supplied ? '1' : '0');
+      if (params?.q) query.set('q', params.q);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset) query.set('offset', String(params.offset));
+      if (params?.tenant_id) query.set('tenant_id', params.tenant_id);
+      const qs = query.toString();
+      return fetchApi<ApprovedItemsResponse>(`/approved-items${qs ? `?${qs}` : ''}`);
+    },
   },
 
   /**
@@ -3421,6 +3490,50 @@ export const api = {
       const query = new URLSearchParams({ customer_number: params.customer_number });
       if (params.tenant_id) query.set('tenant_id', params.tenant_id);
       return fetchApi(`/customers/lookup?${query}`);
+    },
+
+    /**
+     * /api/customers/:id/contacts (0135) -- the people at a customer; the ones
+     * flagged `coa_recipient` are pre-filled on an order send. Writes are
+     * org_admin / super_admin.
+     */
+    contacts: {
+      list: (id: string) => fetchApi<CustomerContactsResponse>(`/customers/${id}/contacts`),
+      create: (id: string, data: CustomerContactWriteRequest) =>
+        fetchApi<CustomerContactsResponse & { contact: CustomerContact }>(`/customers/${id}/contacts`, {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+      update: (id: string, contactId: string, data: CustomerContactWriteRequest) =>
+        fetchApi<CustomerContactsResponse & { contact: CustomerContact }>(
+          `/customers/${id}/contacts/${contactId}`,
+          { method: 'PUT', body: JSON.stringify(data) },
+        ),
+      remove: (id: string, contactId: string) =>
+        fetchApi<CustomerContactsResponse>(`/customers/${id}/contacts/${contactId}`, { method: 'DELETE' }),
+    },
+
+    /**
+     * /api/customers/:id/item-requirements (0135) -- what this customer needs
+     * for each item: COA required yes / no / on request, what it must show,
+     * when, and to whom. One row per customer and item (409 on a second).
+     */
+    itemRequirements: {
+      list: (id: string) => fetchApi<CustomerItemRequirementsResponse>(`/customers/${id}/item-requirements`),
+      create: (id: string, data: CustomerItemRequirementWriteRequest) =>
+        fetchApi<CustomerItemRequirementsResponse & { requirement: CustomerItemRequirement }>(
+          `/customers/${id}/item-requirements`,
+          { method: 'POST', body: JSON.stringify(data) },
+        ),
+      update: (id: string, requirementId: string, data: CustomerItemRequirementWriteRequest) =>
+        fetchApi<CustomerItemRequirementsResponse & { requirement: CustomerItemRequirement }>(
+          `/customers/${id}/item-requirements/${requirementId}`,
+          { method: 'PUT', body: JSON.stringify(data) },
+        ),
+      remove: (id: string, requirementId: string) =>
+        fetchApi<CustomerItemRequirementsResponse>(`/customers/${id}/item-requirements/${requirementId}`, {
+          method: 'DELETE',
+        }),
     },
   },
 

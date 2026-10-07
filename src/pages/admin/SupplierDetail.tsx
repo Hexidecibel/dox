@@ -56,6 +56,8 @@ import LotSchemeSelect from '../../components/LotSchemeSelect';
 import SupplierProductIdentifiersPanel from '../../components/SupplierProductIdentifiersPanel';
 import SupplierLotFormatPanel from '../../components/SupplierLotFormatPanel';
 import SupplierContactsPanel from '../../components/SupplierContactsPanel';
+import SupplierFacilitiesPanel from '../../components/SupplierFacilitiesPanel';
+import { ItemApprovalControl, ItemFacilityControl } from '../../components/ItemApproval';
 import SupplierRequirementGaps, { ProductStatusChip } from '../../components/SupplierRequirementGaps';
 import ProductRequirementsPanel from '../../components/ProductRequirementsPanel';
 import SupplierRequirementsEditor from '../../components/SupplierRequirementsEditor';
@@ -147,6 +149,32 @@ function ProductLotsRow({
             variant="outlined"
           />
         </TableCell>
+        {/* Approval and facility of THIS supplier's link (migration 0135).
+            Approval is a different fact from "no longer supplied", which is
+            the next column. */}
+        <TableCell onClick={(e) => e.stopPropagation()}>
+          <ItemApprovalControl
+            supplierId={supplierId}
+            productId={product.id}
+            productName={product.name}
+            status={product.link_approval_status}
+            source={product.link_approval_source}
+            note={product.link_approval_note}
+            canEdit={canEdit}
+            onChanged={onChanged}
+          />
+        </TableCell>
+        <TableCell onClick={(e) => e.stopPropagation()}>
+          <ItemFacilityControl
+            supplierId={supplierId}
+            productId={product.id}
+            productName={product.name}
+            facilityId={product.link_facility_id}
+            facilityName={product.link_facility_name}
+            canEdit={canEdit}
+            onChanged={onChanged}
+          />
+        </TableCell>
         <TableCell>
           {product.link_discontinued_at ? (
             <Chip size="small" label="No longer supplied" />
@@ -159,7 +187,7 @@ function ProductLotsRow({
         <TableCell>{formatDate(product.created_at)}</TableCell>
       </TableRow>
       <TableRow>
-        <TableCell sx={{ py: 0, borderBottom: open ? undefined : 'none' }} colSpan={6}>
+        <TableCell sx={{ py: 0, borderBottom: open ? undefined : 'none' }} colSpan={8}>
           <Collapse in={open} timeout="auto" unmountOnExit>
             <Box sx={{ py: 2 }}>
               <ProductRequirementsPanel
@@ -853,6 +881,7 @@ export function SupplierDetail() {
           <Tab label="Notes" />
           <Tab label="Lot format" />
           <Tab label="Contacts" />
+          <Tab label="Facilities" />
           {/* Last, so hiding it for a tenant without Compliance shifts no index. */}
           {complianceVisible && <Tab label="Spec watch" />}
         </Tabs>
@@ -887,6 +916,8 @@ export function SupplierDetail() {
                   <TableCell>Name</TableCell>
                   <TableCell>Description</TableCell>
                   <TableCell>Status</TableCell>
+                  <TableCell>Approval</TableCell>
+                  <TableCell>Facility</TableCell>
                   <TableCell>Requirements</TableCell>
                   <TableCell>Created</TableCell>
                 </TableRow>
@@ -1640,9 +1671,18 @@ export function SupplierDetail() {
         )}
       </TabPanel>
 
+      {/* Facilities (migration 0135): the named places this supplier's items
+          come from. Index 10, ahead of the conditional Spec watch tab for the
+          same reason Contacts is. */}
+      <TabPanel value={tab} index={10}>
+        {tab === 10 && (
+          <SupplierFacilitiesPanel supplierId={supplier.id} supplierName={supplier.name} canEdit={isAdmin} />
+        )}
+      </TabPanel>
+
       {complianceVisible && (
-        <TabPanel value={tab} index={10}>
-          {tab === 10 && (
+        <TabPanel value={tab} index={11}>
+          {tab === 11 && (
             <SupplierWatchPanel supplierId={supplier.id} tenantId={supplier.tenant_id} canEdit={isAdmin} />
           )}
         </TabPanel>

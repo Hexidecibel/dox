@@ -120,6 +120,12 @@ describe('moduleForApiPath', () => {
     // export, so gating it cannot take a switched-ON module down with it.
     expect(moduleForApiPath('/api/document-exports/zip')).toBe('library');
     expect(moduleForApiPath('/api/document-exports/send')).toBe('library');
+    // The approved item list (0135) follows the supplier data it reads.
+    expect(moduleForApiPath('/api/approved-items')).toBe('library');
+    expect(moduleForApiPath('/api/suppliers/s1/facilities/f1')).toBe('library');
+    // Customer contacts and per-item COA requirements sit under /api/customers.
+    expect(moduleForApiPath('/api/customers/c1/contacts')).toBe('fulfillment');
+    expect(moduleForApiPath('/api/customers/c1/item-requirements/r1')).toBe('fulfillment');
   });
 
   it('leaves shared read primitives always-on', () => {

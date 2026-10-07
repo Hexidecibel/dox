@@ -54,6 +54,11 @@ const PREVIEW: SupplierListImportResponse = {
     { line: 4, kind: 'row', value: 'Blank Co', reason: 'Approved is blank. Enter Y or N.' },
     { line: 2, kind: 'claim', value: 'vegan', reason: '"vegan" is not a claim type in this tenant, so nothing was derived for it.' },
   ],
+  approvals: [
+    { lines: [2], supplier_id: 'sup_1', supplier_name: 'Darigold, Inc.', product_id: 'p1', product_label: 'Butter', listed: 'approved', current: 'approved', current_source: 'initial', action: 'unchanged', reason: null },
+    { lines: [3], supplier_id: 'sup_1', supplier_name: 'Darigold, Inc.', product_id: 'p2', product_label: 'Heavy Cream', listed: 'not_approved', current: null, current_source: null, action: 'set', reason: null },
+    { lines: [5], supplier_id: 'sup_1', supplier_name: 'Darigold, Inc.', product_id: 'p3', product_label: 'Whole Milk', listed: 'approved', current: 'not_approved', current_source: 'person', action: 'kept_person', reason: 'A person marked this not approved; the list does not override that.' },
+  ],
   rule_problems: [],
   unrecognized_headers: [],
   rules: { baseline: ['certificate-of-insurance'], category_packets: {}, product_spec_sheet: 'spec-sheet' },
@@ -84,10 +89,27 @@ describe('SupplierListImport', () => {
     expect(screen.getByText(/will be flagged for review, not deleted/)).toBeInTheDocument();
     expect(screen.getByText(/Andersen Dairy: Kosher Certificate on file \(required\)/)).toBeInTheDocument();
 
+    // Item approvals (migration 0135): what the Approved column would do to
+    // each pair, before anything is written. What already agrees is counted,
+    // not listed; a person's decision is shown as kept.
+    const approvals = screen.getByTestId('item-approval-preview');
+    expect(approvals).toHaveTextContent('1 already says what the list says.');
+    expect(approvals).toHaveTextContent('Heavy Cream');
+    expect(approvals).toHaveTextContent('Will be set');
+    expect(approvals).toHaveTextContent('Kept: a person decided');
+    expect(approvals).toHaveTextContent('the list does not override that');
+    expect(approvals).not.toHaveTextContent('Butter');
+
     await user.click(screen.getByRole('button', { name: 'Apply this list' }));
     await waitFor(() => expect(onApplied).toHaveBeenCalled());
     expect(importList.mock.calls[1][0]).toMatchObject({ dry_run: false, file_name: 'list.csv' });
     expect(await screen.findByText(/Imported list.csv/)).toBeInTheDocument();
+  });
+
+  it('counts item approvals in the summary when the list sets or keeps any', () => {
+    expect(
+      importSummary({ ...PREVIEW, counts: { ...counts, approvals_set: 2, approvals_kept_person_set: 1 } }),
+    ).toContain('2 item approvals to set · 1 approval kept as a person decided');
   });
 
   it('summarises counts in words', () => {

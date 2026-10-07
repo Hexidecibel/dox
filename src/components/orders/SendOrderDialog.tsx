@@ -78,6 +78,23 @@ function FileRow({ file }: { file: OrderSendPlanFile }) {
   );
 }
 
+/** The addresses the box starts with. Tolerant of a plan from before 0135. */
+function defaultRecipients(plan: OrderSendPreview): string[] {
+  if (plan.recipients && plan.recipients.length > 0) return plan.recipients;
+  return plan.recipient ? [plan.recipient] : [];
+}
+
+function recipientHelp(plan: OrderSendPreview): string {
+  const who = plan.order.customer_name ?? 'this customer';
+  if (plan.recipient_source === 'coa_contacts') {
+    return `The contacts marked as receiving COAs for ${who}. Change the addresses here for this send only.`;
+  }
+  if (defaultRecipients(plan).length > 0) {
+    return `The address on file for ${who}. Change it here for this send only.`;
+  }
+  return 'No address is on file for this customer. Enter the one to send to.';
+}
+
 export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: SendOrderDialogProps) {
   const [plan, setPlan] = useState<OrderSendPreview | null>(null);
   const [loading, setLoading] = useState(false);
@@ -96,7 +113,10 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
       .sendPreview(orderId)
       .then((p) => {
         setPlan(p);
-        setRecipients((r) => r || p.recipient || '');
+        // Pre-filled with the customer's COA contacts (migration 0135), or
+        // the customer's own address when it has none. Still only a starting
+        // point: whatever is in the box when Send is pressed is what is used.
+        setRecipients((r) => r || defaultRecipients(p).join(', '));
         setSubject((s) => s || p.default_subject);
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Could not prepare the send'))
@@ -140,6 +160,7 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
   };
 
   const blocked = plan?.blocked ?? null;
+  const itemRequirements = plan?.item_requirements ?? [];
   const canSend = !!plan && !blocked && plan.email_configured && recipients.trim() !== '' && !busy && !loading;
 
   return (
@@ -171,11 +192,7 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
                   onChange={(e) => setRecipients(e.target.value)}
                   fullWidth
                   size="small"
-                  helperText={
-                    plan.recipient
-                      ? `The address on file for ${plan.order.customer_name ?? 'this customer'}. Change it here for this send only.`
-                      : 'No address is on file for this customer. Enter the one to send to.'
-                  }
+                  helperText={recipientHelp(plan)}
                   inputProps={{ 'data-testid': 'send-order-recipients' }}
                 />
                 <TextField
@@ -220,6 +237,27 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
                     </Box>
                   );
                 })}
+
+                {itemRequirements.length > 0 && (
+                  <Box data-testid="send-item-requirements">
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                      What {plan.order.customer_name ?? 'this customer'} asks for
+                    </Typography>
+                    {itemRequirements.map((r) => (
+                      <Typography
+                        key={r.order_item_id}
+                        variant="caption"
+                        color={r.missing ? 'warning.main' : 'text.secondary'}
+                        sx={{ display: 'block' }}
+                        data-testid={r.missing ? 'send-requirement-missing' : 'send-requirement'}
+                      >
+                        {[r.product_name ?? 'No product named', r.lot_label ? `Lot ${r.lot_label}` : null].filter(Boolean).join(' · ')} — {r.summary}
+                        {r.delivery_contact ? ` · to ${r.delivery_contact.name || r.delivery_contact.email}` : ''}
+                        {r.missing ? ' · no certificate on this line' : ''}
+                      </Typography>
+                    ))}
+                  </Box>
+                )}
 
                 {plan.lines_not_sent.length > 0 && (
                   <Box data-testid="send-lines-not-sent">

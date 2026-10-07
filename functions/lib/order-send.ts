@@ -49,6 +49,7 @@ import {
 } from './email';
 import {
   EXPORT_MAX_DOCUMENTS,
+  EXPORT_MAX_RECIPIENTS,
   exportFileNames,
   exportLinkUrl,
   externalDocumentTitle,
@@ -60,13 +61,17 @@ import {
 } from './document-export';
 import { resolveWholeOriginals } from './coa-original';
 import { loadOrderLines, type OrderWriteRow } from './order-items';
+import { loadOrderCustomerContext } from './customer-coa';
 import {
   ORDER_SEND_MAX_PARTS,
   ORDER_SEND_MAX_PART_BYTES,
   humanBytes,
   lotRowLabel,
+  missingRequirementWarning,
   packOrderSendFiles,
   partSubject,
+  planItemRequirements,
+  planOrderRecipients,
 } from '../../shared/orderSend';
 import type {
   ApiOrderItem,
@@ -325,6 +330,39 @@ export async function planOrderSend(
   }
   const linkDocs = new Set(planned.filter((f) => f.delivery === 'link').flatMap((f) => f.document_ids));
 
+  // What the customer's own record says (migration 0135): who receives COAs,
+  // and what they need for each item on this order. INFORMATION ONLY -- it
+  // adds a warning and pre-fills the address box; it never blocks the send and
+  // is not part of the fingerprint, which covers what leaves, not who reads
+  // the review screen. A customer with no contact and no requirement on file
+  // yields exactly the pre-0135 answer.
+  const customerContext = await loadOrderCustomerContext(db, order.tenant_id, order.customer_id);
+  const sentLineIds = new Set(list.flatMap((e) => e.lines.map((l) => l.order_item_id)));
+  const itemRequirements = planItemRequirements(
+    lines.map((line) => ({
+      order_item_id: line.id,
+      product_id: line.product_id,
+      product_name: line.product_name_resolved ?? line.product_name ?? null,
+      lot_label: lotRowLabel(line.lot_row_number, line.sub_lot_code) ?? line.lot_number ?? null,
+    })),
+    customerContext.requirements,
+    sentLineIds,
+  );
+  const missingWarning = missingRequirementWarning(itemRequirements);
+  if (missingWarning) warnings.push(missingWarning);
+  const recipientPlan = planOrderRecipients({
+    coaContacts: customerContext.coa_contacts,
+    deliveryContacts: itemRequirements.flatMap((r) => (r.delivery_contact ? [r.delivery_contact] : [])),
+    customerEmail: customer?.email ?? null,
+    cap: EXPORT_MAX_RECIPIENTS,
+  });
+  if (recipientPlan.over_cap > 0) {
+    warnings.push(
+      `This customer has ${recipientPlan.recipients.length + recipientPlan.over_cap} addresses to receive COAs and one send reaches at most ${EXPORT_MAX_RECIPIENTS}. ` +
+        `${recipientPlan.over_cap} ${recipientPlan.over_cap === 1 ? 'was' : 'were'} left off the list below.`,
+    );
+  }
+
   let blocked: OrderSendPreview['blocked'] = null;
   if (planned.length === 0) {
     blocked = {
@@ -363,6 +401,10 @@ export async function planOrderSend(
       customer_name: customer?.name ?? order.customer_name,
     },
     recipient: customer?.email ?? null,
+    recipients: recipientPlan.recipients,
+    recipient_source: recipientPlan.source,
+    recipients_over_cap: recipientPlan.over_cap,
+    item_requirements: itemRequirements,
     from_name: viaSenderName(args.tenantName),
     reply_to: args.sender.email,
     default_subject: defaultOrderSubject(args.tenantName, order),

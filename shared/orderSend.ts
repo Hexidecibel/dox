@@ -5,7 +5,14 @@
  * and the tests all get the same answer from the same function.
  */
 
-import type { OrderLineDateState, OrderSendDelivery } from './types';
+import { describeCustomerRequirement } from './itemApproval';
+import type {
+  CustomerItemRequirement,
+  OrderLineDateState,
+  OrderSendDelivery,
+  OrderSendItemRequirement,
+  OrderSendPreview,
+} from './types';
 
 // ---------------------------------------------------------------------------
 // A lot row's production date, with its doubt
@@ -192,4 +199,109 @@ export function humanBytes(bytes: number): string {
   if (n >= 1024 * 1024) return `${Math.round((n / (1024 * 1024)) * 10) / 10} MB`;
   if (n >= 1024) return `${Math.round(n / 1024)} KB`;
   return `${n} B`;
+}
+
+// ---------------------------------------------------------------------------
+// Who it is addressed to, and what the customer asked for (migration 0135)
+// ---------------------------------------------------------------------------
+//
+// Both are INFORMATION for the person reviewing the send. Neither is part of
+// the plan's fingerprint: the fingerprint covers what leaves (which files,
+// under which names, in which email), and the addresses are whatever the
+// sender leaves in the box -- they are echoed back in the send request itself.
+
+export interface OrderRecipientPlan {
+  recipients: string[];
+  source: OrderSendPreview['recipient_source'];
+  /** Addresses left off the pre-filled list because of the cap. */
+  over_cap: number;
+}
+
+/**
+ * The addresses the review screen is pre-filled with: the customer's COA
+ * contacts (primary first, the order they are given in), then any delivery
+ * contact a requirement names for an item on this order; an address appears
+ * once however many times it is named. With no such contact at all the
+ * customer's address on record is the answer, exactly as before 0135.
+ *
+ * Capped at the send's recipient limit. What does not fit is COUNTED, never
+ * silently dropped: the screen says how many were left off.
+ */
+export function planOrderRecipients(input: {
+  coaContacts: ReadonlyArray<{ email: string }>;
+  deliveryContacts: ReadonlyArray<{ email: string }>;
+  customerEmail: string | null | undefined;
+  cap: number;
+}): OrderRecipientPlan {
+  const seen = new Set<string>();
+  const all: string[] = [];
+  for (const c of [...input.coaContacts, ...input.deliveryContacts]) {
+    const addr = (c.email ?? '').trim();
+    const key = addr.toLowerCase();
+    if (!addr || seen.has(key)) continue;
+    seen.add(key);
+    all.push(addr);
+  }
+  if (all.length > 0) {
+    return { recipients: all.slice(0, input.cap), source: 'coa_contacts', over_cap: Math.max(0, all.length - input.cap) };
+  }
+  const fallback = (input.customerEmail ?? '').trim();
+  return fallback
+    ? { recipients: [fallback], source: 'customer_email', over_cap: 0 }
+    : { recipients: [], source: 'none', over_cap: 0 };
+}
+
+/**
+ * The customer's requirement beside each line whose item has one. A line with
+ * no product, or an item the customer has said nothing about, gets no row --
+ * silence about an item is not a requirement.
+ *
+ * `missing` is the warning: the customer requires a COA for the item and this
+ * line will send nothing. It is a warning and only a warning.
+ */
+export function planItemRequirements(
+  lines: ReadonlyArray<{
+    order_item_id: string;
+    product_id: string | null | undefined;
+    product_name: string | null;
+    lot_label: string | null;
+  }>,
+  requirements: ReadonlyMap<string, CustomerItemRequirement>,
+  sentLineIds: ReadonlySet<string>,
+): OrderSendItemRequirement[] {
+  const out: OrderSendItemRequirement[] = [];
+  for (const line of lines) {
+    if (!line.product_id) continue;
+    const req = requirements.get(line.product_id);
+    if (!req) continue;
+    const onLine = sentLineIds.has(line.order_item_id);
+    out.push({
+      order_item_id: line.order_item_id,
+      product_id: line.product_id,
+      product_name: line.product_name ?? req.product_name,
+      lot_label: line.lot_label,
+      coa_required: req.coa_required,
+      must_show: req.must_show,
+      timing: req.timing,
+      summary: describeCustomerRequirement(req),
+      delivery_contact: req.delivery_contact
+        ? { name: req.delivery_contact.name, email: req.delivery_contact.email }
+        : null,
+      document_on_line: onLine,
+      missing: req.coa_required === 'yes' && !onLine,
+    });
+  }
+  return out;
+}
+
+/** The one warning line for required items with nothing to send. Null when there is none. */
+export function missingRequirementWarning(rows: ReadonlyArray<OrderSendItemRequirement>): string | null {
+  const missing = rows.filter((r) => r.missing);
+  if (missing.length === 0) return null;
+  const names = [...new Set(missing.map((r) => r.product_name ?? 'an item'))];
+  const which = missing.length === 1 ? 'that line has' : `${missing.length} of those lines have`;
+  return (
+    `This customer requires a COA for ${names.join(', ')}, and ${which} no certificate to send. ` +
+    'Nothing stops the send; add the certificate first if it should go with it.'
+  );
 }
