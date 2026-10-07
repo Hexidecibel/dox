@@ -1,0 +1,89 @@
+# Decision log (our side)
+
+Decisions Chris has made that the build follows. AJ Conner keeps his own log (rows `D-0xx`, quoted
+where they apply); this file is OURS and uses `C-0xx`. A row here is binding until a later row
+says otherwise — add a new row, do not rewrite an old one.
+
+`Status` says what exists in the code, not what was agreed:
+`built` (on master) / `live` (deployed) / `to build` / `data change` (a write to a tenant's data
+or configuration that needs Chris's go-ahead at the time it is run).
+
+Evidence for the 2026-10-06 rows: `~/drops/aj-2026-10-06/aj-ledger-2026-10-06.md` (every question
+and answer between Chris and AJ since mid-September) and the two code audits of the same day,
+summarised in `~/drops/aj-2026-10-06/reply-finish-line.md`.
+
+## 2026-10-06 — Phase 1 finish line: every open question closed with the recommended default
+
+Chris, 2026-10-06: "just go with recommended ... I don't think any of those require his SME."
+None of these is a question to AJ any more. He is TOLD them (reply-finish-line.md, Part 2) and may
+correct any by number.
+
+| ID | Decision | AJ ref | Status | Lands in |
+|---|---|---|---|---|
+| C-001 | Approval is its own status on the item-and-supplier pair (`product_suppliers`), separate from "currently supplied". Seeded from the supplier list's Approved column; everything on file starts approved. | D-056, open q. 10/06 | to build | step 1c |
+| C-002 | A facility is a named record under a supplier that a person adds. A printed plant code attaches to it as an identifier. A document with no known facility counts toward the whole supplier (B3). "Line" is not built until a real case needs it. | B3, F7, asked 9/30 | to build | step 1c (thin), step 5 (full) |
+| C-003 | The sharing rule (send freely / needs QA approval / locked) is set per document type with a per-document override and is enforced on EVERY exit: download of a file out of the portal by link, ZIP, emailed link, bundles, order sends, API keys. A logged-in read-only user downloading inside the portal is not "leaving". Starting table — free: COA, spec sheet, allergen statement, kosher / halal / organic certificates, SDS; needs QA: audit certificate, HACCP / food safety plan, letter of guarantee, insurance; locked: audit report, W-9, anything unclassified. | D-053, D-054 | to build | step 1d |
+| C-004 | Customer COA requirements: one row per customer and item — COA required (yes / no / on request), what it must show (free text), timing, delivery contact. Widened when AJ's column set arrives. | plan 1.2, item 9 | to build | step 1e |
+| C-005 | A hold is a portal-only status on a lot's certificate. It stops that COA leaving on an order. QA or an admin releases it with a written reason. Nothing is pushed to a WMS in Phase 1. | B1, B3, E2, asked 9/30 | to build | after step 1 |
+| C-006 | Complaint intake Tier 1 is scoped at about 5-7 weeks with four changes: scanned-form reading moves to Tier 2; escalation keywords are a plain word match, not AI; one inbound address per tenant for the PDF channel; the tenant brand record ships first. AJ's recommendation stands on the brief's other open decisions. | 9/27 brief, priced 9/29 | to build | step 3 |
+| C-007 | An incident is its own entity — not a document type, not a Records sheet. (Answered to AJ 9/29; re-checked 10/06: Records has no tests, no numbering / routing / alerts, and its public form exposes customer and supplier names; a document type would pull incidents into gaps, renewals and exports.) | decision 7, D-061 | to build | step 3 |
+| C-008 | While a supplier is on watch, its limit wins over a company-wide limit, including one written for that exact product. CHANGES VERDICTS: today the product-specific limit wins. | B2, asked 9/30 | to build | spec engine |
+| C-009 | A product category is the risk level; one product may be excused from a category's required test with a written reason. Required analytes stay per supplier until category names exist. | A2 | to build | product-scope phase 2 |
+| C-010 | The supplier renewal send escalates internally at 21 days past due (7 days after the +14 follow-up). | D-051 | built | 0133 |
+| C-011 | The claim table sent 9/29 stands: certificate required, scope = product, GFSI = facility; rBST letter of guarantee recommended; gluten-free and Non-GMO need the certificate; a country-of-origin statement suffices for Made in USA; allergen label stays recommended. | F2 | to build (pack) + data change (existing tenants) | starter pack |
+| C-012 | The 17 unrecognised document types: four first-class (FDA Facility Registration, Prop 65, Bioengineered Statement, Environmental Monitoring Program); nine under one "Supplier Compliance Statement"; rBST under Letter of Guarantee; Food Defense statement under Food Defense Plan. | sent 9/29 | to build (pack) + data change | starter pack |
+| C-013 | The neutral requirement group names shipped 9/29 stand until AJ sends the final eight. | D-031, F5 | live | — |
+| C-014 | FDA facility registration renews Oct 1 - Dec 31 of even years, and only ingredient and co-packer suppliers owe it; business license stays universal. CHANGES the F7 baseline (today every approved supplier owes it). | G3, F7 | to build + data change | `shared/requirementDerivation.ts`, pack |
+| C-015 | AJ's GFSI ruling (certificate required, report recommended) is applied to the AJ Clean tenant. | q. 21 of 9/29 | data change | prod, AJ Clean |
+| C-016 | Listeria and Salmonella limits mean "absent in 25 g". A bare "Negative" with no stated sample size on a zero-tolerance analyte raises a notice (not judged out of spec). | E2 | to build + data change (the two limits) | spec engine |
+| C-017 | Judging a per-mL count against a per-g limit stays a per-organisation switch, off by default, named in every verdict it produces. No change. | C2 vs 0093 | live | — |
+| C-018 | The whip product keeps its name; the double space is fixed. | 9/29 | data change | prod, AJ Clean |
+| C-019 | Per-lot COA checking looks back 90 days. | product-scope phase 3 | to build | lot scope |
+| C-020 | A "Certificate of Compliance" from a cheese supplier is treated as a COA. | — | to build (type alias) + data change | classification |
+| C-021 | Supplier requests are a fixed template, never AI-drafted. | D-048 | built | 0133 |
+| C-022 | A read-only account never approves a supplier send and is never chosen as the approver. | D-050, "anyone but a read-only account" | built | 0133 |
+| C-023 | COAs on an order go attached; a split multi-lot certificate goes as the whole original when the trace is unambiguous, else the per-lot page with a visible warning. Originals are kept with no reclaim date. | H2, D-047 | built | 0134 |
+| C-024 | Sizes, not week numbers, are given for the finish-line sequence, except complaint intake (5-7 weeks). | plan Part 5 | — | reply |
+
+### Already decided earlier, restated to AJ in the same reply
+
+| ID | Decision | Status |
+|---|---|---|
+| C-025 | A COA missing a required test stays open, shown as received-incomplete. | live |
+| C-026 | Allergen Statement and Allergen Matrix are one requirement. | live |
+| C-027 | A certificate that lapsed while in our queue is not "expired on arrival". | live |
+| C-028 | Shelf life stays as printed; export file names use the filed date when there is no lot. | live |
+| C-029 | An invoice search does not follow a WMS order number. | live |
+| C-030 | Micro limits, pack size, shelf life, GTIN and country of origin are per product. | to build (product-scope phase 2) |
+
+## Findings the finish line turned up (work, not decisions)
+
+| Finding | Where | Lands in |
+|---|---|---|
+| No tenant brand record exists (logo, colours, display name, support line). | external pages, mail | step 2, before step 3 |
+| First-tenant values in live behaviour: `functions/lib/llm.ts` BASE_PROMPT names Medosweet; the default extraction context is dairy for every tenant; real lot / PO / item numbers in search fallback examples and help text; "far too long for dairy" reviewer warning; dairy vocabulary in `shared/productVocabulary.ts`. | see audit | step 2, start now |
+| Search ignores module toggles (a fulfillment-off tenant still finds orders and customers). | `functions/lib/search/` | step 2 |
+| No whole-tenant export. Registry links, requirements, spec register, orders, notes and config cannot be exported. | — | step 2 |
+| Starter packs cannot be updated in place (insert-or-ignore, no version). Renaming a document type re-slugs it; duplicate concepts are unprevented. | `functions/lib/starter-packs.ts`, `functions/api/document-types/[id].ts` | step 2 |
+| Two automatic emails reach whoever emailed a document in (possibly a supplier): the ingest summary reply and the "Review Needed" mail. | `functions/api/webhooks/email-ingest.ts`, `functions/api/queue/[id]/results.ts` | step 2 |
+| Records public surfaces (forms, update requests, workflow approvals) have no tests and no allow-list; a public form exposes customer / supplier / product names. | `functions/lib/records/` | step 2 |
+| Dead switches still shown: `tenants.auto_approve_threshold`, `document_types.auto_ingest`, `extraction_templates.auto_ingest_enabled`. | — | step 2 |
+| `customer_contacts` is written by the connector and read by nothing; `customers.coa_delivery_method` and `coa_requirements` are read by nothing. | — | step 1b / 1e |
+| `products.brand_owner` / `producer` / `plant_code` have API but no screen. | — | step 1c |
+| A connector re-ingesting an order number a person built tries to delete its lines. | `functions/lib/kinds/order.ts` | before two-tier tenants |
+| `spec_limits`, `supplier_required_analytes`, `teach_sessions` still cascade-delete on a supplier merge. | `functions/lib/suppliers.ts` | soon |
+| "Template-promotion gate" (AJ's core list) matches nothing built; meaning unknown. | — | ask is in the reply |
+
+## Only AJ can supply (not questions of judgement)
+
+DCN license expiry and who exports from DCN; Andersen's required analytes, tighter limit and
+review-by date; Medosweet's two brand colours (else sampled from the logo); D-045..D-047 and the
+Manual COA Fulfillment document, D-001..D-039 if they bind the build; the SharePoint / Cloudflare
+answers from their IT (asked 8/20); and, when ready, the approved-item-list dependencies, the
+customer COA column set, product category names and the final eight group names.
+
+## We owe AJ
+
+The count of split multi-lot COAs whose whole original is still on file
+(`bin/retain-split-originals --remote`); the release carrying the renewal send (0133) and manual
+COA fulfillment (0134).

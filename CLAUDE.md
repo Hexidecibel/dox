@@ -348,6 +348,7 @@ Use the slash commands for common tasks:
 | `releases/` | Per-version release notes (markdown + YAML frontmatter). Mirrored to `public/releases/` so they're served as static assets and rendered in the in-app release notes modal. |
 | `backlog.md` | Deferred ideas, long-term research, and items not in the daily workflow. |
 | `next-time.md` | User's notes/thoughts for the next session. Read on startup, address first. |
+| `docs/decision-log.md` | Decisions Chris has made that the build follows (`C-0xx` rows), with status and where each lands. Check it before asking the client a question; add a row, never rewrite one. |
 
 **Flow:** `todo.md` (idea) -> `plan.md` (planned -> in-progress -> done) -> `releases/vX.Y.Z.md` (shipped, via `bin/release`)
 **Deferred:** Items moved from `todo.md` to `backlog.md` when not prioritized.
