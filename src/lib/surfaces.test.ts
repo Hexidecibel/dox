@@ -105,6 +105,8 @@ const ROUTE_SNAPSHOT: readonly string[] = [
   '/admin/products/:id',
   '/admin/suppliers',
   '/admin/suppliers/:id',
+  // The approved item list (migration 0135), beside Suppliers.
+  '/admin/approved-items',
   '/admin/sources',
   '/admin/sources/new',
   '/admin/sources/:id/edit',
@@ -161,7 +163,7 @@ describe('SURFACES — the path-set snapshot', () => {
   });
 
   it('accounts for every snapshot path exactly once', () => {
-    expect(ROUTE_SNAPSHOT.length).toBe(68);
+    expect(ROUTE_SNAPSHOT.length).toBe(69);
     expect(new Set(ROUTE_SNAPSHOT).size).toBe(ROUTE_SNAPSHOT.length);
     expect(SURFACES.length).toBe(ROUTE_SNAPSHOT.length - NON_SURFACE_PATHS.length);
   });

@@ -165,6 +165,10 @@ function plan(over: Partial<OrderSendPreview> = {}): OrderSendPreview {
   return {
     order: { id: 'o1', order_number: 'SO-77', po_number: 'PO-9', ship_date: '2026-10-12', customer_id: 'c1', customer_name: 'Blue Heron Bakery' },
     recipient: 'qa@blueheron.example',
+    recipients: ['qa@blueheron.example'],
+    recipient_source: 'customer_email',
+    recipients_over_cap: 0,
+    item_requirements: [],
     from_name: 'Medosweet Farms via SupDox',
     reply_to: 'dana@medosweet.example',
     default_subject: 'Medosweet Farms: documents for order SO-77 (PO PO-9)',
@@ -212,6 +216,40 @@ describe('SendOrderDialog', () => {
     expect(screen.getByTestId('send-order-confirm')).toHaveTextContent('Send 2 emails');
   });
 
+  it('starts with the customer\'s COA contacts and shows what the customer asks for, a missing certificate as a warning only', async () => {
+    mocks.sendPreview.mockResolvedValue(
+      plan({
+        recipients: ['qa@blueheron.example', 'buyer@blueheron.example'],
+        recipient_source: 'coa_contacts',
+        warnings: ['This customer requires a COA for Butter, and that line has no certificate to send. Nothing stops the send; add the certificate first if it should go with it.'],
+        item_requirements: [
+          {
+            order_item_id: 'l-a', product_id: 'p1', product_name: 'Heavy Cream 40%', lot_label: '10426203 / 03',
+            coa_required: 'yes', must_show: 'lot number', timing: 'with the shipment',
+            summary: 'COA required - must show lot number - with the shipment',
+            delivery_contact: { name: 'Dee', email: 'lab@blueheron.example' }, document_on_line: true, missing: false,
+          },
+          {
+            order_item_id: 'x', product_id: 'p2', product_name: 'Butter', lot_label: '555',
+            coa_required: 'yes', must_show: null, timing: null, summary: 'COA required',
+            delivery_contact: null, document_on_line: false, missing: true,
+          },
+        ],
+      }),
+    );
+    render(wrap(<SendOrderDialog open orderId="o1" onClose={vi.fn()} onSent={vi.fn()} onFailed={vi.fn()} />));
+
+    expect(await screen.findByTestId('send-order-recipients')).toHaveValue('qa@blueheron.example, buyer@blueheron.example');
+    expect(screen.getByText(/The contacts marked as receiving COAs for Blue Heron Bakery/)).toBeInTheDocument();
+    expect(screen.getByTestId('send-requirement')).toHaveTextContent(
+      'Heavy Cream 40% · Lot 10426203 / 03 — COA required - must show lot number - with the shipment · to Dee',
+    );
+    expect(screen.getByTestId('send-requirement-missing')).toHaveTextContent('Butter · Lot 555 — COA required · no certificate on this line');
+    expect(screen.getByText(/Nothing stops the send/)).toBeInTheDocument();
+    // A warning, never a block: the button is live.
+    expect(screen.getByTestId('send-order-confirm')).toBeEnabled();
+  });
+
   it('sends what was reviewed: the edited address, the message and the plan fingerprint', async () => {
     mocks.sendPreview.mockResolvedValue(plan());
     const result = { send: { recipients: ['buyer@blueheron.example'], status: 'sent' }, sent: true, order_status: 'delivered' };
@@ -244,7 +282,7 @@ describe('SendOrderDialog', () => {
     expect(screen.getByTestId('send-order-confirm')).toBeDisabled();
     unmount();
 
-    mocks.sendPreview.mockResolvedValue(plan({ recipient: null }));
+    mocks.sendPreview.mockResolvedValue(plan({ recipient: null, recipients: [], recipient_source: 'none' }));
     const second = render(wrap(<SendOrderDialog open orderId="o1" onClose={vi.fn()} onSent={vi.fn()} onFailed={vi.fn()} />));
     expect(await screen.findByText(/No address is on file for this customer/)).toBeInTheDocument();
     expect(screen.getByTestId('send-order-confirm')).toBeDisabled();

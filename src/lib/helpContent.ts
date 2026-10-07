@@ -1622,6 +1622,79 @@ export const helpContent = {
       'One kind of link does not expire: a certificate too large to attach to an order goes to the customer as a link that stays open until someone revokes it, and it is listed here marked that way. ' +
       'Certificates sent from an order as attachments are listed below the links: what left, to whom, and whether each email was accepted. An attachment cannot be revoked and nothing reports whether it was opened.',
   },
+  /**
+   * Approved items, facilities and the private-label flag (migration 0135).
+   * A plain object like `sentDocuments`: one list screen, plus the supplier
+   * tab it is edited from.
+   */
+  approvedItems: {
+    headline: 'Approved items',
+    well:
+      'One row for each item from each supplier that ships it: whether it is approved from that supplier, which facility it comes from, and whether it is currently supplied. ' +
+      'Approved and currently supplied are two separate facts. An approved item can be no longer supplied, and an item you still receive can be pending. ' +
+      'Nothing in the portal is blocked by an approval. It is recorded and shown, and every change keeps who made it and when.',
+    help: {
+      sections: [
+        {
+          heading: 'Approved, pending, not approved',
+          body:
+            'Every item-and-supplier pair that was on file when approvals were introduced starts as approved. That starting answer is shown outlined, and its tooltip says nobody decided it. ' +
+            'A pair created afterwards (a certificate naming a new product, an admin linking one, a supplier list) starts as pending. ' +
+            'An organization admin can approve, set back to pending, or mark not approved. Not approved needs a short note saying why, and the note is shown wherever the item is listed. ' +
+            'A decision a person makes is shown as a filled chip.',
+        },
+        {
+          heading: 'The supplier list and approvals',
+          body:
+            'The Approved (Y/N) column of the verified supplier list also sets the approval of the item on that row from that supplier, when the product is found in the catalog. ' +
+            'The preview says what would change before anything is written. A decision a person made is never overridden by the list: the preview says it was kept. ' +
+            'A product the list names that is not in the catalog has no pair to approve and is reported. Two rows that disagree about the same item change nothing.',
+        },
+        {
+          heading: 'Facilities',
+          body:
+            'A facility is a plant or site of a supplier. A person adds it on the supplier page, under Facilities, and can record the plant code the supplier prints on its certificates. ' +
+            'Nothing is read off a certificate to create a facility or to assign one. An item with no facility recorded simply counts toward the whole supplier. ' +
+            'Retiring a facility keeps the items that already name it and stops new ones being assigned. Removing a facility never removes an item: the items go back to no facility recorded.',
+        },
+        {
+          heading: 'Private label',
+          body:
+            'An item is marked private label when a brand owner and a producer are both recorded on the product and they are different companies. Differences in capitals and spacing are ignored. ' +
+            'If either one is missing the item is not marked, because that is not known rather than private label. Brand owner, producer and the printed plant code are edited on the product page. ' +
+            'The mark is a label only. It changes nothing else.',
+        },
+      ],
+    },
+  },
+  /**
+   * A customer's contacts and its COA requirements per item (migration 0135),
+   * and what the order review does with them.
+   */
+  customerCoa: {
+    headline: 'Customer contacts and COA requirements',
+    well:
+      'Who at a customer receives certificates, and what the customer needs for each item it buys. ' +
+      'Both are read when an order is reviewed before sending. They add information and a warning. They never stop a send.',
+    help: {
+      sections: [
+        {
+          heading: 'Contacts',
+          body:
+            'A customer can have several contacts, one per email address, one of them the primary. Each is marked as receiving COAs or not. ' +
+            'When you review an order, the address box starts with the contacts marked as receiving COAs, primary first. You can change the addresses before sending. ' +
+            'A customer with no contact on file uses the email address on the customer record, as before. One send reaches at most ten addresses, and the review screen says so when a customer has more.',
+        },
+        {
+          heading: 'COA requirements by item',
+          body:
+            'One requirement per customer and item: COA required, not needed, or on request; what the certificate must show; when it is due; and, optionally, which contact it goes to. ' +
+            'The requirement is shown beside the item on the order review. If the customer requires a COA for an item and that line has no certificate, the review screen warns you. ' +
+            'The warning does not stop the send. The older free-text notes on the customer record are still shown, labelled as notes.',
+        },
+      ],
+    },
+  },
   tenants,
   users,
   api_keys: apiKeys,

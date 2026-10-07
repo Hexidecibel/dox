@@ -36,6 +36,9 @@ import { HelpWell } from '../../components/HelpWell';
 import { InfoTooltip } from '../../components/InfoTooltip';
 import { EmptyState } from '../../components/EmptyState';
 import { helpContent } from '../../lib/helpContent';
+import { useAuth } from '../../contexts/AuthContext';
+import CustomerContactsPanel from '../../components/CustomerContactsPanel';
+import CustomerItemRequirementsPanel from '../../components/CustomerItemRequirementsPanel';
 
 const DELIVERY_METHODS = ['email', 'portal', 'none'] as const;
 type DeliveryMethod = typeof DELIVERY_METHODS[number];
@@ -99,6 +102,7 @@ const ORDERS_PER_PAGE = 20;
 export function CustomerDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { isAdmin } = useAuth();
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -110,7 +114,6 @@ export function CustomerDetail() {
   const [formCustomerNumber, setFormCustomerNumber] = useState('');
   const [formEmail, setFormEmail] = useState('');
   const [formDeliveryMethod, setFormDeliveryMethod] = useState<DeliveryMethod>('email');
-  const [formRequirements, setFormRequirements] = useState('');
   const [saving, setSaving] = useState(false);
 
   // Orders state
@@ -131,7 +134,6 @@ export function CustomerDetail() {
       setFormCustomerNumber(c.customer_number);
       setFormEmail(c.email || '');
       setFormDeliveryMethod(c.coa_delivery_method);
-      setFormRequirements(c.coa_requirements || '');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load customer');
     } finally {
@@ -181,7 +183,6 @@ export function CustomerDetail() {
         customer_number: formCustomerNumber.trim(),
         email: formEmail.trim() || undefined,
         coa_delivery_method: formDeliveryMethod,
-        coa_requirements: formRequirements.trim() || undefined,
       }) as any;
       setCustomer(result.customer);
       setEditing(false);
@@ -299,6 +300,8 @@ export function CustomerDetail() {
         <Tabs value={tab} onChange={(_, v) => setTab(v)}>
           <Tab label="Info" />
           <Tab label={`Orders${ordersTotal ? ` (${ordersTotal})` : ''}`} />
+          <Tab label="Contacts" />
+          <Tab label="COA requirements" />
         </Tabs>
       </Box>
 
@@ -348,17 +351,6 @@ export function CustomerDetail() {
                 ))}
               </Select>
             </FormControl>
-            <TextField
-              label="COA Requirements"
-              fullWidth
-              multiline
-              rows={3}
-              value={formRequirements}
-              onChange={(e) => setFormRequirements(e.target.value)}
-              disabled={saving}
-              helperText="Special requirements for COA delivery"
-              sx={{ mb: 2 }}
-            />
             <Box sx={{ display: 'flex', gap: 1 }}>
               <Button
                 variant="contained"
@@ -376,7 +368,6 @@ export function CustomerDetail() {
                   setFormCustomerNumber(customer.customer_number);
                   setFormEmail(customer.email || '');
                   setFormDeliveryMethod(customer.coa_delivery_method);
-                  setFormRequirements(customer.coa_requirements || '');
                 }}
                 disabled={saving}
               >
@@ -430,10 +421,18 @@ export function CustomerDetail() {
             {customer.coa_requirements && (
               <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
                 <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                  COA Requirements
+                  Notes
                 </Typography>
                 <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-                  {customer.coa_requirements}
+                  {typeof customer.coa_requirements === 'string'
+                    ? customer.coa_requirements
+                    : JSON.stringify(customer.coa_requirements, null, 2)}
+                </Typography>
+                {/* The older free-text field (read-only since migration 0135).
+                    What the customer needs per item is recorded, one row an
+                    item, on the COA requirements tab. */}
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                  Earlier free-text notes, kept as they were. Per-item requirements are on the COA requirements tab.
                 </Typography>
               </Paper>
             )}
@@ -522,6 +521,21 @@ export function CustomerDetail() {
             )}
           </>
         )}
+      </TabPanel>
+
+      {/* Contacts (migration 0135): who at the customer receives COAs. */}
+      <TabPanel value={tab} index={2}>
+        <CustomerContactsPanel customerId={customer.id} customerName={customer.name} canEdit={isAdmin} />
+      </TabPanel>
+
+      {/* COA requirements by item (migration 0135, decision C-004). */}
+      <TabPanel value={tab} index={3}>
+        <CustomerItemRequirementsPanel
+          customerId={customer.id}
+          customerName={customer.name}
+          tenantId={customer.tenant_id}
+          canEdit={isAdmin}
+        />
       </TabPanel>
     </Box>
   );

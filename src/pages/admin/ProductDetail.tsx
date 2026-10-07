@@ -25,6 +25,8 @@ import { HelpWell } from '../../components/HelpWell';
 import { InfoTooltip } from '../../components/InfoTooltip';
 import { helpContent } from '../../lib/helpContent';
 import { ProductIdentifiersPanel } from '../../components/ProductIdentifiersPanel';
+import ProductAttributionPanel from '../../components/ProductAttributionPanel';
+import { useAuth } from '../../contexts/AuthContext';
 
 /**
  * ProductDetail — minimal info page for a single product. Mirrors the
@@ -46,6 +48,7 @@ export function ProductDetail() {
   const [formName, setFormName] = useState('');
   const [formDescription, setFormDescription] = useState('');
   const [saving, setSaving] = useState(false);
+  const { isAdmin } = useAuth();
 
   const loadProduct = useCallback(async () => {
     if (!id) return;
@@ -236,6 +239,11 @@ export function ProductDetail() {
           {product.description || 'No description.'}
         </Typography>
       </Paper>
+
+      {/* Brand owner, producer and plant code (0078) had an API and no screen.
+          Also where the private-label flag and this item's suppliers, with
+          their approval and facility, are shown (migration 0135). */}
+      <ProductAttributionPanel product={product} canEdit={isAdmin} onSaved={setProduct} />
 
       <ProductIdentifiersPanel productId={product.id} tenantId={product.tenant_id} />
     </Box>
