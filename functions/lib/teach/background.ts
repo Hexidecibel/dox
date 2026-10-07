@@ -16,7 +16,7 @@
  * builders can cleanly omit the section.
  */
 
-import { DAIRY_CONTEXT_AS_MIGRATED } from '../llm';
+import { isMigratedDefaultContext } from '../llm';
 
 export interface TeachBackground {
   /** Org-level extraction context, or '' when none authored. */
@@ -48,7 +48,7 @@ export async function loadTeachBackground(
       .bind(tenantId)
       .first<{ extraction_context: string | null }>();
     const stored = tenantRow?.extraction_context ?? '';
-    tenantContext = stored.trim() && stored !== DAIRY_CONTEXT_AS_MIGRATED ? stored : '';
+    tenantContext = stored.trim() && !isMigratedDefaultContext(stored) ? stored : '';
   } catch {
     tenantContext = '';
   }

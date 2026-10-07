@@ -193,15 +193,48 @@ export const DAIRY_CONTEXT_AS_MIGRATED = DAIRY_CONTEXT_TEMPLATE.replace(
   '\n  "_confidence": 0.95,\n',
 );
 
+/** Length plus 32-bit FNV-1a: enough to tell one known text from anything a person typed. */
+export function contextFingerprint(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `${text.length}:${h.toString(16)}`;
+}
+
 /**
- * The stored text 0136 wrote, read back as this surface's own former default.
+ * The exact texts migration 0136 has written, by fingerprint.
  *
- * EXACT MATCH ONLY. The moment a person edits their context it is theirs and
- * goes to the model as written, on both surfaces, as an edited context always
- * has.
+ * BY FINGERPRINT, NOT BY COMPARING WITH A CONSTANT, for two reasons. The text a
+ * tenant holds is whatever 0136 said on the day it was applied, and the
+ * template constant above is free to be reworded afterwards; a comparison with
+ * the constant would silently stop recognising every tenant migrated before
+ * the rewording. And the first text 0136 wrote names a real supplier in its
+ * worked example, which this file must be able to recognise without spelling.
+ * A later version of the migration's text is ADDED here, never swapped in.
+ */
+const MIGRATED_CONTEXT_FINGERPRINTS: ReadonlySet<string> = new Set([
+  '3675:54cb25f7', // 0136 as first written: the worker's built-in default of 2026-10-06, verbatim
+]);
+
+/** Is this stored context exactly what 0136 wrote -- i.e. nobody has edited it? */
+export function isMigratedDefaultContext(text: string | null | undefined): boolean {
+  return !!text && MIGRATED_CONTEXT_FINGERPRINTS.has(contextFingerprint(text));
+}
+
+/**
+ * The stored text 0136 wrote, read back as this surface's own former default:
+ * the one line on which the two surfaces differed is put back.
+ *
+ * UNEDITED MIGRATED TEXT ONLY. The moment a person edits their context it is
+ * theirs and goes to the model as written, on both surfaces, as an edited
+ * context always has.
  */
 export function industryLayerForThisSurface(industryPrompt: string): string {
-  return industryPrompt === DAIRY_CONTEXT_AS_MIGRATED ? DAIRY_CONTEXT_TEMPLATE : industryPrompt;
+  return isMigratedDefaultContext(industryPrompt)
+    ? industryPrompt.replace('\n  "_confidence": 0.95,\n', '\n  "_confidence": "high",\n')
+    : industryPrompt;
 }
 
 /**

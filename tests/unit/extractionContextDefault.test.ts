@@ -33,6 +33,7 @@ import {
   EXTRACTION_CONTEXT_TEMPLATES,
   GENERIC_INDUSTRY_CONTEXT,
   industryLayerForThisSurface,
+  isMigratedDefaultContext,
   stripUnfilledPlaceholders,
 } from '../../functions/lib/llm';
 import { onRequestGet as getContext } from '../../functions/api/tenant-extraction-context/index';
@@ -147,6 +148,15 @@ describe('migration 0136 pins the context every existing tenant was extracting w
     const key = { supplierId: 'none', documentTypeId: 'none' };
     expect((await loadTeachBackground(db, { tenantId: 'ctx-null', ...key })).tenantContext).toBe('');
     expect((await loadTeachBackground(db, { tenantId: 'ctx-own', ...key })).tenantContext).toBe('ORG CONTEXT:\nWe import spices.');
+  });
+
+  it('recognises what it stored by fingerprint, so rewording the template later cannot orphan a migrated tenant', async () => {
+    const stored = (await contextOf('ctx-null'))!.context!;
+    expect(isMigratedDefaultContext(stored)).toBe(true);
+    expect(isMigratedDefaultContext(stored + ' ')).toBe(false);
+    expect(isMigratedDefaultContext(DAIRY_CONTEXT_TEMPLATE)).toBe(false);
+    expect(isMigratedDefaultContext('')).toBe(false);
+    expect(isMigratedDefaultContext(null)).toBe(false);
   });
 
   it('an EDITED context is never swapped for a template', () => {
