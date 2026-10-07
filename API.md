@@ -1238,6 +1238,99 @@ The value, kind and supplier of an identifier are its **identity** and are not e
 
 ---
 
+## Approved Items, Facilities, Customer Contacts and COA Requirements
+
+Migration 0135. **None of this changes a verdict**: no gap, renewal alert, search answer or order send reads it in order to decide anything. Approval, facility and a customer's requirements are recorded and shown; the order review gains a pre-filled address list and a warning.
+
+### Approved items
+
+`GET /api/approved-items` — any role in the organization. One row per **item-and-supplier pair**.
+
+| Query | Meaning |
+|-------|---------|
+| `supplier_id`, `product_id`, `facility_id` | one supplier / item / facility |
+| `approval` | `approved` \| `pending` \| `not_approved` |
+| `supplied` | `1` = currently supplied, `0` = no longer supplied |
+| `q` | item, supplier, brand owner, producer, facility, or any identifier of the item |
+| `limit` (100, max 500), `offset` | paging |
+| `tenant_id` | super_admin only (required for them) |
+
+```json
+{
+  "items": [{
+    "link_id": "ps_1", "product_id": "p_1", "product_name": "Whole Milk", "product_active": true,
+    "our_sku": "30417", "supplier_id": "s_1", "supplier_name": "Acme Creamery",
+    "facility": { "id": "f_1", "name": "Lynden Plant", "plant_code": "53-104", "active": true },
+    "approval_status": "approved", "approval_source": "initial",
+    "approval_decided_at": null, "approval_decided_by": null, "approval_decided_by_name": null, "approval_note": null,
+    "supplied": true, "discontinued_at": null, "link_source": "import",
+    "brand_owner": "Northwind Foods", "producer": "Acme Creamery", "plant_code": null, "private_label": true
+  }],
+  "total": 1, "counts": { "approved": 1, "pending": 0, "not_approved": 0 }, "limit": 100, "offset": 0
+}
+```
+
+- **Approval is not "supplied".** `approval_status` and `supplied` are separate facts; both are always returned.
+- `approval_source`: `initial` = on file when approvals were introduced (nobody decided it), `person`, `import` (the verified supplier list), or `null` = nothing said yet (a new pair is `pending` with no source).
+- `link_id: null` = the pair exists only through the legacy `products.supplier_id` column and was made after 0135; it reads `pending`.
+- `private_label` = brand owner and producer both recorded and different, ignoring case and spaces. A display flag: nothing is blocked by it.
+- `counts` ignore the `approval` filter, so a screen can count each status for the rest of what was asked.
+- `facility: null` = no facility recorded; the item counts toward the whole supplier.
+
+Deciding an approval or naming a facility is `PUT /api/suppliers/:id/products/:productId` (org_admin, super_admin):
+
+| Field | Meaning |
+|-------|---------|
+| `approval_status` (+ `approval_note`) | `approved` / `pending` / `not_approved`. **`not_approved` needs a note** (400, and nothing else in the request is applied). Stamped `approval_source: "person"` with who and when; the supplier list never overrides it. Audited `product_supplier.approval_decided` with the previous state. |
+| `facility_id` | One of this supplier's facilities that is in use, or `null`. 400 for another supplier's or a retired one. Audited `product_supplier.facility_set`. |
+| `discontinued`, `nothing_owed_reason` | As before (0123). |
+
+`GET /api/products?supplier_id=` rows also carry `link_approval_status` / `_source` / `_note` / `_decided_at` and `link_facility_id` / `link_facility_name` for that supplier's link (null on a legacy-only link).
+
+**The supplier list sets approval.** `POST /api/supplier-list/import`: when a row's product is found in the catalog, its `Approved (Y/N)` value is that item's approval from that supplier. The response's `approvals[]` has one entry per pair — `lines`, `supplier_name`, `product_label`, `listed`, `current`, `current_source`, and `action`: `set` (written; on a dry run, would be), `unchanged`, `kept_person` (a person decided otherwise; not overridden), `unresolved` (the product is not in the catalog, so there is no pair to approve), `conflict` (the list's own rows disagree; nothing changed) — and `counts.approvals_set` / `_unchanged` / `_kept_person_set` / `_unresolved` / `_conflicting`. A dry run writes none of it.
+
+### Facilities
+
+A facility is a named record under a supplier that **a person adds**. Nothing infers one from a certificate. `plant_code` is recorded, never matched on.
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/suppliers/:id/facilities` | any tenant user | `{ supplier, facilities[] }`; each facility has `item_count`. |
+| `POST /api/suppliers/:id/facilities` | org_admin, super_admin | `{ name, plant_code?, notes? }`. 409 when the supplier already has a facility of that name (case and spacing ignored). Audited `supplier.facility_added`. |
+| `PUT /api/suppliers/:id/facilities/:facilityId` | org_admin, super_admin | Any of `name`, `plant_code`, `notes`, `active`. `active: false` retires it: items that name it keep it, no new item can take it. Audited `supplier.facility_updated` (no row for a save that changes nothing). |
+| `DELETE /api/suppliers/:id/facilities/:facilityId` | org_admin, super_admin | Removes it. Items that named it go back to no facility recorded (`cleared_items` in the response, their ids in the audit row); no item is removed. Audited `supplier.facility_removed`. |
+
+A supplier merge moves the loser's facilities to the winner; one both have is kept once and its items re-pointed.
+
+### Customer contacts
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/customers/:id/contacts` | any tenant user | `{ customer: { id, name, email }, contacts[] }`. Each contact: `name`, `email`, `role`, `is_primary`, `coa_recipient`. |
+| `POST /api/customers/:id/contacts` | org_admin, super_admin | `{ email, name?, role?, is_primary?, coa_recipient? }`. `coa_recipient` defaults true; the first contact is the primary unless told otherwise. 409 for an address the customer already has. Audited `customer.contact_added`. |
+| `PUT /api/customers/:id/contacts/:contactId` | org_admin, super_admin | Naming a new primary steps the previous one down. Audited `customer.contact_updated` with both sides. |
+| `DELETE /api/customers/:id/contacts/:contactId` | org_admin, super_admin | A COA requirement that named it keeps its other details and has no delivery contact. Audited `customer.contact_removed`. |
+
+### Customer COA requirements by item
+
+One row per customer and item.
+
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `GET /api/customers/:id/item-requirements` | any tenant user | `{ customer, requirements[] }`. |
+| `POST /api/customers/:id/item-requirements` | org_admin, super_admin | `{ product_id, coa_required?, must_show?, timing?, delivery_contact_id?, notes? }`. `coa_required` is `yes` (default) / `no` / `on_request`. 409 when the customer already has a requirement for that item. Audited `customer.item_requirement_added`. |
+| `PUT /api/customers/:id/item-requirements/:requirementId` | org_admin, super_admin | Any field except `product_id` (another item is another row). Audited `customer.item_requirement_updated`. |
+| `DELETE /api/customers/:id/item-requirements/:requirementId` | org_admin, super_admin | Audited `customer.item_requirement_removed` with the whole row. |
+
+### What the order review reads
+
+`GET /api/orders/:id/send-preview` gains, beside `recipient` (still the customer's own address):
+
+- `recipients[]` — the addresses to pre-fill: the customer's contacts with `coa_recipient`, primary first, then any delivery contact named by a requirement for an item on this order; capped at 10. With no such contact, `[customers.email]`. `recipient_source` is `coa_contacts` / `customer_email` / `none`; `recipients_over_cap` counts what the cap left off (also said in `warnings`).
+- `item_requirements[]` — per line whose item has a requirement: `order_item_id`, `product_name`, `lot_label`, `coa_required`, `must_show`, `timing`, `summary` ("COA required - must show … - with the shipment"), `delivery_contact`, `document_on_line`, and `missing` (required, and that line sends nothing).
+
+A `missing` requirement adds one line to `warnings`. **It never sets `blocked`**, and none of this is part of the `fingerprint`, which covers what leaves. `POST /api/orders/:id/send` with no `recipients` uses the same default.
+
 ## Supplier Contacts and the Supplier Renewal Send
 
 Migration 0133. **The portal never emails a supplier on its own.** The renewal run (`POST /api/expirations/run-scheduled`, `POST /api/expirations/notify`) only **drafts** a request to the supplier's document contact; one approval by a person sends it. Both run responses carry `supplier_requests` (what was drafted, superseded, ended, escalated, and what could not be drafted and why).
@@ -1319,7 +1412,7 @@ What a requirement is owed PER (migration 0123). `requirements.scope` is `suppli
 | `POST /api/requirements`, `PUT /api/requirements/:id` | super_admin, org_admin | Accept `scope`. A change writes `requirement.scope_changed` with `{from, to}`. |
 | `GET /api/requirements/:id/scope-preview?scope=` | super_admin, org_admin | Read-only: per supplier, status before/after, product obligations created, confirmed documents that would stop counting. |
 | `GET/POST /api/product-requirements`, `PUT/DELETE /api/product-requirements/:id` | read: any role; write: super_admin, org_admin | `exempt` one product from an inherited per-product requirement (**reason required**) or `add` one to one product. Only for a `product`-scope requirement and a product the supplier ships. |
-| `PUT /api/suppliers/:id/products/:productId` | super_admin, org_admin | `{ discontinued }` (no longer supplied) and `{ nothing_owed_reason }` (declared: owes nothing per product; reason required, null clears). |
+| `PUT /api/suppliers/:id/products/:productId` | super_admin, org_admin | `{ discontinued }` (no longer supplied) and `{ nothing_owed_reason }` (declared: owes nothing per product; reason required, null clears). Since 0135 also `{ approval_status, approval_note }` and `{ facility_id }` -- see "Approved Items, Facilities, Customer Contacts and COA Requirements". |
 
 Rules the gap engine keeps (`GET /api/supplier-gaps`):
 
@@ -1775,7 +1868,9 @@ nothing. `files[]` (each under the **generated** name it travels under, with
 `bytes`, `delivery` `attachment` / `link`, `source` `document` / `original`,
 `part_number`, the order lines it stands for, and `notes` in plain words),
 `parts[]` (the subject each email will carry), `part_count`, `recipient` (the
-customer's address on record), `from_name`, `reply_to`, `lines_not_sent[]`
+customer's address on record), `recipients[]` / `recipient_source` and
+`item_requirements[]` (migration 0135 -- see "What the order review reads"),
+`from_name`, `reply_to`, `lines_not_sent[]`
 (with the reason), `warnings`, `blocked` (`nothing_to_send` /
 `too_many_parts` / `too_many_linked` / `order_staged`, or null), `limits`, and
 a `fingerprint`. No storage key or queue id is in it.
@@ -1783,8 +1878,9 @@ a `fingerprint`. No storage key or queue id is in it.
 **`POST /api/orders/:id/send`** — body `{ recipients?, subject?, message?,
 fingerprint? }`. The customer gets an exact copy of each file **attached**, not
 a link: from `"<Organization> via SupDox"` at the portal's own address, with a
-reply-to of the calling user. `recipients` defaults to the customer's address
-(400 when there is none); at most 10. Rules:
+reply-to of the calling user. `recipients` defaults to the customer's COA
+contacts, else the customer's address (400 when there is neither); at most 10.
+Rules:
 
 - **Generated file names only.** The uploaded name appears nowhere in the mail.
 - **A multi-lot certificate goes whole**, once, however many lines were cut
