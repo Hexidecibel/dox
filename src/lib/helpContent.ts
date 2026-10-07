@@ -520,7 +520,7 @@ const suppliers: ModuleHelpExpanded = {
       {
         heading: 'Products, templates, and documents',
         body:
-          "Open a supplier to see three tabs. Products — the catalog items this supplier ships. Templates — extraction templates pinned to the supplier + document type pair (set up via the Import / Review Queue flow). Documents — every doc with a supplier_id pointing here, listed newest first. The Templates tab is where you tune auto-ingest thresholds for high-trust supplier+doctype pairs.",
+          "Open a supplier to see three tabs. Products — the catalog items this supplier ships. Templates — extraction templates pinned to the supplier + document type pair (set up via the Import / Review Queue flow). Documents — every doc with a supplier_id pointing here, listed newest first. The Templates tab lists the saved field mappings; a template never files a document by itself — every document is reviewed by a person.",
       },
       {
         heading: 'Contacts',
@@ -644,11 +644,11 @@ const documents: ModuleHelpExpanded = {
 const importHelp = {
   headline: 'Import',
   well:
-    'Smart upload for documents. Drop a file, the AI pipeline extracts fields, and you confirm before it lands in the library. Higher-confidence + matched-template runs auto-ingest without review.',
+    'Smart upload for documents. Drop a file, the AI pipeline extracts fields, and you confirm before it lands in the library. Nothing is filed without a person approving it.',
   main: {
     headline: 'Import',
     well:
-      "Upload one or more files and the smart-upload pipeline runs each through extraction (AI parses fields, detects type, finds product names + lot numbers) and queues them for review. High-confidence runs that match an extraction template can auto-ingest without ever stopping here. Files that need human review surface for editing in the Review Queue or the per-result cards below.",
+      "Upload one or more files and the smart-upload pipeline runs each through extraction (AI parses fields, detects type, finds product names + lot numbers) and queues them for review. Every file is reviewed by a person before it is filed: a matched extraction template makes the reading tighter, it never skips the review. Files surface for editing in the Review Queue or the per-result cards below.",
     sectionTooltips: {
       dropZone:
         'Drag files in or click to browse. PDF, image, CSV, and XLSX are all supported. Multiple files at once run in parallel through extraction.',
@@ -658,7 +658,7 @@ const importHelp = {
       processButton: 'Kick off extraction. Files queue for AI processing in the background; you\'ll move to the queued screen and can come back to review when ready.',
       confidenceChip:
         "How sure the AI was about its overall extraction. >=80% high (green) — fields are likely right. 50-79% medium (yellow) — spot-check the fields. <50% low (red) — assume nothing is right and re-check every field.",
-      autoIngestedChip: "This doc skipped review entirely — a matched extraction template authorized the AI to ingest it directly because confidence cleared the template's threshold.",
+      autoIngestedChip: "An older document that was filed without a review step. That no longer happens: every document is now approved by a person, so this chip only appears on history.",
       templateChip: "An extraction template (saved supplier + doc-type field mapping) matched this doc. The AI used the template's field hints, which usually means tighter, more accurate extraction.",
       duplicateBadge: "dox spotted an existing document with the same external_ref. Importing this would bump the version on the existing doc rather than create a new one — confirm that's what you want.",
       summary: "AI-generated one-line summary of what the document is. Useful as a sanity check that the file is what you thought it was.",
@@ -680,9 +680,9 @@ const importHelp = {
           'Review — for each file, a card shows the file preview, the AI-extracted fields (editable), the confidence score, and a final Import button. High-confidence template-matched runs may have auto-imported and show an \"Imported\" badge directly. Edit any wrong fields and hit Import to commit.',
       },
       {
-        heading: 'Auto-ingest and templates',
+        heading: 'Extraction templates',
         body:
-          "An extraction template is a saved supplier + document-type pair with a field mapping and a confidence threshold. Templates are created from the Review Queue (after you correct an AI extraction, dox offers to save the corrections as a template for that supplier+doctype). Future docs from the same supplier+doctype that match the template skip review and auto-ingest if their confidence clears the threshold. Tune thresholds on the Supplier detail page → Templates tab.",
+          "An extraction template is a saved supplier + document-type pair with a field mapping. Templates are created from the Review Queue (after you correct an AI extraction, dox offers to save the corrections as a template for that supplier+doctype). Future docs from the same supplier+doctype arrive with their fields already mapped, which makes the review quicker. A template never files a document: every document is still approved by a person.",
       },
       {
         heading: 'Common questions',
@@ -698,25 +698,25 @@ const importHelp = {
 const reviewQueue = {
   headline: 'Review Queue',
   well:
-    "AI extraction landing pad. Items here are documents the pipeline has parsed but isn't confident enough to ingest unattended. Review each, correct any wrong fields, then approve or reject.",
+    "AI extraction landing pad. Every document the pipeline has parsed waits here for a person. Review each, correct any wrong fields, then approve or reject.",
   main: {
     headline: 'Review Queue',
     well:
-      "Every document the AI pipeline processed but didn't auto-ingest lives here. Review the extracted fields against the original file, fix anything wrong, then approve to push the doc into the library or reject to discard. Approving an item with corrections also feeds the learning loop — future docs from the same supplier+doctype get tighter extractions.",
+      "Every document the AI pipeline processed lives here until a person decides on it. Review the extracted fields against the original file, fix anything wrong, then approve to push the doc into the library or reject to discard. Approving an item with corrections also feeds the learning loop — future docs from the same supplier+doctype get tighter extractions.",
     fieldTooltips: {
       confidence:
         "Overall extraction confidence from the AI. >=80% high (likely right). 50-79% medium (spot-check). <50% low (re-check everything). Confidence factors in field-by-field certainty plus document-type detection accuracy.",
       status:
         "pending = waiting on you. approved = you confirmed and the doc is now in the library. rejected = you discarded; the file stays in R2 but never becomes a document. Use the filter chips at the top to switch views.",
       autoIngested:
-        "Doc skipped this queue entirely — a matched extraction template let the AI commit it directly. These show up with status=approved and processing_status=ready. Use the \"Auto-ingested only\" toggle to audit recent unattended ingests.",
+        "An older document that was filed without passing through this queue. That no longer happens — every document is now approved by a person — so the chip marks history only. The \"Auto-ingested only\" toggle lists those older items.",
       templateMatch:
         "An extraction template (saved supplier + doc-type field mapping) matched this doc. Field assignments came from the template's hints, which usually tightens extraction.",
       processingStatus:
         "queued — file uploaded, AI hasn't started. processing — extraction in flight. ready — extraction finished, fields are populated and you can review. error — extraction failed; click into the item for the error message.",
       docTypeFilter: 'Narrow the queue to a single document type. Useful when you want to plough through, say, all the pending COAs in one sitting.',
       tenantFilter: 'super_admin only — filter to one tenant. Defaults to all tenants you have access to.',
-      autoIngestedToggle: "Show only docs that auto-ingested (skipped this queue). Lets you spot-check the unattended pipeline without paging through approved manual reviews.",
+      autoIngestedToggle: "Show only older documents that were filed without a review, from before every document was reviewed by a person. Nothing new is added to this list.",
     },
   },
   help: {
@@ -724,7 +724,7 @@ const reviewQueue = {
       {
         heading: 'What the Review Queue is',
         body:
-          "The Review Queue is the human-in-the-loop checkpoint for the AI extraction pipeline. Every file that lands via Import, email, or API runs through extraction and gets a confidence score; if confidence is below the auto-ingest threshold (or no extraction template matched), the result lands here for a human to confirm. " +
+          "The Review Queue is the human-in-the-loop checkpoint for the AI extraction pipeline. Every file that lands via Import, email, or API runs through extraction and gets a confidence score, and every result lands here for a human to confirm — the score tells you how carefully to look, it never decides anything. " +
           "Approving an item with field corrections does two things: pushes the doc into the library and feeds the corrections back into the learning loop — the supplier + doctype pair will get a tighter extraction next time.",
       },
       {
@@ -734,9 +734,9 @@ const reviewQueue = {
           "Three actions. Approve — commits the doc to the library with whatever fields are currently filled. Reject — discards the queue item; the file stays in R2 but never becomes a document. Save Template — only shown after corrections, saves the corrected field mapping as an extraction template for this supplier+doctype so future docs auto-extract correctly.",
       },
       {
-        heading: 'Auto-ingested items',
+        heading: 'Older auto-ingested items',
         body:
-          'Auto-ingested docs skip the queue entirely (they go straight from extraction to the library) but still show up here with status=approved and an "Auto-ingested" badge. Toggle "Auto-ingested only" at the top to audit recent unattended ingests — handy for spot-checking a high-volume connector. Confidence on these is always >= the matched template\'s threshold; if you see a wrong field, lower the threshold or update the template on the Supplier detail page.',
+          'Nothing is filed without a person any more. Documents filed automatically before that rule still show here with status=approved and an "Auto-ingested" badge; toggle "Auto-ingested only" at the top to list them. If one of them carries a wrong field, open the document and correct it.',
       },
       {
         heading: 'Common questions',
@@ -756,7 +756,7 @@ const ingestHistory = {
   main: {
     headline: 'Ingest History',
     well:
-      "The complete audit trail for the AI ingest pipeline. Every file that hit the queue (regardless of source) is one row here, with its journey from upload through extraction, review, and final document creation. Use it to debug stuck items, audit auto-ingest rates, or trace how a specific doc ended up where it did.",
+      "The complete audit trail for the AI ingest pipeline. Every file that hit the queue (regardless of source) is one row here, with its journey from upload through extraction, review, and final document creation. Use it to debug stuck items or trace how a specific doc ended up where it did.",
     columnTooltips: {
       timestamp: 'When the queue item was created — i.e. when the file landed in dox via Import, email, or API.',
       fileName: 'Original file name as uploaded. Hover for the full name + size.',
@@ -765,16 +765,16 @@ const ingestHistory = {
       processing:
         "Where the file is in the AI pipeline. queued = waiting for the worker. processing = extraction running. ready = extraction finished and fields are populated. error = extraction failed; expand for the error message.",
       reviewStatus:
-        "Human-in-the-loop outcome. pending = sitting in the Review Queue. approved = a human (or auto-ingest) confirmed and the doc was created. rejected = a human discarded.",
+        "Human-in-the-loop outcome. pending = sitting in the Review Queue. approved = a human confirmed and the doc was created (older rows may have been filed automatically, and say so). rejected = a human discarded.",
       confidence:
-        "Overall AI confidence in the extraction (0-100). Drives whether auto-ingest fires (template + threshold gates) and informs how carefully a human should review. Color-coded green/yellow/red.",
+        "Overall AI confidence in the extraction (0-100). It tells a human how carefully to review and decides nothing by itself. Color-coded green/yellow/red.",
       supplier: "Supplier the AI assigned (matched against your supplier roster + aliases). Empty when the AI couldn't pick one — usually because no record matched.",
       docType: "Document type the AI assigned, or its raw guess if no per-tenant doctype matched. The doc-type-id column lights up when the guess matches a configured type; otherwise the guess shows as a label-only chip.",
-      templateMatch: "An extraction template matched — the AI used a saved supplier+doctype field mapping. Tighter extraction, often auto-ingestible.",
-      autoIngested: "This file went from queued straight to approved without a human review. Allowed because a template matched and confidence cleared its threshold.",
+      templateMatch: "An extraction template matched — the AI used a saved supplier+doctype field mapping. Tighter extraction, quicker review.",
+      autoIngested: "This older file went from queued straight to approved without a human review. That no longer happens: every document is now approved by a person.",
     },
     pipelineStageTooltips: {
-      reviewFilter: 'Slice the history by the human-review outcome — useful for finding everything you rejected last week, or auditing the auto-approved (ingested) bucket.',
+      reviewFilter: 'Slice the history by the human-review outcome — useful for finding everything you rejected last week, or everything approved in a period.',
       processingFilter: 'Slice by where in the AI pipeline things landed. \"Error\" is the high-value filter when something\'s broken — surfaces every extraction that failed.',
     },
   },
@@ -783,7 +783,7 @@ const ingestHistory = {
       {
         heading: 'What Ingest History is',
         body:
-          "Ingest History is the audit trail for the AI ingest pipeline. Every file that lands in the processing queue — regardless of source (Import, email, API) — appears here as one row. The row carries the file's journey: when it arrived, which door it came in through, the AI extraction outcome (status + confidence), whether a human approved or rejected it, and whether auto-ingest fired. " +
+          "Ingest History is the audit trail for the AI ingest pipeline. Every file that lands in the processing queue — regardless of source (Import, email, API) — appears here as one row. The row carries the file's journey: when it arrived, which door it came in through, the AI extraction outcome (status + confidence), and whether a human approved or rejected it. " +
           "Think of it as the join across Import + email-ingest + API + Review Queue: a single chronological view of everything the pipeline has touched.",
       },
       {
@@ -792,7 +792,7 @@ const ingestHistory = {
           "Each row reflects up to four stages. " +
           "1. Source — which intake door (Import / email / API). " +
           "2. Processing — the AI extraction (queued -> processing -> ready / error). " +
-          "3. Review — human-in-the-loop outcome (pending / approved / rejected; auto-ingest skips human review and lands at approved directly). " +
+          "3. Review — human-in-the-loop outcome (pending / approved / rejected). " +
           "4. Ingest — the actual document creation, only if review was approved. " +
           "Filter chips at the top let you slice by review status and processing status independently — pair them to find, say, every error-state item that's still pending review.",
       },
@@ -807,7 +807,7 @@ const ingestHistory = {
         body:
           'Why is the same file in here twice? Re-uploads create new queue rows even if they\'re duplicates by external_ref. Approve one and reject the rest. ' +
           'Confidence column is empty? The extraction errored before scoring (file unreadable, supplier extraction failed, etc.). Expand for the error. ' +
-          'Auto-ingested rate looks low? Means few extraction templates exist or thresholds are too high. Save more templates from the Review Queue.',
+          'Nothing shows as auto-ingested? Correct: nothing is filed without a person. The filter exists for older rows.',
       },
     ],
   },
@@ -939,8 +939,6 @@ const documentTypes: ModuleHelpExpanded = {
       created: 'When the document type was first created.',
       renewalPeriod:
         "How long a document of this type stays current. Annual unless you change it; specification sheets default to three years, because both major food-safety schemes define a current spec sheet as one revised or reviewed inside that window. A document that states its own expiry date always overrides this — a certificate of insurance reading 'expires 09/01/2027' expires then, whatever the type says. 'Does not renew' is for types that are never re-collected on a cadence: a Certificate of Analysis is superseded by the next lot's certificate, so it is never overdue and stays off the renewal dashboard entirely.",
-      autoIngest:
-        "NOT IMPLEMENTED — the toggle is stored but no code path skips the Review Queue. Nothing in dox auto-ingests; every document is reviewed by a human before it becomes a record.",
       extractTables:
         'When on, the AI also extracts tabular data (test results, spec rows, line items) into structured tables on the document. Off keeps extraction to scalar fields only — faster, less reliable for spec / lab docs that hinge on table content.',
       namingFormat:
@@ -975,9 +973,9 @@ const documentTypes: ModuleHelpExpanded = {
           "Leave it blank for types where you trust the AI to pick the right fields on its own (small / generic types). Fill it in for high-volume regulated types where consistency matters.",
       },
       {
-        heading: 'Auto-ingest and extract tables',
+        heading: 'Extract tables',
         body:
-          "Auto-ingest — NOT IMPLEMENTED. The toggle is stored and reported, but no code path ever skips the Review Queue: nothing in dox auto-ingests, by a deliberate decision (every document is reviewed by a human before it becomes a record). Leave it off. " +
+          "Nothing in dox files a document without a person: every document is reviewed by a human before it becomes a record, whatever its type. " +
           "Extract tables — when on, the AI also pulls tabular data (test results, line items, spec rows) into structured tables on the document. On for COA / Spec Sheet (table content is the point); off for SDS / generic notes where there's no useful table. Extracting tables is slower and noisier, so leave off when you don't need it.",
       },
       {
@@ -985,7 +983,6 @@ const documentTypes: ModuleHelpExpanded = {
         body:
           "AI keeps misclassifying a file as the wrong type? Tighten the extraction_fields list — adding 2-3 distinguishing fields nudges the classifier toward the right type. " +
           "Naming format isn't applying? It never does — see \"Naming format — not implemented\" above. " +
-          "Auto-ingest doesn't skip the queue? It never does — see \"Auto-ingest and extract tables\" above. " +
           "Want to retire a type? Deactivate rather than delete. Existing documents keep their type even after deactivation; new ingests just stop landing on it.",
       },
     ],

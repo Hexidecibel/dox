@@ -29,7 +29,6 @@ import {
   DialogContent,
   DialogActions,
   Checkbox,
-  Slider,
   Table,
   TableBody,
   TableCell,
@@ -427,8 +426,6 @@ export default function ReviewQueue() {
     docTypeName: string;
     docTypeId: string | null;
     fieldMappings: TemplateFieldMapping[];
-    autoIngestEnabled: boolean;
-    confidenceThreshold: number;
   } | null>(null);
 
   // Suppliers list (for template dialog autocomplete)
@@ -1030,8 +1027,6 @@ export default function ReviewQueue() {
           docTypeName: docType?.name || (item as any).document_type_guess || '',
           docTypeId: item.document_type_id || null,
           fieldMappings: mappings,
-          autoIngestEnabled: false,
-          confidenceThreshold: 0.85,
         });
       }
 
@@ -1732,7 +1727,7 @@ export default function ReviewQueue() {
           title={statusFilter === 'pending' ? 'Inbox zero' : `No ${statusFilter} items`}
           description={
             statusFilter === 'pending'
-              ? "Nothing is waiting on review right now. New items appear here when the AI pipeline finishes extraction on a doc that didn't auto-ingest."
+              ? "Nothing is waiting on review right now. New items appear here when the AI pipeline finishes extraction on a document."
               : showAutoIngestedOnly
                 ? `No ${statusFilter} items were auto-ingested. Toggle off "Auto-ingested only" to see manually reviewed ones.`
                 : `Nothing matches the current filters. Try a different status (pending / approved / rejected) or clear the doc-type filter.`
@@ -3486,7 +3481,7 @@ export default function ReviewQueue() {
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
                 These fields will be automatically mapped when documents from this supplier are processed.
-                Required fields must be present for auto-ingest to work.
+                Every document is still reviewed by a person before it is filed.
               </Typography>
 
               <TableContainer component={Paper} variant="outlined" sx={{ mb: 2 }}>
@@ -3558,46 +3553,6 @@ export default function ReviewQueue() {
                 </Table>
               </TableContainer>
 
-              {/* Auto-ingest settings */}
-              <Divider sx={{ my: 2 }} />
-              <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                Auto-ingest
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                When enabled, documents that match this template with high enough confidence
-                will be ingested automatically — no manual review needed.
-              </Typography>
-
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={templateDialog.autoIngestEnabled}
-                    onChange={(e) => setTemplateDialog(prev => prev ? { ...prev, autoIngestEnabled: e.target.checked } : null)}
-                  />
-                }
-                label="Enable auto-ingest"
-              />
-
-              {templateDialog.autoIngestEnabled && (
-                <Box sx={{ mt: 1, px: 1 }}>
-                  <Typography variant="body2" gutterBottom>
-                    Confidence threshold: {Math.round(templateDialog.confidenceThreshold * 100)}%
-                  </Typography>
-                  <Slider
-                    value={templateDialog.confidenceThreshold}
-                    onChange={(_, value) => setTemplateDialog(prev => prev ? { ...prev, confidenceThreshold: value as number } : null)}
-                    min={0.5}
-                    max={1.0}
-                    step={0.05}
-                    marks={[
-                      { value: 0.5, label: '50%' },
-                      { value: 0.7, label: '70%' },
-                      { value: 0.85, label: '85%' },
-                      { value: 1.0, label: '100%' },
-                    ]}
-                  />
-                </Box>
-              )}
             </DialogContent>
             <DialogActions>
               <Button onClick={() => setTemplateDialog(null)}>
@@ -3640,8 +3595,6 @@ export default function ReviewQueue() {
                       supplier_id: supplierId,
                       document_type_id: docTypeId,
                       field_mappings: templateDialog.fieldMappings,
-                      auto_ingest_enabled: templateDialog.autoIngestEnabled,
-                      confidence_threshold: templateDialog.confidenceThreshold,
                     });
 
                     setSnackbar({ open: true, message: 'Template saved! Future documents from this supplier will be auto-mapped.', severity: 'success' });

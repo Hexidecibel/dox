@@ -38,10 +38,7 @@ import {
   DialogContent,
   DialogActions,
   Autocomplete,
-  Switch,
-  FormControlLabel,
   Checkbox,
-  Slider,
 } from '@mui/material';
 import {
   CloudUpload as UploadIcon,
@@ -332,8 +329,6 @@ export function Import() {
     docTypeName: string;
     docTypeId: string | null;
     fieldMappings: TemplateFieldMapping[];
-    autoIngestEnabled: boolean;
-    confidenceThreshold: number;
   } | null>(null);
 
   // Suppliers list (for template dialog autocomplete)
@@ -720,8 +715,6 @@ export function Import() {
           docTypeName: docType?.name || (item.queueItem as any).document_type_guess || '',
           docTypeId: itemDocTypeId || null,
           fieldMappings: mappings,
-          autoIngestEnabled: false,
-          confidenceThreshold: 0.85,
         });
       }
     } catch (err) {
@@ -1707,7 +1700,7 @@ export function Import() {
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
                 These fields will be automatically mapped when documents from this supplier are processed.
-                Required fields must be present for auto-ingest to work.
+                Every document is still reviewed by a person before it is filed.
               </Typography>
 
               <TableContainer component={Paper} variant="outlined" sx={{ mb: 2 }}>
@@ -1779,46 +1772,6 @@ export function Import() {
                 </Table>
               </TableContainer>
 
-              {/* Auto-ingest settings */}
-              <Divider sx={{ my: 2 }} />
-              <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                Auto-ingest
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                When enabled, documents that match this template with high enough confidence
-                will be ingested automatically — no manual review needed.
-              </Typography>
-
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={templateDialog.autoIngestEnabled}
-                    onChange={(e) => setTemplateDialog(prev => prev ? { ...prev, autoIngestEnabled: e.target.checked } : null)}
-                  />
-                }
-                label="Enable auto-ingest"
-              />
-
-              {templateDialog.autoIngestEnabled && (
-                <Box sx={{ mt: 1, px: 1 }}>
-                  <Typography variant="body2" gutterBottom>
-                    Confidence threshold: {Math.round(templateDialog.confidenceThreshold * 100)}%
-                  </Typography>
-                  <Slider
-                    value={templateDialog.confidenceThreshold}
-                    onChange={(_, value) => setTemplateDialog(prev => prev ? { ...prev, confidenceThreshold: value as number } : null)}
-                    min={0.5}
-                    max={1.0}
-                    step={0.05}
-                    marks={[
-                      { value: 0.5, label: '50%' },
-                      { value: 0.7, label: '70%' },
-                      { value: 0.85, label: '85%' },
-                      { value: 1.0, label: '100%' },
-                    ]}
-                  />
-                </Box>
-              )}
             </DialogContent>
             <DialogActions>
               <Button onClick={() => setTemplateDialog(null)}>
@@ -1861,8 +1814,6 @@ export function Import() {
                       supplier_id: supplierId,
                       document_type_id: docTypeId,
                       field_mappings: templateDialog.fieldMappings,
-                      auto_ingest_enabled: templateDialog.autoIngestEnabled,
-                      confidence_threshold: templateDialog.confidenceThreshold,
                     });
 
                     setSnackbar({ open: true, message: 'Template saved! Future documents from this supplier will be auto-mapped.', severity: 'success' });
