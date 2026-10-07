@@ -31,7 +31,7 @@ export const LOT_SCHEME_OPTIONS: SchemeOption[] = [
   {
     value: 'lims_combined',
     label: 'LIMS combined (lot + sublot)',
-    description: 'Concatenate the base lot number with a normalized 2-digit sublot code. Only fires when sublots are extracted (e.g. Darigold).',
+    description: 'Concatenate the base lot number with a normalized 2-digit sublot code. Only fires when sublots are extracted.',
   },
   {
     value: 'plain',

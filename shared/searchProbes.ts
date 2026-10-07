@@ -102,9 +102,9 @@ export type ProbeKind =
 
 export const PROBE_KIND_LABELS: Record<ProbeKind, string> = {
   lot_exact: 'lot, as printed',
-  lot_composite: 'lot + sublot run together (1042620303)',
-  lot_dash: 'lot-sublot (10426203-03)',
-  lot_space: 'lot sublot ("10426203 03")',
+  lot_composite: 'lot + sublot run together (2072611402)',
+  lot_dash: 'lot-sublot (20726114-02)',
+  lot_space: 'lot sublot ("20726114 02")',
   lot_prefix: 'lot prefix under a declared format',
   supplier_po: 'supplier PO',
   invoice: 'invoice number',

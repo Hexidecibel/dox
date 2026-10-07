@@ -122,7 +122,7 @@ const DATE_KINDS = new Set<LotSegmentKind>(['yy', 'julian_day', 'mmddyy', 'yymmd
 
 export const LOT_SCHEME_TEMPLATES: Record<'plant_yy_julian' | 'best_by_mmddyy_suffix' | 'none', { title: string; spec: LotSchemeSpec }> = {
   plant_yy_julian: {
-    title: 'Plant · YY · Julian day, 2-digit sublot (Darigold-style)',
+    title: 'Plant · YY · Julian day, with a 2-digit sublot',
     spec: {
       format: 1,
       kind: 'structured',
@@ -138,7 +138,7 @@ export const LOT_SCHEME_TEMPLATES: Record<'plant_yy_julian' | 'best_by_mmddyy_su
     },
   },
   best_by_mmddyy_suffix: {
-    title: 'Best-by MMDDYY + product suffix (Country Morning-style)',
+    title: 'Best-by MMDDYY + product suffix',
     spec: {
       format: 1,
       kind: 'structured',

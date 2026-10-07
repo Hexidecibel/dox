@@ -130,7 +130,7 @@ export interface SearchSelectionAction {
 }
 
 /** Shown only when the tenant's own examples are unavailable (empty tenant, no organization chosen). */
-const FALLBACK_EXAMPLES = ['lot 10426203-03', 'butter produced Sep 2', 'PO K134273', 'lot 104', 'invoice 261149'];
+const FALLBACK_EXAMPLES = ['lot 20726114-02', 'butter produced Sep 2', 'PO 4500123', 'lot 207', 'invoice 558210'];
 
 export function SearchWorkspace({
   surface = 'search',

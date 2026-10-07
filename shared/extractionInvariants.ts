@@ -93,7 +93,7 @@ const ENVELOPE_KEYS = new Set([
 
 const PLAUSIBLE_MIN_YEAR = 2015;
 const PLAUSIBLE_MAX_YEAR = 2035;
-/** Longer than this between production and expiry is not a dairy shelf life. */
+/** Longer than this between production and expiry is flagged for a look: it is usually a reagent's expiry, not the product's. */
 const MAX_SHELF_LIFE_DAYS = 730;
 
 const DAY = 86400000;
@@ -794,7 +794,7 @@ export function checkExtraction(item: ExtractionInput, opts: CheckOptions = {}):
           scope,
           expValue,
           `${Math.round(days)}d shelf life (> ${MAX_SHELF_LIFE_DAYS}d)`,
-          `That is a ${Math.round(days)}-day shelf life — far too long for dairy. This may be a reagent's expiry, not the product's.`
+          `That is a ${Math.round(days)}-day shelf life — more than two years. Check it: this may be a reagent's expiry, not the product's.`
         );
       } else {
         bump(tally, 'date_ordering', 'pass');

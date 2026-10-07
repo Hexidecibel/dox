@@ -820,10 +820,10 @@ const search: ModuleHelpExpanded = {
   list: {
     headline: 'Search',
     well:
-      "Type the way you would say it — a lot (lot 10426203-03), a dated phrase (produced Sep 2), a PO or an invoice. What dox reads out of your words appears as chips under the box; click a chip to change how it was read, or turn it back into plain words. The answer leads: Covered, Likely · confirm, Nothing covers, or Could mean several products. Below it, covering documents come first, then likely ones, then nearby documents that do not cover it (folded away), then files still in the Review Queue. ✦ Ask AI reads a whole question into chips marked as the AI's. Results can be selected and taken with you as a ZIP or a link that expires. Ctrl K (⌘K on a Mac) opens search from anywhere.",
+      "Type the way you would say it — a lot (lot 20726114-02), a dated phrase (produced Sep 2), a PO or an invoice. What dox reads out of your words appears as chips under the box; click a chip to change how it was read, or turn it back into plain words. The answer leads: Covered, Likely · confirm, Nothing covers, or Could mean several products. Below it, covering documents come first, then likely ones, then nearby documents that do not cover it (folded away), then files still in the Review Queue. ✦ Ask AI reads a whole question into chips marked as the AI's. Results can be selected and taken with you as a ZIP or a link that expires. Ctrl K (⌘K on a Mac) opens search from anywhere.",
     columnTooltips: {
       aiToggle: "✦ Ask AI sends your words to the language model and brings its reading back as chips, each marked ✦ with the reason it was read that way. It only runs when you press it (or Ctrl/⌘ + Enter), never by itself.",
-      lotSublot: "Type a lot and its sublot together (10426203-03, 10426203 03) or click the lot chip and give the sublot its own box. Each part is matched against the lot row's own part — a sublot never matches against the base number.",
+      lotSublot: "Type a lot and its sublot together (20726114-02, 20726114 02) or click the lot chip and give the sublot its own box. Each part is matched against the lot row's own part — a sublot never matches against the base number.",
       chips: "Each chip is one part of your search, in words: what it was read as, and why. Click it to change it — a production date into a code date, an exact lot into \"starts with\", a number into a PO or an order — or press \"Treat as text\" to take the reading back. A reading you take back stays plain words and is never re-read.",
       exportSelection: "Tick the documents you want to take with you. Covering results have a checkbox (and a Select all); a nearby result has to be added with Include anyway, so a near miss is never swept into an export by a default. The bar at the top of the results shows how many are selected and offers Download ZIP or Send by email.",
     },
@@ -854,15 +854,15 @@ const search: ModuleHelpExpanded = {
       {
         heading: 'Lots, sublots and production dates',
         body:
-          "A certificate that lists several lots is checked one lot row at a time, and each result names the row it was judged on: \"Lot 10426203 · sublot 03 · produced Jul 22, 2026\". A lot can be typed as one number (1042620303), with a dash (10426203-03), with a space (10426203 03), or as two inputs with the Lot / sublot button under the search box. " +
+          "A certificate that lists several lots is checked one lot row at a time, and each result names the row it was judged on: \"Lot 20726114 · sublot 02 · produced Apr 24, 2026\". A lot can be typed as one number (2072611402), with a dash (20726114-02), with a space (20726114 02), or as two inputs with the Lot / sublot button under the search box. " +
           "The production date comes from the lot row, with where it came from. A date an older extraction stored as the code date, which the certificate prints under its production date label, shows under Likely covering — confirm: open it and check before sending it. A date that reads two ways (04-05-2026) is never counted as a match.",
       },
       {
         heading: 'Products by any name, and orders',
         body:
-          "Name a product the way you know it: our SKU (2235), the supplier's item number (810004), a pack (300 gal tote, 5 gallon bags, 25 kg) or words next to a date (bulk unsalted butter produced 7/22/26). Search says what it understood, for example \"2235 → DG BTR BULK U/S 55.115# (Darigold, Inc. item 810004, our SKU 2235)\". U/S, NS and unsalted mean the same thing, and a pack in another unit (55.115 lb and 25 kg) matches with the conversion shown. " +
+          "Name a product the way you know it: our SKU (4410), the supplier's item number (730015), a pack (300 gal tote, 5 gallon bags, 25 kg) or words next to a date (bulk unsalted butter produced 7/22/26). Search says what it understood, for example \"4410 → BUTTER BULK U/S 55.115# (Northfield Creamery item 730015, our SKU 4410)\". U/S, NS and unsalted mean the same thing, and a pack in another unit (55.115 lb and 25 kg) matches with the conversion shown. " +
           "When a phrase could mean more than one product, such as \"300 gal tote\" for whole milk and heavy cream, Search does not pick one. It lists each product with its own answer. A result found through an identifier nobody has confirmed shows under Likely covering — confirm. The identifiers are managed on each product's page. " +
-          "Type a WMS order number (1797062) to see the certificates for its lots. A certificate counts as covering only when a person accepted the lot match or one of its lot rows is exactly the shipped lot. A suggested match shows as \"confirm\".",
+          "Type a WMS order number (1650438) to see the certificates for its lots. A certificate counts as covering only when a person accepted the lot match or one of its lot rows is exactly the shipped lot. A suggested match shows as \"confirm\".",
       },
       {
         heading: 'Advanced: every filter, as rows',
@@ -879,7 +879,7 @@ const search: ModuleHelpExpanded = {
       {
         heading: 'Ask AI',
         body:
-          "Typing is fast and reads only what it can be sure of. ✦ Ask AI (or Ctrl/⌘ + Enter) sends a question in plain words (\"Darigold certificates from early September that aren't approved yet\") to the language model and turns its reading into chips, each marked ✦ with why it was read that way — edit or remove any of them like any other chip. It never runs by itself. If part of the question could not become a filter, that is said above the results instead of being quietly dropped.",
+          "Typing is fast and reads only what it can be sure of. ✦ Ask AI (or Ctrl/⌘ + Enter) sends a question in plain words (\"Northfield Creamery certificates from early September that aren't approved yet\") to the language model and turns its reading into chips, each marked ✦ with why it was read that way — edit or remove any of them like any other chip. It never runs by itself. If part of the question could not become a filter, that is said above the results instead of being quietly dropped.",
       },
       {
         heading: 'Keyboard',
