@@ -369,6 +369,91 @@ export interface MergeSuppliersResult {
  *
  * The suppliers_fts AFTER DELETE trigger cleans the search index automatically.
  */
+/**
+ * Move one loser's supplier-scoped spec limits (0084) and required analytes
+ * (0109) to the winner.
+ *
+ * Both reference suppliers ON DELETE CASCADE and were in no move list, so a
+ * merge deleted them with the loser: every tighter limit written for that
+ * supplier and every analyte its certificates were required to report.
+ *
+ * A LIMIT IS NEVER DROPPED QUIETLY. Where the winner already holds a row for
+ * the same key -- `spec_limits` is unique on (tenant, analyte, COALESCEd
+ * supplier / document type / product), 0086; `supplier_required_analytes` on
+ * (tenant, supplier, document type, analyte) -- the winner's row is the one
+ * kept, and the loser's WHOLE row is returned for the `supplier.merged` audit
+ * details with the id of the winner's row that stood in for it. Which of two
+ * thresholds is right is a person's call; the merge only makes sure both are
+ * still written down somewhere.
+ *
+ * `UPDATE OR IGNORE` moves what does not collide (it honours the expression
+ * index); whatever is still on the loser afterwards is, by construction, the
+ * collisions. Moved rows keep their ids, so a frozen `limit_snapshot` and a
+ * `document_spec_gaps.required_analyte_id` still point at something.
+ */
+async function moveSpecWatch(
+  db: D1Database,
+  tenantId: string,
+  winnerId: string,
+  loserId: string,
+  reassigned: Record<string, number>,
+): Promise<{ limits: Array<Record<string, unknown>>; analytes: Array<Record<string, unknown>> }> {
+  const dropped = { limits: [] as Array<Record<string, unknown>>, analytes: [] as Array<Record<string, unknown>> };
+  const tables = [
+    {
+      table: 'spec_limits',
+      into: dropped.limits,
+      keptAs: 'kept_winner_limit_id',
+      twin: `SELECT id FROM spec_limits
+              WHERE tenant_id = ? AND supplier_id = ? AND spec_test_id = ?
+                AND COALESCE(document_type_id, '') = COALESCE(?, '')
+                AND COALESCE(product_id, '') = COALESCE(?, '')`,
+      twinKey: (r: Record<string, unknown>) => [r.spec_test_id, r.document_type_id ?? null, r.product_id ?? null],
+    },
+    {
+      table: 'supplier_required_analytes',
+      into: dropped.analytes,
+      keptAs: 'kept_winner_row_id',
+      twin: `SELECT id FROM supplier_required_analytes
+              WHERE tenant_id = ? AND supplier_id = ? AND spec_test_id = ? AND document_type_id = ?`,
+      twinKey: (r: Record<string, unknown>) => [r.spec_test_id, r.document_type_id],
+    },
+  ];
+  for (const t of tables) {
+    try {
+      const before = await db
+        .prepare(`SELECT COUNT(*) AS c FROM ${t.table} WHERE supplier_id = ? AND tenant_id = ?`)
+        .bind(loserId, tenantId)
+        .first<{ c: number }>();
+      const beforeN = before?.c ?? 0;
+      if (beforeN === 0) {
+        reassigned[t.table] = reassigned[t.table] || 0;
+        continue;
+      }
+      await db
+        .prepare(`UPDATE OR IGNORE ${t.table} SET supplier_id = ? WHERE supplier_id = ? AND tenant_id = ?`)
+        .bind(winnerId, loserId, tenantId)
+        .run();
+      const left = await db
+        .prepare(`SELECT * FROM ${t.table} WHERE supplier_id = ? AND tenant_id = ?`)
+        .bind(loserId, tenantId)
+        .all<Record<string, unknown>>();
+      const leftovers = left.results ?? [];
+      for (const row of leftovers) {
+        const twin = await db.prepare(t.twin).bind(tenantId, winnerId, ...t.twinKey(row)).first<{ id: string }>();
+        t.into.push({ ...row, [t.keptAs]: twin?.id ?? null });
+      }
+      reassigned[t.table] = (reassigned[t.table] || 0) + (beforeN - leftovers.length);
+      if (leftovers.length > 0) {
+        await db.prepare(`DELETE FROM ${t.table} WHERE supplier_id = ? AND tenant_id = ?`).bind(loserId, tenantId).run();
+      }
+    } catch {
+      // A database that predates the table (0084 / 0109): nothing to move.
+    }
+  }
+  return dropped;
+}
+
 export async function mergeSuppliers(
   db: D1Database,
   tenantId: string,
@@ -398,6 +483,9 @@ export async function mergeSuppliers(
     'document_requests',
     'request_links',
     'request_uploads',
+    // Teach interviews (0070): keyed on the session id, so they move as they
+    // are and their messages (CASCADE from the session) come with them.
+    'teach_sessions',
   ];
   // Tables with a UNIQUE constraint that can collide when both winner and loser
   // already have an equivalent row. UPDATE OR IGNORE moves what it can, then we
@@ -486,6 +574,10 @@ export async function mergeSuppliers(
         .bind(loserId, tenantId)
         .run();
     }
+
+    // Spec limits (0084) and required analytes (0109): moved, and a row the
+    // winner already covers is recorded in the audit row below, never dropped.
+    const droppedSpecWatch = await moveSpecWatch(db, tenantId, winnerId, loserId, reassigned);
 
     // Renewal cycles (0133) are keyed (document, due date), not on the
     // supplier, so they move as they are. Guarded like the contacts below: a
@@ -595,6 +687,8 @@ export async function mergeSuppliers(
           loser_name: loser.name,
           winner_id: winnerId,
           ...(droppedLotSchemes.length > 0 ? { dropped_lot_schemes: droppedLotSchemes } : {}),
+          ...(droppedSpecWatch.limits.length > 0 ? { dropped_spec_limits: droppedSpecWatch.limits } : {}),
+          ...(droppedSpecWatch.analytes.length > 0 ? { dropped_required_analytes: droppedSpecWatch.analytes } : {}),
         }),
         actor.ip
       );
