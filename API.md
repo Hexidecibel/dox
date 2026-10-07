@@ -1307,7 +1307,7 @@ A supplier merge moves the loser's facilities to the winner; one both have is ke
 | Endpoint | Who | Purpose |
 |----------|-----|---------|
 | `GET /api/customers/:id/contacts` | any tenant user | `{ customer: { id, name, email }, contacts[] }`. Each contact: `name`, `email`, `role`, `is_primary`, `coa_recipient`. |
-| `POST /api/customers/:id/contacts` | org_admin, super_admin | `{ email, name?, role?, is_primary?, coa_recipient? }`. `coa_recipient` defaults true; the first contact is the primary unless told otherwise. 409 for an address the customer already has. Audited `customer.contact_added`. |
+| `POST /api/customers/:id/contacts` | org_admin, super_admin | `{ email, name?, role?, is_primary?, coa_recipient? }`. `coa_recipient` defaults true for a contact added here (a contact the order connector wrote is false until edited); the first contact is the primary unless told otherwise. 409 for an address the customer already has. Audited `customer.contact_added`. |
 | `PUT /api/customers/:id/contacts/:contactId` | org_admin, super_admin | Naming a new primary steps the previous one down. Audited `customer.contact_updated` with both sides. |
 | `DELETE /api/customers/:id/contacts/:contactId` | org_admin, super_admin | A COA requirement that named it keeps its other details and has no delivery contact. Audited `customer.contact_removed`. |
 

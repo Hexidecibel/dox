@@ -49,9 +49,11 @@
 --     ON DELETE SET NULL: removing a facility never removes a pair.
 --
 -- customer_contacts.coa_recipient -- whether this contact receives COAs on an
---     order send. DEFAULT 1: a contact on file is somebody the customer told
---     us about, and the review screen shows and lets the sender edit the list
---     before anything leaves.
+--     order send. DEFAULT 0: every row that exists before this migration, and
+--     every row the order connector writes after it, was read off an order by
+--     a machine -- nobody chose that address to receive certificates, and a
+--     default of 1 would pre-fill every one of them on the send screen. A
+--     contact a PERSON adds is written as 1 by the API unless they untick it.
 --
 -- customer_item_requirements -- what ONE customer needs for ONE item:
 --     `coa_required` ('yes' / 'no' / 'on_request'), `must_show` (free text:
@@ -122,7 +124,7 @@ UPDATE product_suppliers
    SET approval_status = 'approved', approval_source = 'initial'
  WHERE approval_source IS NULL;
 
-ALTER TABLE customer_contacts ADD COLUMN coa_recipient INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE customer_contacts ADD COLUMN coa_recipient INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS customer_item_requirements (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),

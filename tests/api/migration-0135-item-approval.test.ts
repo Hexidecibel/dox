@@ -175,10 +175,10 @@ describe('0135 on a populated database', () => {
     expect(after.filter((r) => r.id !== 'ps-new')).toEqual(before.filter((r) => r.id !== 'ps-new'));
   });
 
-  it('existing customer contacts receive COAs; facilities and item requirements hold their keys', async () => {
+  it('existing (machine-read) customer contacts are NOT made COA recipients; facilities and item requirements hold their keys', async () => {
     expect(await all(`SELECT id, coa_recipient FROM customer_contacts WHERE customer_id = 'c-0135' ORDER BY id`)).toEqual([
-      { id: 'cc-1', coa_recipient: 1 },
-      { id: 'cc-2', coa_recipient: 1 },
+      { id: 'cc-1', coa_recipient: 0 },
+      { id: 'cc-2', coa_recipient: 0 },
     ]);
 
     await db.prepare(`INSERT INTO supplier_facilities (id, tenant_id, supplier_id, name, name_norm) VALUES ('f-1', '${T}', '${S}', 'Lynden Plant', 'lynden plant')`).run();
