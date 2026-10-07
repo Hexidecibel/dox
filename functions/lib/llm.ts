@@ -65,7 +65,7 @@ FIELD EXTRACTION RULES:
 
 4. FILENAME CONTEXT: The filename is provided in <filename> tags. It often contains metadata like item numbers, product codes, lot numbers, and dates. Use this as supplementary context when the document text is incomplete or ambiguous, but prefer values from the document body when both are available.
 
-5. SUPPLIER vs CUSTOMER: A common error is confusing supplier and customer. The supplier PRODUCES the product; the customer RECEIVES it. If "MEDOSWEET FARMS" appears after "Ship To:", it is the customer_name, not the supplier_name. The company at the TOP of the document (letterhead, header) is usually the supplier.
+5. SUPPLIER vs CUSTOMER: A common error is confusing supplier and customer. The supplier PRODUCES the product; the customer RECEIVES it. {{OWN_ORGANISATION}} The company at the TOP of the document (letterhead, header) is usually the supplier.
 
 6. ON A CERTIFICATE THE LETTERHEAD IS THE ISSUER, NOT THE SUPPLIER. Rule 5's "company at the TOP is usually the supplier" is a COA heuristic and it is backwards here: an insurance certificate is printed on the broker's or insurer's paper, an organic or kosher certificate on the certifying agency's, an audit certificate on the certification body's. The SUBJECT of the certificate — the insured, the guarantor, the certified operation, the audited site, the company the statement is made ABOUT — is the supplier_name, and it is usually named in the body after "issued to", "this is to certify that", "certifies that", "the insured is", "certified operation" or "audited site". The organisation on the letterhead goes in issuing_body, so both are captured and neither is filed under the other's name. If you cannot tell which company is the subject, leave supplier_name null rather than falling back to the letterhead.
 
@@ -82,7 +82,7 @@ TABLE EXTRACTION RULES:
 8. ONE ANALYTE PER ROW, AND "test" HOLDS ONLY THE ANALYTE NAME. "test" is the name of a single measured analyte and nothing else. Never join two analytes into one label ("Coliform Aerobic"), and never append a dilution ratio ("Coliform 1:1"), a weekday, a sample name, an incubator temperature, or the result itself. If you cannot name exactly one analyte for a row, do not emit that row.
 9. A SAMPLE x ANALYTE MATRIX IS NOT ONE ROW. When a micro block runs SAMPLES down the side (Buffer, Blank, Control, Negative, Product, or the product's own name) and ANALYTES across the top, read the PRODUCT sample's row and emit ONE result row per ANALYTE COLUMN, taking "test" from that column's header. Buffer / Blank / Control / Negative rows are lab controls: never emit them as results. If the same analyte heading appears twice across the top, the second group is almost always a dilution or condition group (see rule 10), not a second result.
 10. DILUTIONS, INCUBATION AND CLOCK TIMES ARE PROCESS METADATA, NOT RESULTS. A dilution ratio (1:1, 1-10, 1:100), an incubator temperature, and DATE IN / TIME IN / DATE OUT / TIME OUT describe how the test was run, not what it found. Never put one in "result" and never fold one into "test". Capture them, if at all, in a separate table named "test_conditions".
-11. REGULATORY THRESHOLDS INSIDE CERTIFICATION TEXT ARE NOT RESULTS. Numbers that appear inside a certification, attestation or compliance sentence — e.g. "produced from raw milk meeting the somatic cell (400,000 per ml.) and bacteria standard plate count (100,000 per ml.) requirements of regulation (EC) No 853/2004" — are the REGULATION'S limits, not this lot's measured values. Never emit a result row for them, in any column. This is the "lab consumables are never product data" rule applied to legal boilerplate.
+11. REGULATORY THRESHOLDS INSIDE CERTIFICATION TEXT ARE NOT RESULTS. Numbers that appear inside a certification, attestation or compliance sentence — e.g. "manufactured from ingredients meeting the aerobic plate count (100,000 per g.) and coliform (100 per g.) requirements of regulation (EC) No 2073/2005" — are the REGULATION'S limits, not this lot's measured values. Never emit a result row for them, in any column. This is the "lab consumables are never product data" rule applied to legal boilerplate.
 12. EVERY CELL IN A ROW COMES FROM THAT ROW'S OWN PRINTED LINE. Never carry a value in from a neighbouring row, a different block, the letterhead or the footer. A phone number, a clock time, a plate/reagent lot code or a document id sitting in "result" is always wrong — leave the cell empty instead. Likewise, a "specification" only belongs to a row if the document printed it on that row; do not reuse one analyte's limit as another analyte's spec.
 13. A CELL YOU CANNOT READ IS EMPTY, NOT GUESSED. Emit "" rather than inventing a plausible number, and lower _confidence.
 14. NEVER SUPPLY A UNIT, SPEC OR VERDICT THE DOCUMENT DID NOT PRINT. "unit" is empty unless the unit is printed on that row or in that column's heading. Do not infer one from the analyte ("a coliform count must be CFU/mL"), and never copy one out of an example in these instructions. An invented unit is WORSE than no unit: a result carrying a unit the document never stated cannot be compared against a configured limit, so it is dropped from checking without anyone noticing. The same applies to "specification" and "pass_fail" — empty unless the document printed them.
@@ -101,6 +101,47 @@ Return JSON with:
   "_confidence": "high" | "medium" | "low",
   "document_type": "Certificate of Analysis" | "Bill of Lading" | etc.
 }`;
+
+/** Where rule 5's sentence about the organisation itself goes. Never reaches a model: `withOwnOrganisation` fills it. */
+export const OWN_ORGANISATION_SLOT = '{{OWN_ORGANISATION}}';
+
+/** Rule 5, the part that is true of every organisation's documents. */
+export const SHIP_TO_RULE = 'The party named after "Ship To:", "Sold To:" or "Bill To:" is the customer_name, never the supplier_name.';
+
+/** Rule 5, the part that names the organisation the documents are filed for. `{{NAME}}` is its name. */
+export const OWN_ORGANISATION_RULE = 'These documents are filed by "{{NAME}}": when that name appears on the page it is the customer, never the supplier.';
+
+/**
+ * Rule 5's sentence about who the customer is.
+ *
+ * It used to read: if one named company "appears after Ship To:, it is the
+ * customer_name" -- the first tenant's own name, in the one layer of the prompt
+ * no tenant can replace, sent with every other organisation's documents. The
+ * rule exists because the organisation filing the documents is printed on most
+ * of them, as the recipient, and was being read as the supplier.
+ *
+ * So the name is passed in. With no name (a harness, a tenant row that could
+ * not be read) the rule DEGRADES to the general statement rather than printing
+ * an empty pair of quotes; with one, the general statement is still there,
+ * because an organisation is often printed under a trading name its portal
+ * record does not carry.
+ *
+ * The name is data inside an instruction: quotes and line breaks are removed
+ * and it is capped, so a tenant's name cannot close the quotation and continue
+ * the prompt.
+ *
+ * KEEP IN SYNC with ownOrganisationRule in bin/process-worker;
+ * tests/unit/ownOrganisationRule.test.ts pins the two.
+ */
+export function ownOrganisationRule(name?: string | null): string {
+  const clean = String(name ?? '').replace(/["\u201c\u201d\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  return clean ? `${SHIP_TO_RULE} ${OWN_ORGANISATION_RULE.replace('{{NAME}}', clean)}` : SHIP_TO_RULE;
+}
+
+/** Fill rule 5's slot. */
+export function withOwnOrganisation(prompt: string, name?: string | null): string {
+  return prompt.split(OWN_ORGANISATION_SLOT).join(ownOrganisationRule(name));
+}
 
 export const INDUSTRY_PROMPTS: Record<string, string> = {
   DAIRY_FOOD: `
@@ -125,12 +166,12 @@ DAIRY COA DOMAIN RULES (hard rules — follow exactly):
 - Normalize dates to YYYY-MM-DD; when numeric order is genuinely ambiguous (e.g. 03/04/26 could be Mar or Apr), keep as-is rather than guess.
 
 EXAMPLE — Dairy COA extraction:
-Input: "Darigold Inc. COA for Grade AA Butter 68#, Lot L26-0842, PO PO-44821, Packed 03/15/26, Best By 09/15/26, Plant 42-1234. Tests: Fat >80% result 81.2% Pass, Moisture <16% result 15.4% Pass, Coliform <10 CFU/g result <1 Pass, SPC <20000 CFU/g result 4500 Pass"
+Input: "Northfield Inc. COA for Grade AA Butter 68#, Lot L26-0842, PO PO-44821, Packed 03/15/26, Best By 09/15/26, Plant 42-1234. Tests: Fat >80% result 81.2% Pass, Moisture <16% result 15.4% Pass, Coliform <10 CFU/g result <1 Pass, SPC <20000 CFU/g result 4500 Pass"
 
 Output:
 {
   "fields": {
-    "supplier_name": "Darigold Inc.",
+    "supplier_name": "Northfield Inc.",
     "product_name": "Grade AA Butter 68#",
     "lot_number": "L26-0842",
     "po_number": "PO-44821",
@@ -151,7 +192,7 @@ Output:
     ]
   }],
   "products": ["Grade AA Butter 68#"],
-  "summary": "COA for Darigold Grade AA Butter lot L26-0842, all tests pass.",
+  "summary": "COA for Northfield Grade AA Butter lot L26-0842, all tests pass.",
   "_confidence": "high",
   "document_type": "Certificate of Analysis"
 }`,
@@ -216,6 +257,7 @@ export function contextFingerprint(text: string): string {
  */
 const MIGRATED_CONTEXT_FINGERPRINTS: ReadonlySet<string> = new Set([
   '3675:54cb25f7', // 0136 as first written: the worker's built-in default of 2026-10-06, verbatim
+  '3681:5eef0820', // 0136 as it reads now: the same text with an invented supplier in the worked example
 ]);
 
 /** Is this stored context exactly what 0136 wrote -- i.e. nobody has edited it? */
@@ -438,10 +480,15 @@ export function buildPrompt(options?: {
    * byte-identical to what it was before the classifier existed.
    */
   documentType?: string | null;
+  /**
+   * The name of the organisation these documents are filed for (the tenant).
+   * Fills rule 5; omitted, the rule falls back to its general form.
+   */
+  organisationName?: string | null;
 }): string {
-  const { examples, industryPrompt = GENERIC_INDUSTRY_CONTEXT, instructions, documentType } = options || {};
+  const { examples, industryPrompt = GENERIC_INDUSTRY_CONTEXT, instructions, documentType, organisationName } = options || {};
 
-  let prompt = BASE_PROMPT;
+  let prompt = withOwnOrganisation(BASE_PROMPT, organisationName);
 
   // Immediately after the base rules and ahead of the industry layer: the
   // extractor should know what it is reading before it is told how this
@@ -851,6 +898,8 @@ export async function extractFields(
      * has no tenant catalog to classify against.
      */
     documentType?: string | null;
+    /** The organisation these documents are filed for (the tenant's name); fills rule 5. */
+    organisationName?: string | null;
   }
 ): Promise<ExtractionResult> {
   if (!text || text.trim().length === 0) {
@@ -1063,7 +1112,7 @@ export async function parseNaturalQuery(
     '  "keywords": string[],           // general search terms not matched elsewhere',
     '  "document_type_slug": string|null, // exact slug from available types',
     '  "product_text": string|null,    // the product EXACTLY as the person named it, pack and attributes included:',
-    '                                   // "bulk unsalted butter", "300 gal tote", "5 gallon bags", "2235", "810004"',
+    '                                   // "bulk unsalted butter", "300 gal tote", "5 gallon bags", "4410", "730015"',
     '  "product_names": string[],      // matching product names — use fuzzy matching!',
     '                                   // "creams" → ["Sweet Cream Butter 68#", "Cream - Light 23%"]',
     '                                   // Include ALL products that relate to the query term',
@@ -1086,12 +1135,12 @@ export async function parseNaturalQuery(
     '',
     'RULES:',
     '1. Fuzzy product matching: "butter" matches any product with "butter" in the name. Return ALL matches.',
-    '2. Fuzzy supplier matching: "darigold" matches "Darigold, Inc." — pick the closest match.',
+    '2. Fuzzy supplier matching: "northfield" matches "Northfield Creamery, Inc." — pick the closest match.',
     '3. Temporal reasoning: "expiring soon" = expiration_date within 30 days. "expiring" without qualifier = within 30 days.',
     '4. "from last month" or "in March" → set date_from and date_to to that range. date_role says WHICH date: "produced in March" → "production"; "code date in March" → "code"; "uploaded / added / received last month" → "uploaded". A date printed on the document is never "uploaded".',
     '4a. A single production date ("produced 7/31/26", "production date 22-Jul-2026", "packed on 9/2") → metadata_filters with field=production_date, operator=equals, value YYYY-MM-DD. Use code_date ONLY when the query says "code date". Never put a production date in date_from/date_to with date_role "uploaded".',
     '5. Lot/PO numbers: "lot 776764" → metadata_filters with field=lot_number, operator=equals.',
-    '5a. PRODUCT TEXT: copy the words that name the product into product_text verbatim — the product words, its pack size ("5 gallon bag", "300 gal tote", "55.115#", "25kg", "half gallon") and its attributes ("unsalted", "U/S", "NS", "salted"). A pack size or an attribute is PART OF THE PRODUCT: never drop it, and never put it only in keywords. A bare product or item number ("2235", "810004", "10286") is product_text too, not a lot and not an order number. Do not include the supplier, the dates, or words like "COA".',
+    '5a. PRODUCT TEXT: copy the words that name the product into product_text verbatim — the product words, its pack size ("5 gallon bag", "300 gal tote", "55.115#", "25kg", "half gallon") and its attributes ("unsalted", "U/S", "NS", "salted"). A pack size or an attribute is PART OF THE PRODUCT: never drop it, and never put it only in keywords. A bare product or item number ("4410", "730015", "20417") is product_text too, not a lot and not an order number. Do not include the supplier, the dates, or words like "COA".',
     '6. If query mentions test results, coliform, bacteria, etc. → use content_search.',
     '7. Always provide intent_summary — a clear one-line description of what was understood.',
     '8. Don\'t force matches — if nothing matches a field, leave it null/empty.',

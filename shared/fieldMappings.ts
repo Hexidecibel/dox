@@ -100,7 +100,7 @@ export const CORE_FIELD_DEFINITIONS: readonly CoreFieldDefinition[] = [
     label: 'Order Number',
     required: true,
     default_source_labels: ['order_number', 'order no', 'order #', 'order', 'so', 'so #', 'sales order', 'invoice'],
-    default_format_hint: 'e.g. SO-12345, ORD-2026-001, 1784767',
+    default_format_hint: 'e.g. SO-12345, ORD-2026-001, 1650438',
     description: 'Primary order identifier (distinct from customer_number).',
   },
   {

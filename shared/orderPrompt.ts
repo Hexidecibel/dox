@@ -322,7 +322,7 @@ const STATIC_PROMPT_BODY = `Rules:
   NOT separate orders. Emit one order object with that order_number and put
   each product/qty/lot row under "items". Do NOT emit duplicate order objects
   with the same order_number.
-- An order_number is a multi-digit invoice/order/sale identifier (e.g. 1784767),
+- An order_number is a multi-digit invoice/order/sale identifier (e.g. 1650438),
   DISTINCT from the K#####/P###### customer_number. If you cannot find a clear
   order_number column or value in the source, return an empty "orders" array.
   Do NOT use customer_number as the order_number. Never fabricate an order
@@ -334,7 +334,7 @@ const STATIC_PROMPT_BODY = `Rules:
   multi-digit order_number is present elsewhere for that block.
 - ALWAYS extract every distinct customer you can identify into the "customers"
   array, even when no order is attached to them. This includes standalone
-  customer-registry rows like "(K00166) CHUCKANUT BAY FOODS:" followed by
+  customer-registry rows like "(K00417) MERIDIAN HOLLOW FOODS:" followed by
   contact emails.
 - customer_number formats: K##### or P###### (preserve exact format, including
   any leading zeros).
@@ -347,12 +347,12 @@ const STATIC_PROMPT_BODY = `Rules:
 - For customers with multiple emails, also pick one representative address
   for the top-level "email" field — prefer AP/receiving/orders addresses over
   personal names when obvious, otherwise pick the first contact.
-- Example: a customer-registry row "(K00166) CHUCKANUT BAY FOODS:
-  alice@chuckanut.com; bob@chuckanut.com; orders@chuckanut.com" becomes:
-  {"customer_number":"K00166","name":"CHUCKANUT BAY FOODS",
-   "email":"orders@chuckanut.com",
-   "contacts":[{"email":"alice@chuckanut.com"},{"email":"bob@chuckanut.com"},
-               {"email":"orders@chuckanut.com","role":"Orders"}]}
+- Example: a customer-registry row "(K00417) MERIDIAN HOLLOW FOODS:
+  alice@example.com; bob@example.com; orders@example.com" becomes:
+  {"customer_number":"K00417","name":"MERIDIAN HOLLOW FOODS",
+   "email":"orders@example.com",
+   "contacts":[{"email":"alice@example.com"},{"email":"bob@example.com"},
+               {"email":"orders@example.com","role":"Orders"}]}
 - If no line items are visible for an order, return an empty items array.
 - If a field is not present, omit it or set to null.
 - ALWAYS emit \`_confidence\` on every order, customer, and line item — a single
@@ -401,23 +401,23 @@ Output:
 Example B — Real order with line items.
 An order_number is a multi-digit invoice/order ID, distinct from the K/P
 customer_number. The 1905.80 here is a weight value — strip trailing weight
-numbers from customer_name (it's CHUCKANUT BAY FOODS, NOT
-CHUCKANUT BAY FOODS 1905).
+numbers from customer_name (it's MERIDIAN HOLLOW FOODS, NOT
+MERIDIAN HOLLOW FOODS 1905).
 Input:
-Order: 1784767  Customer: K00166 - CHUCKANUT BAY FOODS  Ship Date: 4/10/2026  Weight: 1905.80
+Order: 1650438  Customer: K00417 - MERIDIAN HOLLOW FOODS  Ship Date: 4/10/2026  Weight: 1905.80
 Output:
 {
   "orders": [
     {
-      "order_number": "1784767",
-      "customer_number": "K00166",
-      "customer_name": "CHUCKANUT BAY FOODS",
+      "order_number": "1650438",
+      "customer_number": "K00417",
+      "customer_name": "MERIDIAN HOLLOW FOODS",
       "po_number": null,
       "_confidence": 1.0
     }
   ],
   "customers": [
-    {"customer_number": "K00166", "name": "CHUCKANUT BAY FOODS", "_confidence": 1.0}
+    {"customer_number": "K00417", "name": "MERIDIAN HOLLOW FOODS", "_confidence": 1.0}
   ]
 }
 
@@ -427,7 +427,7 @@ column), treat the rows as customer expectations, not orders. Only emit
 \`orders[]\` when the source clearly contains order_numbers (multi-digit
 invoice/sale identifiers).
 Input:
-(K00166) CHUCKANUT BAY FOODS: alice@chuckanut.com
+(K00417) MERIDIAN HOLLOW FOODS: alice@example.com
 PO# | DATE | SKU | DESCRIPTION | LOT
 PO123 | 4/10/2026 | SKU001 | WIDGET | LOT-456
 Output:
@@ -435,9 +435,9 @@ Output:
   "orders": [],
   "customers": [
     {
-      "customer_number": "K00166",
-      "name": "CHUCKANUT BAY FOODS",
-      "contacts": [{"email": "alice@chuckanut.com"}],
+      "customer_number": "K00417",
+      "name": "MERIDIAN HOLLOW FOODS",
+      "contacts": [{"email": "alice@example.com"}],
       "_confidence": 0.9
     }
   ]
@@ -524,7 +524,7 @@ export function prependConnectorInstructions(
  *   - fabrication guard / PO label gate
  *   - customer-name digit-strip rule
  *   - "Do NOT use customer_number as the order_number"
- *   - Few-shot anchors (K13957 ACME, 1784767 CHUCKANUT)
+ *   - Few-shot anchors (K13957 ACME, 1650438 MERIDIAN HOLLOW)
  */
 export function buildParsingPrompt(
   mappings: ConnectorFieldMappings,

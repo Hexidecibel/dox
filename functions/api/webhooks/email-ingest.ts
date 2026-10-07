@@ -288,6 +288,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           // Initial extraction (no few-shot — need supplier first)
           const initialExtraction = await extractFields(llmText, context.env, {
             industryPrompt: tenantContext,
+            organisationName: mapping.tenant_name,
             instructions: typeInstructions || null,
             documentType: classifiedTypeName,
           });
@@ -330,6 +331,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             ? await extractFields(llmText, context.env, {
                 examples: fewShotExamples.map(e => ({ text: e.input_text, result: e.corrected_output })),
                 industryPrompt: tenantContext,
+                organisationName: mapping.tenant_name,
                 instructions: typeInstructions || null,
                 documentType: classifiedTypeName,
               })

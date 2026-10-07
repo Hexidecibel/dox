@@ -34,6 +34,7 @@ import {
   GENERIC_INDUSTRY_CONTEXT,
   industryLayerForThisSurface,
   isMigratedDefaultContext,
+  SHIP_TO_RULE,
   stripUnfilledPlaceholders,
 } from '../../functions/lib/llm';
 import { onRequestGet as getContext } from '../../functions/api/tenant-extraction-context/index';
@@ -49,6 +50,26 @@ const PAGES_PROMPT_BEFORE = 'b73143ecc47c735a38367828201368ecf751b335f83273c0f64
 /** ... and with a classified type and authored guidance, so the other layers are in the comparison too. */
 const PAGES_PROMPT_BEFORE_TYPED = '37ecfb1a388aed75a76e486dcbfdc7b4f8bac66c4967e4041aa65ff860459c3c';
 const TYPED = { documentType: 'Certificate of Analysis', instructions: 'Look at the header.' };
+
+/**
+ * THE DELIBERATE EDITS, AND NOTHING ELSE. The prompt commit changed three
+ * things a model reads: the worked example's supplier (a real company, now an
+ * invented one), rule 5's sentence about the organisation itself (it named the
+ * first tenant) and rule 11's example clause (a dairy regulation). Each
+ * "before" hash above is still checked -- by putting exactly those three
+ * things back and hashing the result. So the hashes prove the edits listed here
+ * are the ONLY difference from what was live; anything else that moves fails.
+ */
+const withOldSupplier = (text: string) =>
+  text.split('Northfield Inc.').join('Darigold Inc.').replace('COA for Northfield Grade AA Butter', 'COA for Darigold Grade AA Butter');
+const OLD_RULE_5 = 'If "MEDOSWEET FARMS" appears after "Ship To:", it is the customer_name, not the supplier_name.';
+const OLD_RULE_11 = 'e.g. "produced from raw milk meeting the somatic cell (400,000 per ml.) and bacteria standard plate count (100,000 per ml.) requirements of regulation (EC) No 853/2004"';
+const NEW_RULE_11 = 'e.g. "manufactured from ingredients meeting the aerobic plate count (100,000 per g.) and coliform (100 per g.) requirements of regulation (EC) No 2073/2005"';
+const withOldBaseRules = (prompt: string) => {
+  expect(prompt.split(SHIP_TO_RULE)).toHaveLength(2);
+  expect(prompt.split(NEW_RULE_11)).toHaveLength(2);
+  return prompt.replace(SHIP_TO_RULE, OLD_RULE_5).replace(NEW_RULE_11, OLD_RULE_11);
+};
 
 async function sha256(text: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
@@ -121,15 +142,18 @@ describe('migration 0136 pins the context every existing tenant was extracting w
     expect(await applyMigration()).toBe(0);
   });
 
-  it('stored exactly what the worker was sending before', async () => {
+  it('stored exactly what the worker was sending before, with an invented supplier in the worked example', async () => {
     const stored = (await contextOf('ctx-null'))!.context!;
-    expect(await sha256(stored)).toBe(WORKER_DEFAULT_BEFORE);
+    expect(stored).not.toMatch(/darigold/i);
+    expect(stored.split('Northfield').length - 1).toBe(3);
+    expect(await sha256(withOldSupplier(stored))).toBe(WORKER_DEFAULT_BEFORE);
   });
 
   it('and the Pages surface reads that stored text back as exactly what IT was sending before', async () => {
     const stored = (await contextOf('ctx-null'))!.context!;
-    expect(await sha256(industryLayerForThisSurface(stored))).toBe(PAGES_DEFAULT_BEFORE);
-    expect(await sha256(DAIRY_CONTEXT_TEMPLATE)).toBe(PAGES_DEFAULT_BEFORE);
+    expect(industryLayerForThisSurface(stored)).toBe(DAIRY_CONTEXT_TEMPLATE);
+    expect(await sha256(withOldSupplier(industryLayerForThisSurface(stored)))).toBe(PAGES_DEFAULT_BEFORE);
+    expect(await sha256(withOldSupplier(DAIRY_CONTEXT_TEMPLATE))).toBe(PAGES_DEFAULT_BEFORE);
     // The two copies differ on one line and nothing else.
     const a = DAIRY_CONTEXT_TEMPLATE.split('\n');
     const b = stored.split('\n');
@@ -138,10 +162,24 @@ describe('migration 0136 pins the context every existing tenant was extracting w
     expect(different).toEqual([['  "_confidence": "high",', '  "_confidence": 0.95,']]);
   });
 
-  it('the fully assembled prompt of a migrated tenant is the prompt the old default produced', async () => {
+  it('the fully assembled prompt of a migrated tenant is the old prompt apart from the three deliberate edits', async () => {
     const stored = (await contextOf('ctx-null'))!.context!;
-    expect(await sha256(buildPrompt({ industryPrompt: stored }))).toBe(PAGES_PROMPT_BEFORE);
-    expect(await sha256(buildPrompt({ industryPrompt: stored, ...TYPED }))).toBe(PAGES_PROMPT_BEFORE_TYPED);
+    const restore = (prompt: string) => withOldBaseRules(withOldSupplier(prompt));
+    expect(await sha256(restore(buildPrompt({ industryPrompt: stored })))).toBe(PAGES_PROMPT_BEFORE);
+    expect(await sha256(restore(buildPrompt({ industryPrompt: stored, ...TYPED })))).toBe(PAGES_PROMPT_BEFORE_TYPED);
+  });
+
+  it('a tenant migrated BEFORE the supplier was renamed keeps its stored text, and only the base rules differ', async () => {
+    // 0136 as first written stored the old example verbatim. That database is
+    // not re-migrated; the code has to go on recognising what it holds.
+    const earlier = withOldSupplier((await contextOf('ctx-null'))!.context!);
+    expect(await sha256(earlier)).toBe(WORKER_DEFAULT_BEFORE);
+    expect(isMigratedDefaultContext(earlier)).toBe(true);
+    expect(await sha256(industryLayerForThisSurface(earlier))).toBe(PAGES_DEFAULT_BEFORE);
+    expect(await sha256(withOldBaseRules(buildPrompt({ industryPrompt: earlier })))).toBe(PAGES_PROMPT_BEFORE);
+    await db.prepare(`UPDATE tenants SET extraction_context = ? WHERE id = 'ctx-empty'`).bind(earlier).run();
+    const key = { supplierId: 'none', documentTypeId: 'none' };
+    expect((await loadTeachBackground(db, { tenantId: 'ctx-empty', ...key })).tenantContext).toBe('');
   });
 
   it('the teach interview still sees "nothing authored" for a migrated tenant, as it did for NULL', async () => {

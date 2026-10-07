@@ -2959,6 +2959,7 @@ export const api = {
       const suffix = qs.toString() ? `?${qs.toString()}` : '';
       return fetchApi<{
         extraction_context: string | null;
+        tenant_name?: string | null;
         default_template: string;
         generic_context?: string;
         templates?: Array<{ key: string; label: string; text: string }>;
