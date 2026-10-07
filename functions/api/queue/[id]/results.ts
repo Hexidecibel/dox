@@ -4,7 +4,7 @@ import {
   BadRequestError,
   errorToResponse,
 } from '../../../lib/permissions';
-import { sendEmail } from '../../../lib/email';
+import { buildArrivedByEmailNotice, buildReviewNeededEmail, sendSenderNotice } from '../../../lib/intake/sender-notice';
 import { logAudit, getClientIp } from '../../../lib/db';
 import { resolveExistingSupplierId } from '../../../lib/suppliers';
 import type { Env, User } from '../../../lib/types';
@@ -469,26 +469,37 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           const sourceDetail = JSON.parse(item.source_detail as string);
           const senderEmail = sourceDetail.sender;
 
-          if (senderEmail && context.env.RESEND_API_KEY) {
+          if (senderEmail) {
             const confidence = body.confidence_score || 0;
             const fileName = item.file_name;
+            // The link goes where THIS deployment lives (the worker posts
+            // results to the same origin people log in at), never a
+            // hard-coded host.
+            const origin = new URL(context.request.url).origin;
 
             // COA auto-ingest has been removed — every processed COA document
             // now lands in the Review Queue, so this is always the
-            // needs-review/link notification path.
-            const subject = `[SupDox] Review Needed: ${fileName}`;
-            const htmlBody = `
-                <div style="font-family:sans-serif;max-width:600px">
-                  <h2 style="color:#ed6c02">Document Needs Review</h2>
-                  <p><strong>${fileName}</strong> was processed but needs human review before it can be ingested (${Math.round(confidence * 100)}% confidence).</p>
-                  <p><a href="https://supdox.com/review" style="display:inline-block;padding:10px 20px;background:#1976d2;color:white;text-decoration:none;border-radius:4px">Go to Review Queue</a></p>
-                  <p style="color:#666;font-size:14px">Once reviewed and approved, you'll receive a confirmation with the extracted details.</p>
-                </div>`;
-
-            await sendEmail(context.env.RESEND_API_KEY, {
-              to: senderEmail,
-              subject,
-              html: htmlBody,
+            // needs-review/link notification path. It reaches the SENDER only
+            // when the sender is one of this tenant's users; a supplier who
+            // mailed a certificate in is not sent our confidence score and a
+            // link to an internal screen. Otherwise the org_admins are told a
+            // document arrived from that address. Audited either way.
+            await sendSenderNotice({
+              db: context.env.DB,
+              apiKey: context.env.RESEND_API_KEY,
+              tenantId: item.tenant_id,
+              kind: 'review_needed',
+              sender: senderEmail,
+              toSender: buildReviewNeededEmail({ fileName, confidence, origin }),
+              toAdmins: buildArrivedByEmailNotice({
+                sender: senderEmail,
+                files: [{ fileName, detail: `Needs review (${Math.round(confidence * 100)}% confidence)` }],
+                origin,
+              }),
+              actorUserId: user?.id ?? null,
+              resourceType: 'processing_queue',
+              resourceId: queueId,
+              ip: getClientIp(context.request),
             });
           }
         } catch (emailErr) {
