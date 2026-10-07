@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `CLAUDE.md`; this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 145 tables, 2 views, 260 indexes, 47 triggers.
+Objects: 147 tables, 2 views, 265 indexes, 47 triggers.
 
 ## Core documents & versions
 
@@ -272,10 +272,16 @@ Triggers: `trg_product_identifiers_ad_reindex`, `trg_product_identifiers_ai_rein
   nothing_owed_reason TEXT
   nothing_owed_at TEXT
   nothing_owed_by TEXT
+  approval_status TEXT NOT NULL DEFAULT 'pending' CHECK (approval_status IN ('approved', 'pending', 'not_approved'))
+  approval_source TEXT
+  approval_decided_at TEXT
+  approval_decided_by TEXT
+  approval_note TEXT
+  facility_id TEXT REFERENCES supplier_facilities(id) ON DELETE SET NULL
   UNIQUE(product_id, supplier_id)
 ```
 
-Indexes: `idx_product_suppliers_product`, `idx_product_suppliers_supplier`, `idx_product_suppliers_tenant`
+Indexes: `idx_product_suppliers_approval`, `idx_product_suppliers_facility`, `idx_product_suppliers_product`, `idx_product_suppliers_supplier`, `idx_product_suppliers_tenant`
 
 ### `products`
 
@@ -348,6 +354,26 @@ Indexes: `idx_supplier_contacts_document_contact`, `idx_supplier_contacts_suppli
 ```
 
 Indexes: `idx_sei_supplier_doctype`, `idx_sei_tenant`
+
+### `supplier_facilities`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE
+  name TEXT NOT NULL
+  name_norm TEXT NOT NULL
+  plant_code TEXT
+  notes TEXT
+  active INTEGER NOT NULL DEFAULT 1
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_by TEXT
+  UNIQUE(supplier_id, name_norm)
+```
+
+Indexes: `idx_supplier_facilities_supplier`
 
 ### `supplier_list_imports`
 
@@ -792,6 +818,7 @@ The COA-fulfillment track: order lines, lot binding, and COA match suggestions.
   is_primary INTEGER NOT NULL DEFAULT 0
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  coa_recipient INTEGER NOT NULL DEFAULT 0
 ```
 
 Indexes: `idx_customer_contacts_customer`, `idx_customer_contacts_tenant`, `idx_customer_contacts_unique`
@@ -1494,6 +1521,28 @@ Indexes: `idx_claim_type_requirements_claim`, `idx_claim_type_requirements_requi
 ```
 
 Indexes: `idx_claim_types_tenant`
+
+### `customer_item_requirements`
+
+```sql
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8))))
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE
+  product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE
+  coa_required TEXT NOT NULL DEFAULT 'yes' CHECK (coa_required IN ('yes', 'no', 'on_request'))
+  must_show TEXT
+  timing TEXT
+  delivery_contact_id TEXT REFERENCES customer_contacts(id) ON DELETE SET NULL
+  source TEXT
+  notes TEXT
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_by TEXT
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_by TEXT
+  UNIQUE(tenant_id, customer_id, product_id)
+```
+
+Indexes: `idx_customer_item_requirements_customer`, `idx_customer_item_requirements_product`
 
 ### `document_claims`
 
