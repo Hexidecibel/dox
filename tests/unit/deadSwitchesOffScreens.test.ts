@@ -18,9 +18,6 @@
  * promises nothing, and the columns and API fields are still there -- stored
  * values are history, and an API client that sends one keeps working.
  *
- * NOT COVERED: src/pages/admin/SupplierDetail.tsx still carries the template
- * and document-type switches. That file belongs to a parallel piece of work;
- * it is listed below so the gap is visible and closes with one line.
  */
 import { describe, it, expect } from 'vitest';
 import { env } from 'cloudflare:test';
@@ -28,6 +25,7 @@ import tenantsPage from '../../src/pages/admin/Tenants.tsx?raw';
 import documentTypesPage from '../../src/pages/admin/DocumentTypes.tsx?raw';
 import reviewQueuePage from '../../src/pages/ReviewQueue.tsx?raw';
 import importPage from '../../src/pages/Import.tsx?raw';
+import supplierDetailPage from '../../src/pages/admin/SupplierDetail.tsx?raw';
 import learningPage from '../../src/pages/admin/LearningDashboard.tsx?raw';
 import helpContent from '../../src/lib/helpContent.ts?raw';
 import tenantApi from '../../functions/api/tenants/[id].ts?raw';
@@ -39,12 +37,7 @@ import { stripCodeComments } from './noFirstTenantValues.scan';
 const code = (source: string) => stripCodeComments(source);
 
 /** Screens still to do, with why. Remove an entry when its screen is cleaned. */
-const STILL_SHOWN: Array<{ path: string; reason: string }> = [
-  {
-    path: 'src/pages/admin/SupplierDetail.tsx',
-    reason: 'Template "Enable auto-ingest" and document-type "Auto-ingest" switches; the file is owned by the approved-items workstream.',
-  },
-];
+const STILL_SHOWN: Array<{ path: string; reason: string }> = [];
 
 describe('the dead switches are off the screens', () => {
   it('Tenants: no auto-approve threshold, and the key is not sent', () => {
@@ -94,7 +87,8 @@ describe('the dead switches are off the screens', () => {
   });
 
   it('the list of screens still to clean is short and explained', () => {
-    expect(STILL_SHOWN.map((s) => s.path)).toEqual(['src/pages/admin/SupplierDetail.tsx']);
+    expect(STILL_SHOWN.map((s) => s.path)).toEqual([]);
+    expect(code(supplierDetailPage)).not.toMatch(/auto.?ingest/i);
     for (const s of STILL_SHOWN) expect(s.reason.length).toBeGreaterThan(30);
   });
 });

@@ -29,8 +29,6 @@ import {
   Select,
   MenuItem,
   Checkbox,
-  Slider,
-  Divider,
   Collapse,
 } from '@mui/material';
 import {
@@ -332,7 +330,6 @@ export function SupplierDetail() {
   const [editingTemplate, setEditingTemplate] = useState<ExtractionTemplate | null>(null);
   const [templateFieldMappings, setTemplateFieldMappings] = useState<TemplateFieldMapping[]>([]);
   const [templateSampleData, setTemplateSampleData] = useState<Record<string, string>>({});
-  const [templateAutoIngest, setTemplateAutoIngest] = useState(false);
   const [templateConfidence, setTemplateConfidence] = useState(0.85);
   const [savingTemplate, setSavingTemplate] = useState(false);
 
@@ -360,7 +357,6 @@ export function SupplierDetail() {
   const [editingDocType, setEditingDocType] = useState<ApiDocumentType | null>(null);
   const [dtName, setDtName] = useState('');
   const [dtDescription, setDtDescription] = useState('');
-  const [dtAutoIngest, setDtAutoIngest] = useState(false);
   const [dtExtractTables, setDtExtractTables] = useState(true);
   const [savingDocType, setSavingDocType] = useState(false);
 
@@ -519,7 +515,6 @@ export function SupplierDetail() {
     setEditingDocType(null);
     setDtName('');
     setDtDescription('');
-    setDtAutoIngest(false);
     setDtExtractTables(true);
     setDocTypeDialogOpen(true);
   };
@@ -528,7 +523,6 @@ export function SupplierDetail() {
     setEditingDocType(dt);
     setDtName(dt.name);
     setDtDescription(dt.description || '');
-    setDtAutoIngest(!!dt.auto_ingest);
     setDtExtractTables(dt.extract_tables !== 0);
     setDocTypeDialogOpen(true);
   };
@@ -542,7 +536,6 @@ export function SupplierDetail() {
         await api.documentTypes.update(editingDocType.id, {
           name: dtName.trim(),
           description: dtDescription.trim() || undefined,
-          auto_ingest: dtAutoIngest ? 1 : 0,
           extract_tables: dtExtractTables ? 1 : 0,
         });
       } else {
@@ -553,7 +546,6 @@ export function SupplierDetail() {
           // Owned by THIS supplier (vs the global DocumentTypes admin page
           // which leaves supplier_id null for shared types).
           supplier_id: supplier.id,
-          auto_ingest: dtAutoIngest ? 1 : 0,
           extract_tables: dtExtractTables ? 1 : 0,
         });
       }
@@ -647,7 +639,6 @@ export function SupplierDetail() {
     if (!supplier) return;
     setEditingTemplate(template);
     setTemplateFieldMappings([...template.field_mappings]);
-    setTemplateAutoIngest(!!template.auto_ingest_enabled);
     setTemplateConfidence(template.confidence_threshold);
     setTemplateSampleData({});
 
@@ -685,7 +676,6 @@ export function SupplierDetail() {
     try {
       await api.extractionTemplates.update(editingTemplate.id, {
         field_mappings: templateFieldMappings,
-        auto_ingest_enabled: templateAutoIngest,
         confidence_threshold: templateConfidence,
       });
       setEditingTemplate(null);
@@ -1004,7 +994,6 @@ export function SupplierDetail() {
                 <TableRow>
                   <TableCell>Document Type</TableCell>
                   <TableCell align="center">Fields</TableCell>
-                  <TableCell align="center">Auto-Ingest</TableCell>
                   <TableCell align="center">Confidence</TableCell>
                   <TableCell>Updated</TableCell>
                   <TableCell align="right">Actions</TableCell>
@@ -1020,14 +1009,6 @@ export function SupplierDetail() {
                     </TableCell>
                     <TableCell align="center">
                       <Chip label={template.field_mappings.length} size="small" />
-                    </TableCell>
-                    <TableCell align="center">
-                      <Chip
-                        label={template.auto_ingest_enabled ? 'On' : 'Off'}
-                        size="small"
-                        color={template.auto_ingest_enabled ? 'success' : 'default'}
-                        variant="outlined"
-                      />
                     </TableCell>
                     <TableCell align="center">
                       <Typography variant="body2">
@@ -1171,42 +1152,6 @@ export function SupplierDetail() {
                   </Table>
                 </TableContainer>
 
-                {/* Auto-ingest settings */}
-                <Divider sx={{ my: 2 }} />
-                <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                  Auto-ingest
-                </Typography>
-
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={templateAutoIngest}
-                      onChange={(e) => setTemplateAutoIngest(e.target.checked)}
-                    />
-                  }
-                  label="Enable auto-ingest"
-                />
-
-                {templateAutoIngest && (
-                  <Box sx={{ mt: 1, px: 1 }}>
-                    <Typography variant="body2" gutterBottom>
-                      Confidence threshold: {Math.round(templateConfidence * 100)}%
-                    </Typography>
-                    <Slider
-                      value={templateConfidence}
-                      onChange={(_, value) => setTemplateConfidence(value as number)}
-                      min={0.5}
-                      max={1.0}
-                      step={0.05}
-                      marks={[
-                        { value: 0.5, label: '50%' },
-                        { value: 0.7, label: '70%' },
-                        { value: 0.85, label: '85%' },
-                        { value: 1.0, label: '100%' },
-                      ]}
-                    />
-                  </Box>
-                )}
               </DialogContent>
               <DialogActions sx={{ px: 3, pb: 2 }}>
                 <Button onClick={() => setEditingTemplate(null)} disabled={savingTemplate}>
@@ -1555,7 +1500,7 @@ export function SupplierDetail() {
         )}
 
         {/* Create/Edit doctype dialog — mirrors the global DocumentTypes */}
-        {/* admin form (name, description, auto-ingest, extract-tables).   */}
+        {/* admin form (name, description, extract-tables).   */}
         <Dialog open={docTypeDialogOpen} onClose={() => setDocTypeDialogOpen(false)} maxWidth="sm" fullWidth>
           <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             {editingDocType ? 'Edit Document Type' : 'Add Document Type'}
@@ -1584,13 +1529,6 @@ export function SupplierDetail() {
               disabled={savingDocType}
               sx={{ mb: 2 }}
             />
-            <FormControlLabel
-              control={<Switch checked={dtAutoIngest} onChange={(e) => setDtAutoIngest(e.target.checked)} disabled={savingDocType} />}
-              label="Auto-ingest"
-            />
-            <Typography variant="body2" color="text.secondary" sx={{ ml: 4, mt: -0.5, mb: 1 }}>
-              Automatically import high-confidence documents (requires 3+ training examples)
-            </Typography>
             <FormControlLabel
               control={<Switch checked={dtExtractTables} onChange={(e) => setDtExtractTables(e.target.checked)} disabled={savingDocType} />}
               label="Extract tables"
