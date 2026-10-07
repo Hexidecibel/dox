@@ -436,7 +436,7 @@ describe('keyboard', () => {
   it('an empty tenant falls back to the static chips', async () => {
     render(wrap(<SearchWorkspace surface="search" tenantId="t1" />));
     const row = await screen.findByTestId('search-examples');
-    expect(within(row).getByText('lot 10426203-03')).toBeInTheDocument();
+    expect(within(row).getByText('lot 20726114-02')).toBeInTheDocument();
   });
 
   it('a super_admin with no organization chosen gets no examples, and none are asked for', async () => {

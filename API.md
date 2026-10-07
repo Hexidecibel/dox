@@ -1706,6 +1706,25 @@ Emails are sent via the [Resend](https://resend.com) API when `RESEND_API_KEY` i
 
 All emails are sent from `noreply@supdox.com`.
 
+### A document that arrives by email: who is told
+
+Two mails follow an emailed-in document: the ingest summary (`POST /api/webhooks/email-ingest`) and
+"Review Needed" (when the worker posts results for an item whose `source` is `email`). **Neither is
+sent to the sender unless the sender's address is an active user of the tenant the document landed
+in.** The sender of inbound mail is usually a supplier, and nothing in the portal mails a supplier
+without a person deciding to.
+
+| Sender | Who is mailed |
+|---|---|
+| an active user of that tenant | the sender (summary / "Review Needed", link to the Review Queue) |
+| anyone else — a supplier, an inactive account, a user of another tenant | the tenant's org_admins: "N document(s) arrived by email from `<address>`", which says the address was not answered |
+| anyone else, and the tenant has no org_admin | nobody |
+
+Every decision writes an `intake.sender_notice` audit row: `kind` (`ingest_summary` /
+`review_needed`), `path` (`sender` / `org_admins` / `nobody`), `sender`, `sender_is_tenant_user`,
+`recipients`, `sent`. The Review Queue link is built from the request's own origin. Logic:
+`functions/lib/intake/sender-notice.ts`.
+
 ---
 
 ## File Storage
@@ -1741,6 +1760,23 @@ The upload endpoint validates both the MIME type and file extension, rejecting m
 The search term is wrapped in `%..%` wildcards. Only active documents are returned. The join against `document_versions` means you can search for documents by the name of any file that was uploaded to them.
 
 For more advanced search, use the GraphQL `searchDocuments` query which provides the same functionality with typed parameters.
+
+### Search and the module toggles
+
+`/api/search*` belongs to no module, but orders and customers are the **fulfillment** module's
+records. When that module is off for the caller — switched off for the organization, or not among
+what the caller's department sees — search leaves them out and says so:
+
+- `GET /api/search`: the `orders` and `customers` blocks are `{ total: 0, results: [] }` and are not read.
+- `POST /api/search/query`: a clause on `order` or `customer` is not run and its id is in
+  `not_applied`; no WMS order is read to explain a typed number or to follow a customer's PO. A PO or
+  invoice is still answered from what the documents themselves print.
+- `POST /api/search/interpret`, `POST /api/documents/search/natural` and `GET /api/search/examples`
+  read no order either.
+- Every one of those responses carries `"modules_not_applied": ["fulfillment"]`.
+
+A caller who has the module gets the response they always got: the key is absent. A super_admin is
+never narrowed. The lookup fails open, like every other module check.
 
 ### Coverage: covering documents vs. near misses
 
@@ -1934,6 +1970,20 @@ admin may revoke anyone's; another tenant's link is a 404, never a 403. A
 second press is a no-op that does not move the first revocation's timestamp.
 Audited as `document_export.revoked` with the recipients, the id list, and the
 view/download counts at the moment it was pulled.
+
+**A connector file for an order a person has worked on.** Approving an order file in the Review
+Queue (`PUT /api/queue/:id`, `status: "approved"`) upserts by order number. For an order where a
+person picked a certificate, or accepted / rejected a suggestion, the lines are reconciled instead
+of replaced: the header updates; a file line matching an existing line (same product code or name,
+same lot) updates it in place; an unmatched file line is added; **a line a person decided is never
+deleted or overwritten**, whether or not the file still lists it; an undecided line the file dropped
+is removed. When decided lines were kept the response carries `notes` (plain words, one per order),
+also written to the `queue_item.approved` audit row and to `connector_runs.details.notes`:
+
+```json
+{ "item": { "id": "...", "status": "approved" }, "summary": "0 created, 1 updated, 0 failed",
+  "notes": ["Order 1650438: kept 1 line a person had decided (not changed by this file). The file listed 2 lines: 1 added, 1 removed, 0 updated."] }
+```
 
 **There is deliberately no "extend".** Lengthening a link after the fact
 quietly changes the terms of a mail already sent ("this link expires on the

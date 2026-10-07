@@ -97,6 +97,13 @@ describe('FilterBuilder — clause rows ARE the query', () => {
     expect(screen.queryByTestId('filter-na-0')).toBeNull();
   });
 
+  it('a row the server skipped because Orders is off for this person says THAT, not "doesn\'t apply to documents"', () => {
+    const clauses: Clause[] = [{ id: 'c1', field: 'order', op: 'is', values: ['1650438'], source: 'builder' }];
+    render(<FilterBuilder query={q(clauses)} labels={{}} facets={{}} onChange={() => {}} notApplied={['c1']} modulesNotApplied={['fulfillment']} entity="documents" />);
+    expect(screen.getByTestId('filter-na-0')).toHaveTextContent('orders and customers are not part of your access');
+    expect(screen.getByTestId('filter-na-0')).not.toHaveTextContent("Doesn't apply to");
+  });
+
   it('an identifying field cannot be excluded (the Exclude segment is disabled)', () => {
     render(<FilterBuilder query={q([{ id: 'c1', field: 'lot', op: 'is', values: ['20726107'], source: 'builder' }])} labels={{}} facets={{}} onChange={() => {}} notApplied={[]} entity="documents" />);
     expect(screen.getByTestId('filter-exclude-0')).toBeDisabled();

@@ -140,7 +140,7 @@ describe('scoreProbe / scorecard', () => {
     expect(card.likely_by_basis['decoded from the lot code']).toEqual({ total: 1, pass: 1 });
     expect(overallRate(card)).toBe(0.75);
     const text = formatScorecard(card);
-    expect(text).toContain('lot-sublot (10426203-03)');
+    expect(text).toContain('lot-sublot (20726114-02)');
     expect(text).toContain('[lot_dash] "10426203-03" (doc d1): expected covering, document landed absent (coverage=none)');
     expect(text).toContain('No document on file covers lot 10426203-03.');
     expect(text).toContain('1 unsupported by the reader');

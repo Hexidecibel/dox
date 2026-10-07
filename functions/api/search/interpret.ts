@@ -13,6 +13,7 @@
  */
 
 import { BadRequestError, errorToResponse, requireRole, requireTenantAccess } from '../../lib/permissions';
+import { callerHasModule } from '../../lib/module-access';
 import { interpretQueryText } from '../../lib/search/interpretText';
 import type { Env, User } from '../../lib/types';
 import type { SearchInterpretRequest } from '../../../shared/types';
@@ -35,8 +36,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!tenantId) throw new BadRequestError('tenant_id is required');
     requireTenantAccess(user, tenantId);
 
-    const result = await interpretQueryText(context.env.DB, tenantId, body.text);
-    return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+    const fulfillment = await callerHasModule(context.env.DB, user, context.data, 'fulfillment');
+    const result = await interpretQueryText(context.env.DB, tenantId, body.text, { fulfillment });
+    const body2 = fulfillment ? result : { ...result, modules_not_applied: ['fulfillment' as const] };
+    return new Response(JSON.stringify(body2), { headers: { 'Content-Type': 'application/json' } });
   } catch (err) {
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;

@@ -771,7 +771,7 @@ function checkExtraction(item, opts = {}) {
           scope,
           expValue,
           `${Math.round(days)}d shelf life (> ${MAX_SHELF_LIFE_DAYS}d)`,
-          `That is a ${Math.round(days)}-day shelf life \u2014 far too long for dairy. This may be a reagent's expiry, not the product's.`
+          `That is a ${Math.round(days)}-day shelf life \u2014 more than two years. Check it: this may be a reagent's expiry, not the product's.`
         );
       } else {
         bump(tally, "date_ordering", "pass");

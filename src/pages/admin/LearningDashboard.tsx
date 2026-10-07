@@ -225,9 +225,9 @@ export default function LearningDashboard() {
           <Card variant="outlined" sx={{ bgcolor: '#fafafa' }}>
             <CardContent>
               <Typography variant="body2" color="text.secondary">
-                Trust ladder not yet enabled — Phase 3b. Once the override-rate trend at left
-                shows learning is working, the trust ladder will graduate suppliers from
-                pre-fill into silent-apply and finally auto-ingest.
+                Trust ladder not yet enabled. The override-rate trend at left shows whether
+                learning is working. Whatever it shows, every document is still reviewed and
+                approved by a person.
               </Typography>
             </CardContent>
           </Card>

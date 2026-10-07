@@ -697,13 +697,15 @@ export async function planInstantSearch(
   tenantId: string,
   q: string,
   structured: { lot?: string | null; sublot?: string | null } = {},
+  /** `followOrders: false` = the fulfillment module is off for the caller; no order is read. */
+  opts: { followOrders?: boolean } = {},
 ): Promise<CoveragePlan | null> {
   const parsed = parseQueryText(q);
   const structuredLot = structured.lot && structured.lot.trim()
     ? makeStructuredLotConstraint('c0', structured.lot, structured.sublot)
     : null;
   const catalog = q.trim() ? await loadProductCatalog(db, tenantId) : null;
-  const orders = q.trim() ? await findOrdersInQuery(db, tenantId, q, catalog) : [];
+  const orders = q.trim() && opts.followOrders !== false ? await findOrdersInQuery(db, tenantId, q, catalog) : [];
   if (parsed.dates.length === 0 && parsed.lotTokens.length === 0 && !structuredLot && orders.length === 0 && !catalog) return null;
   const notLots = new Set<string>([
     ...(catalog ? catalogCodes(catalog) : []),
@@ -801,11 +803,15 @@ export async function applyNaturalProductAndOrder(
   constraints: SearchConstraint[],
   parsed: ParsedQuery,
   rawQuery: string,
+  /** `followOrders: false` = the fulfillment module is off for the caller; no order is read. */
+  opts: { followOrders?: boolean } = {},
 ): Promise<SearchConstraint[]> {
   let out = [...constraints];
   let n = 100;
   const catalog = await loadProductCatalog(db, tenantId);
-  const orders = await findOrdersInQuery(db, tenantId, [rawQuery, ...out.filter((c) => c.kind === 'metadata').map((c) => c.value)].join(' '), catalog);
+  const orders = opts.followOrders === false
+    ? []
+    : await findOrdersInQuery(db, tenantId, [rawQuery, ...out.filter((c) => c.kind === 'metadata').map((c) => c.value)].join(' '), catalog);
   for (const o of orders) {
     // A metadata filter the model put the order number in IS the order.
     out = out.filter((c) => !(c.kind === 'metadata' && normAlnum(c.value) === normAlnum(o.evidence.order_number)));

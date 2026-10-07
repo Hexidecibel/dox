@@ -60,6 +60,8 @@
  *                                         #   picture pages on their own; this keeps
  *                                         #   their ground truth independently
  *                                         #   checkable and the two routes comparable
+ *   bin/eval-aj-docs --industry generic   # dairy (default: what existing tenants send) |
+ *                                         #   generic (what a new organisation gets)
  *   bin/eval-aj-docs --set specs          # specs | packet | packet-parts | packet-whole
  *   bin/eval-aj-docs --doc packet-p04-sqf-certificate
  *   bin/eval-aj-docs --concurrency 3
@@ -97,7 +99,7 @@ const C = process.stdout.isTTY
 function parseArgs(argv) {
   const o = {
     doc: null, set: null, concurrency: 2, json: false, out: null, rescore: null,
-    classifyOnly: false, verify: false, classifyModel: 'fast', forceOcr: false, help: false,
+    classifyOnly: false, verify: false, classifyModel: 'fast', forceOcr: false, industry: 'dairy', help: false,
   };
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
@@ -107,6 +109,7 @@ function parseArgs(argv) {
       case '--classify-model': o.classifyModel = argv[++i]; break;
       case '--verify': o.verify = true; break;
       case '--force-ocr': o.forceOcr = true; break;
+      case '--industry': o.industry = argv[++i]; break;
       case '--concurrency': o.concurrency = Math.max(1, parseInt(argv[++i], 10) || 1); break;
       case '--json': o.json = true; break;
       case '--out': o.out = argv[++i]; break;
@@ -391,7 +394,17 @@ async function main() {
       note(`${C.d}chains ok: ${chains.results.map((r) => `${r.tag}=${r.live[0]}`).join(', ')}${C.x}`);
     }
 
-    const { extractFields, classifyDocumentType } = bundle('functions/lib/llm.ts', 'llm.cjs');
+    const { extractFields, classifyDocumentType, DAIRY_CONTEXT_TEMPLATE, GENERIC_INDUSTRY_CONTEXT } = bundle('functions/lib/llm.ts', 'llm.cjs');
+    // The industry layer is passed EXPLICITLY. Since migration 0136 the code
+    // default is the generic block and every existing tenant carries the dairy
+    // template as its own stored context, so `dairy` is what production sends
+    // and what every number quoted from this corpus was measured on.
+    // `--industry generic` measures what a brand-new organisation gets.
+    if (opts.industry !== 'dairy' && opts.industry !== 'generic') {
+      console.error(`--industry must be dairy or generic (got ${opts.industry})`);
+      process.exit(2);
+    }
+    const industryPrompt = opts.industry === 'generic' ? GENERIC_INDUSTRY_CONTEXT : DAIRY_CONTEXT_TEMPLATE;
     const candidates = loadCandidates();
     note(`${C.d}extracting ${runs.length} document(s) via ${env.QWEN_URL} (concurrency ${opts.concurrency})…${C.x}`);
 
@@ -427,6 +440,7 @@ async function main() {
           try {
             result = await extractFields(llmText, env, {
               fileName: path.basename(run.pdf),
+              industryPrompt,
               documentType: classification ? classification.documentType : null,
             });
           } catch (err) {

@@ -4,14 +4,19 @@
  *
  * Two read-only sources:
  *   1. Tenant `extraction_context` (org-level instructions, column on `tenants`
- *      added in migration 0072). NULL/missing → '' (we do NOT substitute the
- *      dairy default here; this is "what's already authored", not the default).
+ *      added in migration 0072). NULL/missing → '' (we do NOT substitute a
+ *      default here; this is "what's already authored", not the default).
+ *      The text migration 0136 wrote into tenants that had none is NOT
+ *      authored either -- it is the former built-in default written down --
+ *      so, unedited, it reads as '' exactly as the NULL it replaced did.
  *   2. Existing `supplier_extraction_instructions.instructions` for this exact
  *      (supplier_id, document_type_id) pair — a prior teach session's output.
  *
  * Never throws on a missing row; returns '' for each absent piece so the prompt
  * builders can cleanly omit the section.
  */
+
+import { isMigratedDefaultContext } from '../llm';
 
 export interface TeachBackground {
   /** Org-level extraction context, or '' when none authored. */
@@ -42,7 +47,8 @@ export async function loadTeachBackground(
       .prepare('SELECT extraction_context FROM tenants WHERE id = ?')
       .bind(tenantId)
       .first<{ extraction_context: string | null }>();
-    tenantContext = tenantRow?.extraction_context?.trim() ? tenantRow.extraction_context : '';
+    const stored = tenantRow?.extraction_context ?? '';
+    tenantContext = stored.trim() && !isMigratedDefaultContext(stored) ? stored : '';
   } catch {
     tenantContext = '';
   }

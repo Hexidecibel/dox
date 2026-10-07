@@ -2991,6 +2991,15 @@ export interface SearchCoverageFields {
   unreviewed_candidates?: SearchUnreviewedCandidate[];
   /** The structured scan hit its row cap; a covering document could be past it. */
   coverage_scan_truncated?: boolean;
+  /**
+   * Modules whose records were left OUT of this answer because the module is
+   * off for the caller (switched off for the organization, or not among what
+   * their department sees). Today only `fulfillment`: no order or customer was
+   * searched, an order number was not followed to its certificates, and a PO
+   * was answered from the documents' own printed PO only. Absent when nothing
+   * was left out -- which is every response for a caller who has the module.
+   */
+  modules_not_applied?: Array<import('./modules').ModuleKey>;
 }
 
 export interface NaturalSearchResponse extends SearchCoverageFields {
@@ -5136,6 +5145,8 @@ export interface SearchExamplesResponse {
   examples: SearchExample[];
   /** The day the set was built for; it stays the same all day. */
   as_of: string;
+  /** See `SearchCoverageFields.modules_not_applied`: no example was answered through an order. */
+  modules_not_applied?: Array<import('./modules').ModuleKey>;
 }
 
 export interface SearchInterpretResponse {
@@ -5145,6 +5156,8 @@ export interface SearchInterpretResponse {
   residual: string;
   /** Each clause in words, keyed by clause id. */
   labels: Record<string, string>;
+  /** See `SearchCoverageFields.modules_not_applied`: a typed number was not looked up as an order. */
+  modules_not_applied?: Array<import('./modules').ModuleKey>;
 }
 
 export interface SearchQueryClauseSummary {
@@ -5178,8 +5191,10 @@ export interface SearchQueryResponse extends SearchCoverageFields {
   /** What the answer cost: D1 statements prepared, round trips, subjects judged. */
   stats: { statements: number; round_trips: number; candidates: number; scan_fallback: boolean };
   /**
-   * Clauses NOT run because their field does not apply to the result mode
-   * (`view.entity`), by id. Kept in the query, greyed, never silently dropped.
+   * Clauses NOT run, by id: their field does not apply to the result mode
+   * (`view.entity`), or it belongs to a module that is off for the caller (an
+   * `order` / `customer` clause with fulfillment off -- see
+   * `modules_not_applied`). Kept in the query, greyed, never silently dropped.
    */
   not_applied?: string[];
   /** The result mode's rows when `view.entity` is lots / products / suppliers. */

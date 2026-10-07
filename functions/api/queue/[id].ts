@@ -1450,6 +1450,9 @@ async function handleRecordsApprove(
   }
 
   let summary = '';
+  // Plain-words notes from the producer that are not errors -- today, an order
+  // on which lines a person had decided were kept rather than replaced.
+  let notes: string[] = [];
   let correctedRecords: OrderRecordsPayload | ShipmentRecordsPayload;
 
   if (kind === 'order') {
@@ -1479,11 +1482,13 @@ async function handleRecordsApprove(
       );
     }
     summary = `${result.ordersCreated} created, ${result.ordersUpdated} updated, ${result.errors} failed`;
+    notes = result.notes;
     await accumulateRunRollup(context.env.DB, item.connector_run_id, {
       recordsCreated: result.ordersCreated + result.customersCreated,
       recordsStaged: result.ordersStaged,
       recordsErrored: result.errors,
     });
+    await recordRunNotes(context.env.DB, item.connector_run_id, notes);
   } else {
     const payload = validateShipmentRecords(rawRecords);
     correctedRecords = payload;
@@ -1529,7 +1534,7 @@ async function handleRecordsApprove(
     'queue_item.approved',
     'processing_queue',
     item.id,
-    JSON.stringify({ output_kind: kind, file_name: item.file_name, summary }),
+    JSON.stringify({ output_kind: kind, file_name: item.file_name, summary, ...(notes.length ? { notes } : {}) }),
     getClientIp(context.request)
   );
 
@@ -1537,9 +1542,37 @@ async function handleRecordsApprove(
     JSON.stringify({
       item: { id: item.id, status: 'approved', reviewed_by: user.id, output_kind: kind },
       summary,
+      ...(notes.length ? { notes } : {}),
     }),
     { headers: { 'Content-Type': 'application/json' } }
   );
+}
+
+/**
+ * Write a producer's plain-words notes onto the connector run that carried the
+ * file (`connector_runs.details`, a JSON object; any existing keys are kept and
+ * notes accumulate across the items of one run). No run, or no notes: nothing.
+ * Best-effort -- a note about a write must never fail the write.
+ */
+async function recordRunNotes(db: Env['DB'], connectorRunId: string | null, notes: string[]): Promise<void> {
+  if (!connectorRunId || notes.length === 0) return;
+  try {
+    const row = await db.prepare('SELECT details FROM connector_runs WHERE id = ?').bind(connectorRunId).first<{ details: string | null }>();
+    let details: Record<string, unknown> = {};
+    if (row?.details) {
+      try {
+        const parsed = JSON.parse(row.details);
+        details = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { previous: row.details };
+      } catch {
+        details = { previous: row.details };
+      }
+    }
+    const earlier = Array.isArray(details.notes) ? (details.notes as unknown[]).filter((n): n is string => typeof n === 'string') : [];
+    details.notes = [...earlier, ...notes];
+    await db.prepare('UPDATE connector_runs SET details = ? WHERE id = ?').bind(JSON.stringify(details), connectorRunId).run();
+  } catch (err) {
+    console.error('[queue-approve] connector_runs notes failed:', err instanceof Error ? err.message : String(err));
+  }
 }
 
 /**

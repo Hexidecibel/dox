@@ -11,6 +11,7 @@
  */
 
 import { BadRequestError, errorToResponse, requireRole, requireTenantAccess } from '../../lib/permissions';
+import { callerHasModule } from '../../lib/module-access';
 import { buildSearchExamples } from '../../lib/search/examples';
 import type { Env, User } from '../../lib/types';
 
@@ -24,7 +25,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!tenantId) throw new BadRequestError('tenant_id is required');
     requireTenantAccess(user, tenantId);
 
-    const result = await buildSearchExamples(context.env.DB, tenantId);
+    const fulfillment = await callerHasModule(context.env.DB, user, context.data, 'fulfillment');
+    const result = await buildSearchExamples(context.env.DB, tenantId, new Date(), { fulfillment });
     return new Response(JSON.stringify(result), {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'private, max-age=3600' },
     });

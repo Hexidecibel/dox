@@ -40,7 +40,13 @@ function ph(n: number): string {
   return Array(n).fill('?').join(',');
 }
 
-export async function interpretQueryText(db: D1Database, tenantId: string, rawText: string): Promise<SearchInterpretResponse> {
+export async function interpretQueryText(
+  db: D1Database,
+  tenantId: string,
+  rawText: string,
+  /** `fulfillment: false` = the module is off for the caller: no WMS order explains a typed number. */
+  opts: { fulfillment?: boolean } = {},
+): Promise<SearchInterpretResponse> {
   const text = rawText.replace(/\s+/g, ' ').trim().slice(0, INTERPRET_MAX_CHARS);
   if (!text) return { clauses: [], residual: '', labels: {} };
   const scan = scanText(text, { now: new Date() });
@@ -82,7 +88,7 @@ export async function interpretQueryText(db: D1Database, tenantId: string, rawTe
         WHERE sls.tenant_id = ? ORDER BY sls.version DESC`,
     ).bind(tenantId));
   }
-  const ov = scanOrderValues(scan).slice(0, 30);
+  const ov = opts.fulfillment === false ? [] : scanOrderValues(scan).slice(0, 30);
   if (ov.length) {
     const pov = [...new Set(ov.map(foldCustomerPo).filter(Boolean))].slice(0, 3).flatMap(customerPoSpellings).slice(0, 60);
     add('orders', db.prepare(

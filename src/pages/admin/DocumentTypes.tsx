@@ -92,7 +92,6 @@ export function DocumentTypes() {
   const [formName, setFormName] = useState('');
   const [formDescription, setFormDescription] = useState('');
   const [formTenantId, setFormTenantId] = useState('');
-  const [formAutoIngest, setFormAutoIngest] = useState(false);
   const [formExtractTables, setFormExtractTables] = useState(true);
   /** '' means "no period of its own" — the annual default applies. */
   /**
@@ -218,7 +217,6 @@ export function DocumentTypes() {
     setEditingType(null);
     setFormName('');
     setFormDescription('');
-    setFormAutoIngest(false);
     setFormExtractTables(true);
     setFormRenewalMonths('');
     setFormWindow(windowToForm(FDA_FOOD_FACILITY_REGISTRATION_WINDOW));
@@ -239,7 +237,6 @@ export function DocumentTypes() {
     setEditingType(dt);
     setFormName(dt.name);
     setFormDescription(dt.description || '');
-    setFormAutoIngest(!!dt.auto_ingest);
     setFormExtractTables(dt.extract_tables !== 0);
     const storedWindow = dt.renewal_policy === 'period' ? parseRenewalWindow(dt.renewal_window) : null;
     setFormWindow(windowToForm(storedWindow ?? FDA_FOOD_FACILITY_REGISTRATION_WINDOW));
@@ -364,7 +361,6 @@ export function DocumentTypes() {
         await api.documentTypes.update(editingType.id, {
           name: formName.trim(),
           description: formDescription.trim() || undefined,
-          auto_ingest: formAutoIngest ? 1 : 0,
           extract_tables: formExtractTables ? 1 : 0,
           ...renewalPayload(),
           renewal_alert_lead_days: formLeadDays,
@@ -387,7 +383,6 @@ export function DocumentTypes() {
           name: formName.trim(),
           description: formDescription.trim() || undefined,
           tenant_id: tenantId,
-          auto_ingest: formAutoIngest ? 1 : 0,
           extract_tables: formExtractTables ? 1 : 0,
           ...renewalPayload(),
           renewal_alert_lead_days: formLeadDays,
@@ -866,17 +861,10 @@ export function DocumentTypes() {
           <Box>
             <Typography variant="subtitle2" sx={{ mb: 1 }}>Features</Typography>
 
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <FormControlLabel
-                control={<Switch checked={formAutoIngest} onChange={(e) => setFormAutoIngest(e.target.checked)} disabled={saving} />}
-                label="Auto-ingest"
-              />
-              <InfoTooltip text={helpContent.document_types.list?.columnTooltips?.autoIngest} />
-            </Box>
-            <Typography variant="body2" color="text.secondary" sx={{ ml: 4, mt: -0.5, mb: 1 }}>
-              Automatically import high-confidence documents (requires 3+ training examples)
-            </Typography>
-
+            {/* The "Auto-ingest" switch that stood here was removed: nothing in
+                dox files a document without a person, so the switch promised a
+                behaviour that does not exist. `auto_ingest` is no longer sent,
+                which leaves a stored value untouched by an edit. */}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
               <FormControlLabel
                 control={<Switch checked={formExtractTables} onChange={(e) => setFormExtractTables(e.target.checked)} disabled={saving} />}

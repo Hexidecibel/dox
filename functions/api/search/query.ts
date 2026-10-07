@@ -22,6 +22,7 @@
  */
 
 import { BadRequestError, errorToResponse, requireRole, requireTenantAccess } from '../../lib/permissions';
+import { callerHasModule } from '../../lib/module-access';
 import { runSearch } from '../../lib/search/execute';
 import type { Env, User } from '../../lib/types';
 import type { SearchQueryRequest } from '../../../shared/types';
@@ -57,8 +58,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const limit = Math.min(Math.max(Number(body.limit ?? 20) || 20, 1), 200);
     const offset = Math.max(Number(body.offset ?? 0) || 0, 0);
 
+    // Orders and customers are the fulfillment module's records. A caller
+    // without it gets an answer built without them, and told so.
+    const fulfillment = await callerHasModule(context.env.DB, user, context.data, 'fulfillment');
+
     const result = await runSearch(context.env.DB, tenantId, {
       query,
+      fulfillment,
       limit,
       offset,
       facets: body.facets !== false,

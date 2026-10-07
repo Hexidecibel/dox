@@ -54,10 +54,20 @@ export interface FilterBuilderProps {
   facets: Partial<Record<FacetField, FacetCount[]>>;
   onChange: (next: SearchQuery) => void;
   notApplied: string[];
+  /**
+   * Modules whose records the server left out because they are off for this
+   * person (`modules_not_applied`). With `fulfillment` in it the Order and
+   * Customer fields are not offered, and a row that already holds one says why
+   * it did not run instead of blaming the result mode.
+   */
+  modulesNotApplied?: string[];
   entity: SearchEntity;
   tenantId?: string;
   onLabel?: (id: string, name: string) => void;
 }
+
+/** Fields that exist only through the fulfillment module's records (mirrors the executor). */
+const FULFILLMENT_FIELD_KEYS = new Set<string>(['order', 'customer']);
 
 const OP_WORDS: Record<ClauseOp, string> = {
   in: 'is any of',
@@ -90,7 +100,8 @@ function blank(field: FieldKey, id: string): Clause {
 
 const segSx = { '& .MuiToggleButton-root': { textTransform: 'none', py: 0.25, px: 1, fontSize: '0.78rem' } } as const;
 
-export function FilterBuilder({ query, labels, facets, onChange, notApplied, entity, tenantId, onLabel }: FilterBuilderProps) {
+export function FilterBuilder({ query, labels, facets, onChange, notApplied, modulesNotApplied, entity, tenantId, onLabel }: FilterBuilderProps) {
+  const fulfillmentOff = (modulesNotApplied ?? []).includes('fulfillment');
   const [drafts, setDrafts] = useState<Clause[]>([]);
   const rows: Array<{ clause: Clause; draft: boolean }> = [
     ...query.clauses.map((c) => ({ clause: c, draft: false })),
@@ -136,6 +147,7 @@ export function FilterBuilder({ query, labels, facets, onChange, notApplied, ent
           labels={labels}
           facets={facets}
           notApplied={notApplied.includes(row.clause.id)}
+          fulfillmentOff={fulfillmentOff}
           entity={entity}
           tenantId={tenantId}
           onLabel={onLabel}
@@ -164,6 +176,7 @@ interface FilterRowProps {
   labels: Record<string, string>;
   facets: Partial<Record<FacetField, FacetCount[]>>;
   notApplied: boolean;
+  fulfillmentOff: boolean;
   entity: SearchEntity;
   tenantId?: string;
   onLabel?: (id: string, name: string) => void;
@@ -172,8 +185,13 @@ interface FilterRowProps {
   onRemove: () => void;
 }
 
-function FilterRow({ index, clause, draft, labels, facets, notApplied, entity, tenantId, onLabel, onCommit, onDraft, onRemove }: FilterRowProps) {
+function FilterRow({ index, clause, draft, labels, facets, notApplied, fulfillmentOff, entity, tenantId, onLabel, onCommit, onDraft, onRemove }: FilterRowProps) {
   const def = SEARCH_FIELDS[clause.field];
+  // A field the person cannot use is not offered -- but a row that already
+  // holds it (a saved view, a shared link) keeps its own field selectable so
+  // the row still renders as what it is.
+  const offered = (k: string) => !fulfillmentOff || !FULFILLMENT_FIELD_KEYS.has(k) || k === clause.field;
+  const moduleOff = fulfillmentOff && FULFILLMENT_FIELD_KEYS.has(clause.field);
   const [error, setError] = useState<string | null>(null);
 
   const attempt = (next: Clause) => {
@@ -239,7 +257,7 @@ function FilterRow({ index, clause, draft, labels, facets, notApplied, entity, t
         <ListSubheader>Narrow to</ListSubheader>
         {SCOPE_KEYS.map((k) => <MenuItem key={k} value={k}>{SEARCH_FIELDS[k].label}</MenuItem>)}
         <ListSubheader>Find what covers</ListSubheader>
-        {IDENT_KEYS.map((k) => <MenuItem key={k} value={k}>{SEARCH_FIELDS[k].label}</MenuItem>)}
+        {IDENT_KEYS.filter(offered).map((k) => <MenuItem key={k} value={k}>{SEARCH_FIELDS[k].label}</MenuItem>)}
         <ListSubheader>Words</ListSubheader>
         <MenuItem value="text">Mentions</MenuItem>
       </Select>
@@ -279,7 +297,9 @@ function FilterRow({ index, clause, draft, labels, facets, notApplied, entity, t
         <Box sx={{ gridColumn: { xs: '1 / -1', md: '2 / -1' }, mt: -0.25 }}>
           {notApplied && (
             <Typography variant="caption" sx={{ display: 'block', fontStyle: 'italic', color: 'text.secondary' }} data-testid={`filter-na-${index}`}>
-              Doesn't apply to {entity}. Kept, and applies again when you switch back.
+              {moduleOff
+                ? 'Not run: orders and customers are not part of your access. An administrator can change this in Settings.'
+                : `Doesn't apply to ${entity}. Kept, and applies again when you switch back.`}
             </Typography>
           )}
           {error && <Typography variant="caption" color="warning.main" sx={{ display: 'block' }}>{error}</Typography>}

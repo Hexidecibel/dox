@@ -8,7 +8,8 @@ import { extractFields, classifyDocumentType } from '../../lib/llm';
 import type { DocumentTypeCandidate } from '../../lib/llm';
 import { loadTypeInstructions } from '../../lib/extractionInstructionStack';
 import { computeConfidenceScore } from '../../lib/confidence';
-import { sendEmail, buildEmailIngestSummaryEmail } from '../../lib/email';
+import { buildEmailIngestSummaryEmail } from '../../lib/email';
+import { buildArrivedByEmailNotice, sendSenderNotice } from '../../lib/intake/sender-notice';
 import { resolveExistingSupplierId } from '../../lib/suppliers';
 import type { Env } from '../../lib/types';
 
@@ -464,23 +465,36 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       }
     }
 
-    // 9. Send summary email back to sender
-    if (context.env.RESEND_API_KEY && results.length > 0) {
-      try {
-        const { subject: emailSubject, html } =
-          buildEmailIngestSummaryEmail({
-            senderName: senderEmail,
-            tenantName: mapping.tenant_name,
-            results,
-          });
-        await sendEmail(context.env.RESEND_API_KEY, {
-          to: senderEmail,
-          subject: emailSubject,
-          html,
-        });
-      } catch {
-        // Non-critical — don't fail the webhook if email send fails
-      }
+    // 9. Say what happened -- to the sender ONLY when the sender is one of
+    //    this tenant's own users. Mail arrives here from suppliers, and a
+    //    supplier is not sent our processing summary: the tenant's org_admins
+    //    get an internal notice instead, and the path taken is audited
+    //    (functions/lib/intake/sender-notice.ts).
+    if (results.length > 0) {
+      const origin = new URL(context.request.url).origin;
+      await sendSenderNotice({
+        db: context.env.DB,
+        apiKey: context.env.RESEND_API_KEY,
+        tenantId: mapping.tenant_id,
+        kind: 'ingest_summary',
+        sender: senderEmail,
+        toSender: buildEmailIngestSummaryEmail({
+          senderName: senderEmail,
+          tenantName: mapping.tenant_name,
+          results,
+        }),
+        toAdmins: buildArrivedByEmailNotice({
+          sender: senderEmail,
+          tenantName: mapping.tenant_name,
+          files: results.map((r) => ({ fileName: r.fileName, status: r.status, detail: r.error ?? r.status })),
+          origin,
+        }),
+        actorUserId: mapping.default_user_id,
+        resourceType: 'email_ingest',
+        resourceId: null,
+        ip: context.request.headers.get('cf-connecting-ip') || 'webhook',
+        extra: { attachments: results.length },
+      });
     }
 
     return jsonResponse({ message: 'Processed', results }, 200);

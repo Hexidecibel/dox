@@ -158,19 +158,169 @@ Output:
 };
 
 /**
- * The seeded default for a tenant's editable extraction_context (the dairy
- * "industry layer"). When a tenant has no custom extraction_context, this string
- * occupies the industry-layer slot. Served by GET /api/tenant-extraction-context
- * as `default_template` so the editor UI can seed without duplicating the text.
+ * The dairy "industry layer", as a NAMED TEMPLATE a tenant can load into its
+ * editable extraction_context (Settings > Extraction Context, "Load dairy
+ * template").
+ *
+ * Until migration 0136 this text was also what every tenant got when it had
+ * written no context of its own, which made one tenant's dairy playbook the
+ * product default. 0136 writes it into `tenants.extraction_context` for every
+ * tenant that was relying on that fallback, so no existing tenant's prompt
+ * moves, and the fallback itself became GENERIC_INDUSTRY_CONTEXT below.
  */
-export const DEFAULT_DAIRY_CONTEXT = INDUSTRY_PROMPTS.DAIRY_FOOD;
+export const DAIRY_CONTEXT_TEMPLATE = INDUSTRY_PROMPTS.DAIRY_FOOD;
+
+/**
+ * The dairy text EXACTLY as migration 0136 stored it, which is not quite
+ * DAIRY_CONTEXT_TEMPLATE.
+ *
+ * The two prompt surfaces had each carried their own copy of the built-in
+ * default, and the copies differed on one line of the worked example: this
+ * file's says `"_confidence": "high"` (this surface asks for high / medium /
+ * low and reads nothing else), the worker's said `"_confidence": 0.95` (the
+ * worker asks for a number). One column cannot hold both. The worker runs the
+ * Review Queue -- nearly every extraction -- so the migration stores ITS text,
+ * and the worker goes on sending the characters it always sent.
+ *
+ * `industryLayerForThisSurface` below is the other half: this surface, handed
+ * that exact stored text, puts its own line back. So a tenant that had no
+ * context before 0136 gets a byte-identical prompt after it on BOTH surfaces.
+ * tests/unit/extractionContextDefault.test.ts runs the migration and pins all
+ * of it, including the SHA-256 of what each surface sent before.
+ */
+export const DAIRY_CONTEXT_AS_MIGRATED = DAIRY_CONTEXT_TEMPLATE.replace(
+  '\n  "_confidence": "high",\n',
+  '\n  "_confidence": 0.95,\n',
+);
+
+/** Length plus 32-bit FNV-1a: enough to tell one known text from anything a person typed. */
+export function contextFingerprint(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `${text.length}:${h.toString(16)}`;
+}
+
+/**
+ * The exact texts migration 0136 has written, by fingerprint.
+ *
+ * BY FINGERPRINT, NOT BY COMPARING WITH A CONSTANT, for two reasons. The text a
+ * tenant holds is whatever 0136 said on the day it was applied, and the
+ * template constant above is free to be reworded afterwards; a comparison with
+ * the constant would silently stop recognising every tenant migrated before
+ * the rewording. And the first text 0136 wrote names a real supplier in its
+ * worked example, which this file must be able to recognise without spelling.
+ * A later version of the migration's text is ADDED here, never swapped in.
+ */
+const MIGRATED_CONTEXT_FINGERPRINTS: ReadonlySet<string> = new Set([
+  '3675:54cb25f7', // 0136 as first written: the worker's built-in default of 2026-10-06, verbatim
+]);
+
+/** Is this stored context exactly what 0136 wrote -- i.e. nobody has edited it? */
+export function isMigratedDefaultContext(text: string | null | undefined): boolean {
+  return !!text && MIGRATED_CONTEXT_FINGERPRINTS.has(contextFingerprint(text));
+}
+
+/**
+ * The stored text 0136 wrote, read back as this surface's own former default:
+ * the one line on which the two surfaces differed is put back.
+ *
+ * UNEDITED MIGRATED TEXT ONLY. The moment a person edits their context it is
+ * theirs and goes to the model as written, on both surfaces, as an edited
+ * context always has.
+ */
+export function industryLayerForThisSurface(industryPrompt: string): string {
+  return isMigratedDefaultContext(industryPrompt)
+    ? industryPrompt.replace('\n  "_confidence": 0.95,\n', '\n  "_confidence": "high",\n')
+    : industryPrompt;
+}
+
+/**
+ * The old name, kept so nothing that imports it breaks. It is no longer the
+ * default for anybody: read it as "the dairy template".
+ */
+export const DEFAULT_DAIRY_CONTEXT = DAIRY_CONTEXT_TEMPLATE;
+
+/**
+ * What occupies the industry-layer slot for a tenant that has written no
+ * extraction_context: the same hard rules the dairy template carries, with
+ * nothing in them that assumes what the organisation buys or sells.
+ *
+ * Same SHAPE as the dairy template on purpose (an ORG CONTEXT placeholder the
+ * wire drops, a context list, the hard rules, one worked example), so the two
+ * are interchangeable in the editor and `stripUnfilledPlaceholders` treats them
+ * alike. The worked example is invented: the supplier, the product and every
+ * number in it belong to nobody.
+ *
+ * KEEP IN SYNC with GENERIC_INDUSTRY_PROMPT in bin/process-worker;
+ * tests/unit/extractionContextDefault.test.ts pins the two together.
+ */
+export const GENERIC_INDUSTRY_CONTEXT = `
+ORG CONTEXT:
+[Describe your organization and what these documents are for — edit this. e.g. "We are a food distributor managing supplier documents for regulatory compliance. Lot traceability is critical; every certificate of analysis must be tied to a lot."]
+
+GENERAL CONTEXT — supplier documents:
+- A Certificate of Analysis reports tests such as microbiological counts, composition (fat %, moisture %, protein %), pH and sensory checks. The tests differ by product: take each test's name from the page, never from a list of what is usual.
+- Grade designations and plant / facility numbers are copied as printed
+- Code dates may be printed in Julian format (YDDD where Y=last digit of year, DDD=day) — copy them exactly as printed; never convert one to a calendar date
+- Net weights: keep the unit the page prints (lbs, kg, gallons, litres)
+
+COA DOMAIN RULES (hard rules — follow exactly):
+- Lab consumables are NEVER product data. Reagent / control / buffer lot numbers and their expirations, dilution rows, plate-incubation tables, and incubator temperatures must never be bound to a product field. A reagent lot mistaken for the product's lot is the single worst error.
+- Certification / legal boilerplate numbers are reference, not results. Numbers inside certification clauses or regulatory citations are reference thresholds, NOT this product's measured values. Do not extract them as results.
+- Capture specifications verbatim; NEVER derive pass/fail. Copy the spec string exactly as printed. Leave pass/fail empty unless the document itself prints an explicit verdict — the human decides conformance.
+- Result is not the spec. When a table has Spec and Result columns, the measured value is the Result; never report the spec/limit as the result.
+- Lot is the most important field and keys every record. If there is no explicit lot label but a CODE DATE / DATE CODE is present, it may serve as the lot — capture it as the lot, and also keep it in its own date field.
+- A missing required pathogen result (Listeria, Salmonella) is a GAP, not a pass — return null; do not infer absence.
+- Capture yeast/mold and sensory (flavor / color / odor) exactly as printed — never auto-combine, split, or collapse them.
+- Normalize dates to YYYY-MM-DD; when numeric order is genuinely ambiguous (e.g. 03/04/26 could be Mar or Apr), keep as-is rather than guess.
+
+EXAMPLE — COA extraction:
+Input: "Northfield Foods Co. COA for Whole Wheat Flour 50#, Lot L26-0842, PO PO-44821, Packed 03/15/26, Best By 09/15/26, Plant 42-1234. Tests: Protein >12% result 13.1% Pass, Moisture <14% result 12.6% Pass, Coliform <10 CFU/g result <1 Pass, SPC <20000 CFU/g result 4500 Pass"
+
+Output:
+{
+  "fields": {
+    "supplier_name": "Northfield Foods Co.",
+    "product_name": "Whole Wheat Flour 50#",
+    "lot_number": "L26-0842",
+    "po_number": "PO-44821",
+    "code_date": "2026-03-15",
+    "expiration_date": "2026-09-15",
+    "plant_number": "42-1234",
+    "net_weight": "50 lbs"
+  },
+  "tables": [{
+    "name": "test_results",
+    "headers": ["test", "test_method", "specification", "result", "units", "pass_fail"],
+    "rows": [
+      ["Protein", "AACC 46-30", ">12%", "13.1", "%", "Pass"],
+      ["Moisture", "AACC 44-15", "<14%", "12.6", "%", "Pass"],
+      ["Coliform", "AOAC 989.10", "<10", "<1", "CFU/g", "Pass"],
+      ["Standard Plate Count", "AOAC 989.10", "<20,000", "4,500", "CFU/g", "Pass"]
+    ]
+  }],
+  "products": ["Whole Wheat Flour 50#"],
+  "summary": "COA for Northfield Whole Wheat Flour lot L26-0842, all tests pass.",
+  "document_type": "Certificate of Analysis"
+}`;
+
+/**
+ * The templates the settings box offers, by name. One today. A template is
+ * loaded by a person into their own record; nothing applies one by itself.
+ */
+export const EXTRACTION_CONTEXT_TEMPLATES: ReadonlyArray<{ key: string; label: string; text: string }> = [
+  { key: 'dairy', label: 'Dairy & food', text: DAIRY_CONTEXT_TEMPLATE },
+];
 
 /**
  * Strip unfilled editor placeholders out of an industry-context block before it
  * is sent to the model.
  *
  * The industry layer is a WHOLE BLOCK — either a tenant's editable
- * `extraction_context` (migration 0072) or the DEFAULT_DAIRY_CONTEXT seed below.
+ * `extraction_context` (migration 0072) or GENERIC_INDUSTRY_CONTEXT above.
  * There is no per-tenant "org description" field that fills a slot in it, so the
  * `ORG CONTEXT:` heading and its `[Describe your organization … edit this]` line
  * are an instruction to the HUMAN editing the template (it is served verbatim as
@@ -273,7 +423,7 @@ export function classifiedTypeBlock(documentType: string): string {
   ].join('\n');
 }
 
-function buildPrompt(options?: {
+export function buildPrompt(options?: {
   examples?: Array<{ text: string; result: string }>;
   industryPrompt?: string;
   /**
@@ -289,7 +439,7 @@ function buildPrompt(options?: {
    */
   documentType?: string | null;
 }): string {
-  const { examples, industryPrompt = INDUSTRY_PROMPTS.DAIRY_FOOD, instructions, documentType } = options || {};
+  const { examples, industryPrompt = GENERIC_INDUSTRY_CONTEXT, instructions, documentType } = options || {};
 
   let prompt = BASE_PROMPT;
 
@@ -301,7 +451,7 @@ function buildPrompt(options?: {
   }
 
   if (industryPrompt) {
-    prompt += '\n' + stripUnfilledPlaceholders(industryPrompt);
+    prompt += '\n' + stripUnfilledPlaceholders(industryLayerForThisSurface(industryPrompt));
   }
 
   if (examples && examples.length > 0) {

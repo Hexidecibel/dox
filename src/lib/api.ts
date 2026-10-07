@@ -3016,9 +3016,10 @@ export const api = {
   /**
    * Per-tenant extraction context. The org-wide prompt layer prepended to every
    * extraction for this tenant (the editable "industry/domain" slot). NULL on
-   * the server means fall back to the built-in dairy default; the GET returns
-   * that default as `default_template` so the UI can seed the editor without
-   * duplicating the text client-side.
+   * the server means fall back to a generic block that assumes nothing about
+   * the industry; the GET returns the named templates a person can load
+   * (`templates`) so the UI can seed the editor without duplicating the text
+   * client-side. `default_template` is the dairy template under its older name.
    */
   tenantExtractionContext: {
     get: (params?: { tenant_id?: string }) => {
@@ -3028,6 +3029,8 @@ export const api = {
       return fetchApi<{
         extraction_context: string | null;
         default_template: string;
+        generic_context?: string;
+        templates?: Array<{ key: string; label: string; text: string }>;
         updated_at: string | null;
         updated_by: string | null;
       }>(`/tenant-extraction-context${suffix}`);

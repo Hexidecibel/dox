@@ -1008,6 +1008,14 @@ components:
         candidate_count: { type: integer }
         unreviewed_candidates: { type: array, items: { $ref: '#/components/schemas/SearchUnreviewedCandidate' } }
         coverage_scan_truncated: { type: boolean }
+        modules_not_applied:
+          type: array
+          items: { type: string, enum: [library, compliance, fulfillment, records] }
+          description: |
+            Modules whose records were left out of this answer because the module is off for the
+            caller (off for the organization, or not among what their department sees). Today only
+            `fulfillment`: no order or customer was searched and no order number or customer PO was
+            followed. ABSENT for a caller who has the module.
     UniversalSearchBlock:
       type: object
       properties:
@@ -1811,6 +1819,10 @@ paths:
         they shipped; a certificate covers only through a person's accepted match or an exact lot row.
 
         Query-time folding: simple singular/plural and `gal/gallon`, `lb/lbs/pound`, `oz/ounce`.
+
+        **Module toggles.** Orders and customers belong to the fulfillment module. When it is off for
+        the caller the `orders` and `customers` blocks are empty, an order number is not followed, and
+        the response carries `modules_not_applied: ["fulfillment"]`. A super_admin is never narrowed.
         **Requires any authenticated user.**
       parameters:
         - name: q

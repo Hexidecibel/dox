@@ -79,7 +79,7 @@ var IMPLIED_WIDTH = {
 var DATE_KINDS = /* @__PURE__ */ new Set(["yy", "julian_day", "mmddyy", "yymmdd"]);
 var LOT_SCHEME_TEMPLATES = {
   plant_yy_julian: {
-    title: "Plant \xB7 YY \xB7 Julian day, 2-digit sublot (Darigold-style)",
+    title: "Plant \xB7 YY \xB7 Julian day, with a 2-digit sublot",
     spec: {
       format: 1,
       kind: "structured",
@@ -95,7 +95,7 @@ var LOT_SCHEME_TEMPLATES = {
     }
   },
   best_by_mmddyy_suffix: {
-    title: "Best-by MMDDYY + product suffix (Country Morning-style)",
+    title: "Best-by MMDDYY + product suffix",
     spec: {
       format: 1,
       kind: "structured",

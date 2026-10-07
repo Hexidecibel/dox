@@ -393,7 +393,7 @@ export default function SupplierLotFormatPanel({ supplierId, supplierName, canEd
       <Paper variant="outlined" sx={{ p: 2 }} data-testid="lot-format-tester">
         <Typography variant="subtitle2" gutterBottom>Try a lot</Typography>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-          <TextField size="small" label="Lot" placeholder="10426203-03" value={testLot} onChange={(e) => setTestLot(e.target.value)} sx={{ flex: 1 }} />
+          <TextField size="small" label="Lot" placeholder="20726114-02" value={testLot} onChange={(e) => setTestLot(e.target.value)} sx={{ flex: 1 }} />
           <TextField size="small" label="Sublot (optional)" value={testSublot} onChange={(e) => setTestSublot(e.target.value)} sx={{ width: 160 }} />
         </Stack>
         {test && (

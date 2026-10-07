@@ -61,7 +61,7 @@ export const Omnibox = forwardRef<HTMLInputElement, OmniboxProps>(function Omnib
     onAskAi,
     aiBusy = false,
     busy = false,
-    placeholder = 'butter produced Sep 2 · PO 4500123 · lot 10426203-03',
+    placeholder = 'butter produced Sep 2 · PO 4500123 · lot 20726114-02',
     modKey,
   },
   inputRef,

@@ -230,7 +230,21 @@ export interface RunSearchInput {
   repairLimit?: number;
   /** Which facets to count (default: every facet). Easy mode asks for its five. */
   facetFields?: readonly FacetField[];
+  /**
+   * False when the fulfillment module is off for this caller -- switched off
+   * for the organization, or not among what their department sees
+   * (functions/lib/module-access.ts). Orders and customers are then not part of
+   * the answer at all: an `order` / `customer` clause is not run and is named
+   * in `not_applied`, no WMS order is read to explain a typed number or to
+   * follow a PO, and the response carries `modules_not_applied`. A PO or an
+   * invoice is still answered from what the documents themselves print.
+   * Absent / true is every caller before this existed, unchanged.
+   */
+  fulfillment?: boolean;
 }
+
+/** The clause fields that exist only through the fulfillment module's records. */
+export const FULFILLMENT_FIELDS: ReadonlySet<string> = new Set(['order', 'customer']);
 
 /** The facets this request counts, in sidebar order. */
 function activeFacetFields(input: RunSearchInput): FacetField[] {
@@ -1368,14 +1382,23 @@ export async function runSearch(rawDb: D1Database, tenantId: string, input: RunS
   // something for its rows; the others stay in the query, greyed, and are
   // named in `not_applied` — never silently dropped (search redesign Phase 3).
   const entity: SearchEntity = input.query.view?.entity ?? 'documents';
-  const notApplied = input.query.clauses.filter((c) => !appliesTo(c.field, entity)).map((c) => c.id);
+  // The same rule for a module the caller does not have: an order or customer
+  // clause (a saved view from before the module was switched off, a shared
+  // link) stays in the query and is reported, and nothing of an order is read.
+  const moduleOff = input.fulfillment === false;
+  const runs = (field: Clause['field']) => appliesTo(field, entity) && !(moduleOff && FULFILLMENT_FIELDS.has(field));
+  const notApplied = input.query.clauses.filter((c) => !runs(c.field)).map((c) => c.id);
   const query = notApplied.length
-    ? { ...input.query, clauses: input.query.clauses.filter((c) => appliesTo(c.field, entity)) }
+    ? { ...input.query, clauses: input.query.clauses.filter((c) => runs(c.field)) }
     : input.query;
   const res = await runSearchInner(rawDb, tenantId, { ...input, query }, entity);
   const detectedNa = (res.interpreted?.clauses ?? []).filter((c) => !appliesTo(c.field, entity)).map((c) => c.id);
   const na = [...notApplied, ...detectedNa];
-  return na.length ? { ...res, not_applied: na } : res;
+  return {
+    ...res,
+    ...(na.length ? { not_applied: na } : {}),
+    ...(moduleOff ? { modules_not_applied: ['fulfillment' as const] } : {}),
+  };
 }
 
 async function runSearchInner(rawDb: D1Database, tenantId: string, input: RunSearchInput, entity: SearchEntity): Promise<SearchQueryResponse> {
@@ -1461,8 +1484,13 @@ async function runSearchInner(rawDb: D1Database, tenantId: string, input: RunSea
     ).bind(tenantId))
     : null;
   // WMS orders: every typed number, and every explicit order / PO / identifier / invoice value.
-  const orderValues = new Set<string>(scan ? scanOrderValues(scan) : []);
-  for (const c of explicitIdent) {
+  // With the fulfillment module off for the caller this set stays EMPTY, which
+  // is the whole gate: no order, line or suggestion is read, so a typed number
+  // is never explained as an order and a PO is answered from the documents'
+  // own printed PO only.
+  const followOrders = input.fulfillment !== false;
+  const orderValues = new Set<string>(scan && followOrders ? scanOrderValues(scan) : []);
+  for (const c of followOrders ? explicitIdent : []) {
     if (c.field === 'order' || c.field === 'po' || c.field === 'identifier' || c.field === 'invoice') {
       const v = c.values[0].trim();
       const bare = stripKeyword(stripKeyword(v, 'po'), 'invoice');

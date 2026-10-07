@@ -553,28 +553,47 @@ async function fetchReviewerInstructions(tenantId, supplierId, documentTypeId) {
 }
 
 /**
- * Fetch the tenant's editable extraction context (the "industry layer" / dairy
- * brain). When a tenant has set one, it replaces the hardcoded
- * DAIRY_FOOD_INDUSTRY_PROMPT default in the assembled system prompt; when unset
- * (null / empty), the caller falls back to the default. Non-fatal — returns
- * null on miss or any error, never throws (mirrors fetchReviewerInstructions).
+ * Fetch the tenant's editable extraction context (the "industry layer"). When
+ * a tenant has set one, it replaces the GENERIC_INDUSTRY_PROMPT default in the
+ * assembled system prompt; when unset (null / empty), the caller falls back to
+ * that default. Never throws (mirrors fetchReviewerInstructions).
+ *
+ * A FAILED fetch is not the same answer as "this tenant has none", and since
+ * migration 0136 the difference matters: every existing tenant carries its
+ * context as stored text, so falling back on a blip would extract one document
+ * under a different industry layer than the tenant's and say nothing. It is
+ * therefore tried three times, and a persistent failure is LOGGED as what it
+ * is before the generic block is used.
  *
  * See migration 0072_tenant_extraction_context.sql + /api/tenant-extraction-context.
  */
 async function fetchTenantContext(tenantId) {
   if (!tenantId) return null;
-  try {
-    const params = new URLSearchParams({ tenant_id: tenantId });
-    const res = await fetch(
-      `${DOX_API_URL}/api/tenant-extraction-context?${params.toString()}`,
-      { headers }
-    );
-    if (!res.ok) return null;
-    const data = await res.json();
-    return (data && typeof data.extraction_context === 'string') ? data.extraction_context : null;
-  } catch {
-    return null;
+  const params = new URLSearchParams({ tenant_id: tenantId });
+  let lastFailure = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(
+        `${DOX_API_URL}/api/tenant-extraction-context?${params.toString()}`,
+        { headers }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        return (data && typeof data.extraction_context === 'string') ? data.extraction_context : null;
+      }
+      lastFailure = `HTTP ${res.status}`;
+      // A 4xx will not get better by asking again.
+      if (res.status >= 400 && res.status < 500) break;
+    } catch (err) {
+      lastFailure = err && err.message ? err.message : String(err);
+    }
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
   }
+  console.warn(
+    `  Tenant extraction context could not be read for ${tenantId} (${lastFailure}); ` +
+    'extracting with the GENERIC industry block, which may not be this tenant\'s own.'
+  );
+  return null;
 }
 
 /**
@@ -2442,8 +2461,8 @@ async function processCoaItem(item) {
     // mirror of the existing vlm_model column.
     let servedTextModel = null;
     // Tenant-level extraction context (the editable "industry layer"). Fetched
-    // once per item; when null the prompt builders fall back to the hardcoded
-    // dairy default. Combo reviewer instructions still stack on top of this.
+    // once per item; when null the prompt builders fall back to the generic
+    // block. Combo reviewer instructions still stack on top of this.
     const tenantContext = await fetchTenantContext(item.tenant_id);
     try {
       const supplierName = item.supplier || guessedSupplier || null;
@@ -3616,20 +3635,29 @@ RULES for records:
 - Specs verbatim, never derive pass/fail, lab consumables are never product data — the same domain rules as above apply inside each record.
 - Omit "records" ONLY when the page certifies exactly ONE product with ONE lot AND ONE sublot (a single result). In THAT case you MUST still report the sublot in the FLAT "sub_lot_code" field — the flat field set has a sub_lot_code slot precisely so a single-sublot page never loses it. A printed sublot code is NEVER optional: it goes in records[].fields.sub_lot_code when you emit records, and in the flat sub_lot_code when you do not. If there are MULTIPLE sublots — even all under the same lot number — you MUST emit one record per sublot; never collapse multiple sublots into flat fields. Likewise, if the page prints MULTIPLE lots or MULTIPLE products, you MUST emit one record each; never collapse them into flat fields.`;
 
-const DAIRY_FOOD_INDUSTRY_PROMPT = `
+/**
+ * What occupies the industry-layer slot for a tenant that has written no
+ * extraction_context. Until migration 0136 this was one tenant's dairy playbook
+ * (which that migration wrote into every tenant relying on it, so no existing
+ * prompt moved); the dairy text now lives only in functions/lib/llm.ts as a
+ * named template a person loads from the settings box.
+ *
+ * KEEP IN SYNC with GENERIC_INDUSTRY_CONTEXT in functions/lib/llm.ts;
+ * tests/unit/extractionContextDefault.test.ts pins the two byte for byte.
+ */
+const GENERIC_INDUSTRY_PROMPT = `
 ORG CONTEXT:
-[Describe your organization and what these documents are for — edit this. e.g. "We are a dairy distributor managing supplier Certificates of Analysis for regulatory compliance. Lot traceability is critical; every document must be tied to a lot."]
+[Describe your organization and what these documents are for — edit this. e.g. "We are a food distributor managing supplier documents for regulatory compliance. Lot traceability is critical; every certificate of analysis must be tied to a lot."]
 
-INDUSTRY CONTEXT — Dairy & Food:
-- Common COA tests: Standard Plate Count (SPC), coliform, E. coli, yeast & mold, somatic cell count, butterfat %, moisture %, pH, acidity, temperature
-- Grade designations: Grade A, Grade AA, US Extra, USDA grades
-- Plant/facility numbers: USDA plant numbers (e.g., "Plant 42-1234")
+GENERAL CONTEXT — supplier documents:
+- A Certificate of Analysis reports tests such as microbiological counts, composition (fat %, moisture %, protein %), pH and sensory checks. The tests differ by product: take each test's name from the page, never from a list of what is usual.
+- Grade designations and plant / facility numbers are copied as printed
 - Code dates may be printed in Julian format (YDDD where Y=last digit of year, DDD=day) — copy them exactly as printed; never convert one to a calendar date
-- Net weights: common units are lbs, gallons, kg
+- Net weights: keep the unit the page prints (lbs, kg, gallons, litres)
 
-DAIRY COA DOMAIN RULES (hard rules — follow exactly):
-- Lab consumables are NEVER product data. Reagent / control / buffer lot numbers (e.g. 3M Petrifilm CC/AC/BUFFER lots and their expirations), dilution rows, plate-incubation tables, and incubator temperatures must never be bound to a product field. A reagent lot mistaken for the product's lot is the single worst error.
-- Certification / legal boilerplate numbers are reference, not results. Numbers inside raw-milk certification clauses or regulatory citations (e.g. "standard plate count 100,000 per ml", "somatic cell 400,000 per ml") are reference thresholds, NOT this product's measured values. Do not extract them as results.
+COA DOMAIN RULES (hard rules — follow exactly):
+- Lab consumables are NEVER product data. Reagent / control / buffer lot numbers and their expirations, dilution rows, plate-incubation tables, and incubator temperatures must never be bound to a product field. A reagent lot mistaken for the product's lot is the single worst error.
+- Certification / legal boilerplate numbers are reference, not results. Numbers inside certification clauses or regulatory citations are reference thresholds, NOT this product's measured values. Do not extract them as results.
 - Capture specifications verbatim; NEVER derive pass/fail. Copy the spec string exactly as printed. Leave pass/fail empty unless the document itself prints an explicit verdict — the human decides conformance.
 - Result is not the spec. When a table has Spec and Result columns, the measured value is the Result; never report the spec/limit as the result.
 - Lot is the most important field and keys every record. If there is no explicit lot label but a CODE DATE / DATE CODE is present, it may serve as the lot — capture it as the lot, and also keep it in its own date field.
@@ -3637,35 +3665,33 @@ DAIRY COA DOMAIN RULES (hard rules — follow exactly):
 - Capture yeast/mold and sensory (flavor / color / odor) exactly as printed — never auto-combine, split, or collapse them.
 - Normalize dates to YYYY-MM-DD; when numeric order is genuinely ambiguous (e.g. 03/04/26 could be Mar or Apr), keep as-is rather than guess.
 
-EXAMPLE — Dairy COA extraction:
-Input: "Darigold Inc. COA for Grade AA Butter 68#, Lot L26-0842, PO PO-44821, Packed 03/15/26, Best By 09/15/26, Plant 42-1234. Tests: Fat >80% result 81.2% Pass, Moisture <16% result 15.4% Pass, Coliform <10 CFU/g result <1 Pass, SPC <20000 CFU/g result 4500 Pass"
+EXAMPLE — COA extraction:
+Input: "Northfield Foods Co. COA for Whole Wheat Flour 50#, Lot L26-0842, PO PO-44821, Packed 03/15/26, Best By 09/15/26, Plant 42-1234. Tests: Protein >12% result 13.1% Pass, Moisture <14% result 12.6% Pass, Coliform <10 CFU/g result <1 Pass, SPC <20000 CFU/g result 4500 Pass"
 
 Output:
 {
   "fields": {
-    "supplier_name": "Darigold Inc.",
-    "product_name": "Grade AA Butter 68#",
+    "supplier_name": "Northfield Foods Co.",
+    "product_name": "Whole Wheat Flour 50#",
     "lot_number": "L26-0842",
     "po_number": "PO-44821",
     "code_date": "2026-03-15",
     "expiration_date": "2026-09-15",
-    "grade": "Grade AA",
     "plant_number": "42-1234",
-    "net_weight": "68 lbs"
+    "net_weight": "50 lbs"
   },
   "tables": [{
     "name": "test_results",
     "headers": ["test", "test_method", "specification", "result", "units", "pass_fail"],
     "rows": [
-      ["Fat Content", "SMEDP 15.122", ">80%", "81.2", "%", "Pass"],
-      ["Moisture", "SMEDP 15.122", "<16%", "15.4", "%", "Pass"],
+      ["Protein", "AACC 46-30", ">12%", "13.1", "%", "Pass"],
+      ["Moisture", "AACC 44-15", "<14%", "12.6", "%", "Pass"],
       ["Coliform", "AOAC 989.10", "<10", "<1", "CFU/g", "Pass"],
       ["Standard Plate Count", "AOAC 989.10", "<20,000", "4,500", "CFU/g", "Pass"]
     ]
   }],
-  "products": ["Grade AA Butter 68#"],
-  "summary": "COA for Darigold Grade AA Butter lot L26-0842, all tests pass.",
-  "_confidence": 0.95,
+  "products": ["Whole Wheat Flour 50#"],
+  "summary": "COA for Northfield Whole Wheat Flour lot L26-0842, all tests pass.",
   "document_type": "Certificate of Analysis"
 }`;
 
@@ -3675,7 +3701,7 @@ Output:
  *
  * WHY: the "industry layer" of the system prompt is either the tenant's own
  * editable `extraction_context` (migration 0072) or, when they have not written
- * one, the hardcoded DAIRY_FOOD_INDUSTRY_PROMPT below. It is a WHOLE BLOCK that
+ * one, the hardcoded GENERIC_INDUSTRY_PROMPT above. It is a WHOLE BLOCK that
  * gets replaced — there is no per-tenant "org description" field that fills a
  * slot in it. The `ORG CONTEXT:` heading plus its
  * `[Describe your organization … edit this]` line are therefore an instruction
@@ -3771,7 +3797,7 @@ function buildPrompt(examples = [], tenantContext = null, classifiedType = null)
     BASE_PROMPT +
     (classifiedType ? '\n' + classifiedTypeBlock(classifiedType) : '') +
     '\n\n' +
-    stripUnfilledPlaceholders(tenantContext || DAIRY_FOOD_INDUSTRY_PROMPT) +
+    stripUnfilledPlaceholders(tenantContext || GENERIC_INDUSTRY_PROMPT) +
     buildFewShotBlock(examples)
   );
 }
@@ -3958,7 +3984,7 @@ Return JSON with:
     VLM_HEADER +
     (classifiedType ? '\n' + classifiedTypeBlock(classifiedType) : '') +
     '\n\n' +
-    stripUnfilledPlaceholders(tenantContext || DAIRY_FOOD_INDUSTRY_PROMPT) +
+    stripUnfilledPlaceholders(tenantContext || GENERIC_INDUSTRY_PROMPT) +
     buildFewShotBlock(examples);
 
   return prompt;
