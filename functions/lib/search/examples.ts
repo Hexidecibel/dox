@@ -35,8 +35,9 @@ export function clearExamplesCache(): void {
   cache.clear();
 }
 
-async function answers(db: D1Database, tenantId: string, probe: Probe, now: Date) {
+async function answers(db: D1Database, tenantId: string, probe: Probe, now: Date, fulfillment: boolean) {
   const res = await runSearch(db, tenantId, {
+    fulfillment,
     query: { v: 1, text: probe.text, clauses: probe.clauses ?? [], view: { entity: 'documents' } },
     limit: 50,
     offset: 0,
@@ -57,9 +58,20 @@ const ORDER: ProbeKind[] = ['lot_dash', 'lot_exact', 'lot_prefix', 'supplier_po'
 /** One lot example is enough: dash form first, a plain lot when no lot has a sublot. */
 const SAME_SLOT: Partial<Record<ProbeKind, ProbeKind>> = { lot_exact: 'lot_dash' };
 
-export async function buildSearchExamples(db: D1Database, tenantId: string, now = new Date()): Promise<SearchExamplesResponse> {
+export async function buildSearchExamples(
+  db: D1Database,
+  tenantId: string,
+  now = new Date(),
+  /**
+   * `fulfillment: false` = the module is off for the caller. An example is only
+   * offered if it answers for THEM, so each candidate is run the way their own
+   * search would run it -- without orders -- and that set is cached apart.
+   */
+  opts: { fulfillment?: boolean } = {},
+): Promise<SearchExamplesResponse> {
+  const fulfillment = opts.fulfillment !== false;
   const asOf = now.toISOString().slice(0, 10);
-  const key = `${tenantId}|${asOf}`;
+  const key = `${tenantId}|${asOf}${fulfillment ? '' : '|no-fulfillment'}`;
   const hit = cache.get(key);
   if (hit) return hit;
 
@@ -84,10 +96,10 @@ export async function buildSearchExamples(db: D1Database, tenantId: string, now 
       const text = exampleText(p);
       if (usedTexts.has(text.toLowerCase())) continue;
       if (p.needs === 'month_phrases') {
-        const read = await interpretQueryText(db, tenantId, p.text);
+        const read = await interpretQueryText(db, tenantId, p.text, { fulfillment });
         if (!read.clauses.some((c) => c.field === 'date' || c.field === 'production_date')) break; // the reader does not read months yet
       }
-      const res = await answers(db, tenantId, { ...p, text }, now);
+      const res = await answers(db, tenantId, { ...p, text }, now, fulfillment);
       if (scoreProbe(p, res).outcome !== 'pass') continue;
       let label: string | null = null;
       if (kind === 'lot_prefix') {
@@ -108,7 +120,7 @@ export async function buildSearchExamples(db: D1Database, tenantId: string, now 
     const word = day ? day.text.replace(/ produced .*$/, '') : null;
     const text = `${word ? `${word} ` : ''}produced ${spokenDay(n.day)}`;
     const probe: Probe = { kind: 'neg_adjacent_day', text, doc_id: n.doc_id, expect: 'none' };
-    const res = await answers(db, tenantId, probe, now);
+    const res = await answers(db, tenantId, probe, now, fulfillment);
     const scored = scoreProbe(probe, res);
     // Only when the neighbour is SHOWN as nearby: that is what the example teaches.
     if (scored.outcome !== 'pass' || scored.landed !== 'nearby') continue;
@@ -116,7 +128,11 @@ export async function buildSearchExamples(db: D1Database, tenantId: string, now 
     break;
   }
 
-  const out: SearchExamplesResponse = { examples, as_of: asOf };
+  const out: SearchExamplesResponse = {
+    examples,
+    as_of: asOf,
+    ...(fulfillment ? {} : { modules_not_applied: ['fulfillment' as const] }),
+  };
   if (cache.size >= CACHE_MAX) cache.clear();
   cache.set(key, out);
   return out;

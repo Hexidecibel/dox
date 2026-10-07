@@ -44,6 +44,7 @@
  */
 
 import { errorToResponse, BadRequestError } from '../../lib/permissions';
+import { callerHasModule } from '../../lib/module-access';
 import { buildMatchExpr, buildMatchExprWithLot, DOCUMENTS_FTS_COLS, documentsBm25Expr } from '../../lib/search-fts';
 import { planInstantSearch, runCoverageSearch, unreviewedTextCandidates } from '../../lib/search-coverage';
 import type { Env, User } from '../../lib/types';
@@ -68,6 +69,7 @@ interface UniversalResponse extends SearchCoverageFields {
   customers: PerEntityBlock<Record<string, unknown>>;
   bundles: PerEntityBlock<Record<string, unknown>>;
 }
+// (`modules_not_applied` comes with SearchCoverageFields.)
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
@@ -99,6 +101,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       throw new BadRequestError('tenant_id is required');
     }
 
+    // Orders and customers are the fulfillment module's records. With the
+    // module off for this caller (off for the organization, or not among what
+    // their department sees) neither block is searched, an order number is not
+    // followed to its certificates, and the response says so.
+    const fulfillment = await callerHasModule(context.env.DB, user, context.data, 'fulfillment');
+    const modulesNotApplied = fulfillment ? {} : { modules_not_applied: ['fulfillment' as const] };
+
     const matchExpr = buildMatchExpr(q);
     // documents_fts carries a `lot_text` column (migration 0074); the
     // doc-specific match expr ORs in a normalized, column-scoped lot
@@ -122,6 +131,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         orders: { ...empty },
         customers: { ...empty },
         bundles: { ...empty },
+        ...modulesNotApplied,
       };
       return new Response(JSON.stringify(responseBody), {
         headers: { 'Content-Type': 'application/json' },
@@ -309,6 +319,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       ).bind(tenantId, docMatchExpr, docLimit, docOffset),
     ];
 
+    if (!fulfillment) {
+      // Positions are fixed (blockFromPair reads by index), so the four
+      // customer / order statements are swapped for one that reads nothing.
+      for (const i of [6, 7, 10, 11]) stmts[i] = context.env.DB.prepare('SELECT 0 AS total WHERE 1 = 0');
+    }
+
     // A structured-lot search with no typed text has nothing to FTS-match.
     const batchResults = matchExpr ? await context.env.DB.batch<RowWithCount>(stmts) : [];
 
@@ -331,6 +347,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       bundles: blockFromPair(8, 9, (r) => r as Record<string, unknown>),
       orders: blockFromPair(10, 11, (r) => r as Record<string, unknown>),
       documents: blockFromPair(12, 13, (r) => r as Record<string, unknown>),
+      ...modulesNotApplied,
     };
 
     // ----------------------------------------------------------------
@@ -341,7 +358,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     // and pending Review Queue files ride along as unreviewed candidates.
     // An ordinary search keeps the FTS block above untouched.
     // ----------------------------------------------------------------
-    const plan = await planInstantSearch(context.env.DB, tenantId, q, { lot: structuredLot, sublot: structuredSublot });
+    const plan = await planInstantSearch(context.env.DB, tenantId, q, { lot: structuredLot, sublot: structuredSublot }, { followOrders: fulfillment });
     if (plan) {
       const run = await runCoverageSearch(context.env.DB, tenantId, {
         constraints: plan.constraints,

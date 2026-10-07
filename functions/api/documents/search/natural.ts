@@ -38,6 +38,7 @@ import { constraintsFromParsedQuery } from '../../../../shared/searchCoverage';
 import type { Env, User } from '../../../lib/types';
 import type { NaturalSearchResponse } from '../../../../shared/types';
 import { constraintsToAiClauses } from '../../../lib/search/naturalClauses';
+import { callerHasModule } from '../../../lib/module-access';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -138,13 +139,21 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // The product as the person named it ("bulk unsalted butter", "10286",
     // "300 gal tote") resolves through the identifier graph, and a WMS order
     // number follows its lines to their lots (Phase 3).
+    // ...unless the fulfillment module is off for this caller: then no order
+    // is read, and every response below says orders were left out.
+    const fulfillment = await callerHasModule(context.env.DB, user, context.data, 'fulfillment');
     const constraints = await applyNaturalProductAndOrder(
       context.env.DB, tenantId, parsedConstraints.constraints, parsedQuery, body.query,
+      { followOrders: fulfillment },
     );
     // The same reading as clauses of the one query model, each marked as the
     // AI's, so the workspace can show it as chips a person edits or rejects.
     const ai = constraintsToAiClauses(constraints, dropped, { suppliers: supplierRows, documentTypes: docTypes });
-    const aiFields = { clauses: ai.clauses, ai_dropped: ai.dropped };
+    const aiFields = {
+      clauses: ai.clauses,
+      ai_dropped: ai.dropped,
+      ...(fulfillment ? {} : { modules_not_applied: ['fulfillment' as const] }),
+    };
     if (body.clauses_only) {
       const readingOnly: NaturalSearchResponse = {
         parsed_query: parsedQuery,

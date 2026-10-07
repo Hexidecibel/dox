@@ -709,6 +709,7 @@ export function SearchWorkspace({
         facets={facets}
         onChange={setQuery}
         notApplied={data?.not_applied ?? []}
+        modulesNotApplied={data?.modules_not_applied}
         entity={query.view.entity ?? 'documents'}
         tenantId={tenantId}
         onLabel={(id, name) => setLabelsExtra((l) => ({ ...l, [id]: name }))}

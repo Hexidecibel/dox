@@ -287,3 +287,26 @@ export async function isModuleEnabledForTenant(
     return true;
   }
 }
+
+/**
+ * Does this caller have one module -- asked from INSIDE a handler?
+ *
+ * The middleware gate answers for a PATH, and that covers a module's own
+ * endpoints. It cannot cover a surface no module owns that still reads another
+ * module's records: search is the case. `/api/search` belongs to no module
+ * (it is how documents are found, whatever else is switched on), yet it
+ * returned orders and customers to a tenant that had turned Orders off,
+ * because nothing between the URL and the SQL ever asked. Such a handler asks
+ * here and leaves those records out, saying so in its response.
+ *
+ * Same rules as every other read in this file: super_admin is never narrowed,
+ * a failed lookup fails open, and the answer is memoized on the request.
+ */
+export async function callerHasModule(
+  db: D1Database,
+  user: User,
+  memo: ModuleAccessMemo,
+  moduleKey: ModuleKey,
+): Promise<boolean> {
+  return (await getModuleAccess(db, user, memo)).visible.includes(moduleKey);
+}
