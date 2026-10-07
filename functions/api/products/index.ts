@@ -86,9 +86,17 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const linkColumns = supplierIdFilter
       ? `, (SELECT ps.source FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_source,
            (SELECT ps.discontinued_at FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_discontinued_at,
-           (SELECT ps.nothing_owed_reason FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_nothing_owed_reason`
+           (SELECT ps.nothing_owed_reason FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_nothing_owed_reason,
+           (SELECT ps.approval_status FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_approval_status,
+           (SELECT ps.approval_source FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_approval_source,
+           (SELECT ps.approval_note FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_approval_note,
+           (SELECT ps.approval_decided_at FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_approval_decided_at,
+           (SELECT ps.facility_id FROM product_suppliers ps WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_facility_id,
+           (SELECT f.name FROM product_suppliers ps JOIN supplier_facilities f ON f.id = ps.facility_id
+             WHERE ps.product_id = products.id AND ps.supplier_id = ?) AS link_facility_name`
       : '';
-    const linkParams = supplierIdFilter ? [supplierIdFilter, supplierIdFilter, supplierIdFilter] : [];
+    // One bind per link column above (approval + facility: migration 0135).
+    const linkParams = supplierIdFilter ? Array.from({ length: 9 }, () => supplierIdFilter) : [];
     const results = await context.env.DB.prepare(
       `SELECT products.*${linkColumns} FROM products ${whereClause} ORDER BY name ASC LIMIT ? OFFSET ?`
     )

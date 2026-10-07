@@ -114,11 +114,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       );
     }
 
-    // One address per customer to start (AJ): the customer's address on record
-    // unless the sender typed others on the review screen.
+    // The addresses the sender left on the review screen. With none sent, the
+    // same default the review screen was pre-filled with: the customer's COA
+    // contacts (migration 0135), else the customer's address on record.
     const asked = normalizeOrderRecipients(body.recipients);
     if (asked.bad.length > 0) throw new BadRequestError(`Not a valid email address: ${asked.bad.join(', ')}`);
-    const fallback = normalizeOrderRecipients(plan.preview.recipient ? [plan.preview.recipient] : []);
+    const fallback = normalizeOrderRecipients(plan.preview.recipients);
     const recipients = asked.ok.length > 0 ? asked.ok : fallback.ok;
     if (recipients.length === 0) {
       throw new BadRequestError(

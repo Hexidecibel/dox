@@ -128,6 +128,7 @@ import m0131 from '../../migrations/0131_fts_registry_rebuild.sql?raw';
 import m0132 from '../../migrations/0132_duplicate_decisions.sql?raw';
 import m0133 from '../../migrations/0133_supplier_renewal_send.sql?raw';
 import m0134 from '../../migrations/0134_order_fulfillment_sends.sql?raw';
+import m0135 from '../../migrations/0135_item_approval_facilities_customers.sql?raw';
 
 const migrations: string[] = [
   m0001, m0002, m0003, m0004, m0005, m0006, m0007, m0008, m0009, m0010,
@@ -143,7 +144,7 @@ const migrations: string[] = [
   m0096, m0097, m0098, m0099, m0100, m0101, m0102, m0103, m0104,
   m0105, m0106, m0107, m0108, m0109, m0110, m0111, m0112, m0113, m0114,
   m0115, m0116, m0117, m0118, m0119, m0120, m0121, m0122, m0123, m0124,
-  m0125, m0126, m0130, m0131, m0132, m0133, m0134,
+  m0125, m0126, m0130, m0131, m0132, m0133, m0134, m0135,
 ];
 
 /** The ordered migration SQL, for a test that stops the chain part-way (e.g. the 0110 lots rebuild). */
@@ -397,6 +398,10 @@ export async function cleanTables(db: D1Database): Promise<void> {
     // suppliers and document_requests, contacts FK suppliers -- all three clear
     // ahead of every one of those.
     'renewal_request_sends', 'renewal_requests', 'supplier_contacts',
+    // 0135: a customer's per-item COA requirements FK customers, products and
+    // customer_contacts; facilities FK suppliers (product_suppliers points at
+    // them ON DELETE SET NULL). Both clear ahead of all of those.
+    'customer_item_requirements', 'supplier_facilities',
     // 0101 setup runs: FK tenants only, and it is the wizard's POSITION, not
     // its output — clearing it strands nothing. Ahead of tenants, and ahead of
     // users only because started_by/completed_by name one (bare TEXT, no FK,

@@ -167,6 +167,25 @@ describe('the middleware gate', () => {
     }
   });
 
+  it('gates the approved item list, facilities and the customer sub-resources (0135) with the data they read', async () => {
+    await disableModule(seed.tenantId, 'library');
+    for (const path of ['/api/approved-items', '/api/suppliers/s1/facilities', '/api/suppliers/s1/facilities/f1']) {
+      const res = await callChain(req(path), { user: regularUser() });
+      expect(res.status, path).toBe(403);
+      expect(res.body.module, path).toBe('library');
+    }
+    // Customers belong to fulfillment, which is still on.
+    for (const path of ['/api/customers/c1/contacts', '/api/customers/c1/item-requirements']) {
+      expect((await callChain(req(path), { user: regularUser() })).status, path).toBe(200);
+    }
+    await disableModule(seed.tenantId, 'fulfillment');
+    for (const path of ['/api/customers/c1/contacts/x', '/api/customers/c1/item-requirements/y']) {
+      const res = await callChain(req(path), { user: regularUser() });
+      expect(res.status, path).toBe(403);
+      expect(res.body.module, path).toBe('fulfillment');
+    }
+  });
+
   it('distinguishes "the tenant turned it off" from "your function does not include it"', async () => {
     // The two are fixed on different screens by different people, so they must
     // not share a message even though they share a status.

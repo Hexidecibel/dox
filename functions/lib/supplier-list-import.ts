@@ -16,6 +16,13 @@
  *
  * WHAT AN IMPORT IS: the whole verified list, not a patch. A derived row for a
  * supplier the list no longer implies is FLAGGED for review, never deleted.
+ *
+ * THE APPROVED COLUMN IS ALSO THE PAIR'S APPROVAL (migration 0135, decision
+ * C-001). One row is supplier x product, so when the product resolves, Y / N
+ * sets that item's approval from that supplier (`approval_source = 'import'`).
+ * It never overrides a decision a person made; a product that does not resolve
+ * has no pair to approve and is reported; rows that disagree change nothing.
+ * The dry run reports every one of those outcomes and writes none of them.
  */
 
 import { generateId, logAudit } from './db';
@@ -47,7 +54,17 @@ import {
 } from '../../shared/supplierListTemplate';
 import { normalizeCode, normalizeName } from '../../shared/productVocabulary';
 import { linkProductToSupplier } from './entities/products';
+import {
+  decideItemApproval,
+  loadProductSupplierLink,
+  planApprovalDecision,
+  type ProductSupplierLinkRow,
+} from './item-approval';
+import { ITEM_APPROVAL_LABELS } from '../../shared/itemApproval';
 import type {
+  ItemApprovalSource,
+  ItemApprovalStatus,
+  SupplierListApprovalOutcome,
   SupplierListFlaggedLine,
   SupplierListImportCounts,
   SupplierListImportResponse,
@@ -91,6 +108,41 @@ async function loadKnownContactEmails(db: D1Database, tenantId: string): Promise
 }
 
 /** A slug-ish key for comparing a claim phrase to a claim type. */
+/**
+ * The approval every supplier-and-item pair holds BEFORE this run touches
+ * anything (migration 0135), keyed `supplier|product`. Read once, up front, so
+ * a dry run and the apply that follows it report the same "current" -- the
+ * apply links a new pair as it goes, and reading afterwards would show a
+ * `pending` row the dry run never saw.
+ */
+async function loadPairApprovals(
+  db: D1Database,
+  tenantId: string,
+): Promise<Map<string, Pick<ProductSupplierLinkRow, 'approval_status' | 'approval_source' | 'approval_note'>>> {
+  const res = await db
+    .prepare(
+      `SELECT supplier_id, product_id, approval_status, approval_source, approval_note
+         FROM product_suppliers WHERE tenant_id = ?`,
+    )
+    .bind(tenantId)
+    .all<{
+      supplier_id: string;
+      product_id: string;
+      approval_status: ItemApprovalStatus;
+      approval_source: ItemApprovalSource | null;
+      approval_note: string | null;
+    }>();
+  const out = new Map<string, Pick<ProductSupplierLinkRow, 'approval_status' | 'approval_source' | 'approval_note'>>();
+  for (const r of res.results ?? []) {
+    out.set(`${r.supplier_id}|${r.product_id}`, {
+      approval_status: r.approval_status,
+      approval_source: r.approval_source ?? null,
+      approval_note: r.approval_note ?? null,
+    });
+  }
+  return out;
+}
+
 function claimKey(s: string): string {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
@@ -171,6 +223,12 @@ function matchProduct(
   };
 }
 
+/** The note an import-set approval carries: where the answer came from. */
+function importApprovalNote(fileName: string | null, lines: number[], status: ItemApprovalStatus): string {
+  const where = `line${lines.length === 1 ? '' : 's'} ${lines.join(', ')}`;
+  return `Supplier list${fileName ? ` "${fileName}"` : ''}, ${where}: Approved = ${status === 'approved' ? 'Y' : 'N'}`;
+}
+
 function emptyCounts(): SupplierListImportCounts {
   return {
     rows_total: 0,
@@ -211,11 +269,19 @@ export async function runSupplierListImport(
 ): Promise<SupplierListImportResponse> {
   const rules = input.rules ?? DEFAULT_SUPPLIER_LIST_RULES;
   const pack = await resolveTenantPack(db, input.tenantId, input.packOverride);
-  const [vocab, claims, catalog] = await Promise.all([
+  const [vocab, claims, catalog, pairApprovals] = await Promise.all([
     loadRequirementVocab(db, input.tenantId),
     loadClaimVocab(db, input.tenantId),
     loadCatalogForMatching(db, input.tenantId),
+    loadPairApprovals(db, input.tenantId),
   ]);
+  // What the Approved column says about each supplier-and-item pair (0135).
+  // One row of the list is supplier x product, so the approval is the PAIR's.
+  const pairListings = new Map<
+    string,
+    { supplierKey: string; productId: string; label: string; lines: number[]; values: Set<boolean> }
+  >();
+  const approvalOutcomes: SupplierListApprovalOutcome[] = [];
 
   const counts = emptyCounts();
   const unmatched: SupplierListUnmatched[] = [];
@@ -341,9 +407,35 @@ export async function runSupplierListImport(
               source: 'import',
             });
           }
+          if (r.approved !== null) {
+            const pairKey = `${supplierKey}|${pm.product_id}`;
+            const listing = pairListings.get(pairKey) ?? {
+              supplierKey,
+              productId: pm.product_id,
+              label,
+              lines: [],
+              values: new Set<boolean>(),
+            };
+            listing.lines.push(r.line);
+            listing.values.add(r.approved);
+            pairListings.set(pairKey, listing);
+          }
         } else {
           counts.products_unmatched++;
           unmatched.push({ line: r.line, kind: 'product', value: label, reason: pm.reason! });
+          // No item, so no pair to approve. Said, not dropped.
+          approvalOutcomes.push({
+            lines: [r.line],
+            supplier_id: supplierId,
+            supplier_name: displayName,
+            product_id: null,
+            product_label: label,
+            listed: r.approved === null ? null : r.approved ? 'approved' : 'not_approved',
+            current: null,
+            current_source: null,
+            action: 'unresolved',
+            reason: `${pm.reason} Its approval was not recorded.`,
+          });
         }
         products.push({ label, claims: matchedClaims });
       } else {
@@ -370,6 +462,55 @@ export async function runSupplierListImport(
     if (match === 'created' || match === 'will_create') counts.suppliers_created++;
     if (!approved) counts.suppliers_not_approved++;
   }
+
+  // Item approvals (0135). Planned here, for both modes, by the same pure
+  // rule the apply below executes -- so the dry run reports exactly what an
+  // apply would write. An import NEVER overrides a person's decision.
+  const approvalWrites: Array<{ supplierId: string; productId: string; status: ItemApprovalStatus; outcome: SupplierListApprovalOutcome }> = [];
+  for (const listing of pairListings.values()) {
+    const meta = supplierMeta.get(listing.supplierKey)!;
+    const current = meta.id ? pairApprovals.get(`${meta.id}|${listing.productId}`) ?? null : null;
+    const outcome: SupplierListApprovalOutcome = {
+      lines: listing.lines,
+      supplier_id: meta.id,
+      supplier_name: meta.name,
+      product_id: listing.productId,
+      product_label: catalog.names.get(listing.productId) ?? listing.label,
+      listed: null,
+      current: current?.approval_status ?? null,
+      current_source: current?.approval_source ?? null,
+      action: 'conflict',
+      reason: null,
+    };
+    if (listing.values.size > 1) {
+      outcome.reason = `Lines ${listing.lines.join(', ')} disagree on Approved for this item. Nothing was changed.`;
+    } else {
+      const status: ItemApprovalStatus = listing.values.has(true) ? 'approved' : 'not_approved';
+      outcome.listed = status;
+      const plan = current
+        ? planApprovalDecision(current, { status, note: importApprovalNote(input.fileName, listing.lines, status), source: 'import' })
+        : { write: true, kept: null };
+      if (plan.write) {
+        outcome.action = 'set';
+        if (meta.id) approvalWrites.push({ supplierId: meta.id, productId: listing.productId, status, outcome });
+      } else if (plan.kept === 'person_decided') {
+        outcome.action = 'kept_person';
+        outcome.reason =
+          current!.approval_status === status
+            ? 'A person already decided this.'
+            : `A person marked this ${ITEM_APPROVAL_LABELS[current!.approval_status].toLowerCase()}; the list does not override that.`;
+      } else {
+        outcome.action = 'unchanged';
+      }
+    }
+    approvalOutcomes.push(outcome);
+  }
+  approvalOutcomes.sort((a, b) => (a.lines[0] ?? 0) - (b.lines[0] ?? 0));
+  counts.approvals_set = approvalOutcomes.filter((a) => a.action === 'set').length;
+  counts.approvals_unchanged = approvalOutcomes.filter((a) => a.action === 'unchanged').length;
+  counts.approvals_kept_person_set = approvalOutcomes.filter((a) => a.action === 'kept_person').length;
+  counts.approvals_unresolved = approvalOutcomes.filter((a) => a.action === 'unresolved').length;
+  counts.approvals_conflicting = approvalOutcomes.filter((a) => a.action === 'conflict').length;
 
   counts.rows_rejected = [...outcomes.values()].filter((o) => o.status === 'rejected').length;
   counts.rows_accepted = counts.rows_total - counts.rows_rejected;
@@ -592,6 +733,52 @@ export async function runSupplierListImport(
       }
     }
 
+    // Item approvals, after the requirement writes and outside their batches
+    // for the contacts' reason: an approval is not part of the derivation and
+    // must not be able to roll one back. `decideItemApproval` is guarded in
+    // SQL against a person's decision landing in between, and each pair it
+    // changes gets the same audit row a person's decision writes.
+    for (const w of approvalWrites) {
+      try {
+        const link = await loadProductSupplierLink(db, w.productId, w.supplierId);
+        if (!link) continue;
+        const note = importApprovalNote(input.fileName, w.outcome.lines, w.status);
+        const result = await decideItemApproval(db, link, {
+          status: w.status,
+          note,
+          source: 'import',
+          actorId: input.actorId,
+        });
+        if (!result.changed) continue;
+        await logAudit(
+          db,
+          input.actorId,
+          input.tenantId,
+          'product_supplier.approval_decided',
+          'supplier',
+          w.supplierId,
+          JSON.stringify({
+            supplier_name: w.outcome.supplier_name,
+            product_id: w.productId,
+            product_name: w.outcome.product_label,
+            approval_status: result.status,
+            approval_note: result.note,
+            approval_source: 'import',
+            via: 'supplier_list_import',
+            run_id: runId,
+            lines: w.outcome.lines,
+            previous: result.previous,
+          }),
+          input.ip,
+        );
+      } catch (err) {
+        console.error(
+          '[supplier-list-import] recording an item approval failed:',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+
     await logAudit(
       db,
       input.actorId,
@@ -620,6 +807,7 @@ export async function runSupplierListImport(
     flagged,
     rows: rowOutcomes,
     unmatched,
+    approvals: approvalOutcomes,
     rule_problems: derivation.problems.map(describeProblem),
     unrecognized_headers: input.unrecognizedHeaders ?? [],
     rules: {

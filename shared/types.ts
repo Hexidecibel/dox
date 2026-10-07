@@ -1241,6 +1241,13 @@ export interface ApiProduct extends ProductRow {
   link_source?: string | null;
   link_discontinued_at?: string | null;
   link_nothing_owed_reason?: string | null;
+  /** Approval + facility of this supplier's link (migration 0135). */
+  link_approval_status?: ItemApprovalStatus | null;
+  link_approval_source?: ItemApprovalSource | null;
+  link_approval_note?: string | null;
+  link_approval_decided_at?: string | null;
+  link_facility_id?: string | null;
+  link_facility_name?: string | null;
 }
 
 /** One `product_requirements` row (0123) with names joined. */
@@ -3398,8 +3405,20 @@ export interface OrderSendPreview {
     customer_id: string | null;
     customer_name: string | null;
   };
-  /** The customer's address on record, pre-filled and editable. */
+  /** The customer's address on record (`customers.email`). */
   recipient: string | null;
+  /**
+   * The addresses pre-filled on the review screen, editable there (migration
+   * 0135): the customer's COA contacts plus any delivery contact named by a
+   * requirement for an item on this order, capped at the send's limit; with
+   * no such contact, the customer's address on record.
+   */
+  recipients: string[];
+  recipient_source: 'coa_contacts' | 'customer_email' | 'none';
+  /** COA contacts left off the pre-filled list because of the cap. */
+  recipients_over_cap: number;
+  /** The customer's requirement for each line's item, where one is recorded. */
+  item_requirements: OrderSendItemRequirement[];
   from_name: string;
   reply_to: string;
   default_subject: string;
@@ -7451,6 +7470,15 @@ export interface SupplierListImportCounts {
    * run. Absent on runs recorded before 0133.
    */
   contacts_added?: number;
+  /**
+   * Item approvals from the Approved column (migration 0135), counted per
+   * supplier-and-item pair. Absent on runs recorded before 0135.
+   */
+  approvals_set?: number;
+  approvals_unchanged?: number;
+  approvals_kept_person_set?: number;
+  approvals_unresolved?: number;
+  approvals_conflicting?: number;
 }
 
 /** POST /api/supplier-list/import */
@@ -7478,6 +7506,8 @@ export interface SupplierListImportResponse {
   flagged: SupplierListFlaggedLine[];
   rows: SupplierListRowOutcome[];
   unmatched: SupplierListUnmatched[];
+  /** What the Approved column does to each supplier-and-item pair (0135). */
+  approvals: SupplierListApprovalOutcome[];
   /** Rule problems: a slug the tenant does not hold, a category with no packet. */
   rule_problems: string[];
   unrecognized_headers: string[];
@@ -7588,6 +7618,227 @@ export interface SupplierContactWriteRequest {
   priority?: number | null;
   is_document_contact?: boolean;
   active?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Approved items, facilities, customer contacts + COA requirements (0135)
+// ---------------------------------------------------------------------------
+
+/** Approval of ONE item from ONE supplier (C-001). Separate from "currently supplied". */
+export type ItemApprovalStatus = 'approved' | 'pending' | 'not_approved';
+
+/**
+ * Who or what set an approval. `initial` = on file when approvals were
+ * introduced (nobody decided it); `person` = a named user; `import` = the
+ * verified supplier list. An import never overrides `person`.
+ */
+export type ItemApprovalSource = 'initial' | 'person' | 'import';
+
+/** A named place under a supplier that a person added (C-002). */
+export interface SupplierFacility {
+  id: string;
+  supplier_id: string;
+  name: string;
+  /** The identifier a certificate prints. Recorded, never matched on. */
+  plant_code: string | null;
+  notes: string | null;
+  active: boolean;
+  /** How many of the supplier's items name this facility. */
+  item_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SupplierFacilitiesResponse {
+  supplier: { id: string; name: string };
+  facilities: SupplierFacility[];
+}
+
+export interface SupplierFacilityWriteRequest {
+  name?: string;
+  plant_code?: string | null;
+  notes?: string | null;
+  active?: boolean;
+}
+
+/** PUT /api/suppliers/:id/products/:productId */
+export interface SupplierProductLinkWriteRequest {
+  discontinued?: boolean;
+  nothing_owed_reason?: string | null;
+  approval_status?: ItemApprovalStatus;
+  /** Required with `not_approved`. */
+  approval_note?: string | null;
+  /** One of this supplier's active facilities, or null = no facility recorded. */
+  facility_id?: string | null;
+}
+
+export interface SupplierProductLink {
+  product_id: string;
+  supplier_id: string;
+  source: string | null;
+  discontinued_at: string | null;
+  discontinued_by: string | null;
+  nothing_owed_reason: string | null;
+  nothing_owed_at: string | null;
+  nothing_owed_by: string | null;
+  approval_status: ItemApprovalStatus;
+  approval_source: ItemApprovalSource | null;
+  approval_decided_at: string | null;
+  approval_decided_by: string | null;
+  approval_note: string | null;
+  facility_id: string | null;
+}
+
+/**
+ * One row of GET /api/approved-items: ONE item from ONE supplier. The read the
+ * later "document orders" feature takes approval, facility and private label
+ * from, so the shape is flat and carries no screen-only field.
+ */
+export interface ApprovedItem {
+  /**
+   * The `product_suppliers` row. NULL = the pair exists only through the
+   * legacy `products.supplier_id` column and was made after 0135, so nothing
+   * has been recorded about it yet; it reads `pending`.
+   */
+  link_id: string | null;
+  product_id: string;
+  product_name: string;
+  product_active: boolean;
+  /** Our SKU(s) for the item (`product_identifiers` kind our_sku), ", "-joined. */
+  our_sku: string | null;
+  supplier_id: string;
+  supplier_name: string;
+  /** NULL = no facility recorded; the item counts toward the whole supplier. */
+  facility: { id: string; name: string; plant_code: string | null; active: boolean } | null;
+  approval_status: ItemApprovalStatus;
+  approval_source: ItemApprovalSource | null;
+  approval_decided_at: string | null;
+  approval_decided_by: string | null;
+  approval_decided_by_name: string | null;
+  approval_note: string | null;
+  /** Currently supplied = not marked "no longer supplied". Independent of approval. */
+  supplied: boolean;
+  discontinued_at: string | null;
+  /** How the link itself was made ('certificate' / 'admin' / 'import' / 'connector' / null). */
+  link_source: string | null;
+  brand_owner: string | null;
+  producer: string | null;
+  /** The product's own printed plant code (0078), distinct from the facility's. */
+  plant_code: string | null;
+  /** Brand owner and producer both recorded and different. Display only. */
+  private_label: boolean;
+}
+
+export interface ApprovedItemsResponse {
+  items: ApprovedItem[];
+  total: number;
+  /** Over the filtered set IGNORING the approval filter, so the tabs can count. */
+  counts: Record<ItemApprovalStatus, number>;
+  limit: number;
+  offset: number;
+}
+
+/** One person at a customer (GET /api/customers/:id/contacts). */
+export interface CustomerContact {
+  id: string;
+  customer_id: string;
+  name: string | null;
+  email: string;
+  role: string | null;
+  is_primary: boolean;
+  /** Pre-filled as a recipient when an order's documents are sent. */
+  coa_recipient: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomerContactsResponse {
+  customer: { id: string; name: string; email: string | null };
+  contacts: CustomerContact[];
+}
+
+export interface CustomerContactWriteRequest {
+  name?: string | null;
+  email?: string;
+  role?: string | null;
+  is_primary?: boolean;
+  coa_recipient?: boolean;
+}
+
+export type CustomerCoaRequired = 'yes' | 'no' | 'on_request';
+
+/** What ONE customer needs for ONE item (C-004). */
+export interface CustomerItemRequirement {
+  id: string;
+  customer_id: string;
+  product_id: string;
+  product_name: string;
+  product_active: boolean;
+  coa_required: CustomerCoaRequired;
+  /** Free text: what the certificate has to state. */
+  must_show: string | null;
+  /** Free text: with the shipment, before it, monthly. */
+  timing: string | null;
+  delivery_contact_id: string | null;
+  delivery_contact: { id: string; name: string | null; email: string } | null;
+  source: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomerItemRequirementsResponse {
+  customer: { id: string; name: string };
+  requirements: CustomerItemRequirement[];
+}
+
+export interface CustomerItemRequirementWriteRequest {
+  product_id?: string;
+  coa_required?: CustomerCoaRequired;
+  must_show?: string | null;
+  timing?: string | null;
+  delivery_contact_id?: string | null;
+  notes?: string | null;
+}
+
+/** The customer's requirement for the item on one line of an order being reviewed. */
+export interface OrderSendItemRequirement {
+  order_item_id: string;
+  product_id: string;
+  product_name: string | null;
+  lot_label: string | null;
+  coa_required: CustomerCoaRequired;
+  must_show: string | null;
+  timing: string | null;
+  /** "COA required - must show ... - with the shipment". */
+  summary: string;
+  delivery_contact: { name: string | null; email: string } | null;
+  /** This line carries a document that will be sent. */
+  document_on_line: boolean;
+  /** Required (`yes`) and nothing on this line will be sent. A warning, never a block. */
+  missing: boolean;
+}
+
+/** What the verified supplier list says about one supplier-and-item pair's approval. */
+export interface SupplierListApprovalOutcome {
+  lines: number[];
+  supplier_id: string | null;
+  supplier_name: string;
+  product_id: string | null;
+  product_label: string;
+  /** What the list says. NULL when its rows for this pair disagree. */
+  listed: ItemApprovalStatus | null;
+  /** What is on file now. NULL = no pair on file yet. */
+  current: ItemApprovalStatus | null;
+  current_source: ItemApprovalSource | null;
+  /**
+   * `set` = written (or would be, on a dry run); `unchanged` = already says
+   * so; `kept_person` = a person decided otherwise and the list does not
+   * override it; `unresolved` = the product is not in the catalog, so there is
+   * no pair to approve; `conflict` = the list's own rows disagree.
+   */
+  action: 'set' | 'unchanged' | 'kept_person' | 'unresolved' | 'conflict';
+  reason: string | null;
 }
 
 export type RenewalRequestStage = import('./renewalRequestTemplate').RenewalRequestStage;

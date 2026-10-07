@@ -94,10 +94,24 @@ export const MODULES: Record<ModuleKey, ModuleDefinition> = {
     blurb:
       'For whoever chases paperwork out of suppliers — the certificates arrive, get reviewed by a person, and end up filed against the right supplier.',
     defaultEnabled: true,
-    uiPrefixes: ['/documents', '/import', '/review', '/requests', '/bundles', '/ingest-history', '/admin/suppliers'],
+    uiPrefixes: [
+      '/documents',
+      '/import',
+      '/review',
+      '/requests',
+      '/bundles',
+      '/ingest-history',
+      '/admin/suppliers',
+      '/admin/approved-items',
+    ],
     apiPrefixes: [
       '/api/queue',
       '/api/suppliers',
+      // The approved item list (0135) is a read over suppliers and what each
+      // ships -- the supplier facilities and the approval both live under
+      // /api/suppliers -- so it follows the supplier data it is made of. With
+      // Supplier Documents off there are no suppliers for it to list.
+      '/api/approved-items',
       '/api/bundles',
       '/api/document-requests',
       '/api/request-lines',
