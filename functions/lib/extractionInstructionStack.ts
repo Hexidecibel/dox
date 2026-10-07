@@ -7,7 +7,7 @@
  * ---------
  *   1. tenants.extraction_context            (0072) — the tenant "industry
  *      layer". NOT resolved here: it occupies a different slot in the prompt
- *      (it REPLACES the seeded DEFAULT_DAIRY_CONTEXT block wholesale) and is
+ *      (it REPLACES the GENERIC_INDUSTRY_CONTEXT block wholesale) and is
  *      served by /api/tenant-extraction-context.
  *   2. document_type_extraction_instructions (0098) — "how to read a
  *      Certificate of Insurance", from anybody.

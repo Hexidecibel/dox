@@ -66,6 +66,8 @@
  *   bin/measure-doctype-extraction --instructions      # the guided arm (below)
  *   bin/measure-doctype-extraction --classify-model best   # fast (default) | best | off
  *   bin/measure-doctype-extraction --classify-only         # classification alone, no extraction
+ *   bin/measure-doctype-extraction --industry generic      # dairy (default: what existing tenants
+ *                                                          #   send) | generic (a new organisation)
  *   bin/measure-doctype-extraction --no-scanned
  *   bin/measure-doctype-extraction --concurrency 3
  *   bin/measure-doctype-extraction --out runs/2026-09-02.json
@@ -112,13 +114,14 @@ const C = process.stdout.isTTY
   : { g: '', r: '', y: '', c: '', d: '', b: '', x: '' };
 
 function parseArgs(argv) {
-  const o = { doc: null, type: null, tier: null, scanned: true, concurrency: 2, json: false, out: null, rescore: null, instructions: false, classifyModel: 'fast', classifyOnly: false, help: false };
+  const o = { doc: null, type: null, tier: null, scanned: true, concurrency: 2, json: false, out: null, rescore: null, instructions: false, classifyModel: 'fast', classifyOnly: false, industry: 'dairy', help: false };
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
       case '--doc': o.doc = argv[++i]; break;
       case '--type': o.type = argv[++i].split(',').map((s) => s.trim()); break;
       case '--tier': o.tier = argv[++i].split(',').map((s) => s.trim()); break;
       case '--no-scanned': o.scanned = false; break;
+      case '--industry': o.industry = argv[++i]; break;
       case '--instructions': o.instructions = true; break;
       case '--classify-model': o.classifyModel = argv[++i]; break;
       case '--classify-only': o.classifyOnly = true; break;
@@ -294,7 +297,17 @@ async function main() {
     note(`${C.d}re-scoring ${extractions.size} saved extractions from ${opts.rescore} — no model calls${C.x}\n`);
   } else {
     const bundle = buildLlmBundle();
-    const { extractFields, classifyDocumentType, DEFAULT_DAIRY_CONTEXT } = require(bundle);
+    const { extractFields, classifyDocumentType, DAIRY_CONTEXT_TEMPLATE, GENERIC_INDUSTRY_CONTEXT } = require(bundle);
+    // The industry layer is passed EXPLICITLY. Since migration 0136 the code
+    // default is the generic block and every existing tenant carries the dairy
+    // template as its own stored context, so `dairy` is what production sends
+    // and what every number quoted from this corpus was measured on.
+    // `--industry generic` measures what a brand-new organisation gets.
+    if (opts.industry !== 'dairy' && opts.industry !== 'generic') {
+      console.error(`--industry must be dairy or generic (got ${opts.industry})`);
+      process.exit(2);
+    }
+    const baseIndustry = opts.industry === 'generic' ? GENERIC_INDUSTRY_CONTEXT : DAIRY_CONTEXT_TEMPLATE;
     const candidates = loadCandidates();
     const env = { QWEN_URL: process.env.QWEN_URL || 'https://qwen.cush.rocks', QWEN_SECRET: resolveSecret() };
     if (!env.QWEN_SECRET) console.warn(`${C.y}warning: no QWEN_SECRET found (env or ${WORKER_UNIT}); the router will probably refuse${C.x}`);
@@ -339,8 +352,8 @@ async function main() {
         // null clause for every type, so this measures the SLOT, not the wording.
         const instr = opts.instructions ? corpus.type_instructions[run.doc.type_slug] : null;
         const industryPrompt = instr
-          ? `${DEFAULT_DAIRY_CONTEXT}\n\nDOCUMENT-TYPE GUIDANCE:\n${instr}\nReturn null for any of these fields the document does not state. Never supply a value the document did not print.`
-          : undefined;
+          ? `${baseIndustry}\n\nDOCUMENT-TYPE GUIDANCE:\n${instr}\nReturn null for any of these fields the document does not state. Never supply a value the document did not print.`
+          : baseIndustry;
         let result = null;
         let error = null;
         // --classify-only exists so the classifier can be re-tuned WITHOUT

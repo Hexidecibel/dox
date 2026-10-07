@@ -8,9 +8,10 @@
  *   - (Supplier x doc-type) layer: per-source quirks, authored in the
  *     SupplierDetail "Extraction Instructions" tab (ExtractionInstructionsBox).
  *
- * Leave this empty to fall back to the built-in dairy default. The "Load
- * default dairy template" button seeds the box from that default so the user
- * can start from it and edit into the tenant record.
+ * Leave this empty and extraction uses a generic block that assumes nothing
+ * about the industry. A named template (one today: dairy) can be loaded into
+ * the box as a starting point; loading it writes it to THIS tenant's record,
+ * where it is theirs to edit. Nothing applies a template by itself.
  *
  * Modeled on ExtractionInstructionsBox: debounced autosave, save-state label,
  * load-on-mount. Scoped to the caller's own tenant.
@@ -53,7 +54,7 @@ export default function TenantExtractionContextBox({ tenantId }: Props) {
   // Snapshot of what's persisted on the server — we only save when `value`
   // differs from this (avoids a no-op PUT on every blur).
   const [persistedValue, setPersistedValue] = useState('');
-  const [defaultTemplate, setDefaultTemplate] = useState('');
+  const [templates, setTemplates] = useState<Array<{ key: string; label: string; text: string }>>([]);
   const [updatedBy, setUpdatedBy] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -80,7 +81,15 @@ export default function TenantExtractionContextBox({ tenantId }: Props) {
         const text = res.extraction_context || '';
         setValue(text);
         setPersistedValue(text);
-        setDefaultTemplate(res.default_template || '');
+        // `templates` is the list; a server that predates it still sends the
+        // dairy text as `default_template`.
+        setTemplates(
+          res.templates && res.templates.length
+            ? res.templates
+            : res.default_template
+              ? [{ key: 'dairy', label: 'Dairy & food', text: res.default_template }]
+              : [],
+        );
         setUpdatedBy(res.updated_by);
         setUpdatedAt(res.updated_at);
       } catch (err) {
@@ -99,7 +108,7 @@ export default function TenantExtractionContextBox({ tenantId }: Props) {
   }, [effectiveTenantId]);
 
   // Shared save path — used by debounced autosave, onBlur flush, and the
-  // "load default" button.
+  // "load template" buttons.
   const save = async (text: string) => {
     if (text === persistedValue) return;
     setSaveState('saving');
@@ -144,11 +153,11 @@ export default function TenantExtractionContextBox({ tenantId }: Props) {
     void save(value);
   };
 
-  const handleLoadDefault = () => {
-    if (!defaultTemplate) return;
+  const handleLoadTemplate = (template: { key: string; label: string; text: string }) => {
+    if (!template.text) return;
     // Confirm-guard so we don't silently clobber existing edits.
-    if (value.trim() && !window.confirm(
-      'Replace the current extraction context with the default dairy template? This overwrites your existing text.'
+    if (value.trim() && value !== template.text && !window.confirm(
+      `Replace the current extraction context with the ${template.label} template? This overwrites your existing text.`
     )) {
       return;
     }
@@ -156,8 +165,8 @@ export default function TenantExtractionContextBox({ tenantId }: Props) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
-    setValue(defaultTemplate);
-    void save(defaultTemplate);
+    setValue(template.text);
+    void save(template.text);
   };
 
   const statusLabel = (() => {
@@ -190,20 +199,24 @@ export default function TenantExtractionContextBox({ tenantId }: Props) {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 720 }}>
         This is the organization-wide context prepended to every extraction for
         your tenant — stable domain rules and conventions that apply across all
-        suppliers and document types. Leave it empty to use the built-in dairy
-        default. Per-supplier quirks belong in each supplier's "Extraction
-        Instructions" tab instead.
+        suppliers and document types. Leave it empty to use a general-purpose
+        set of rules that assumes nothing about your industry, or load a
+        template and edit it into your own. Per-supplier quirks belong in each
+        supplier's "Extraction Instructions" tab instead.
       </Typography>
 
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-        <Button
-          size="small"
-          variant="outlined"
-          onClick={handleLoadDefault}
-          disabled={loading || !defaultTemplate}
-        >
-          Load default dairy template
-        </Button>
+        {templates.map((template) => (
+          <Button
+            key={template.key}
+            size="small"
+            variant="outlined"
+            onClick={() => handleLoadTemplate(template)}
+            disabled={loading || !template.text}
+          >
+            Load {template.label} template
+          </Button>
+        ))}
         {statusLabel && (
           <Typography
             variant="caption"
@@ -223,7 +236,7 @@ export default function TenantExtractionContextBox({ tenantId }: Props) {
         onChange={(e) => handleChange(e.target.value)}
         onBlur={handleBlur}
         disabled={loading}
-        placeholder="Org-wide extraction context. Leave empty to use the built-in dairy default."
+        placeholder="Org-wide extraction context. Leave empty to use the general-purpose rules."
       />
 
       {updatedBy && (
