@@ -92,6 +92,8 @@ API keys provide long-lived programmatic access without JWT token management. Th
 
 Keys use the prefix `dox_sk_` and authenticate as the user who created them (inheriting that user's role and tenant scope).
 
+**One thing a key does NOT inherit: taking files out.** A key reads a document's file only when that document's [sharing rule](#the-sharing-rule-migration-0137) is "send freely", on every route that hands over a file, whoever the key belongs to. A key made by an administrator is refused a locked document exactly as a key made by anybody else is.
+
 ```bash
 # Use an API key
 curl http://localhost:8788/api/documents \
@@ -479,6 +481,8 @@ curl -X PUT http://localhost:8788/api/documents/DOC_ID \
   -d '{"title":"Updated Title","status":"archived"}'
 ```
 
+`sharing_rule_override` (`"free"` / `"qa"` / `"locked"`, or `null` to follow the document type again) with `sharing_rule_reason` gives one document its own [sharing rule](#the-sharing-rule-migration-0137). See that section for who may send it.
+
 #### DELETE /api/documents/:id
 
 Soft-delete a document (sets status to "deleted").
@@ -534,6 +538,8 @@ curl -OJ "http://localhost:8788/api/documents/DOC_ID/download?version=1" \
 ```
 
 Returns the raw file with `Content-Disposition: attachment` and appropriate `Content-Type`.
+
+A logged-in person may download any document they can see, whatever its [sharing rule](#the-sharing-rule-migration-0137): opening one file inside the portal is not "leaving". An **API key** gets the file only when the rule is "send freely"; otherwise `403` with `code: "sharing_rule_refused"` and the `reason` (`locked` or `needs_qa`). `?source=packet` returns the original packet a version was split from; a key reads that only when every document split from the packet is "send freely".
 
 #### GET /api/documents/:id/versions
 
@@ -1845,6 +1851,98 @@ is a POSITION in the link's own frozen list**, not a document id, so a
 forwarded link can never be edited into covering something else. Links expire
 in 30 days, carry a `revoked_at` kill switch, and every view and download
 writes an audit row.
+
+Both routes, and every read of a link, obey the sharing rule below.
+
+### The sharing rule (migration 0137)
+
+Every document carries one answer to "may this leave the organization":
+
+| rule | words on screen | means |
+|---|---|---|
+| `free` | Send freely | Anyone who can see it may send it. API keys can read it. |
+| `qa` | Needs QA approval | Leaves only when QA or an administrator sends it. API keys cannot read it. |
+| `locked` | Locked | Never leaves: no ZIP, no link, no order, no API key. |
+
+**Where the answer comes from**, most specific first: the document's own
+override; a document with **no type at all** is `locked`; the rule stored on its
+document type (`document_types.sharing_rule`); the type's NAME against the
+starting table; a name nobody recognises is `qa`.
+
+The starting table: **free** - certificate of analysis, specification sheet,
+allergen statement, kosher / halal / organic certificates, safety data sheet.
+**qa** - audit certificate, HACCP or food safety plan, letter of guarantee,
+insurance. **locked** - audit report, W-9. A new type is given its rule from
+this table when it is created and the rule is stored, so an admin can see and
+change it.
+
+**What "leaving" is.** A ZIP, an emailed link, a recipient reading a link, a
+bundle ZIP, an order send or resend, and ANY file read made with an API key. A
+logged-in person opening or downloading one file in the portal is not leaving,
+whatever their role and whatever the rule.
+
+**Who may release a `qa` document.** A super admin, an org admin of the
+organization, a non-reader user on the `QA` owner route (`/api/owner-routes`),
+and - only when that route names nobody usable - the organization's master
+user. Never a read-only account. There is no separate approval step: when one
+of those people ZIPs or sends a `qa` document themselves, that act is the
+approval, and it writes a `document.qa_release_approved` audit row naming them
+and the documents. Nobody releases `locked`.
+
+**A refusal is always stated.** No exit drops a document silently:
+
+| exit | when some may go | when none may go |
+|---|---|---|
+| `POST /api/document-exports/zip` | 200; `manifest.csv` has a "Not included" block; headers `X-Export-Refused: N` and `X-Export-Refused-Ids: id:reason,...` | 403 |
+| `POST /api/document-exports/send` | 200; `refused[]` in the body (each with `document_id`, `title`, `rule`, `reason`, `message`); nothing refused is on the link | 403; no link is minted, no mail sent |
+| `GET /api/bundles/:id/download` | 200; `NOT-INCLUDED.txt` in the archive; headers `X-Bundle-Refused`, `X-Bundle-Refused-Ids` | 403 |
+| `GET /api/orders/:id/send-preview`, `POST .../send` | the line is in `lines_not_sent` with `sharing_refusal` and the reason; the order is not marked delivered | preview `blocked.code = nothing_to_send`; send 400 |
+| `POST /api/orders/:id/sends/:sendId/resend` | each file is re-checked before its bytes are read, for whoever is pressing resend; a refused file fails its part with the reason | - |
+| public link reads | a document locked since the send is not listed or served; `unavailable_count` says how many are gone | 404 on the ZIP |
+| single file with an API key | - | 403 |
+
+Every 403 from the rule has `code: "sharing_rule_refused"` and, for the multi
+document exits, `refused[]`; the `error` sentence names each document under its
+reason.
+
+**One file, several documents.** A packet original and a whole multi-lot
+certificate take the strictest rule of every document on them, including lots
+that are not on the order. When the whole certificate may not go, the order
+sends each lot's own page instead and the review screen says so.
+
+**A link already sent.** The rule is re-read on every read of a public export
+link. A `qa` document stays served (the send was its approval); a document that
+is `locked` now is withheld.
+
+**Setting it.**
+
+```bash
+# On a document type (admin). Audited as document_type.sharing_rule_updated.
+curl -X PUT http://localhost:8788/api/document-types/TYPE_ID \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"sharing_rule":"qa"}'
+
+# On one document (an admin or a QA releaser; a reason is required).
+# null goes back to the type's rule. Audited as document.sharing_rule_overridden.
+curl -X PUT http://localhost:8788/api/documents/DOC_ID \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"sharing_rule_override":"locked","sharing_rule_reason":"Wrong lot on it"}'
+```
+
+`POST /api/document-types` takes an optional `sharing_rule`; left out, the rule
+is proposed from the name. `PUT` refuses `null` (a type is not set back to "not
+stored"). On a document, only an administrator may move it OFF `locked` - by
+choosing another rule or by clearing an override that locked it - so the person
+who may release `qa` cannot relabel a locked document and then release it.
+`GET /api/documents/:id` returns `document.sharing`: `rule`, `source`
+(`override` / `no_type` / `type` / `type_name` / `unrecognised`), `type_rule`,
+the override with who / when / why, and `can_edit` / `can_unlock` for the caller.
+
+**Types that predate 0137** have no stored rule and are read by name, so there
+is no unguarded window. `bin/backfill-sharing-rules` (dry run by default;
+`--tenant <id>`, `--all` to report, `--remote`, `--apply`) writes the rule each
+such type is already read as, so the Document Types screen shows a stored
+setting. It never overwrites a stored rule.
 
 ### Building an order by hand, and sending its certificates (migration 0134)
 

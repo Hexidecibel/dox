@@ -22,7 +22,7 @@ correct any by number.
 |---|---|---|---|---|
 | C-001 | Approval is its own status on the item-and-supplier pair (`product_suppliers`), separate from "currently supplied". Seeded from the supplier list's Approved column; everything on file starts approved. | D-056, open q. 10/06 | built | 0135 |
 | C-002 | A facility is a named record under a supplier that a person adds. A printed plant code attaches to it as an identifier. A document with no known facility counts toward the whole supplier (B3). "Line" is not built until a real case needs it. | B3, F7, asked 9/30 | built (thin); step 5 for the full approval record | 0135 |
-| C-003 | The sharing rule (send freely / needs QA approval / locked) is set per document type with a per-document override and is enforced on EVERY exit: download of a file out of the portal by link, ZIP, emailed link, bundles, order sends, API keys. A logged-in read-only user downloading inside the portal is not "leaving". Starting table — free: COA, spec sheet, allergen statement, kosher / halal / organic certificates, SDS; needs QA: audit certificate, HACCP / food safety plan, letter of guarantee, insurance; locked: audit report, W-9, anything unclassified. | D-053, D-054 | to build | step 1d |
+| C-003 | The sharing rule (send freely / needs QA approval / locked) is set per document type with a per-document override and is enforced on EVERY exit: download of a file out of the portal by link, ZIP, emailed link, bundles, order sends, API keys. A logged-in read-only user downloading inside the portal is not "leaving". Starting table — free: COA, spec sheet, allergen statement, kosher / halal / organic certificates, SDS; needs QA: audit certificate, HACCP / food safety plan, letter of guarantee, insurance; locked: audit report, W-9, anything unclassified. | D-053, D-054 | built | 0137 (step 1d) |
 | C-004 | Customer COA requirements: one row per customer and item — COA required (yes / no / on request), what it must show (free text), timing, delivery contact. Widened when AJ's column set arrives. | plan 1.2, item 9 | built | 0135 |
 | C-005 | A hold is a portal-only status on a lot's certificate. It stops that COA leaving on an order. QA or an admin releases it with a written reason. Nothing is pushed to a WMS in Phase 1. | B1, B3, E2, asked 9/30 | to build | after step 1 |
 | C-006 | Complaint intake Tier 1 is scoped at about 5-7 weeks with four changes: scanned-form reading moves to Tier 2; escalation keywords are a plain word match, not AI; one inbound address per tenant for the PDF channel; the tenant brand record ships first. AJ's recommendation stands on the brief's other open decisions. | 9/27 brief, priced 9/29 | to build | step 3 |
@@ -99,3 +99,16 @@ COA fulfillment (0134).
 | C-035 | The two automatic intake emails go to the sender only when the address is an active user of that tenant; otherwise org_admins get an internal notice (audited `intake.sender_notice`). | built | — |
 | C-036 | A connector re-ingesting an order never deletes or overwrites a line a person decided (picked, accepted or rejected a suggestion); undecided lines reconcile as before. | built | — |
 | C-037 | On a supplier merge, spec limits / required analytes / teach sessions move to the winner; on a key collision the winner's row is kept and the loser's whole row goes into the `supplier.merged` audit row. | built | — |
+
+## 2026-10-08 — decided with defaults while building the sharing rule (0137)
+
+Chris approved these with the plan for step 1d (document orders + the sharing rule). They fill in
+what C-003 left open. C-043 and C-044 belong to the document-orders release and are added with it.
+
+| ID | Decision | Status | Lands in |
+|---|---|---|---|
+| C-038 | A document type with no stored rule and a name we do not recognise is `qa`. A document with **no type** is `locked` (C-003's "anything unclassified"). | built | 0137 |
+| C-039 | "Leaving" = ZIP, emailed link, public link read, bundle ZIP, order send / resend, any API-key file read. A logged-in person opening or downloading one file in the portal is not leaving (any role, any rule). | built | 0137 |
+| C-040 | Who is "QA": a non-reader user on the `QA` owner route, else the tenant's master user, else org admins (the same ladder as `resolveRenewalApprover`). They, and admins, may release a `qa` document; when one of them ZIPs or sends a `qa` document themselves, that act is the approval and is audited as such (`document.qa_release_approved`). Nobody releases `locked`. | built | 0137 |
+| C-041 | API keys read `free` documents only, on every exit, whoever the key belongs to. | built | 0137 |
+| C-042 | A file that holds several documents (a packet original, a whole multi-lot original) takes the strictest rule of the documents on it. | built | 0137 |
