@@ -18,7 +18,14 @@ import AttachFileIcon from '@mui/icons-material/AttachFile';
 import LinkIcon from '@mui/icons-material/Link';
 import { api } from '../../lib/api';
 import { humanBytes } from '../../../shared/orderSend';
-import type { OrderSendPlanFile, OrderSendPreview, OrderSendResponse } from '../../../shared/types';
+import { SHARING_RULE_LABELS } from '../../../shared/sharingRule';
+import { sharingRuleColor } from './OrderDocumentLines';
+import type {
+  OrderSendDocumentLine,
+  OrderSendPlanFile,
+  OrderSendPreview,
+  OrderSendResponse,
+} from '../../../shared/types';
 
 /**
  * "Review and send" -- the last look before an order's documents reach the
@@ -49,19 +56,28 @@ export interface SendOrderDialogProps {
 }
 
 function FileRow({ file }: { file: OrderSendPlanFile }) {
+  // Two kinds of link: a certificate too large to attach (does not expire),
+  // and a document order's documents (the link runs out).
+  const expiring = file.delivery === 'link' && !!file.link_days;
   return (
     <Box sx={{ py: 1 }} data-testid="send-file-row">
       <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: 'wrap' }}>
-        {file.delivery === 'link' ? <LinkIcon fontSize="small" color="warning" /> : <AttachFileIcon fontSize="small" color="action" />}
+        {file.delivery === 'link' ? <LinkIcon fontSize="small" color={expiring ? 'action' : 'warning'} /> : <AttachFileIcon fontSize="small" color="action" />}
         <Typography variant="body2" sx={{ fontWeight: 600, wordBreak: 'break-all' }}>
           {file.file_name}
         </Typography>
         <Typography variant="caption" color="text.secondary">
           {humanBytes(file.bytes)}
         </Typography>
-        {file.delivery === 'link' && <Chip size="small" color="warning" variant="outlined" label="Sent as a link" />}
+        {file.delivery === 'link' && !expiring && <Chip size="small" color="warning" variant="outlined" label="Sent as a link" />}
+        {expiring && <Chip size="small" variant="outlined" label={`On the ${file.link_days}-day link`} />}
         {file.source === 'original' && <Chip size="small" variant="outlined" label="Whole certificate" />}
       </Stack>
+      {(file.document_lines ?? []).map((l) => (
+        <Typography key={l.order_document_id} variant="caption" color="text.secondary" sx={{ display: 'block', pl: 3.5 }}>
+          {[l.document_type_name, l.product_name, l.supplier_name].filter(Boolean).join(' · ')}
+        </Typography>
+      ))}
       {file.lines.map((l) => (
         <Typography key={l.order_item_id} variant="caption" color="text.secondary" sx={{ display: 'block', pl: 3.5 }}>
           {[l.product_name ?? l.product_code ?? 'No product named', l.lot_label ? `Lot ${l.lot_label}` : 'No lot', l.production_date_label ? `Produced ${l.production_date_label}` : null]
@@ -73,6 +89,61 @@ function FileRow({ file }: { file: OrderSendPlanFile }) {
         <Typography key={n} variant="caption" sx={{ display: 'block', pl: 3.5, color: 'warning.dark' }}>
           {n}
         </Typography>
+      ))}
+    </Box>
+  );
+}
+
+/**
+ * One of the three groups a document order's lines fall into (migration 0138):
+ * goes now, waits for QA, will not go. Each line says what was asked for, the
+ * document found, its rule, and the server's own sentence for why.
+ */
+function DocumentGroup({
+  title,
+  testId,
+  lines,
+  tone,
+}: {
+  title: string;
+  testId: string;
+  lines: OrderSendDocumentLine[];
+  tone: 'success.dark' | 'warning.dark' | 'text.secondary';
+}) {
+  if (lines.length === 0) return null;
+  return (
+    <Box data-testid={testId}>
+      <Typography variant="subtitle2" sx={{ fontWeight: 700, color: tone }}>
+        {title} ({lines.length})
+      </Typography>
+      {lines.map((l) => (
+        <Box key={l.order_document_id} sx={{ py: 0.5 }} data-testid="send-document-line">
+          <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: 'wrap' }}>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+              {l.document_type_name ?? 'Document'}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {[l.product_name, l.supplier_name, l.facility_name].filter(Boolean).join(' · ')}
+            </Typography>
+            {l.sharing_rule && (
+              <Chip size="small" variant="outlined" color={sharingRuleColor(l.sharing_rule)} label={SHARING_RULE_LABELS[l.sharing_rule]} />
+            )}
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+            {l.document_title ? `${l.document_title}. ` : ''}
+            {l.text}
+          </Typography>
+          {l.stale_note && (
+            <Typography variant="caption" sx={{ display: 'block', color: 'warning.dark' }}>
+              {l.stale_note}
+            </Typography>
+          )}
+          {l.advisory && (
+            <Typography variant="caption" sx={{ display: 'block', color: 'info.dark' }} data-testid="send-document-advisory">
+              {l.advisory}
+            </Typography>
+          )}
+        </Box>
       ))}
     </Box>
   );
@@ -161,6 +232,11 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
 
   const blocked = plan?.blocked ?? null;
   const itemRequirements = plan?.item_requirements ?? [];
+  const documents = plan?.documents ?? null;
+  // A document line that will not go is in `documents.will_not_go`; the plain
+  // "Not sent" list keeps the COA lines only, so nothing is printed twice.
+  const coaLinesNotSent = (plan?.lines_not_sent ?? []).filter((l) => !l.order_document_id);
+  const onlyAsksQa = documents?.only_asks_qa === true;
   const canSend = !!plan && !blocked && plan.email_configured && recipients.trim() !== '' && !busy && !loading;
 
   return (
@@ -221,6 +297,26 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
 
                 <Divider />
 
+                {documents && (
+                  <Stack spacing={1.5} data-testid="send-documents">
+                    {onlyAsksQa && (
+                      <Alert severity="info" data-testid="send-only-asks-qa">
+                        Nothing reaches the customer with this send. QA is told what is waiting, missing or expired.
+                        Documents that QA releases are mailed to the addresses above.
+                      </Alert>
+                    )}
+                    <DocumentGroup title="Goes now" testId="send-documents-goes-now" lines={documents.goes_now} tone="success.dark" />
+                    <DocumentGroup title="Waits for QA" testId="send-documents-waits" lines={documents.waits_for_qa} tone="warning.dark" />
+                    <DocumentGroup title="Will not go" testId="send-documents-will-not-go" lines={documents.will_not_go} tone="text.secondary" />
+                    {documents.goes_now.some((l) => l.delivery === 'link') && (
+                      <Typography variant="caption" color="text.secondary">
+                        Documents go on one link that works for {documents.link_days} days. Certificates of analysis are attached.
+                      </Typography>
+                    )}
+                    <Divider />
+                  </Stack>
+                )}
+
                 {plan.parts.map((part) => {
                   const inPart = plan.files.filter((f) => f.part_number === part.part_number);
                   return (
@@ -259,12 +355,12 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
                   </Box>
                 )}
 
-                {plan.lines_not_sent.length > 0 && (
+                {coaLinesNotSent.length > 0 && (
                   <Box data-testid="send-lines-not-sent">
                     <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                      Not sent ({plan.lines_not_sent.length})
+                      Not sent ({coaLinesNotSent.length})
                     </Typography>
-                    {plan.lines_not_sent.map((l) => (
+                    {coaLinesNotSent.map((l) => (
                       <Typography key={l.order_item_id} variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                         {[l.product_name ?? 'No product named', l.lot_number ? `Lot ${l.lot_number}` : null].filter(Boolean).join(' · ')} — {l.reason}
                       </Typography>
@@ -283,9 +379,11 @@ export function SendOrderDialog({ open, orderId, onClose, onSent, onFailed }: Se
         <Button variant="contained" onClick={send} disabled={!canSend} sx={{ textTransform: 'none' }} data-testid="send-order-confirm">
           {busy
             ? 'Sending…'
-            : plan && plan.part_count > 1
-              ? `Send ${plan.part_count} emails`
-              : 'Send'}
+            : onlyAsksQa
+              ? 'Ask QA'
+              : plan && plan.part_count > 1
+                ? `Send ${plan.part_count} emails`
+                : 'Send'}
         </Button>
       </DialogActions>
     </Dialog>

@@ -55,6 +55,7 @@ import {
   FileUpload as ImportIcon,
   RateReview as RateReviewIcon,
   ShoppingCart as OrdersIcon,
+  HowToReg as WaitingForQaIcon,
   Inventory2 as LotsIcon,
   Assessment as ReportsIcon,
   EventBusy as RenewalsIcon,
@@ -106,6 +107,7 @@ import LearningDashboard from '../pages/admin/LearningDashboard';
 import { ProcessingStatus } from '../pages/admin/ProcessingStatus';
 import { Orders } from '../pages/Orders';
 import { OrderDetail } from '../pages/OrderDetail';
+import { OrdersWaitingForQa } from '../pages/OrdersWaitingForQa';
 import { Lots } from '../pages/Lots';
 import { Reports } from '../pages/Reports';
 import { Expirations } from '../pages/Expirations';
@@ -129,6 +131,16 @@ export interface SurfaceNav {
    * would reshuffle between builds for no reason a reader could see.
    */
   order: number;
+  /**
+   * A rail entry only some people of the role can act on. `qa_release` = shown
+   * only to a person who may release documents that need QA approval (the QA
+   * owner route, the master user, an administrator -- `canReleaseQa`), with
+   * the number waiting beside it. The role table cannot say this: a QA
+   * releaser is an ordinary `user` named on a route. The ROUTE stays reachable
+   * by the whole tier (the page explains itself to anybody else); only the
+   * rail entry is narrowed, by `Layout`, from GET /api/order-documents/pending.
+   */
+  requires?: 'qa_release';
 }
 
 export interface Surface {
@@ -324,6 +336,17 @@ export const SURFACES: Surface[] = [
     element: <Orders />,
     module: 'fulfillment',
     nav: { label: 'Orders', icon: <OrdersIcon />, order: 10 },
+  },
+  {
+    // QA's worklist for document orders (migration 0138): documents held on
+    // an order because the sender could not approve them. Beside Orders, where
+    // the orders they belong to are. Not for `reader`: a read-only account
+    // never releases, on any rung.
+    path: '/orders/waiting-for-qa',
+    element: <OrdersWaitingForQa />,
+    module: 'fulfillment',
+    roles: CONTRIBUTOR,
+    nav: { label: 'Waiting for QA', icon: <WaitingForQaIcon />, order: 15, requires: 'qa_release' },
   },
   { path: '/orders/:id', element: <OrderDetail />, module: 'fulfillment' },
   {

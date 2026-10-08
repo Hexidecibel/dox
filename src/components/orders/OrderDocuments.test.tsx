@@ -1,0 +1,685 @@
+/**
+ * The document order screens (migration 0138).
+ *
+ * What these pin is what a person must be able to SEE and what they must not
+ * be offered:
+ *   - a document line shows the item, supplier, plant, type, the document, its
+ *     rule as it stands now and what a send would do, in the server's words;
+ *   - the private-label advisory is on the line and on the send review;
+ *   - the add dialog lists one row per item AND supplier, previews what
+ *     resolves before adding, and names what was refused;
+ *   - the send review shows the three groups: goes now, waits for QA, will
+ *     not go;
+ *   - a read-only account builds and is not offered Send;
+ *   - Release and Refuse are offered only to a person who may, and a refusal
+ *     needs a note.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+
+let reader = false;
+
+vi.mock('../../contexts/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 'u1', role: reader ? 'reader' : 'user', tenant_id: 't1' },
+    isAdmin: false,
+    isSuperAdmin: false,
+    isReader: reader,
+  }),
+}));
+vi.mock('../../contexts/TenantContext', () => ({
+  useTenant: () => ({ selectedTenantId: null }),
+}));
+vi.mock('react-router-dom', async (orig) => {
+  const actual = await orig<typeof import('react-router-dom')>();
+  return { ...actual, useParams: () => ({ id: 'o1' }) };
+});
+
+vi.mock('../../lib/api', () => {
+  const m = {
+    get: vi.fn(),
+    sendPreview: vi.fn(),
+    send: vi.fn(),
+    resendFailed: vi.fn(),
+    addDocuments: vi.fn(),
+    removeDocument: vi.fn(),
+    refreshDocument: vi.fn(),
+    releaseDocuments: vi.fn(),
+    refuseDocument: vi.fn(),
+    approvedList: vi.fn(),
+    typesList: vi.fn(),
+    pending: vi.fn(),
+  };
+  return {
+    api: {
+      orders: {
+        get: m.get,
+        sendPreview: m.sendPreview,
+        send: m.send,
+        resendFailed: m.resendFailed,
+        addDocuments: m.addDocuments,
+        removeDocument: m.removeDocument,
+        refreshDocument: m.refreshDocument,
+        releaseDocuments: m.releaseDocuments,
+        refuseDocument: m.refuseDocument,
+        addItems: vi.fn(),
+        update: vi.fn(),
+        delete: vi.fn(),
+        updateItem: vi.fn(),
+        removeItem: vi.fn(),
+      },
+      approvedItems: { list: m.approvedList },
+      documentTypes: { list: m.typesList },
+      orderDocuments: { pending: m.pending },
+      lotMatches: { resolve: vi.fn() },
+      customers: { list: vi.fn().mockResolvedValue({ customers: [] }) },
+    },
+    __mocks: m,
+  };
+});
+
+import * as apiModule from '../../lib/api';
+import { OrderDocumentLines } from './OrderDocumentLines';
+import { AddOrderDocumentsDialog } from './AddOrderDocumentsDialog';
+import { SendOrderDialog } from './SendOrderDialog';
+import { OrderSendHistory } from './OrderSendHistory';
+import { OrderDetail } from '../../pages/OrderDetail';
+import { OrdersWaitingForQa } from '../../pages/OrdersWaitingForQa';
+import type {
+  ApiOrderDocument,
+  ApprovedItem,
+  OrderDocumentProposal,
+  OrderSendDocumentLine,
+  OrderSendPreview,
+  OrderSendSummary,
+  PendingOrderDocument,
+} from '../../../shared/types';
+
+const mocks = (apiModule as unknown as { __mocks: Record<string, ReturnType<typeof vi.fn>> }).__mocks;
+const wrap = (ui: React.ReactNode) => <MemoryRouter>{ui}</MemoryRouter>;
+
+const ADVISORY = "This document is the producer's own and names Northfield Creamery. The item is sold under Harbor Pantry, so the customer will see who makes it.";
+
+function docLine(over: Partial<ApiOrderDocument> = {}): ApiOrderDocument {
+  return {
+    id: 'dl1',
+    order_id: 'o1',
+    product_id: 'p1',
+    product_name: 'Cream Cheese 3 lb',
+    supplier_id: 's1',
+    supplier_name: 'Northfield Creamery',
+    facility: { id: 'f1', name: 'Plant 2', plant_code: '55-1234' },
+    document_type_id: 't-spec',
+    document_type_name: 'Spec Sheet',
+    document_id: 'd1',
+    document_title: 'Cream cheese specification',
+    document_status: 'active',
+    version_number: 1,
+    resolution: 'found',
+    resolution_note: null,
+    document_due_date: null,
+    resolved_at: '2026-10-08 10:00:00',
+    rule_at_resolve: 'free',
+    sharing_rule: 'free',
+    release_status: 'none',
+    pending_at: null,
+    pending_requested_by_name: null,
+    decided_by_name: null,
+    decided_at: null,
+    decision_note: null,
+    qa_notified_at: null,
+    last_sent_at: null,
+    added_by: 'u1',
+    added_by_name: 'Dana Reid',
+    created_at: '2026-10-08 10:00:00',
+    private_label: false,
+    advisory: null,
+    stale: false,
+    stale_note: null,
+    disposition: 'goes_now',
+    disposition_reason: null,
+    disposition_text: 'Goes now, on a link that works for 30 days.',
+    delivery: 'link',
+    ...over,
+  };
+}
+
+beforeEach(() => {
+  reader = false;
+  for (const m of Object.values(mocks)) m.mockReset();
+  mocks.removeDocument.mockResolvedValue({ success: true });
+  mocks.refreshDocument.mockResolvedValue({ changed: true, document: null });
+  mocks.refuseDocument.mockResolvedValue({ success: true });
+  mocks.releaseDocuments.mockResolvedValue({ released: ['dl1'], refused: [], sends: [], order_status: 'pending' });
+  mocks.typesList.mockResolvedValue({ documentTypes: [] });
+  mocks.approvedList.mockResolvedValue({ items: [], total: 0, counts: { approved: 0, pending: 0, not_approved: 0 }, limit: 100, offset: 0 });
+});
+
+// ---------------------------------------------------------------------------
+// The Documents section
+// ---------------------------------------------------------------------------
+
+describe('OrderDocumentLines', () => {
+  const props = { orderId: 'o1', canBuild: true, canRelease: false, onChanged: vi.fn(), onOpenDocument: vi.fn() };
+
+  it('shows the item, supplier and plant, type, document, rule and what a send would do', () => {
+    render(wrap(<OrderDocumentLines {...props} documents={[docLine()]} />));
+    const row = screen.getByTestId('order-document-line');
+    expect(within(row).getByText('Cream Cheese 3 lb')).toBeInTheDocument();
+    expect(within(row).getByText('Northfield Creamery')).toBeInTheDocument();
+    expect(within(row).getByText('Plant 2 (55-1234)')).toBeInTheDocument();
+    expect(within(row).getByText('Spec Sheet')).toBeInTheDocument();
+    expect(within(row).getByText('Cream cheese specification')).toBeInTheDocument();
+    expect(within(row).getByTestId('order-document-rule')).toHaveTextContent('Send freely');
+    expect(within(row).getByTestId('order-document-status')).toHaveTextContent('Goes now');
+    expect(within(row).getByText('Goes now, on a link that works for 30 days.')).toBeInTheDocument();
+    expect(row).toHaveAttribute('data-disposition', 'goes_now');
+  });
+
+  it('says each state in a word: waiting, missing, expired, locked, refused, released, refresh needed', () => {
+    render(
+      wrap(
+        <OrderDocumentLines
+          {...props}
+          documents={[
+            docLine({ id: 'a', sharing_rule: 'qa', release_status: 'pending_qa', disposition: 'waits_for_qa' }),
+            docLine({ id: 'b', document_id: null, document_title: null, sharing_rule: null, resolution: 'missing', disposition: 'will_not_go', disposition_reason: 'missing' }),
+            docLine({ id: 'c', resolution: 'expired', document_due_date: '2026-03-01', disposition: 'will_not_go', disposition_reason: 'expired' }),
+            docLine({ id: 'd', sharing_rule: 'locked', disposition: 'will_not_go', disposition_reason: 'locked' }),
+            docLine({ id: 'e', sharing_rule: 'qa', release_status: 'refused', disposition: 'will_not_go', disposition_reason: 'refused', disposition_text: 'QA refused this document for this order: Wrong revision.' }),
+            docLine({ id: 'f', sharing_rule: 'qa', release_status: 'released', decided_by_name: 'Quinn Lee', disposition: 'will_not_go', disposition_reason: 'already_released' }),
+            docLine({ id: 'g', document_id: null, sharing_rule: null, stale: true, stale_note: 'A document is on file now. Refresh this line to use it.', disposition: 'will_not_go', disposition_reason: 'stale' }),
+          ]}
+        />,
+      ),
+    );
+    expect(screen.getAllByTestId('order-document-status').map((c) => c.textContent)).toEqual([
+      'Waiting for QA',
+      'Missing',
+      'Expired',
+      'Locked',
+      'Refused by QA',
+      'Released by QA',
+      'Refresh needed',
+    ]);
+    expect(screen.getAllByText('Nothing on file')).toHaveLength(2);
+    expect(screen.getByText('Expired Mar 1, 2026')).toBeInTheDocument();
+    expect(screen.getByText(/Wrong revision\./)).toBeInTheDocument();
+    expect(screen.getByText('Released by Quinn Lee')).toBeInTheDocument();
+    expect(screen.getByTestId('order-document-stale')).toHaveTextContent('Refresh this line to use it');
+  });
+
+  it('carries the private-label advisory on the line', () => {
+    render(wrap(<OrderDocumentLines {...props} documents={[docLine({ private_label: true, advisory: ADVISORY })]} />));
+    expect(screen.getByTestId('order-document-advisory')).toHaveTextContent('names Northfield Creamery');
+  });
+
+  it('removes and refreshes through the API, and offers neither when the order cannot be built on', async () => {
+    const onChanged = vi.fn();
+    const { rerender } = render(wrap(<OrderDocumentLines {...props} onChanged={onChanged} documents={[docLine()]} />));
+    await userEvent.click(screen.getByTestId('order-document-refresh'));
+    expect(mocks.refreshDocument).toHaveBeenCalledWith('o1', 'dl1');
+    await userEvent.click(screen.getByTestId('order-document-remove'));
+    expect(mocks.removeDocument).toHaveBeenCalledWith('o1', 'dl1');
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(2));
+
+    rerender(wrap(<OrderDocumentLines {...props} canBuild={false} documents={[docLine()]} />));
+    expect(screen.queryByTestId('order-document-refresh')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('order-document-remove')).not.toBeInTheDocument();
+  });
+
+  it('offers Release and Refuse only to a person who may, and only on a waiting line', async () => {
+    const waiting = docLine({ sharing_rule: 'qa', release_status: 'pending_qa', disposition: 'waits_for_qa' });
+    const { rerender } = render(wrap(<OrderDocumentLines {...props} documents={[waiting]} />));
+    expect(screen.queryByTestId('order-document-release')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('order-document-refuse')).not.toBeInTheDocument();
+
+    rerender(wrap(<OrderDocumentLines {...props} canRelease documents={[docLine()]} />));
+    expect(screen.queryByTestId('order-document-release')).not.toBeInTheDocument();
+
+    rerender(wrap(<OrderDocumentLines {...props} canRelease documents={[waiting]} />));
+    await userEvent.click(screen.getByTestId('order-document-release'));
+    expect(mocks.releaseDocuments).toHaveBeenCalledWith('o1', ['dl1']);
+  });
+
+  it('a refusal needs a note before it can be sent', async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <OrderDocumentLines
+          {...props}
+          canRelease
+          documents={[docLine({ sharing_rule: 'qa', release_status: 'pending_qa', disposition: 'waits_for_qa' })]}
+        />,
+      ),
+    );
+    await user.click(screen.getByTestId('order-document-refuse'));
+    expect(screen.getByTestId('order-document-refuse-confirm')).toBeDisabled();
+    await user.type(screen.getByTestId('order-document-refuse-note'), 'Superseded. Ask for the 2026 plan.');
+    await user.click(screen.getByTestId('order-document-refuse-confirm'));
+    expect(mocks.refuseDocument).toHaveBeenCalledWith('o1', 'dl1', 'Superseded. Ask for the 2026 plan.');
+  });
+
+  it('releases several waiting documents of one order in one act', async () => {
+    const waiting = (id: string) => docLine({ id, sharing_rule: 'qa', release_status: 'pending_qa', disposition: 'waits_for_qa' });
+    render(wrap(<OrderDocumentLines {...props} canRelease documents={[waiting('a'), waiting('b'), docLine({ id: 'c' })]} />));
+    await userEvent.click(screen.getByTestId('order-documents-release-all'));
+    expect(mocks.releaseDocuments).toHaveBeenCalledTimes(1);
+    expect(mocks.releaseDocuments).toHaveBeenCalledWith('o1', ['a', 'b']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Add documents for items
+// ---------------------------------------------------------------------------
+
+function approved(over: Partial<ApprovedItem>): ApprovedItem {
+  return {
+    link_id: 'l1',
+    product_id: 'p1',
+    product_name: 'Heavy Cream 40%',
+    product_active: true,
+    our_sku: '30417',
+    supplier_id: 's1',
+    supplier_name: 'Northfield Creamery',
+    facility: null,
+    approval_status: 'approved',
+    approval_source: 'initial',
+    approval_decided_at: null,
+    approval_decided_by: null,
+    approval_decided_by_name: null,
+    approval_note: null,
+    supplied: true,
+    discontinued_at: null,
+    link_source: 'admin',
+    brand_owner: null,
+    producer: null,
+    plant_code: null,
+    private_label: false,
+    ...over,
+  };
+}
+
+function proposal(over: Partial<OrderDocumentProposal> = {}): OrderDocumentProposal {
+  return {
+    product_id: 'p1',
+    product_name: 'Heavy Cream 40%',
+    supplier_id: 's1',
+    supplier_name: 'Northfield Creamery',
+    document_type_id: 't-spec',
+    document_type_name: 'Spec Sheet',
+    resolution: 'found',
+    resolution_note: null,
+    document_id: 'd1',
+    document_title: 'Heavy cream specification',
+    document_due_date: null,
+    sharing_rule: 'free',
+    private_label: false,
+    advisory: null,
+    outcome: 'would_add',
+    ...over,
+  };
+}
+
+describe('AddOrderDocumentsDialog', () => {
+  const TYPES = { documentTypes: [{ id: 't-spec', name: 'Spec Sheet', supplier_id: null }, { id: 't-haccp', name: 'HACCP Plan', supplier_id: null }, { id: 't-own', name: 'Lakeshore Process Flow', supplier_id: 's-other' }] };
+
+  it('lists one row per item AND supplier, from the approved pairs only', async () => {
+    mocks.typesList.mockResolvedValue(TYPES);
+    mocks.approvedList.mockResolvedValue({
+      items: [approved({}), approved({ link_id: 'l2', supplier_id: 's2', supplier_name: 'Lakeshore Dairy Cooperative', private_label: true })],
+      total: 2, counts: { approved: 2, pending: 0, not_approved: 0 }, limit: 100, offset: 0,
+    });
+    render(wrap(<AddOrderDocumentsDialog open orderId="o1" onClose={vi.fn()} onAdded={vi.fn()} />));
+
+    const rows = await screen.findAllByTestId('add-documents-item');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('Heavy Cream 40% (30417)');
+    expect(rows[0]).toHaveTextContent('Northfield Creamery');
+    expect(rows[1]).toHaveTextContent('Lakeshore Dairy Cooperative · Private label');
+    expect(mocks.approvedList).toHaveBeenCalledWith(expect.objectContaining({ approval: 'approved' }));
+    // Another supplier's own type is not offered until one of its items is picked.
+    expect(screen.getByText('Spec Sheet')).toBeInTheDocument();
+    expect(screen.queryByText('Lakeshore Process Flow')).not.toBeInTheDocument();
+    // Nothing chosen yet: nothing to look up.
+    expect(screen.getByTestId('add-documents-preview-button')).toBeDisabled();
+  });
+
+  it('searches the approved list on the server', async () => {
+    const user = userEvent.setup();
+    render(wrap(<AddOrderDocumentsDialog open orderId="o1" onClose={vi.fn()} onAdded={vi.fn()} />));
+    await user.type(screen.getByTestId('add-documents-search'), 'cream cheese');
+    await waitFor(() => expect(mocks.approvedList).toHaveBeenCalledWith(expect.objectContaining({ q: 'cream cheese', approval: 'approved' })));
+  });
+
+  it('shows what resolves BEFORE adding, names what is refused, and then adds exactly that', async () => {
+    mocks.typesList.mockResolvedValue(TYPES);
+    mocks.approvedList.mockResolvedValue({
+      items: [approved({}), approved({ link_id: 'l2', supplier_id: 's2', supplier_name: 'Lakeshore Dairy Cooperative' })],
+      total: 2, counts: { approved: 2, pending: 0, not_approved: 0 }, limit: 100, offset: 0,
+    });
+    const dryRun = {
+      dry_run: true,
+      lines: [
+        proposal(),
+        proposal({ document_type_id: 't-haccp', document_type_name: 'HACCP Plan', resolution: 'missing', document_id: null, document_title: null, sharing_rule: null }),
+        proposal({ supplier_id: 's2', supplier_name: 'Lakeshore Dairy Cooperative', resolution: 'expired', sharing_rule: 'qa', advisory: ADVISORY }),
+      ],
+      refused: [{ product_id: 'p9', supplier_id: 's2', product_name: 'Butter', supplier_name: 'Lakeshore Dairy Cooperative', reason: 'This item is waiting for approval from this supplier.' }],
+    };
+    mocks.addDocuments.mockResolvedValueOnce(dryRun).mockResolvedValueOnce({ ...dryRun, dry_run: false });
+    const onAdded = vi.fn();
+    const user = userEvent.setup();
+    render(wrap(<AddOrderDocumentsDialog open orderId="o1" onClose={vi.fn()} onAdded={onAdded} />));
+
+    for (const row of await screen.findAllByTestId('add-documents-item')) await user.click(row);
+    const typeBoxes = screen.getAllByTestId('add-documents-type');
+    await user.click(typeBoxes[0]);
+    await user.click(typeBoxes[1]);
+    await user.click(screen.getByTestId('add-documents-preview-button'));
+
+    const expectedBody = {
+      items: [{ product_id: 'p1', supplier_id: 's1' }, { product_id: 'p1', supplier_id: 's2' }],
+      document_type_ids: ['t-spec', 't-haccp'],
+    };
+    expect(mocks.addDocuments).toHaveBeenNthCalledWith(1, 'o1', { ...expectedBody, dry_run: true });
+
+    const previewRows = await screen.findAllByTestId('add-documents-preview-row');
+    expect(previewRows).toHaveLength(3);
+    expect(previewRows[0]).toHaveTextContent('Found');
+    expect(previewRows[0]).toHaveTextContent('Send freely');
+    expect(previewRows[1]).toHaveTextContent('Nothing on file');
+    expect(previewRows[2]).toHaveTextContent('Expired');
+    expect(previewRows[2]).toHaveTextContent('Needs QA approval');
+    expect(previewRows[2]).toHaveTextContent('names Northfield Creamery');
+    expect(screen.getByTestId('add-documents-refused')).toHaveTextContent('Butter · Lakeshore Dairy Cooperative: This item is waiting for approval');
+
+    await user.click(screen.getByTestId('add-documents-confirm'));
+    expect(mocks.addDocuments).toHaveBeenNthCalledWith(2, 'o1', expectedBody);
+    await waitFor(() => expect(onAdded).toHaveBeenCalled());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The three groups on the send review
+// ---------------------------------------------------------------------------
+
+function planLine(over: Partial<OrderSendDocumentLine> = {}): OrderSendDocumentLine {
+  return {
+    order_document_id: 'dl1',
+    product_name: 'Cream Cheese 3 lb',
+    supplier_name: 'Northfield Creamery',
+    facility_name: 'Plant 2',
+    document_type_name: 'Spec Sheet',
+    document_id: 'd1',
+    document_title: 'Cream cheese specification',
+    sharing_rule: 'free',
+    reason: null,
+    text: 'Goes now, on a link that works for 30 days.',
+    delivery: 'link',
+    advisory: null,
+    stale_note: null,
+    notifies_qa: false,
+    ...over,
+  };
+}
+
+function documentPlan(over: Partial<OrderSendPreview> = {}): OrderSendPreview {
+  return {
+    order: { id: 'o1', order_number: 'DO-41', po_number: null, ship_date: null, customer_id: 'c1', customer_name: 'Harbor Bakery' },
+    recipient: 'buyer@harborbakery.example',
+    recipients: ['buyer@harborbakery.example'],
+    recipient_source: 'customer_email',
+    recipients_over_cap: 0,
+    item_requirements: [],
+    from_name: 'Test Corp via SupDox',
+    reply_to: 'dana@example.com',
+    default_subject: 'Test Corp: documents for order DO-41',
+    email_configured: true,
+    files: [
+      {
+        key: 'doclink:d1', file_name: 'Northfield-Creamery_Spec-Sheet_1.pdf', bytes: 64000, delivery: 'link', source: 'document',
+        part_number: 1, document_ids: ['d1'], document_title: 'Spec Sheet - Northfield Creamery', supplier_name: 'Northfield Creamery',
+        document_type_name: 'Spec Sheet', lot_label: null, lines: [], notes: [], link_days: 30,
+        document_lines: [{ order_document_id: 'dl1', product_name: 'Cream Cheese 3 lb', supplier_name: 'Northfield Creamery', document_type_name: 'Spec Sheet' }],
+      },
+    ],
+    parts: [{ part_number: 1, subject: 'Test Corp: documents for order DO-41', bytes: 0, file_count: 1 }],
+    part_count: 1,
+    total_bytes: 64000,
+    lines_not_sent: [
+      { order_item_id: 'x', product_name: 'Butter', lot_number: '555', reason: 'No document on this line.' },
+      { order_item_id: '', order_document_id: 'dl3', product_name: 'Cream Cheese 3 lb', lot_number: null, reason: 'Locked. This document does not leave the organization.', sharing_refusal: 'locked' },
+    ],
+    documents: {
+      goes_now: [planLine({ advisory: ADVISORY })],
+      waits_for_qa: [planLine({ order_document_id: 'dl2', document_type_name: 'HACCP Plan', document_title: 'Hazard plan', sharing_rule: 'qa', text: 'Needs QA approval. It is held for QA, and mailed to the same addresses once QA releases it.', notifies_qa: true })],
+      will_not_go: [
+        planLine({ order_document_id: 'dl3', document_type_name: 'W-9', document_title: 'Tax form', sharing_rule: 'locked', reason: 'locked', text: 'Locked. This document does not leave the organization.' }),
+        planLine({ order_document_id: 'dl4', document_type_name: 'Kosher Certificate', document_id: null, document_title: null, sharing_rule: null, reason: 'missing', text: 'No approved document of this type is on file for this item and supplier. QA is told when the order is sent.', notifies_qa: true }),
+      ],
+      link_days: 30,
+      only_asks_qa: false,
+    },
+    warnings: [],
+    blocked: null,
+    limits: { max_part_bytes: 15 * 1024 * 1024, max_parts: 10 },
+    fingerprint: 'fp-docs',
+    ...over,
+  };
+}
+
+describe('SendOrderDialog with document lines', () => {
+  it('shows the three groups: goes now, waits for QA, will not go, each with its reason', async () => {
+    mocks.sendPreview.mockResolvedValue(documentPlan());
+    render(wrap(<SendOrderDialog open orderId="o1" onClose={vi.fn()} onSent={vi.fn()} onFailed={vi.fn()} />));
+
+    const goes = await screen.findByTestId('send-documents-goes-now');
+    expect(goes).toHaveTextContent('Goes now (1)');
+    expect(goes).toHaveTextContent('Spec Sheet');
+    expect(goes).toHaveTextContent('Send freely');
+    // The private-label advisory is in the review, for the sender.
+    expect(within(goes).getByTestId('send-document-advisory')).toHaveTextContent('names Northfield Creamery');
+
+    const waits = screen.getByTestId('send-documents-waits');
+    expect(waits).toHaveTextContent('Waits for QA (1)');
+    expect(waits).toHaveTextContent('HACCP Plan');
+    expect(waits).toHaveTextContent('Needs QA approval');
+
+    const wont = screen.getByTestId('send-documents-will-not-go');
+    expect(wont).toHaveTextContent('Will not go (2)');
+    expect(wont).toHaveTextContent('Locked. This document does not leave the organization.');
+    expect(wont).toHaveTextContent('No approved document of this type is on file');
+
+    // The file on the link says which link, and it is not the non-expiring one.
+    expect(screen.getByTestId('send-file-row')).toHaveTextContent('On the 30-day link');
+    expect(screen.queryByText('Sent as a link')).not.toBeInTheDocument();
+    expect(screen.getByText(/one link that works for 30 days/)).toBeInTheDocument();
+    // The COA "Not sent" list keeps the COA line only: nothing is printed twice.
+    expect(screen.getByTestId('send-lines-not-sent')).toHaveTextContent('Not sent (1)');
+    expect(screen.getByTestId('send-order-confirm')).toHaveTextContent('Send');
+    expect(screen.getByTestId('send-order-confirm')).toBeEnabled();
+  });
+
+  it('says so when the send reaches nobody yet and only asks QA', async () => {
+    mocks.sendPreview.mockResolvedValue(
+      documentPlan({
+        files: [],
+        parts: [],
+        part_count: 0,
+        lines_not_sent: [],
+        documents: { ...documentPlan().documents!, goes_now: [], only_asks_qa: true },
+      }),
+    );
+    render(wrap(<SendOrderDialog open orderId="o1" onClose={vi.fn()} onSent={vi.fn()} onFailed={vi.fn()} />));
+    expect(await screen.findByTestId('send-only-asks-qa')).toHaveTextContent('Nothing reaches the customer with this send');
+    expect(screen.queryByTestId('send-documents-goes-now')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('send-part')).not.toBeInTheDocument();
+    expect(screen.getByTestId('send-order-confirm')).toHaveTextContent('Ask QA');
+    expect(screen.getByTestId('send-order-confirm')).toBeEnabled();
+  });
+
+  it('an order of COAs alone shows no document groups', async () => {
+    mocks.sendPreview.mockResolvedValue(documentPlan({ documents: undefined }));
+    render(wrap(<SendOrderDialog open orderId="o1" onClose={vi.fn()} onSent={vi.fn()} onFailed={vi.fn()} />));
+    await screen.findByTestId('send-file-row');
+    expect(screen.queryByTestId('send-documents')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The record
+// ---------------------------------------------------------------------------
+
+describe('OrderSendHistory with document orders', () => {
+  function record(over: Partial<OrderSendSummary> = {}): OrderSendSummary {
+    return {
+      id: 's1', order_id: 'o1', order_number: 'DO-41', customer_name: 'Harbor Bakery', status: 'sent',
+      created_at: '2026-10-08 12:00:00', sent_by_id: 'u2', sent_by_name: 'Quinn Lee', sent_by_email: 'quinn@example.com',
+      recipients: ['buyer@harborbakery.example'], subject: 'Documents for order DO-41 - additional documents', message: null,
+      part_count: 1, parts: [{ part_number: 1, ok: true, status: 200, error: null, sent_at: 'x', attempts: 1 }],
+      files: [{ position: 0, file_name: 'Hazard-plan_1.pdf', bytes: 1000, part_number: 1, delivery: 'link', source: 'document', document_id: 'd2', document_ids: ['d2'], document_title: 'HACCP Plan', lot_label: null, sent_ok: true, link_days: 30, order_document_ids: ['dl2'] }],
+      can_resend: false,
+      kind: 'qa_release',
+      ...over,
+    };
+  }
+
+  it('a QA release names who released it and says the link runs out', () => {
+    render(wrap(<OrderSendHistory sends={[record()]} />));
+    const card = screen.getByTestId('order-send-card');
+    expect(card).toHaveAttribute('data-kind', 'qa_release');
+    expect(card).toHaveTextContent('Released by QA');
+    expect(card).toHaveTextContent('released by Quinn Lee');
+    expect(card).toHaveTextContent('sent on a link that works for 30 days');
+    expect(card).not.toHaveTextContent('does not expire');
+  });
+
+  it('a send that only asked QA does not read as though something was sent', () => {
+    render(wrap(<OrderSendHistory sends={[record({ kind: 'qa_request', part_count: 0, parts: [], files: [] })]} />));
+    const card = screen.getByTestId('order-send-card');
+    expect(card).toHaveTextContent('Asked QA');
+    expect(card).not.toHaveTextContent('Sent');
+    expect(screen.getByTestId('order-send-qa-request')).toHaveTextContent('Nothing was sent to the customer');
+  });
+
+  it('a failed release says the documents wait again, and offers no resend', () => {
+    render(
+      wrap(
+        <OrderSendHistory
+          sends={[record({ status: 'failed', parts: [{ part_number: 1, ok: false, status: 500, error: 'provider said no', sent_at: null, attempts: 1 }] })]}
+        />,
+      ),
+    );
+    expect(screen.getByTestId('order-send-card')).toHaveTextContent('The documents are waiting for QA again');
+    expect(screen.queryByTestId('order-send-resend')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The order page: a reader builds and does not send
+// ---------------------------------------------------------------------------
+
+describe('OrderDetail', () => {
+  const order = {
+    id: 'o1', order_number: 'DO-41', po_number: null, customer_name: 'Harbor Bakery', customer_number: null, customer_id: null,
+    status: 'pending', item_count: 0, matched_count: 0, connector_id: null, connector_run_id: null, connector_name: null,
+    source_data: null, staged_at: null, created_at: '2026-10-08 10:00:00', updated_at: '2026-10-08 10:00:00',
+  };
+
+  it('a read-only account sees Build and is not offered Send', async () => {
+    reader = true;
+    mocks.get.mockResolvedValue({ order, items: [], suggestions: [], sends: [], documents: [docLine()], can_release_qa: false });
+    render(wrap(<OrderDetail />));
+
+    expect(await screen.findByTestId('order-add-documents')).toBeInTheDocument();
+    expect(screen.getByTestId('order-document-line')).toBeInTheDocument();
+    expect(screen.getByTestId('order-document-remove')).toBeInTheDocument();
+    expect(screen.getByTestId('order-reader-builds')).toHaveTextContent('Sending it is done by somebody with a sending account');
+    expect(screen.queryByTestId('order-review-send')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('order-add-coas')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('order-document-release')).not.toBeInTheDocument();
+  });
+
+  it('an order with only document lines can be reviewed and sent by someone who may', async () => {
+    mocks.get.mockResolvedValue({ order, items: [], suggestions: [], sends: [], documents: [docLine()], can_release_qa: false });
+    render(wrap(<OrderDetail />));
+    expect(await screen.findByTestId('order-review-send')).toBeEnabled();
+    expect(screen.getByTestId('order-add-documents')).toBeInTheDocument();
+  });
+
+  it('with nothing on the order there is nothing to review', async () => {
+    mocks.get.mockResolvedValue({ order, items: [], suggestions: [], sends: [], documents: [], can_release_qa: false });
+    render(wrap(<OrderDetail />));
+    expect(await screen.findByTestId('order-review-send')).toBeDisabled();
+    expect(screen.getByTestId('order-documents-empty')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Waiting for QA
+// ---------------------------------------------------------------------------
+
+describe('OrdersWaitingForQa', () => {
+  function pendingLine(over: Partial<PendingOrderDocument> = {}): PendingOrderDocument {
+    return {
+      id: 'dl2', order_id: 'o1', order_number: 'DO-41', customer_name: 'Harbor Bakery',
+      product_name: 'Cream Cheese 3 lb', supplier_name: 'Northfield Creamery', facility_name: 'Plant 2',
+      document_type_name: 'HACCP Plan', document_id: 'd2', document_title: 'Hazard plan', document_status: 'active',
+      sharing_rule: 'qa', requested_by_name: 'Dana Reid', requested_at: '2026-10-08 11:00:00',
+      recipients: ['buyer@harborbakery.example'], private_label: false, advisory: null, releasable: true, blocked_reason: null,
+      ...over,
+    };
+  }
+
+  it('lists what is waiting by order, with the count, who asked and who it goes to', async () => {
+    mocks.pending.mockResolvedValue({
+      can_release: true,
+      count: 3,
+      lines: [
+        pendingLine(),
+        pendingLine({ id: 'dl5', document_type_name: 'Letter of Guarantee', document_title: 'Guarantee letter' }),
+        pendingLine({ id: 'dl6', document_type_name: 'Audit Certificate', sharing_rule: 'locked', releasable: false, blocked_reason: 'The document is locked now. Nobody releases a locked document.' }),
+      ],
+    });
+    render(wrap(<OrdersWaitingForQa />));
+
+    expect(await screen.findByTestId('waiting-count')).toHaveTextContent('(3)');
+    const card = screen.getByTestId('waiting-order');
+    expect(card).toHaveTextContent('Order DO-41');
+    expect(card).toHaveTextContent('for Harbor Bakery');
+    expect(card).toHaveTextContent('Asked by Dana Reid');
+    expect(card).toHaveTextContent('goes to buyer@harborbakery.example');
+    expect(screen.getAllByTestId('waiting-line')).toHaveLength(3);
+    // A document that can no longer be released says why and has no live button.
+    expect(screen.getByTestId('waiting-blocked')).toHaveTextContent('locked now');
+    expect(screen.getAllByTestId('waiting-release')[2]).toBeDisabled();
+
+    // Released together, the releasable ones go in one call.
+    mocks.releaseDocuments.mockResolvedValue({ released: ['dl2', 'dl5'], refused: [], sends: [], order_status: 'pending' });
+    await userEvent.click(screen.getByTestId('waiting-release-all'));
+    expect(mocks.releaseDocuments).toHaveBeenCalledTimes(1);
+    expect(mocks.releaseDocuments).toHaveBeenCalledWith('o1', ['dl2', 'dl5']);
+    expect(await screen.findByText(/Released 2 documents in one email/)).toBeInTheDocument();
+  });
+
+  it('refusing needs a note', async () => {
+    mocks.pending.mockResolvedValue({ can_release: true, count: 1, lines: [pendingLine()] });
+    const user = userEvent.setup();
+    render(wrap(<OrdersWaitingForQa />));
+    await user.click(await screen.findByTestId('waiting-refuse'));
+    expect(screen.getByTestId('waiting-refuse-confirm')).toBeDisabled();
+    await user.type(screen.getByTestId('waiting-refuse-note'), 'Not this revision.');
+    await user.click(screen.getByTestId('waiting-refuse-confirm'));
+    expect(mocks.refuseDocument).toHaveBeenCalledWith('o1', 'dl2', 'Not this revision.');
+  });
+
+  it('tells somebody who cannot release that it is not theirs to do, and offers no button', async () => {
+    mocks.pending.mockResolvedValue({ can_release: false, count: 0, lines: [] });
+    render(wrap(<OrdersWaitingForQa />));
+    expect(await screen.findByTestId('waiting-not-a-releaser')).toBeInTheDocument();
+    expect(screen.queryByTestId('waiting-release')).not.toBeInTheDocument();
+  });
+});

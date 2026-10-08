@@ -4,7 +4,7 @@ import { Link as RouterLink } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { formatDateTime } from '../../utils/format';
 import { humanBytes } from '../../../shared/orderSend';
-import type { OrderSendStatus, OrderSendSummary } from '../../../shared/types';
+import type { OrderSendFileRecord, OrderSendStatus, OrderSendSummary } from '../../../shared/types';
 
 /**
  * What left on an order, to whom, and how (migration 0134).
@@ -31,6 +31,12 @@ const STATUS_COLOR: Record<OrderSendStatus, 'success' | 'warning' | 'error'> = {
   partial: 'warning',
   failed: 'error',
 };
+
+/** How a file left, in words. A link is one of two kinds and they are never confused. */
+export function describeDelivery(f: Pick<OrderSendFileRecord, 'delivery' | 'link_days'>): string {
+  if (f.delivery !== 'link') return 'attached';
+  return f.link_days ? `sent on a link that works for ${f.link_days} days` : 'sent as a link that does not expire';
+}
 
 export interface OrderSendHistoryProps {
   sends: OrderSendSummary[];
@@ -69,10 +75,22 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
       )}
       {sends.map((s) => {
         const failedParts = s.parts.filter((p) => !p.ok);
+        // Document orders (0138): a send that only asked QA, and the mail a QA
+        // release produced, are their own kinds and are worded as what they are.
+        const kind = s.kind ?? 'send';
+        const who = s.sent_by_name ?? s.sent_by_email ?? 'a former user';
         return (
-          <Paper key={s.id} variant="outlined" sx={{ p: 2 }} data-testid="order-send-card">
+          <Paper key={s.id} variant="outlined" sx={{ p: 2 }} data-testid="order-send-card" data-kind={kind}>
             <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: 'wrap', mb: 0.5 }}>
-              <Chip size="small" color={STATUS_COLOR[s.status]} label={STATUS_LABEL[s.status]} />
+              {kind === 'qa_request' ? (
+                <Chip size="small" color="warning" label="Asked QA" />
+              ) : (
+                <Chip
+                  size="small"
+                  color={STATUS_COLOR[s.status]}
+                  label={kind === 'qa_release' ? (s.status === 'sent' ? 'Released by QA' : 'Release not sent') : STATUS_LABEL[s.status]}
+                />
+              )}
               <Typography variant="body2" sx={{ fontWeight: 600 }}>
                 {showOrder ? (
                   <>
@@ -87,9 +105,15 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
                 )}
               </Typography>
               <Typography variant="caption" color="text.secondary">
-                {formatDateTime(s.created_at)} · by {s.sent_by_name ?? s.sent_by_email ?? 'a former user'}
+                {formatDateTime(s.created_at)} · {kind === 'qa_release' ? 'released by' : 'by'} {who}
               </Typography>
             </Stack>
+            {kind === 'qa_request' && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }} data-testid="order-send-qa-request">
+                Nothing was sent to the customer. QA was told what is waiting, missing or expired. Documents QA releases
+                are mailed to these addresses.
+              </Typography>
+            )}
             {showOrder && (
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                 To {s.recipients.join(', ')}
@@ -102,7 +126,7 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
             {s.files.map((f) => (
               <Typography key={f.position} variant="caption" sx={{ display: 'block', color: f.sent_ok ? 'text.primary' : 'error.main' }}>
                 {f.sent_ok ? '✓' : '✗'} {f.file_name} · {humanBytes(f.bytes)} ·{' '}
-                {f.delivery === 'link' ? 'sent as a link that does not expire' : 'attached'} ·{' '}
+                {describeDelivery(f)} ·{' '}
                 {f.source === 'original' ? 'the whole certificate' : 'the document on file'}
                 {f.lot_label ? ` · Lot ${f.lot_label}` : ''}
                 {s.part_count > 1 ? ` · email ${f.part_number} of ${s.part_count}` : ''}
@@ -128,7 +152,9 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
                   ) : undefined
                 }
               >
-                {failedParts.length === s.part_count
+                {kind === 'qa_release'
+                  ? 'The release email did not go, so nothing reached the customer. The documents are waiting for QA again.'
+                  : failedParts.length === s.part_count
                   ? 'Nothing reached the customer.'
                   : `${failedParts.length} of ${s.part_count} emails did not go. The others reached the customer and will not be sent again.`}
                 {failedParts.map((p) => (

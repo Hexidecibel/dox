@@ -3610,9 +3610,10 @@ export interface OrderSendSummary {
   /**
    * What kind of record this is (0138). `send` = an ordinary send;
    * `qa_request` = nothing could go yet, QA was asked; `qa_release` = the mail
-   * a QA release produced, and `sent_by` is the person who released.
+   * a QA release produced, and `sent_by` is the person who released. The server
+   * always sets it; absent reads as `send`.
    */
-  kind: OrderSendKind;
+  kind?: OrderSendKind;
 }
 
 export type OrderSendKind = 'send' | 'qa_request' | 'qa_release';

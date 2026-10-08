@@ -47,7 +47,9 @@ import { OrderLines, type OrderLineSuggestion } from '../components/orders/Order
 import { AddDocumentsDialog } from '../components/orders/AddDocumentsDialog';
 import { SendOrderDialog } from '../components/orders/SendOrderDialog';
 import { OrderSendHistory } from '../components/orders/OrderSendHistory';
-import type { ApiOrderItem, OrderSendSummary } from '../../shared/types';
+import { OrderDocumentLines } from '../components/orders/OrderDocumentLines';
+import { AddOrderDocumentsDialog } from '../components/orders/AddOrderDocumentsDialog';
+import type { ApiOrderDocument, ApiOrderItem, OrderSendSummary } from '../../shared/types';
 
 const ORDER_STATUSES = ['pending', 'enriched', 'matched', 'fulfilled', 'delivered', 'error'] as const;
 
@@ -97,6 +99,11 @@ export function OrderDetail() {
   const [items, setItems] = useState<ApiOrderItem[]>([]);
   // What has already left on this order, newest first (migration 0134).
   const [sends, setSends] = useState<OrderSendSummary[]>([]);
+  // The order's document lines (migration 0138), judged by the server for the
+  // person looking, and whether that person may release one waiting for QA.
+  const [documents, setDocuments] = useState<ApiOrderDocument[]>([]);
+  const [canReleaseQa, setCanReleaseQa] = useState(false);
+  const [addOrderDocsOpen, setAddOrderDocsOpen] = useState(false);
   // Pending lot-match suggestions, by order line. The matcher never links on
   // its own; a person confirms each one here.
   const [suggestions, setSuggestions] = useState<OrderLineSuggestion[]>([]);
@@ -140,6 +147,8 @@ export function OrderDetail() {
       setItems(result.items || []);
       setSuggestions(result.suggestions || []);
       setSends(result.sends || []);
+      setDocuments(result.documents || []);
+      setCanReleaseQa(result.can_release_qa === true);
       setNewStatus(result.order.status);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load order');
@@ -255,7 +264,13 @@ export function OrderDetail() {
   // A staged order is still being reviewed for what the connector read; its
   // lines are edited there, not here.
   const canEdit = !isReader && !order.staged_at;
-  const sendable = items.some((i) => i.coa_document_id && (i.coa_document_status ?? 'active') === 'active');
+  // ANY login builds the document lines, a read-only account included
+  // (migration 0138). Sending keeps its own bar: `canEdit`.
+  const canBuildDocuments = !order.staged_at;
+  // The server decides what a send does; this only keeps the button from
+  // opening a review of an order with nothing on it at all.
+  const sendable =
+    items.some((i) => i.coa_document_id && (i.coa_document_status ?? 'active') === 'active') || documents.length > 0;
 
   return (
     <Box>
@@ -505,6 +520,48 @@ export function OrderDetail() {
         />
       )}
 
+      {/* Documents for items (migration 0138) */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
+        <Typography variant="h6" fontWeight={600} sx={{ flex: '1 1 auto' }}>
+          Documents ({documents.length})
+        </Typography>
+        {canBuildDocuments && (
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<AddDocsIcon />}
+            onClick={() => setAddOrderDocsOpen(true)}
+            sx={{ textTransform: 'none' }}
+            data-testid="order-add-documents"
+          >
+            Add documents for items
+          </Button>
+        )}
+      </Box>
+      {documents.length === 0 ? (
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }} data-testid="order-documents-empty">
+          Spec sheets, hazard plans and other supplier documents the customer asks for. Choose items from the approved
+          list and the portal finds each supplier&apos;s current document.
+          {isReader ? ' You can build the order. Somebody who can send will send it.' : ''}
+        </Typography>
+      ) : (
+        <>
+          {isReader && (
+            <Alert severity="info" sx={{ mb: 1 }} data-testid="order-reader-builds">
+              You can add and remove documents on this order. Sending it is done by somebody with a sending account.
+            </Alert>
+          )}
+          <OrderDocumentLines
+            orderId={order.id}
+            documents={documents}
+            canBuild={canBuildDocuments}
+            canRelease={canReleaseQa}
+            onChanged={reload}
+            onOpenDocument={(docId) => navigate(`/documents/${docId}`)}
+          />
+        </>
+      )}
+
       {/* What has already left */}
       {sends.length > 0 && (
         <Box sx={{ mb: 3 }}>
@@ -564,10 +621,31 @@ export function OrderDetail() {
         onFailed={reload}
         onSent={(result) => {
           setSendOpen(false);
+          const waiting = result.documents?.pending_qa ?? 0;
+          const held = waiting > 0 ? ` ${waiting} document${waiting === 1 ? ' is' : 's are'} waiting for QA.` : '';
           setNotice(
-            result.sent
-              ? `Sent to ${result.send.recipients.join(', ')}.`
-              : 'Some of the emails did not go. See Sent below to resend them.',
+            result.send.kind === 'qa_request'
+              ? `Nothing was sent to the customer yet. QA has been told.${held}`
+              : result.sent
+                ? `Sent to ${result.send.recipients.join(', ')}.${held}`
+                : 'Some of the emails did not go. See Sent below to resend them.',
+          );
+          reload();
+        }}
+      />
+
+      <AddOrderDocumentsDialog
+        open={addOrderDocsOpen}
+        orderId={order.id}
+        tenantId={selectedTenantId || undefined}
+        onClose={() => setAddOrderDocsOpen(false)}
+        onAdded={(result) => {
+          setAddOrderDocsOpen(false);
+          const added = result.lines.filter((l) => l.outcome === 'added').length;
+          const refused = result.refused.length;
+          setNotice(
+            `${added} document line${added === 1 ? '' : 's'} added.` +
+              (refused > 0 ? ` ${refused} not added: ${result.refused[0].reason}` : ''),
           );
           reload();
         }}

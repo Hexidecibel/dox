@@ -382,7 +382,8 @@ const orders: ModuleHelpExpanded = {
     well:
       "Everything dox knows about this order: its lines, customer, PO and ship date, the certificate on each line, and what has already been sent. " +
       "Add COAs puts approved certificates on the order, one line per lot each certifies; every line shows its product, lot and production date so a wrong pick is visible before it goes. " +
-      "Review and send shows exactly what the customer will receive before anything leaves.",
+      "Review and send shows exactly what the customer will receive before anything leaves. " +
+      "Add documents for items puts a supplier's spec sheet, hazard plan or certificate on the order: choose items from the approved list and the portal finds each supplier's current document.",
   },
   help: {
     sections: [
@@ -413,7 +414,20 @@ const orders: ModuleHelpExpanded = {
           "A certificate that covers several lots is sent whole, once, even when several lines came from it. If the whole certificate is not on file the screen says so and the page for that lot is sent instead. " +
           "When the files do not fit in one email they go as numbered emails, 1 of 3 and so on, and the screen shows the split before you send. A single file too large to attach goes as a link in the first email; that link does not expire and can be revoked from Sent documents. An order that would need more than ten emails is refused with the number, so send it in two goes. " +
           "Lines with no certificate, or whose certificate has since been archived, are listed as not sent. " +
-          "Sent, on the order, lists each send: who sent it, to which address, each file and how it went. If some of the emails failed, Resend failed parts sends only those. The order becomes delivered once every email has gone and no line was left unsent. A read-only account cannot build or send an order.",
+          "Sent, on the order, lists each send: who sent it, to which address, each file and how it went. If some of the emails failed, Resend failed parts sends only those. The order becomes delivered once every email has gone and no line was left unsent. A read-only account cannot pick certificates or send an order.",
+      },
+      {
+        heading: 'Document orders',
+        body:
+          "An order is internal: documents already on file, for a customer. A request is the ask to a supplier and is a separate thing; a document order never writes to a supplier. " +
+          "Anyone with a login can open an order and build it, a read-only account included. Sending it needs an account that can send. " +
+          "Add documents for items lists the approved items, one row for each item and supplier. An item with two approved suppliers is two rows and nothing chooses between them: tick the ones you want and take off any line you do not. Then choose the document types. Before anything is added the portal shows what it found for each. " +
+          "The current document is the item's own document of that type when there is one, otherwise the supplier's, and the newest of those. If the newest has expired the line says expired; an older copy is not used in its place. A line keeps the document it was added with. When a newer one arrives the line says so and Refresh takes it. " +
+          "Every document has a sharing rule, set on its document type and changeable on the document. Send freely goes straight away, on one link that works for 30 days. Needs QA approval is held: QA is told, reviews it, and releasing it mails the link to the addresses the order was sent to. Locked never leaves. Certificates of analysis are attached, as on any order. " +
+          "Review and send shows the three groups before you send: what goes now, what waits for QA, and what will not go and why. If you can release QA documents yourself, sending one is the approval and is recorded as yours. " +
+          "If you order a document that is missing or has expired, QA is told once, with the item, supplier and document type. Nothing is drafted or sent to the supplier. " +
+          "On a private label item, a co-packer's document says who makes the product. The order shows a note naming the producer so you know before you share it. It is a note only and blocks nothing. " +
+          "Waiting for QA, beside Orders, lists every held document for the people who can release it. Refusing needs a note, which the person who ordered reads on the order.",
       },
       {
         heading: 'Filtering and search',
