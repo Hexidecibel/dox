@@ -1166,6 +1166,12 @@ describe('QA releasing and refusing held documents', () => {
     expect(await linksHolding(h.plan.id)).toEqual([]);
     expect((await lineRow(h.planLine.id)).release_status).toBe('pending_qa');
 
+    // Nor does a releaser's own SEND of the order carry it: the line was `qa`
+    // when it was added, and the rule that decides is the one in force now.
+    const review = await preview(h.order, 'qa');
+    expect(review.documents?.will_not_go.find((l) => l.order_document_id === h.planLine.id)?.reason).toBe('locked');
+    expect(review.files.flatMap((f) => f.document_ids)).not.toContain(h.plan.id);
+
     // In a batch, the locked one is named and the other still goes.
     const mixed = await release(h.order, [h.planLine.id, h.letterLine.id]);
     expect(mixed.status).toBe(200);

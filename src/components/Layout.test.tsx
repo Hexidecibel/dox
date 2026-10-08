@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ModuleKey, Role, User } from '../lib/types';
 
@@ -36,6 +36,17 @@ vi.mock('../contexts/ModuleAccessContext', () => ({
 }));
 // The bell polls; it has nothing to do with the rail.
 vi.mock('./NotificationsBell', () => ({ NotificationsBell: () => null }));
+
+// "Waiting for QA" (migration 0138) is drawn only for a person the server says
+// may release. Everything else on `api` stays the real client.
+const pendingMock = vi.fn();
+vi.mock('../lib/api', async (orig) => {
+  const actual = await orig<typeof import('../lib/api')>();
+  return {
+    ...actual,
+    api: { ...actual.api, orderDocuments: { pending: (...args: unknown[]) => pendingMock(...args) } },
+  };
+});
 
 import { Layout } from './Layout';
 
@@ -63,6 +74,51 @@ function renderRail() {
 beforeEach(() => {
   currentUser = user('org_admin');
   visibleModules = ['library', 'compliance', 'fulfillment', 'records'];
+  pendingMock.mockReset();
+  pendingMock.mockResolvedValue({ can_release: false, count: 0, lines: [] });
+});
+
+describe('Layout — Waiting for QA in the rail', () => {
+  it('is drawn, with the number waiting, for a person who can release', async () => {
+    currentUser = user('user');
+    pendingMock.mockResolvedValue({ can_release: true, count: 3, lines: [] });
+    renderRail();
+    expect(await screen.findByText('Waiting for QA')).toBeInTheDocument();
+    expect(screen.getByTestId('nav-waiting-for-qa-count')).toHaveTextContent('3');
+  });
+
+  it('is drawn without a number when nothing is waiting', async () => {
+    pendingMock.mockResolvedValue({ can_release: true, count: 0, lines: [] });
+    renderRail();
+    expect(await screen.findByText('Waiting for QA')).toBeInTheDocument();
+    expect(screen.queryByTestId('nav-waiting-for-qa-count')).not.toBeInTheDocument();
+  });
+
+  it('is not drawn for a person who cannot release, or when the question fails', async () => {
+    currentUser = user('user');
+    const { unmount } = renderRail();
+    await waitFor(() => expect(pendingMock).toHaveBeenCalled());
+    expect(screen.queryByText('Waiting for QA')).not.toBeInTheDocument();
+    unmount();
+
+    pendingMock.mockRejectedValue(new Error('no'));
+    renderRail();
+    await waitFor(() => expect(pendingMock).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('Waiting for QA')).not.toBeInTheDocument();
+  });
+
+  it('is never asked about for a read-only account, or with order fulfillment switched off', () => {
+    currentUser = user('reader');
+    const first = renderRail();
+    expect(pendingMock).not.toHaveBeenCalled();
+    first.unmount();
+
+    currentUser = user('org_admin');
+    visibleModules = ['library', 'compliance', 'records'];
+    renderRail();
+    expect(pendingMock).not.toHaveBeenCalled();
+    expect(screen.queryByText('Waiting for QA')).not.toBeInTheDocument();
+  });
 });
 
 describe('Layout — the module-gated rail', () => {
