@@ -4,7 +4,7 @@
 
 Source: live `sqlite_master` read from LOCAL D1.
 
-Migration history lives in `CLAUDE.md`; this file is the *current state*.
+Migration history lives in `docs/migration-history.md` (compact table in `CLAUDE.md`); this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
 Objects: 147 tables, 2 views, 265 indexes, 47 triggers.

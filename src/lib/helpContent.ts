@@ -1224,7 +1224,7 @@ const audit: ModuleHelpExpanded = {
         heading: 'Retention',
         body:
           "Audit entries are retained indefinitely in production. There's no automatic pruning, no rotation, no soft-delete. If you need to remove specific entries for legal reasons (PII deletion requests, etc.), that has to happen via a direct D1 mutation by a super_admin and should itself be documented out-of-band. " +
-          "The CLAUDE.md describes the audit table as \"immutable\"; the implementation enforces this only by convention — there is no DB-level trigger preventing deletes. Treat that as a known limitation if your compliance regime is strict.",
+          "The audit log is append-only: no screen or API edits or deletes a row. The implementation enforces this only by convention — there is no DB-level trigger preventing deletes. Treat that as a known limitation if your compliance regime is strict.",
       },
       {
         heading: 'Common questions',

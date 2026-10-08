@@ -53,7 +53,7 @@ src/                    # React frontend
   components/           # Reusable UI components
   contexts/             # React contexts (auth, etc.)
   pages/                # Route pages
-migrations/             # D1 SQL migration files (0001-0016)
+migrations/             # D1 SQL migration files (table below; rationale in docs/migration-history.md)
 bin/                    # Operational scripts (deploy, migrate, seed)
 ```
 
