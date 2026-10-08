@@ -6,6 +6,7 @@ hand-edit historical entries.
 
 ## Releases
 
+- [v2.29.1](releases/v2.29.1.md) — 2026-10-07 — The prompts name no one
 - [v2.29.0](releases/v2.29.0.md) — 2026-10-07 — A person approves, a person sends
 - [v2.28.1](releases/v2.28.1.md) — 2026-09-30 — Rebuild search from the admin screen
 - [v2.28.0](releases/v2.28.0.md) — 2026-09-30 — You already have this

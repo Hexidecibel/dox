@@ -1,6 +1,11 @@
 {
-  "current": "2.29.0",
+  "current": "2.29.1",
   "versions": [
+    {
+      "version": "2.29.1",
+      "date": "2026-10-07",
+      "title": "The prompts name no one"
+    },
     {
       "version": "2.29.0",
       "date": "2026-10-07",
