@@ -29,6 +29,8 @@ export interface ReleaseCandidate {
   advisory: string | null;
   /** The release did not finish last time: releasing again withdraws that link first. */
   stuck: boolean;
+  /** QA refused this same ask on this order before it was taken off and added again. */
+  earlier_refusals: { by_name: string | null; at: string | null; note: string }[];
 }
 
 export function candidateFromPending(l: PendingOrderDocument): ReleaseCandidate {
@@ -47,6 +49,7 @@ export function candidateFromPending(l: PendingOrderDocument): ReleaseCandidate 
     pending_send_id: l.pending_send_id,
     advisory: l.advisory,
     stuck: l.stuck,
+    earlier_refusals: l.earlier_refusals ?? [],
   };
 }
 
@@ -66,6 +69,8 @@ export function candidateFromOrderLine(l: ApiOrderDocument): ReleaseCandidate {
     pending_send_id: l.pending_send_id,
     advisory: l.advisory,
     stuck: l.release_stuck,
+    // The order page does not carry the history; the waiting list does.
+    earlier_refusals: [],
   };
 }
 
@@ -147,6 +152,12 @@ export function ReleaseDocumentsDialog({ open, orderNumber, candidates, busy, ma
                   An earlier release of this document did not finish. Its link is withdrawn first, then a new one is sent.
                 </Typography>
               )}
+              {c.earlier_refusals.map((r, i) => (
+                <Typography key={i} variant="caption" sx={{ display: 'block', color: 'error.main' }} data-testid="release-earlier-refusal">
+                  Refused before on this order by {r.by_name ?? 'a former user'}
+                  {r.at ? ` on ${formatDateTime(r.at)}` : ''}: {r.note}
+                </Typography>
+              ))}
               {c.advisory && (
                 <Typography variant="caption" sx={{ display: 'block', color: 'info.dark' }}>
                   {c.advisory}

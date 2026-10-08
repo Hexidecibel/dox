@@ -283,6 +283,12 @@ export function OrdersWaitingForQa() {
                           : 'This document is being released right now.'}
                       </Typography>
                     )}
+                    {(line.earlier_refusals ?? []).map((r, i) => (
+                      <Typography key={i} variant="caption" sx={{ display: 'block', color: 'error.main' }} data-testid="waiting-earlier-refusal">
+                        Refused before on this order by {r.by_name ?? 'a former user'}
+                        {r.at ? ` on ${formatDateTime(r.at)}` : ''}: {r.note}
+                      </Typography>
+                    ))}
                     {line.blocked_reason && (
                       <Typography variant="caption" sx={{ display: 'block', color: 'error.main' }} data-testid="waiting-blocked">
                         {line.blocked_reason}

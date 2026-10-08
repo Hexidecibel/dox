@@ -333,7 +333,11 @@ export function OrderDocumentLines({ orderId, documents, canBuild, readOnly = fa
                         </Button>
                       </>
                     )}
-                    {canBuild && !(readOnly && ['pending_qa', 'releasing', 'released'].includes(line.release_status)) && (
+                    {canBuild &&
+                      // Nobody takes a line out from under a release in progress, and a
+                      // read-only account does not undo what QA is looking at or decided.
+                      line.release_status !== 'releasing' &&
+                      !(readOnly && ['pending_qa', 'released', 'refused'].includes(line.release_status)) && (
                       <>
                         <Tooltip title="Look again for the current document">
                           <span>

@@ -32,6 +32,26 @@ const STATUS_COLOR: Record<OrderSendStatus, 'success' | 'warning' | 'error'> = {
   failed: 'error',
 };
 
+/**
+ * The chip a send leads with. Read from `outcome`, which the server derives
+ * from the per-email record: a send in which nothing left because everything
+ * was withdrawn is NOT "Not sent" waiting for a retry and is never "Sent".
+ */
+export function sendChip(s: OrderSendSummary): { label: string; color: 'success' | 'warning' | 'error' | 'default' } {
+  const kind = s.kind ?? 'send';
+  if (kind === 'qa_request') return { label: 'Asked QA', color: 'warning' };
+  if (kind === 'qa_release') {
+    if (s.status === 'sent') return { label: 'Released by QA', color: 'success' };
+    if (s.parts[0]?.code === 'undone') return { label: 'Release undone', color: 'error' };
+    if (s.status === 'partial') return { label: 'Release did not finish', color: 'error' };
+    return { label: 'Release not sent', color: 'error' };
+  }
+  const outcome = s.outcome ?? s.status;
+  if (outcome === 'withdrawn') return { label: 'Withdrawn, nothing sent', color: 'default' };
+  if (outcome === 'sent_rest_withdrawn') return { label: 'Partly sent, the rest withdrawn', color: 'warning' };
+  return { label: STATUS_LABEL[s.status], color: STATUS_COLOR[s.status] };
+}
+
 /** How a file left, in words. A link is one of two kinds and they are never confused. */
 export function describeDelivery(f: Pick<OrderSendFileRecord, 'delivery' | 'link_days'>): string {
   if (f.delivery !== 'link') return 'attached';
@@ -74,7 +94,10 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
         </Alert>
       )}
       {sends.map((s) => {
-        const failedParts = s.parts.filter((p) => !p.ok);
+        // An email that was withdrawn did not fail: nothing was left to put in it.
+        const failedParts = s.parts.filter((p) => !p.ok && !p.withdrawn);
+        const chip = sendChip(s);
+        const outcome = s.outcome ?? s.status;
         // Document orders (0138): a send that only asked QA, and the mail a QA
         // release produced, are their own kinds and are worded as what they are.
         const kind = s.kind ?? 'send';
@@ -82,23 +105,7 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
         return (
           <Paper key={s.id} variant="outlined" sx={{ p: 2 }} data-testid="order-send-card" data-kind={kind}>
             <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: 'wrap', mb: 0.5 }}>
-              {kind === 'qa_request' ? (
-                <Chip size="small" color="warning" label="Asked QA" />
-              ) : (
-                <Chip
-                  size="small"
-                  color={STATUS_COLOR[s.status]}
-                  label={
-                    kind === 'qa_release'
-                      ? s.status === 'sent'
-                        ? 'Released by QA'
-                        : s.status === 'partial'
-                          ? 'Release did not finish'
-                          : 'Release not sent'
-                      : STATUS_LABEL[s.status]
-                  }
-                />
-              )}
+              <Chip size="small" color={chip.color} label={chip.label} data-testid="order-send-chip" />
               <Typography variant="body2" sx={{ fontWeight: 600 }}>
                 {showOrder ? (
                   <>
@@ -146,6 +153,13 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
               </Typography>
             ))}
 
+            {(outcome === 'withdrawn' || outcome === 'sent_rest_withdrawn') && (
+              <Alert severity="info" sx={{ mt: 1 }} data-testid="order-send-withdrawn">
+                {outcome === 'withdrawn'
+                  ? 'No email left on this send, and none will: every document in it was refused, removed or changed after it was reviewed. Send the order again to send what is on it now.'
+                  : 'Part of this send reached the customer. The rest was withdrawn: those documents were refused, removed or changed after it was reviewed. There is nothing left to resend.'}
+              </Alert>
+            )}
             {failedParts.length > 0 && (
               <Alert
                 severity={s.status === 'failed' ? 'error' : 'warning'}
@@ -165,7 +179,9 @@ export function OrderSendHistory({ sends, showOrder = false, onChanged }: OrderS
                   ) : undefined
                 }
               >
-                {kind === 'qa_release' && s.status === 'partial'
+                {kind === 'qa_release' && s.parts[0]?.code === 'undone'
+                  ? ''
+                  : kind === 'qa_release' && s.status === 'partial'
                   ? 'This release did not finish, and it is not known whether the email reached the customer. The documents show as "release did not finish" until QA releases them again or puts them back.'
                   : kind === 'qa_release'
                   ? 'The release email did not go, so nothing reached the customer. The documents are waiting for QA again.'

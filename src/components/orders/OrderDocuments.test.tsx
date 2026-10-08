@@ -291,6 +291,21 @@ describe('OrderDocumentLines', () => {
     expect(screen.queryByTestId('order-document-give-back')).not.toBeInTheDocument();
   });
 
+  it('nobody is offered remove or refresh on a line in the middle of a release, and a reader not on a refused one', () => {
+    const { rerender } = render(
+      wrap(<OrderDocumentLines {...props} canRelease documents={[docLine({ ...WAITING, release_status: 'releasing', release_stuck: true })]} />),
+    );
+    expect(screen.queryByTestId('order-document-remove')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('order-document-refresh')).not.toBeInTheDocument();
+
+    const refused = docLine({ ...WAITING, release_status: 'refused', disposition: 'will_not_go', disposition_reason: 'refused' });
+    rerender(wrap(<OrderDocumentLines {...props} readOnly documents={[refused]} />));
+    expect(screen.queryByTestId('order-document-remove')).not.toBeInTheDocument();
+    // Somebody who may send still can.
+    rerender(wrap(<OrderDocumentLines {...props} documents={[refused]} />));
+    expect(screen.getByTestId('order-document-remove')).toBeInTheDocument();
+  });
+
   it('a read-only account is not offered remove or refresh on a line that is waiting or released', () => {
     render(
       wrap(
@@ -649,6 +664,52 @@ describe('OrderSendHistory with document orders', () => {
     expect(screen.queryByTestId('order-send-resend')).not.toBeInTheDocument();
   });
 
+  it('a send in which nothing left reads "Withdrawn, nothing sent", never "Sent", and offers no resend', () => {
+    const r = record({
+      kind: 'send', status: 'failed', outcome: 'withdrawn', can_resend: false,
+      parts: [{ part_number: 1, ok: false, status: 0, error: null, sent_at: null, attempts: 2, withdrawn: true, note: 'Nothing was left to send in this email, so no email was sent.' }],
+    });
+    r.files[0] = { ...r.files[0], sent_ok: false, not_sent_reason: 'Hazard-plan_1.pdf was not sent again: its line was taken off the order.' };
+    render(wrap(<OrderSendHistory sends={[r]} />));
+    expect(screen.getByTestId('order-send-chip')).toHaveTextContent('Withdrawn, nothing sent');
+    expect(screen.getByTestId('order-send-chip')).not.toHaveTextContent(/^Sent$/);
+    expect(screen.getByTestId('order-send-withdrawn')).toHaveTextContent('No email left on this send');
+    expect(screen.queryByTestId('order-send-resend')).not.toBeInTheDocument();
+    // It did not "fail": nothing says the customer may still get it on a retry.
+    expect(screen.queryByText('Nothing reached the customer.')).not.toBeInTheDocument();
+  });
+
+  it('some emails went and the rest were withdrawn: said as that, with nothing left to resend', () => {
+    const r = record({
+      kind: 'send', status: 'partial', outcome: 'sent_rest_withdrawn', can_resend: false, part_count: 2,
+      parts: [
+        { part_number: 1, ok: true, status: 200, error: null, sent_at: 'x', attempts: 1 },
+        { part_number: 2, ok: false, status: 0, error: null, sent_at: null, attempts: 2, withdrawn: true },
+      ],
+    });
+    render(wrap(<OrderSendHistory sends={[r]} />));
+    expect(screen.getByTestId('order-send-chip')).toHaveTextContent('Partly sent, the rest withdrawn');
+    expect(screen.getByTestId('order-send-withdrawn')).toHaveTextContent('There is nothing left to resend');
+    expect(screen.queryByTestId('order-send-resend')).not.toBeInTheDocument();
+  });
+
+  it('a release somebody else put back mid-flight says who, and is not "Released"', () => {
+    const error = 'The email was sent, but Org Admin put this release back while it was going out, and its link was withdrawn. The customer holds a link that no longer opens. The documents are waiting for QA again.';
+    render(
+      wrap(
+        <OrderSendHistory
+          sends={[record({ status: 'failed', parts: [{ part_number: 1, ok: false, status: 200, error, sent_at: 'x', attempts: 1, code: 'undone', undone_by_name: 'Org Admin' }] })]}
+        />,
+      ),
+    );
+    const card = screen.getByTestId('order-send-card');
+    expect(screen.getByTestId('order-send-chip')).toHaveTextContent('Release undone');
+    expect(card).toHaveTextContent('Org Admin put this release back');
+    expect(card).not.toHaveTextContent('Released by QA');
+    // Not the plain "did not go" wording: the email DID go.
+    expect(card).not.toHaveTextContent('The release email did not go');
+  });
+
   it('a file a resend left out says why', () => {
     const r = record({ kind: 'send' });
     r.files[0] = { ...r.files[0], sent_ok: false, not_sent_reason: 'Hazard-plan_1.pdf was not sent again: QA has since refused it for this order.' };
@@ -722,6 +783,7 @@ describe('OrdersWaitingForQa', () => {
       version_number: 3, document_approved_at: '2026-06-01 09:00:00', pending_send_id: 'send-9', release_status: 'pending_qa', stuck: false,
       sharing_rule: 'qa', requested_by_name: 'Dana Reid', requested_at: '2026-10-08 11:00:00',
       recipients: ['buyer@harborbakery.example'], private_label: false, advisory: null, releasable: true, blocked_reason: null,
+      earlier_refusals: [],
       ...over,
     };
   }
@@ -786,6 +848,20 @@ describe('OrdersWaitingForQa', () => {
       document_id: 'd2',
       pending_send_id: 'send-9',
     });
+  });
+
+  it('an earlier refusal of the same ask on the same order is shown on the list and in the release dialog', async () => {
+    mocks.pending.mockResolvedValue({
+      can_release: true,
+      count: 1,
+      lines: [pendingLine({ earlier_refusals: [{ by_name: 'Quinn Lee', at: '2026-10-07 09:00:00', note: 'Superseded. Use the 2026 plan.', document_id: 'd2' }] })],
+    });
+    render(wrap(<OrdersWaitingForQa />));
+    const before = await screen.findByTestId('waiting-earlier-refusal');
+    expect(before).toHaveTextContent('Refused before on this order by Quinn Lee');
+    expect(before).toHaveTextContent('Superseded. Use the 2026 plan.');
+    await userEvent.click(screen.getByTestId('waiting-release'));
+    expect(await screen.findByTestId('release-earlier-refusal')).toHaveTextContent('Superseded. Use the 2026 plan.');
   });
 
   it('a line that changed since the list was opened is said, and the list reloads', async () => {
