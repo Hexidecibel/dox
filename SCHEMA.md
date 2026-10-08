@@ -7,7 +7,7 @@ Source: live `sqlite_master` read from LOCAL D1.
 Migration history lives in `docs/migration-history.md` (compact table in `CLAUDE.md`); this file is the *current state*.
 Regenerate after every migration: `./bin/schema-doc`
 
-Objects: 147 tables, 2 views, 265 indexes, 47 triggers.
+Objects: 148 tables, 2 views, 269 indexes, 47 triggers.
 
 ## Core documents & versions
 
@@ -1814,6 +1814,42 @@ Indexes: `idx_intake_duplicates_decision_document`, `idx_intake_duplicates_docum
   FOREIGN KEY (tenant_id, owner_key) REFERENCES owner_labels(tenant_id, owner_key) ON DELETE CASCADE
 ```
 
+### `order_documents`
+
+```sql
+  id TEXT PRIMARY KEY
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+  order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE
+  product_id TEXT NOT NULL REFERENCES products(id)
+  supplier_id TEXT NOT NULL REFERENCES suppliers(id)
+  document_type_id TEXT NOT NULL REFERENCES document_types(id)
+  document_id TEXT REFERENCES documents(id)
+  version_number INTEGER
+  resolution TEXT NOT NULL CHECK (resolution IN ('found', 'missing', 'expired'))
+  resolution_note TEXT
+  document_due_date TEXT
+  resolved_at TEXT NOT NULL DEFAULT (datetime('now'))
+  rule_at_resolve TEXT
+  release_status TEXT NOT NULL DEFAULT 'none' CHECK (release_status IN ('none', 'pending_qa', 'released', 'refused'))
+  pending_send_id TEXT
+  pending_at TEXT
+  pending_requested_by TEXT
+  decided_by TEXT
+  decided_at TEXT
+  decision_note TEXT
+  qa_notified_at TEXT
+  qa_notified_cause TEXT
+  export_link_id TEXT
+  last_send_id TEXT
+  last_sent_at TEXT
+  added_by TEXT NOT NULL REFERENCES users(id)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  UNIQUE(order_id, product_id, supplier_id, document_type_id)
+```
+
+Indexes: `idx_order_documents_document`, `idx_order_documents_order`, `idx_order_documents_pending`, `idx_order_documents_supplier`
+
 ### `order_send_files`
 
 ```sql
@@ -1836,6 +1872,8 @@ Indexes: `idx_intake_duplicates_decision_document`, `idx_intake_duplicates_docum
   export_link_id TEXT
   sent_ok INTEGER NOT NULL DEFAULT 0
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  order_document_ids TEXT
+  link_days INTEGER
 ```
 
 Indexes: `idx_order_send_files_document`, `idx_order_send_files_send`
@@ -1858,6 +1896,7 @@ Indexes: `idx_order_send_files_document`, `idx_order_send_files_send`
   status TEXT NOT NULL CHECK (status IN ('sent', 'partial', 'failed'))
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  kind TEXT
 ```
 
 Indexes: `idx_order_sends_order`, `idx_order_sends_sender`, `idx_order_sends_tenant`

@@ -48,7 +48,7 @@ silent-apply, and eventually full auto-ingest.
 
 ### The sharing rule on every exit (C-003, step 1d, release A of two)
 
-**Status:** done — built 2026-10-08 (migration 0137 sharing_rule). Not yet deployed. Release B (document orders, migration 0138) is NOT built.
+**Status:** done — built 2026-10-08 (migration 0137 sharing_rule), shipped as v2.30.0. Release B (document orders, migration 0138) is built: see the next entry.
 
 **Source:** AJ Conner's finish-line order, 2026-10-06: sales builds a document order and each
 document leaves according to a sharing rule (send freely / needs QA approval / locked). We told him
@@ -69,8 +69,32 @@ in `docs/decision-log.md`; full notes in `docs/feature-notes.md` under "Sharing 
 deploys; after the deploy, `bin/backfill-sharing-rules --tenant <id> --remote` (dry run, then
 `--apply`) per tenant. Release note reach tokens: the rule is `[existing]`, the QA route `[config]`.
 
-**Next (release B):** document orders — `order_documents`, the current-document resolver, a held
-"pending QA" release with a QA notice, the private-label advisory (C-043, C-044).
+**Release B:** document orders, built as migration 0138 - the entry below.
+
+### Document orders (C-043 / C-044, step 1d, release B of two)
+
+**Status:** done — built 2026-10-08 (migration 0138 order_documents). Not yet deployed.
+
+**Source:** AJ Conner's finish-line order, 2026-10-06: "Same order record you just agreed to for
+manual COA fulfillment, used by sales for documents that are already in the portal." An order is
+internal, for documents on file; a request stays the external ask to a supplier. Decisions C-043,
+C-044, C-047..C-058 in `docs/decision-log.md`; full notes in `docs/feature-notes.md` under
+"Document Orders (migration 0138)".
+
+- `migrations/0138_order_documents.sql`: `order_documents` (one line per order, item, supplier, type), `order_sends.kind`, `order_send_files.order_document_ids` / `link_days`. Additive.
+- `shared/currentDocument.ts` (pure ranking) + `functions/lib/current-document.ts`: the item's own document before the supplier's, newest, an expired newest reported expired, a stated tie-break.
+- `shared/orderDocuments.ts` (pure): the three groups (`judgeOrderDocumentLine`), the private-label advisory.
+- `functions/lib/order-documents.ts`: add (approved pairs only, `dry_run`), remove, refresh, the judged read, the waiting list. `functions/lib/order-document-notices.ts`: QA told once per line per cause. `functions/lib/order-document-release.ts`: release (claim, link in the releaser's name, one mail per act) and refuse (note required).
+- `functions/lib/order-send.ts`: document lines in the one plan and the one gate; one 30-day link beside the attachments; COA-typed lines attached; a send that only asks QA; the fingerprint and the delivered check cover the lines.
+- Routes: `POST / GET /api/orders/:id/documents`, `DELETE .../:lineId`, `POST .../:lineId/refresh | release | refuse`, `POST .../documents/release`, `GET /api/order-documents/pending`. `POST /api/orders` opens to every login.
+- `mergeSuppliers` moves document lines.
+- Screens: Order > Documents + "Add documents for items", the three groups on Review and send, Waiting for QA (`/orders/waiting-for-qa`, in the rail for releasers with a count).
+- Tests: `tests/unit/currentDocument.test.ts`, `tests/api/order-documents.test.ts`, `tests/api/migration-0138-order-documents.test.ts`, `src/components/orders/OrderDocuments.test.tsx`.
+
+**To ship:** `bin/backup`, then 0138 on staging and prod with `bin/migrate-prod-one` BEFORE the code
+deploys (`GET /api/orders/:id` reads the new table on every order). Release note reach tokens:
+document orders are `[existing]`; QA being told by mail needs the `QA` owner route, `[config]`.
+Nobody has clicked through these screens in a browser.
 
 ### One file is not one document — detect a supplier packet, propose the split, let a human decide (AJ's packet, 2026-09-16)
 
