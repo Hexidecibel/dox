@@ -186,13 +186,19 @@ export function BundleDetail() {
     setDownloadWarning('');
     try {
       const res = await api.bundles.download(id, bundle?.name || 'bundle');
+      const titles = new Map(items.map((i) => [i.document_id, i.document_title ?? null]));
+      const parts: string[] = [];
       if (res.refused.length > 0) {
-        const titles = new Map(items.map((i) => [i.document_id, i.document_title ?? null]));
-        setDownloadWarning(
-          describeRefusals(res.refused.map((r) => ({ title: titles.get(r.document_id), reason: r.reason }))) +
-            ' The archive lists them in NOT-INCLUDED.txt.',
+        parts.push(describeRefusals(res.refused.map((r) => ({ title: titles.get(r.document_id), reason: r.reason }))));
+      }
+      const lost = res.unavailable_ids ?? [];
+      if (lost.length > 0) {
+        const names = lost.map((id) => titles.get(id) || 'Untitled document').join(', ');
+        parts.push(
+          `${lost.length} file${lost.length === 1 ? ' is' : 's are'} not in storage and ${lost.length === 1 ? 'was' : 'were'} left out: ${names}.`,
         );
       }
+      if (parts.length > 0) setDownloadWarning(`${parts.join(' ')} The archive lists them in NOT-INCLUDED.txt.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The bundle could not be downloaded');
     } finally {

@@ -63,6 +63,7 @@ in `docs/decision-log.md`; full notes in `docs/feature-notes.md` under "Sharing 
 - Screens: rule select + chip on Document Types, rule + Change on the document page, refusals named in the search selection bar and on the bundle page, a count on the recipient page.
 - `bin/backfill-sharing-rules` for types that predate 0137 (dry run by default).
 - The guard: `tests/unit/exitRegister.test.ts` + `exitRegister.allow.ts`. Tests: `tests/unit/sharingRule.test.ts`, `tests/api/sharing-rule-exits.test.ts`.
+- After an independent review (same day): a change of a document's TYPE is checked like an override (`planDocumentRuleChange`, C-046); types are tenant-checked; the queue and arrival file routes ask a key on the staging read too; a key never loosens a rule; a public link serves `qa` only on its minter's authority (C-045); the bundle ZIP drops deleted documents and states missing files; the exit register pins a per-file signature. Regression tests: `tests/api/sharing-rule-bypasses.test.ts`.
 
 **To ship:** `bin/backup`, then 0137 on staging and prod with `bin/migrate-prod-one` BEFORE the code
 deploys; after the deploy, `bin/backfill-sharing-rules --tenant <id> --remote` (dry run, then

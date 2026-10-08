@@ -66,6 +66,8 @@ describe('DocumentSharingRule', () => {
     );
     expect(screen.getByText('Locked')).toBeInTheDocument();
     expect(screen.getByText('this document has no type')).toBeInTheDocument();
+    // And says who can change that: typing it is an administrator's act now.
+    expect(screen.getByTestId('sharing-no-type-hint')).toHaveTextContent('Only an administrator');
   });
 
   it('shows who set an override, when and why', () => {

@@ -1538,6 +1538,15 @@ paths:
         required when it changes (400 otherwise), and only an admin may move a
         document off `locked`. Audited as `document.sharing_rule_overridden`
         with the reason. Sending the value already in force is not a change.
+
+        `document_type_id` and `categories` change the document's TYPE, and the
+        type carries the sharing rule, so they are checked the same way: a
+        change that LOOSENS the effective rule needs an administrator (off
+        `locked`, which includes typing a document that has no type) or a QA
+        releaser (`qa` to `free`), and is never made with an API key; 403
+        `sharing_rule_change_refused` otherwise, and nothing is written. The
+        type must belong to the document's organization (400). Any move of the
+        effective rule is audited as `document.sharing_rule_changed`.
       parameters:
         - name: id
           in: path
@@ -3090,9 +3099,11 @@ paths:
         approval has moved the bytes, serves the linked document's current
         version instead. `X-File-Source` says which (`upload` | `document`).
 
-        Sharing rule (migration 0137): the `document` branch serves an approved
-        document, so an API key reads it only when that document is `free`
-        (403 `sharing_rule_refused` otherwise). A logged-in person is not asked.
+        Sharing rule (migration 0137): once the arrival has become a document,
+        an API key reads the bytes only when that document is `free` (403
+        `sharing_rule_refused` otherwise), whichever object serves them. An
+        arrival that is still only an arrival, and a logged-in person, are not
+        asked.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
@@ -4859,7 +4870,13 @@ paths:
               schema: { type: integer }
             X-Bundle-Refused-Ids:
               schema: { type: string, example: "9f2c:locked,41ab:needs_qa" }
-        '400': { description: The bundle has no items, or no file could be retrieved }
+            X-Bundle-Unavailable:
+              schema: { type: integer }
+              description: Documents left out because storage does not hold the file.
+            X-Bundle-Unavailable-Ids:
+              schema: { type: string }
+              description: Present when any were. Comma separated document ids.
+        '400': { description: The bundle has no items (a deleted document is not one), or no file could be retrieved }
         '403':
           description: The sharing rule kept every document back
           content:
@@ -5467,8 +5484,9 @@ paths:
         The sharing rule is re-read on every request (migration 0137): a
         document that has been LOCKED since the link was sent is no longer
         listed or served, here or on the two file routes below. A `qa` document
-        stays served: the send was its approval. `unavailable_count` says how
-        many documents the link was sent with that it no longer serves (locked
+        is served only while the person who minted the link can still release
+        QA documents (decision C-045). `unavailable_count` says how many
+        documents the link was sent with that it no longer serves (withheld
         or removed), and nothing about which or why.
       security: []
       parameters:

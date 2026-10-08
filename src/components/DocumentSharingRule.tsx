@@ -118,6 +118,11 @@ export function DocumentSharingRule({ documentId, sharing, onChanged }: Props) {
       <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 0.5 }}>
         {SHARING_RULE_HELP[sharing.rule]}
       </Typography>
+      {sharing.source === 'no_type' && (
+        <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 0.5 }} data-testid="sharing-no-type-hint">
+          Give it a document type to change this. Only an administrator can move a document off Locked.
+        </Typography>
+      )}
       {sharing.override && (
         <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 0.5 }}>
           Set{sharing.override_by_name ? ` by ${sharing.override_by_name}` : ''}

@@ -1895,11 +1895,11 @@ and the documents. Nobody releases `locked`.
 |---|---|---|
 | `POST /api/document-exports/zip` | 200; `manifest.csv` has a "Not included" block; headers `X-Export-Refused: N` and `X-Export-Refused-Ids: id:reason,...` | 403 |
 | `POST /api/document-exports/send` | 200; `refused[]` in the body (each with `document_id`, `title`, `rule`, `reason`, `message`); nothing refused is on the link | 403; no link is minted, no mail sent |
-| `GET /api/bundles/:id/download` | 200; `NOT-INCLUDED.txt` in the archive; headers `X-Bundle-Refused`, `X-Bundle-Refused-Ids` | 403 |
+| `GET /api/bundles/:id/download` | 200; `NOT-INCLUDED.txt` in the archive; headers `X-Bundle-Refused`, `X-Bundle-Refused-Ids` (and `X-Bundle-Unavailable`, `X-Bundle-Unavailable-Ids` for a file missing from storage; a deleted document is not served) | 403 |
 | `GET /api/orders/:id/send-preview`, `POST .../send` | the line is in `lines_not_sent` with `sharing_refusal` and the reason; the order is not marked delivered | preview `blocked.code = nothing_to_send`; send 400 |
 | `POST /api/orders/:id/sends/:sendId/resend` | each file is re-checked before its bytes are read, for whoever is pressing resend; a refused file fails its part with the reason | - |
 | public link reads | a document locked since the send is not listed or served; `unavailable_count` says how many are gone | 404 on the ZIP |
-| single file with an API key | - | 403 |
+| single file with an API key (`documents/:id/download`, and `queue/:id/file` / `request-uploads/:id/file` once the item or arrival has become a document) | - | 403 |
 
 Every 403 from the rule has `code: "sharing_rule_refused"` and, for the multi
 document exits, `refused[]`; the `error` sentence names each document under its
@@ -1911,8 +1911,13 @@ that are not on the order. When the whole certificate may not go, the order
 sends each lot's own page instead and the review screen says so.
 
 **A link already sent.** The rule is re-read on every read of a public export
-link. A `qa` document stays served (the send was its approval); a document that
-is `locked` now is withheld.
+link, on the authority of the person who minted it. A `qa` document is served
+only while that person can still release QA documents: a link an ordinary user
+sent while the document was "send freely" stops serving it once it becomes
+`qa`, and so does a link whose sender has lost the QA route or been
+deactivated. That includes the never-expiring link an order send mints for an
+oversize file. A document that is `locked` now is never served. Either way it
+is counted in `unavailable_count`.
 
 **Setting it.**
 
@@ -1931,9 +1936,30 @@ curl -X PUT http://localhost:8788/api/documents/DOC_ID \
 
 `POST /api/document-types` takes an optional `sharing_rule`; left out, the rule
 is proposed from the name. `PUT` refuses `null` (a type is not set back to "not
-stored"). On a document, only an administrator may move it OFF `locked` - by
-choosing another rule or by clearing an override that locked it - so the person
-who may release `qa` cannot relabel a locked document and then release it.
+stored"), and renaming a type that has no stored rule writes down the rule it
+was read as first, so a rename never moves the rule.
+
+**Changing a document's TYPE changes its rule, and is checked the same way.**
+The rule before and after the whole change is compared, on every route that
+writes a document's type: `PUT /api/documents/:id` (`document_type_id`, and
+`categories`, whose primary becomes the type), the upsert of
+`POST /api/documents/ingest` and `/ingest-url`, and "Replace existing" in the
+Review Queue.
+
+| the change | who may make it |
+|---|---|
+| tightens the rule, or leaves it where it was | whoever may edit the document |
+| `qa` to `free` | a QA releaser (which includes administrators) |
+| off `locked` (a document with no type is locked) | an administrator of the organization only |
+| any loosening, of a document or of a type's `sharing_rule` | never an API key, whoever owns it |
+
+A refused change is `403` with `code: "sharing_rule_change_refused"` and the
+reason in words, and refuses the whole request: an ingest writes no version
+(send the file without `document_type_id` to add one and keep the type). A
+`document_type_id` must belong to the document's own organization (`400`
+otherwise); a document that already points at another organization's type is
+read as having no type. Every move of a document's effective rule is audited as
+`document.sharing_rule_changed` (`from`, `to`, `direction`, `cause`, `via`).
 `GET /api/documents/:id` returns `document.sharing`: `rule`, `source`
 (`override` / `no_type` / `type` / `type_name` / `unrecognised`), `type_rule`,
 the override with who / when / why, and `can_edit` / `can_unlock` for the caller.

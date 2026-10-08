@@ -2579,7 +2579,12 @@ export const api = {
     download: async (
       bundleId: string,
       fallbackName = 'bundle',
-    ): Promise<{ count: number; refused: { document_id: string; reason: SharingRefusalReason }[] }> => {
+    ): Promise<{
+      count: number;
+      refused: { document_id: string; reason: SharingRefusalReason }[];
+      /** Documents whose file storage does not hold: left out, and said. */
+      unavailable_ids: string[];
+    }> => {
       const token = localStorage.getItem(AUTH_TOKEN_KEY);
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -2605,6 +2610,7 @@ export const api = {
       return {
         count: Number(res.headers.get('X-Bundle-Documents') || 0),
         refused: parseRefusedHeader(res.headers.get('X-Bundle-Refused-Ids')),
+        unavailable_ids: (res.headers.get('X-Bundle-Unavailable-Ids') || '').split(',').filter(Boolean),
       };
     },
   },
