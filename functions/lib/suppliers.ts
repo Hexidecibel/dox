@@ -336,6 +336,77 @@ async function maybeAppendAlias(
   return true;
 }
 
+/**
+ * Move one loser's document order lines (0138) to the winner.
+ *
+ * `order_documents` is unique on (order, item, supplier, type), so a line the
+ * loser has on an order the winner ALSO has it on cannot simply move. One of
+ * the two is the same thing asked for twice -- but which one survives matters:
+ * a line may be waiting for QA, in the middle of a release, released, or
+ * refused, and the first cut deleted the loser's copy whatever it carried, and
+ * wrote nothing down.
+ *
+ *   - Only the loser's line carries a decision or a pending ask: it is kept
+ *     (moved to the winner) and the winner's bare line is the one removed.
+ *   - Otherwise the winner's line is kept -- including when BOTH carry one.
+ *   - Either way THE WHOLE ROW that was removed is returned for the
+ *     `supplier.merged` audit details with the id of the line that stood in
+ *     for it (C-037's rule: a merge only makes sure both are still written down).
+ *
+ * A database that has not run 0138 has no such table and has nothing to move;
+ * any other error is real and is not swallowed.
+ */
+async function moveOrderDocuments(
+  db: D1Database,
+  tenantId: string,
+  winnerId: string,
+  loserId: string,
+  reassigned: Record<string, number>,
+): Promise<Array<Record<string, unknown>>> {
+  let loserRows: Array<Record<string, unknown>>;
+  try {
+    const res = await db
+      .prepare('SELECT * FROM order_documents WHERE supplier_id = ? AND tenant_id = ? ORDER BY created_at, id')
+      .bind(loserId, tenantId)
+      .all<Record<string, unknown>>();
+    loserRows = res.results ?? [];
+  } catch (err) {
+    if (/no such table/i.test(err instanceof Error ? err.message : String(err))) return [];
+    throw err;
+  }
+
+  const carries = (row: Record<string, unknown>) => (row.release_status ?? 'none') !== 'none';
+  const dropped: Array<Record<string, unknown>> = [];
+  let moved = 0;
+  for (const loser of loserRows) {
+    const winner = await db
+      .prepare(
+        `SELECT * FROM order_documents
+          WHERE tenant_id = ? AND supplier_id = ? AND order_id = ? AND product_id = ? AND document_type_id = ?`,
+      )
+      .bind(tenantId, winnerId, loser.order_id, loser.product_id, loser.document_type_id)
+      .first<Record<string, unknown>>();
+    if (winner && !(carries(loser) && !carries(winner))) {
+      // The winner's line stands. The loser's is recorded, then removed.
+      await db.prepare('DELETE FROM order_documents WHERE id = ? AND tenant_id = ?').bind(loser.id, tenantId).run();
+      dropped.push({ ...loser, kept_order_document_id: winner.id });
+      continue;
+    }
+    if (winner) {
+      // Only the loser's line carries something: the winner's bare copy goes.
+      await db.prepare('DELETE FROM order_documents WHERE id = ? AND tenant_id = ?').bind(winner.id, tenantId).run();
+      dropped.push({ ...winner, kept_order_document_id: loser.id });
+    }
+    await db
+      .prepare('UPDATE order_documents SET supplier_id = ? WHERE id = ? AND tenant_id = ?')
+      .bind(winnerId, loser.id, tenantId)
+      .run();
+    moved += 1;
+  }
+  if (loserRows.length > 0) reassigned.order_documents = (reassigned.order_documents || 0) + moved;
+  return dropped;
+}
+
 export interface MergeSuppliersResult {
   winnerId: string;
   reassigned: Record<string, number>;
@@ -361,9 +432,10 @@ export interface MergeSuppliersResult {
  *   Facilities (0135): supplier_facilities, one per name; items re-pointed
  *   Document order lines (0138): order_documents, one per (order, item,
  *     supplier, type). Its supplier_id has NO ON DELETE action, so the loser
- *     could not be deleted at all while a line named it: the lines move, and
- *     where the winner already has the same line on the same order the
- *     winner's is the one kept.
+ *     could not be deleted at all while a line named it: the lines move
+ *     (`moveOrderDocuments`). Where both suppliers have the same line on the
+ *     same order, the one carrying a decision or a pending ask is kept, and
+ *     the other's whole row goes into the `supplier.merged` audit.
  *
  * THE REQUEST TABLES WERE MISSING FROM THIS LIST UNTIL 0133, and every one of
  * them references suppliers ON DELETE CASCADE. A merge therefore DELETED every
@@ -585,37 +657,9 @@ export async function mergeSuppliers(
     // winner already covers is recorded in the audit row below, never dropped.
     const droppedSpecWatch = await moveSpecWatch(db, tenantId, winnerId, loserId, reassigned);
 
-    // Document order lines (0138). UNIQUE(order, item, supplier, type): move
-    // what does not collide, and drop the loser's copy of a line the winner
-    // already has on the same order -- the same thing was asked for twice.
-    // Guarded: a database that has not run 0138 has no such table.
-    try {
-      const before = await db
-        .prepare('SELECT COUNT(*) AS c FROM order_documents WHERE supplier_id = ? AND tenant_id = ?')
-        .bind(loserId, tenantId)
-        .first<{ c: number }>();
-      const beforeN = before?.c ?? 0;
-      if (beforeN > 0) {
-        await db
-          .prepare('UPDATE OR IGNORE order_documents SET supplier_id = ? WHERE supplier_id = ? AND tenant_id = ?')
-          .bind(winnerId, loserId, tenantId)
-          .run();
-        const after = await db
-          .prepare('SELECT COUNT(*) AS c FROM order_documents WHERE supplier_id = ? AND tenant_id = ?')
-          .bind(loserId, tenantId)
-          .first<{ c: number }>();
-        const leftover = after?.c ?? 0;
-        if (leftover > 0) {
-          await db
-            .prepare('DELETE FROM order_documents WHERE supplier_id = ? AND tenant_id = ?')
-            .bind(loserId, tenantId)
-            .run();
-        }
-        reassigned.order_documents = (reassigned.order_documents || 0) + (beforeN - leftover);
-      }
-    } catch {
-      // Pre-0138 database.
-    }
+    // Document order lines (0138): moved, and where both suppliers have the
+    // same line on the same order, the one that carries a decision is kept.
+    const droppedOrderDocuments = await moveOrderDocuments(db, tenantId, winnerId, loserId, reassigned);
 
     // Renewal cycles (0133) are keyed (document, due date), not on the
     // supplier, so they move as they are. Guarded like the contacts below: a
@@ -770,6 +814,7 @@ export async function mergeSuppliers(
           ...(droppedLotSchemes.length > 0 ? { dropped_lot_schemes: droppedLotSchemes } : {}),
           ...(droppedSpecWatch.limits.length > 0 ? { dropped_spec_limits: droppedSpecWatch.limits } : {}),
           ...(droppedSpecWatch.analytes.length > 0 ? { dropped_required_analytes: droppedSpecWatch.analytes } : {}),
+          ...(droppedOrderDocuments.length > 0 ? { dropped_order_documents: droppedOrderDocuments } : {}),
         }),
         actor.ip
       );

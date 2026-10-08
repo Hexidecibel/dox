@@ -4,7 +4,10 @@
  *
  * Any login of the organization, a read-only account included: it is the
  * other half of building the order, and a person who added a line for the
- * wrong supplier must be able to take it back. The whole line goes into the
+ * wrong supplier must be able to take it back. EXCEPT that a read-only
+ * account may not remove a line that is waiting for QA, being released, or
+ * released (403): that would pull a document out from under QA's review, or
+ * erase a release from the order. Anybody who may send still can. The whole line goes into the
  * audit record. A line of another order, or of another organization, is a 404.
  */
 import { getClientIp } from '../../../../lib/db';
@@ -25,7 +28,7 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
     refuseStaged(order);
     await removeDocumentLine(
       context.env.DB,
-      { order, userId: user.id, clientIp: getClientIp(context.request) },
+      { order, userId: user.id, clientIp: getClientIp(context.request), role: user.role },
       context.params.lineId as string,
     );
     return json({ success: true });

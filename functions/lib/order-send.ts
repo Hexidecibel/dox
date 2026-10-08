@@ -101,11 +101,14 @@ import { judgeExit, sharingRefusalMessage, type ExitActor } from '../../shared/s
 import { loadOrderLines, type OrderWriteRow } from './order-items';
 import {
   countDocumentLinesBehind,
+  loadDocumentLineStates,
   loadJudgedOrderDocuments,
   markLinesPendingQa,
   markLinesSent,
   type JudgedOrderDocument,
 } from './order-documents';
+import { loadDocumentLiveFacts, todayIso } from './current-document';
+import { isPastDue } from '../../shared/currentDocument';
 import { notifyQaAboutOrderDocuments, type QaNoticeItem } from './order-document-notices';
 import { ORDER_DOCUMENT_LINK_DAYS } from '../../shared/orderDocuments';
 import { loadOrderCustomerContext } from './customer-coa';
@@ -612,7 +615,14 @@ export async function planOrderSend(
   // A send with nothing to put in front of the customer still does something
   // when it asks QA: it holds documents for release, or reports ones that are
   // missing or expired.
-  const asksQa = docsWaiting.length > 0 || documentNotices.length > 0;
+  //
+  // ONLY SOMETHING NEW COUNTS (C-053, C-059). A line already waiting for QA is
+  // not asked for again and is NOT re-pointed at this send: its asking send and
+  // its recipients are fixed. So a send with nothing to go and nothing new for
+  // QA is refused as "nothing to send" -- it would mail nobody and change
+  // nothing, and the first cut let it silently move where a release would go.
+  const docsNewlyWaiting = docsWaiting.filter((x) => x.l.row.release_status === 'none');
+  const asksQa = docsNewlyWaiting.length > 0 || documentNotices.length > 0;
 
   const warnings: string[] = [];
   if (linesNotSent.length > 0) {
@@ -760,7 +770,7 @@ export async function planOrderSend(
     documents:
       documentLines.length > 0
         ? {
-            pending_line_ids: docsWaiting.map((x) => x.l.row.id),
+            pending_line_ids: docsNewlyWaiting.map((x) => x.l.row.id),
             notices: documentNotices,
             going: docsGoNow.length,
             not_sent: docsNotGoing.length,
@@ -928,6 +938,8 @@ interface StoredFile {
   order_document_ids?: string | null;
   /** Days a link file's link lives; NULL = an oversize file's non-expiring link. */
   link_days?: number | null;
+  /** Why a resend left this file out (0138), or NULL. */
+  not_sent_reason?: string | null;
 }
 
 interface StoredSend {
@@ -1011,6 +1023,91 @@ interface PartsRun {
   results: OrderSendPartResult[];
   /** `qa` documents that went in this run because the actor is a QA releaser. */
   qaReleasedIds: string[];
+  /** Files this run left out because their document line no longer asks for them. */
+  withdrawn: { file_name: string; reason: string }[];
+}
+
+/**
+ * A stored file that came from a DOCUMENT LINE, judged against that line as
+ * it stands NOW (C-061). A resend rebuilds from the stored record, which may
+ * be days old; since then QA may have refused the document for this order, the
+ * line may have been taken off, or it may hold a different document. The first
+ * cut asked only the sharing rule, so a resend carried a document QA had
+ * refused and then marked the refused line released.
+ *
+ *   valid      the lines this file still stands for, each with the document
+ *              that travels (never a line that now holds something else);
+ *   withdraw   set when the file must NOT be resent, in words. It is left out
+ *              of the email and the reason is stored on the file.
+ *
+ * A file that ALSO stands for a COA line of the order (the same document
+ * picked as a certificate) is kept for that line whatever its document lines
+ * say: COA picks keep the behaviour they had.
+ */
+async function documentLineFileVerdict(
+  db: D1Database,
+  send: StoredSend,
+  f: StoredFile,
+): Promise<{ valid: { lineId: string; documentId: string }[]; withdraw: string | null }> {
+  const lineIds = parseJsonArray<string>(f.order_document_ids);
+  if (lineIds.length === 0) return { valid: [], withdraw: null };
+  const own = parseJsonArray<string>(f.document_ids);
+  const docIds = own.length > 0 ? own : [f.document_id];
+  const states = await loadDocumentLineStates(db, send.tenant_id, send.order_id, lineIds);
+
+  const valid: { lineId: string; documentId: string }[] = [];
+  const reasons: string[] = [];
+  for (const id of lineIds) {
+    const line = states.get(id);
+    if (!line) reasons.push('its line was taken off the order');
+    else if (!line.document_id || !docIds.includes(line.document_id)) reasons.push('its line now holds a different document');
+    else if (line.release_status === 'refused') reasons.push('QA has since refused it for this order');
+    else if (line.release_status === 'releasing') reasons.push('QA is releasing it separately');
+    else valid.push({ lineId: id, documentId: line.document_id });
+  }
+
+  // Does the file also stand for a COA line? Then it is that line's file too.
+  let coaLine = false;
+  if (f.delivery === 'attachment') {
+    // One file stands for a handful of documents; chunked all the same.
+    for (let i = 0; i < docIds.length && !coaLine; i += 80) {
+      const slice = docIds.slice(i, i + 80);
+      const hit = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM order_items
+            WHERE order_id = ? AND coa_document_id IN (${slice.map(() => '?').join(', ')})`,
+        )
+        .bind(send.order_id, ...slice)
+        .first<{ n: number }>();
+      coaLine = Number(hit?.n) > 0;
+    }
+  }
+  if (coaLine) return { valid, withdraw: null };
+
+  if (valid.length === 0) {
+    return { valid, withdraw: `${f.file_name} was not sent again: ${[...new Set(reasons)].join('; ')}.` };
+  }
+
+  // Still asked for. Is it still the document that was reviewed, and in date?
+  // The same test the resolver uses (`isPastDue` over `resolveRenewalExpiry`).
+  const live = await loadDocumentLiveFacts(db, send.tenant_id, valid.map((v) => v.documentId));
+  const today = todayIso();
+  for (const v of valid) {
+    const doc = live.get(v.documentId);
+    if (!doc || doc.status !== 'active') {
+      return { valid: [], withdraw: `${f.file_name} was not sent again: the document is no longer active.` };
+    }
+    if (isPastDue(doc.due_date, today)) {
+      return { valid: [], withdraw: `${f.file_name} was not sent again: the document has expired since this send was reviewed.` };
+    }
+    if (f.delivery === 'link' && f.version_number != null && Number(doc.current_version) !== Number(f.version_number)) {
+      return {
+        valid: [],
+        withdraw: `${f.file_name} was not sent again: the document has a new version since this send was reviewed. Send the order again to send it.`,
+      };
+    }
+  }
+  return { valid, withdraw: null };
 }
 
 /**
@@ -1073,11 +1170,45 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
   const previous = parseJsonArray<OrderSendPartResult>(send.parts);
   const results: OrderSendPartResult[] = [];
   const qaReleasedIds = new Set<string>();
+  const withdrawn: { file_name: string; reason: string }[] = [];
 
   for (const part of partNumbers) {
     const prior = previous.find((p) => p.part_number === part);
     const attempts = (prior?.attempts ?? 0) + 1;
-    const inPart = all.filter((f) => f.part_number === part);
+
+    // EACH DOCUMENT LINE'S FILE IS ASKED OF ITS LINE FIRST. One that the line
+    // no longer asks for is left out of this email, and says why; the rest of
+    // the email still goes. (A file an earlier resend left out stays out.)
+    const inPart: StoredFile[] = [];
+    const linesOfFile = new Map<string, { lineId: string; documentId: string }[]>();
+    for (const f of all.filter((x) => x.part_number === part && !x.not_sent_reason)) {
+      const verdict = await documentLineFileVerdict(db, send, f);
+      if (verdict.withdraw) {
+        await db
+          .prepare('UPDATE order_send_files SET not_sent_reason = ? WHERE id = ?')
+          .bind(verdict.withdraw, f.id)
+          .run();
+        f.not_sent_reason = verdict.withdraw;
+        withdrawn.push({ file_name: f.file_name, reason: verdict.withdraw });
+        continue;
+      }
+      linesOfFile.set(f.id, verdict.valid);
+      inPart.push(f);
+    }
+    if (inPart.length === 0) {
+      // Nothing is left to put in this email. No mail is sent, and the part is
+      // closed so it is not offered for resend for ever.
+      results.push({
+        part_number: part,
+        ok: true,
+        status: 0,
+        error: null,
+        sent_at: null,
+        attempts,
+        note: 'Nothing was left to send in this email, so no email was sent.',
+      });
+      continue;
+    }
     const attachedFiles = inPart.filter((f) => f.delivery === 'attachment');
     // Two kinds of link, never mixed: a certificate too large to attach rides
     // a link that does not expire (0134); a document order's documents ride
@@ -1214,22 +1345,31 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
       continue;
     }
     await db
-      .prepare('UPDATE order_send_files SET sent_ok = 1, export_link_id = COALESCE(?, export_link_id) WHERE send_id = ? AND part_number = ?')
+      .prepare(
+        `UPDATE order_send_files SET sent_ok = 1, export_link_id = COALESCE(?, export_link_id)
+          WHERE send_id = ? AND part_number = ? AND not_sent_reason IS NULL`,
+      )
       .bind(linkId, send.id, part)
       .run();
     if (documentsLinkId) {
       await db
-        .prepare('UPDATE order_send_files SET export_link_id = ? WHERE send_id = ? AND part_number = ? AND link_days IS NOT NULL')
+        .prepare(
+          `UPDATE order_send_files SET export_link_id = ?
+            WHERE send_id = ? AND part_number = ? AND link_days IS NOT NULL AND not_sent_reason IS NULL`,
+        )
         .bind(documentsLinkId, send.id, part)
         .run();
     }
-    // The document lines these files stood for went with this email.
-    const sentLineIds = inPart.flatMap((f) => parseJsonArray<string>(f.order_document_ids));
-    if (sentLineIds.length > 0) {
+    // The document lines these files STILL stand for went with this email --
+    // each named with the document that travelled, so a line that has moved on
+    // to another document is not touched.
+    const sentLines = inPart.flatMap((f) => linesOfFile.get(f.id) ?? []);
+    if (sentLines.length > 0) {
       try {
         await markLinesSent(db, {
           tenantId: send.tenant_id,
-          lineIds: sentLineIds,
+          orderId: send.order_id,
+          lines: sentLines,
           sendId: send.id,
           exportLinkId: documentsLinkId,
           actorUserId: ctx.actorUserId,
@@ -1267,7 +1407,7 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
     .run();
   send.parts = JSON.stringify(merged);
   send.status = status;
-  return { results, qaReleasedIds: [...qaReleasedIds] };
+  return { results, qaReleasedIds: [...qaReleasedIds], withdrawn };
 }
 
 /**
@@ -1282,6 +1422,9 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
  */
 async function markDeliveredIfSent(db: D1Database, send: StoredSend, actor: ExitActor): Promise<string | null> {
   if (send.status !== 'sent') return null;
+  // A send in which no email actually left delivered nothing: one that only
+  // asked QA, or a resend whose every file had been withdrawn.
+  if (!parseJsonArray<OrderSendPartResult>(send.parts).some((p) => p.ok && p.sent_at)) return null;
   const behind = await db
     .prepare(
       `SELECT COUNT(*) AS n
@@ -1532,7 +1675,7 @@ export async function executeOrderSend(
 export async function resendFailedParts(
   ctx: RunContext,
   args: { sendId: string; tenantId: string; actorId: string; clientIp: string | null },
-): Promise<{ orderStatus: string | null; attempted: number } | null> {
+): Promise<{ orderStatus: string | null; attempted: number; notResent: { file_name: string; reason: string }[] } | null> {
   const send = await ctx.db
     .prepare('SELECT * FROM order_sends WHERE id = ? AND tenant_id = ?')
     .bind(args.sendId, args.tenantId)
@@ -1540,10 +1683,10 @@ export async function resendFailedParts(
   if (!send) return null;
   // A QA release is not resent from its record: the release claimed lines and
   // gave them back when its mail failed, so the retry is pressing Release.
-  if (sendKind(send.kind) === 'qa_release') return { orderStatus: null, attempted: 0 };
+  if (sendKind(send.kind) === 'qa_release') return { orderStatus: null, attempted: 0, notResent: [] };
   const done = new Set(parseJsonArray<OrderSendPartResult>(send.parts).filter((p) => p.ok).map((p) => p.part_number));
   const failed = Array.from({ length: send.part_count }, (_, i) => i + 1).filter((n) => !done.has(n));
-  if (failed.length === 0) return { orderStatus: null, attempted: 0 };
+  if (failed.length === 0) return { orderStatus: null, attempted: 0, notResent: [] };
   const run = await runParts(ctx, send, failed);
   const delivered = await markDeliveredIfSent(ctx.db, send, ctx.actor);
   // The audit row names whoever pressed resend, which may be an admin rather
@@ -1558,7 +1701,7 @@ export async function resendFailedParts(
     resourceId: send.id,
     clientIp: args.clientIp,
   });
-  return { orderStatus: delivered, attempted: failed.length };
+  return { orderStatus: delivered, attempted: failed.length, notResent: run.withdrawn };
 }
 
 // ---------------------------------------------------------------------------
@@ -1643,6 +1786,7 @@ export async function loadOrderSends(
         document_title: f.document_title,
         lot_label: f.lot_label,
         sent_ok: Number(f.sent_ok) === 1,
+        ...(f.not_sent_reason ? { not_sent_reason: f.not_sent_reason } : {}),
         ...(f.delivery === 'link' ? { link_days: f.link_days ?? null } : {}),
         ...(f.order_document_ids ? { order_document_ids: parseJsonArray<string>(f.order_document_ids) } : {}),
       });

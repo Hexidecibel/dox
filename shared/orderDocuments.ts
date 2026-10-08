@@ -36,12 +36,28 @@ export const ORDER_DOCUMENTS_MAX_PER_REQUEST = 200;
 
 export const ORDER_DOCUMENT_REFUSE_NOTE_MAX = 500;
 
+/**
+ * A line `releasing` for longer than this did not finish: the Worker died
+ * between the claim and the record. Releases take seconds.
+ */
+export const ORDER_DOCUMENT_RELEASE_STUCK_MINUTES = 5;
+
+/** True when a `releasing` claim is old enough to be called unfinished. */
+export function releaseIsStuck(releasingAt: string | null | undefined, now: Date = new Date()): boolean {
+  if (!releasingAt) return true;
+  const s = releasingAt.trim();
+  const ms = Date.parse(s.includes('T') ? s : `${s.replace(' ', 'T')}Z`);
+  if (!Number.isFinite(ms)) return true;
+  return now.getTime() - ms > ORDER_DOCUMENT_RELEASE_STUCK_MINUTES * 60 * 1000;
+}
+
 /** The causes QA is told about, once per line each. */
 export type OrderDocumentQaCause = 'pending_qa' | 'missing' | 'expired';
 
 export const RELEASE_STATUS_LABELS: Record<OrderDocumentReleaseStatus, string> = {
   none: '',
   pending_qa: 'Waiting for QA',
+  releasing: 'Being released',
   released: 'Released by QA',
   refused: 'Refused by QA',
 };
@@ -87,6 +103,11 @@ export interface OrderDocumentLineFacts {
   is_coa_type: boolean;
   /** A fresh resolve finds a current, in-date document that is not the one on the line. */
   fresh_found: boolean;
+  /** When the line was put in front of QA, and for whom. Only read while it waits. */
+  pending_at?: string | null;
+  pending_recipients?: readonly string[];
+  /** A `releasing` claim that never finished. */
+  release_stuck?: boolean;
 }
 
 export interface OrderDocumentJudgement {
@@ -101,6 +122,23 @@ export interface OrderDocumentJudgement {
 }
 
 const REFRESH = 'Refresh the line to use it.';
+
+/**
+ * A line already in front of QA says since when and for whom, because neither
+ * changes: a later send of the order does not ask again and does not move the
+ * addresses the release will mail.
+ */
+export function alreadyWaitingText(
+  pendingAt: string | null | undefined,
+  recipients: readonly string[] | null | undefined,
+): string {
+  const day = humanDay(pendingAt ?? null);
+  const who = (recipients ?? []).filter(Boolean).join(', ');
+  return (
+    `Already waiting for QA${day ? ` since ${day}` : ''}${who ? `, for ${who}` : ''}. ` +
+    'Sending the order again does not ask again and does not change who it goes to.'
+  );
+}
 
 /** Decide one line. `actor` is the person asking, as `exitActorForRequest` built it. */
 export function judgeOrderDocumentLine(facts: OrderDocumentLineFacts, actor: ExitActor): OrderDocumentJudgement {
@@ -154,6 +192,21 @@ export function judgeOrderDocumentLine(facts: OrderDocumentLineFacts, actor: Exi
   if (verdict === 'locked') {
     return wont('locked', 'Locked. This document does not leave the organization.');
   }
+  // A release in progress (or one that did not finish) is QA's to complete.
+  // Nobody's send carries the document meanwhile, a releaser's included: two
+  // mails for one approval is what the claim exists to prevent.
+  if (facts.release_status === 'releasing') {
+    return {
+      disposition: 'waits_for_qa',
+      reason: null,
+      text: facts.release_stuck
+        ? 'A release of this document did not finish. QA can release it again or put it back in the waiting list. It has not been sent.'
+        : 'QA is releasing this document now.',
+      delivery: 'link',
+      qa_cause: null,
+      behind: true,
+    };
+  }
   if (verdict === 'needs_qa') {
     if (facts.release_status === 'released') {
       const day = humanDay(facts.decided_at);
@@ -169,7 +222,7 @@ export function judgeOrderDocumentLine(facts: OrderDocumentLineFacts, actor: Exi
       reason: null,
       text:
         facts.release_status === 'pending_qa'
-          ? 'Waiting for QA. When QA releases it, it is mailed to the addresses this order was sent to.'
+          ? alreadyWaitingText(facts.pending_at, facts.pending_recipients)
           : 'Needs QA approval. It is held for QA, and mailed to the same addresses once QA releases it.',
       delivery: 'link',
       qa_cause: 'pending_qa',

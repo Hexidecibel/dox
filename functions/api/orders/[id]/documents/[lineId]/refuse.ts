@@ -1,6 +1,8 @@
 /**
- * POST /api/orders/:id/documents/:lineId/refuse { note } — QA says no to one
- * held document (migration 0138).
+ * POST /api/orders/:id/documents/:lineId/refuse { note, document_id,
+ * pending_send_id } — QA says no to one held document (migration 0138). The
+ * document and the asking send are what QA saw; a line that has changed since
+ * is not refused (409).
  *
  * A NOTE IS REQUIRED: the person who ordered the document reads it on the
  * order, and "refused" with no reason sends them back to QA to ask. The line
@@ -38,6 +40,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       lineId: context.params.lineId as string,
       user,
       note: body?.note,
+      documentId: body?.document_id,
+      pendingSendId: body?.pending_send_id,
       clientIp: getClientIp(context.request),
     });
     return json({ success: true });

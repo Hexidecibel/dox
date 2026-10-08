@@ -267,6 +267,8 @@ export interface DocumentLiveFacts {
   has_file: boolean;
   due_date: string | null;
   document_type_name: string | null;
+  /** COALESCE(approved_at, created_at). */
+  approved_at: string | null;
 }
 
 /**
@@ -288,7 +290,7 @@ export async function loadDocumentLiveFacts(
       .prepare(
         `SELECT d.id AS document_id, d.title AS title, d.status AS status,
                 d.current_version AS version_number,
-                d.created_at AS created_at, d.created_at AS effective_at,
+                d.created_at AS created_at, COALESCE(d.approved_at, d.created_at) AS effective_at,
                 d.renewal_type AS renewal_type, d.renewal_due_date AS renewal_due_date,
                 d.renewal_interval_months AS renewal_interval_months, d.renewal_decision AS renewal_decision,
                 json_extract(d.primary_metadata, '$.document_expires_on') AS meta_document_expires_on,
@@ -315,6 +317,7 @@ export async function loadDocumentLiveFacts(
         has_file: Boolean(r.r2_key),
         due_date: dueDateOf(r),
         document_type_name: r.document_type_name,
+        approved_at: r.effective_at,
       });
     }
   }

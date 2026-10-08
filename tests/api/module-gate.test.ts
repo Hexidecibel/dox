@@ -174,8 +174,10 @@ describe('the middleware gate', () => {
       '/api/orders/xyz/documents/abc/refresh',
       '/api/orders/xyz/documents/abc/release',
       '/api/orders/xyz/documents/abc/refuse',
+      '/api/orders/xyz/documents/abc/give-back',
       '/api/orders/xyz/documents/release',
       '/api/order-documents/pending',
+      '/api/order-documents/pending?count=1',
     ]) {
       expect((await callChain(req(path), { user: regularUser() })).status, path).toBe(403);
     }

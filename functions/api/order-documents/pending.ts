@@ -17,9 +17,9 @@
  * Under the fulfillment module, like the orders the lines belong to.
  */
 import { BadRequestError, errorToResponse, requireTenantAccess } from '../../lib/permissions';
-import { listPendingOrderDocuments } from '../../lib/order-documents';
+import { countPendingOrderDocuments, listPendingOrderDocuments } from '../../lib/order-documents';
 import { exitActorForRequest } from '../../lib/sharing-rule';
-import type { PendingOrderDocumentsResponse } from '../../../shared/types';
+import type { PendingOrderDocumentsCount, PendingOrderDocumentsResponse } from '../../../shared/types';
 import type { Env, User } from '../../lib/types';
 
 function json(body: unknown, status = 200): Response {
@@ -37,6 +37,16 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     const actor = await exitActorForRequest(context.env.DB, context.data, user, tenantId);
     const canRelease = actor.method === 'jwt' && actor.canReleaseQa;
+
+    // `?count=1` is what the rail asks: ONE COUNT, none of the live judgement
+    // the list runs over every line.
+    if (url.searchParams.get('count') === '1') {
+      const body: PendingOrderDocumentsCount = {
+        can_release: canRelease,
+        count: canRelease ? await countPendingOrderDocuments(context.env.DB, tenantId) : 0,
+      };
+      return json(body);
+    }
     if (!canRelease) {
       const empty: PendingOrderDocumentsResponse = { can_release: false, count: 0, lines: [] };
       return json(empty);

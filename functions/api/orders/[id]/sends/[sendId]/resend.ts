@@ -125,6 +125,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       send: after,
       sent: after.status === 'sent',
       order_status: result.orderStatus ?? order.status,
+      // Files left out because the document line they came from no longer
+      // asks for them (refused, removed, re-pointed, expired). Said, per file.
+      ...(result.notResent.length > 0 ? { not_resent: result.notResent } : {}),
     };
     return json(response);
   } catch (err) {

@@ -38,7 +38,7 @@
  */
 
 import { generateId, logAudit } from './db';
-import { BadRequestError, NotFoundError } from './permissions';
+import { BadRequestError, ForbiddenError, NotFoundError } from './permissions';
 import { loadSharingRules } from './sharing-rule';
 import {
   currentDocumentKey,
@@ -54,6 +54,7 @@ import {
   ORDER_DOCUMENTS_MAX_PER_REQUEST,
   judgeOrderDocumentLine,
   privateLabelAdvisory,
+  releaseIsStuck,
   type OrderDocumentJudgement,
 } from '../../shared/orderDocuments';
 import { isPrivateLabel } from '../../shared/itemApproval';
@@ -100,6 +101,8 @@ export interface OrderDocumentRow {
   pending_send_id: string | null;
   pending_at: string | null;
   pending_requested_by: string | null;
+  releasing_at: string | null;
+  release_send_id: string | null;
   decided_by: string | null;
   decided_at: string | null;
   decision_note: string | null;
@@ -179,9 +182,15 @@ async function judgeRows(
   if (rows.length === 0) return [];
   const today = todayIso();
   const docIds = rows.map((r) => r.document_id).filter((id): id is string => Boolean(id));
-  const [live, rules, fresh] = await Promise.all([
+  const [live, rules, askingSends, fresh] = await Promise.all([
     loadDocumentLiveFacts(db, tenantId, docIds),
     loadSharingRules(db, tenantId, docIds),
+    // Who a waiting line's release would mail: the send that asked, exactly.
+    loadSendRecipients(
+      db,
+      tenantId,
+      rows.filter((r) => r.release_status === 'pending_qa' || r.release_status === 'releasing').map((r) => r.pending_send_id ?? ''),
+    ),
     resolveCurrentDocuments(
       db,
       tenantId,
@@ -199,6 +208,9 @@ async function judgeRows(
     const rule = row.document_id ? rules.get(row.document_id)?.rule ?? null : null;
     const now = fresh.get(currentDocumentKey(row)) ?? null;
     const expired = Boolean(doc && isPastDue(doc.due_date, today));
+    const waiting = row.release_status === 'pending_qa' || row.release_status === 'releasing';
+    const pendingRecipients = waiting ? askingSends.get(row.pending_send_id ?? '')?.recipients ?? [] : [];
+    const releaseStuck = row.release_status === 'releasing' && releaseIsStuck(row.releasing_at);
 
     // "Stale" = a fresh resolve would put a different document on the line, or
     // would now find one where there was none.
@@ -227,6 +239,9 @@ async function judgeRows(
         decided_at: row.decided_at,
         is_coa_type: looksLikeCoaType(row.document_type_name ?? ''),
         fresh_found: freshFound,
+        pending_at: row.pending_at,
+        pending_recipients: pendingRecipients,
+        release_stuck: releaseStuck,
       },
       actor,
     );
@@ -255,8 +270,12 @@ async function judgeRows(
       rule_at_resolve: parseSharingRule(row.rule_at_resolve),
       sharing_rule: rule,
       release_status: row.release_status,
+      pending_send_id: waiting ? row.pending_send_id : null,
       pending_at: row.pending_at,
       pending_requested_by_name: row.pending_requested_by_name,
+      pending_recipients: pendingRecipients,
+      document_approved_at: doc?.approved_at ?? null,
+      release_stuck: releaseStuck,
       decided_by_name: row.decided_by_name,
       decided_at: row.decided_at,
       decision_note: row.decision_note,
@@ -328,6 +347,25 @@ export interface OrderDocumentContext {
   order: OrderWriteRow;
   userId: string;
   clientIp: string | null;
+  /** The caller's role, for the one thing a read-only account may not do to a line. */
+  role?: string;
+}
+
+/**
+ * A READ-ONLY ACCOUNT BUILDS; IT DOES NOT UNDO WHAT QA IS LOOKING AT OR HAS
+ * DECIDED. A reader may add lines, and remove or refresh a line nothing has
+ * happened to. Once a line is waiting for QA, being released, or released, a
+ * reader taking it off (or re-resolving it, which resets it) would pull a
+ * document out from under QA's review or erase a release from the order.
+ * Everybody who may send may still do both.
+ */
+function refuseReaderOnDecidedLine(ctx: OrderDocumentContext, row: OrderDocumentRow, verb: string): void {
+  if (ctx.role !== 'reader') return;
+  if (row.release_status === 'pending_qa' || row.release_status === 'releasing' || row.release_status === 'released') {
+    throw new ForbiddenError(
+      `A read-only account cannot ${verb} a document that is waiting for QA or that QA has released. Ask somebody who can send the order.`,
+    );
+  }
 }
 
 function cleanIds(raw: unknown): string[] {
@@ -630,6 +668,7 @@ export async function loadOrderDocumentRow(
 
 export async function removeDocumentLine(db: D1Database, ctx: OrderDocumentContext, lineId: string): Promise<void> {
   const row = await loadOrderDocumentRow(db, ctx.order, lineId);
+  refuseReaderOnDecidedLine(ctx, row, 'remove');
   await db
     .prepare('DELETE FROM order_documents WHERE id = ? AND order_id = ? AND tenant_id = ?')
     .bind(row.id, ctx.order.id, ctx.order.tenant_id)
@@ -665,6 +704,7 @@ export async function refreshDocumentLine(
   lineId: string,
 ): Promise<{ changed: boolean }> {
   const row = await loadOrderDocumentRow(db, ctx.order, lineId);
+  refuseReaderOnDecidedLine(ctx, row, 'refresh');
   const ask: CurrentDocumentAsk = {
     product_id: row.product_id,
     supplier_id: row.supplier_id,
@@ -687,6 +727,7 @@ export async function refreshDocumentLine(
             SET document_id = ?, version_number = ?, resolution = ?, resolution_note = ?,
                 document_due_date = ?, rule_at_resolve = ?, resolved_at = datetime('now'),
                 release_status = 'none', pending_send_id = NULL, pending_at = NULL, pending_requested_by = NULL,
+                releasing_at = NULL, release_send_id = NULL,
                 decided_by = NULL, decided_at = NULL, decision_note = NULL,
                 qa_notified_at = NULL, qa_notified_cause = NULL,
                 export_link_id = NULL, last_send_id = NULL, last_sent_at = NULL,
@@ -735,6 +776,13 @@ export async function refreshDocumentLine(
  * Hold lines for QA. The send that asked is recorded on the line, because the
  * release mails THAT send's recipients -- not whoever the customer's contacts
  * are by the time QA gets to it.
+ *
+ * ONLY A LINE NOBODY IS WAITING ON (`none`) IS TAKEN. A line already
+ * `pending_qa` is NOT re-pointed at this send: its asking send and its
+ * recipients are fixed until it is released, refused, removed or refreshed.
+ * The first cut accepted `pending_qa` here too, so a second send to a
+ * different address -- which mailed nobody -- silently moved where QA's
+ * release would go.
  */
 export async function markLinesPendingQa(
   db: D1Database,
@@ -745,24 +793,63 @@ export async function markLinesPendingQa(
     `UPDATE order_documents
         SET release_status = 'pending_qa', pending_send_id = ?, pending_at = datetime('now'),
             pending_requested_by = ?, updated_at = datetime('now')
-      WHERE id = ? AND order_id = ? AND tenant_id = ? AND release_status IN ('none', 'pending_qa')`,
+      WHERE id = ? AND order_id = ? AND tenant_id = ? AND release_status = 'none'`,
   );
   for (const part of chunk(args.lineIds, 50)) {
     await db.batch(part.map((id) => stmt.bind(args.sendId, args.requestedBy, id, args.orderId, args.tenantId)));
   }
 }
 
+/** What a document line is NOW, for a file that claims to stand for it. */
+export interface DocumentLineState {
+  id: string;
+  order_id: string;
+  document_id: string | null;
+  release_status: OrderDocumentReleaseStatus;
+}
+
+/** The current state of the lines named. A line that was removed is absent. */
+export async function loadDocumentLineStates(
+  db: D1Database,
+  tenantId: string,
+  orderId: string,
+  lineIds: string[],
+): Promise<Map<string, DocumentLineState>> {
+  const out = new Map<string, DocumentLineState>();
+  for (const part of chunk([...new Set(lineIds.filter(Boolean))])) {
+    const res = await db
+      .prepare(
+        `SELECT id, order_id, document_id, release_status FROM order_documents
+          WHERE tenant_id = ? AND order_id = ? AND id IN (${part.map(() => '?').join(', ')})`,
+      )
+      .bind(tenantId, orderId, ...part)
+      .all<DocumentLineState>();
+    for (const r of res.results ?? []) out.set(r.id, r);
+  }
+  return out;
+}
+
 /**
- * Record that lines left with a send. A line whose document needed QA
- * approval and went because the sender may give it is `released` in that
- * person's name -- the send was the approval. Any other line that was waiting
- * is no longer waiting: its rule was loosened and it went.
+ * Record that lines left with a send.
+ *
+ * A LINE IS TOUCHED ONLY FOR THE DOCUMENT IT HOLDS NOW. Each entry names the
+ * line and the document that actually travelled; the UPDATE carries
+ * `document_id = ?`, so a resend of an old send that carried document A cannot
+ * mark a line that has since been refreshed to document B (which may be
+ * waiting for QA) as gone. And a line QA REFUSED, or one in the middle of a
+ * release, is never overwritten: the guard is in the WHERE.
+ *
+ * A line whose document needed QA approval and went because the sender may
+ * give it is `released` in that person's name -- the send was the approval.
+ * A line that was waiting and whose own document went on a looser rule is no
+ * longer waiting.
  */
 export async function markLinesSent(
   db: D1Database,
   args: {
     tenantId: string;
-    lineIds: string[];
+    orderId: string;
+    lines: { lineId: string; documentId: string }[];
     sendId: string;
     exportLinkId: string | null;
     actorUserId: string;
@@ -770,47 +857,45 @@ export async function markLinesSent(
     qaReleasedDocumentIds: string[];
   },
 ): Promise<void> {
-  if (args.lineIds.length === 0) return;
+  if (args.lines.length === 0) return;
   const qa = new Set(args.qaReleasedDocumentIds);
-  for (const part of chunk([...new Set(args.lineIds)])) {
-    const rows = await db
-      .prepare(
-        `SELECT id, document_id FROM order_documents
-          WHERE tenant_id = ? AND id IN (${part.map(() => '?').join(', ')})`,
-      )
-      .bind(args.tenantId, ...part)
-      .all<{ id: string; document_id: string | null }>();
-    const stmts = (rows.results ?? []).map((r) =>
-      r.document_id && qa.has(r.document_id)
-        ? db
-            .prepare(
-              `UPDATE order_documents
-                  SET last_send_id = ?, last_sent_at = datetime('now'),
-                      export_link_id = COALESCE(?, export_link_id),
-                      release_status = 'released', decided_by = ?, decided_at = datetime('now'),
-                      decision_note = 'Sent by a QA releaser; the send is the approval.',
-                      updated_at = datetime('now')
-                WHERE id = ? AND tenant_id = ?`,
-            )
-            .bind(args.sendId, args.exportLinkId, args.actorUserId, r.id, args.tenantId)
-        : db
-            .prepare(
-              `UPDATE order_documents
-                  SET last_send_id = ?, last_sent_at = datetime('now'),
-                      export_link_id = COALESCE(?, export_link_id),
-                      release_status = CASE WHEN release_status = 'pending_qa' THEN 'none' ELSE release_status END,
-                      updated_at = datetime('now')
-                WHERE id = ? AND tenant_id = ?`,
-            )
-            .bind(args.sendId, args.exportLinkId, r.id, args.tenantId),
-    );
-    if (stmts.length > 0) await db.batch(stmts);
-  }
+  const guard = `id = ? AND tenant_id = ? AND order_id = ? AND document_id = ?
+                 AND release_status NOT IN ('refused', 'releasing')`;
+  const stmts = args.lines.map((l) =>
+    qa.has(l.documentId)
+      ? db
+          .prepare(
+            `UPDATE order_documents
+                SET last_send_id = ?, last_sent_at = datetime('now'),
+                    export_link_id = COALESCE(?, export_link_id),
+                    release_status = 'released', decided_by = ?, decided_at = datetime('now'),
+                    decision_note = 'Sent by a QA releaser; the send is the approval.',
+                    updated_at = datetime('now')
+              WHERE ${guard}`,
+          )
+          .bind(args.sendId, args.exportLinkId, args.actorUserId, l.lineId, args.tenantId, args.orderId, l.documentId)
+      : db
+          .prepare(
+            `UPDATE order_documents
+                SET last_send_id = ?, last_sent_at = datetime('now'),
+                    export_link_id = COALESCE(?, export_link_id),
+                    release_status = CASE WHEN release_status = 'pending_qa' THEN 'none' ELSE release_status END,
+                    updated_at = datetime('now')
+              WHERE ${guard}`,
+          )
+          .bind(args.sendId, args.exportLinkId, l.lineId, args.tenantId, args.orderId, l.documentId),
+  );
+  for (const part of chunk(stmts, 50)) await db.batch(part);
 }
 
 /**
- * How many document lines of an order did NOT go with this send and were not
- * released by QA. An order with one of those is not delivered.
+ * How many document lines of an order are LEFT BEHIND as of this send. An
+ * order with one of those is not delivered (C-056).
+ *
+ * A line is done in exactly two ways: QA released it, or it went with THIS
+ * send and nothing is outstanding on it. Everything else is behind -- waiting
+ * for QA, in the middle of a release, refused, missing, expired, locked, or
+ * sent only by some other send.
  */
 export async function countDocumentLinesBehind(
   db: D1Database,
@@ -822,7 +907,8 @@ export async function countDocumentLinesBehind(
     .prepare(
       `SELECT COUNT(*) AS n FROM order_documents
         WHERE tenant_id = ? AND order_id = ?
-          AND NOT (release_status = 'released' OR (last_send_id IS NOT NULL AND last_send_id = ?))`,
+          AND NOT (release_status = 'released'
+                   OR (release_status = 'none' AND last_send_id IS NOT NULL AND last_send_id = ?))`,
     )
     .bind(tenantId, orderId, sendId)
     .first<{ n: number }>();
@@ -879,18 +965,37 @@ export function releaseBlockedReason(line: JudgedOrderDocument, recipients: stri
 }
 
 /**
- * Every line waiting for QA in the organization, oldest first. `actor` must
- * be a QA releaser's: the "releasable" answer is theirs.
+ * How many lines are in front of QA. ONE COUNT, no judgement: this is what the
+ * rail asks, on a timer, for every releaser with the portal open.
+ */
+export async function countPendingOrderDocuments(db: D1Database, tenantId: string): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM order_documents
+        WHERE tenant_id = ? AND release_status IN ('pending_qa', 'releasing')`,
+    )
+    .bind(tenantId)
+    .first<{ n: number }>();
+  return Number(row?.n) || 0;
+}
+
+/**
+ * Every line in front of QA in the organization, oldest first: waiting, and
+ * any whose release was claimed and has not finished. `actor` must be a QA
+ * releaser's: the "releasable" answer is theirs.
+ *
+ * EACH ROW CARRIES WHAT A RELEASE IS PINNED TO -- the document, its version
+ * and the asking send -- and the screen sends those three back with the line
+ * id, so QA releases what QA was shown or nothing.
  */
 export async function listPendingOrderDocuments(
   db: D1Database,
   tenantId: string,
   actor: ExitActor,
 ): Promise<PendingOrderDocument[]> {
-  const rows = await loadJoinedRows(db, tenantId, `od.release_status = 'pending_qa'`, []);
+  const rows = await loadJoinedRows(db, tenantId, `od.release_status IN ('pending_qa', 'releasing')`, []);
   if (rows.length === 0) return [];
   const judged = await judgeRows(db, tenantId, rows, actor);
-  const sends = await loadSendRecipients(db, tenantId, rows.map((r) => r.pending_send_id ?? ''));
 
   const orders = new Map<string, { order_number: string; customer_name: string | null }>();
   for (const part of chunk([...new Set(rows.map((r) => r.order_id))])) {
@@ -908,8 +1013,13 @@ export async function listPendingOrderDocuments(
   return judged
     .sort((a, b) => (a.row.pending_at ?? '').localeCompare(b.row.pending_at ?? ''))
     .map((line) => {
-      const recipients = sends.get(line.row.pending_send_id ?? '')?.recipients ?? [];
-      const blocked = releaseBlockedReason(line, recipients);
+      const recipients = line.api.pending_recipients;
+      const releasing = line.row.release_status === 'releasing';
+      const stuck = line.api.release_stuck;
+      const blocked =
+        releasing && !stuck
+          ? 'This document is being released right now.'
+          : releaseBlockedReason(line, recipients);
       const order = orders.get(line.row.order_id);
       return {
         id: line.row.id,
@@ -923,6 +1033,11 @@ export async function listPendingOrderDocuments(
         document_id: line.api.document_id,
         document_title: line.api.document_title,
         document_status: line.api.document_status,
+        version_number: line.api.version_number,
+        document_approved_at: line.api.document_approved_at,
+        pending_send_id: line.row.pending_send_id,
+        release_status: line.row.release_status,
+        stuck,
         sharing_rule: line.api.sharing_rule,
         requested_by_name: line.api.pending_requested_by_name,
         requested_at: line.api.pending_at,

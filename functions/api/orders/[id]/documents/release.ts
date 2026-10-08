@@ -1,6 +1,12 @@
 /**
- * POST /api/orders/:id/documents/release { line_ids } — QA releases documents
+ * POST /api/orders/:id/documents/release { lines } — QA releases documents
  * that were held on this order (migration 0138, decision C-044).
+ *
+ * `lines` is `[{ id, document_id, version_number, pending_send_id }]`: each
+ * line WITH WHAT QA SAW, exactly as GET /api/order-documents/pending returned
+ * it. A line whose document, version or asking send has changed since is not
+ * released, and says so (`refused[].code: "changed"`). At most 50 lines -- what
+ * one link carries; more is a 400 with both numbers and releases nothing.
  *
  * The batch form, and the only implementation: the single-line route
  * (./[lineId]/release.ts) calls the same function with one id. Lines released
@@ -81,7 +87,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     } catch {
       throw new BadRequestError('Invalid JSON body');
     }
-    return await handleRelease(context, body?.line_ids);
+    return await handleRelease(context, body?.lines);
   } catch (err) {
     const httpErr = errorToResponse(err);
     if (httpErr) return httpErr;

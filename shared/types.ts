@@ -3568,6 +3568,8 @@ export interface OrderSendPartResult {
   error: string | null;
   sent_at: string | null;
   attempts: number;
+  /** Set when a resend found nothing left to send in this email (0138). */
+  note?: string | null;
 }
 
 export interface OrderSendFileRecord {
@@ -3582,6 +3584,11 @@ export interface OrderSendFileRecord {
   document_title: string | null;
   lot_label: string | null;
   sent_ok: boolean;
+  /**
+   * Set when a RESEND left this file out (0138): its document line was
+   * refused, removed or re-pointed, or its document expired or changed. In words.
+   */
+  not_sent_reason?: string | null;
   /** Days a `link` file's link lives; null = does not expire (0134). */
   link_days?: number | null;
   /** The document lines (0138) the file stood for. */
@@ -3625,6 +3632,8 @@ export interface OrderSendResponse {
   order_status: string;
   /** What happened to the order's document lines (0138). Absent when it has none. */
   documents?: OrderSendDocumentsOutcome;
+  /** Files a RESEND left out, each with the reason (0138). Absent when there are none. */
+  not_resent?: { file_name: string; reason: string }[];
 }
 
 // === Document orders (migration 0138) ===
@@ -3634,7 +3643,12 @@ export interface OrderSendResponse {
 // drafts or sends anything to a supplier.
 
 export type OrderDocumentResolution = 'found' | 'missing' | 'expired';
-export type OrderDocumentReleaseStatus = 'none' | 'pending_qa' | 'released' | 'refused';
+/**
+ * `releasing` = a release was claimed and its mail has not been recorded yet.
+ * A line is `released` only after the mail went AND the record was written, so
+ * a release that died half way reads "did not finish", never "sent".
+ */
+export type OrderDocumentReleaseStatus = 'none' | 'pending_qa' | 'releasing' | 'released' | 'refused';
 /** What a send would do with a line, for the person asking. */
 export type OrderDocumentDisposition = 'goes_now' | 'waits_for_qa' | 'will_not_go';
 /** Why a line will not go. Null on a line that goes or waits. */
@@ -3678,8 +3692,16 @@ export interface ApiOrderDocument {
   /** The document's rule NOW. Null when the line has no document. */
   sharing_rule: SharingRule | null;
   release_status: OrderDocumentReleaseStatus;
+  /** The send that put the line in front of QA. Fixed while the line waits. */
+  pending_send_id: string | null;
   pending_at: string | null;
   pending_requested_by_name: string | null;
+  /** Who a release would mail: the recipients of that send, exactly. */
+  pending_recipients: string[];
+  /** When the document on the line was approved (else created). */
+  document_approved_at: string | null;
+  /** A release was claimed more than a few minutes ago and never finished. */
+  release_stuck: boolean;
   decided_by_name: string | null;
   decided_at: string | null;
   decision_note: string | null;
@@ -3800,15 +3822,29 @@ export interface OrderSendDocumentsOutcome {
   qa_notice: OrderDocumentQaNotice | null;
 }
 
+/**
+ * One line QA is releasing or refusing, WITH WHAT QA SAW. A release is not
+ * "this line id, whatever it holds by now": it is this document, at this
+ * version, asked for by this send (and so bound for those recipients). If any
+ * of the three has changed since the list was loaded the line is not released
+ * and the answer says it changed.
+ */
+export interface OrderDocumentReleaseTarget {
+  id: string;
+  document_id: string;
+  version_number: number;
+  pending_send_id: string;
+}
+
 /** POST /api/orders/:id/documents/release */
 export interface OrderDocumentsReleaseRequest {
-  line_ids: string[];
+  lines: OrderDocumentReleaseTarget[];
 }
 
 export interface OrderDocumentsReleaseResponse {
   released: string[];
   /** Lines that were not released, each with the reason. They stay waiting. */
-  refused: { order_document_id: string; reason: string }[];
+  refused: { order_document_id: string; reason: string; code?: 'changed' | 'in_progress' | 'unfinished' }[];
   /** The mail(s) the release produced: one per distinct set of recipients. */
   sends: OrderSendSummary[];
   order_status: string;
@@ -3817,6 +3853,9 @@ export interface OrderDocumentsReleaseResponse {
 /** POST /api/orders/:id/documents/:lineId/refuse */
 export interface OrderDocumentRefuseRequest {
   note: string;
+  /** What QA saw, as for a release. */
+  document_id: string;
+  pending_send_id: string;
 }
 
 /** One line waiting for QA, across orders. */
@@ -3832,6 +3871,15 @@ export interface PendingOrderDocument {
   document_id: string | null;
   document_title: string | null;
   document_status: string | null;
+  /** The document's current version: what a release would send. */
+  version_number: number | null;
+  /** When the document was approved (else created). */
+  document_approved_at: string | null;
+  /** The send that asked. Echoed back on release, with the document and version. */
+  pending_send_id: string | null;
+  release_status: OrderDocumentReleaseStatus;
+  /** `releasing` for more than a few minutes: the release did not finish. */
+  stuck: boolean;
   /** The document's rule NOW. */
   sharing_rule: SharingRule | null;
   requested_by_name: string | null;
@@ -3851,6 +3899,12 @@ export interface PendingOrderDocumentsResponse {
   can_release: boolean;
   count: number;
   lines: PendingOrderDocument[];
+}
+
+/** GET /api/order-documents/pending?count=1 -- one cheap COUNT, for the rail. */
+export interface PendingOrderDocumentsCount {
+  can_release: boolean;
+  count: number;
 }
 
 // === Unified Activity Feed ===

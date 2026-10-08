@@ -48,12 +48,23 @@
 --         columns. The live rule is re-read at send, at release and at every
 --         read of the link; no decision ever reads this column.
 --
---     release_status -- 'none' / 'pending_qa' / 'released' / 'refused',
---         CHECKed. `pending_qa` is the held release C-044 describes.
+--     release_status -- 'none' / 'pending_qa' / 'releasing' / 'released' /
+--         'refused', CHECKed. `pending_qa` is the held release C-044
+--         describes. `releasing` is a release that has been CLAIMED and whose
+--         mail has not been recorded yet: a line is `released` only after the
+--         mail went and the record was written, so a Worker that dies between
+--         the two leaves a line that says "release did not finish", never one
+--         that says it was sent.
+--     releasing_at / release_send_id -- when the claim was made and the
+--         `order_sends` row (kind 'qa_release') it belongs to, so a release
+--         that did not finish can be found, its link withdrawn, and the line
+--         released again or given back.
 --     pending_send_id / pending_at / pending_requested_by -- the send that
 --         put the line in front of QA. The addresses a release mails are
 --         read from THAT send's stored recipients, so a release cannot be
---         redirected by a later edit to the customer.
+--         redirected by a later edit to the customer. WRITTEN ONCE: a line
+--         already waiting is never re-pointed at a later send, and a release
+--         is claimed against this value as QA saw it.
 --     decided_by / decided_at / decision_note -- who released or refused it.
 --         A refusal needs a note (enforced by the API).
 --
@@ -77,8 +88,13 @@
 -- order_send_files.link_days -- for a `delivery = 'link'` file, how long the
 --     link lives. NULL keeps 0134's meaning exactly: a file too large to
 --     attach, on a link that does not expire. 30 is a document order's link.
+-- order_send_files.not_sent_reason -- set when a RESEND found that a file no
+--     longer belongs in the send (its document line was refused, removed or
+--     re-pointed, or the document has expired or has a new version). The file
+--     is left out of the retried email and the reason is kept here, in words.
+--     NULL on every file that was sent, or is still to be sent.
 --
--- ADDITIVE ONLY. One new table, three nullable columns with no default. No
+-- ADDITIVE ONLY. One new table, four nullable columns with no default. No
 -- existing row changes and nothing is rebuilt.
 
 CREATE TABLE IF NOT EXISTS order_documents (
@@ -96,10 +112,12 @@ CREATE TABLE IF NOT EXISTS order_documents (
   resolved_at TEXT NOT NULL DEFAULT (datetime('now')),
   rule_at_resolve TEXT,
   release_status TEXT NOT NULL DEFAULT 'none'
-    CHECK (release_status IN ('none', 'pending_qa', 'released', 'refused')),
+    CHECK (release_status IN ('none', 'pending_qa', 'releasing', 'released', 'refused')),
   pending_send_id TEXT,
   pending_at TEXT,
   pending_requested_by TEXT,
+  releasing_at TEXT,
+  release_send_id TEXT,
   decided_by TEXT,
   decided_at TEXT,
   decision_note TEXT,
@@ -123,3 +141,4 @@ ALTER TABLE order_sends ADD COLUMN kind TEXT;
 
 ALTER TABLE order_send_files ADD COLUMN order_document_ids TEXT;
 ALTER TABLE order_send_files ADD COLUMN link_days INTEGER;
+ALTER TABLE order_send_files ADD COLUMN not_sent_reason TEXT;

@@ -8,7 +8,10 @@
  * different document, whatever was decided about the old one (a release, a
  * refusal, a notice to QA) is cleared, because it was about that document.
  *
- * Any login of the organization, like adding and removing.
+ * Any login of the organization, like adding and removing -- with the same
+ * exception: a read-only account may not refresh a line that is waiting for
+ * QA, being released, or released (403), because a refresh that lands on a
+ * different document resets all of that.
  */
 import { getClientIp } from '../../../../../lib/db';
 import { errorToResponse } from '../../../../../lib/permissions';
@@ -30,7 +33,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const lineId = context.params.lineId as string;
     const result = await refreshDocumentLine(
       context.env.DB,
-      { order, userId: user.id, clientIp: getClientIp(context.request) },
+      { order, userId: user.id, clientIp: getClientIp(context.request), role: user.role },
       lineId,
     );
     const actor = await exitActorForRequest(context.env.DB, context.data, user, order.tenant_id);

@@ -86,11 +86,11 @@ describe('0138 on a populated database', () => {
     expect(sends.map((s) => s.kind)).toEqual([null]);
 
     const sentFiles = await all(`SELECT * FROM order_send_files WHERE tenant_id = '${T}' ORDER BY position`);
-    expect(JSON.stringify(strip(sentFiles, ['order_document_ids', 'link_days']))).toBe(filesBefore);
+    expect(JSON.stringify(strip(sentFiles, ['order_document_ids', 'link_days', 'not_sent_reason']))).toBe(filesBefore);
     // NULL link_days on a link file keeps 0134's meaning: it does not expire.
-    expect(sentFiles.map((f) => [f.delivery, f.link_days, f.order_document_ids])).toEqual([
-      ['attachment', null, null],
-      ['link', null, null],
+    expect(sentFiles.map((f) => [f.delivery, f.link_days, f.order_document_ids, f.not_sent_reason])).toEqual([
+      ['attachment', null, null, null],
+      ['link', null, null, null],
     ]);
   });
 
@@ -127,6 +127,8 @@ describe('0138 on a populated database', () => {
       rule_at_resolve: null,
       qa_notified_at: null,
       pending_send_id: null,
+      releasing_at: null,
+      release_send_id: null,
       export_link_id: null,
       last_send_id: null,
     });
@@ -142,7 +144,7 @@ describe('0138 on a populated database', () => {
     await expect(insertLine('od-bad-rel', { supplier_id: `'sup-free'`, release_status: `'approved'` })).rejects.toThrow(/CHECK/i);
     // No CHECK on the snapshot: it is read through parseSharingRule, which
     // treats a word it does not know as "not stored", and it decides nothing.
-    await insertLine('od-odd-rule', { supplier_id: `'sup-free'`, rule_at_resolve: `'whatever'` });
+    await insertLine('od-odd-rule', { supplier_id: `'sup-free'`, rule_at_resolve: `'whatever'`, release_status: `'releasing'` });
     await run(`DELETE FROM order_documents WHERE id = 'od-odd-rule'`);
   });
 
@@ -163,7 +165,7 @@ describe('0138 on a populated database', () => {
     const [create, ...rest] = splitStatements(m0138);
     await run(create);
     const alters = rest.filter((s) => /^ALTER TABLE/i.test(s.trim()));
-    expect(alters).toHaveLength(3);
+    expect(alters).toHaveLength(4);
     for (const stmt of alters) await expect(run(stmt)).rejects.toThrow(/duplicate column/i);
     expect((await all('SELECT id FROM order_documents')).map((r) => r.id)).toEqual(['od-1']);
   });

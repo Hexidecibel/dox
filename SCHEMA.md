@@ -1830,10 +1830,12 @@ Indexes: `idx_intake_duplicates_decision_document`, `idx_intake_duplicates_docum
   document_due_date TEXT
   resolved_at TEXT NOT NULL DEFAULT (datetime('now'))
   rule_at_resolve TEXT
-  release_status TEXT NOT NULL DEFAULT 'none' CHECK (release_status IN ('none', 'pending_qa', 'released', 'refused'))
+  release_status TEXT NOT NULL DEFAULT 'none' CHECK (release_status IN ('none', 'pending_qa', 'releasing', 'released', 'refused'))
   pending_send_id TEXT
   pending_at TEXT
   pending_requested_by TEXT
+  releasing_at TEXT
+  release_send_id TEXT
   decided_by TEXT
   decided_at TEXT
   decision_note TEXT
@@ -1874,6 +1876,7 @@ Indexes: `idx_order_documents_document`, `idx_order_documents_order`, `idx_order
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
   order_document_ids TEXT
   link_days INTEGER
+  not_sent_reason TEXT
 ```
 
 Indexes: `idx_order_send_files_document`, `idx_order_send_files_send`

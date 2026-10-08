@@ -34,6 +34,12 @@ import { onRequestPost as refreshDocument } from '../../functions/api/orders/[id
 import { onRequestPost as releaseBatch } from '../../functions/api/orders/[id]/documents/release';
 import { onRequestPost as releaseOne } from '../../functions/api/orders/[id]/documents/[lineId]/release';
 import { onRequestPost as refuseOne } from '../../functions/api/orders/[id]/documents/[lineId]/refuse';
+import { onRequestPost as giveBackOne } from '../../functions/api/orders/[id]/documents/[lineId]/give-back';
+import { ingestOrders } from '../../functions/lib/kinds/order';
+import { mintExportLink } from '../../functions/lib/document-export';
+import { RELEASE_OUTCOME_UNRECORDED } from '../../functions/lib/order-document-release';
+import { READER_ORDER_CREATE_LIMIT_PER_HOUR } from '../../functions/api/orders/index';
+import type { ConnectorOutput } from '../../functions/lib/connectors/types';
 import { onRequestGet as pendingList } from '../../functions/api/order-documents/pending';
 import { onRequestGet as sendPreview } from '../../functions/api/orders/[id]/send-preview';
 import { onRequestPost as sendOrder } from '../../functions/api/orders/[id]/send';
@@ -264,25 +270,75 @@ async function send(order: string, who: Who = 'user', body: Record<string, unkno
   );
 }
 
-async function release(order: string, lineIds: string[], who: Who = 'qa') {
+interface Target {
+  id: string;
+  document_id: string;
+  version_number: number;
+  pending_send_id: string;
+}
+
+/**
+ * What QA would be looking at for these lines RIGHT NOW: the document on each,
+ * its current version, and the send that asked. A release echoes these back.
+ */
+async function targetsFor(lineIds: string[]): Promise<Target[]> {
+  const out: Target[] = [];
+  for (const id of lineIds) {
+    const row = await db
+      .prepare(
+        `SELECT od.document_id, od.pending_send_id, d.current_version
+           FROM order_documents od LEFT JOIN documents d ON d.id = od.document_id WHERE od.id = ?`,
+      )
+      .bind(id)
+      .first<{ document_id: string | null; pending_send_id: string | null; current_version: number | null }>();
+    out.push({
+      id,
+      document_id: row?.document_id ?? 'no-document',
+      version_number: Number(row?.current_version ?? 1),
+      pending_send_id: row?.pending_send_id ?? 'no-send',
+    });
+  }
+  return out;
+}
+
+async function release(order: string, lineIds: string[], who: Who = 'qa', targets?: Target[]) {
   return call<OrderDocumentsReleaseResponse>(
     releaseBatch,
     as(who, `http://localhost/api/orders/${order}/documents/release`, {
       method: 'POST',
-      body: JSON.stringify({ line_ids: lineIds }),
+      body: JSON.stringify({ lines: targets ?? (await targetsFor(lineIds)) }),
       params: { id: order },
     }),
   );
 }
 
-async function refuse(order: string, lineId: string, note: unknown, who: Who = 'qa') {
+async function refuse(order: string, lineId: string, note: unknown, who: Who = 'qa', target?: Partial<Target>) {
+  const [seen] = await targetsFor([lineId]);
   return call<{ success?: boolean }>(
     refuseOne,
     as(who, `http://localhost/api/orders/${order}/documents/${lineId}/refuse`, {
       method: 'POST',
-      body: JSON.stringify({ note }),
+      body: JSON.stringify({ note, document_id: seen.document_id, pending_send_id: seen.pending_send_id, ...target }),
       params: { id: order, lineId },
     }),
+  );
+}
+
+async function resend(order: string, sendId: string, who: Who = 'org_admin') {
+  return call<OrderSendResponse>(
+    resendOrder,
+    as(who, `http://localhost/api/orders/${order}/sends/${sendId}/resend`, { method: 'POST', body: '{}', params: { id: order, sendId } }),
+  );
+}
+
+async function orderStatus(order: string): Promise<string> {
+  return (await db.prepare('SELECT status FROM orders WHERE id = ?').bind(order).first<{ status: string }>())!.status;
+}
+
+async function refresh(order: string, lineId: string, who: Who = 'user') {
+  return call<{ changed: boolean; document: ApiOrderDocument }>(
+    refreshDocument,
+    as(who, `http://localhost/api/orders/${order}/documents/${lineId}/refresh`, { method: 'POST', params: { id: order, lineId } }),
   );
 }
 
@@ -402,7 +458,7 @@ beforeAll(async () => {
 
 afterEach(async () => {
   vi.unstubAllGlobals();
-  await db.prepare(`DELETE FROM rate_limits WHERE key LIKE 'order_send:%'`).run();
+  await db.prepare(`DELETE FROM rate_limits WHERE key LIKE 'order_send:%' OR key LIKE 'order_create:%'`).run();
 });
 
 // ===========================================================================
@@ -1093,10 +1149,11 @@ describe('QA releasing and refusing held documents', () => {
   it('the single-line route releases one and leaves the other waiting', async () => {
     const h = await heldOrder('Single Release Item');
     const before = h.mails.length;
+    const [seen] = await targetsFor([h.planLine.id]);
     const res = await call<OrderDocumentsReleaseResponse>(
       releaseOne,
       as('org_admin', `http://localhost/api/orders/${h.order}/documents/${h.planLine.id}/release`, {
-        method: 'POST', params: { id: h.order, lineId: h.planLine.id },
+        method: 'POST', body: JSON.stringify(seen), params: { id: h.order, lineId: h.planLine.id },
       }),
     );
     expect(res.status).toBe(200);
@@ -1253,5 +1310,739 @@ describe('mergeSuppliers and document order lines', () => {
     expect(after).toHaveLength(2);
     expect(after.every((l) => l.supplier_id === winner)).toBe(true);
     expect(await db.prepare('SELECT id FROM suppliers WHERE id = ?').bind(loser).first()).toBeNull();
+  });
+});
+
+// ===========================================================================
+// What an independent review broke, kept closed (decisions C-059..C-066)
+// ===========================================================================
+
+describe('a release is pinned to what QA saw (C-059, C-060)', () => {
+  it('a second send to a different address does NOT re-point a waiting line: it is refused, and the release mails the first address', async () => {
+    const pair = await makePair('Repoint Item');
+    const plan = await makeDoc(types.haccp, { products: [pair.product_id] });
+    const order = await newOrder();
+    await addDocs(order, [pair], [types.haccp]);
+    const mails = stubMail();
+    const first = await send(order, 'user', { recipients: [CUSTOMER_EMAIL] });
+    expect(first.status).toBe(200);
+    const [line] = await lines(order);
+    expect((await lineRow(line.id)).pending_send_id).toBe(first.body.send.id);
+
+    // The review says it is already waiting, since when and for whom.
+    const review = await preview(order, 'org_admin');
+    expect(review.documents?.waits_for_qa).toEqual([]); // an admin can release it themselves
+    const asUserSees = await preview(order, 'user');
+    expect(asUserSees.documents?.waits_for_qa[0].text).toMatch(/^Already waiting for QA since .*, for buyer@harborbakery\.example\./);
+    expect(asUserSees.documents?.waits_for_qa[0].notifies_qa).toBe(false);
+    expect(asUserSees.blocked?.code).toBe('nothing_to_send');
+
+    // Any non-reader sends again, to somebody else. Nothing new to send and
+    // nothing new to ask: refused, and nothing about the line moves.
+    const sendsBefore = (await db.prepare('SELECT COUNT(*) AS n FROM order_sends WHERE order_id = ?').bind(order).first<{ n: number }>())!.n;
+    const second = await send(order, 'user', { recipients: ['attacker@elsewhere.example'] });
+    expect(second.status).toBe(400);
+    expect(second.body.code).toBe('nothing_to_send');
+    expect((await db.prepare('SELECT COUNT(*) AS n FROM order_sends WHERE order_id = ?').bind(order).first<{ n: number }>())!.n).toBe(sendsBefore);
+    expect((await lineRow(line.id)).pending_send_id).toBe(first.body.send.id);
+    expect((await pending('qa')).lines.find((l) => l.id === line.id)?.recipients).toEqual([CUSTOMER_EMAIL]);
+
+    const before = mails.length;
+    const released = await release(order, [line.id]);
+    expect(released.status).toBe(200);
+    const fresh = mails.slice(before);
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].to).toEqual([CUSTOMER_EMAIL]);
+    expect(await linksHolding(plan.id)).toHaveLength(1);
+  });
+
+  it('a later send that DOES go (a free line beside it) still does not re-point the waiting line', async () => {
+    const pair = await makePair('Repoint Two Item');
+    await makeDoc(types.spec, { products: [pair.product_id] });
+    await makeDoc(types.haccp, { products: [pair.product_id] });
+    const order = await newOrder();
+    await addDocs(order, [pair], [types.spec, types.haccp]);
+    const mails = stubMail();
+    const first = await send(order, 'user', { recipients: [CUSTOMER_EMAIL] });
+    const held = (await lines(order)).find((l) => l.release_status === 'pending_qa')!;
+
+    const second = await send(order, 'user', { recipients: ['other@elsewhere.example'] });
+    expect(second.status).toBe(200);
+    expect(second.body.documents).toMatchObject({ sent: 1, pending_qa: 0 });
+    expect((await lineRow(held.id)).pending_send_id).toBe(first.body.send.id);
+
+    const before = mails.length;
+    expect((await release(order, [held.id])).status).toBe(200);
+    expect(mails.slice(before)[0].to).toEqual([CUSTOMER_EMAIL]);
+  });
+
+  it('a line refreshed to a newer document and sent again is NOT released on what QA saw before', async () => {
+    const supplier = await makeSupplier('Stale Review Dairy');
+    const pair = await makePair('Stale Review Item', { supplier });
+    const old = await makeDoc(types.haccp, { supplier, createdAt: '2026-01-01 09:00:00', title: 'Plan QA looked at' });
+    const order = await newOrder();
+    await addDocs(order, [pair], [types.haccp]);
+    const mails = stubMail();
+    await send(order, 'user');
+    const [line] = await lines(order);
+    // QA opens the list: this is what is on their screen.
+    const seen = await targetsFor([line.id]);
+    expect(seen[0].document_id).toBe(old.id);
+
+    // A newer document arrives, the line is refreshed and sent again.
+    const newer = await makeDoc(types.haccp, { supplier, createdAt: '2026-09-01 09:00:00', title: 'Plan nobody reviewed' });
+    expect((await refresh(order, line.id, 'user')).body.changed).toBe(true);
+    expect((await lineRow(line.id)).release_status).toBe('none');
+    expect((await send(order, 'user')).status).toBe(200);
+    const row = await lineRow(line.id);
+    expect(row).toMatchObject({ release_status: 'pending_qa', document_id: newer.id });
+    expect(row.pending_send_id).not.toBe(seen[0].pending_send_id);
+
+    // QA presses Release on the list they loaded earlier.
+    const before = mails.length;
+    const stale = await release(order, [line.id], 'qa', seen);
+    expect(stale.status).toBe(409);
+    expect(stale.body.released).toEqual([]);
+    expect(stale.body.refused[0]).toMatchObject({ order_document_id: line.id, code: 'changed' });
+    expect(stale.body.refused[0].reason).toContain('changed since you opened it');
+    expect(mails.slice(before)).toHaveLength(0);
+    expect(await linksHolding(newer.id)).toEqual([]);
+    expect(await linksHolding(old.id)).toEqual([]);
+    expect((await lineRow(line.id)).release_status).toBe('pending_qa');
+
+    // Half-right is still wrong: the new document with the old asking send.
+    const mixed = await release(order, [line.id], 'qa', [{ ...seen[0], document_id: newer.id }]);
+    expect(mixed.status).toBe(409);
+    expect(mixed.body.refused[0].code).toBe('changed');
+    // A stale refusal is not applied either.
+    expect((await refuse(order, line.id, 'no', 'qa', { document_id: old.id })).status).toBe(409);
+    expect((await lineRow(line.id)).release_status).toBe('pending_qa');
+
+    // With what is on the screen NOW, it goes.
+    const ok = await release(order, [line.id]);
+    expect(ok.status).toBe(200);
+    expect(JSON.parse((await linksHolding(newer.id))[0].document_ids)).toEqual([newer.id]);
+  });
+
+  it('a new VERSION of the same document since QA looked is a change too', async () => {
+    const pair = await makePair('New Version Item');
+    const plan = await makeDoc(types.haccp, { products: [pair.product_id] });
+    const order = await newOrder();
+    await addDocs(order, [pair], [types.haccp]);
+    stubMail();
+    await send(order, 'user');
+    const [line] = await lines(order);
+    const seen = await targetsFor([line.id]);
+    expect(seen[0].version_number).toBe(1);
+
+    await db
+      .prepare(
+        `INSERT INTO document_versions (id, document_id, version_number, file_name, file_size, mime_type, r2_key, uploaded_by)
+         VALUES (?, ?, 2, 'v2.pdf', 64, 'application/pdf', ?, ?)`,
+      )
+      .bind(generateTestId(), plan.id, `docs/${plan.id}/v2.pdf`, seed.orgAdminId)
+      .run();
+    await db.prepare('UPDATE documents SET current_version = 2 WHERE id = ?').bind(plan.id).run();
+
+    const stale = await release(order, [line.id], 'qa', seen);
+    expect(stale.status).toBe(409);
+    expect(stale.body.refused[0].code).toBe('changed');
+    expect(await linksHolding(plan.id)).toEqual([]);
+    expect((await pending('qa')).lines.find((l) => l.id === line.id)?.version_number).toBe(2);
+  });
+
+  it('the waiting list shows what a release is pinned to, and a release must say it', async () => {
+    const pair = await makePair('Pinned Item');
+    const plan = await makeDoc(types.haccp, { products: [pair.product_id], title: 'Pinned plan', createdAt: '2026-05-05 09:00:00' });
+    const order = await newOrder();
+    await addDocs(order, [pair], [types.haccp]);
+    stubMail();
+    const sent = await send(order, 'user');
+    const listed = (await pending('qa')).lines.find((l) => l.document_id === plan.id)!;
+    expect(listed).toMatchObject({
+      document_title: 'Pinned plan',
+      document_type_name: 'HACCP Plan',
+      version_number: 1,
+      document_approved_at: '2026-05-05 09:00:00',
+      product_name: 'Pinned Item',
+      supplier_name: 'Northfield Creamery',
+      requested_by_name: 'Regular User',
+      recipients: [CUSTOMER_EMAIL],
+      pending_send_id: sent.body.send.id,
+      release_status: 'pending_qa',
+      stuck: false,
+    });
+    expect(listed.requested_at).toBeTruthy();
+
+    // A release that names only the line id is not a release.
+    const bare = await call(releaseBatch, as('qa', `http://localhost/api/orders/${order}/documents/release`, {
+      method: 'POST', body: JSON.stringify({ lines: [{ id: listed.id }] }), params: { id: order },
+    }));
+    expect(bare.status).toBe(400);
+    const legacy = await call(releaseBatch, as('qa', `http://localhost/api/orders/${order}/documents/release`, {
+      method: 'POST', body: JSON.stringify({ line_ids: [listed.id] }), params: { id: order },
+    }));
+    expect(legacy.status).toBe(400);
+    expect((await lineRow(listed.id)).release_status).toBe('pending_qa');
+  });
+});
+
+describe('a resend of an old failed send does not override later decisions (C-061)', () => {
+  /** A send by a QA releaser whose mail fails: the stored record holds a `qa` document's file. */
+  async function failedReleaserSend(name: string) {
+    const pair = await makePair(name);
+    const plan = await makeDoc(types.haccp, { products: [pair.product_id], title: `${name} plan` });
+    const order = await newOrder();
+    await addDocs(order, [pair], [types.haccp]);
+    stubMail(() => true);
+    const failed = await send(order, 'qa');
+    expect(failed.status).toBe(502);
+    vi.unstubAllGlobals();
+    const [line] = await lines(order);
+    expect((await lineRow(line.id)).release_status).toBe('none');
+    return { order, plan, line, sendId: failed.body.send.id };
+  }
+
+  it('does not carry a document QA has since REFUSED, and leaves the line refused', async () => {
+    const f = await failedReleaserSend('Refused Later Item');
+    const mails = stubMail();
+    // The salesperson sends; QA is asked and says no.
+    expect((await send(f.order, 'user')).status).toBe(200);
+    expect((await refuse(f.order, f.line.id, 'Not for this customer.')).status).toBe(200);
+    expect((await lineRow(f.line.id)).release_status).toBe('refused');
+
+    const before = mails.length;
+    const again = await resend(f.order, f.sendId, 'org_admin');
+    expect(again.status).toBe(200);
+    // Said, per file; nothing mailed; nothing minted.
+    expect(again.body.not_resent).toHaveLength(1);
+    expect(again.body.not_resent![0].reason).toContain('QA has since refused it for this order');
+    expect(mails.slice(before)).toHaveLength(0);
+    expect((await linksHolding(f.plan.id)).filter((l) => l.revoked_at === null)).toEqual([]);
+    expect(again.body.send.files[0]).toMatchObject({ sent_ok: false });
+    expect(again.body.send.files[0].not_sent_reason).toContain('refused');
+    expect(again.body.send.parts[0]).toMatchObject({ ok: true, sent_at: null });
+    expect(again.body.send.parts[0].note).toContain('no email was sent');
+
+    const row = await lineRow(f.line.id);
+    expect(row.release_status).toBe('refused');
+    expect(row.decision_note).toBe('Not for this customer.');
+    expect(row.last_send_id).toBeNull();
+    expect(await orderStatus(f.order)).not.toBe('delivered');
+    expect(again.body.order_status).not.toBe('delivered');
+    // It is over: the record offers no further resend.
+    expect((await readOrder(f.order, 'org_admin')).sends!.find((s) => s.id === f.sendId)?.can_resend).toBe(false);
+  });
+
+  it('does not carry a line that was taken off the order', async () => {
+    const f = await failedReleaserSend('Removed Later Item');
+    await call(removeDocument, as('user', `http://localhost/api/orders/${f.order}/documents/${f.line.id}`, {
+      method: 'DELETE', params: { id: f.order, lineId: f.line.id },
+    }));
+    const mails = stubMail();
+    const again = await resend(f.order, f.sendId, 'org_admin');
+    expect(again.body.not_resent![0].reason).toContain('taken off the order');
+    expect(mails).toHaveLength(0);
+    expect(await orderStatus(f.order)).not.toBe('delivered');
+  });
+
+  it('does not take a DIFFERENT pending document off QA\'s list, or mark the order delivered', async () => {
+    const supplier = await makeSupplier('Different Pending Dairy');
+    const pair = await makePair('Different Pending Item', { supplier });
+    const docA = await makeDoc(types.kosher, { supplier, createdAt: '2026-01-01 09:00:00', title: 'Certificate A' });
+    const order = await newOrder('org_admin');
+    await addDocs(order, [pair], [types.kosher], 'org_admin');
+    stubMail(() => true);
+    const failed = await send(order, 'org_admin');
+    expect(failed.status).toBe(502);
+    vi.unstubAllGlobals();
+    const [line] = await lines(order);
+
+    // The line moves on to a newer document that needs QA, and is sent again.
+    const docB = await makeDoc(types.kosher, { supplier, createdAt: '2026-09-01 09:00:00', title: 'Certificate B' });
+    await setOverride(docB.id, 'qa');
+    await refresh(order, line.id, 'user');
+    const mails = stubMail();
+    expect((await send(order, 'user')).status).toBe(200);
+    expect(await lineRow(line.id)).toMatchObject({ release_status: 'pending_qa', document_id: docB.id });
+
+    // An administrator resends the OLD failed send, which carried document A.
+    const before = mails.length;
+    const again = await resend(order, failed.body.send.id, 'org_admin');
+    expect(again.body.not_resent![0].reason).toContain('now holds a different document');
+    expect(mails.slice(before)).toHaveLength(0);
+    expect((await linksHolding(docA.id)).filter((l) => l.revoked_at === null)).toEqual([]);
+
+    const row = await lineRow(line.id);
+    expect(row).toMatchObject({ release_status: 'pending_qa', document_id: docB.id });
+    expect(row.last_send_id).toBeNull();
+    expect((await pending('qa')).lines.some((l) => l.id === line.id)).toBe(true);
+    expect(await orderStatus(order)).not.toBe('delivered');
+  });
+
+  it('when one file stands for two lines and one has moved on, only the line that still holds it is marked', async () => {
+    const supplier = await makeSupplier('Two Lines One File Dairy');
+    const one = await makePair('Shared Doc Item One', { supplier });
+    const two = await makePair('Shared Doc Item Two', { supplier });
+    const shared = await makeDoc(types.kosher, { supplier, createdAt: '2026-01-01 09:00:00' });
+    const order = await newOrder('org_admin');
+    await addDocs(order, [one, two], [types.kosher], 'org_admin');
+    stubMail(() => true);
+    const failed = await send(order, 'org_admin');
+    expect(failed.body.send.files).toHaveLength(1);
+    vi.unstubAllGlobals();
+    const all = await lines(order);
+    const first = all.find((l) => l.product_id === one.product_id)!;
+    const second = all.find((l) => l.product_id === two.product_id)!;
+
+    // Item two gets its own, newer certificate that needs QA; its line moves.
+    const own = await makeDoc(types.kosher, { supplier, products: [two.product_id], createdAt: '2026-09-01 09:00:00' });
+    await setOverride(own.id, 'qa');
+    await refresh(order, second.id, 'user');
+    const mails = stubMail();
+    await send(order, 'user', { recipients: ['later@harborbakery.example'] });
+    expect((await lineRow(second.id)).release_status).toBe('pending_qa');
+    const firstAfterSecondSend = await lineRow(first.id);
+
+    const before = mails.length;
+    const again = await resend(order, failed.body.send.id, 'org_admin');
+    expect(again.body.send.status).toBe('sent');
+    expect(again.body.not_resent).toBeUndefined();
+    expect(mails.slice(before)).toHaveLength(1);
+    // The line that still holds the shared certificate went with the resend...
+    expect((await lineRow(first.id)).last_send_id).toBe(failed.body.send.id);
+    expect(firstAfterSecondSend.last_send_id).not.toBe(failed.body.send.id);
+    // ...and the one that moved on is exactly as it was.
+    expect(await lineRow(second.id)).toMatchObject({ release_status: 'pending_qa', document_id: own.id, last_send_id: null });
+    expect(await orderStatus(order)).not.toBe('delivered');
+  });
+
+  it('does not carry a document that has EXPIRED since the failed send', async () => {
+    const pair = await makePair('Expired Later Item');
+    const spec = await makeDoc(types.spec, { products: [pair.product_id] });
+    const order = await newOrder('org_admin');
+    await addDocs(order, [pair], [types.spec], 'org_admin');
+    stubMail(() => true);
+    const failed = await send(order, 'org_admin');
+    vi.unstubAllGlobals();
+
+    await db.prepare(`UPDATE documents SET renewal_due_date = '2026-01-01' WHERE id = ?`).bind(spec.id).run();
+    const mails = stubMail();
+    const again = await resend(order, failed.body.send.id, 'org_admin');
+    expect(again.body.not_resent![0].reason).toContain('has expired since this send was reviewed');
+    expect(mails).toHaveLength(0);
+    expect((await linksHolding(spec.id)).filter((l) => l.revoked_at === null)).toEqual([]);
+    expect(await orderStatus(order)).not.toBe('delivered');
+  });
+
+  it('a COA pick keeps its behaviour: the same document on a COA line is still resent', async () => {
+    const pair = await makePair('COA Kept Item');
+    const coa = await makeDoc(types.coa, { products: [pair.product_id] });
+    const order = await newOrder('org_admin');
+    await addDocs(order, [pair], [types.coa], 'org_admin');
+    await call(addItems, as('org_admin', `http://localhost/api/orders/${order}/items`, {
+      method: 'POST', body: JSON.stringify({ document_ids: [coa.id] }), params: { id: order },
+    }));
+    stubMail(() => true);
+    const failed = await send(order, 'org_admin');
+    expect(failed.body.send.files).toHaveLength(1);
+    vi.unstubAllGlobals();
+    const [line] = await lines(order);
+    await call(removeDocument, as('org_admin', `http://localhost/api/orders/${order}/documents/${line.id}`, {
+      method: 'DELETE', params: { id: order, lineId: line.id },
+    }));
+
+    const mails = stubMail();
+    const again = await resend(order, failed.body.send.id, 'org_admin');
+    expect(again.body.send.status).toBe('sent');
+    expect(again.body.not_resent).toBeUndefined();
+    expect(toCustomer(mails)[0].attachments).toHaveLength(1);
+  });
+});
+
+describe('a release that does not finish (C-063)', () => {
+  /** A line left `releasing` by a release that died: claimed, link minted, record written, nothing after. */
+  async function strandedRelease(name: string, minutesAgo: number) {
+    const pair = await makePair(name);
+    const plan = await makeDoc(types.haccp, { products: [pair.product_id], title: `${name} plan` });
+    const order = await newOrder();
+    await addDocs(order, [pair], [types.haccp]);
+    const mails = stubMail();
+    await send(order, 'user');
+    const [line] = await lines(order);
+    const link = await mintExportLink(db, {
+      tenantId: seed.tenantId, documentIds: [plan.id], createdBy: qaUserId, recipients: [CUSTOMER_EMAIL], ttlDays: 30,
+    });
+    const sendId = generateTestId();
+    await db
+      .prepare(
+        `INSERT INTO order_sends (id, tenant_id, order_id, order_number, sent_by, recipients, subject, part_count, parts, status, kind)
+         VALUES (?, ?, ?, 'DO-stranded', ?, ?, 'Documents', 1, ?, 'partial', 'qa_release')`,
+      )
+      .bind(
+        sendId, seed.tenantId, order, qaUserId, JSON.stringify([CUSTOMER_EMAIL]),
+        JSON.stringify([{ part_number: 1, ok: false, status: 0, error: RELEASE_OUTCOME_UNRECORDED, sent_at: null, attempts: 1 }]),
+      )
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO order_send_files (id, send_id, tenant_id, position, document_id, version_number, document_ids, file_name, bytes, part_number, delivery, source, order_document_ids, link_days, export_link_id)
+         VALUES (?, ?, ?, 0, ?, 1, ?, 'plan.pdf', 64, 1, 'link', 'document', ?, 30, ?)`,
+      )
+      .bind(generateTestId(), sendId, seed.tenantId, plan.id, JSON.stringify([plan.id]), JSON.stringify([line.id]), link.id)
+      .run();
+    await db
+      .prepare(
+        `UPDATE order_documents SET release_status = 'releasing', releasing_at = datetime('now', ?), release_send_id = ?, decided_by = ? WHERE id = ?`,
+      )
+      .bind(`-${minutesAgo} minutes`, sendId, qaUserId, line.id)
+      .run();
+    return { order, plan, line, link, sendId, mails };
+  }
+
+  const giveBack = (order: string, lineId: string, who: Who = 'qa') =>
+    call(giveBackOne, as(who, `http://localhost/api/orders/${order}/documents/${lineId}/give-back`, { method: 'POST', params: { id: order, lineId } }));
+
+  it('is never shown as sent, and nobody\'s send carries the document meanwhile', async () => {
+    const s = await strandedRelease('Stranded Shown Item', 30);
+    const [line] = await lines(s.order, 'qa');
+    expect(line).toMatchObject({ release_status: 'releasing', release_stuck: true, disposition: 'waits_for_qa' });
+    expect(line.disposition_text).toContain('did not finish');
+    expect(line.disposition_text).toContain('has not been sent');
+    expect(line.last_sent_at).toBeNull();
+
+    const record = (await readOrder(s.order, 'qa')).sends!.find((x) => x.id === s.sendId)!;
+    expect(record.status).not.toBe('sent');
+    expect(record.status).not.toBe('failed');
+    expect(record.parts[0].error).toBe(RELEASE_OUTCOME_UNRECORDED);
+
+    // Not even a releaser's own send of the order takes it.
+    for (const who of ['qa', 'user'] as const) {
+      const review = await preview(s.order, who);
+      expect(review.documents?.goes_now).toEqual([]);
+      expect(review.files).toEqual([]);
+      expect(review.blocked?.code).toBe('nothing_to_send');
+    }
+    expect(await orderStatus(s.order)).not.toBe('delivered');
+
+    const listed = (await pending('qa')).lines.find((l) => l.id === s.line.id)!;
+    expect(listed).toMatchObject({ release_status: 'releasing', stuck: true, releasable: true });
+  });
+
+  it('can be put back: its link is withdrawn, its record says so, and it waits again', async () => {
+    const s = await strandedRelease('Stranded Give Back Item', 30);
+    for (const who of ['user', 'reader', 'api_key'] as const) expect((await giveBack(s.order, s.line.id, who)).status).toBe(403);
+    expect((await giveBack(s.order, s.line.id, 'other_tenant')).status).toBe(404);
+
+    expect((await giveBack(s.order, s.line.id)).status).toBe(200);
+    expect(await lineRow(s.line.id)).toMatchObject({ release_status: 'pending_qa', releasing_at: null, release_send_id: null, decided_by: null });
+    expect((await linkById(s.link.id))!.revoked_at).not.toBeNull();
+    const record = (await readOrder(s.order, 'qa')).sends!.find((x) => x.id === s.sendId)!;
+    expect(record.status).toBe('failed');
+    expect(record.parts[0].error).toContain('did not finish');
+    // Now it is an ordinary waiting line; putting it back twice is a 409.
+    expect((await giveBack(s.order, s.line.id)).status).toBe(409);
+  });
+
+  it('can be released again: the unfinished link is withdrawn and a new one is sent', async () => {
+    const s = await strandedRelease('Stranded Release Again Item', 30);
+    const before = s.mails.length;
+    const res = await release(s.order, [s.line.id]);
+    expect(res.status).toBe(200);
+    expect(res.body.released).toEqual([s.line.id]);
+    expect(s.mails.slice(before)).toHaveLength(1);
+    expect((await linkById(s.link.id))!.revoked_at).not.toBeNull();
+    const live = (await linksHolding(s.plan.id)).filter((l) => l.revoked_at === null);
+    expect(live).toHaveLength(1);
+    expect(await lineRow(s.line.id)).toMatchObject({ release_status: 'released', export_link_id: live[0].id, releasing_at: null });
+    expect(res.body.sends[0]).toMatchObject({ kind: 'qa_release', status: 'sent' });
+  });
+
+  it('a release in progress is left alone: not released twice, not put back', async () => {
+    const s = await strandedRelease('In Progress Item', 0);
+    const before = s.mails.length;
+    const res = await release(s.order, [s.line.id]);
+    expect(res.status).toBe(409);
+    expect(res.body.refused[0].code).toBe('in_progress');
+    expect((await giveBack(s.order, s.line.id)).status).toBe(409);
+    expect(s.mails.slice(before)).toHaveLength(0);
+    expect((await linkById(s.link.id))!.revoked_at).toBeNull();
+    expect((await lineRow(s.line.id)).release_status).toBe('releasing');
+    expect((await pending('qa')).lines.find((l) => l.id === s.line.id)).toMatchObject({ stuck: false, releasable: false });
+  });
+
+  it('when the mail goes and the record cannot be written, nothing says "failed" and nothing says "sent"', async () => {
+    const pair = await makePair('Record Lost Item');
+    const plan = await makeDoc(types.haccp, { products: [pair.product_id] });
+    const order = await newOrder();
+    await addDocs(order, [pair], [types.haccp]);
+    const mails = stubMail();
+    await send(order, 'user');
+    const [line] = await lines(order);
+
+    // The database refuses the one write that would say "released".
+    await db
+      .prepare(
+        `CREATE TRIGGER test_block_release BEFORE UPDATE OF release_status ON order_documents
+         WHEN NEW.release_status = 'released' AND NEW.id = '${line.id}'
+         BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`,
+      )
+      .run();
+    let res: Awaited<ReturnType<typeof release>>;
+    const before = mails.length;
+    try {
+      res = await release(order, [line.id]);
+    } finally {
+      await db.prepare('DROP TRIGGER test_block_release').run();
+    }
+    // The customer HAS the mail.
+    expect(toCustomer(mails.slice(before))).toHaveLength(1);
+    expect(res.status).toBe(409);
+    expect(res.body.released).toEqual([]);
+    expect(res.body.refused[0].code).toBe('unfinished');
+    expect(res.body.refused[0].reason).toContain('The email was sent, but the record of it could not be written');
+
+    const row = await lineRow(line.id);
+    expect(row.release_status).toBe('releasing');
+    const record = (await readOrder(order, 'qa')).sends!.find((x) => x.id === row.release_send_id)!;
+    // Not "failed" while a customer holds the link; not "sent" either.
+    expect(record.status).toBe('partial');
+    expect(record.parts[0].error).toBe(RELEASE_OUTCOME_UNRECORDED);
+    expect(record.files[0].sent_ok).toBe(false);
+    // And the link it minted is findable from the record, so it can be withdrawn.
+    const minted = (await linksHolding(plan.id)).filter((l) => l.revoked_at === null);
+    expect(minted).toHaveLength(1);
+    expect(await orderStatus(order)).not.toBe('delivered');
+
+    // Recoverable: once the claim is old enough, releasing again withdraws that link and sends a new one.
+    await db.prepare(`UPDATE order_documents SET releasing_at = datetime('now', '-30 minutes') WHERE id = ?`).bind(line.id).run();
+    const again = await release(order, [line.id]);
+    expect(again.status).toBe(200);
+    expect((await linkById(minted[0].id))!.revoked_at).not.toBeNull();
+    expect((await lineRow(line.id)).release_status).toBe('released');
+  });
+});
+
+describe('a release at scale (C-062)', () => {
+  it('more than one link carries is refused with both numbers, and releases nothing', async () => {
+    const order = await newOrder();
+    const targets = Array.from({ length: 51 }, (_, i) => ({ id: `line-${i}`, document_id: 'd', version_number: 1, pending_send_id: 's' }));
+    const res = await release(order, [], 'qa', targets);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('at most 50 documents');
+    expect(res.body.error).toContain('this is 51');
+    expect(res.body.error).toContain('Nothing was released');
+  });
+
+  it('fifty lines release in one act, on one link, in one email', async () => {
+    const supplier = await makeSupplier('Fifty Lines Dairy');
+    const plan = await makeDoc(types.haccp, { supplier, title: 'One plan for fifty items' });
+    const pairs = [];
+    for (let i = 0; i < 50; i++) pairs.push(await makePair(`Fifty Item ${i}`, { supplier }));
+    const order = await newOrder();
+    expect((await addDocs(order, pairs, [types.haccp])).status).toBe(201);
+    const mails = stubMail();
+    expect((await send(order, 'user')).status).toBe(200);
+    const all = await lines(order);
+    expect(all).toHaveLength(50);
+    expect(all.every((l) => l.release_status === 'pending_qa')).toBe(true);
+
+    const before = mails.length;
+    const res = await release(order, all.map((l) => l.id));
+    expect(res.status).toBe(200);
+    expect(res.body.released).toHaveLength(50);
+    expect(mails.slice(before)).toHaveLength(1);
+    expect(await linksHolding(plan.id)).toHaveLength(1);
+    const left = await db.prepare(`SELECT COUNT(*) AS n FROM order_documents WHERE order_id = ? AND release_status != 'released'`).bind(order).first<{ n: number }>();
+    expect(left!.n).toBe(0);
+    expect(res.body.order_status).toBe('delivered');
+  }, 60_000);
+
+  it('a release whose mail fails gives all fifty back', async () => {
+    const supplier = await makeSupplier('Fifty Back Dairy');
+    await makeDoc(types.haccp, { supplier });
+    const pairs = [];
+    for (let i = 0; i < 50; i++) pairs.push(await makePair(`Fifty Back Item ${i}`, { supplier }));
+    const order = await newOrder();
+    await addDocs(order, pairs, [types.haccp]);
+    stubMail();
+    await send(order, 'user');
+    vi.unstubAllGlobals();
+    stubMail((m) => m.to.includes(CUSTOMER_EMAIL));
+    const all = await lines(order);
+    const res = await release(order, all.map((l) => l.id));
+    expect(res.status).toBe(409);
+    const waiting = await db.prepare(`SELECT COUNT(*) AS n FROM order_documents WHERE order_id = ? AND release_status = 'pending_qa'`).bind(order).first<{ n: number }>();
+    expect(waiting!.n).toBe(50);
+  }, 60_000);
+});
+
+describe('what a read-only account may not undo (C-064)', () => {
+  it('a reader cannot remove or refresh a line that is waiting for QA or released; a sender can', async () => {
+    const pair = await makePair('Reader Guard Item');
+    await makeDoc(types.haccp, { products: [pair.product_id] });
+    await makeDoc(types.guarantee, { products: [pair.product_id] });
+    await makeDoc(types.spec, { products: [pair.product_id] });
+    const order = await newOrder('reader');
+    await addDocs(order, [pair], [types.haccp, types.guarantee, types.spec], 'reader');
+    stubMail();
+    await send(order, 'user');
+    const all = await lines(order);
+    const waiting = all.find((l) => l.document_type_id === types.haccp)!;
+    const toRelease = all.find((l) => l.document_type_id === types.guarantee)!;
+    const plain = all.find((l) => l.document_type_id === types.spec)!;
+    await release(order, [toRelease.id]);
+
+    const remove = (lineId: string, who: Who) =>
+      call<{ error?: string }>(removeDocument, as(who, `http://localhost/api/orders/${order}/documents/${lineId}`, { method: 'DELETE', params: { id: order, lineId } }));
+
+    for (const lineId of [waiting.id, toRelease.id]) {
+      const gone = await remove(lineId, 'reader');
+      expect(gone.status).toBe(403);
+      expect(gone.body.error).toContain('read-only account cannot remove');
+      expect((await refresh(order, lineId, 'reader')).status).toBe(403);
+    }
+    expect((await lineRow(waiting.id)).release_status).toBe('pending_qa');
+    expect((await lineRow(toRelease.id)).release_status).toBe('released');
+
+    // A line nothing has happened to is still theirs to take back.
+    expect((await refresh(order, plain.id, 'reader')).status).toBe(200);
+    expect((await remove(plain.id, 'reader')).status).toBe(200);
+    // And somebody who may send may do both to the others.
+    expect((await refresh(order, waiting.id, 'user')).status).toBe(200);
+    expect((await remove(waiting.id, 'user')).status).toBe(200);
+  });
+
+  it('a reader opens at most twenty orders an hour; other roles are not counted', async () => {
+    const open = (who: Who) =>
+      call<{ order?: { id: string }; code?: string }>(createOrder, as(who, 'http://localhost/api/orders', {
+        method: 'POST', body: JSON.stringify({ order_number: `RL-${generateTestId().slice(0, 10)}` }),
+      }));
+    expect(READER_ORDER_CREATE_LIMIT_PER_HOUR).toBe(20);
+    for (let i = 0; i < READER_ORDER_CREATE_LIMIT_PER_HOUR; i++) expect((await open('reader')).status).toBe(201);
+    const over = await open('reader');
+    expect(over.status).toBe(429);
+    expect(over.body.code).toBe('rate_limited');
+    expect(over.body.error).toContain('20 orders opened in an hour');
+    expect((await open('user')).status).toBe(201);
+  });
+
+  it('a connector file for an order number a reader pre-created keeps the document lines and takes the connector\'s data', async () => {
+    const pair = await makePair('Connector Later Item');
+    const spec = await makeDoc(types.spec, { products: [pair.product_id] });
+    const number = `RC-${generateTestId().slice(0, 8)}`;
+    const order = await newOrder('reader', { order_number: number, customer_id: undefined, customer_name: 'Typed By Reader' });
+    await addDocs(order, [pair], [types.spec], 'reader');
+    const before = await lineRow((await lines(order))[0].id);
+
+    const result = await ingestOrders(
+      db,
+      {
+        orders: [{ order_number: number, po_number: 'PO-55019', customer_number: 'K00912', customer_name: 'Kestrel Foods', items: [{ product_name: 'Heavy Cream', product_code: '30417', quantity: 4, lot_number: '10426203' }], source_data: {} }],
+        customers: [{ customer_number: 'K00912', name: 'Kestrel Foods' }],
+        errors: [],
+        info: [],
+      } as unknown as ConnectorOutput,
+      { tenantId: seed.tenantId, connectorId: null, connectorRunId: null },
+    );
+    expect(JSON.stringify(result)).not.toContain('FOREIGN KEY');
+
+    // One order, not two; the connector's header and line are on it...
+    const rows = await db.prepare('SELECT id, po_number, customer_number, created_by FROM orders WHERE tenant_id = ? AND order_number = ?').bind(seed.tenantId, number).all<Record<string, any>>();
+    expect(rows.results).toHaveLength(1);
+    expect(rows.results![0]).toMatchObject({ id: order, po_number: 'PO-55019', customer_number: 'K00912', created_by: seed.readerId });
+    const items = await db.prepare('SELECT product_code, lot_number, quantity FROM order_items WHERE order_id = ?').bind(order).all<Record<string, any>>();
+    expect(items.results).toEqual([{ product_code: '30417', lot_number: '10426203', quantity: 4 }]);
+    // ...and the person's document line is exactly as it was.
+    const after = await lineRow(before.id);
+    expect(after).toEqual(before);
+    expect(after.document_id).toBe(spec.id);
+  });
+});
+
+describe('a supplier merge keeps the line that carries a decision (C-065)', () => {
+  async function auditOfMerge(winner: string) {
+    return (await audits('supplier.merged', winner)).at(-1)!.details;
+  }
+
+  it('the loser\'s waiting line survives over the winner\'s bare one, and the removed row is in the audit', async () => {
+    const winner = await makeSupplier('Merge Keep Winner Dairy');
+    const loser = await makeSupplier('Merge Keep Loser Dairy');
+    const onWinner = await makePair('Merge Keep Item', { supplier: winner });
+    const onLoser = await makePair('Merge Keep Item', { supplier: loser, product: onWinner.product_id });
+    await makeDoc(types.haccp, { supplier: loser, title: 'Loser hazard plan' });
+    const order = await newOrder();
+    await addDocs(order, [onWinner, onLoser], [types.haccp]);
+    stubMail();
+    await send(order, 'user');
+    const all = await lines(order);
+    const bare = all.find((l) => l.supplier_id === winner)!;
+    const waiting = all.find((l) => l.supplier_id === loser)!;
+    expect(bare.release_status).toBe('none');
+    expect(waiting.release_status).toBe('pending_qa');
+
+    await mergeSuppliers(db, seed.tenantId, { winnerId: winner, loserIds: [loser], actor: { userId: seed.orgAdminId, ip: null } });
+
+    const after = await lines(order);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ id: waiting.id, supplier_id: winner, release_status: 'pending_qa' });
+    expect((await pending('qa')).lines.some((l) => l.id === waiting.id)).toBe(true);
+    const details = await auditOfMerge(winner);
+    expect(details.dropped_order_documents).toHaveLength(1);
+    expect(details.dropped_order_documents[0]).toMatchObject({ id: bare.id, release_status: 'none', kept_order_document_id: waiting.id });
+  });
+
+  it('when both carry one the winner\'s is kept and the loser\'s whole row is recorded', async () => {
+    const winner = await makeSupplier('Merge Both Winner Dairy');
+    const loser = await makeSupplier('Merge Both Loser Dairy');
+    const onWinner = await makePair('Merge Both Item', { supplier: winner });
+    const onLoser = await makePair('Merge Both Item', { supplier: loser, product: onWinner.product_id });
+    await makeDoc(types.haccp, { supplier: winner });
+    const loserDoc = await makeDoc(types.haccp, { supplier: loser });
+    const order = await newOrder();
+    await addDocs(order, [onWinner, onLoser], [types.haccp]);
+    stubMail();
+    await send(order, 'user');
+    const all = await lines(order);
+    const winnerLine = all.find((l) => l.supplier_id === winner)!;
+    const loserLine = all.find((l) => l.supplier_id === loser)!;
+    await refuse(order, loserLine.id, 'Use the other plant.');
+
+    await mergeSuppliers(db, seed.tenantId, { winnerId: winner, loserIds: [loser], actor: { userId: seed.orgAdminId, ip: null } });
+    const after = await lines(order);
+    expect(after.map((l) => l.id)).toEqual([winnerLine.id]);
+    expect(after[0].release_status).toBe('pending_qa');
+    const dropped = (await auditOfMerge(winner)).dropped_order_documents;
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]).toMatchObject({
+      id: loserLine.id,
+      release_status: 'refused',
+      decision_note: 'Use the other plant.',
+      document_id: loserDoc.id,
+      kept_order_document_id: winnerLine.id,
+    });
+  });
+});
+
+describe('the rail count (C-066)', () => {
+  it('?count=1 answers with one number and no lines, and nothing to a person who cannot release', async () => {
+    const pair = await makePair('Count Item');
+    await makeDoc(types.haccp, { products: [pair.product_id] });
+    const order = await newOrder();
+    await addDocs(order, [pair], [types.haccp]);
+    stubMail();
+    await send(order, 'user');
+
+    const count = (who: Who) => call<Record<string, unknown>>(pendingList, as(who, 'http://localhost/api/order-documents/pending?count=1'));
+    const qa = await count('qa');
+    expect(qa.status).toBe(200);
+    expect(Object.keys(qa.body).sort()).toEqual(['can_release', 'count']);
+    expect(qa.body.can_release).toBe(true);
+    expect(qa.body.count).toBe((await pending('qa')).count);
+    expect(Number(qa.body.count)).toBeGreaterThan(0);
+    for (const who of ['user', 'reader', 'api_key'] as const) {
+      expect((await count(who)).body).toEqual({ can_release: false, count: 0 });
+    }
+    expect((await count('other_tenant')).body).toEqual({ can_release: true, count: 0 });
   });
 });
