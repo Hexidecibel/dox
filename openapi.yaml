@@ -136,7 +136,11 @@ components:
         document_due_date: { type: string, nullable: true }
         rule_at_resolve: { type: string, nullable: true, enum: [free, qa, locked], description: The rule when the line was resolved. Decides nothing. }
         sharing_rule: { type: string, nullable: true, enum: [free, qa, locked], description: The rule now }
-        release_status: { type: string, enum: [none, pending_qa, released, refused] }
+        release_status: { type: string, enum: [none, pending_qa, releasing, released, refused] }
+        release_stuck: { type: boolean, description: "A release was claimed more than five minutes ago and never finished. Never shown as sent." }
+        pending_send_id: { type: string, nullable: true }
+        pending_recipients: { type: array, items: { type: string }, description: Who a release would mail }
+        document_approved_at: { type: string, nullable: true }
         decided_by_name: { type: string, nullable: true }
         decided_at: { type: string, nullable: true }
         decision_note: { type: string, nullable: true }
@@ -5522,6 +5526,9 @@ paths:
         '403': { description: Not the sender, not an admin, or a read-only account }
         '404': { description: No such order or send }
         '409': { description: Every email of this send already went, or the record is a QA release (released again from the waiting list, not resent) }
+        # 200 may carry `not_resent: [{ file_name, reason }]` (migration 0138): files left out
+        # because the document line they came from was refused, removed or re-pointed, or its
+        # document expired or changed. The rest of the email still goes.
         '429': { description: Rate limited }
         '503': { description: Email is not configured for this portal }
 
@@ -5642,7 +5649,7 @@ paths:
     delete:
       tags: [Orders]
       summary: Take one document line off an order
-      description: Any login of the organization. The whole line goes into the audit record.
+      description: "Any login of the organization, except that a read-only account may not remove a line that is waiting for QA, being released or released (403). The whole line goes into the audit record."
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: lineId, in: path, required: true, schema: { type: string } }
@@ -5695,9 +5702,24 @@ paths:
           application/json:
             schema:
               type: object
-              required: [line_ids]
+              required: [lines]
               properties:
-                line_ids: { type: array, maxItems: 100, items: { type: string } }
+                lines:
+                  type: array
+                  maxItems: 50
+                  description: |
+                    Each line WITH WHAT QA SAW, as GET /api/order-documents/pending
+                    returned it. A line whose document, version or asking send has
+                    changed since is not released (`refused[].code: changed`).
+                    More than 50 is a 400 and releases nothing.
+                  items:
+                    type: object
+                    required: [id, document_id, version_number, pending_send_id]
+                    properties:
+                      id: { type: string }
+                      document_id: { type: string }
+                      version_number: { type: integer }
+                      pending_send_id: { type: string }
       responses:
         '200':
           description: At least one document was released
@@ -5714,6 +5736,10 @@ paths:
                       properties:
                         order_document_id: { type: string }
                         reason: { type: string }
+                        code:
+                          type: string
+                          enum: [changed, in_progress, unfinished]
+                          description: "changed = not what QA saw any more; in_progress = being released right now; unfinished = the email went and the record could not be written."
                   order_status: { type: string }
                   sends: { type: array, items: { type: object } }
         '403': { description: Not a QA releaser, a read-only account, or an API key }
@@ -5725,10 +5751,21 @@ paths:
     post:
       tags: [Orders]
       summary: QA releases one held document
-      description: The batch route with one id. Same rules, same responses.
+      description: The batch route with one line. Same rules, same responses.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: lineId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [document_id, version_number, pending_send_id]
+              properties:
+                document_id: { type: string }
+                version_number: { type: integer }
+                pending_send_id: { type: string }
       responses:
         '200': { description: Released }
         '403': { description: Not a QA releaser, a read-only account, or an API key }
@@ -5748,15 +5785,36 @@ paths:
           application/json:
             schema:
               type: object
-              required: [note]
+              required: [note, document_id, pending_send_id]
               properties:
                 note: { type: string, maxLength: 500 }
+                document_id: { type: string, description: The document QA saw on the line }
+                pending_send_id: { type: string, description: The send that asked, as QA saw it }
       responses:
         '200': { description: Refused. The line stays on the order, marked, with the note. }
-        '400': { description: No note }
+        '400': { description: "No note, or no document_id / pending_send_id" }
         '403': { description: Not a QA releaser, a read-only account, or an API key }
         '404': { description: No such order or line in this organization }
-        '409': { description: The line is not waiting for QA any more }
+        '409': { description: "The line is not waiting for QA any more, or changed since QA opened it" }
+
+  /api/orders/{id}/documents/{lineId}/give-back:
+    post:
+      tags: [Orders]
+      summary: Put a release that did not finish back in the waiting list
+      description: |
+        A release is claimed (`releasing`) before its mail is sent and is
+        `released` only once the mail went and the record was written. A line
+        still `releasing` after five minutes did not finish. This revokes the
+        link that attempt minted, marks its record, and returns the line to
+        `pending_qa`. A QA releaser signed in; never an API key.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: lineId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Back in the waiting list }
+        '403': { description: "Not a QA releaser, a read-only account, or an API key" }
+        '404': { description: No such order or line in this organization }
+        '409': { description: "The line is not in the middle of a release, or the release is still in progress" }
 
   /api/order-documents/pending:
     get:
@@ -5768,6 +5826,7 @@ paths:
         so navigation can ask for the count). An API key is never a releaser.
       parameters:
         - { name: tenant_id, in: query, required: false, schema: { type: string }, description: super_admin only }
+        - { name: count, in: query, required: false, schema: { type: string, enum: ['1'] }, description: "Answer can_release and count from one COUNT, with no lines. What the navigation polls." }
       responses:
         '200':
           description: The waiting lines
@@ -5793,6 +5852,11 @@ paths:
                         document_type_name: { type: string, nullable: true }
                         document_id: { type: string, nullable: true }
                         document_title: { type: string, nullable: true }
+                        version_number: { type: integer, nullable: true, description: "The version a release would send. Echoed back on release." }
+                        document_approved_at: { type: string, nullable: true }
+                        pending_send_id: { type: string, nullable: true, description: "The send that asked. Echoed back on release." }
+                        release_status: { type: string, enum: [pending_qa, releasing] }
+                        stuck: { type: boolean, description: "releasing for more than five minutes: the release did not finish" }
                         sharing_rule: { type: string, nullable: true, enum: [free, qa, locked] }
                         requested_by_name: { type: string, nullable: true }
                         requested_at: { type: string, nullable: true }
