@@ -1,6 +1,11 @@
 {
-  "current": "2.29.1",
+  "current": "2.30.0",
   "versions": [
+    {
+      "version": "2.30.0",
+      "date": "2026-10-08",
+      "title": "What may leave, and who says so"
+    },
     {
       "version": "2.29.1",
       "date": "2026-10-07",
