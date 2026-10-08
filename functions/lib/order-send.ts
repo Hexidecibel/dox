@@ -703,6 +703,12 @@ export interface RunContext {
    * reply-to, and may no longer be allowed to release what they once did.
    */
   actor: ExitActor;
+  /**
+   * The account of that same person. A link minted for an oversize file is
+   * minted in THEIR name, because a link serves a `qa` document only while
+   * its minter may release QA documents (C-045).
+   */
+  actorUserId: string;
 }
 
 /** What one run of parts did. */
@@ -845,7 +851,7 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
       const link = await mintExportLink(db, {
         tenantId: send.tenant_id,
         documentIds: ids,
-        createdBy: ctx.sender.id,
+        createdBy: ctx.actorUserId,
         recipients,
         onBehalfOf: null,
         message: send.message,

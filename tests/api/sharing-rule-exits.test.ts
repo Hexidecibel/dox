@@ -653,7 +653,7 @@ describe('a public export link is re-checked on every read', () => {
     return (await readJson(res)) as DocumentExportLandingView;
   }
 
-  it('a qa document stays served (the mint was the approval); one locked since is not', async () => {
+  it('a qa document minted onto a link by a QA releaser stays served; one locked since is not', async () => {
     const set = await makeSet();
     const mails = stubMail();
     const res = await exportSend(

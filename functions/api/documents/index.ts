@@ -2,6 +2,7 @@ import { generateId } from '../../lib/db';
 import { logAudit, getClientIp } from '../../lib/db';
 import { requireRole, requireTenantAccess, errorToResponse } from '../../lib/permissions';
 import { sanitizeString } from '../../lib/validation';
+import { documentTypeInTenant } from '../../lib/sharing-rule';
 import type { Env, User } from '../../lib/types';
 
 /**
@@ -147,6 +148,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // Verify tenant access
     requireTenantAccess(user, tenantId);
+
+    // A document type must be this organization's own (migration 0137): the
+    // type carries the sharing rule.
+    if (body.document_type_id && !(await documentTypeInTenant(context.env.DB, tenantId, body.document_type_id))) {
+      return new Response(
+        JSON.stringify({ error: 'document_type_id does not reference a document type in this organization' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
 
     // Verify tenant exists
     const tenant = await context.env.DB.prepare(

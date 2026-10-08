@@ -13,6 +13,7 @@ import {
   describeRefusals,
   effectiveSharingRule,
   judgeExit,
+  loosens,
   matchSharingRuleTable,
   parseRefusedHeader,
   parseSharingRule,
@@ -238,17 +239,37 @@ describe('judgeExit', () => {
     }
   });
 
-  it('a public link serves free and qa (the mint was the approval), never locked', () => {
+  it('a public link serves free; qa only on the minter\'s authority; never locked (C-045)', () => {
+    const MINTED_BY_RELEASER: ExitActor = { method: 'link', canReleaseQa: true };
     expect(judgeExit('free', 'public_link', LINK)).toBe('allow');
-    expect(judgeExit('qa', 'public_link', LINK)).toBe('allow');
+    expect(judgeExit('free', 'public_link', MINTED_BY_RELEASER)).toBe('allow');
+    // "The mint was the approval" is only true of a releaser's mint.
+    expect(judgeExit('qa', 'public_link', MINTED_BY_RELEASER)).toBe('allow');
+    expect(judgeExit('qa', 'public_link', LINK)).toBe('needs_qa');
     expect(judgeExit('locked', 'public_link', LINK)).toBe('locked');
+    expect(judgeExit('locked', 'public_link', MINTED_BY_RELEASER)).toBe('locked');
+    // Nobody else borrows the door: a login or a key asking for this exit
+    // gets no qa document through it, releaser or not.
+    expect(judgeExit('qa', 'public_link', QA)).toBe('needs_qa');
+    expect(judgeExit('qa', 'public_link', KEY)).toBe('needs_qa');
   });
 
-  it('a link holder has no other door', () => {
-    for (const exit of ['portal_file', ...LEAVING] as SharingExit[]) {
-      expect(judgeExit('qa', exit, LINK)).toBe('needs_qa');
-      expect(judgeExit('locked', exit, LINK)).toBe('locked');
+  it('a link holder has no other door, whoever minted the link', () => {
+    for (const actor of [LINK, { method: 'link', canReleaseQa: true } as ExitActor]) {
+      for (const exit of ['portal_file', ...LEAVING] as SharingExit[]) {
+        expect(judgeExit('qa', exit, actor)).toBe('needs_qa');
+        expect(judgeExit('locked', exit, actor)).toBe('locked');
+      }
     }
+  });
+
+  it('loosens: free < qa < locked', () => {
+    expect(loosens('locked', 'qa')).toBe(true);
+    expect(loosens('locked', 'free')).toBe(true);
+    expect(loosens('qa', 'free')).toBe(true);
+    expect(loosens('free', 'qa')).toBe(false);
+    expect(loosens('qa', 'locked')).toBe(false);
+    for (const r of SHARING_RULES) expect(loosens(r, r)).toBe(false);
   });
 
   it('refusals read in plain words', () => {

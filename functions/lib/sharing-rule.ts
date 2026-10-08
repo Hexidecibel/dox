@@ -21,6 +21,7 @@ import {
   describeRefusals,
   effectiveSharingRule,
   judgeExit,
+  loosens,
   sharingRefusalMessage,
   strictest,
   type ExitActor,
@@ -87,7 +88,8 @@ export async function loadSharingRules(
                 dt.name                 AS type_name,
                 dt.sharing_rule         AS type_rule
            FROM documents d
-           LEFT JOIN document_types dt ON dt.id = d.document_type_id
+           LEFT JOIN document_types dt
+                  ON dt.id = d.document_type_id AND dt.tenant_id = d.tenant_id
           WHERE d.tenant_id = ? AND d.id IN (${part.map(() => '?').join(', ')})`,
       )
       .bind(tenantId, ...part)
@@ -102,7 +104,9 @@ export async function loadSharingRules(
       }>();
     for (const r of res.results ?? []) {
       // A type id that points at no row is no type: nothing says what the
-      // document is.
+      // document is. THE JOIN IS TENANT SCOPED: a document pointed at another
+      // organization's type has no type either, and reads locked. A rule
+      // stored by somebody else's admin must never decide what leaves here.
       const eff = effectiveSharingRule({
         override: r.override_rule,
         typeRule: r.type_rule,
@@ -188,8 +192,25 @@ export async function exitActorForRequest(
   return { method: 'jwt', canReleaseQa: await canReleaseQa(db, user, tenantId) };
 }
 
-/** The recipient of a public export link: no account. */
-export const LINK_ACTOR: ExitActor = { method: 'link', canReleaseQa: false };
+/**
+ * The recipient of a public export link. They have no account and no authority
+ * of their own: a `qa` document is served to them only while THE PERSON WHO
+ * MINTED THE LINK may release QA documents, asked now (C-045). A minter who
+ * has been deactivated, has left the organization, or has lost the QA route
+ * approves nothing any more.
+ */
+export async function linkActor(
+  db: D1Database,
+  link: { tenant_id: string; created_by: string | null },
+): Promise<ExitActor> {
+  if (!link.created_by) return { method: 'link', canReleaseQa: false };
+  const minter = await db
+    .prepare('SELECT id, role, tenant_id, active FROM users WHERE id = ?')
+    .bind(link.created_by)
+    .first<{ id: string; role: User['role']; tenant_id: string | null; active: number }>();
+  if (!minter || !minter.active) return { method: 'link', canReleaseQa: false };
+  return { method: 'link', canReleaseQa: await canReleaseQa(db, minter, link.tenant_id) };
+}
 
 export interface ExitJudgement {
   /** Ids that may go, in the order asked. */
@@ -335,6 +356,7 @@ function isAdminOf(user: Pick<User, 'role' | 'tenant_id'>, tenantId: string): bo
 }
 
 interface SharingRow {
+  stored_type_id: string | null;
   override_rule: string | null;
   override_by: string | null;
   override_at: string | null;
@@ -343,6 +365,28 @@ interface SharingRow {
   type_row_id: string | null;
   type_name: string | null;
   type_rule: string | null;
+}
+
+async function loadSharingRow(db: D1Database, tenantId: string, documentId: string): Promise<SharingRow | null> {
+  return db
+    .prepare(
+      `SELECT d.document_type_id             AS stored_type_id,
+              d.sharing_rule_override        AS override_rule,
+              d.sharing_rule_override_by     AS override_by,
+              d.sharing_rule_override_at     AS override_at,
+              d.sharing_rule_override_reason AS override_reason,
+              u.name                         AS override_by_name,
+              dt.id                          AS type_row_id,
+              dt.name                        AS type_name,
+              dt.sharing_rule                AS type_rule
+         FROM documents d
+         LEFT JOIN document_types dt
+                ON dt.id = d.document_type_id AND dt.tenant_id = d.tenant_id
+         LEFT JOIN users u ON u.id = d.sharing_rule_override_by
+        WHERE d.id = ? AND d.tenant_id = ?`,
+    )
+    .bind(documentId, tenantId)
+    .first<SharingRow>();
 }
 
 /**
@@ -355,23 +399,7 @@ export async function describeDocumentSharing(
   tenantId: string,
   documentId: string,
 ): Promise<DocumentSharingInfo | null> {
-  const row = await db
-    .prepare(
-      `SELECT d.sharing_rule_override        AS override_rule,
-              d.sharing_rule_override_by     AS override_by,
-              d.sharing_rule_override_at     AS override_at,
-              d.sharing_rule_override_reason AS override_reason,
-              u.name                         AS override_by_name,
-              dt.id                          AS type_row_id,
-              dt.name                        AS type_name,
-              dt.sharing_rule                AS type_rule
-         FROM documents d
-         LEFT JOIN document_types dt ON dt.id = d.document_type_id
-         LEFT JOIN users u ON u.id = d.sharing_rule_override_by
-        WHERE d.id = ? AND d.tenant_id = ?`,
-    )
-    .bind(documentId, tenantId)
-    .first<SharingRow>();
+  const row = await loadSharingRow(db, tenantId, documentId);
   if (!row) return null;
 
   const typeInput = { typeRule: row.type_rule, typeName: row.type_name, hasType: Boolean(row.type_row_id) };
@@ -392,87 +420,264 @@ export async function describeDocumentSharing(
   };
 }
 
-export type SharingOverridePlan =
-  | { ok: false; status: 400 | 403; error: string }
-  | { ok: true; changed: false }
-  | {
-      ok: true;
-      changed: true;
-      override: SharingRule | null;
-      reason: string;
-      previous_override: SharingRule | null;
-      previous_rule: SharingRule;
-      next_rule: SharingRule;
-    };
+/** Does this document type exist in this organization? */
+export async function documentTypeInTenant(
+  db: D1Database,
+  tenantId: string,
+  documentTypeId: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare('SELECT id FROM document_types WHERE id = ? AND tenant_id = ?')
+    .bind(documentTypeId, tenantId)
+    .first<{ id: string }>();
+  return Boolean(row);
+}
 
-export type SharingOverrideChange = Extract<SharingOverridePlan, { changed: true }>;
+// ---------------------------------------------------------------------------
+// Changing a document's rule -- by override, or by changing its TYPE
+// ---------------------------------------------------------------------------
+
+/** Who is making the change. `apiKey` comes from `context.data.authMethod`. */
+export interface RuleChangeActor {
+  user: Pick<User, 'id' | 'role' | 'tenant_id'>;
+  apiKey: boolean;
+}
+
+export function ruleChangeActor(data: Record<string, unknown>, user: Pick<User, 'id' | 'role' | 'tenant_id'>): RuleChangeActor {
+  return { user, apiKey: data.authMethod === 'api_key' };
+}
+
+/** What moved the rule. Written into the audit row. */
+export type RuleChangeCause = 'override' | 'type_change' | 'override_and_type_change';
+
+export interface DocumentRuleChange {
+  ok: true;
+  /** The effective rule before and after everything in this change. */
+  before: SharingRule;
+  after: SharingRule;
+  rule_changed: boolean;
+  loosened: boolean;
+  cause: RuleChangeCause | null;
+  /** The type the document will point at, when the change names one. */
+  type_changed: boolean;
+  previous_type_id: string | null;
+  next_type_id: string | null;
+  /** The override write, when the change names one that differs. */
+  override: { value: SharingRule | null; reason: string; previous: SharingRule | null } | null;
+}
+
+export type DocumentRuleChangePlan =
+  | { ok: false; status: 400 | 403; error: string; code?: 'sharing_rule_change_refused' }
+  | DocumentRuleChange;
 
 /** A reason longer than this is a document, not a reason. */
 export const SHARING_OVERRIDE_REASON_MAX = 500;
 
+function refuseLoosening(error: string): DocumentRuleChangePlan {
+  return { ok: false, status: 403, error, code: 'sharing_rule_change_refused' };
+}
+
 /**
- * Decide whether this person may set (or clear, with null) the override on
- * this document. Writes nothing.
+ * THE ONE DECISION behind every write that can move a document's effective
+ * sharing rule: its override, AND ITS TYPE. Writes nothing.
  *
- *   - An admin or a QA releaser may set it; nobody else (C-040).
- *   - A REASON IS REQUIRED: the override is a person deciding against the
- *     type's rule, and the row has to say why.
- *   - MOVING A DOCUMENT OFF `locked` IS AN ADMIN'S ACT. "Nobody releases
- *     locked" would mean little if the person who may release `qa` could
- *     relabel a locked document `qa` and then release it.
- *   - Sending the value already in force is not a change and needs no reason:
- *     an editor that posts every field on save must not be refused.
+ * WHY THE TYPE IS HERE. The rule comes from the type, so changing the type
+ * changes the rule. Before this, anybody who could edit a document could move
+ * a W-9 to "Certificate of Analysis" and walk it out, and could give an
+ * untyped (locked) document a free type. So every path that writes
+ * `documents.document_type_id` on an EXISTING document asks this function
+ * first: the document page, the category editor, both ingest upserts and the
+ * Review Queue's "Replace existing".
+ *
+ * THE RULE (C-046):
+ *   - The effective rule is computed BEFORE and AFTER the whole change.
+ *   - TIGHTENING, or no change, is open to whoever may edit the document.
+ *   - LOOSENING needs authority:
+ *       off `locked`      an administrator of the organization, nobody else
+ *       `qa` -> `free`    a QA releaser (which includes administrators)
+ *   - AN API KEY NEVER LOOSENS, whoever owns it (C-041): a key releases
+ *     nothing, and relabelling a document so that it may then read it is
+ *     releasing with an extra step.
+ *   - The OVERRIDE itself is set only by a QA releaser or an administrator,
+ *     with a REASON, whichever direction it moves (C-040).
+ *   - A type must belong to the document's own organization.
+ *
+ * `documentTypeId` / `override`: `undefined` = this change does not touch it.
+ * Sending the value already in force is not a change: an editor that posts
+ * every field on save must not be refused.
  */
-export async function planSharingOverride(
+export async function planDocumentRuleChange(
   db: D1Database,
-  user: Pick<User, 'id' | 'role' | 'tenant_id'>,
+  actor: RuleChangeActor,
   tenantId: string,
   documentId: string,
-  rawOverride: unknown,
-  rawReason: unknown,
-): Promise<SharingOverridePlan> {
-  let next: SharingRule | null;
-  if (rawOverride === null || rawOverride === '') {
-    next = null;
+  change: { documentTypeId?: string | null; override?: unknown; reason?: unknown },
+): Promise<DocumentRuleChangePlan> {
+  let nextOverride: SharingRule | null | undefined;
+  if (change.override === undefined) {
+    nextOverride = undefined;
+  } else if (change.override === null || change.override === '') {
+    nextOverride = null;
   } else {
-    next = parseSharingRule(rawOverride);
-    if (!next) {
+    const parsed = parseSharingRule(change.override);
+    if (!parsed) {
       return { ok: false, status: 400, error: 'sharing_rule_override must be free, qa, locked or null' };
+    }
+    nextOverride = parsed;
+  }
+
+  const row = await loadSharingRow(db, tenantId, documentId);
+  if (!row) return { ok: false, status: 400, error: 'Document not found' };
+
+  const currentOverride = parseSharingRule(row.override_rule);
+  const currentType = { typeRule: row.type_rule, typeName: row.type_name, hasType: Boolean(row.type_row_id) };
+  const before = effectiveSharingRule({ ...currentType, override: currentOverride }).rule;
+
+  // The type after the change. A type id is only ever accepted from the
+  // document's own organization.
+  let nextType = currentType;
+  const requestedTypeId = change.documentTypeId === undefined ? undefined : change.documentTypeId || null;
+  const typeChanged = requestedTypeId !== undefined && requestedTypeId !== (row.stored_type_id ?? null);
+  if (typeChanged) {
+    if (requestedTypeId === null) {
+      nextType = { typeRule: null, typeName: null, hasType: false };
+    } else {
+      const type = await db
+        .prepare('SELECT id, name, sharing_rule FROM document_types WHERE id = ? AND tenant_id = ?')
+        .bind(requestedTypeId, tenantId)
+        .first<{ id: string; name: string; sharing_rule: string | null }>();
+      if (!type) {
+        return {
+          ok: false,
+          status: 400,
+          error: 'document_type_id does not reference a document type in this organization',
+        };
+      }
+      nextType = { typeRule: type.sharing_rule, typeName: type.name, hasType: true };
     }
   }
 
-  const info = await describeDocumentSharing(db, user, tenantId, documentId);
-  if (!info) return { ok: false, status: 400, error: 'Document not found' };
-  if (next === info.override) return { ok: true, changed: false };
+  const overrideChanged = nextOverride !== undefined && nextOverride !== currentOverride;
+  const overrideAfter = overrideChanged ? (nextOverride as SharingRule | null) : currentOverride;
+  const after = effectiveSharingRule({ ...nextType, override: overrideAfter }).rule;
+  const loosened = loosens(before, after);
 
-  if (!info.can_edit) {
+  const releaser = await canReleaseQa(db, actor.user, tenantId);
+  const admin = isAdminOf(actor.user, tenantId);
+
+  if (overrideChanged && !releaser) {
     return {
       ok: false,
       status: 403,
       error: 'Only QA or an administrator can change how a document may be shared.',
     };
   }
-  const nextRule = next ?? info.type_rule;
-  if (info.rule === 'locked' && nextRule !== 'locked' && !info.can_unlock) {
-    return {
-      ok: false,
-      status: 403,
-      error: 'This document is locked. Only an administrator can unlock it.',
-    };
+
+  if (loosened) {
+    const how = typeChanged && !overrideChanged ? 'Changing its type' : 'That change';
+    const to = SHARING_RULE_WORDS[after];
+    if (actor.apiKey) {
+      return refuseLoosening(
+        `${how} would move this document from ${SHARING_RULE_WORDS[before]} to ${to}. An API key cannot loosen a sharing rule; a person has to.`,
+      );
+    }
+    if (before === 'locked' && !admin) {
+      return refuseLoosening(
+        typeChanged && !overrideChanged
+          ? `This document is locked, and changing its type would move it to ${to}. Only an administrator can unlock a document.`
+          : 'This document is locked. Only an administrator can unlock it.',
+      );
+    }
+    if (!releaser) {
+      return refuseLoosening(
+        `${how} would move this document from ${SHARING_RULE_WORDS[before]} to ${to}. Only QA or an administrator can do that.`,
+      );
+    }
   }
-  const reason = typeof rawReason === 'string' ? rawReason.trim().slice(0, SHARING_OVERRIDE_REASON_MAX) : '';
-  if (!reason) {
-    return { ok: false, status: 400, error: 'Say why the sharing rule is being changed on this document.' };
+
+  let override: DocumentRuleChange['override'] = null;
+  if (overrideChanged) {
+    const reason =
+      typeof change.reason === 'string' ? change.reason.trim().slice(0, SHARING_OVERRIDE_REASON_MAX) : '';
+    if (!reason) {
+      return { ok: false, status: 400, error: 'Say why the sharing rule is being changed on this document.' };
+    }
+    override = { value: nextOverride as SharingRule | null, reason, previous: currentOverride };
   }
+
   return {
     ok: true,
-    changed: true,
-    override: next,
-    reason,
-    previous_override: info.override,
-    previous_rule: info.rule,
-    next_rule: nextRule,
+    before,
+    after,
+    rule_changed: before !== after,
+    loosened,
+    cause:
+      before === after
+        ? null
+        : overrideChanged && typeChanged
+          ? 'override_and_type_change'
+          : overrideChanged
+            ? 'override'
+            : 'type_change',
+    type_changed: typeChanged,
+    previous_type_id: row.stored_type_id ?? null,
+    next_type_id: typeChanged ? (requestedTypeId as string | null) : row.stored_type_id ?? null,
+    override,
   };
+}
+
+const SHARING_RULE_WORDS: Record<SharingRule, string> = {
+  free: '"Send freely"',
+  qa: '"Needs QA approval"',
+  locked: '"Locked"',
+};
+
+/**
+ * The effective rule of a document moved. One row per move, whatever moved it,
+ * so "when did this document become sendable, who did it and how" is one
+ * query. `via` says which door: the document page, an ingest, a replace.
+ * Never throws.
+ */
+export async function auditRuleChange(
+  db: D1Database,
+  args: {
+    userId: string | null;
+    tenantId: string;
+    documentId: string;
+    from: SharingRule;
+    to: SharingRule;
+    cause: RuleChangeCause;
+    via: string;
+    previousTypeId?: string | null;
+    typeId?: string | null;
+    reason?: string | null;
+    clientIp: string | null;
+  },
+): Promise<void> {
+  if (args.from === args.to) return;
+  try {
+    await logAudit(
+      db,
+      args.userId,
+      args.tenantId,
+      'document.sharing_rule_changed',
+      'document',
+      args.documentId,
+      JSON.stringify({
+        from: args.from,
+        to: args.to,
+        direction: loosens(args.from, args.to) ? 'loosened' : 'tightened',
+        cause: args.cause,
+        via: args.via,
+        previous_type_id: args.previousTypeId ?? null,
+        type_id: args.typeId ?? null,
+        reason: args.reason ?? null,
+      }),
+      args.clientIp,
+    );
+  } catch (err) {
+    console.error('[sharing-rule] rule change audit failed:', err instanceof Error ? err.message : String(err));
+  }
 }
 
 // ---------------------------------------------------------------------------

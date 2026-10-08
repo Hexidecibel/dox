@@ -46,7 +46,7 @@ import type {
   SharingRefusal,
 } from '../../shared/types';
 import type { ExitActor, SharingExit } from '../../shared/sharingRule';
-import { LINK_ACTOR, judgeDocumentsForExit } from './sharing-rule';
+import { judgeDocumentsForExit, linkActor } from './sharing-rule';
 
 /** Which exit is asking for these documents, and on whose authority. */
 export interface ExportGate {
@@ -67,6 +67,13 @@ export interface ExportGate {
  * `exportSizeRefusal` -- so "too big" is always actionable.
  */
 export const EXPORT_MAX_DOCUMENTS = 50;
+
+/**
+ * Ids per SQL statement. D1 caps bound parameters at 100; an export is capped
+ * at 50 documents, but an ORDER is not, and `planOrderSend` loads every
+ * distinct document on its lines through `loadExportDocuments`.
+ */
+export const EXPORT_IN_CHUNK = 80;
 export const EXPORT_MAX_TOTAL_BYTES = 40 * 1024 * 1024;
 
 /** How many addresses one send may name. A distribution list is not this. */
@@ -177,7 +184,14 @@ export async function loadExportDocuments(
     return { rows: [], missing_ids: [], refused: [], refused_rows: [], qa_released_ids: [] };
   }
 
-  const placeholders = ids.map(() => '?').join(', ');
+  // D1 caps bound parameters at 100 per statement, and an order may carry
+  // more distinct documents than that: both reads below go in chunks.
+  const idChunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += EXPORT_IN_CHUNK) idChunks.push(ids.slice(i, i + EXPORT_IN_CHUNK));
+
+  const byId = new Map<string, ExportDocumentRow>();
+  for (const part of idChunks) {
+  const placeholders = part.map(() => '?').join(', ');
   const res = await db
     .prepare(
       `SELECT d.id            AS document_id,
@@ -192,48 +206,59 @@ export async function loadExportDocuments(
               dv.file_size    AS file_size
          FROM documents d
          LEFT JOIN suppliers s       ON s.id  = d.supplier_id
-         LEFT JOIN document_types dt ON dt.id = d.document_type_id
+         LEFT JOIN document_types dt
+                ON dt.id = d.document_type_id AND dt.tenant_id = d.tenant_id
          INNER JOIN document_versions dv
                  ON dv.document_id = d.id AND dv.version_number = d.current_version
         WHERE d.tenant_id = ?
           AND d.status != 'deleted'
           AND d.id IN (${placeholders})`,
     )
-    .bind(tenantId, ...ids)
+    .bind(tenantId, ...part)
     .all<Omit<ExportDocumentRow, 'lot_label' | 'production_date'>>();
 
-  const byId = new Map<string, ExportDocumentRow>();
   for (const r of res.results ?? []) {
     byId.set(r.document_id, { ...r, lot_label: null, production_date: null });
+  }
   }
 
   // Lots are a second query rather than a join: a certificate can certify
   // several lot rows, and fanning the main select out by them would multiply
   // the file rows it returns.
-  const lots = await db
-    .prepare(
-      `SELECT dl.document_id AS document_id,
-              l.lot_number   AS lot_number,
-              l.sub_lot_code AS sub_lot_code,
-              l.production_date AS production_date,
-              l.production_date_status AS production_date_status
-         FROM document_lots dl
-         INNER JOIN lots l ON l.id = dl.lot_id
-        WHERE l.tenant_id = ? AND dl.document_id IN (${placeholders})
-        ORDER BY l.lot_number ASC, l.sub_lot_code ASC`,
-    )
-    .bind(tenantId, ...ids)
-    .all<{
-      document_id: string;
-      lot_number: string;
-      sub_lot_code: string | null;
-      production_date: string | null;
-      production_date_status: string | null;
-    }>();
+  interface LotRow {
+    document_id: string;
+    lot_number: string;
+    sub_lot_code: string | null;
+    production_date: string | null;
+    production_date_status: string | null;
+  }
+  const lotRows: LotRow[] = [];
+  for (const part of idChunks) {
+    const lots = await db
+      .prepare(
+        `SELECT dl.document_id AS document_id,
+                l.lot_number   AS lot_number,
+                l.sub_lot_code AS sub_lot_code,
+                l.production_date AS production_date,
+                l.production_date_status AS production_date_status
+           FROM document_lots dl
+           INNER JOIN lots l ON l.id = dl.lot_id
+          WHERE l.tenant_id = ? AND dl.document_id IN (${part.map(() => '?').join(', ')})
+          ORDER BY l.lot_number ASC, l.sub_lot_code ASC`,
+      )
+      .bind(tenantId, ...part)
+      .all<LotRow>();
+    lotRows.push(...(lots.results ?? []));
+  }
+  // Ordered across chunks, as the single statement ordered them.
+  lotRows.sort(
+    (a, b) =>
+      a.lot_number.localeCompare(b.lot_number) || (a.sub_lot_code ?? '').localeCompare(b.sub_lot_code ?? ''),
+  );
 
   const lotLabels = new Map<string, string[]>();
   const productionDates = new Map<string, Set<string>>();
-  for (const l of lots.results ?? []) {
+  for (const l of lotRows) {
     const label = l.sub_lot_code ? `${l.lot_number} / ${l.sub_lot_code}` : l.lot_number;
     const list = lotLabels.get(l.document_id) ?? [];
     if (!list.includes(label)) list.push(label);
@@ -685,10 +710,11 @@ export function exportLinkNeverExpires(row: { never_expires?: number | boolean |
  * rather than returning null: an alert must go out even without a link, but an
  * export email whose link does not exist is an email with nothing in it.
  *
- * THE MINT IS THE APPROVAL (0137). `documentIds` must be ids that
- * `loadExportDocuments` returned for the `send` (or `order_send`) exit: a
- * `qa` document on a link was put there by a QA releaser, which is why a
- * later read of the link serves it. Reads re-check only for `locked`.
+ * THE MINT IS THE APPROVAL ONLY OF A RELEASER (0137, C-045). `documentIds`
+ * must be ids that `loadExportDocuments` returned for the `send` (or
+ * `order_send`) exit, and `createdBy` must be THE PERSON WHOSE AUTHORITY PUT
+ * THEM THERE: every later read of the link re-reads the rule and serves a
+ * `qa` document only while that person may still release QA documents.
  */
 export async function mintExportLink(
   db: D1Database,
@@ -944,7 +970,14 @@ export interface ExportLinkSet {
  *
  * THE RULE IS RE-CHECKED ON EVERY READ (0137), as the `public_link` exit: a
  * document that has been LOCKED since the link was minted is no longer served.
- * A `qa` document stays -- the mint was its approval (see `mintExportLink`).
+ *
+ * A `qa` DOCUMENT IS SERVED ONLY ON THE MINTER'S AUTHORITY (C-045): while the
+ * person who minted the link (`created_by`) may release QA documents, asked
+ * NOW. "The mint was the approval" is only true of a releaser's mint. A link
+ * an ordinary user sent while the document was "send freely" -- or before the
+ * rule existed -- approved nothing, and stops serving the document once it
+ * becomes `qa`; so does a link whose minter has since lost the QA route. That
+ * includes the never-expiring link an order send mints for an oversize file.
  */
 export async function loadExportLinkSet(
   db: D1Database,
@@ -954,7 +987,7 @@ export async function loadExportLinkSet(
   if (ids.length === 0) return { rows: [], withheld: [], missing_ids: [] };
   const loaded = await loadExportDocuments(db, link.tenant_id, ids, {
     exit: 'public_link',
-    actor: LINK_ACTOR,
+    actor: await linkActor(db, link),
   });
   return { rows: loaded.rows, withheld: loaded.refused, missing_ids: loaded.missing_ids };
 }

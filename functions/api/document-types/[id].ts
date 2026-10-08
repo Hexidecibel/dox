@@ -11,6 +11,7 @@ import { parseRenewalIntervalMonths, parseTypeRenewalWindowSetting } from '../..
 import { parseRenewalAlertLeadDays } from '../../../shared/renewalLeadTime';
 import {
   defaultSharingRuleForTypeName,
+  loosens,
   parseSharingRule,
   type SharingRule,
 } from '../../../shared/sharingRule';
@@ -253,15 +254,40 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         );
       }
       const stored = parseSharingRule(documentType.sharing_rule);
+      const effective = stored ?? defaultSharingRuleForTypeName(documentType.name as string);
+      // AN API KEY NEVER LOOSENS A RULE, whoever owns it (C-041). A key reads
+      // "send freely" documents only; a key that could first relabel a whole
+      // type as "send freely" would read anything. Tightening is allowed.
+      if (context.data.authMethod === 'api_key' && loosens(effective, parsedRule)) {
+        return new Response(
+          JSON.stringify({
+            error: 'An API key cannot loosen a sharing rule; a person has to.',
+            code: 'sharing_rule_change_refused',
+          }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
       if (stored !== parsedRule) {
-        sharingRuleChange = {
-          from: stored,
-          from_effective: stored ?? defaultSharingRuleForTypeName(documentType.name as string),
-          to: parsedRule,
-        };
+        sharingRuleChange = { from: stored, from_effective: effective, to: parsedRule };
         updates.push('sharing_rule = ?');
         params.push(parsedRule);
       }
+    } else if (
+      body.name !== undefined &&
+      parseSharingRule(documentType.sharing_rule) === null &&
+      defaultSharingRuleForTypeName(sanitizeString(body.name)) !==
+        defaultSharingRuleForTypeName(documentType.name as string)
+    ) {
+      // A RENAME MUST NOT MOVE THE RULE. A type that predates 0137 has no
+      // stored rule and is read from its NAME, so renaming "Vendor Form" to
+      // "Certificate of Analysis" would have re-read every document of the
+      // type as "send freely" without anybody deciding that. The rule the type
+      // was read as until now is written down first; changing it is its own,
+      // audited, edit of `sharing_rule`.
+      const pinned = defaultSharingRuleForTypeName(documentType.name as string);
+      sharingRuleChange = { from: null, from_effective: pinned, to: pinned };
+      updates.push('sharing_rule = ?');
+      params.push(pinned);
     }
 
     // Renewal alert lead time override (migration 0111). Stamped and audited
@@ -351,6 +377,9 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
           sharing_rule: sharingRuleChange.to,
           previous_sharing_rule: sharingRuleChange.from,
           previous_effective_rule: sharingRuleChange.from_effective,
+          ...(sharingRuleChange.to === sharingRuleChange.from_effective
+            ? { note: 'Pinned on rename: the rule this type was read as from its old name.' }
+            : {}),
         }),
         getClientIp(context.request)
       );

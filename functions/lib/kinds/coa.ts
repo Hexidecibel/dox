@@ -7,6 +7,7 @@
 // uses the global) a type error: 11 of them across this file and
 // functions/api/queue/[id].ts. D1Database is imported because it is not
 // otherwise in scope here and its two copies DO match structurally.
+import { auditRuleChange, loadSharingRules } from '../sharing-rule';
 import type { D1Database } from '@cloudflare/workers-types';
 import { generateId, logAudit } from '../db';
 import { ConflictError } from '../permissions';
@@ -453,6 +454,11 @@ async function writeReplacementVersion(
   }
   const previousVersion = Number(existing.current_version) || 1;
   const versionNumber = previousVersion + 1;
+  // The sharing rule before the replace (migration 0137): a replace writes this
+  // item's type onto the document, and the type carries the rule. WHETHER the
+  // approver may do that is decided at the route (functions/api/queue/[id].ts,
+  // which knows how the request authenticated); here the move is recorded.
+  const ruleBefore = (await loadSharingRules(db, item.tenant_id, [existing.id])).get(existing.id);
   const r2Key = buildR2Key(item.tenant_slug, existing.id, versionNumber, item.file_name);
   await uploadFile(files, r2Key, args.bytes, args.mimeType);
 
@@ -524,6 +530,21 @@ async function writeReplacementVersion(
   }
 
   await auditRenewalDecision(db, args.userId, item.tenant_id, existing.id, item.id, renewal, args.clientIp);
+  const ruleAfter = (await loadSharingRules(db, item.tenant_id, [existing.id])).get(existing.id);
+  if (ruleBefore && ruleAfter) {
+    await auditRuleChange(db, {
+      userId: args.userId,
+      tenantId: item.tenant_id,
+      documentId: existing.id,
+      from: ruleBefore.rule,
+      to: ruleAfter.rule,
+      cause: 'type_change',
+      via: 'queue_replace',
+      previousTypeId: ruleBefore.document_type_id,
+      typeId: ruleAfter.document_type_id,
+      clientIp: args.clientIp,
+    });
+  }
   try {
     await logAudit(
       db,

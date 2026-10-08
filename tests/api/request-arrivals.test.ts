@@ -581,6 +581,42 @@ describe('amendments, re-uploads and files', () => {
     await person.arrayBuffer();
   });
 
+  it('an API key is asked even while the arrival\'s OWN object is still in storage (migration 0137)', async () => {
+    // Nothing guarantees approval removes the upload's object: the records
+    // path keeps it. So "served from the upload" is not "not a document".
+    const withKey = (id: string) => {
+      const ctx = fnContext(`/api/request-uploads/${id}/file`, { user: admin, params: { id } }) as any;
+      ctx.data.authMethod = 'api_key';
+      return ctx as never;
+    };
+    const a = await arrive(['Allergen Statement']);
+    const bytes = new TextEncoder().encode('the file the supplier sent');
+    const docId = await extractAndApprove(fx, a.queueId, admin);
+    // Put the upload's object back, as if approval had not removed it.
+    await env.FILES.put(a.r2Key, bytes);
+
+    const free = await fileGet(withKey(a.uploadId));
+    expect(free.status).toBe(200);
+    expect(free.headers.get('X-File-Source')).toBe('upload');
+    await free.arrayBuffer();
+
+    await db.prepare(`UPDATE documents SET sharing_rule_override = 'locked' WHERE id = ?`).bind(docId).run();
+    const refused = await fileGet(withKey(a.uploadId));
+    expect(refused.status).toBe(403);
+    expect(((await readJson(refused)) as { code: string; reason: string })).toMatchObject({
+      code: 'sharing_rule_refused',
+      reason: 'locked',
+    });
+    // A logged-in reader is not asked, and still gets the upload's own object.
+    const person = await fileGet(
+      fnContext(`/api/request-uploads/${a.uploadId}/file`, { user: reader, params: { id: a.uploadId } }),
+    );
+    expect(person.status).toBe(200);
+    expect(person.headers.get('X-File-Source')).toBe('upload');
+    await person.arrayBuffer();
+    await env.FILES.delete(a.r2Key);
+  });
+
   it('enqueues a file nobody read, once', async () => {
     const a = await arrive(['Allergen Statement']);
     // Simulate the enqueue failure the upload door tolerates: no queue item

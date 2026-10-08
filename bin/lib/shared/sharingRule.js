@@ -29,6 +29,7 @@ __export(sharingRule_exports, {
   describeRefusals: () => describeRefusals,
   effectiveSharingRule: () => effectiveSharingRule,
   judgeExit: () => judgeExit,
+  loosens: () => loosens,
   matchSharingRuleTable: () => matchSharingRuleTable,
   parseRefusedHeader: () => parseRefusedHeader,
   parseSharingRule: () => parseSharingRule,
@@ -127,7 +128,11 @@ function judgeExit(rule, exit, actor) {
   if (actor.method === "api_key") {
     return rule === "free" ? "allow" : rule === "qa" ? "needs_qa" : "locked";
   }
-  if (exit === "public_link") return rule === "locked" ? "locked" : "allow";
+  if (exit === "public_link") {
+    if (rule === "locked") return "locked";
+    if (rule === "free") return "allow";
+    return actor.method === "link" && actor.canReleaseQa ? "allow" : "needs_qa";
+  }
   if (actor.method === "link") {
     return rule === "free" ? "allow" : rule === "qa" ? "needs_qa" : "locked";
   }
@@ -168,6 +173,9 @@ function parseRefusedHeader(value) {
   }
   return out;
 }
+function loosens(before, after) {
+  return STRICTNESS[after] < STRICTNESS[before];
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   REFUSAL_NAMES_SHOWN,
@@ -179,6 +187,7 @@ function parseRefusedHeader(value) {
   describeRefusals,
   effectiveSharingRule,
   judgeExit,
+  loosens,
   matchSharingRuleTable,
   parseRefusedHeader,
   parseSharingRule,

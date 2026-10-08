@@ -105,6 +105,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         // The rule is asked of whoever is pressing resend, not of the
         // original sender (migration 0137).
         actor: await exitActorForRequest(context.env.DB, context.data, user, order.tenant_id),
+        actorUserId: user.id,
       },
       { sendId, tenantId: order.tenant_id, actorId: user.id, clientIp: getClientIp(context.request) },
     );

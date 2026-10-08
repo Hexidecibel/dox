@@ -27,16 +27,28 @@ interface BundleItemRow {
   r2_key: string | null;
 }
 
-function notIncludedText(bundleName: string, refused: SharingRefusal[]): string {
+/** What `NOT-INCLUDED.txt` says about a file that storage does not hold. */
+export const BUNDLE_FILE_MISSING_MESSAGE = 'The file is not in storage.';
+
+function notIncludedText(
+  bundleName: string,
+  refused: SharingRefusal[],
+  unavailable: { title: string; document_type_name: string | null }[],
+): string {
+  const n = refused.length + unavailable.length;
   const lines = [
     `Bundle: ${bundleName}`,
     '',
-    `${refused.length} document${refused.length === 1 ? ' is' : 's are'} in this bundle but not in this archive:`,
+    `${n} document${n === 1 ? ' is' : 's are'} in this bundle but not in this archive:`,
     '',
   ];
   for (const r of refused) {
     lines.push(`- ${r.title || 'Untitled document'}${r.document_type_name ? ` (${r.document_type_name})` : ''}`);
     lines.push(`  ${r.message}`);
+  }
+  for (const u of unavailable) {
+    lines.push(`- ${u.title || 'Untitled document'}${u.document_type_name ? ` (${u.document_type_name})` : ''}`);
+    lines.push(`  ${BUNDLE_FILE_MISSING_MESSAGE}`);
   }
   lines.push('');
   return lines.join('\r\n');
@@ -57,7 +69,8 @@ function notIncludedText(bundleName: string, refused: SharingRefusal[]): string 
  * A PACKAGE MISSING A DOCUMENT MUST NOT LOOK COMPLETE. What was kept back is
  * named inside the archive (NOT-INCLUDED.txt), in the `X-Bundle-Refused`
  * headers and in the audit row; when nothing may go the answer is a 403 that
- * names every document.
+ * names every document. A file that storage does not hold is said the same
+ * way (`X-Bundle-Unavailable`). A deleted document is not in the bundle.
  *
  * AUDITED. This route used to hand over a whole bundle and write nothing --
  * the one way out of the portal with no record. It now writes one
@@ -83,13 +96,15 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     // Get all items with their file info. The document must be this
     // organization's: a bundle row is data, and data is not trusted to have
-    // stayed inside its own tenant.
+    // stayed inside its own tenant. A DELETED document is not served -- the
+    // search export has always filtered it, and this route never did.
     const items = await db
       .prepare(
         `SELECT bi.document_id, bi.version_number, d.current_version,
                 dv.file_name, dv.r2_key
            FROM document_bundle_items bi
            INNER JOIN documents d ON bi.document_id = d.id AND d.tenant_id = ?
+                  AND d.status != 'deleted'
            LEFT JOIN document_versions dv ON dv.document_id = d.id
              AND dv.version_number = COALESCE(bi.version_number, d.current_version)
           WHERE bi.bundle_id = ?
@@ -159,9 +174,19 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       );
     }
 
-    if (judged.refused.length > 0) {
+    // A file missing from storage is left out too, and that is SAID in the
+    // same three places as a refusal: the note in the archive, a header, and
+    // the audit row. It used to be recorded only in the audit row.
+    if (judged.refused.length > 0 || unavailable.length > 0) {
       files[BUNDLE_NOT_INCLUDED_NAME] = new TextEncoder().encode(
-        notIncludedText(String(bundle.name ?? ''), judged.refused),
+        notIncludedText(
+          String(bundle.name ?? ''),
+          judged.refused,
+          unavailable.map((id) => ({
+            title: judged.rules.get(id)?.title ?? '',
+            document_type_name: judged.rules.get(id)?.document_type_name ?? null,
+          })),
+        ),
       );
     }
 
@@ -208,6 +233,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         'X-Bundle-Documents': String(sent.length),
         'X-Bundle-Refused': String(judged.refused.length),
         ...(judged.refused.length > 0 ? { 'X-Bundle-Refused-Ids': refusedHeaderValue(judged.refused) } : {}),
+        // Files storage does not hold: how many, and which documents.
+        'X-Bundle-Unavailable': String(unavailable.length),
+        ...(unavailable.length > 0 ? { 'X-Bundle-Unavailable-Ids': unavailable.join(',') } : {}),
       },
     });
   } catch (err) {

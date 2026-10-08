@@ -175,6 +175,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         sender: user,
         order,
         actor,
+        actorUserId: user.id,
       },
       {
         order,

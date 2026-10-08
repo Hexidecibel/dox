@@ -217,7 +217,11 @@ export interface ExitActor {
    * export link: no account at all.
    */
   method: 'jwt' | 'api_key' | 'link';
-  /** Resolved by `canReleaseQa`. Ignored for an API key and for a link. */
+  /**
+   * Resolved by `canReleaseQa`. Ignored for an API key. For a `link` it is
+   * asked of the PERSON WHO MINTED THE LINK, at the moment of the read (C-045):
+   * the recipient has no authority of their own, only the sender's.
+   */
   canReleaseQa: boolean;
 }
 
@@ -228,16 +232,25 @@ export type ExitVerdict = 'allow' | 'needs_qa' | 'locked';
  *
  *   - `locked` passes exactly one door: a logged-in person opening one file.
  *   - An API key reads `free` only, on every exit (C-041).
- *   - A public link read serves `free` and `qa`: the mint was the approval,
- *     so a `qa` document on a live link stays served. Only a document that is
- *     `locked` NOW is withheld.
+ *   - A public link read (C-045) serves `free`, and serves `qa` ONLY WHILE THE
+ *     PERSON WHO MINTED THE LINK MAY RELEASE QA DOCUMENTS. "The mint was the
+ *     approval" is true only of a releaser's mint: a link an ordinary user
+ *     sent while the document was `free` (or before the rule existed) approved
+ *     nothing, and stops serving the document once it becomes `qa`. `locked`
+ *     is never served.
  *   - Everything else that leaves: `free` for anyone, `qa` for a QA releaser.
  */
 export function judgeExit(rule: SharingRule, exit: SharingExit, actor: ExitActor): ExitVerdict {
   if (actor.method === 'api_key') {
     return rule === 'free' ? 'allow' : rule === 'qa' ? 'needs_qa' : 'locked';
   }
-  if (exit === 'public_link') return rule === 'locked' ? 'locked' : 'allow';
+  if (exit === 'public_link') {
+    if (rule === 'locked') return 'locked';
+    if (rule === 'free') return 'allow';
+    // `qa`: only on the minter's authority, and a link is the only actor with
+    // a minter. Anything else asking for this exit is a caller mistake.
+    return actor.method === 'link' && actor.canReleaseQa ? 'allow' : 'needs_qa';
+  }
   if (actor.method === 'link') {
     // A link holder has exactly one exit. Anything else is a caller mistake,
     // and a mistake must not open a door.
@@ -317,4 +330,9 @@ export function parseRefusedHeader(
     if (id && (reason === 'locked' || reason === 'needs_qa')) out.push({ document_id: id, reason });
   }
   return out;
+}
+
+/** Is `after` a LOOSER rule than `before` (free < qa < locked)? */
+export function loosens(before: SharingRule, after: SharingRule): boolean {
+  return STRICTNESS[after] < STRICTNESS[before];
 }

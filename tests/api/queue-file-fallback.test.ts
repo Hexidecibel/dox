@@ -32,7 +32,7 @@ const ORIGINAL = '%PDF-1.4 original five-page bundle';
 const SCOPED = '%PDF-1.4 one page';
 
 /** A queue row whose staging object may or may not still exist. */
-async function makeQueueItem(opts: { stagingExists: boolean }): Promise<string> {
+async function makeQueueItem(opts: { stagingExists: boolean; status?: string; split?: boolean }): Promise<string> {
   const id = generateTestId();
   const r2Key = `pending/${id}.pdf`;
   if (opts.stagingExists) {
@@ -45,10 +45,13 @@ async function makeQueueItem(opts: { stagingExists: boolean }): Promise<string> 
       `INSERT INTO processing_queue
          (id, tenant_id, document_type_id, file_r2_key, file_name, file_size, mime_type,
           extracted_text, processing_status, output_kind, status, created_by, created_at)
-       VALUES (?, ?, NULL, ?, ?, ?, 'application/pdf', NULL, 'ready', 'coa', 'approved', ?, datetime('now'))`
+       VALUES (?, ?, NULL, ?, ?, ?, 'application/pdf', NULL, 'ready', 'coa', ?, ?, datetime('now'))`
     )
-    .bind(id, seed.tenantId, r2Key, `${id}.pdf`, ORIGINAL.length, seed.userId)
+    .bind(id, seed.tenantId, r2Key, `${id}.pdf`, ORIGINAL.length, opts.status ?? 'approved', seed.userId)
     .run();
+  if (opts.split) {
+    await db.prepare(`UPDATE processing_queue SET packet_split_at = datetime('now') WHERE id = ?`).bind(id).run();
+  }
   return id;
 }
 
@@ -168,15 +171,86 @@ describe('the sharing rule on the queue file route', () => {
     return id;
   }
 
-  it('a key always reads the staging file: that read is intake, whatever came of the item', async () => {
-    const id = await makeQueueItem({ stagingExists: true });
-    // Even with an untyped (locked) document already produced from it.
-    await makeProducedDocument(id, '', ORIGINAL);
-
+  it('a key reads the staging file of an item still WAITING: that read is intake', async () => {
+    const id = await makeQueueItem({ stagingExists: true, status: 'pending' });
     const res = await getQueueFile(keyContext(id));
     expect(res.status).toBe(200);
     expect(res.headers.get('X-File-Source')).toBe('queue');
     expect(await res.text()).toBe(ORIGINAL);
+  });
+
+  // The staging object is not always "not a document yet". The records path
+  // keeps it after approval ON PURPOSE (it is the whole multi-lot certificate),
+  // and the first version of the rule asked only on the fallback -- so a key
+  // read whole originals of locked documents through this route.
+  it('a key is asked on the STAGING read once the item has documents: a whole multi-lot original', async () => {
+    const id = await makeQueueItem({ stagingExists: true, status: 'approved' });
+    await makeProducedDocument(id, '-lot1', SCOPED);
+    await makeProducedDocument(id, '-lot2', SCOPED);
+    const coa = await coaTypeId();
+    await db.prepare(`UPDATE documents SET document_type_id = ? WHERE external_ref = ?`).bind(coa, `queue-${id}-lot1`).run();
+
+    // One lot is a COA, the other is still unclassified (locked): refused.
+    const refused = await getQueueFile(keyContext(id));
+    expect(refused.status).toBe(403);
+    expect((await refused.json()) as { code: string; reason: string }).toMatchObject({
+      code: 'sharing_rule_refused',
+      reason: 'locked',
+    });
+    // A logged-in reviewer still opens it.
+    const person = await getQueueFile(fileContext(id));
+    expect(person.status).toBe(200);
+    expect(person.headers.get('X-File-Source')).toBe('queue');
+    await person.text();
+
+    // Every lot "send freely": the replay harness reads the original again.
+    await db.prepare(`UPDATE documents SET document_type_id = ? WHERE external_ref = ?`).bind(coa, `queue-${id}-lot2`).run();
+    const ok = await getQueueFile(keyContext(id));
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('X-File-Source')).toBe('queue');
+    expect(await ok.text()).toBe(ORIGINAL);
+  });
+
+  it('a pending item that already produced a document is asked too', async () => {
+    const id = await makeQueueItem({ stagingExists: true, status: 'pending' });
+    await makeProducedDocument(id, '', ORIGINAL);
+    expect((await getQueueFile(keyContext(id))).status).toBe(403);
+  });
+
+  it('a key is asked for a split PACKET: the strictest rule of every part made from it', async () => {
+    const packet = await makeQueueItem({ stagingExists: true, status: 'pending', split: true });
+    // Split, but no part approved yet: the packet is not intake any more, and
+    // nothing says it may leave.
+    expect((await getQueueFile(keyContext(packet))).status).toBe(403);
+
+    // Two approved parts, born from their own queue items, citing the packet.
+    const coa = await coaTypeId();
+    const partIds: string[] = [];
+    for (const suffix of ['a', 'b']) {
+      const child = await makeQueueItem({ stagingExists: false, status: 'approved' });
+      await makeProducedDocument(child, '', `part ${suffix}`);
+      const doc = await db
+        .prepare('SELECT id FROM documents WHERE external_ref = ?')
+        .bind(`queue-${child}`)
+        .first<{ id: string }>();
+      partIds.push(doc!.id);
+      await db.prepare('UPDATE document_versions SET source_packet_queue_id = ? WHERE document_id = ?').bind(packet, doc!.id).run();
+    }
+    await db.prepare('UPDATE documents SET document_type_id = ? WHERE id = ?').bind(coa, partIds[0]).run();
+    // One part is a COA; the other is unclassified. The packet holds both.
+    expect((await getQueueFile(keyContext(packet))).status).toBe(403);
+
+    await db.prepare('UPDATE documents SET document_type_id = ? WHERE id = ?').bind(coa, partIds[1]).run();
+    const ok = await getQueueFile(keyContext(packet));
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toBe(ORIGINAL);
+
+    // Locking one part afterwards closes the packet again.
+    await db.prepare(`UPDATE documents SET sharing_rule_override = 'locked' WHERE id = ?`).bind(partIds[0]).run();
+    expect((await getQueueFile(keyContext(packet))).status).toBe(403);
+    const person = await getQueueFile(fileContext(packet));
+    expect(person.status).toBe(200);
+    await person.text();
   });
 
   it('a key is refused the fallback for a document that is not "send freely", and a person is not', async () => {

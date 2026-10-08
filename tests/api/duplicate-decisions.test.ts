@@ -243,6 +243,60 @@ describe('a byte-identical arrival', () => {
     expect(replaced?.details.new_version).toBe(2);
   });
 
+  it('replace cannot move a document off a stricter sharing rule without the authority to (migration 0137)', async () => {
+    // "Replace existing" writes the arriving item's type onto the document it
+    // replaces, and the type carries the sharing rule.
+    const { docId, queueId } = await identicalPair('byte-rule');
+    const lockedType = generateTestId();
+    await db
+      .prepare(`INSERT INTO document_types (id, tenant_id, name, slug, active, sharing_rule) VALUES (?, ?, 'W-9', ?, 1, 'locked')`)
+      .bind(lockedType, seed.tenantId, `w9-${lockedType.slice(0, 6)}`)
+      .run();
+    await db.prepare('UPDATE documents SET document_type_id = ? WHERE id = ?').bind(lockedType, docId).run();
+    await db.prepare('UPDATE processing_queue SET document_type_id = ? WHERE id = ?').bind(coaType, queueId).run();
+    const body = { status: 'approved', fields: { title: 'byte-rule v2' }, supplier_id: supplierA, duplicate_decision: 'replace' };
+
+    // Approving is an administrator's act already, so the only caller who can
+    // reach the replace without the authority to unlock is an administrator's
+    // API KEY -- and a key never loosens a rule, whoever owns it.
+    const keyCtx = fnContext(`/api/queue/${queueId}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/json' },
+      params: { id: queueId },
+      user: userA,
+    }) as any;
+    keyCtx.data.authMethod = 'api_key';
+    const { onRequestPut } = await import('../../functions/api/queue/[id]');
+    const viaKey = await onRequestPut(keyCtx);
+    expect(viaKey.status).toBe(403);
+    const refusal = ((await readJson(viaKey)) as { error: string }).error;
+    expect(refusal).toContain('API key');
+    expect(refusal).toContain('Keep as a new document');
+    // Nothing was written.
+    expect(await versionsOf(docId)).toHaveLength(1);
+    expect(
+      (await db.prepare('SELECT document_type_id AS t FROM documents WHERE id = ?').bind(docId).first<{ t: string }>())!.t,
+    ).toBe(lockedType);
+    expect((await db.prepare('SELECT status FROM processing_queue WHERE id = ?').bind(queueId).first<{ status: string }>())!.status).toBe('pending');
+
+    // The administrator, logged in: allowed, and the move is on record.
+    const ok = await approve(queueId, { fields: { title: 'byte-rule v2' }, supplier_id: supplierA, duplicate_decision: 'replace' });
+    expect(ok.status).toBe(200);
+    expect(await versionsOf(docId)).toHaveLength(2);
+    const moved = await auditFor('document.sharing_rule_changed', docId);
+    expect(moved?.user_id).toBe(seed.orgAdminId);
+    expect(moved?.details).toMatchObject({
+      from: 'locked',
+      to: 'free',
+      direction: 'loosened',
+      cause: 'type_change',
+      via: 'queue_replace',
+      previous_type_id: lockedType,
+      type_id: coaType,
+    });
+  });
+
   it('replace with no renewal answer keeps the renewal decision already on the document', async () => {
     const { docId, queueId } = await identicalPair('byte-renewal');
     await db

@@ -25,6 +25,7 @@ import {
 import { applyDocumentTypeRequirementDefaults } from '../../lib/requirement-defaults';
 import { recordClassification } from '../../lib/classification';
 import type { DocumentFacetInput } from '../../lib/registry';
+import { auditRuleChange, planDocumentRuleChange, ruleChangeActor } from '../../lib/sharing-rule';
 import type { Env, User, Document } from '../../lib/types';
 
 const ALLOWED_TYPES = [
@@ -325,6 +326,31 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (existingDoc) {
       // === UPDATE FLOW: Add new version ===
+      // THE SHARING RULE (migration 0137). An upsert that names a document type
+      // RE-TYPES an existing document, and the type carries the rule -- so this
+      // is asked before a byte is written: a change that would LOOSEN the
+      // document's effective rule needs an administrator (off "locked") or a
+      // QA releaser, and is never made by an API key, which is how this
+      // endpoint is usually called. Tightening, and the same type again, pass.
+      const ruleChange = effectiveDocTypeId
+        ? await planDocumentRuleChange(
+            context.env.DB,
+            ruleChangeActor(context.data, user),
+            tenantId,
+            existingDoc.id,
+            { documentTypeId: effectiveDocTypeId },
+          )
+        : null;
+      if (ruleChange && !ruleChange.ok) {
+        return new Response(
+          JSON.stringify({
+            error: `${ruleChange.error} Nothing was ingested. Send the file without document_type_id to add a version and keep the type.`,
+            ...(ruleChange.code ? { code: ruleChange.code } : {}),
+          }),
+          { status: ruleChange.status, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+
       const newVersion = existingDoc.current_version + 1;
       const r2Key = buildR2Key(tenant.slug, existingDoc.id, newVersion, fileName);
 
@@ -414,6 +440,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       )
         .bind(...updateBindings)
         .run();
+
+      if (ruleChange && ruleChange.ok && ruleChange.rule_changed && ruleChange.cause) {
+        await auditRuleChange(context.env.DB, {
+          userId: user.id,
+          tenantId,
+          documentId: existingDoc.id,
+          from: ruleChange.before,
+          to: ruleChange.after,
+          cause: ruleChange.cause,
+          via: context.data.authMethod === 'api_key' ? 'ingest (api key)' : 'ingest',
+          previousTypeId: ruleChange.previous_type_id,
+          typeId: ruleChange.next_type_id,
+          clientIp: getClientIp(context.request),
+        });
+      }
+
 
       // REPLACE the category set when categories were sent (multi-category
       // "one doc, many mappings"). FTS category_text refreshes via triggers.
