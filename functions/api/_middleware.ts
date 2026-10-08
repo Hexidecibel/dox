@@ -182,6 +182,13 @@ const auth: PagesFunction<Env> = async (context) => {
       .run();
 
     context.data.user = result.user;
+    // HOW the request was authenticated (migration 0137). An API key acts as
+    // the user who made it for everything EXCEPT taking files out: a key reads
+    // only documents whose sharing rule is "send freely", whoever it belongs
+    // to (functions/lib/sharing-rule.ts). Nothing could tell the two apart
+    // before this line.
+    context.data.authMethod = 'api_key';
+    context.data.apiKeyId = result.keyId;
 
     return context.next();
   }
@@ -233,6 +240,7 @@ const auth: PagesFunction<Env> = async (context) => {
 
   // Attach user to context data so handlers can access it
   context.data.user = user;
+  context.data.authMethod = 'jwt';
 
   return context.next();
 };

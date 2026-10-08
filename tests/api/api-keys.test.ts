@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
+import { createTestToken } from '../helpers/auth';
+import { hashApiKey } from '../../functions/lib/auth';
+import { onRequest as middleware } from '../../functions/api/_middleware';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;
@@ -218,5 +221,85 @@ describe('API Keys - Auth Lookup', () => {
 
     expect(row).not.toBeNull();
     expect(new Date(row!.expires_at) < new Date()).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// How the request was authenticated (migration 0137). A key acts as the user
+// who made it for everything except taking files out, where it reads only
+// "send freely" documents -- so the middleware has to SAY it was a key.
+// ---------------------------------------------------------------------------
+describe('API Keys - the middleware records how the caller authenticated', () => {
+  async function throughAuth(headers: Record<string, string>, url = 'http://localhost/api/documents') {
+    const [, authFn] = middleware;
+    const data: Record<string, unknown> = {};
+    const res = await authFn({
+      request: new Request(url, { headers }),
+      env,
+      data,
+      params: {},
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+      functionPath: '/api/documents',
+      next: async () => new Response(JSON.stringify({ reached: true }), { status: 200 }),
+    } as any);
+    return { status: res.status, data };
+  }
+
+  async function liveKey(): Promise<{ raw: string; id: string }> {
+    const raw = `dox_sk_${generateTestId().replace(/[^a-z0-9]/gi, '')}${Math.random().toString(16).slice(2)}`;
+    const id = generateTestId();
+    await db
+      .prepare(
+        `INSERT INTO api_keys (id, name, key_hash, key_prefix, user_id, tenant_id, permissions, revoked)
+         VALUES (?, 'method test key', ?, ?, ?, ?, '["*"]', 0)`,
+      )
+      .bind(id, await hashApiKey(raw), raw.slice(0, 12), seed.orgAdminId, seed.tenantId)
+      .run();
+    return { raw, id };
+  }
+
+  it('an API key is marked as a key, with its id, and still resolves to its user', async () => {
+    const key = await liveKey();
+    const { status, data } = await throughAuth({ 'X-API-Key': key.raw });
+    expect(status).toBe(200);
+    expect(data.authMethod).toBe('api_key');
+    expect(data.apiKeyId).toBe(key.id);
+    expect((data.user as { id: string }).id).toBe(seed.orgAdminId);
+  });
+
+  it('a login is marked as a login, in the header or in ?token=', async () => {
+    const token = await createTestToken('org_admin', {
+      userId: seed.orgAdminId,
+      email: 'orgadmin@test.com',
+      tenantId: seed.tenantId,
+    });
+    const header = await throughAuth({ Authorization: `Bearer ${token}` });
+    expect(header.status).toBe(200);
+    expect(header.data.authMethod).toBe('jwt');
+    expect(header.data.apiKeyId).toBeUndefined();
+
+    const query = await throughAuth({}, `http://localhost/api/documents?token=${encodeURIComponent(token)}`);
+    expect(query.status).toBe(200);
+    expect(query.data.authMethod).toBe('jwt');
+  });
+
+  it('a login sent together with a key is a login: the key is not consulted', async () => {
+    const key = await liveKey();
+    const token = await createTestToken('user', {
+      userId: seed.userId,
+      email: 'user@test.com',
+      tenantId: seed.tenantId,
+    });
+    const { data } = await throughAuth({ Authorization: `Bearer ${token}`, 'X-API-Key': key.raw });
+    expect(data.authMethod).toBe('jwt');
+    expect((data.user as { id: string }).id).toBe(seed.userId);
+  });
+
+  it('a refused key marks nothing', async () => {
+    const { status, data } = await throughAuth({ 'X-API-Key': 'dox_sk_not_a_real_key' });
+    expect(status).toBe(401);
+    expect(data.authMethod).toBeUndefined();
+    expect(data.user).toBeUndefined();
   });
 });
