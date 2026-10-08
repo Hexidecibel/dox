@@ -79,6 +79,7 @@ import SupplierAutocomplete, { type SupplierValue } from '../components/Supplier
 import EntityNotes from '../components/EntityNotes';
 import { ReceivedAgainPanel } from '../components/IntakeDuplicateNotes';
 import { DocumentSpecResults } from '../components/DocumentSpecResults';
+import { DocumentSharingRule } from '../components/DocumentSharingRule';
 import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { helpContent } from '../lib/helpContent';
@@ -750,6 +751,10 @@ export function DocumentDetail() {
             <Chip label={doc.documentTypeName} color="info" variant="outlined" size="small" />
           </Box>
         )}
+
+        {/* May this document leave the organization (migration 0137). Shown
+            to everybody; the Change button only to QA and administrators. */}
+        <DocumentSharingRule documentId={doc.id} sharing={doc.sharing} onChanged={loadDocument} />
 
         {/* Supplier — read-only chip for everyone; admins can change it. */}
         {(doc.supplierName || isAdmin) && (

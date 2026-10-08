@@ -37,6 +37,7 @@ import {
   Lock as FinalizeIcon,
   RemoveCircleOutline as RemoveIcon,
 } from '@mui/icons-material';
+import { describeRefusals } from '../../shared/sharingRule';
 import { api } from '../lib/api';
 import type { ApiBundle, ApiBundleItem, ApiProduct } from '../lib/types';
 import { DocumentPicker } from '../components/DocumentPicker';
@@ -63,6 +64,9 @@ export function BundleDetail() {
   const [items, setItems] = useState<ApiBundleItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [downloading, setDownloading] = useState(false);
+  /** What the sharing rule kept out of the last download, by name and reason. */
+  const [downloadWarning, setDownloadWarning] = useState('');
 
   // Edit dialog
   const [editOpen, setEditOpen] = useState(false);
@@ -172,10 +176,28 @@ export function BundleDetail() {
     }
   };
 
-  const handleDownload = () => {
+  // Read with fetch rather than opened in a new tab: the response can say
+  // which documents the sharing rule kept out of the archive (migration 0137),
+  // and a new tab has nowhere to show that.
+  const handleDownload = async () => {
     if (!id) return;
-    const url = api.bundles.downloadUrl(id);
-    window.open(url, '_blank');
+    setDownloading(true);
+    setError('');
+    setDownloadWarning('');
+    try {
+      const res = await api.bundles.download(id, bundle?.name || 'bundle');
+      if (res.refused.length > 0) {
+        const titles = new Map(items.map((i) => [i.document_id, i.document_title ?? null]));
+        setDownloadWarning(
+          describeRefusals(res.refused.map((r) => ({ title: titles.get(r.document_id), reason: r.reason }))) +
+            ' The archive lists them in NOT-INCLUDED.txt.',
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The bundle could not be downloaded');
+    } finally {
+      setDownloading(false);
+    }
   };
 
   if (loading) {
@@ -240,13 +262,20 @@ export function BundleDetail() {
         </Alert>
       )}
 
+      {downloadWarning && (
+        <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setDownloadWarning('')} data-testid="bundle-refused">
+          {downloadWarning}
+        </Alert>
+      )}
+
       {/* Actions */}
       <Box sx={{ display: 'flex', gap: 1, mb: 3, flexWrap: 'wrap' }}>
         <Button
           variant="contained"
           startIcon={<DownloadIcon />}
           onClick={handleDownload}
-          disabled={items.length === 0}
+          disabled={items.length === 0 || downloading}
+          data-testid="bundle-download"
         >
           Download ZIP
         </Button>

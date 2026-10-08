@@ -22,6 +22,11 @@ export interface ExportSelectionBarProps {
   busy?: boolean;
   error?: string | null;
   notice?: string | null;
+  /**
+   * Something went, and something did not: the documents the sharing rule
+   * kept back, by name and reason. Shown beside `notice`, never instead of it.
+   */
+  warning?: string | null;
   onDownload: () => void;
   onSend: () => void;
   onClear: () => void;
@@ -35,6 +40,7 @@ export function ExportSelectionBar({
   busy = false,
   error,
   notice,
+  warning,
   onDownload,
   onSend,
   onClear,
@@ -42,7 +48,7 @@ export function ExportSelectionBar({
   extraAction,
   hideExport = false,
 }: ExportSelectionBarProps) {
-  if (count === 0 && !error && !notice) return null;
+  if (count === 0 && !error && !notice && !warning) return null;
 
   return (
     <Box
@@ -68,6 +74,11 @@ export function ExportSelectionBar({
       {notice && (
         <Alert severity="success" sx={{ mb: 1 }} onClose={onDismissMessage}>
           {notice}
+        </Alert>
+      )}
+      {warning && (
+        <Alert severity="warning" sx={{ mb: 1 }} onClose={onDismissMessage} data-testid="export-refused">
+          {warning}
         </Alert>
       )}
       {count > 0 && (

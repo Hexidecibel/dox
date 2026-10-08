@@ -146,6 +146,17 @@ export function ExportLanding() {
         {/* A certificate too large to attach is sent by a link that does not run out (0134). */}
         {view.never_expires ? 'This link does not expire.' : `This link works until ${formatDate(view.expires_at)}.`}
       </Typography>
+      {/* The list can be shorter than what was sent: a document removed from
+          the portal, or locked since (0137). The recipient is told how many,
+          and to ask the sender, and nothing about which or why. */}
+      {view.unavailable_count > 0 && (
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }} data-testid="export-landing-unavailable">
+          {view.unavailable_count === 1
+            ? '1 document sent with this link is no longer available.'
+            : `${view.unavailable_count} documents sent with this link are no longer available.`}{' '}
+          Ask the sender if you need {view.unavailable_count === 1 ? 'it' : 'them'}.
+        </Typography>
+      )}
 
       {view.message && (
         <Box

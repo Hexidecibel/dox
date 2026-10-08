@@ -53,6 +53,14 @@ import {
   SPEC_SHEET_RENEWAL_MONTHS,
   type RenewalWindow,
 } from '../../../shared/renewalPeriod';
+import {
+  SHARING_RULES,
+  SHARING_RULE_HELP,
+  SHARING_RULE_LABELS,
+  defaultSharingRuleForTypeName,
+  parseSharingRule,
+  type SharingRule,
+} from '../../../shared/sharingRule';
 import type { ApiDocumentType } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTenant } from '../../contexts/TenantContext';
@@ -116,6 +124,14 @@ export function DocumentTypes() {
    * so the value they see before saving is the value that will be stored.
    */
   const [formRenewalTouched, setFormRenewalTouched] = useState(false);
+  /**
+   * The sharing rule (migration 0137): may documents of this type leave the
+   * organization. Same contract as the renewal period above: a new type
+   * follows its name until the admin picks, and an existing type keeps what it
+   * has (a type with nothing stored shows the rule it is read as today).
+   */
+  const [formSharingRule, setFormSharingRule] = useState<SharingRule>('qa');
+  const [formSharingTouched, setFormSharingTouched] = useState(false);
   /**
    * Renewal alert lead time override (migration 0111). null = use the
    * organization's number, which is fetched when the dialog opens so the
@@ -221,6 +237,8 @@ export function DocumentTypes() {
     setFormRenewalMonths('');
     setFormWindow(windowToForm(FDA_FOOD_FACILITY_REGISTRATION_WINDOW));
     setFormRenewalTouched(false);
+    setFormSharingRule(defaultSharingRuleForTypeName(''));
+    setFormSharingTouched(false);
     setFormLeadDays(null);
     setFormLeadValid(true);
     setFormCloses([]);
@@ -251,6 +269,8 @@ export function DocumentTypes() {
     );
     // An existing type keeps what it has; never re-guess from the name here.
     setFormRenewalTouched(true);
+    setFormSharingRule(sharingRuleOf(dt));
+    setFormSharingTouched(true);
     setFormLeadDays(dt.renewal_alert_lead_days ?? null);
     setFormLeadValid(true);
     setFormTenantId(dt.tenant_id);
@@ -327,6 +347,12 @@ export function DocumentTypes() {
     setFormRenewalMonths(proposed == null ? '' : String(proposed));
   }, [formName, editingType, formRenewalTouched]);
 
+  // The sharing rule follows the name the same way, until the admin picks one.
+  useEffect(() => {
+    if (editingType || formSharingTouched) return;
+    setFormSharingRule(defaultSharingRuleForTypeName(formName));
+  }, [formName, editingType, formSharingTouched]);
+
   const windowCheck = validateRenewalWindow(formToWindow(formWindow));
   const windowInvalid = formRenewalMonths === 'window' && !windowCheck.ok;
 
@@ -364,6 +390,7 @@ export function DocumentTypes() {
           extract_tables: formExtractTables ? 1 : 0,
           ...renewalPayload(),
           renewal_alert_lead_days: formLeadDays,
+          sharing_rule: formSharingRule,
         });
         if (formCloses !== null && closesOriginal !== null && !sameIdSet(formCloses, closesOriginal)) {
           await api.documentTypeRequirements.replace({
@@ -386,6 +413,7 @@ export function DocumentTypes() {
           extract_tables: formExtractTables ? 1 : 0,
           ...renewalPayload(),
           renewal_alert_lead_days: formLeadDays,
+          sharing_rule: formSharingRule,
         });
         if (formCloses && formCloses.length > 0 && created.documentType?.id) {
           await api.documentTypeRequirements.replace({
@@ -528,6 +556,12 @@ export function DocumentTypes() {
                     {dt.renewal_alert_lead_days != null && dt.renewal_policy !== 'none' && (
                       <Chip label={`Warns ${dt.renewal_alert_lead_days} days before`} size="small" variant="outlined" />
                     )}
+                    <Chip
+                      label={`Sharing: ${SHARING_RULE_LABELS[sharingRuleOf(dt)]}`}
+                      size="small"
+                      color={sharingRuleColor(sharingRuleOf(dt))}
+                      variant="outlined"
+                    />
                     {instructionsByType[dt.id]?.authored && (
                       <Chip label="Extraction guidance" size="small" color="primary" variant="outlined" />
                     )}
@@ -592,6 +626,12 @@ export function DocumentTypes() {
                 </TableCell>
                 <TableCell>
                   <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                    Sharing
+                    <InfoTooltip text="Whether documents of this type may leave the organization: in a ZIP, an emailed link, a bundle, an order, or through an API key. One document can be given its own rule on its page." />
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
                     Created
                     <InfoTooltip text={helpContent.document_types.list?.columnTooltips?.created} />
                   </Box>
@@ -637,6 +677,14 @@ export function DocumentTypes() {
                           Warns {dt.renewal_alert_lead_days} days before
                         </Typography>
                       )}
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label={SHARING_RULE_LABELS[sharingRuleOf(dt)]}
+                        size="small"
+                        color={sharingRuleColor(sharingRuleOf(dt))}
+                        variant="outlined"
+                      />
                     </TableCell>
                     <TableCell>{formatDate(dt.created_at)}</TableCell>
                     <TableCell align="right">
@@ -818,6 +866,33 @@ export function DocumentTypes() {
             dashboard and never trigger a renewal alert.
           </Typography>
 
+          {/* Sharing rule (migration 0137) */}
+          <FormControl fullWidth sx={{ mb: 1 }}>
+            <InputLabel id="sharing-rule-label">Sharing</InputLabel>
+            <Select
+              labelId="sharing-rule-label"
+              value={formSharingRule}
+              onChange={(e) => {
+                setFormSharingTouched(true);
+                setFormSharingRule(e.target.value as SharingRule);
+              }}
+              label="Sharing"
+              disabled={saving}
+              inputProps={{ 'data-testid': 'sharing-rule-select' }}
+            >
+              {SHARING_RULES.map((rule) => (
+                <MenuItem key={rule} value={rule}>
+                  {SHARING_RULE_LABELS[rule]}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }} data-testid="sharing-rule-help">
+            {SHARING_RULE_HELP[formSharingRule]} This covers every way a file leaves: a ZIP, an emailed
+            link, a bundle, an order, and an API key. Opening one document inside the portal is never
+            affected. One document can be given its own rule on its page.
+          </Typography>
+
           {/* Renewal alert lead time override (migration 0111) */}
           <Box sx={{ mb: 2 }}>
             <LeadDaysField
@@ -910,6 +985,19 @@ export function DocumentTypes() {
 }
 
 /** The window as the dialog edits it: every field as text. */
+/**
+ * The sharing rule a type is read as: its stored rule, or -- for a type that
+ * predates migration 0137 -- the one its name resolves to, which is exactly
+ * what the server enforces for it.
+ */
+function sharingRuleOf(dt: Pick<ApiDocumentType, 'name' | 'sharing_rule'>): SharingRule {
+  return parseSharingRule(dt.sharing_rule) ?? defaultSharingRuleForTypeName(dt.name);
+}
+
+function sharingRuleColor(rule: SharingRule): 'success' | 'warning' | 'error' {
+  return rule === 'free' ? 'success' : rule === 'qa' ? 'warning' : 'error';
+}
+
 function windowToForm(w: RenewalWindow): { opens: string; closes: string; every_years: string; reference_year: string; source: string } {
   return {
     opens: w.opens,

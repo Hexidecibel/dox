@@ -1,3 +1,4 @@
+import { parseRefusedHeader, type SharingRefusalReason } from '../../shared/sharingRule';
 import type {
   AuthPayload,
   Document,
@@ -572,7 +573,7 @@ export const api = {
      * with no explicit `status` lands 'confirmed', which is the only status
      * gap detection counts.
      */
-    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; supplier_name: string; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null; categories: string[]; primary_category_id: string | null; requirements: DocumentFacetLinkInput[]; claims: DocumentFacetLinkInput[]; aliases: string[]; criteria: string[]; applies_to: string[]; owner: string | null; renewal_type: string | null; renewal_interval_months: number | null; renewal_due_date: string | null; renewal_reason: string | null }>): Promise<Document> => {
+    update: async (id: string, data: Partial<{ title: string; description: string; category: string; tags: string[]; status: string; document_type_id: string | null; supplier_id: string | null; supplier_name: string; primary_metadata: Record<string, string | null> | null; extended_metadata: Record<string, string | null> | null; categories: string[]; primary_category_id: string | null; requirements: DocumentFacetLinkInput[]; claims: DocumentFacetLinkInput[]; aliases: string[]; criteria: string[]; applies_to: string[]; owner: string | null; renewal_type: string | null; renewal_interval_months: number | null; renewal_due_date: string | null; renewal_reason: string | null; sharing_rule_override: import('../../shared/sharingRule').SharingRule | null; sharing_rule_reason: string }>): Promise<Document> => {
       const response = await fetchApi<DocumentUpdateResponse>(`/documents/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1267,7 +1268,7 @@ export const api = {
      * POST /api/document-types
      * Returns: { documentType: ApiDocumentType }
      */
-    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null }) =>
+    create: (data: { name: string; description?: string; tenant_id?: string; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null; sharing_rule?: import('../../shared/sharingRule').SharingRule }) =>
       fetchApi<{ documentType: ApiDocumentType }>('/document-types', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -1277,7 +1278,7 @@ export const api = {
      * PUT /api/document-types/:id
      * Returns: { documentType: ApiDocumentType }
      */
-    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null }) =>
+    update: (id: string, data: { name?: string; description?: string; active?: number; supplier_id?: string | null; auto_ingest?: number; extract_tables?: number; renewal_interval_months?: number | null; renewal_policy?: TypeRenewalPolicy; renewal_window?: import('../../shared/renewalPeriod').RenewalWindow | null; renewal_alert_lead_days?: number | null; sharing_rule?: import('../../shared/sharingRule').SharingRule }) =>
       fetchApi<{ documentType: ApiDocumentType }>(`/document-types/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -2568,6 +2569,44 @@ export const api = {
       const qs = params.toString();
       return `${API_BASE}/bundles/${bundleId}/download${qs ? `?${qs}` : ''}`;
     },
+
+    /**
+     * GET /api/bundles/:id/download, read here rather than opened in a new
+     * tab, because the response can say something a new tab cannot show: which
+     * documents the sharing rule kept out of the archive (migration 0137), or
+     * that nothing at all may go (a 403 whose message names every document).
+     */
+    download: async (
+      bundleId: string,
+      fallbackName = 'bundle',
+    ): Promise<{ count: number; refused: { document_id: string; reason: SharingRefusalReason }[] }> => {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch(`${API_BASE}/bundles/${bundleId}/download`, { headers });
+      if (!res.ok) {
+        let message: string;
+        try {
+          const body = (await res.json()) as { error?: string };
+          message = body.error || res.statusText;
+        } catch {
+          message = res.statusText;
+        }
+        throw new Error(message);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const match = res.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/);
+      a.download = match?.[1] || `${fallbackName}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return {
+        count: Number(res.headers.get('X-Bundle-Documents') || 0),
+        refused: parseRefusedHeader(res.headers.get('X-Bundle-Refused-Ids')),
+      };
+    },
   },
 
   processing: {
@@ -3582,7 +3621,10 @@ export const api = {
      * the raw response and drives the browser download itself rather than
      * going through `fetchApi`, which assumes JSON.
      */
-    downloadZip: async (documentIds: string[], tenantId?: string): Promise<{ count: number }> => {
+    downloadZip: async (
+      documentIds: string[],
+      tenantId?: string,
+    ): Promise<{ count: number; refused: { document_id: string; reason: SharingRefusalReason }[] }> => {
       const token = localStorage.getItem(AUTH_TOKEN_KEY);
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -3613,7 +3655,12 @@ export const api = {
       a.download = match?.[1] || `documents-${new Date().toISOString().split('T')[0]}.zip`;
       a.click();
       URL.revokeObjectURL(url);
-      return { count: Number(res.headers.get('X-Export-Documents') || documentIds.length) };
+      return {
+        count: Number(res.headers.get('X-Export-Documents') || documentIds.length),
+        // Documents the sharing rule kept back (migration 0137): the archive
+        // is short by these, and the caller says so.
+        refused: parseRefusedHeader(res.headers.get('X-Export-Refused-Ids')),
+      };
     },
 
     /** POST /api/document-exports/send — the "on behalf of" email. */

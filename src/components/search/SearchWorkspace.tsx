@@ -40,6 +40,7 @@ import { useRecentSearches } from '../../hooks/useRecentSearches';
 import { useSavedSearches } from '../../hooks/useSavedSearches';
 import { useSearchRun } from '../../hooks/useSearchRun';
 import { useSearchExamples } from '../../hooks/useSearchExamples';
+import { describeRefusals } from '../../../shared/sharingRule';
 import { api } from '../../lib/api';
 import { isTypingTarget, modKeyLabel } from '../../lib/platform';
 import {
@@ -376,6 +377,8 @@ export function SearchWorkspace({
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  /** What the sharing rule kept back from the last ZIP or send (0137). */
+  const [exportWarning, setExportWarning] = useState<string | null>(null);
   const [sendOpen, setSendOpen] = useState(false);
   const selectedIds = useMemo(() => new Set(selectedDocs.map((d) => d.id)), [selectedDocs]);
   const toggleDoc = useCallback((doc: UniversalSearchDocument) => {
@@ -400,9 +403,20 @@ export function SearchWorkspace({
     setExportBusy(true);
     setExportError(null);
     setExportNotice(null);
+    setExportWarning(null);
+    const titles = new Map(selectedDocs.map((d) => [d.id, d.title ?? null]));
     api.documentExports
       .downloadZip(selectedDocs.map((d) => d.id), tenantId)
-      .then((res) => setExportNotice(`${res.count} document${res.count === 1 ? '' : 's'} downloaded.`))
+      .then((res) => {
+        setExportNotice(`${res.count} document${res.count === 1 ? '' : 's'} downloaded.`);
+        // The archive is short by these, and its manifest says so too.
+        const refused = res.refused ?? [];
+        if (refused.length > 0) {
+          setExportWarning(
+            describeRefusals(refused.map((r) => ({ title: titles.get(r.document_id), reason: r.reason }))),
+          );
+        }
+      })
       .catch((e: unknown) => setExportError(e instanceof Error ? e.message : 'Export failed'))
       .finally(() => setExportBusy(false));
   }, [selectedDocs, tenantId]);
@@ -412,6 +426,7 @@ export function SearchWorkspace({
       setExportBusy(true);
       setExportError(null);
       setExportNotice(null);
+      setExportWarning(null);
       api.documentExports
         .send({
           document_ids: selectedDocs.map((d) => d.id),
@@ -428,6 +443,8 @@ export function SearchWorkspace({
             `Sent ${res.document_count} document${res.document_count === 1 ? '' : 's'} to ${res.recipients.join(', ')}. ` +
               'Sent the wrong thing? Documents you sent (under Documents in the menu) can revoke the link.',
           );
+          // Sent, but not all of it: name what the sharing rule kept back.
+          if (res.refused && res.refused.length > 0) setExportWarning(describeRefusals(res.refused));
         })
         .catch((e: unknown) => setExportError(e instanceof Error ? e.message : 'Send failed'))
         .finally(() => setExportBusy(false));
@@ -919,6 +936,7 @@ export function SearchWorkspace({
             busy={exportBusy}
             error={exportError}
             notice={exportNotice}
+            warning={exportWarning}
             hideExport={!exportOffered}
             extraAction={
               selectionAction
@@ -935,10 +953,12 @@ export function SearchWorkspace({
               setIncludedAnyway(new Set());
               setExportError(null);
               setExportNotice(null);
+              setExportWarning(null);
             }}
             onDismissMessage={() => {
               setExportError(null);
               setExportNotice(null);
+              setExportWarning(null);
             }}
           />
           {exportOffered && <SendExportDialog
