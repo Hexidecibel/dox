@@ -9,26 +9,10 @@
 import type { AllowEntry } from './noFirstTenantValues.scan';
 
 /**
- * PROMPT TEXT, HELD FOR MEASUREMENT. Every line below is sent to a model, and
- * in this project a prompt does not change on the strength of reading it: it
- * changes when bin/eval-aj-docs and bin/measure-doctype-extraction say the
- * numbers held. The replacements are written and sit on their own commit; that
- * commit DELETES this block. If you are reading this on master, the prompt
- * cleanup has not been measured and merged yet.
+ * Empty, and that is the goal. The prompt lines that sat here while their
+ * replacements waited to be measured came off with the prompt commit.
  */
-const PENDING_PROMPT_MEASUREMENT =
-  'Prompt text sent to a model. Its tenant-neutral replacement is on a separate commit that must be measured ' +
-  '(bin/eval-aj-docs, bin/measure-doctype-extraction) before it merges; that commit removes this entry.';
-
-export const ALLOWLIST: AllowEntry[] = [
-  { path: 'functions/lib/llm.ts', pattern: /If "MEDOSWEET FARMS" appears after "Ship To:"/, reason: PENDING_PROMPT_MEASUREMENT },
-  { path: 'functions/lib/llm.ts', pattern: /Darigold Inc\.|COA for Darigold Grade AA Butter/, reason: PENDING_PROMPT_MEASUREMENT },
-  { path: 'functions/lib/llm.ts', pattern: /"darigold" matches "Darigold, Inc\."/, reason: PENDING_PROMPT_MEASUREMENT },
-  { path: 'functions/lib/llm.ts', pattern: /810004/, reason: PENDING_PROMPT_MEASUREMENT },
-  { path: 'shared/fieldMappings.ts', pattern: /ORD-2026-001, 1784767/, reason: PENDING_PROMPT_MEASUREMENT },
-  { path: 'functions/lib/connectors/schemaDiscovery.ts', pattern: /\(K00166\) CHUCKANUT BAY FOODS/, reason: PENDING_PROMPT_MEASUREMENT },
-  { path: 'shared/orderPrompt.ts', pattern: /CHUCKANUT|chuckanut|K00166|1784767/, reason: PENDING_PROMPT_MEASUREMENT },
-];
+export const ALLOWLIST: AllowEntry[] = [];
 
 export interface KnownShape {
   path: string;

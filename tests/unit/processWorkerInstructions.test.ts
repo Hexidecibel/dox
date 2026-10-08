@@ -72,7 +72,7 @@ describe('process-worker — reviewer instructions wiring', () => {
     // settled on. It is what lets the prompt say what the document IS on the
     // FIRST call instead of after a re-extract.
     expect(processWorkerSource).toMatch(
-      /prependReviewerInstructions\(buildPrompt\(examples, tenantContext, classifiedTypeName\), reviewerInstructions\)/
+      /prependReviewerInstructions\(buildPrompt\(examples, tenantContext, classifiedTypeName, tenantNameFor\(item\.tenant_id\)\), reviewerInstructions\)/
     );
   });
 

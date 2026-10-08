@@ -48,6 +48,17 @@
 -- before the change, and pins the SHA-256 of the whole assembled prompt, so
 -- none of it can drift from what was live.
 --
+-- ONE DELIBERATE DIFFERENCE FROM WHAT WAS LIVE. The worked example in the old
+-- default named a real supplier. The text below names an invented one
+-- ("Northfield Inc.") in the same three places and is otherwise the worker's
+-- former default character for character -- the test proves exactly that, by
+-- putting the old name back and comparing the SHA-256. A product migration
+-- does not write a real company's name into every organisation's settings.
+-- A database that applied this file BEFORE that change holds the earlier text;
+-- the code recognises both by fingerprint (isMigratedDefaultContext).
+-- PRODUCTION AND STAGING ARE SUCH DATABASES: both applied this file on
+-- 2026-10-07 with the earlier text, before the change above was merged.
+--
 -- NOTHING IS STAMPED. extraction_context_updated_at / _updated_by (0072) stay
 -- NULL. Those columns say a PERSON edited the context, and the settings box
 -- prints them as "Last edited by". Nobody edited anything here; a stamp would
@@ -107,7 +118,7 @@ SET extraction_context =
       ('- Normalize dates to YYYY-MM-DD; when numeric order is genuinely ambiguous (e.g. 03/04/26 could be Mar or Apr), keep as-is rather than guess.' || char(10)) ||
       ('' || char(10)) ||
       ('EXAMPLE ' || char(8212) || ' Dairy COA extraction:' || char(10)) ||
-      ('Input: "Darigold Inc. COA for Grade AA Butter 68#, Lot L26-0842, PO PO-44821, Packed 03/15/26, Best By 09/15/26, Plant 42-1234. Tests: Fat >80% result 81.2% Pass, Moisture <16% result 15.4% Pass, Coliform <10 CFU/g result <1 Pass, SPC <20000 CFU/g result 4500 Pass"' || char(10)) ||
+      ('Input: "Northfield Inc. COA for Grade AA Butter 68#, Lot L26-0842, PO PO-44821, Packed 03/15/26, Best By 09/15/26, Plant 42-1234. Tests: Fat >80% result 81.2% Pass, Moisture <16% result 15.4% Pass, Coliform <10 CFU/g result <1 Pass, SPC <20000 CFU/g result 4500 Pass"' || char(10)) ||
       ('' || char(10))
     )
     ||
@@ -115,7 +126,7 @@ SET extraction_context =
       ('Output:' || char(10)) ||
       ('{' || char(10)) ||
       ('  "fields": {' || char(10)) ||
-      ('    "supplier_name": "Darigold Inc.",' || char(10)) ||
+      ('    "supplier_name": "Northfield Inc.",' || char(10)) ||
       ('    "product_name": "Grade AA Butter 68#",' || char(10)) ||
       ('    "lot_number": "L26-0842",' || char(10)) ||
       ('    "po_number": "PO-44821",' || char(10)) ||
@@ -145,7 +156,7 @@ SET extraction_context =
     )
     ||
     (
-      ('  "summary": "COA for Darigold Grade AA Butter lot L26-0842, all tests pass.",' || char(10)) ||
+      ('  "summary": "COA for Northfield Grade AA Butter lot L26-0842, all tests pass.",' || char(10)) ||
       ('  "_confidence": 0.95,' || char(10)) ||
       ('  "document_type": "Certificate of Analysis"' || char(10)) ||
       ('}')

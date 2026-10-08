@@ -1015,7 +1015,7 @@ Rules:
 - Identify EVERY distinct field you can see, including ones without an obvious
   canonical mapping. Set candidate_target to null for those.
 - DO NOT extract every order. Only sample 3-5 example values per field.
-- Detect block-per-customer layouts: "(K00166) CHUCKANUT BAY FOODS:" followed
+- Detect block-per-customer layouts: "(K00417) MERIDIAN HOLLOW FOODS:" followed
   by indented rows is block_per_customer, not tabular.
 - A multi-digit numeric ID adjacent to a K#####/P###### code is order_number,
   not customer_number.

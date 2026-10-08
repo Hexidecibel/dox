@@ -93,8 +93,8 @@ describe('getDefaultParsingPrompt — hard rules', () => {
   });
 
   it('includes the Example B real-order fragment verbatim', () => {
-    // Anchors the 1784767 / CHUCKANUT BAY FOODS real-order example.
-    expect(prompt).toContain('1784767');
+    // Anchors the worked order example (an invented order and customer).
+    expect(prompt).toContain('1650438');
   });
 });
 

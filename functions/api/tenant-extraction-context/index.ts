@@ -64,11 +64,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     requireTenantAccess(user, tenantId);
 
     const row = await context.env.DB.prepare(
-      `SELECT extraction_context, extraction_context_updated_at, extraction_context_updated_by
+      `SELECT name, extraction_context, extraction_context_updated_at, extraction_context_updated_by
        FROM tenants WHERE id = ?`
     )
       .bind(tenantId)
       .first<{
+        name: string | null;
         extraction_context: string | null;
         extraction_context_updated_at: string | null;
         extraction_context_updated_by: string | null;
@@ -77,6 +78,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     return new Response(
       JSON.stringify({
         extraction_context: row?.extraction_context ?? null,
+        // The organisation's own name. The extraction worker reads it from here
+        // to fill rule 5 of the prompt ("these documents are filed by ...").
+        tenant_name: row?.name ?? null,
         default_template: DAIRY_CONTEXT_TEMPLATE,
         generic_context: GENERIC_INDUSTRY_CONTEXT,
         templates: EXTRACTION_CONTEXT_TEMPLATES,
