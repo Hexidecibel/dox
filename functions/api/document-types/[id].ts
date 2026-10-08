@@ -9,6 +9,11 @@ import {
 import { sanitizeString } from '../../lib/validation';
 import { parseRenewalIntervalMonths, parseTypeRenewalWindowSetting } from '../../lib/registry';
 import { parseRenewalAlertLeadDays } from '../../../shared/renewalLeadTime';
+import {
+  defaultSharingRuleForTypeName,
+  parseSharingRule,
+  type SharingRule,
+} from '../../../shared/sharingRule';
 import type { Env, User } from '../../lib/types';
 
 function slugify(text: string): string {
@@ -102,6 +107,8 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       renewal_policy?: string | null;
       /** A fixed calendar renewal window (0125, G3); null clears it. */
       renewal_window?: unknown;
+      /** 'free' / 'qa' / 'locked' (migration 0137). */
+      sharing_rule?: string | null;
       /** Days of renewal-alert warning for this type; null = the organization's setting (0111). */
       renewal_alert_lead_days?: number | null;
     };
@@ -110,6 +117,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     const params: (string | number | null)[] = [];
     /** Set when this request actually changes the alert lead time, for its own audit row. */
     let leadTimeChange: { from: number | null; to: number | null } | null = null;
+    let sharingRuleChange: { from: SharingRule | null; from_effective: SharingRule; to: SharingRule } | null = null;
 
     if (body.name !== undefined) {
       const name = sanitizeString(body.name);
@@ -229,6 +237,33 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }
     }
 
+    // The sharing rule (migration 0137, decision C-003): may documents of this
+    // type leave. Audited on its own, and only when the value CHANGES -- this
+    // setting decides what an API key can read and what a reader can ZIP, so
+    // "who loosened it and when" has to be one query.
+    //
+    // A type is never set back to "not stored": null is refused. The stored
+    // value is the point -- it is what the Document Types screen shows.
+    if (body.sharing_rule !== undefined) {
+      const parsedRule = parseSharingRule(body.sharing_rule);
+      if (!parsedRule) {
+        return new Response(
+          JSON.stringify({ error: 'sharing_rule must be one of: free, qa, locked' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      const stored = parseSharingRule(documentType.sharing_rule);
+      if (stored !== parsedRule) {
+        sharingRuleChange = {
+          from: stored,
+          from_effective: stored ?? defaultSharingRuleForTypeName(documentType.name as string),
+          to: parsedRule,
+        };
+        updates.push('sharing_rule = ?');
+        params.push(parsedRule);
+      }
+    }
+
     // Renewal alert lead time override (migration 0111). Stamped and audited
     // on its own only when the value CHANGES, so re-saving the dialog does
     // not leave a trail of no-op "changes" to a setting that decides when
@@ -303,6 +338,23 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       }),
       getClientIp(context.request)
     );
+
+    if (sharingRuleChange) {
+      await logAudit(
+        context.env.DB,
+        user.id,
+        documentType.tenant_id as string,
+        'document_type.sharing_rule_updated',
+        'document_type',
+        docTypeId,
+        JSON.stringify({
+          sharing_rule: sharingRuleChange.to,
+          previous_sharing_rule: sharingRuleChange.from,
+          previous_effective_rule: sharingRuleChange.from_effective,
+        }),
+        getClientIp(context.request)
+      );
+    }
 
     if (leadTimeChange) {
       await logAudit(

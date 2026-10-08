@@ -1,6 +1,11 @@
 import { generateId } from '../../lib/db';
 import { logAudit, getClientIp } from '../../lib/db';
 import { requireRole, errorToResponse } from '../../lib/permissions';
+import {
+  defaultSharingRuleForTypeName,
+  parseSharingRule,
+  type SharingRule,
+} from '../../../shared/sharingRule';
 import { sanitizeString } from '../../lib/validation';
 import {
   defaultRenewalSettingForTypeName,
@@ -140,6 +145,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       renewal_policy?: string | null;
       /** A fixed calendar renewal window (0125, G3). */
       renewal_window?: unknown;
+      /** 'free' / 'qa' / 'locked' (migration 0137). Omitted = proposed from the name. */
+      sharing_rule?: string | null;
       /** Days of renewal-alert warning for this type; null/absent = inherit (0111). */
       renewal_alert_lead_days?: number | null;
     };
@@ -258,6 +265,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       renewalWindow = proposed.window;
     }
 
+    // The sharing rule (migration 0137, decision C-003). Same contract as the
+    // renewal default above: said by the caller, or PROPOSED ONCE from the
+    // name and written into a setting an admin can see and change. A name the
+    // starting table does not recognise starts at 'qa'.
+    let sharingRule: SharingRule;
+    if (body.sharing_rule !== undefined && body.sharing_rule !== null && body.sharing_rule !== '') {
+      const parsedRule = parseSharingRule(body.sharing_rule);
+      if (!parsedRule) {
+        return new Response(
+          JSON.stringify({ error: 'sharing_rule must be one of: free, qa, locked' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      sharingRule = parsedRule;
+    } else {
+      sharingRule = defaultSharingRuleForTypeName(body.name);
+    }
+
     // Renewal alert lead time override (0111). Absent or null = inherit the
     // organization's setting, which is what every existing type does.
     let renewalAlertLeadDays: number | null = null;
@@ -274,8 +299,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     await context.env.DB.prepare(
       `INSERT INTO document_types (id, tenant_id, name, slug, description, supplier_id, active, auto_ingest, extract_tables, renewal_interval_months, renewal_policy,
-                                   renewal_alert_lead_days, renewal_alert_lead_updated_at, renewal_alert_lead_updated_by, renewal_window)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, ?, ?)`
+                                   renewal_alert_lead_days, renewal_alert_lead_updated_at, renewal_alert_lead_updated_by, renewal_window,
+                                   sharing_rule)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, ?, ?, ?)`
     )
       .bind(
         id,
@@ -291,7 +317,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         renewalAlertLeadDays,
         renewalAlertLeadDays,
         renewalAlertLeadDays === null ? null : user.id,
-        renewalWindow === null ? null : JSON.stringify(renewalWindow)
+        renewalWindow === null ? null : JSON.stringify(renewalWindow),
+        sharingRule
       )
       .run();
 
@@ -309,6 +336,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         renewal_policy: renewalPolicy,
         renewal_window: renewalWindow,
         renewal_alert_lead_days: renewalAlertLeadDays,
+        sharing_rule: sharingRule,
       }),
       getClientIp(context.request)
     );

@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env } from 'cloudflare:test';
 import { seedTestData, generateTestId } from '../helpers/db';
+import { fnContext, readJson } from '../helpers/requests';
+import type { TestUser } from '../helpers/requests';
+import { onRequestPost as createDocumentType } from '../../functions/api/document-types/index';
+import { onRequestPut as updateDocumentType } from '../../functions/api/document-types/[id]';
 
 let seed: Awaited<ReturnType<typeof seedTestData>>;
 const db = env.DB;
@@ -193,5 +197,126 @@ describe('Document Types - Update', () => {
     await db.prepare("UPDATE document_types SET active = 0, updated_at = datetime('now') WHERE id = ?").bind(dtId).run();
     const dt = await db.prepare('SELECT active FROM document_types WHERE id = ?').bind(dtId).first();
     expect(dt!.active).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The sharing rule on a type (migration 0137, decision C-003)
+// ---------------------------------------------------------------------------
+describe('Document Types - sharing rule', () => {
+  const admin = (): TestUser => ({
+    id: seed.orgAdminId,
+    email: 'orgadmin@test.com',
+    name: 'Org Admin',
+    role: 'org_admin',
+    tenant_id: seed.tenantId,
+  });
+  const member = (): TestUser => ({
+    id: seed.userId,
+    email: 'user@test.com',
+    name: 'Regular User',
+    role: 'user',
+    tenant_id: seed.tenantId,
+  });
+
+  async function create(body: Record<string, unknown>, user: TestUser = admin()) {
+    const res = await createDocumentType(
+      fnContext('http://localhost/api/document-types', {
+        method: 'POST',
+        body: JSON.stringify({ tenant_id: seed.tenantId, ...body }),
+        user,
+      }),
+    );
+    return { status: res.status, body: (await readJson(res)) as { documentType?: Record<string, any>; error?: string } };
+  }
+
+  async function update(id: string, body: Record<string, unknown>, user: TestUser = admin()) {
+    const res = await updateDocumentType(
+      fnContext(`http://localhost/api/document-types/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+        user,
+        params: { id },
+      }),
+    );
+    return { status: res.status, body: (await readJson(res)) as { documentType?: Record<string, any>; error?: string } };
+  }
+
+  const unique = (name: string) => `${name} ${generateTestId().slice(0, 6)}`;
+
+  it('a new type starts with the rule its name calls for, STORED', async () => {
+    for (const [name, rule] of [
+      ['Certificate of Analysis', 'free'],
+      ['Allergen Statement', 'free'],
+      ['Letter of Guarantee', 'qa'],
+      ['Audit Report', 'locked'],
+      // Nobody recognises this one: a person looks before it goes (C-038).
+      ['Vendor Questionnaire', 'qa'],
+    ] as const) {
+      const { status, body } = await create({ name: unique(name) });
+      expect(status, name).toBe(201);
+      expect(body.documentType!.sharing_rule, name).toBe(rule);
+    }
+  });
+
+  it('a rule the caller states wins over the name, and a bad one is refused', async () => {
+    const stated = await create({ name: unique('Certificate of Analysis'), sharing_rule: 'locked' });
+    expect(stated.status).toBe(201);
+    expect(stated.body.documentType!.sharing_rule).toBe('locked');
+
+    const bad = await create({ name: unique('Anything'), sharing_rule: 'public' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toContain('sharing_rule');
+  });
+
+  it('an admin changes it, and the change is audited on its own with what it was', async () => {
+    const made = await create({ name: unique('Letter of Guarantee') });
+    const id = made.body.documentType!.id as string;
+
+    const res = await update(id, { sharing_rule: 'free' });
+    expect(res.status).toBe(200);
+    expect(res.body.documentType!.sharing_rule).toBe('free');
+
+    const audit = await db
+      .prepare(`SELECT user_id, details FROM audit_log WHERE action = 'document_type.sharing_rule_updated' AND resource_id = ?`)
+      .bind(id)
+      .all<{ user_id: string; details: string }>();
+    expect(audit.results).toHaveLength(1);
+    expect(audit.results[0].user_id).toBe(seed.orgAdminId);
+    expect(JSON.parse(audit.results[0].details)).toEqual({
+      sharing_rule: 'free',
+      previous_sharing_rule: 'qa',
+      previous_effective_rule: 'qa',
+    });
+  });
+
+  it('a type that predates the column records what it was READ as before the change', async () => {
+    // No stored rule: until now it resolved from its name.
+    const id = generateTestId();
+    await db
+      .prepare('INSERT INTO document_types (id, tenant_id, name, slug, active) VALUES (?, ?, ?, ?, 1)')
+      .bind(id, seed.tenantId, 'W-9', `w9-${id.slice(0, 6)}`)
+      .run();
+    const res = await update(id, { sharing_rule: 'qa' });
+    expect(res.status).toBe(200);
+    const audit = await db
+      .prepare(`SELECT details FROM audit_log WHERE action = 'document_type.sharing_rule_updated' AND resource_id = ?`)
+      .bind(id)
+      .first<{ details: string }>();
+    expect(JSON.parse(audit!.details)).toEqual({
+      sharing_rule: 'qa',
+      previous_sharing_rule: null,
+      previous_effective_rule: 'locked',
+    });
+  });
+
+  it('refuses a bad value, refuses null, and refuses anybody who is not an admin', async () => {
+    const made = await create({ name: unique('Letter of Guarantee') });
+    const id = made.body.documentType!.id as string;
+    expect((await update(id, { sharing_rule: 'open' })).status).toBe(400);
+    expect((await update(id, { sharing_rule: null })).status).toBe(400);
+    expect((await update(id, { sharing_rule: 'free' }, member())).status).toBe(403);
+    const row = await db.prepare('SELECT sharing_rule FROM document_types WHERE id = ?').bind(id).first<{ sharing_rule: string }>();
+    expect(row!.sharing_rule).toBe('qa');
   });
 });

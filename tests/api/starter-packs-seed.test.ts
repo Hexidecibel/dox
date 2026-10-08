@@ -15,6 +15,9 @@ import fsqaRaw from '../../starter-packs/fsqa.json?raw';
 import financeRaw from '../../starter-packs/finance.json?raw';
 import { requirementsOpenedByClaims } from '../../functions/lib/registry';
 import { defaultRenewalSettingForTypeName } from '../../shared/renewalPeriod';
+import { defaultSharingRuleForTypeName } from '../../shared/sharingRule';
+import { applyStarterPack } from '../../functions/lib/starter-packs';
+import { STARTER_PACKS } from '../../functions/lib/starterPacks.generated';
 
 const db = env.DB;
 const fsqa = JSON.parse(fsqaRaw);
@@ -111,6 +114,51 @@ describe('starter pack seeding — fsqa', () => {
     const spec = rows.results.find((r) => r.name === 'Specification Sheet');
     expect(spec?.renewal_policy).toBe('period');
     expect(spec?.renewal_interval_months).toBe(36);
+  });
+
+  it('seeds a STORED sharing rule on every type, the one its name calls for (migration 0137)', async () => {
+    const rows = await db
+      .prepare('SELECT name, sharing_rule FROM document_types WHERE tenant_id = ? ORDER BY name')
+      .bind(FSQA_TENANT.id)
+      .all<{ name: string; sharing_rule: string | null }>();
+    expect(rows.results.length).toBeGreaterThan(0);
+    for (const row of rows.results) {
+      // Stored, not left to read-time resolution: it is what the Document
+      // Types screen shows. Same helper as POST /api/document-types.
+      expect(row.sharing_rule, row.name).toBe(defaultSharingRuleForTypeName(row.name));
+    }
+    const rule = (name: string) => rows.results.find((r) => r.name === name)?.sharing_rule;
+    expect(rule('Certificate of Analysis')).toBe('free');
+    expect(rule('Allergen Statement')).toBe('free');
+    expect(rule('3rd Party Audit Certificate')).toBe('qa');
+    expect(rule('Letter of Guarantee')).toBe('qa');
+    expect(rule('3rd Party Food Safety Audit Report')).toBe('locked');
+    expect(rule('W-9')).toBe('locked');
+  });
+
+  it('re-provisioning does not overwrite a rule an admin changed', async () => {
+    const id = `dt_${FSQA_TENANT.slug}_w-9`;
+    await db.prepare(`UPDATE document_types SET sharing_rule = 'qa' WHERE id = ?`).bind(id).run();
+    await applyPack(fsqa, FSQA_TENANT);
+    const row = await db.prepare('SELECT sharing_rule FROM document_types WHERE id = ?').bind(id).first<{ sharing_rule: string }>();
+    expect(row!.sharing_rule).toBe('qa');
+    await db.prepare(`UPDATE document_types SET sharing_rule = 'locked' WHERE id = ?`).bind(id).run();
+  });
+
+  it('the in-portal applier writes the same rules as the CLI', async () => {
+    const tenant = { id: 'tenant_pack_portal_share', slug: 'packportalshare' };
+    await db.prepare(`INSERT OR IGNORE INTO tenants (id, name, slug, active) VALUES (?, ?, ?, 1)`).bind(tenant.id, tenant.slug, tenant.slug).run();
+    await applyStarterPack(db, STARTER_PACKS.fsqa, tenant.id, tenant.slug);
+    const portal = await db
+      .prepare('SELECT name, sharing_rule FROM document_types WHERE tenant_id = ? ORDER BY name')
+      .bind(tenant.id)
+      .all<{ name: string; sharing_rule: string | null }>();
+    const cli = await db
+      .prepare('SELECT name, sharing_rule FROM document_types WHERE tenant_id = ? ORDER BY name')
+      .bind(FSQA_TENANT.id)
+      .all<{ name: string; sharing_rule: string | null }>();
+    expect(portal.results.length).toBe(cli.results.length);
+    expect(portal.results).toEqual(cli.results);
   });
 
   it('seeds the audit REPORT and the audit CERTIFICATE as two distinct document types', async () => {
