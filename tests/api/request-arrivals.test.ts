@@ -547,6 +547,76 @@ describe('amendments, re-uploads and files', () => {
     expect(gone.status).toBe(410);
   });
 
+  it('an API key reads an approved arrival only while its document is "send freely" (migration 0137)', async () => {
+    const withKey = (id: string) => {
+      const ctx = fnContext(`/api/request-uploads/${id}/file`, { user: admin, params: { id } }) as any;
+      ctx.data.authMethod = 'api_key';
+      return ctx as never;
+    };
+
+    // Not approved yet: the bytes are an arrival, not a document. Never asked.
+    const pending = await arrive(['Allergen Statement']);
+    const fromUpload = await fileGet(withKey(pending.uploadId));
+    expect(fromUpload.status).toBe(200);
+    expect(fromUpload.headers.get('X-File-Source')).toBe('upload');
+    await fromUpload.arrayBuffer();
+
+    // Approved as a COA: "send freely" by its type's name.
+    const a = await arrive(['Allergen Statement']);
+    const docId = await extractAndApprove(fx, a.queueId, admin);
+    const free = await fileGet(withKey(a.uploadId));
+    expect(free.status).toBe(200);
+    expect(free.headers.get('X-File-Source')).toBe('document');
+    await free.arrayBuffer();
+
+    // Locked on the document: the key is refused, a logged-in reader is not.
+    await db.prepare(`UPDATE documents SET sharing_rule_override = 'locked' WHERE id = ?`).bind(docId).run();
+    const refused = await fileGet(withKey(a.uploadId));
+    expect(refused.status).toBe(403);
+    expect(((await readJson(refused)) as { code: string }).code).toBe('sharing_rule_refused');
+    const person = await fileGet(
+      fnContext(`/api/request-uploads/${a.uploadId}/file`, { user: reader, params: { id: a.uploadId } }),
+    );
+    expect(person.status).toBe(200);
+    await person.arrayBuffer();
+  });
+
+  it('an API key is asked even while the arrival\'s OWN object is still in storage (migration 0137)', async () => {
+    // Nothing guarantees approval removes the upload's object: the records
+    // path keeps it. So "served from the upload" is not "not a document".
+    const withKey = (id: string) => {
+      const ctx = fnContext(`/api/request-uploads/${id}/file`, { user: admin, params: { id } }) as any;
+      ctx.data.authMethod = 'api_key';
+      return ctx as never;
+    };
+    const a = await arrive(['Allergen Statement']);
+    const bytes = new TextEncoder().encode('the file the supplier sent');
+    const docId = await extractAndApprove(fx, a.queueId, admin);
+    // Put the upload's object back, as if approval had not removed it.
+    await env.FILES.put(a.r2Key, bytes);
+
+    const free = await fileGet(withKey(a.uploadId));
+    expect(free.status).toBe(200);
+    expect(free.headers.get('X-File-Source')).toBe('upload');
+    await free.arrayBuffer();
+
+    await db.prepare(`UPDATE documents SET sharing_rule_override = 'locked' WHERE id = ?`).bind(docId).run();
+    const refused = await fileGet(withKey(a.uploadId));
+    expect(refused.status).toBe(403);
+    expect(((await readJson(refused)) as { code: string; reason: string })).toMatchObject({
+      code: 'sharing_rule_refused',
+      reason: 'locked',
+    });
+    // A logged-in reader is not asked, and still gets the upload's own object.
+    const person = await fileGet(
+      fnContext(`/api/request-uploads/${a.uploadId}/file`, { user: reader, params: { id: a.uploadId } }),
+    );
+    expect(person.status).toBe(200);
+    expect(person.headers.get('X-File-Source')).toBe('upload');
+    await person.arrayBuffer();
+    await env.FILES.delete(a.r2Key);
+  });
+
   it('enqueues a file nobody read, once', async () => {
     const a = await arrive(['Allergen Statement']);
     // Simulate the enqueue failure the upload door tolerates: no queue item

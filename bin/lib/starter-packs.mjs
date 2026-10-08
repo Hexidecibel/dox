@@ -92,6 +92,10 @@
  * by `npm run build:worker-shared`.
  */
 import { defaultRenewalSettingForTypeName } from './shared/renewalPeriod.js';
+// The sharing rule a type starts with (migration 0137) -- the compiled mirror
+// of shared/sharingRule.ts, for the same reason as the line above: the name
+// match exists once, and this file must not grow a second copy of it.
+import { defaultSharingRuleForTypeName } from './shared/sharingRule.js';
 
 /** Grains a claim_types.subject_grain may declare (mirrors functions/lib/registry.ts). */
 export const SUBJECT_GRAINS = ['any', 'tenant', 'product', 'supplier', 'facility'];
@@ -781,11 +785,12 @@ export function packToStatements(rawPack, { tenantId, tenantSlug, moduleKeys } =
     // the in-portal applier call rather than a third copy of the name match.
     const renewal = defaultRenewalSettingForTypeName(dt.name);
     statements.push(
-      `INSERT OR IGNORE INTO document_types (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months, renewal_window) VALUES (` +
+      `INSERT OR IGNORE INTO document_types (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months, renewal_window, sharing_rule) VALUES (` +
         `${sqlQuote(packRowId('dt', tenantSlug, dt.slug))}, ${sqlQuote(tenantId)}, ` +
         `${sqlQuote(dt.name)}, ${sqlQuote(dt.slug)}, ${sqlQuote(dt.description)}, ` +
         `${sqlQuote(dt.owner)}, ${sqlQuote(renewal.policy)}, ${sqlNum(renewal.interval_months)}, ` +
-        `${renewal.window ? sqlQuote(JSON.stringify(renewal.window)) : 'NULL'});`,
+        `${renewal.window ? sqlQuote(JSON.stringify(renewal.window)) : 'NULL'}, ` +
+        `${sqlQuote(defaultSharingRuleForTypeName(dt.name))});`,
     );
   }
 

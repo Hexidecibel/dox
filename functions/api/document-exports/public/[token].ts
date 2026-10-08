@@ -16,6 +16,9 @@
  *   - The response is an allow-list built in `functions/lib/document-export.ts`.
  *     It shows the documents THIS export contained and can never widen: the id
  *     list was frozen at send time and nothing in the request can add to it.
+ *   - It can NARROW (migration 0137): the sharing rule is re-read on every
+ *     open, and a document locked since the send is no longer listed or
+ *     served. The page is told only how many are gone.
  */
 import { logAudit, getClientIp } from '../../../lib/db';
 import { checkRateLimit, recordAttempt } from '../../../lib/ratelimit';
@@ -75,7 +78,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       'document_export_link.view',
       'document_export_link',
       link.id,
-      JSON.stringify({ document_count: view.documents.length, ip }),
+      JSON.stringify({ document_count: view.documents.length, unavailable_count: view.unavailable_count, ip }),
       ip,
     );
 

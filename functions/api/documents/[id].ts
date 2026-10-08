@@ -21,6 +21,13 @@ import {
 import type { DocumentFacetInput } from '../../lib/registry';
 import { applyDocumentTypeRequirementDefaults } from '../../lib/requirement-defaults';
 import { recordClassification } from '../../lib/classification';
+import {
+  describeDocumentSharing,
+  auditRuleChange,
+  planDocumentRuleChange,
+  ruleChangeActor,
+  type DocumentRuleChange,
+} from '../../lib/sharing-rule';
 import type { Env, User, Document } from '../../lib/types';
 import type { RenewalType } from '../../../shared/types';
 import {
@@ -82,6 +89,15 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     (doc as Record<string, unknown>).claims = await listDocumentFacet(
       context.env.DB,
       'claim',
+      docId,
+    );
+
+    // The sharing rule in force (migration 0137): may this document leave,
+    // where the answer comes from, and whether this caller may change it.
+    (doc as Record<string, unknown>).sharing = await describeDocumentSharing(
+      context.env.DB,
+      user,
+      doc.tenant_id as string,
       docId,
     );
 
@@ -208,6 +224,13 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
        * recorded".
        */
       renewal_reason?: string | null;
+      /**
+       * This document's own sharing rule (migration 0137): 'free' / 'qa' /
+       * 'locked', or null to go back to its type's rule. An admin or a QA
+       * releaser only, and `sharing_rule_reason` is REQUIRED when it changes.
+       */
+      sharing_rule_override?: string | null;
+      sharing_rule_reason?: string | null;
     };
 
     // A renewal date edited HERE is a decision made after approval, and is
@@ -258,6 +281,47 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       await validateCategoryIds(context.env.DB, doc.tenant_id, body.categories);
       primaryCatId = resolvePrimaryCategoryId(body.categories, body.primary_category_id);
     }
+
+    // THE SHARING RULE, decided before anything is written (migration 0137).
+    //
+    // Three fields of this request can move a document's effective rule: its
+    // override, its `document_type_id`, and its `categories` (whose primary
+    // becomes the type). All three go through ONE decision, which computes the
+    // rule before and after the whole edit: tightening is open to whoever may
+    // edit the document; LOOSENING needs an administrator (off "locked") or a
+    // QA releaser ("needs QA" to "send freely"), and is never done by an API
+    // key. Without this, re-typing a W-9 as a certificate of analysis was a
+    // way to walk it out. The type must also be this organization's own.
+    //
+    // A refused change refuses the WHOLE request: nothing half-applied.
+    const requestedTypeId: string | null | undefined =
+      body.categories !== undefined
+        ? (primaryCatId ?? null)
+        : body.document_type_id !== undefined
+          ? (body.document_type_id || null)
+          : undefined;
+    let ruleChange: DocumentRuleChange | null = null;
+    if (requestedTypeId !== undefined || body.sharing_rule_override !== undefined) {
+      const plan = await planDocumentRuleChange(
+        context.env.DB,
+        ruleChangeActor(context.data, user),
+        doc.tenant_id,
+        docId,
+        {
+          documentTypeId: requestedTypeId,
+          override: body.sharing_rule_override,
+          reason: body.sharing_rule_reason,
+        },
+      );
+      if (!plan.ok) {
+        return new Response(JSON.stringify({ error: plan.error, ...(plan.code ? { code: plan.code } : {}) }), {
+          status: plan.status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      ruleChange = plan;
+    }
+    const sharingChange = ruleChange?.override ?? null;
 
     // Registry facet link sets. An omitted key leaves the document's existing
     // links alone; a supplied array (including []) REPLACES that facet's set.
@@ -317,7 +381,7 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
     }
     if (body.document_type_id !== undefined) {
       updates.push('document_type_id = ?');
-      params.push(body.document_type_id);
+      params.push(body.document_type_id || null);
     }
     if (body.supplier_id !== undefined) {
       updates.push('supplier_id = ?');
@@ -369,11 +433,31 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       updates.push('document_type_id = ?');
       params.push(primaryCatId ?? null);
     }
+    if (sharingChange) {
+      // Clearing the override clears who / when / why with it: those three
+      // describe an override, and there is none. The audit row keeps them.
+      updates.push(
+        'sharing_rule_override = ?',
+        'sharing_rule_override_by = ?',
+        'sharing_rule_override_at = ?',
+        'sharing_rule_override_reason = ?',
+      );
+      const cleared = sharingChange.value === null;
+      params.push(
+        sharingChange.value,
+        cleared ? null : user.id,
+        cleared ? null : new Date().toISOString(),
+        cleared ? null : sharingChange.reason,
+      );
+    }
 
     // A facet-only edit ("this document also satisfies X") touches no documents
     // column, so it must not be rejected as an empty update. Bump updated_at so
     // the row still reflects that the document changed.
-    if (updates.length === 0 && !hasFacetWrite) {
+    // A sharing override sent with the value already in force is a no-op, not
+    // an empty update: the editor posts the field on every save.
+    const sharingNoop = body.sharing_rule_override !== undefined && !sharingChange;
+    if (updates.length === 0 && !hasFacetWrite && !sharingNoop) {
       return new Response(
         JSON.stringify({ error: 'No fields to update' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
@@ -522,6 +606,42 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       );
     }
 
+    if (sharingChange && ruleChange) {
+      await logAudit(
+        context.env.DB,
+        user.id,
+        doc.tenant_id,
+        'document.sharing_rule_overridden',
+        'document',
+        docId,
+        JSON.stringify({
+          override: sharingChange.value,
+          previous_override: sharingChange.previous,
+          rule: ruleChange.after,
+          previous_rule: ruleChange.before,
+          reason: sharingChange.reason,
+        }),
+        getClientIp(context.request)
+      );
+    }
+    // The effective rule moved, by whichever of the three fields: one row
+    // saying from what, to what, and what moved it.
+    if (ruleChange?.rule_changed && ruleChange.cause) {
+      await auditRuleChange(context.env.DB, {
+        userId: user.id,
+        tenantId: doc.tenant_id,
+        documentId: docId,
+        from: ruleChange.before,
+        to: ruleChange.after,
+        cause: ruleChange.cause,
+        via: context.data.authMethod === 'api_key' ? 'document_edit (api key)' : 'document_edit',
+        previousTypeId: ruleChange.previous_type_id,
+        typeId: ruleChange.next_type_id,
+        reason: sharingChange?.reason ?? null,
+        clientIp: getClientIp(context.request),
+      });
+    }
+
     await logAudit(
       context.env.DB,
       user.id,
@@ -560,6 +680,12 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
       (updated as Record<string, unknown>).claims = await listDocumentFacet(
         context.env.DB,
         'claim',
+        docId,
+      );
+      (updated as Record<string, unknown>).sharing = await describeDocumentSharing(
+        context.env.DB,
+        user,
+        doc.tenant_id,
         docId,
       );
     }

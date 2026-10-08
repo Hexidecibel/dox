@@ -29,6 +29,7 @@ import { starterPackStatements } from '../../functions/lib/starter-packs';
 import { STARTER_PACKS } from '../../functions/lib/starterPacks.generated';
 import { MODULE_KEYS } from '../../shared/modules';
 import { defaultRenewalSettingForTypeName } from '../../shared/renewalPeriod';
+import { defaultSharingRuleForTypeName } from '../../shared/sharingRule';
 import fsqaRaw from '../../starter-packs/fsqa.json?raw';
 import financeRaw from '../../starter-packs/finance.json?raw';
 
@@ -77,11 +78,16 @@ describe('starter packs — every seeded document type carries a renewal setting
         const want = defaultRenewalSettingForTypeName(dt.name);
         const sql = statements.find((s) => s.includes(`'dt_acme-foods_${dt.slug}'`));
         expect(sql, `${packName}/${dt.slug}`).toBeTruthy();
-        // The renewal pair, then the window (0125), are the last values in the row.
+        // The renewal pair, then the window (0125), then the sharing rule
+        // (0137) are the last values in the row. The sharing rule comes from
+        // its own name match, for the same reason and under the same contract.
         const months = want.interval_months === null ? 'NULL' : String(want.interval_months);
         const window = want.window === null ? 'NULL' : `'${JSON.stringify(want.window).replace(/'/g, "''")}'`;
-        expect(sql!.trimEnd().endsWith(`'${want.policy}', ${months}, ${window});`), `${packName}/${dt.slug}`)
-          .toBe(true);
+        const rule = defaultSharingRuleForTypeName(dt.name);
+        expect(
+          sql!.trimEnd().endsWith(`'${want.policy}', ${months}, ${window}, '${rule}');`),
+          `${packName}/${dt.slug}`,
+        ).toBe(true);
       }
     }
   });
@@ -98,12 +104,13 @@ describe('starter packs — every seeded document type carries a renewal setting
       const typeCalls = calls.filter((c) => c.sql.includes('INTO document_types'));
       expect(typeCalls.length, name).toBe(STARTER_PACKS[name].document_types.length);
       for (const c of typeCalls) {
-        // (id, tenant_id, name, slug, description, default_owner, policy, months, window)
+        // (id, tenant_id, name, slug, description, default_owner, policy, months, window, sharing_rule)
         const typeName = c.args[2] as string;
         const want = defaultRenewalSettingForTypeName(typeName);
         expect(c.args[6], `${name}/${typeName} policy`).toBe(want.policy);
         expect(c.args[7], `${name}/${typeName} months`).toBe(want.interval_months);
         expect(c.args[8], `${name}/${typeName} window`).toBe(want.window === null ? null : JSON.stringify(want.window));
+        expect(c.args[9], `${name}/${typeName} sharing rule`).toBe(defaultSharingRuleForTypeName(typeName));
       }
     }
   });

@@ -38,6 +38,7 @@
 
 import type { StarterPack } from './starterPacks.generated';
 import { defaultRenewalSettingForTypeName } from '../../shared/renewalPeriod';
+import { defaultSharingRuleForTypeName } from '../../shared/sharingRule';
 
 /** Same slug rule as `slugify` in bin/lib/starter-packs.mjs and the vocabulary APIs. */
 export function slugify(text: string): string {
@@ -200,13 +201,16 @@ export function starterPackStatements(
     // Analysis proposed an annual renewal. Same helper as POST
     // /api/document-types and as the CLI compiler.
     const renewal = defaultRenewalSettingForTypeName(dt.name);
+    // The sharing rule (0137) is NAMED for the same reason: a type the pack
+    // writes should show a stored rule on the Document Types screen, the same
+    // one POST /api/document-types would have proposed for that name.
     push(
       'document_types',
       db
         .prepare(
           `INSERT OR IGNORE INTO document_types
-             (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months, renewal_window)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, tenant_id, name, slug, description, default_owner, renewal_policy, renewal_interval_months, renewal_window, sharing_rule)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           packRowId('dt', tenantSlug, dt.slug),
@@ -218,6 +222,7 @@ export function starterPackStatements(
           renewal.policy,
           renewal.interval_months,
           renewal.window === null ? null : JSON.stringify(renewal.window),
+          defaultSharingRuleForTypeName(dt.name),
         ),
     );
   }

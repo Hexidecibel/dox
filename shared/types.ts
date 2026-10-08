@@ -20,6 +20,53 @@ export type {
 } from './specCheck';
 import type { UnjudgedResult, MissingRequiredAnalyte } from './specCheck';
 
+// The sharing rule (decision C-003, migration 0137). The rule and the verdicts
+// are defined in shared/sharingRule.ts; the shapes an API response carries are
+// here with the rest.
+export type {
+  SharingRule,
+  SharingRuleSource,
+  SharingExit,
+  SharingRefusalReason,
+} from './sharingRule';
+import type { SharingRule, SharingRuleSource, SharingRefusalReason } from './sharingRule';
+
+/**
+ * One document an exit refused, and why. Every exit that can refuse names its
+ * refusals with this shape -- a ZIP, a send, a bundle, an order -- so a
+ * document left behind is always SAID, never silently dropped.
+ */
+export interface SharingRefusal {
+  document_id: string;
+  title: string;
+  document_type_name: string | null;
+  /** The document's rule at the moment it was refused. */
+  rule: SharingRule;
+  /** `locked` = never leaves; `needs_qa` = the caller may not release it. */
+  reason: SharingRefusalReason;
+  /** One sentence a screen can print as it stands. */
+  message: string;
+}
+
+/** The sharing rule of one document, as `GET /api/documents/:id` reports it. */
+export interface DocumentSharingInfo {
+  /** The rule in force. */
+  rule: SharingRule;
+  source: SharingRuleSource;
+  /** What the rule would be with no override on the document. */
+  type_rule: SharingRule;
+  type_source: SharingRuleSource;
+  /** The override on this document, or null. */
+  override: SharingRule | null;
+  override_by_name: string | null;
+  override_at: string | null;
+  override_reason: string | null;
+  /** May the caller set or clear the override (an admin or a QA releaser)? */
+  can_edit: boolean;
+  /** May the caller move this document off `locked` (an admin only)? */
+  can_unlock: boolean;
+}
+
 // The alias gap. Defined in shared/unmatchedAnalytes.ts, which is also bundled
 // for bin/ so the CLI and the admin page answer with the same shape.
 export type {
@@ -554,6 +601,13 @@ export interface DocumentTypeRow {
    * `parseRenewalWindow` (shared/renewalPeriod.ts).
    */
   renewal_window?: string | null;
+  /**
+   * May documents of this type leave the organization (migration 0137,
+   * decision C-003): 'free' / 'qa' / 'locked'. NULL = not stored, resolved at
+   * read time from the type's name (shared/sharingRule.ts); a name nobody
+   * recognises reads 'qa'. A document's own override wins over this.
+   */
+  sharing_rule?: SharingRule | null;
   /**
    * The department that owns renewals for documents of this type (migration
    * 0100) — a free-text `owner_routes` label, not a user id, because the owners
@@ -1348,6 +1402,11 @@ export interface ApiDocument {
   supplier_name?: string;
   primary_metadata: string | null; // JSON string
   extended_metadata: string | null; // JSON string
+  /**
+   * The sharing rule in force on this document (migration 0137). Present on
+   * `GET` / `PUT /api/documents/:id`; absent on list rows.
+   */
+  sharing?: DocumentSharingInfo;
 }
 
 export interface ApiDocumentVersion {
@@ -1601,6 +1660,8 @@ export interface Document {
   classificationStatus?: ClassificationStatus;
   classificationReviewedAt?: string | null;
   classificationReviewedBy?: string | null;
+  /** The sharing rule in force (migration 0137). On `GET` / `PUT /api/documents/:id` only. */
+  sharing?: DocumentSharingInfo;
   // Search-result convenience fields inlined by the search endpoints
   // (GET /api/documents/search, POST /api/documents/search/natural,
   // GET /api/search) so a result renders "Letter of Guarantee, v2, expires
@@ -3437,7 +3498,18 @@ export interface OrderSendPreview {
   part_count: number;
   total_bytes: number;
   /** Lines with no document, or whose document is no longer active: not sent, and said. */
-  lines_not_sent: { order_item_id: string; product_name: string | null; lot_number: string | null; reason: string }[];
+  lines_not_sent: {
+    order_item_id: string;
+    product_name: string | null;
+    lot_number: string | null;
+    reason: string;
+    /**
+     * Set when the SHARING RULE is why (migration 0137): the document is
+     * locked, or needs a QA approval the sender cannot give.
+     */
+    sharing_refusal?: SharingRefusalReason;
+    document_id?: string;
+  }[];
   warnings: string[];
   /** Why this order cannot be sent as it stands, or null. */
   blocked: { code: string; message: string } | null;
@@ -6067,7 +6139,24 @@ export interface DocumentExportSendResponse {
   document_count: number;
   /** Ids asked for that are not in the export (deleted, or another tenant's). */
   missing_ids: string[];
+  /**
+   * Documents the sharing rule kept back (migration 0137): locked, or needing
+   * a QA approval the sender cannot give. The rest still went.
+   */
+  refused: SharingRefusal[];
+  /** `qa` documents that went because the sender is a QA releaser. */
+  qa_released_ids: string[];
   expires_at: string;
+}
+
+/**
+ * The body of a refusal when the sharing rule left NOTHING to export (403,
+ * `code: 'sharing_rule_refused'`), on the ZIP, the send and the bundle ZIP.
+ */
+export interface SharingRuleRefusedResponse {
+  error: string;
+  code: 'sharing_rule_refused';
+  refused: SharingRefusal[];
 }
 
 /**
@@ -6108,6 +6197,11 @@ export interface DocumentExportLandingView {
    */
   never_expires?: boolean;
   documents: DocumentExportItem[];
+  /**
+   * How many documents this link was sent with that it no longer serves:
+   * removed from the portal, or locked since (migration 0137). A count only.
+   */
+  unavailable_count: number;
 }
 
 /**

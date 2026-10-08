@@ -205,3 +205,40 @@ describe('SendExportDialog', () => {
     });
   });
 });
+
+describe('the selection bar says what the sharing rule kept back', () => {
+  const noop = () => {};
+
+  it('shows the warning beside the notice, not instead of it', () => {
+    render(
+      <ExportSelectionBar
+        count={2}
+        notice="1 document downloaded."
+        warning="1 document was not included. Locked: Tax form."
+        onDownload={noop}
+        onSend={noop}
+        onClear={noop}
+      />,
+    );
+    expect(screen.getByText('1 document downloaded.')).toBeInTheDocument();
+    expect(screen.getByTestId('export-refused')).toHaveTextContent('Locked: Tax form.');
+  });
+
+  it('still shows the warning after the selection is cleared', () => {
+    render(
+      <ExportSelectionBar
+        count={0}
+        warning="2 documents were not included. Needs QA approval: Guarantee letter, Audit certificate."
+        onDownload={noop}
+        onSend={noop}
+        onClear={noop}
+      />,
+    );
+    expect(screen.getByTestId('export-refused')).toHaveTextContent('Needs QA approval');
+  });
+
+  it('renders no warning when there is none', () => {
+    render(<ExportSelectionBar count={1} onDownload={noop} onSend={noop} onClear={noop} />);
+    expect(screen.queryByTestId('export-refused')).toBeNull();
+  });
+});

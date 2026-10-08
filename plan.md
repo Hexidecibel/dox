@@ -46,6 +46,32 @@ silent-apply, and eventually full auto-ingest.
 
 ## Planned
 
+### The sharing rule on every exit (C-003, step 1d, release A of two)
+
+**Status:** done — built 2026-10-08 (migration 0137 sharing_rule). Not yet deployed. Release B (document orders, migration 0138) is NOT built.
+
+**Source:** AJ Conner's finish-line order, 2026-10-06: sales builds a document order and each
+document leaves according to a sharing rule (send freely / needs QA approval / locked). We told him
+(C-003) the rule has to hold on EVERY way a file leaves, not only on orders. Decisions C-038..C-042
+in `docs/decision-log.md`; full notes in `docs/feature-notes.md` under "Sharing Rule (migration 0137)".
+
+- `migrations/0137_sharing_rule.sql`: `document_types.sharing_rule`, `documents.sharing_rule_override` + by / at / reason. Additive, nullable.
+- `shared/sharingRule.ts` (pure): the three rules, the starting table, `effectiveSharingRule`, `judgeExit`, `strictest`, `describeRefusals`. `functions/lib/sharing-rule.ts`: `loadSharingRules`, `canReleaseQa`, `judgeDocumentsForExit`, `judgeSharedFile`, `apiKeyFileRefusal`, `planSharingOverride`.
+- `functions/api/_middleware.ts` records `authMethod` (`api_key` / `jwt`) and the key id.
+- Every exit asks: single download + packet original, search ZIP, emailed link, public link reads, bundle ZIP (now audited), order send, order resend (re-checked before bytes are read), and the document-version fallback of the queue and arrival file routes.
+- Setting it: `sharing_rule` on the document-type API (stored on create from the name), both starter-pack appliers, the override on `PUT /api/documents/:id` (admin or QA releaser, reason required, only an admin unlocks).
+- Screens: rule select + chip on Document Types, rule + Change on the document page, refusals named in the search selection bar and on the bundle page, a count on the recipient page.
+- `bin/backfill-sharing-rules` for types that predate 0137 (dry run by default).
+- The guard: `tests/unit/exitRegister.test.ts` + `exitRegister.allow.ts`. Tests: `tests/unit/sharingRule.test.ts`, `tests/api/sharing-rule-exits.test.ts`.
+- After an independent review (same day): a change of a document's TYPE is checked like an override (`planDocumentRuleChange`, C-046); types are tenant-checked; the queue and arrival file routes ask a key on the staging read too; a key never loosens a rule; a public link serves `qa` only on its minter's authority (C-045); the bundle ZIP drops deleted documents and states missing files; the exit register pins a per-file signature. Regression tests: `tests/api/sharing-rule-bypasses.test.ts`.
+
+**To ship:** `bin/backup`, then 0137 on staging and prod with `bin/migrate-prod-one` BEFORE the code
+deploys; after the deploy, `bin/backfill-sharing-rules --tenant <id> --remote` (dry run, then
+`--apply`) per tenant. Release note reach tokens: the rule is `[existing]`, the QA route `[config]`.
+
+**Next (release B):** document orders — `order_documents`, the current-document resolver, a held
+"pending QA" release with a QA notice, the private-label advisory (C-043, C-044).
+
 ### One file is not one document — detect a supplier packet, propose the split, let a human decide (AJ's packet, 2026-09-16)
 
 **Status:** done — built 2026-09-17 (migrations 0118 packet_split + 0119 request_one_document_per_file). Not yet deployed.

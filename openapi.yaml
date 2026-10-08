@@ -697,6 +697,43 @@ components:
               description: "1 if user must change password on next login"
       required: [token, user]
 
+    SharingRule:
+      type: string
+      enum: [free, qa, locked]
+      description: |
+        May a document leave the organization (decision C-003, migration 0137).
+        `free` = send freely; `qa` = needs QA approval; `locked` = never leaves.
+        Resolved, most specific first: the document's own override; NO TYPE AT
+        ALL = `locked`; the rule stored on its document type; the type's name
+        against the starting table; a name nobody recognises = `qa`.
+
+    SharingRefusal:
+      type: object
+      description: |
+        One document an exit refused, and why. Every exit that can refuse names
+        its refusals with this shape; a document left behind is never silently
+        dropped.
+      properties:
+        document_id: { type: string }
+        title: { type: string }
+        document_type_name: { type: string, nullable: true }
+        rule: { $ref: '#/components/schemas/SharingRule' }
+        reason:
+          type: string
+          enum: [locked, needs_qa]
+          description: "`locked` = never leaves; `needs_qa` = the caller may not release it."
+        message: { type: string, description: One sentence a screen can print as it stands. }
+
+    SharingRuleRefused:
+      type: object
+      description: The 403 body when the sharing rule left NOTHING to hand over.
+      properties:
+        error: { type: string, description: Names every document under its reason. }
+        code: { type: string, enum: [sharing_rule_refused] }
+        refused:
+          type: array
+          items: { $ref: '#/components/schemas/SharingRefusal' }
+
     Error:
       type: object
       properties:
@@ -1494,6 +1531,22 @@ paths:
         Updates title, description, category, tags, and/or status.
         Logs a diff of what changed in the audit trail.
         **Requires super_admin, org_admin, or user role** with tenant access.
+
+        `sharing_rule_override` (migration 0137) gives this ONE document its own
+        sharing rule, or `null` to go back to its type's rule. Only an admin or
+        a QA releaser may change it (403 otherwise), `sharing_rule_reason` is
+        required when it changes (400 otherwise), and only an admin may move a
+        document off `locked`. Audited as `document.sharing_rule_overridden`
+        with the reason. Sending the value already in force is not a change.
+
+        `document_type_id` and `categories` change the document's TYPE, and the
+        type carries the sharing rule, so they are checked the same way: a
+        change that LOOSENS the effective rule needs an administrator (off
+        `locked`, which includes typing a document that has no type) or a QA
+        releaser (`qa` to `free`), and is never made with an API key; 403
+        `sharing_rule_change_refused` otherwise, and nothing is written. The
+        type must belong to the document's organization (400). Any move of the
+        effective rule is audited as `document.sharing_rule_changed`.
       parameters:
         - name: id
           in: path
@@ -1520,6 +1573,13 @@ paths:
                 status:
                   type: string
                   enum: [active, archived]
+                sharing_rule_override:
+                  nullable: true
+                  allOf:
+                    - $ref: '#/components/schemas/SharingRule'
+                sharing_rule_reason:
+                  type: string
+                  description: Why. Required when `sharing_rule_override` changes. 500 characters at most.
             example:
               title: "Updated Title"
               status: "archived"
@@ -1660,6 +1720,14 @@ paths:
         Returns the raw file with Content-Disposition header for browser download.
         Logs a download audit entry.
         **Requires any authenticated user** with tenant access.
+
+        **Sharing rule (migration 0137).** A logged-in person opening one file
+        in the portal is not "leaving": any role, any rule. An **API key** reads
+        the file only when its sharing rule is `free`; otherwise 403
+        `sharing_rule_refused` (audited `document.sharing_rule_refused`). With
+        `source=packet` the file is the original packet, which holds every part
+        split from it, so a key reads it only when EVERY document citing that
+        packet is `free`.
       parameters:
         - name: id
           in: path
@@ -1671,6 +1739,12 @@ paths:
           schema:
             type: integer
           description: Version number to download (defaults to current version)
+        - name: source
+          in: query
+          schema:
+            type: string
+            enum: [packet]
+          description: Return the original packet this version was split out of (migration 0126).
       responses:
         '200':
           description: File download
@@ -3024,6 +3098,12 @@ paths:
         Any tenant user. Serves the upload's own object while it exists; once
         approval has moved the bytes, serves the linked document's current
         version instead. `X-File-Source` says which (`upload` | `document`).
+
+        Sharing rule (migration 0137): once the arrival has become a document,
+        an API key reads the bytes only when that document is `free` (403
+        `sharing_rule_refused` otherwise), whichever object serves them. An
+        arrival that is still only an arrival, and a logged-in person, are not
+        asked.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
@@ -4756,6 +4836,54 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/bundles/{id}/download:
+    get:
+      tags: [Documents]
+      summary: Download a bundle as a ZIP
+      description: |
+        Every document of the bundle at its pinned version (or the current one),
+        under the uploaded file names. **Any authenticated user** with tenant
+        access. Module-gated under `library`.
+
+        **Sharing rule (migration 0137).** The same rule as the search ZIP: a
+        `locked` document never goes in; a `qa` document only for a QA releaser
+        (audited `document.qa_release_approved`); an API key gets `free` only.
+        A package missing a document must not look complete, so what was kept
+        back is named in `NOT-INCLUDED.txt` inside the archive, in the
+        `X-Bundle-Refused` / `X-Bundle-Refused-Ids` headers and in the audit
+        row. When nothing may go: 403 `sharing_rule_refused`.
+
+        Audited as `bundle.downloaded`, naming every document that went (this
+        route wrote no audit row before 0137), or `bundle.download_refused`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ZIP archive
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+          headers:
+            X-Bundle-Documents:
+              schema: { type: integer }
+            X-Bundle-Refused:
+              schema: { type: integer }
+            X-Bundle-Refused-Ids:
+              schema: { type: string, example: "9f2c:locked,41ab:needs_qa" }
+            X-Bundle-Unavailable:
+              schema: { type: integer }
+              description: Documents left out because storage does not hold the file.
+            X-Bundle-Unavailable-Ids:
+              schema: { type: string }
+              description: Present when any were. Comma separated document ids.
+        '400': { description: The bundle has no items (a deleted document is not one), or no file could be retrieved }
+        '403':
+          description: The sharing rule kept every document back
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SharingRuleRefused' }
+        '404': { description: No such bundle }
+
   /api/document-exports/zip:
     post:
       tags: [Documents]
@@ -4773,6 +4901,15 @@ paths:
 
         Refused with 413 over 50 documents or 40 MB of source files; the message
         states the cap. Module-gated under `library`.
+
+        **Sharing rule (migration 0137).** A ZIP is a file leaving. A `locked`
+        document never goes in; a `qa` document goes in only when the caller is
+        a QA releaser (an admin, a non-reader on the `QA` owner route, else the
+        organization's master user), and that is audited as the approval
+        (`document.qa_release_approved`); an API key gets `free` documents only.
+        What was kept back is named in `manifest.csv` ("Not included"), in the
+        `X-Export-Refused` / `X-Export-Refused-Ids` headers and in the audit
+        row. When NOTHING may go: 403 `sharing_rule_refused`.
       requestBody:
         required: true
         content:
@@ -4799,7 +4936,18 @@ paths:
               schema: { type: integer }
             X-Export-Missing:
               schema: { type: integer }
+            X-Export-Refused:
+              schema: { type: integer }
+              description: How many documents the sharing rule kept back.
+            X-Export-Refused-Ids:
+              schema: { type: string, example: "9f2c:locked,41ab:needs_qa" }
+              description: Present when any were. `id:reason`, comma separated.
         '400': { description: Empty selection }
+        '403':
+          description: The sharing rule kept every document back
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SharingRuleRefused' }
         '404': { description: Nothing in the selection is available }
         '413': { description: Over the document or size cap }
 
@@ -4817,6 +4965,13 @@ paths:
         email fails, so a live link never exists for a message nobody received.
         Audited as `document_export.sent` with the recipients and the id list.
         Module-gated under `library`.
+
+        **Sharing rule (migration 0137).** Asked BEFORE the link is minted,
+        because the mint is the approval: a `locked` document is never put on a
+        link; a `qa` document only when the sender is a QA releaser (audited
+        `document.qa_release_approved`); an API key sends `free` documents only.
+        What was kept back comes home in `refused`; the rest still goes. When
+        nothing may go, nothing is minted or mailed: 403 `sharing_rule_refused`.
       requestBody:
         required: true
         content:
@@ -4850,9 +5005,20 @@ paths:
                   missing_ids:
                     type: array
                     items: { type: string }
+                  refused:
+                    type: array
+                    description: Documents the sharing rule kept back. The rest went.
+                    items: { $ref: '#/components/schemas/SharingRefusal' }
+                  qa_released_ids:
+                    type: array
+                    description: "`qa` documents that went because the sender is a QA releaser."
+                    items: { type: string }
                   expires_at: { type: string }
         '400': { description: No recipients, or an address that is not valid }
-        '403': { description: A reader may download an export but may not mail one }
+        '403':
+          description: |
+            A reader may download an export but may not mail one; or the sharing
+            rule kept every document back (`code: sharing_rule_refused`, with `refused`).
         '413': { description: Over the document or size cap }
         '429': { description: Rate limited }
         '502': { description: The email could not be sent; the link was revoked }
@@ -5164,6 +5330,11 @@ paths:
                       properties:
                         order_item_id: { type: string }
                         reason: { type: string }
+                        sharing_refusal:
+                          type: string
+                          enum: [locked, needs_qa]
+                          description: Set when the sharing rule is why the line is not sent (migration 0137).
+                        document_id: { type: string }
                   warnings: { type: array, items: { type: string } }
                   blocked:
                     type: object
@@ -5309,6 +5480,14 @@ paths:
         their POSITION in the link's own frozen list. Every unusable state —
         unknown, expired, revoked — answers 404 alike. Each view is audited
         (`document_export_link.view`) and rate limited per (link, IP).
+
+        The sharing rule is re-read on every request (migration 0137): a
+        document that has been LOCKED since the link was sent is no longer
+        listed or served, here or on the two file routes below. A `qa` document
+        is served only while the person who minted the link can still release
+        QA documents (decision C-045). `unavailable_count` says how many
+        documents the link was sent with that it no longer serves (withheld
+        or removed), and nothing about which or why.
       security: []
       parameters:
         - name: token
@@ -5328,7 +5507,8 @@ paths:
       description: |
         The same archive and manifest as the signed-in export. The document set
         comes from the link, never from the request. Audited as
-        `document_export_link.download`.
+        `document_export_link.download` (with `withheld_ids` when the sharing
+        rule now withholds a document that was on the link).
       security: []
       parameters:
         - name: token

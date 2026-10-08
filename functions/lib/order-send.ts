@@ -37,6 +37,20 @@
  * exactly those emails from the stored record -- the same files, the same
  * names, the same subject -- rather than re-planning from an order that may
  * have changed since.
+ *
+ * THE SHARING RULE (decision C-003, migration 0137) IS ASKED TWICE, on purpose.
+ * Once in the PLAN: a line whose document is locked, or needs a QA approval
+ * the sender cannot give, is listed in `lines_not_sent` with that reason and
+ * its file is not planned. And once more IMMEDIATELY BEFORE EACH FILE'S BYTES
+ * ARE READ (`runParts`), for the first send and for every resend: a resend
+ * rebuilds from the stored record and never re-plans, so without the second
+ * check a document locked after the first attempt would still go out on the
+ * retry. The second check is made for whoever is pressing the button NOW.
+ *
+ * A WHOLE CERTIFICATE HOLDS EVERY LOT ON IT (C-042). The original takes the
+ * strictest rule of every document cut from it -- including lots that are not
+ * on this order. When that is stricter than the sender may pass, the per-lot
+ * page goes instead and the review screen says so.
  */
 
 import { generateId, logAudit } from './db';
@@ -60,6 +74,14 @@ import {
   type ExportDocumentRow,
 } from './document-export';
 import { resolveWholeOriginals } from './coa-original';
+import {
+  auditQaRelease,
+  documentsFromQueueItem,
+  judgeDocumentsForExit,
+  judgeSharedFile,
+  loadSharingRules,
+} from './sharing-rule';
+import { judgeExit, sharingRefusalMessage, type ExitActor } from '../../shared/sharingRule';
 import { loadOrderLines, type OrderWriteRow } from './order-items';
 import { loadOrderCustomerContext } from './customer-coa';
 import {
@@ -160,6 +182,8 @@ export async function planOrderSend(
     order: OrderWriteRow;
     tenantName: string;
     sender: Pick<User, 'email'>;
+    /** Who is asking, for the sharing rule (0137). */
+    actor: ExitActor;
     emailConfigured: boolean;
     /** The subject the parts are numbered under; defaults to the generated one. */
     subject?: string | null;
@@ -196,14 +220,54 @@ export async function planOrderSend(
   }
 
   const docIds = [...new Set(sendable.map((l) => l.coa_document_id as string))];
-  const { rows } = await loadExportDocuments(db, order.tenant_id, docIds);
+  const { rows, refused } = await loadExportDocuments(db, order.tenant_id, docIds, {
+    exit: 'order_send',
+    actor: args.actor,
+  });
   const rowById = new Map(rows.map((r) => [r.document_id, r]));
-  const originals = await resolveWholeOriginals(db, files, order.tenant_id, docIds);
+  const refusedById = new Map(refused.map((r) => [r.document_id, r]));
+  const originals = await resolveWholeOriginals(db, files, order.tenant_id, rows.map((r) => r.document_id));
+
+  // The whole certificate holds every lot cut from it, on this order or not
+  // (C-042). Judged once per original.
+  //
+  // The documents on an original are those BORN from its queue item plus the
+  // order's own documents that trace to it: a version written by "Replace
+  // existing" came from a different queue item than the one its document was
+  // born from, so the first list alone would miss it.
+  const tracedTo = new Map<string, Set<string>>();
+  for (const [docId, resolution] of originals) {
+    if (resolution.state !== 'on_file') continue;
+    const set = tracedTo.get(resolution.original.queue_id) ?? new Set<string>();
+    set.add(docId);
+    tracedTo.set(resolution.original.queue_id, set);
+  }
+  const originalVerdicts = new Map<string, Awaited<ReturnType<typeof judgeSharedFile>>>();
+  for (const [queueId, traced] of tracedTo) {
+    const onIt = new Set<string>([...traced, ...(await documentsFromQueueItem(db, order.tenant_id, queueId))]);
+    originalVerdicts.set(
+      queueId,
+      await judgeSharedFile(db, order.tenant_id, [...onIt], 'order_send', args.actor),
+    );
+  }
 
   const entries = new Map<string, Entry>();
   for (const line of sendable) {
     const docId = line.coa_document_id as string;
     const row = rowById.get(docId);
+    const refusal = refusedById.get(docId);
+    if (refusal) {
+      // Held back by the sharing rule: said, with the reason, never dropped.
+      linesNotSent.push({
+        order_item_id: line.id,
+        product_name: line.product_name_resolved ?? line.product_name ?? null,
+        lot_number: lotRowLabel(line.lot_row_number, line.sub_lot_code) ?? line.lot_number ?? null,
+        reason: refusal.message,
+        sharing_refusal: refusal.reason,
+        document_id: docId,
+      });
+      continue;
+    }
     if (!row || !row.r2_key) {
       linesNotSent.push({
         order_item_id: line.id,
@@ -225,6 +289,17 @@ export async function planOrderSend(
       );
     }
     if (resolution.state === 'missing') notes.push(resolution.message);
+    if (useOriginal && resolution.state === 'on_file') {
+      const whole = originalVerdicts.get(resolution.original.queue_id);
+      if (!whole || whole.verdict !== 'allow') {
+        useOriginal = false;
+        notes.push(
+          whole && whole.verdict === 'needs_qa'
+            ? 'The whole certificate also covers a document that needs QA approval, so only this lot\'s page is sent.'
+            : 'The whole certificate also covers a document that is locked, so only this lot\'s page is sent.',
+        );
+      }
+    }
 
     const key =
       useOriginal && resolution.state === 'on_file'
@@ -365,9 +440,12 @@ export async function planOrderSend(
 
   let blocked: OrderSendPreview['blocked'] = null;
   if (planned.length === 0) {
+    const heldByRule = linesNotSent.length > 0 && linesNotSent.every((l) => l.sharing_refusal);
     blocked = {
       code: 'nothing_to_send',
-      message: 'No line of this order has an active document on it, so there is nothing to send.',
+      message: heldByRule
+        ? 'Every document on this order is held back by its sharing rule, so there is nothing to send. See the list below.'
+        : 'No line of this order has an active document on it, so there is nothing to send.',
     };
   } else if (packed.refusal) {
     blocked = { code: 'too_many_parts', message: packed.refusal };
@@ -619,6 +697,66 @@ export interface RunContext {
   tenantName: string;
   sender: Pick<User, 'id' | 'name' | 'email'>;
   order: Pick<OrderWriteRow, 'order_number' | 'po_number' | 'ship_date'>;
+  /**
+   * Who is pressing send (or resend) NOW, for the sharing rule (0137). Not
+   * `sender`: on a resend `sender` is the original sender, kept for the
+   * reply-to, and may no longer be allowed to release what they once did.
+   */
+  actor: ExitActor;
+  /**
+   * The account of that same person. A link minted for an oversize file is
+   * minted in THEIR name, because a link serves a `qa` document only while
+   * its minter may release QA documents (C-045).
+   */
+  actorUserId: string;
+}
+
+/** What one run of parts did. */
+interface PartsRun {
+  results: OrderSendPartResult[];
+  /** `qa` documents that went in this run because the actor is a QA releaser. */
+  qaReleasedIds: string[];
+}
+
+/**
+ * The sharing rule for ONE stored file, read now. Returns the sentence to fail
+ * the part with, or null when the file may go.
+ *
+ * A stored file stands for one or more documents (`document_ids`); a whole
+ * original additionally holds every document cut from the same queue item.
+ * The strictest of all of them decides (C-042). A file whose documents can no
+ * longer be found is refused: nothing says it may leave.
+ */
+async function storedFileRefusal(
+  db: D1Database,
+  tenantId: string,
+  f: StoredFile,
+  actor: ExitActor,
+): Promise<{ problem: string | null; qaReleased: string[] }> {
+  const own = parseJsonArray<string>(f.document_ids);
+  const ids = new Set<string>(own.length > 0 ? own : [f.document_id]);
+  if (f.source === 'original' && f.source_queue_id) {
+    for (const id of await documentsFromQueueItem(db, tenantId, f.source_queue_id)) ids.add(id);
+  }
+  const judged = await judgeSharedFile(db, tenantId, [...ids], 'order_send', actor);
+  if (judged.verdict !== 'allow') {
+    return {
+      problem: `${f.file_name} was not sent. ${sharingRefusalMessage(judged.verdict, { apiKey: actor.method === 'api_key' })}`,
+      qaReleased: [],
+    };
+  }
+  if (judged.document_ids.length < ids.size) {
+    return {
+      problem: `${f.file_name} was not sent: a document it stands for is no longer in the portal.`,
+      qaReleased: [],
+    };
+  }
+  // Which of them are `qa`, passing only because of who is sending.
+  const rules = await loadSharingRules(db, tenantId, [...ids]);
+  const qaReleased = [...rules.values()]
+    .filter((r) => r.rule === 'qa' && judgeExit(r.rule, 'order_send', actor) === 'allow')
+    .map((r) => r.document_id);
+  return { problem: null, qaReleased };
 }
 
 /**
@@ -629,7 +767,7 @@ export interface RunContext {
  * FAILS ITS PART with the reason. Nothing is sent short: an email that is
  * missing a certificate the review screen promised is worse than no email.
  */
-async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]): Promise<OrderSendPartResult[]> {
+async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]): Promise<PartsRun> {
   const { db } = ctx;
   const filesRes = await db
     .prepare('SELECT * FROM order_send_files WHERE send_id = ? ORDER BY position ASC')
@@ -639,6 +777,7 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
   const recipients = parseJsonArray<string>(send.recipients);
   const previous = parseJsonArray<OrderSendPartResult>(send.parts);
   const results: OrderSendPartResult[] = [];
+  const qaReleasedIds = new Set<string>();
 
   for (const part of partNumbers) {
     const prior = previous.find((p) => p.part_number === part);
@@ -658,6 +797,25 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
 
     const attachments: EmailAttachment[] = [];
     let problem: string | null = null;
+    const partQaReleased: string[] = [];
+
+    // THE SHARING RULE, READ NOW, before a byte of this part is read -- for
+    // every file of the part, attached or linked. This is the check a resend
+    // depends on: it rebuilds from the stored record, so the plan's own check
+    // is days old by the time it runs.
+    for (const f of inPart) {
+      const ruled = await storedFileRefusal(db, send.tenant_id, f, ctx.actor);
+      if (ruled.problem) {
+        problem = ruled.problem;
+        break;
+      }
+      partQaReleased.push(...ruled.qaReleased);
+    }
+    if (problem) {
+      results.push(fail(problem));
+      continue;
+    }
+
     for (const f of attachedFiles) {
       const key = await storedFileKey(db, send.tenant_id, f);
       const bytes = await readExportBytes(ctx.files, key);
@@ -693,7 +851,7 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
       const link = await mintExportLink(db, {
         tenantId: send.tenant_id,
         documentIds: ids,
-        createdBy: ctx.sender.id,
+        createdBy: ctx.actorUserId,
         recipients,
         onBehalfOf: null,
         message: send.message,
@@ -736,6 +894,7 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
       .prepare('UPDATE order_send_files SET sent_ok = 1, export_link_id = COALESCE(?, export_link_id) WHERE send_id = ? AND part_number = ?')
       .bind(linkId, send.id, part)
       .run();
+    for (const id of partQaReleased) qaReleasedIds.add(id);
     results.push({
       part_number: part,
       ok: true,
@@ -761,7 +920,7 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
     .run();
   send.parts = JSON.stringify(merged);
   send.status = status;
-  return results;
+  return { results, qaReleasedIds: [...qaReleasedIds] };
 }
 
 /**
@@ -771,8 +930,10 @@ async function runParts(ctx: RunContext, send: StoredSend, partNumbers: number[]
  * line of the order was left behind -- a line with no document, or whose
  * document is no longer active, was listed as "not sent" on the review screen,
  * and an order with one of those is not delivered however well the rest went.
+ * The same holds for a line the SHARING RULE held back (0137): its document is
+ * active and on the line, and it did not go.
  */
-async function markDeliveredIfSent(db: D1Database, send: StoredSend): Promise<string | null> {
+async function markDeliveredIfSent(db: D1Database, send: StoredSend, actor: ExitActor): Promise<string | null> {
   if (send.status !== 'sent') return null;
   const behind = await db
     .prepare(
@@ -785,6 +946,18 @@ async function markDeliveredIfSent(db: D1Database, send: StoredSend): Promise<st
     .bind(send.order_id)
     .first<{ n: number }>();
   if (Number(behind?.n) > 0) return null;
+  const onLines = await db
+    .prepare('SELECT DISTINCT coa_document_id AS id FROM order_items WHERE order_id = ? AND coa_document_id IS NOT NULL')
+    .bind(send.order_id)
+    .all<{ id: string }>();
+  const held = await judgeDocumentsForExit(
+    db,
+    send.tenant_id,
+    (onLines.results ?? []).map((r) => r.id),
+    'order_send',
+    actor,
+  );
+  if (held.refused.length > 0) return null;
   await db
     .prepare(`UPDATE orders SET status = 'delivered', updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`)
     .bind(send.order_id, send.tenant_id)
@@ -919,9 +1092,19 @@ export async function executeOrderSend(
   );
 
   const send = (await db.prepare('SELECT * FROM order_sends WHERE id = ?').bind(sendId).first<StoredSend>())!;
-  const ran = await runParts(ctx, send, Array.from({ length: send.part_count }, (_, i) => i + 1));
-  const delivered = await markDeliveredIfSent(db, send);
-  await auditSend(db, send, ctx.sender.id, args.clientIp, ran, false);
+  const run = await runParts(ctx, send, Array.from({ length: send.part_count }, (_, i) => i + 1));
+  const delivered = await markDeliveredIfSent(db, send, ctx.actor);
+  await auditSend(db, send, ctx.sender.id, args.clientIp, run.results, false);
+  // A QA releaser sending a document that needs QA approval IS the approval.
+  await auditQaRelease(db, {
+    userId: ctx.sender.id,
+    tenantId: send.tenant_id,
+    exit: 'order_send',
+    documentIds: run.qaReleasedIds,
+    resourceType: 'order_send',
+    resourceId: send.id,
+    clientIp: args.clientIp,
+  });
   return { sendId, orderStatus: delivered ?? order.status };
 }
 
@@ -938,11 +1121,20 @@ export async function resendFailedParts(
   const done = new Set(parseJsonArray<OrderSendPartResult>(send.parts).filter((p) => p.ok).map((p) => p.part_number));
   const failed = Array.from({ length: send.part_count }, (_, i) => i + 1).filter((n) => !done.has(n));
   if (failed.length === 0) return { orderStatus: null, attempted: 0 };
-  const ran = await runParts(ctx, send, failed);
-  const delivered = await markDeliveredIfSent(ctx.db, send);
+  const run = await runParts(ctx, send, failed);
+  const delivered = await markDeliveredIfSent(ctx.db, send, ctx.actor);
   // The audit row names whoever pressed resend, which may be an admin rather
   // than the original sender.
-  await auditSend(ctx.db, send, args.actorId, args.clientIp, ran, true);
+  await auditSend(ctx.db, send, args.actorId, args.clientIp, run.results, true);
+  await auditQaRelease(ctx.db, {
+    userId: args.actorId,
+    tenantId: send.tenant_id,
+    exit: 'order_send',
+    documentIds: run.qaReleasedIds,
+    resourceType: 'order_send',
+    resourceId: send.id,
+    clientIp: args.clientIp,
+  });
   return { orderStatus: delivered, attempted: failed.length };
 }
 

@@ -79,6 +79,7 @@ import SupplierAutocomplete, { type SupplierValue } from '../components/Supplier
 import EntityNotes from '../components/EntityNotes';
 import { ReceivedAgainPanel } from '../components/IntakeDuplicateNotes';
 import { DocumentSpecResults } from '../components/DocumentSpecResults';
+import { DocumentSharingRule } from '../components/DocumentSharingRule';
 import { HelpWell } from '../components/HelpWell';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { helpContent } from '../lib/helpContent';
@@ -750,6 +751,10 @@ export function DocumentDetail() {
             <Chip label={doc.documentTypeName} color="info" variant="outlined" size="small" />
           </Box>
         )}
+
+        {/* May this document leave the organization (migration 0137). Shown
+            to everybody; the Change button only to QA and administrators. */}
+        <DocumentSharingRule documentId={doc.id} sharing={doc.sharing} onChanged={loadDocument} />
 
         {/* Supplier — read-only chip for everyone; admins can change it. */}
         {(doc.supplierName || isAdmin) && (
@@ -1512,6 +1517,14 @@ export function DocumentDetail() {
                   </MenuItem>
                 ))}
               </Select>
+              {/* The type carries the sharing rule (migration 0137), so the
+                  server refuses a change of type that would loosen it. Said
+                  here so the refusal is not a surprise. */}
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }} data-testid="type-sharing-hint">
+                The type decides how this document may be shared. Moving it to a type that shares more
+                freely needs QA or an administrator, and a locked document (one with no type is locked)
+                can only be unlocked by an administrator.
+              </Typography>
             </FormControl>
           )}
           {/* Metadata fields are edited inline on the document detail page, not in this dialog */}

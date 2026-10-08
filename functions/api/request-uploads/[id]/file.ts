@@ -17,9 +17,17 @@
  * `X-File-Source: upload | document` says which, same idea as the queue's own
  * file endpoint. Any tenant user may read, matching the role model's "reader:
  * read-only, download files".
+ *
+ * THE SHARING RULE (migration 0137): once the arrival has become a document,
+ * an API key reads its bytes only when that document is "send freely" (C-041),
+ * on EITHER branch -- the upload's own object is not always deleted by
+ * approval. An arrival that is still only an arrival is not a document and is
+ * never asked; nor is a logged-in person.
  */
 
 import { downloadFile } from '../../../lib/r2';
+import { getClientIp } from '../../../lib/db';
+import { apiKeyFileRefusal, documentsFromQueueItem } from '../../../lib/sharing-rule';
 import { errorToResponse, NotFoundError } from '../../../lib/permissions';
 import { resolveTenantForUpload } from '../../../lib/request-arrivals';
 import type { Env, User } from '../../../lib/types';
@@ -33,7 +41,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     const upload = await db
       .prepare(
-        `SELECT id, r2_key, file_name, mime_type, document_id
+        `SELECT id, r2_key, file_name, mime_type, document_id, queue_id
            FROM request_uploads WHERE id = ? AND tenant_id = ?`,
       )
       .bind(id, tenantId)
@@ -43,8 +51,33 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         file_name: string;
         mime_type: string;
         document_id: string | null;
+        queue_id: string | null;
       }>();
     if (!upload) throw new NotFoundError('Arrival not found');
+
+    // THE UPLOAD'S OWN OBJECT CAN OUTLIVE ITS APPROVAL (migration 0137): the
+    // records path keeps it, and nothing deletes it on acceptance. Once the
+    // arrival has become a document -- it is linked to one, or its Review
+    // Queue item has produced any -- these bytes ARE that document's, and an
+    // API key reads them only when every such document is "send freely",
+    // whichever branch below serves them. An arrival that is still only an
+    // arrival is never asked.
+    const becameDocuments = [
+      ...new Set([
+        ...(upload.document_id ? [upload.document_id] : []),
+        ...(upload.queue_id ? await documentsFromQueueItem(db, tenantId, upload.queue_id) : []),
+      ]),
+    ];
+    if (becameDocuments.length > 0) {
+      const refusal = await apiKeyFileRefusal(db, context.data, {
+        user,
+        tenantId,
+        documentIds: becameDocuments,
+        route: 'request-uploads/file',
+        clientIp: getClientIp(context.request),
+      });
+      if (refusal) return refusal;
+    }
 
     let file = await downloadFile(context.env.FILES, upload.r2_key);
     let source = 'upload';
@@ -63,6 +96,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         .bind(upload.document_id, tenantId)
         .first<{ r2_key: string; file_name: string; mime_type: string }>();
       if (version) {
+        // Already asked above: `upload.document_id` is set on this branch.
         file = await downloadFile(context.env.FILES, version.r2_key);
         if (file) {
           source = 'document';

@@ -1122,6 +1122,57 @@ describe('the whole original of a multi-lot certificate', () => {
     expect(body.send.files[0].document_ids).toHaveLength(2);
   });
 
+  it('does not go whole when another lot on the same certificate may not leave (C-042)', async () => {
+    // Three lots on one certificate. The order takes the first two; the THIRD,
+    // which is not on the order at all, is locked. The whole original carries
+    // that lot's page too, so it takes the strictest rule of all three.
+    const cert = await approveMultiLot('5556000');
+    await db.prepare(`UPDATE documents SET sharing_rule_override = 'locked' WHERE id = ?`).bind(cert.docIds[2]).run();
+    const order = await orderId();
+    await pick(order, [cert.docIds[0], cert.docIds[1]]);
+
+    const plan = await preview(order);
+    expect(plan.files).toHaveLength(2);
+    expect(plan.files.every((f) => f.source === 'document')).toBe(true);
+    expect(plan.files[0].notes.join(' ')).toMatch(/also covers a document that is locked, so only this lot's page is sent/);
+    // The two lines themselves are free, so nothing is listed as not sent.
+    expect(plan.lines_not_sent).toEqual([]);
+
+    const mail = stubMail();
+    const { body } = await send(order, { fingerprint: plan.fingerprint });
+    expect(body.send.status).toBe('sent');
+    const sizes = mail.flatMap((m) => m.attachments ?? []).map((a) => atob(a.content).length);
+    // Two per-lot pages, neither of them the three-page original.
+    expect(sizes).toHaveLength(2);
+    expect(sizes.every((n) => n !== cert.original.byteLength)).toBe(true);
+  });
+
+  it('a whole original already recorded on a send is re-checked on resend (C-042)', async () => {
+    const cert = await approveMultiLot('5557000');
+    const order = await orderId();
+    await pick(order, [cert.docIds[0], cert.docIds[1]]);
+    stubMail(() => true);
+    const first = await send(order);
+    expect(first.status).toBe(502);
+    expect(first.body.send.files[0].source).toBe('original');
+    vi.unstubAllGlobals();
+
+    // A lot that is on the certificate but not on the order is locked.
+    await db.prepare(`UPDATE documents SET sharing_rule_override = 'locked' WHERE id = ?`).bind(cert.docIds[2]).run();
+    const mail = stubMail();
+    const res = await resendOrder(
+      fnContext(`http://localhost/api/orders/${order}/sends/${first.body.send.id}/resend`, {
+        method: 'POST',
+        user: asUser(),
+        params: { id: order, sendId: first.body.send.id },
+      }),
+    );
+    const after = (await readJson(res)) as OrderSendResponse;
+    expect(after.send.status).toBe('failed');
+    expect(after.send.parts[0].error).toMatch(/was not sent\. Locked/);
+    expect(mail).toHaveLength(0);
+  });
+
   it('falls back to the per-lot page, and says so, when the original is not on file', async () => {
     const cert = await approveMultiLot('5552000');
     await files.delete(cert.r2Key);

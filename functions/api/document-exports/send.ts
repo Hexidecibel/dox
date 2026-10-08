@@ -25,6 +25,13 @@
  * addresses outside the organization, and may be repeated 30 times an hour.
  * That is publishing, not reading, and the read-only role is named for what it
  * is. `user` and above, matching every other outbound surface.
+ *
+ * THE SHARING RULE (decision C-003, migration 0137) is asked before the link
+ * is minted, because THE MINT IS THE APPROVAL: a locked document is never put
+ * on a link; one that needs QA approval is put on it only when the sender is a
+ * QA releaser, and that is recorded as the approval. What was kept back comes
+ * home in `refused`, by name and reason, and the rest still goes. When nothing
+ * may go, nothing is minted and the answer is a 403 naming every document.
  */
 import { logAudit, getClientIp } from '../../lib/db';
 import {
@@ -49,6 +56,11 @@ import {
   revokeExportLink,
 } from '../../lib/document-export';
 import type { DocumentExportSendResponse } from '../../../shared/types';
+import {
+  auditQaRelease,
+  exitActorForRequest,
+  sharingRefusedResponse,
+} from '../../lib/sharing-rule';
 import type { Env, User } from '../../lib/types';
 
 /**
@@ -167,8 +179,27 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
     await recordAttempt(context.env.DB, rlKey, SEND_RATE_WINDOW_SECONDS);
 
-    const { rows, missing_ids } = await loadExportDocuments(context.env.DB, tenantId, ids);
+    const actor = await exitActorForRequest(context.env.DB, context.data, user, tenantId);
+    const { rows, missing_ids, refused, qa_released_ids } = await loadExportDocuments(
+      context.env.DB,
+      tenantId,
+      ids,
+      { exit: 'send', actor },
+    );
     if (rows.length === 0) {
+      if (refused.length > 0) {
+        await logAudit(
+          context.env.DB,
+          user.id,
+          tenantId,
+          'document_export.refused',
+          'document_export',
+          null,
+          JSON.stringify({ exit: 'send', requested_ids: ids, refused, via: actor.method }),
+          getClientIp(context.request),
+        );
+        return sharingRefusedResponse(refused);
+      }
       return json({ error: 'None of those documents are available to send.' }, 404);
     }
 
@@ -262,16 +293,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         document_count: rows.length,
         requested_ids: ids,
         missing_ids,
+        refused: refused.map((r) => ({ document_id: r.document_id, rule: r.rule, reason: r.reason })),
+        qa_released_ids,
+        via: actor.method,
         expires_at: link.expires_at,
       }),
       getClientIp(context.request),
     );
+    await auditQaRelease(context.env.DB, {
+      userId: user.id,
+      tenantId,
+      exit: 'send',
+      documentIds: qa_released_ids,
+      resourceType: 'document_export_link',
+      resourceId: link.id,
+      clientIp: getClientIp(context.request),
+    });
 
     const response: DocumentExportSendResponse = {
       sent: true,
       recipients,
       document_count: rows.length,
       missing_ids,
+      refused,
+      qa_released_ids,
       expires_at: link.expires_at,
     };
     return json(response);

@@ -2,6 +2,40 @@
 
 Deferred ideas, long-term research, and items not in the daily workflow.
 
+## KNOWN GAP: a login token in `?token=` is a 24-hour bearer URL to any file in the tenant (2026-10-08)
+
+**Not fixed, deliberately out of the sharing-rule batch (0137).** `functions/api/_middleware.ts`
+accepts the JWT from `?token=` as well as from the `Authorization` header, and the UI builds
+download and preview URLs that way (`api.documents.download`, `downloadPacketSource`, the document
+preview in `src/components/DocumentPreview.tsx`) because a browser navigation cannot carry a header. Such a URL is a
+bearer credential for the whole session: for up to 24 hours it opens every file that user can
+open, it lands in browser history, proxy logs and anything the URL is pasted into, and the sharing
+rule does not see it as "leaving" because it authenticates as a logged-in person (C-039).
+
+The sharing rule narrows this in one place only: the bundle page now downloads with `fetch` and a
+header rather than a `?token=` URL (`api.bundles.downloadUrl` still exists, unused by the page).
+Everything else still mints them.
+
+What a fix looks like: a short-lived, single-file download ticket (minted by an authenticated
+POST, good for one object for a minute or two) for every place a navigation needs a URL, and
+then `?token=` refused outright (the sheet-session WebSocket in `src/hooks/useSheetSession.ts` also
+authenticates this way and needs its own answer). Not started.
+
+## KNOWN GAP: a public export link still serves a document that has since been ARCHIVED (2026-10-08)
+
+**Not fixed, deliberately out of the sharing-rule batch (0137).** `loadExportDocuments`
+(`functions/lib/document-export.ts`) filters `d.status != 'deleted'`, so an archived document
+stays on every link it was ever sent on. The order send refuses an archived document at plan time
+("Only active documents are sent"); the link does not notice a document being archived afterwards.
+
+0137 re-reads the SHARING RULE on every read of a link, so locking a document pulls it off its
+links. Archiving does not. Whether it should is a real question, not an oversight to patch: a
+superseded certificate a customer was sent last month may be exactly what they need to still be
+able to open, and "archived" is used for both "superseded" and "should never have been filed".
+Decide with AJ which of those archive means before changing what a recipient can open; until
+then, locking the document (or revoking the link from Documents > Sent documents) is the way to
+pull it back.
+
 ## IDEA: Renewals on a FIXED CALENDAR WINDOW, not a period from an anchor (2026-09-17)
 
 **Not built, deliberately.** The SME named three renewals the current model cannot

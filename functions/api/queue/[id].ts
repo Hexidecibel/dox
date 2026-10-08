@@ -14,6 +14,7 @@ import {
   NotFoundError,
   BadRequestError,
   ConflictError,
+  ForbiddenError,
   errorToResponse,
 } from '../../lib/permissions';
 import { decideArrival, preflightArrivalDecision } from '../../lib/request-arrivals';
@@ -42,6 +43,7 @@ import {
   type RenewalWrite,
 } from '../../lib/renewal-proposal';
 import type { QueueItem, FieldPickCapture, FieldDismissalCapture, TableEditCapture } from '../../lib/queue-approve';
+import { planDocumentRuleChange, ruleChangeActor } from '../../lib/sharing-rule';
 import type { Env, User } from '../../lib/types';
 import { parseCoaRecords } from '../../../shared/types';
 import type { TemplateFieldMapping, CoaRecordsPayload } from '../../../shared/types';
@@ -485,6 +487,34 @@ export const onRequestPut: PagesFunction<Env> = async (context) => {
         }
         if (!target) throw refuse('the file on record was split into several documents and this one does not pair with one of them.');
         flatReplace = { documentId: target, changeNote: replaceNote };
+      }
+
+      // THE SHARING RULE (migration 0137). "Replace existing" writes this
+      // item's document type onto the document it replaces, and the type
+      // carries the rule. So a replace that would LOOSEN a document's
+      // effective rule -- a file typed as a certificate of analysis replacing
+      // a locked document -- needs the same authority as loosening it any
+      // other way, and is never done with an API key. "Keep as a new
+      // document" is always available: a NEW document has no earlier rule.
+      if (item.document_type_id) {
+        const targets = [
+          ...(flatReplace ? [flatReplace.documentId] : []),
+          ...Object.values(recordsReplace ?? {}).map((r) => r.documentId),
+        ];
+        for (const documentId of new Set(targets)) {
+          const plan = await planDocumentRuleChange(
+            context.env.DB,
+            ruleChangeActor(context.data, user),
+            item.tenant_id,
+            documentId,
+            { documentTypeId: String(item.document_type_id) },
+          );
+          if (!plan.ok && plan.status === 403) {
+            throw new ForbiddenError(
+              `"Replace existing" is not available here: ${plan.error} Choose "Keep as a new document", or ask an administrator to approve this one.`,
+            );
+          }
+        }
       }
     }
 

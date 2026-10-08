@@ -8,6 +8,10 @@
  * whole safety property: the recipient never holds an identifier that means
  * anything outside this export, and an index outside the list is a 404 rather
  * than a lookup. Nothing here reads an id from the request.
+ *
+ * The list is the one `loadExportLinkDocuments` returns NOW, with the sharing
+ * rule re-read (migration 0137): a document locked since the send is not in
+ * it, so no index reaches it.
  */
 import { logAudit, getClientIp } from '../../../../../lib/db';
 import { checkRateLimit, recordAttempt } from '../../../../../lib/ratelimit';
